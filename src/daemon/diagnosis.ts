@@ -20,7 +20,7 @@ import type { Runner } from '../runner/types.js';
 import { type DaemonAction, type DaemonState, message } from './state.js';
 import { record, selectDiagnosticianFleet } from './effects.js';
 import { createRefused } from './doctor.js';
-import { maxDecisionRequests } from './decisions.js';
+import { adoptedOnRefusal, maxDecisionRequests, standingNamedIn } from './decisions.js';
 import type { Cycle } from './cycle.js';
 
 // ---------------------------------------------------------------------------
@@ -560,11 +560,11 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
     let fix: Work;
     try { fix = await diagnostician.file(input, `${diagnosisKey(entry.subject)}:fix`); }
     catch (error) {
-      // GY-1530: the create route's own refusal (a 409: an e2e proof naming a scenario nothing
-      // registered, GY-1516's "Register E2E scenario … before creating work that requires it") is the
-      // same malformed fix as one the local checks refuse, and settles the entry the same way, under
-      // the proof class's fix-item; thrown on, it reached cycle.isolate as an unclassified
-      // action:diagnosis. A plane-wide failure still throws to ridePlane, and the next cycle files again.
+      // GY-1530 / GY-1713: the create route's own refusal (a 409: an e2e proof naming a scenario nothing
+      // registered; or a 400 zod "Invalid input" under schema skew) is the same malformed fix as one
+      // the local checks refuse, and settles the entry the same way, under the proof class's fix-item;
+      // thrown on, it reached cycle.isolate as an unclassified action:diagnosis. A plane-wide failure
+      // still throws to ridePlane, and the next cycle files again.
       if (!createRefused(error)) throw error;
       entry.state = 'failed';
       await note(entry, 'failed', `The control plane refused the diagnostician's fix item for ${entry.subject} as written, so it is not filed again; the diagnosis stands for the master to file by hand: ${message(error)}`, 'fix-item');
@@ -615,15 +615,25 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
 async function request(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, work: Work, action: 'release' | 'close', input: Record<string, unknown>, reason: string, note: Note) {
   const requested = await decideFresh(cycle, diagnostician, entry, work, action, input, clip(reason, 2000), note);
   if (!requested) return;
-  const { decision, target } = requested;
+  const { decision, target, adopted } = requested;
   entry.decision = { id: decision.id, action, work: target.key, approver: null };
   entry.state = action === 'release' ? 'releasing' : 'closing';
-  await note(entry, 'done', `Requested ${action} decision ${decision.id} on ${target.key} for the diagnosis of ${entry.subject}`);
-  return launchApprover(cycle, entry, target, note);
+  // GY-1713: a standing adoption is named here; launchApprover's note would overwrite a separate one.
+  await note(entry, 'done', adopted
+    ? `Adopted ${action} decision ${decision.id}, already standing on ${target.key}, for the diagnosis of ${entry.subject}`
+    : `Requested ${action} decision ${decision.id} on ${target.key} for the diagnosis of ${entry.subject}`);
+  return launchApprover(cycle, entry, target, note, adopted);
 }
 const revisionRaced = (error: unknown) => /Task revision changed/.test(message(error));
 /** GY-1336: the item was delivered after the cycle's snapshot, so the server refuses any decision on it. */
 const deliveredMeanwhile = (error: unknown) => /Delivered work is immutable/.test(message(error));
+/**
+ * GY-1713: a 409 naming a decision of this action already requested — the decisions step adopts it
+ * via standingNamedIn + adoptedOnRefusal (GY-1374); diagnosis must too, or every cycle re-asks and
+ * throws (GY-1710's close 65bf0fef). Only actions adoptedOnRefusal lists (close here) are adopted.
+ */
+const standingAdopted = (error: unknown, action: 'release' | 'close') =>
+  action !== 'release' && adoptedOnRefusal.includes(action) ? standingNamedIn(error, action) : null;
 /**
  * GY-1318: the request names the item's revision from the cycle's snapshot, and the loop's own next
  * write can move the item before the request lands — the server refuses it "Task revision changed
@@ -638,10 +648,16 @@ const deliveredMeanwhile = (error: unknown) => /Delivered work is immutable/.tes
  * refuses "Delivered work is immutable" (GY-1333's instance). It is reloaded the same way, found
  * no longer applicable, and recorded with no fault; the next cycle's snapshot shows it done, and
  * the diagnosis is answered as for any item closed while it was diagnosed (GY-1266).
+ *
+ * GY-1713: a 409 naming a standing request of the same action is adopted (entry.decision := that id)
+ * rather than thrown — the decisions step already does this (GY-1374); without it the diagnosis
+ * re-requested a close that already stood and threw every cycle (GY-1710).
  */
-async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, work: Work, action: 'release' | 'close', input: Record<string, unknown>, reason: string, note: Note) {
+async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, work: Work, action: 'release' | 'close', input: Record<string, unknown>, reason: string, note: Note): Promise<{ decision: { id: string }; target: Work; adopted?: boolean } | null> {
   try { return { decision: await diagnostician.decide(work, action, reason, input), target: work }; }
   catch (error) {
+    const held = standingAdopted(error, action);
+    if (held) return { decision: { id: held }, target: work, adopted: true };
     if (!revisionRaced(error) && !deliveredMeanwhile(error)) throw error;
     const why = `The ${action} request on ${work.key} for the diagnosis of ${entry.subject} was refused: ${message(error)}`;
     const fresh = (await cycle.effects.snapshot()).work.find(candidate => candidate.id === work.id);
@@ -657,6 +673,8 @@ async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, en
     if (spent >= maxDecisionRequests) { await note(entry, 'done', `${why}; ${spent} ${action} request(s) already settled without applying, so it is not asked again here and the next cycle decides afresh`, null); return null; }
     try { return { decision: await diagnostician.decide(fresh, action, reason, input), target: fresh }; }
     catch (again) {
+      const adopted = standingAdopted(again, action);
+      if (adopted) return { decision: { id: adopted }, target: fresh, adopted: true };
       if (!revisionRaced(again) && !deliveredMeanwhile(again)) throw again;
       await note(entry, 'done', `${why}; asked again against revision ${fresh.revision} and refused again (${message(again)}), so the next cycle decides afresh`, null);
       return null;
@@ -705,13 +723,16 @@ async function settleNoLongerOpen(state: DaemonState, entry: DiagnosisRecord, ta
 }
 
 /** The independent approver for the entry's decision; a launch that fails is tried again next cycle while the decision stands. */
-async function launchApprover(cycle: Cycle, entry: DiagnosisRecord, work: Work, note: Note) {
+async function launchApprover(cycle: Cycle, entry: DiagnosisRecord, work: Work, note: Note, adopted = false) {
   const decision = entry.decision!;
   if (!cycle.effects.approver) return;
   try {
     const launched = await cycle.effects.approver(work, decision.id);
     decision.approver = launched.agentName;
-    await note(entry, 'done', `Launched approver ${launched.agentName} for ${decision.action} decision ${decision.id} on ${work.key}`);
+    // GY-1713: keep the adoption in the surviving note (request's note shares this diagnosis key).
+    await note(entry, 'done', adopted
+      ? `Adopted ${decision.action} decision ${decision.id}, already standing on ${work.key}, and launched approver ${launched.agentName}`
+      : `Launched approver ${launched.agentName} for ${decision.action} decision ${decision.id} on ${work.key}`);
   } catch (error) { await note(entry, 'failed', `Could not launch the approver for ${decision.action} decision ${decision.id} on ${work.key}: ${message(error)}; it is launched again next cycle`, planeWideRefusal(error) ? null : undefined); }
 }
 

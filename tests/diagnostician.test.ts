@@ -17,7 +17,8 @@ import { decisionInput } from '../src/master/autonomy.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { standingFaultClassItem, clearDiagnoses, diagnosesSettled, diagnosisStep, diagnosisSubjects, fixItem, type DiagnosticianEffects, type DiagnosisContext, type DiagnosisSubject } from '../src/daemon/diagnosis.js';
 import { deriveDiagnosisFixPlannedFiles } from '../src/daemon/diagnosis.js';
-import { clearDoctorRuns, doctorStep, type DoctorEffects } from '../src/daemon/doctor.js';
+import { clearDoctorRuns, createRefused, doctorStep, type DoctorEffects } from '../src/daemon/doctor.js';
+import { refusedBodyDetail } from '../src/daemon/effects.js';
 import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
 import { overtakenClosure } from '../src/triage.js';
 import { RefusedResponse } from '../src/model/refusal.js';
@@ -835,4 +836,163 @@ test('integration:doctor-pending-file-unregistered-scenario-escalates — the do
   assert.equal(posts, 1, 'never re-filed');
   assert.equal(state.faults.instances.length, 1, 'one refusal, one instance');
   assert.deepEqual((await store.list()).filter(candidate => candidate.title === title), [], 'nothing was created');
+});
+
+// ---- GY-1713: 400 create refusals settle; a decide 409 naming a standing decision is adopted ----
+//
+// Instances: GY-1700 diagnosis threw on create 400 Invalid input; doctor:file:capacity retried the
+// same 400 unbounded; GY-1710 re-requested close 65bf0fef that already stood and threw every cycle.
+const invalidInputBody = {
+  error: 'Invalid input',
+  issues: [{ code: 'invalid_type', path: ['origin', 'faultClass', 'windowHours'], message: 'Expected number, received string' }],
+};
+const invalidInputRefusal = () => new RefusedResponse(
+  `Graphyard refused work (400): ${refusedBodyDetail(invalidInputBody)}`, 400, invalidInputBody);
+const standingCloseId = '65bf0fef-d9c1-4cd2-8467-9f1866b0fd41';
+const standingCloseRefusal = (work = 'GY-1710') => new RefusedResponse(
+  `Graphyard refused work/edc29f40-7b82-4e88-9431-4358949147f3/decide (409): Decision ${standingCloseId} (close) is already requested on ${work}; wait for it`,
+  409, { error: `Decision ${standingCloseId} (close) is already requested on ${work}; wait for it` });
+
+test('unit:create-400-refused-as-written — a create the plane refuses with 400 Invalid input counts as refused-as-written, like a 409; a plane-wide 5xx does not', () => {
+  assert.ok(createRefused(invalidInputRefusal()), 'a 400 RefusedResponse is refused-as-written');
+  assert.ok(createRefused(new Error('Graphyard refused work (400): Invalid input')), 'a 400 wrapped in plain text is the same');
+  assert.ok(createRefused(new RefusedResponse('Graphyard refused work (409): Idempotency key reused with different input', 409, { error: 'Idempotency key reused with different input' })), 'a 409 still is');
+  assert.ok(!createRefused(new RefusedResponse('Graphyard refused work (502): Application failed to respond', 502, null)), 'a plane that did not answer is not');
+  assert.ok(!createRefused(new Error('Graphyard refused work (503): the control plane is unavailable')), 'a 503 is not');
+});
+
+test('unit:refusal-message-carries-issues — the operator-agent refusal message names the body\'s error and zod issues, not the bare status', () => {
+  assert.equal(refusedBodyDetail(invalidInputBody), 'Invalid input: origin.faultClass.windowHours: Expected number, received string');
+  assert.equal(refusedBodyDetail({ error: 'Invalid input', issues: [] }), 'Invalid input');
+  assert.equal(refusedBodyDetail({ error: 'Invalid input' }), 'Invalid input');
+  assert.equal(refusedBodyDetail({ error: 'Decision already requested' }), 'Decision already requested');
+  assert.match(new RefusedResponse(`Graphyard refused work (400): ${refusedBodyDetail(invalidInputBody)}`, 400, invalidInputBody).message,
+    /Invalid input: origin\.faultClass\.windowHours: Expected number, received string/);
+});
+
+test('integration:diagnosis-fix-400-settles-fix-item — a fix item the create route refuses with 400 Invalid input settles the diagnosis failed under fix-item naming the issues, and is not rethrown', async () => {
+  const h = harness(() => diagnosis('GY-101', { fix }));
+  let posts = 0;
+  h.diagnostician.file = async () => { posts += 1; throw invalidInputRefusal(); };
+  const state = emptyDaemonState(config()), work = [recurring(state)];
+  const isolated: string[] = [];
+  const cycleOf = (at: number) => ({ config: config(), state, effects: effects(h, () => work, () => at), now: () => at, snapshot: { work, now: new Date(at).toISOString() }, clock: at, performed: [],
+    isolate: async (_kind: string, _item: unknown, name: string, body: () => Promise<unknown>) => { try { return await body(); } catch (error) { isolated.push(`${name}: ${String(error)}`); return undefined; } } } as unknown as Cycle);
+  await diagnosisStep(cycleOf(clock)); await diagnosesSettled();
+  await diagnosisStep(cycleOf(clock + minute)); await diagnosesSettled();
+  const entry = state.diagnoses['GY-101'];
+  assert.equal(entry.state, 'failed');
+  assert.equal(posts, 1, 'filed once');
+  assert.match(entry.detail, /refused the diagnostician's fix item for GY-101 as written.*Invalid input: origin\.faultClass\.windowHours: Expected number, received string/);
+  assert.deepEqual(isolated, [], 'nothing reached the diagnosis step\'s isolation record');
+  assert.deepEqual(diagnosisInstances(state).map(fault => fault.slice(0, 2)), [['fix-item', 'proof']]);
+  assert.equal(h.requested.length, 0, 'no release is requested');
+  await diagnosisStep(cycleOf(clock + 2 * minute)); await diagnosesSettled();
+  assert.equal(posts, 1, 'not re-filed');
+  assert.equal(state.diagnoses['GY-101'].state, 'failed');
+  assert.equal(diagnosisInstances(state).length, 1);
+});
+
+test('integration:doctor-retry-400-stops-refile — a pending doctor filing the create route refuses with 400 Invalid input is dropped, recorded under fix-item naming the issues, and never re-filed', async () => {
+  clearDoctorRuns();
+  const state = emptyDaemonState(config());
+  const key = 'doctor:a0cdc186f65394498c5a7123:file:capacity', title = 'Approver, reviewer and worker sessions exhaust their model-account limit mid-attempt, losing judgements and attempts and breaching machine bounds';
+  state.doctor.pendingFiles = [{ key, at: iso(-10 * minute), file: { faultClass: 'capacity', priority: 1, title, description: 'evidence', plannedFiles: ['src/daemon/capacity.ts'],
+    criteria: [{ id: 'AC-1', text: 'A spent account is held until its reset', proofs: ['unit:capacity-hold'] }] } }];
+  let posts = 0;
+  const doctor: DoctorEffects = { settings: { ...doctorSettingsSchema.parse({ enabled: false }), command: 'pi' }, cwd: '/checkout', env: {}, runner: async () => { throw new Error('no run is launched'); },
+    file: async () => { posts += 1; throw invalidInputRefusal(); } };
+  const cycleOf = (at: number) => ({ config: config(), state, effects: { persist: async () => {}, snapshot: async () => ({ work: [], now: new Date(at).toISOString() }), doctor }, now: () => at, snapshot: { work: [], now: new Date(at).toISOString() }, clock: at, performed: [],
+    isolate: async (_kind: string, _item: unknown, _name: string, body: () => Promise<unknown>) => body() } as unknown as Cycle);
+  await doctorStep(cycleOf(clock));
+  assert.equal(posts, 1, 'the retry reaches create once');
+  assert.deepEqual(state.doctor.pendingFiles, [], 'dropped');
+  assert.deepEqual(state.faults.instances.map(entry => [entry.kind, entry.faultClass]), [['fix-item', 'proof']]);
+  assert.match(state.actions[key].detail, /Could not file ".+", and it is not filed again: master create refused the filing itself: Graphyard refused work \(400\): Invalid input: origin\.faultClass\.windowHours/);
+  const escalations = Object.values(state.actions).filter(action => action.kind === 'escalation');
+  assert.equal(escalations.length, 1);
+  assert.match(escalations[0].detail, /master create refused it \(Graphyard refused work \(400\): Invalid input: origin\.faultClass\.windowHours/);
+  for (let round = 1; round <= 6; round++) { state.cycle += 1 << round; await doctorStep(cycleOf(clock + round * minute)); }
+  assert.equal(posts, 1, 'never re-filed');
+  assert.equal(state.faults.instances.length, 1);
+  clearDoctorRuns();
+});
+
+test('unit:diagnosis-adopts-standing-decision — a decide 409 naming a standing close is adopted as the entry\'s decision with an adoption note, and the approver is launched', async () => {
+  const h = harness(() => diagnosis('GY-101', { covering: 'GY-50' }));
+  let decides = 0;
+  h.diagnostician.decide = async (work, action) => {
+    decides += 1;
+    assert.equal(action, 'close');
+    throw standingCloseRefusal(work.key);
+  };
+  const state = emptyDaemonState(config()), work = [recurring(state), item('GY-50', { stage: 'build' } as Partial<Work>)];
+  const isolated: string[] = [];
+  const cycleOf = (at: number) => ({ config: config(), state, effects: effects(h, () => work, () => at), now: () => at, snapshot: { work, now: new Date(at).toISOString() }, clock: at, performed: [],
+    isolate: async (_kind: string, _item: unknown, name: string, body: () => Promise<unknown>) => { try { return await body(); } catch (error) { isolated.push(`${name}: ${String(error)}`); return undefined; } } } as unknown as Cycle);
+  await diagnosisStep(cycleOf(clock)); await diagnosesSettled();
+  await diagnosisStep(cycleOf(clock + minute)); await diagnosesSettled();
+  const entry = state.diagnoses['GY-101'];
+  assert.equal(entry.state, 'closing');
+  assert.deepEqual(entry.decision, { id: standingCloseId, action: 'close', work: 'GY-101', approver: `approver-${standingCloseId.slice(0, 8)}` });
+  assert.match(entry.detail, /^Adopted close decision 65bf0fef-d9c1-4cd2-8467-9f1866b0fd41, already standing on GY-101, and launched approver/);
+  assert.equal(decides, 1);
+  assert.deepEqual(isolated, [], 'the standing 409 did not throw to isolate');
+  assert.deepEqual(h.approvers, [{ work: 'GY-101', decision: standingCloseId }]);
+  assert.deepEqual(diagnosisInstances(state), [], 'no diagnosis fault');
+});
+
+test('integration:diagnosis-close-409-adopts-standing — replaying the GY-1710 shape (close already standing) adopts against the candidate instead of throwing every cycle', async () => {
+  // Real engine: a close already stands; the diagnosis step's covering path asks again and adopts.
+  const instances: FaultInstance[] = ['GY-1', 'GY-2', 'GY-3'].map(subject => ({ id: `blocker|${subject}|standing-close`, kind: 'blocker', faultClass: 'stalled-gate', subject, text: `${subject} stalls`, at: iso(0), lastSeenAt: iso(0), linkedTo: null }));
+  const recurringItem = await ok(master.token, 'work', faultClassItem({ faultClass: 'stalled-gate', recent: instances }, policy, clock)) as Work;
+  const covering = await ok(master.token, 'work', { ...fix, title: `Covering fix for standing close ${randomUUID().slice(0, 8)}`, reason: 'Already covers the cause' }) as Work;
+  const standing = await ok(master.token, `work/${recurringItem.key}/decide`, { action: 'close', input: decisionInput('close', recurringItem, { kind: 'duplicate', ref: covering.key }), reason: 'Close as duplicate of the covering fix' });
+  const standingId = standing.id as string;
+  let decides = 0;
+  const diagnostician: DiagnosticianEffects = {
+    settings, cwd: '/checkout/project',
+    tree: async () => ({ ref: filingTree.ref, files: new Set(filingTree.files) }),
+    runner: async () => ({ runner: fakeRunner('pi', () => diagnosis(recurringItem.key, { covering: covering.key }), []), runtime: 'pi', model: settings.model }),
+    context: async () => ({ journal: [], serverLog: [], pullRequests: [] }),
+    file: async () => { throw new Error('no fix is filed when covering is named'); },
+    decide: async (work, action, reason, input) => {
+      decides += 1;
+      const response = await fetch(`${url}/api/work/${work.id}/decide`, { method: 'POST', headers: { Authorization: `Bearer ${master.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() },
+        body: JSON.stringify({ action, reason, input: decisionInput(action, work, input) }) });
+      const result: any = await response.json();
+      if (!response.ok) throw new RefusedResponse(`Graphyard refused work/${work.id}/decide (${response.status}): ${refusedBodyDetail(result)}`, response.status, result);
+      return result as { id: string };
+    },
+  };
+  const hApprovers: { work: string; decision: string }[] = [];
+  const fx = {
+    diagnostician, persist: async () => {}, snapshot: async () => ({ work: await store.list(), now: new Date(clock).toISOString() }),
+    decisions: async (work: Work) => ok(master.token, `work/${encodeURIComponent(work.id)}/decisions`),
+    approver: async (work: Work, decision: string) => { hApprovers.push({ work: work.key, decision }); return { agentName: `approver-${decision.slice(0, 8)}`, pane: null }; },
+  } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config());
+  state.faults.instances.push(...instances.map(entry => ({ ...entry, linkedTo: recurringItem.key })));
+  const isolated: string[] = [];
+  const cycleOf = async (at: number) => {
+    const listed = await store.list();
+    const cycle = { config: config(), state, effects: fx, now: () => at, snapshot: { work: listed, now: new Date(at).toISOString() }, clock: at, performed: [],
+      isolate: async (_kind: string, _item: unknown, name: string, body: () => Promise<unknown>) => { try { return await body(); } catch (error) { isolated.push(`${name}: ${String(error)}`); return undefined; } } } as unknown as Cycle;
+    await diagnosisStep(cycle); await diagnosesSettled(); return cycle;
+  };
+  await cycleOf(clock);
+  await cycleOf(clock + minute);
+  const entry = state.diagnoses[recurringItem.key];
+  assert.equal(entry.state, 'closing', entry.detail);
+  assert.equal(entry.decision?.id, standingId, 'the standing close is the entry\'s decision');
+  assert.equal(entry.decision?.action, 'close');
+  assert.equal(decides, 1, 'asked once; the 409 was adopted, not retried');
+  assert.deepEqual(isolated, [], 'nothing threw to isolate');
+  assert.deepEqual(hApprovers, [{ work: recurringItem.key, decision: standingId }]);
+  assert.match(entry.detail, new RegExp(`^Adopted close decision ${standingId}, already standing on ${recurringItem.key}, and launched approver`));
+  // Later cycles do not re-ask: the entry holds the standing decision and waits on its approver.
+  await cycleOf(clock + 2 * minute);
+  assert.equal(decides, 1);
+  assert.equal(entry.state, 'closing');
+  assert.equal(diagnosisInstances(state).length, 0);
 });

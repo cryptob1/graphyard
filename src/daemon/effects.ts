@@ -16,6 +16,26 @@ import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import { type HostMemoryReading, type ResourceReclaimReport, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
 import { healUserSupervision, type UserSupervisionAllowance, type UserSupervisionHeal } from '../user-manager.js';
 import { RefusedResponse } from '../model/refusal.js';
+
+/**
+ * GY-1713: the refusal body's `error` and zod `issues`, so a recorded reason names which field the
+ * plane refused — not the bare status. A body without `error` is stringified as before.
+ */
+export function refusedBodyDetail(result: unknown): string {
+  if (!result || typeof result !== 'object') return JSON.stringify(result);
+  const body = result as { error?: unknown; issues?: unknown };
+  if (typeof body.error !== 'string') return JSON.stringify(result);
+  const issues = Array.isArray(body.issues) ? body.issues : [];
+  if (!issues.length) return body.error;
+  const named = issues.map((issue: unknown) => {
+    if (!issue || typeof issue !== 'object') return String(issue);
+    const row = issue as { path?: unknown; message?: unknown };
+    const path = Array.isArray(row.path) ? row.path.map(String).join('.') : '';
+    const text = typeof row.message === 'string' ? row.message : String(issue);
+    return path ? `${path}: ${text}` : text;
+  }).join('; ');
+  return `${body.error}: ${named}`;
+}
 import { rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, launchProducer, reclaimCheckouts } from '../producer.js';
@@ -437,7 +457,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     const response = await fetcher(`${config.url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30_000) });
     const result = await response.json();
     // The body is kept on the error: a decision refusal names the standing refused decision as a field (GY-265).
-    if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`, response.status, result);
+    // GY-1713: the message carries error and zod issues so diagnosis/doctor attention names the field.
+    if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${refusedBodyDetail(result)}`, response.status, result);
     return result;
   };
   /**

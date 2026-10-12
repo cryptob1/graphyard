@@ -29,7 +29,7 @@ Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linger
 
 ## Research and diagnosis
 
-`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get a diagnostician (`run.diagnostician`; none for parks); fix `plannedFiles` as `master create`; quota refusals wait until `retryAt` (`daemon.diagnoses`); `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3×, then escalated (`decision-stale`); raced, delivered, [plane-wide](operations.md#incident-decision-tree) requests retry faultless; refused fix `create` is `fix-item`, never re-filed; overlong/`limit-wait` (GY-1705); no `loop` fault for restart-lost diagnoses, approver refusals, nor `merge` for base conflicts <30m.
+`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get a diagnostician (`run.diagnostician`; none for parks); fix `plannedFiles` as `master create`; quota refusals wait until `retryAt` (`daemon.diagnoses`); `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3×, then escalated (`decision-stale`); raced, delivered, [plane-wide](operations.md#incident-decision-tree) requests retry faultless; refused fix `create` (409 or 400 Invalid input) is `fix-item`, never re-filed; a decide 409 naming a standing request of the same action (close) is adopted and its approver launched, not rethrown (GY-1713); refusal messages carry the body's error and zod issues; overlong/`limit-wait` (GY-1705); no `loop` fault for restart-lost diagnoses, approver refusals, nor `merge` for base conflicts <30m.
 
 ## Machine-filed backlog
 
