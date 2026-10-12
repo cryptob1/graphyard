@@ -4,6 +4,10 @@ import { ensureMainWriteProtection } from '../src/install/deploy-key.js';
 import { applyProtection } from '../src/install/github.js';
 import type { GitHubCli } from '../src/install/github.js';
 import { mainWriteRuleset, mainWriteRulesetCurrent, mainWriteRulesetName, mergeQueueRuleset } from '../src/protection.js';
+import { runUp, upControlPlaneSteps, upStateFile, type UpEvent, type UpRequest } from '../src/up.js';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 
 // GY-1715: under the control-plane merger, setup protects the base branch with a ruleset that
 // refuses pushes, force pushes and deletions from every actor but the merge writer's deploy key.
@@ -17,6 +21,7 @@ interface GitHubState {
   rulesets: any[];
   classic: any | null;
   keys: { id: number; key: string; title: string; readOnly: boolean }[];
+  rulesetsUnreadable?: boolean;
 }
 
 function fakeGitHub(state: GitHubState) {
@@ -39,7 +44,12 @@ function fakeGitHub(state: GitHubState) {
     }
     reads.push(path);
     if (path === 'repos/owner/project') return json({ default_branch: state.defaultBranch, owner: { type: 'Organization' }, allow_auto_merge: false });
-    if (path.startsWith('repos/owner/project/rulesets?')) return json(state.rulesets.map(({ id, name }) => ({ id, name })));
+    if (path.startsWith('repos/owner/project/rulesets?')) {
+      // GitHub pages the list (per_page defaults to 30): only the page asked for is returned.
+      const query = new URLSearchParams(path.split('?')[1]);
+      const size = Number(query.get('per_page') ?? 30), page = Number(query.get('page') ?? 1);
+      return state.rulesetsUnreadable ? missing : json(state.rulesets.slice((page - 1) * size, page * size).map(({ id, name }) => ({ id, name })));
+    }
     const one = path.match(/\/rulesets\/(\d+)$/);
     if (one) { const found = state.rulesets.find(ruleset => ruleset.id === Number(one[1])); return found ? json(found) : missing; }
     if (path.endsWith('/protection')) return state.classic ? json(state.classic) : missing;
@@ -95,6 +105,34 @@ test('unit:main-write-protection-ruleset — control-plane setup writes an activ
   const failingList: GitHubCli = async (args, options) => args[1] === 'deploy-key' ? { stdout: '', stderr: 'HTTP 403', code: 1 } : unreadable.gh(args, options);
   await assert.rejects(ensureMainWriteProtection('owner/project', failingList, { writerKey: WRITER }), /deploy keys of owner\/project could not be read/);
   assert.deepEqual(unreadable.writes, []);
+
+  // An install whose deploy-key step completed in an earlier run (before this protection existed) still
+  // gets it: graphyard up checks the base branch on every control-plane run, through the install's own key.
+  const root = await mkdtemp(join(tmpdir(), 'main-write-protection-'));
+  try {
+    const installDir = join(root, 'install');
+    await mkdir(installDir, { recursive: true });
+    await writeFile(join(installDir, 'deploy-key'), 'private', { mode: 0o600 });
+    await writeFile(join(installDir, 'deploy-key.pub'), `${WRITER}\n`, { mode: 0o600 });
+    const request: UpRequest = { repository: 'owner/project', provider: 'compose', agent: true, reviewer: 'claude', master: 'claude', goalFile: null, browserProfile: null, merger: 'control-plane' };
+    await mkdir(dirname(upStateFile(root)), { recursive: true });
+    await writeFile(upStateFile(root), JSON.stringify({ version: 1, repository: request.repository, provider: request.provider, merger: 'control-plane', completed: [...upControlPlaneSteps], noHerdr: true, goal: null }));
+    const resumed = fakeGitHub(fresh());
+    const events: UpEvent[] = [];
+    const ghCalls: string[][] = [];
+    await runUp(request, {
+      root, emit: event => { events.push(event); }, now: () => 0, sleep: async () => {}, pollMs: 1, machineWaitMs: 0, humanWaitMs: 0,
+      serverUrl: async () => null, masterToken: async () => null, status: async () => null,
+      cli: async () => ({ code: 0, stdout: '{}' }), publishOnboarding: async () => null, onboardingMerged: async () => true,
+      installDirectory: () => installDir,
+      gh: async (args, input) => { ghCalls.push(args); return resumed.gh(args, input === undefined ? undefined : { input }); },
+    });
+    assert.ok(events.some(event => event.kind === 'step' && event.step === 'deploy-key' && event.state === 'skipped'), 'the deploy-key step itself is done by the earlier run');
+    assert.deepEqual(resumed.writes.map(write => [write.method, write.path]), [['POST', 'repos/owner/project/rulesets']]);
+    assert.deepEqual(resumed.writes[0]!.body, mainWriteRuleset('main'));
+    assert.ok(events.some(event => event.kind === 'note' && /Base branch protection: Graphyard merge writer only on main/.test(event.text)), 'the run reports the protection');
+    assert.ok(!ghCalls.some(args => args[1] === 'deploy-key' && args[2] === 'add'), 'the registered key is not added again');
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('unit:main-write-protection-idempotent — applying the protection twice writes once; a drifted Graphyard ruleset is rewritten in place; a base branch the operator already protects (classic protection or another ruleset) is left untouched and reported', async () => {
@@ -114,6 +152,22 @@ test('unit:main-write-protection-idempotent — applying the protection twice wr
   assert.deepEqual(drifted.writes.map(write => [write.method, write.path]), [['PUT', 'repos/owner/project/rulesets/7']]);
   assert.equal(drifted.state.rulesets.length, 1);
   assert.equal((await ensureMainWriteProtection('owner/project', drifted.gh, { writerKey: WRITER })).state, 'unchanged');
+
+  // Graphyard's ruleset past the first page of GET /rulesets (GitHub's default page is 30) is still found:
+  // a second application reads every page and writes nothing, rather than reporting the operator's rulesets or adding a duplicate.
+  const tagRulesets = Array.from({ length: 130 }, (_, index) => ({ id: 1000 + index, name: `Operator tags ${index}`, target: 'tag', enforcement: 'active', conditions: { ref_name: { include: [`refs/tags/v${index}`], exclude: [] } }, rules: [] }));
+  const paged = fakeGitHub(fresh({ rulesets: [...tagRulesets, { id: 7, ...mainWriteRuleset('main') }] }));
+  assert.equal((await ensureMainWriteProtection('owner/project', paged.gh, { writerKey: WRITER })).state, 'unchanged');
+  assert.equal(paged.writes.length, 0);
+  assert.ok(paged.reads.includes('repos/owner/project/rulesets?includes_parents=false&per_page=100&page=2'), 'the second page is read');
+  assert.ok(!paged.reads.some(path => path.includes('/protection') || path.includes('/rules/branches/')), 'Graphyard\'s ruleset is not taken for absent, so no operator protection is looked for');
+  paged.state.rulesets = paged.state.rulesets.map(ruleset => ruleset.id === 7 ? { ...ruleset, enforcement: 'evaluate' } : ruleset);
+  assert.equal((await ensureMainWriteProtection('owner/project', paged.gh, { writerKey: WRITER })).state, 'updated', 'drift past page one is rewritten in place');
+  assert.deepEqual(paged.writes.map(write => [write.method, write.path]), [['PUT', 'repos/owner/project/rulesets/7']]);
+  // A ruleset list that cannot be read refuses rather than guessing from a partial list.
+  const unreadableRulesets = fakeGitHub(fresh({ rulesetsUnreadable: true }));
+  await assert.rejects(ensureMainWriteProtection('owner/project', unreadableRulesets.gh, { writerKey: WRITER }), /rulesets of owner\/project could not be read, so main was not protected/);
+  assert.deepEqual(unreadableRulesets.writes, []);
 
   // The operator's classic branch protection is kept as is and reported.
   const classic = { required_pull_request_reviews: { required_approving_review_count: 1 }, enforce_admins: { enabled: true } };

@@ -110,8 +110,7 @@ export async function ensureMainWriteProtection(repository: string, gh: GitHubCl
   const others = writable.filter((entry: any) => publicKeyFingerprint(String(entry?.key ?? '')) !== writer).map((entry: any) => String(entry?.title ?? entry?.id)).sort();
   const writerListed = writable.length > others.length;
 
-  const rulesets = await ghJson(gh, ['api', `repos/${repository}/rulesets?includes_parents=false`], []) as any[];
-  const ours = Array.isArray(rulesets) ? rulesets.find(ruleset => ruleset?.name === mainWriteRulesetName) : undefined;
+  const ours = (await repositoryRulesets(repository, gh, baseBranch)).find(ruleset => ruleset?.name === mainWriteRulesetName);
   if (!ours?.id) {
     const classic = await gh(['api', `repos/${repository}/branches/${baseBranch}/protection`], { allowFailure: true });
     const rules = await ghJson(gh, ['api', `repos/${repository}/rules/branches/${baseBranch}`], []) as any[];
@@ -131,4 +130,21 @@ export async function ensureMainWriteProtection(repository: string, gh: GitHubCl
   }
   await gh(['api', '--method', 'POST', `repos/${repository}/rulesets`, '--input', '-'], body);
   return { state: 'created', baseBranch, detail: `${mainWriteRulesetName} on ${baseBranch}: only the merge-writer deploy key may push` };
+}
+
+/** Rulesets per page of GET repos/OWNER/REPO/rulesets: GitHub's maximum (its default is 30). */
+export const rulesetPageSize = 100;
+/**
+ * Every ruleset on REPOSITORY itself, page by page until a short page, so Graphyard's own is never
+ * taken for absent because it sits past the first page. An unreadable page refuses: a partial list
+ * could misreport Graphyard's ruleset as the operator's protection or write a duplicate.
+ */
+async function repositoryRulesets(repository: string, gh: GitHubCli, baseBranch: string): Promise<any[]> {
+  const rulesets: any[] = [];
+  for (let page = 1; ; page++) {
+    const batch = await ghJson(gh, ['api', `repos/${repository}/rulesets?includes_parents=false&per_page=${rulesetPageSize}&page=${page}`]);
+    if (!Array.isArray(batch)) throw new Error(`The rulesets of ${repository} could not be read, so ${baseBranch} was not protected`);
+    rulesets.push(...batch);
+    if (batch.length < rulesetPageSize) return rulesets;
+  }
 }

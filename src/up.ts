@@ -212,6 +212,11 @@ export interface UpDependencies {
   /** GY-1552: ensure the install's deploy key on REPOSITORY; defaults to ensureDeployKey. */
   ensureDeployKey?(installDir: string, repository: string): Promise<string>;
   /**
+   * GY-1715: protect the base branch so only the install's deploy key may push, on every control-plane
+   * run, returning what was found or written; defaults to ensureMainWriteProtection through gh.
+   */
+  protectBaseBranch?(installDir: string, repository: string): Promise<string>;
+  /**
    * GY-1552: `POST /api/merger` as admin to set the control-plane writer. Defaults to
    * `master merger control-plane` with the admin credential.
    */
@@ -768,24 +773,35 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     // GY-1552: deploy key under the install directory, then POST /api/merger as admin so the checklist
     // treats App and protection items as not required. Github mode never runs these steps.
     if (controlPlaneMerger) {
+      const directory = deps.installDirectory?.() ?? installDirectory(installIdFor(request.repository));
+      const gh: GitHubCli | null = deps.gh ? async (args, options) => {
+        const result = await deps.gh!(args, options?.input);
+        if (result.code !== 0 && !options?.allowFailure) throw new Error(`gh ${args.join(' ')} exited ${result.code}${result.stderr ? `: ${result.stderr.split('\n')[0].slice(0, 200)}` : ''}`);
+        return { stdout: result.stdout, stderr: result.stderr ?? '', code: result.code };
+      } : null;
       await step('deploy-key', async () => {
-        const directory = deps.installDirectory?.() ?? installDirectory(installIdFor(request.repository));
-        let protection: string | null = null;
         const ensure = deps.ensureDeployKey ?? (async (installDir, repository) => {
-          if (!deps.gh) throw new UpStop('deploy-key: control-plane merger needs gh on this machine to register the deploy key', upExitCodes.prerequisite);
-          const gh: GitHubCli = async (args, options) => {
-            const result = await deps.gh!(args, options?.input);
-            if (result.code !== 0 && !options?.allowFailure) throw new Error(`gh ${args.join(' ')} exited ${result.code}${result.stderr ? `: ${result.stderr.split('\n')[0].slice(0, 200)}` : ''}`);
-            return { stdout: result.stdout, stderr: result.stderr ?? '', code: result.code };
-          };
-          const key = await ensureDeployKey(installDir, repository, gh);
-          // GY-1715: the base branch then refuses pushes from everyone but this key.
-          protection = (await ensureMainWriteProtection(repository, gh, { writerKey: await readFile(`${key}.pub`, 'utf8') })).detail;
-          return key;
+          if (!gh) throw new UpStop('deploy-key: control-plane merger needs gh on this machine to register the deploy key', upExitCodes.prerequisite);
+          return ensureDeployKey(installDir, repository, gh);
         });
         await ensure(directory, request.repository);
-        return `deploy key registered read-write for the merge writer${protection ? `; ${protection}` : ''}`;
+        return 'deploy key registered read-write for the merge writer';
       });
+      // GY-1715: checked on every run, outside the resumable step, so an install whose deploy-key step
+      // completed before this protection existed, or whose ruleset drifted since, is protected too.
+      // An injected deploy key with no protectBaseBranch is a test double: the default path always protects.
+      const protect = deps.protectBaseBranch ?? (deps.ensureDeployKey ? null : async (installDir: string, repository: string) => {
+        if (!gh) throw new UpStop('deploy-key: control-plane merger needs gh on this machine to protect the base branch', upExitCodes.prerequisite);
+        const key = await ensureDeployKey(installDir, repository, gh);
+        return (await ensureMainWriteProtection(repository, gh, { writerKey: await readFile(`${key}.pub`, 'utf8') })).detail;
+      });
+      if (protect) {
+        const detail = await protect(directory, request.repository).catch(error => {
+          if (error instanceof UpStop) throw error;
+          throw new UpStop(`deploy-key: ${String(error?.message ?? error).split('\n')[0].slice(0, 500)}; rerun ${rerun()} once that is fixed`, upExitCodes.failed);
+        });
+        deps.emit({ kind: 'note', text: `Base branch protection: ${detail}.` });
+      }
       await step('merger-setting', async () => {
         const current = await deps.status().catch(() => null);
         if (current?.mergeWriter?.merger === 'control-plane') return 'merger already control-plane';
