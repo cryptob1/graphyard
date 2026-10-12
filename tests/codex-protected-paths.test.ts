@@ -14,9 +14,10 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * of a session started without them failed. A codex launch creates each missing one first.
  *
  * unit:codex-protected-paths-created — before a codex launch in a directory lacking `.agents` or
- * `.codex`, both exist afterwards; ones already present, including a file or symlink, are untouched
- * (a symlink also refuses the launch, as Codex's bubblewrap sandbox rejects it).
+ * `.codex`, both exist afterwards; ones already present, including a file or symlink, are untouched.
  * unit:codex-protected-paths-codex-only — other runtimes' launches create nothing.
+ * unit:codex-protected-paths-symlink-refused — a codex launch where either is a symlink, dangling or
+ * not, is refused naming the path and saying to remove the symlink, which is left unmodified.
  */
 
 const codexProtectedPaths = ['.agents', '.codex'];
@@ -53,9 +54,28 @@ test('unit:codex-protected-paths-created — a codex launch creates the missing 
   assert.equal(readFileSync(join(filed, '.agents'), 'utf8'), 'a file\n');
   assert.ok((await lstat(join(filed, '.codex'))).isDirectory());
 
-  // A symlink, dangling or not, is left exactly as it is, but bubblewrap rejects a protected path
-  // through a symlink, so the launch is refused by name instead of starting a sandbox that fails.
-  const refused = (path: string) => (error: unknown) => error instanceof LaunchRefusedError && error.kind === 'codex' && error.message.includes(path) && /symlink/.test(error.message);
+  // A symlink in its place is left exactly as it is (the launch itself is refused; see below).
+  const symlinked = await temporaryDirectory('codex-symlinked'), elsewhere = await temporaryDirectory('codex-elsewhere');
+  await symlink(elsewhere, join(symlinked, '.codex'));
+  await assert.rejects(launch('codex', symlinked), LaunchRefusedError);
+  assert.equal(readlinkSync(join(symlinked, '.codex')), elsewhere);
+  assert.deepEqual(await readdir(elsewhere), []);
+});
+
+test('unit:codex-protected-paths-codex-only — no other runtime\'s launch creates .agents or .codex', async () => {
+  const others = Object.keys(nonInteractiveLaunch).filter(kind => kind !== 'codex');
+  assert.ok(others.includes('claude'));
+  for (const kind of others) {
+    const cwd = await temporaryDirectory(`${kind}-cwd`);
+    await launch(kind, cwd);
+    for (const name of codexProtectedPaths) assert.ok(!existsSync(join(cwd, name)), `${kind} created ${name}`);
+  }
+});
+
+test('unit:codex-protected-paths-symlink-refused — a codex launch where .agents or .codex is a symlink, dangling or not, is refused naming it, and the symlink is not modified', async () => {
+  // Bubblewrap rejects a protected path through a symlink, so the launch is refused by name instead
+  // of starting a sandbox that fails, and the symlink is left exactly as it is.
+  const refused = (path: string) => (error: unknown) => error instanceof LaunchRefusedError && error.kind === 'codex' && error.message.includes(path) && /remove the symlink/.test(error.message);
   const dangling = await temporaryDirectory('codex-dangling'), target = await temporaryDirectory('codex-target');
   await symlink(join(target, 'missing'), join(dangling, '.codex'));
   await assert.rejects(launch('codex', dangling), refused(join(dangling, '.codex')));
@@ -70,14 +90,4 @@ test('unit:codex-protected-paths-created — a codex launch creates the missing 
   assert.equal(realpathSync(join(linked, '.agents')), realpathSync(real));
   assert.deepEqual(await readdir(real), []);
   assert.ok((await lstat(join(linked, '.codex'))).isDirectory());
-});
-
-test('unit:codex-protected-paths-codex-only — no other runtime\'s launch creates .agents or .codex', async () => {
-  const others = Object.keys(nonInteractiveLaunch).filter(kind => kind !== 'codex');
-  assert.ok(others.includes('claude'));
-  for (const kind of others) {
-    const cwd = await temporaryDirectory(`${kind}-cwd`);
-    await launch(kind, cwd);
-    for (const name of codexProtectedPaths) assert.ok(!existsSync(join(cwd, name)), `${kind} created ${name}`);
-  }
 });

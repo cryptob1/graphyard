@@ -245,7 +245,7 @@ export async function createCodexProtectedPaths(folder: string) {
     try { if ((await lstat(path)).isSymbolicLink()) linked.push(path); continue; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     try { await mkdir(path); created.push(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
   }
-  if (linked.length) throw new LaunchRefusedError('codex', `Graphyard refuses to launch the codex runtime in ${folder}: ${linked.join(' and ')} ${linked.length > 1 ? 'are symlinks' : 'is a symlink'}, which Codex's bubblewrap sandbox rejects as a protected path, so every command in the session would fail in the sandbox; Graphyard leaves it untouched, so replace it with a directory, then launch again.`);
+  if (linked.length) throw new LaunchRefusedError('codex', `Graphyard refuses to launch the codex runtime in ${folder}: ${linked.join(' and ')} ${linked.length > 1 ? 'are symlinks' : 'is a symlink'}, which Codex's bubblewrap sandbox rejects as a protected path, so every command in the session would fail in the sandbox; Graphyard leaves it untouched, so remove the symlink, then launch again.`);
   return created;
 }
 export async function trustCodexFolder(directory: string, environment: Record<string, string> = {}): Promise<FolderTrust> {
