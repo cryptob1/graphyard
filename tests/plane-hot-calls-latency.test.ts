@@ -114,7 +114,7 @@ test('unit:plane-hot-calls-bounded-under-load — decide, requirements and statu
   assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
   const epoch = claimed.body.epoch as number;
   const target = open[1];
-  const rewrite = { expectedPolicyRevision: target.policyRevision, criteria: target.criteria, dependencies: [], plannedFiles: [...target.plannedFiles, 'src/more.ts'], exclusiveResources: [], producerProofs: [] };
+  const rewrite = { expectedPolicyRevision: target.policyRevision, criteria: target.criteria, dependencies: [], plannedFiles: [...target.plannedFiles, 'src/more.ts'], exclusiveResources: [], producerProofs: [], reason: 'widen' };
   // What the server does every minute (main.ts), run back to back for as long as the calls are timed.
   const cache = new LedgerRowCache();
   let scanning = true, scans = 0;
@@ -131,15 +131,18 @@ test('unit:plane-hot-calls-bounded-under-load — decide, requirements and statu
     // At least three rounds, and until the scan has run three times: its first pass reads the window, the later ones what was written since.
     for (let round = 0; round < 3 || (scans < 3 && round < 120); round++) {
       if (round >= 3) await new Promise(resolve => setTimeout(resolve, 250));
+      // A fresh draft each round, so every timed release is a first request and succeeds.
+      const fresh = await call(master.token, 'POST', 'work', { title: `decide-${round}`, plannedFiles: [`src/decide-${round}.ts`], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'seed' });
+      assert.equal(fresh.status, 200, JSON.stringify(fresh.body));
       let renewing = true;
       const renewal = (async () => { while (renewing) { const renewed = await call(token(worker), 'POST', `work/${open[0].key}/heartbeat`, { epoch }); assert.equal(renewed.status, 200, JSON.stringify(renewed.body)); renewals.push(renewed.ms); } })();
       const [decided, revised, read] = await Promise.all([
-        call(master.token, 'POST', `work/${open[2].key}/decide`, { action: 'release', input: { expectedRevision: open[2].revision }, reason: `round ${round}` }),
+        call(master.token, 'POST', `work/${fresh.body.key}/decide`, { action: 'release', input: { expectedRevision: fresh.body.revision }, reason: `round ${round}` }),
         call(token(operator), 'POST', `work/${target.key}/requirements`, { ...rewrite, plannedFiles: [...rewrite.plannedFiles, `src/more-${round}.ts`] }),
         call(token(operator), 'GET', 'status'),
       ]);
       renewing = false; await renewal;
-      for (const [name, result] of Object.entries({ decide: decided, requirements: revised, status: read })) assert.ok(result.status < 500, `${name}: ${result.status} ${JSON.stringify(result.body).slice(0, 300)}`);
+      for (const [name, result] of Object.entries({ decide: decided, requirements: revised, status: read })) assert.equal(result.status, 200, `${name}: ${result.status} ${JSON.stringify(result.body).slice(0, 300)}`);
       decide.push(decided.ms); requirements.push(revised.ms); status.push(read.ms);
       rewrite.expectedPolicyRevision += 1;
     }
