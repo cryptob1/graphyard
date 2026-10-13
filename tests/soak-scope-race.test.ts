@@ -32,7 +32,7 @@ test('unit:soak-invariants-hold — over two simulated days a routed scope ask w
   // The world: one item in build whose live attempt asked for a file the widening rule refused, and
   // its decisions as the control plane keeps them. The approver judges at its launch.
   const asked = { epoch: 1, at: iso(start - 5 * minute), paths: [daemon], reason: 'AC-1 needs the research worktree, which only the cycle module creates', requestedBy: 'worker',
-    decision: { state: 'refused' as const, reason: 'No rule implies src/daemon/cycle-widget.ts', at: iso(start - 4 * minute), decidedBy: 'graphyard' } };
+    decision: { state: 'refused' as const, reason: 'No rule implies src/daemon/cycle-widget.ts', at: iso(start - 4 * minute), decidedBy: 'graphyard', treeRead: true } };
   let plannedFiles = [layout], scopeRequest: typeof asked | null = asked, scopeDecision: unknown = null, judged = 0, refusedDecides = 0;
   const decisions: { id: string; action: string; state: string; input: any; outcome: string | null; approvedBy: string | null; refusal: null; requestedAt: string }[] = [];
   const launches: string[] = [], decideAt: number[] = [];

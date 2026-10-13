@@ -127,6 +127,7 @@ function fleetExecutor(launched: string[], only?: string): ExecutorEffects {
     launchReview: async () => { throw new Error('no review is launched here'); },
     launchProducer: async () => { throw new Error('no producer is launched here'); },
     observeDeployment: async () => { throw new Error('no deployment is observed here'); },
+    repositoryFiles: async () => new Set(['src/priority-palette/index.ts']),
   });
   return {
     // Scoped to the item under test, the way a real executor is scoped to its repository: the

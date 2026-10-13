@@ -2,6 +2,7 @@ import { documentationGlobMatches } from './documentation-glob.js';
 import { companionGround as recordCompanionGround, followUpPaths, timingBaseline, type FollowUpSource } from './scope-companions.js';
 export { followUpPaths, plannedCompanions } from './scope-companions.js';
 import { addsTestFile, timingBaselinePath } from './timing-companion.js';
+import { type NonRepositoryPath, nonRepositoryReason } from './scope-repository.js';
 import { type CollapsedScope, askIdentity, collapseArea, collapsePlannedFiles, describeWidening, plannedFilesCovered, routableScopeRequest, terminalScopeRefusal } from './scope-collapse.js';
 // Deliberately bounded scope syntax: exact paths or directory prefixes ending /, /*, /**.
 // Unsupported glob expressions are not interpreted as semantic dependency knowledge.
@@ -81,6 +82,10 @@ export interface ScopeDecision {
   requestedAt: string;
   /** The attempt that asked: an answered request is cleared, and its worker still reads the outcome here. */
   epoch?: number;
+  /** The refusal is the evidence gate's (GY-1764): the ask names no repository file, so it is never routed to the approver. */
+  nonRepository?: boolean;
+  /** The repository tree was read for this decision (GY-1764): only a refusal so evidenced may be routed to the approver, so a missing read never turns an ask into an approver decision. */
+  treeRead?: boolean;
 }
 
 /**
@@ -171,7 +176,7 @@ export function companionGround(...args: Parameters<typeof recordCompanionGround
   return timed ? `${path} is the test-duration baseline a change to ${timed} must keep covering` : null;
 }
 /** `companions`: approved paths implied only as the timing baseline's companion (GY-1023), never added to plannedFiles so its line judgement stays in force. */
-export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; paths: string[]; companions?: string[] }
+export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; paths: string[]; companions?: string[]; nonRepository?: boolean }
 /**
  * The decision itself, computed from the item's own record: never from what the requester claims.
  * A purely additive request whose every path is implied is approved with the implication as its
@@ -180,7 +185,7 @@ export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; p
 export function decideScopeRequest(
   item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; observation?: { files?: readonly string[] } | null } & FollowUpSource,
   request: Pick<ScopeRequestState, 'paths' | 'remove' | 'criteria'>,
-  options: { documentation?: readonly string[]; documentationConsumers?: readonly string[] } = {},
+  options: { documentation?: readonly string[]; documentationConsumers?: readonly string[]; nonRepository?: readonly NonRepositoryPath[]; treeRead?: boolean } = {},
 ): ScopeVerdict {
   // Paths the current planned scope already covers are no widening at all, so the decision is
   // about the rest: a master revision between the request and this decision narrows the ask
@@ -190,6 +195,9 @@ export function decideScopeRequest(
   if (request.remove?.length) return refused(`the request drops planned paths (${request.remove.join(', ')}); only additive scope is decided automatically, and narrowing containment is an operator requirements revision`);
   if (request.criteria?.length) return refused('the request rewrites criteria or proofs; requirements are decided by an operator and approved by an independent agent, never by the loop');
   if (!paths.length) return refused('the request names no path outside the planned scope; nothing is left to widen');
+  // GY-1764: an ask naming what is not a repository file is refused here, on the tree the loop read, and never routed.
+  const offending = (options.nonRepository ?? []).filter(entry => paths.includes(entry.path));
+  if (offending.length) return { ...refused(nonRepositoryReason(offending)), nonRepository: true };
   const implied = [...impliedScopes(item.criteria, options.documentation ?? itemDocumentationPaths(item), item.origin, item.description),
     ...(plansDocumentationTree(item.plannedFiles) ? (options.documentationConsumers ?? documentationConsumerScopes).map(scope => ({ scope, kind: 'documentation-consumer' as const, why: `${scope} renders or tests the documentation this item rewrites` })) : []),
     // A change that adds a test file may record its timing line (GY-1023): the baseline is implied by the test.
@@ -224,38 +232,7 @@ export function decideScopeRequest(
 
 /** A test file as the pinning rule reads one: under a tests directory, or named `*.test.*` / `*.spec.*`. */
 export const testFile = (path: string) => !pathScope(path).prefix && (/(^|\/)(tests?|__tests__|browser-tests|spec)\//.test(path) || /\.(test|spec)\.[cm]?[jt]sx?$/.test(path));
-/** The shortest quote the rule accepts: shorter text is too common to tie a test to a file. */
-export const pinnedQuoteMin = 8;
-/**
- * The texts a request's reason quotes, as written and as the file would hold them: backtick and
- * double-quoted segments as they are, and a regular-expression literal (`/Old text\./`) both as its
- * source (the test holds that) and unescaped (the planned file holds that).
- */
-export function quotedTexts(reason: string): { raw: string; text: string }[] {
-  const quotes: { raw: string; text: string }[] = [];
-  for (const match of reason.matchAll(/`([^`\n]+)`|"([^"\n]+)"|(?:^|[\s(,=:])\/((?:\\.|[^/\\\n])+)\/[dgimsuyv]*/g)) {
-    const raw = match[1] ?? match[2] ?? match[3];
-    const text = match[3] ? raw.replace(/\\(.)/g, '$1') : raw;
-    if (text.trim().length >= pinnedQuoteMin) quotes.push({ raw, text });
-  }
-  return quotes;
-}
-/**
- * The grounds a test file is granted on, or null. The request's reason quotes the failing assertion;
- * the quote must be in the test file (it is that test's assertion) and in a file the item already
- * plans (the text the item changes). Anything else — a quote only one of them holds, a file that is
- * not a test — is refused and goes to the approver.
- */
-export function pinningTestGround(path: string, reason: string, testText: string | null, planned: readonly { path: string; text: string | null }[]): string | null {
-  if (!testFile(path) || !testText) return null;
-  for (const quote of quotedTexts(reason)) {
-    if (!testText.includes(quote.raw) && !testText.includes(quote.text)) continue;
-    const holder = planned.find(file => file.path !== path && !!file.text && file.text.includes(quote.text));
-    if (holder) return `${path} pins "${quote.text.length > 80 ? `${quote.text.slice(0, 79)}…` : quote.text}", which planned file ${holder.path} holds`;
-  }
-  return null;
-}
-
+export { pinnedQuoteMin, pinningTestGround, quotedTexts } from './scope-pinning.js';
 /**
  * True when a request the loop refused would be approved by the rules as they stand now — a rule
  * change, or a widening that made its implication hold — so the loop asks the control plane to
@@ -264,7 +241,7 @@ export function pinningTestGround(path: string, reason: string, testText: string
  */
 export function redecidableScopeRefusal(item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; observation?: { files?: readonly string[] } | null; blocker?: string | null; scopeRequest?: ScopeRequestState | null }) {
   const request = item.scopeRequest;
-  return !!request && request.decision?.state === 'refused' && !!item.blocker?.startsWith(scopeRefusalBlocker)
+  return !!request && request.decision?.state === 'refused' && !request.decision.nonRepository && !!item.blocker?.startsWith(scopeRefusalBlocker)
     && decideScopeRequest(item, request).state === 'approved';
 }
 

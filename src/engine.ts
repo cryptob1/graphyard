@@ -31,6 +31,7 @@ import { protectedCasePrefix, protectedCaseRefusals, readProtectingGoals } from 
 import { retroCheckRefusals } from './model/retro-synthesis.js';
 import { readAppliedRetroChecks } from './retro-synthesis.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
+import { nonRepositoryRead } from './model/scope-repository.js';
 import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, unplannedPaths, type ScopeDecision, type ScopeRequestState } from './model/scope.js';
 import { askIdentity, mergedScopeRequest, plannedFilesCovered, widenedPlannedFiles } from './model/scope-collapse.js';
 import { handScopeWideningRefusal, routedScopeAsk } from './model/scope-provenance.js';
@@ -110,6 +111,8 @@ const commands = {
   recover: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
   claim: z.object({}).strict(),
   rereview: z.object({ epoch: epoch.optional() }).strict(),
+  // GY-1764: the loop reports the review ledger's planned mechanical-fix round for the item (or its absence), the one ground the review gate's hold reads.
+  mechanicalplan: z.object({ reviewId: z.number().int().positive(), head: sha, planned: z.boolean() }).strict(),
   heartbeat: z.object({ epoch }).strict(),
   // The supervisor names the exact systemd scope it launches the session in, and its own pid,
   // so settlement can tell this assignment's containment from a neighbour's.
@@ -156,7 +159,8 @@ const commands = {
   // The master loop asking the control plane to decide the open scope request now. It carries no
   // verdict: the decision is recomputed here from the item's own criteria and the repository's
   // documentation rule, exactly as `autosettle` recomputes containment death.
-  autoscope: z.object({ epoch }).strict(),
+  // GY-1764: the loop's reading of which asked paths are no repository file (read from the base tree outside this transaction); the rule refuses an ask naming them.
+  autoscope: z.object({ epoch, treeRead: z.boolean().optional(), nonRepository: z.array(z.object({ path: z.string().min(1).max(1000), nearMiss: z.string().max(300).nullable(), why: z.enum(['install-local', 'untracked']) }).strict()).max(50).optional() }).strict(),
   // The master loop recording that dispatching the item keeps failing for one unchanged cause
   // (GY-1078): the cause becomes the item's blocker, so nothing dispatches it again until an
   // operator clears it. It needs no lease — no attempt is running — and is refused while one is.
@@ -318,7 +322,7 @@ const endedScopeRecord = (request: ScopeRequestState, by: string, now: Date) => 
  * plannedFiles already cover.
  */
 export function carriedScopeRequest(work: Pick<Work, 'plannedFiles'>, request: ScopeRequestState): ScopeRequestState | null {
-  if (request.decision?.state !== 'refused' || request.decision.decidedBy !== 'graphyard' || request.remove?.length || request.criteria?.length) return null;
+  if (request.decision?.state !== 'refused' || request.decision.decidedBy !== 'graphyard' || request.decision.nonRepository || !request.decision.treeRead || request.remove?.length || request.criteria?.length) return null; // GY-1764: the tree refuted these paths, so a later attempt's ask starts clean
   const paths = unplannedPaths(work.plannedFiles, request.paths);
   return paths.length ? { ...request, paths } : null;
 }
@@ -341,10 +345,10 @@ export function inheritedScopeRequest(work: Pick<Work, 'plannedFiles' | 'carried
 // A blocker ends its attempt (GY-1008); a cleared one (`blocked GY-N EPOCH -`) keeps the lease, so its request stays open.
 const attemptEndingCommands = new Set<string>(['submit', 'release', 'rework', 'requirements', 'unblock', 'blocked', 'defer']);
 /** `ground` is what the verdict is decided on: the item, or (GY-1726) the item with the criteria its held requirements decisions carry. */
-export function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest']>, now: Date, ground: Parameters<typeof decideScopeRequest>[0] = work): ScopeDecision {
-  const verdict = decideScopeRequest(ground, request);
+export function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest']>, now: Date, ground: Parameters<typeof decideScopeRequest>[0] = work, options: Parameters<typeof decideScopeRequest>[2] = {}): ScopeDecision {
+  const verdict = decideScopeRequest(ground, request, options);
   const decision: ScopeDecision = { state: verdict.state, reason: verdict.reason, at: now.toISOString(), decidedBy: 'graphyard',
-    waitedMs: Math.max(0, now.getTime() - Date.parse(request.at)), paths: verdict.paths, requestedBy: request.requestedBy, requestedAt: request.at, epoch: request.epoch };
+    waitedMs: Math.max(0, now.getTime() - Date.parse(request.at)), paths: verdict.paths, requestedBy: request.requestedBy, requestedAt: request.at, epoch: request.epoch, ...(verdict.nonRepository ? { nonRepository: true } : {}), ...(verdict.nonRepository || options.treeRead ? { treeRead: true } : {}) };
   work.scopeDecision = decision;
   // An applied request is answered and cleared, exactly as an operator widening clears it;
   // a refused one stays open, carrying its refusal, because someone still has to decide it.
@@ -1229,6 +1233,13 @@ export class Engine {
           && (data.state === 'finished' || handle.state === 'running' && data.observed !== undefined && ['coordinator', 'admin'].includes(actor.role)));
       preserveAssignment(work); retainQuarantineFence(work);
       if (command !== 'create' && !containmentCleanup.includes(command) && !postDeployment && !deliveredSessionClosure) demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
+      if (command === 'mechanicalplan') {
+        demand(['coordinator', 'admin'].includes(actor.role), 'Coordinator permission required', 403);
+        // `at` is the control plane's own instant of the report: the review gate holds only while the loop
+        // confirmed the plan this recently, so a report whose write or ledger read keeps failing cannot
+        // keep holding a head the ledger no longer plans a round for (GY-1764).
+        work.mechanicalPlan = data.planned ? { reviewId: data.reviewId, head: data.head, at: now.toISOString() } : null;
+      }
       if (command === 'rereview') {
         if (actor.role !== 'admin') { demand(actor.role === 'worker', 'Worker or operator required', 403); activeLease(work, actor, data.epoch, now); }
         demand(work.policy.review && ['codex', 'agent'].includes(reviewProviderOf(work.policy)) && work.submission && !work.observation?.merged, 'Open submitted work with a dispatched review provider is required');
@@ -1543,8 +1554,12 @@ export class Engine {
         // its worker asked for, and the refusal stood until an operator cleared it by hand).
         const held = await this.heldRequirements(db, work);
         const ground = { ...work, criteria: [...work.criteria, ...held.flatMap(decision => decision.criteria)] };
-        if (request!.decision && (request!.decision.state !== 'refused' || decideScopeRequest(ground, request!).state !== 'approved')) return work;
-        demand(work.lease && work.lease.epoch === request!.epoch && Date.parse(work.lease.expiresAt) > now.getTime(),
+        const offenders = nonRepositoryRead(data.nonRepository, request!.paths);
+        // The evidence gate (GY-1764) re-decides a refusal the rule gave before the loop had read the tree: the ask is then refused for the paths it names that are no repository file.
+        const regate = (!!offenders.length || !!data.treeRead) && !request!.decision?.treeRead && request!.decision?.state === 'refused' && request!.decision.decidedBy === 'graphyard' && !request!.decision.nonRepository;
+        if (request!.decision && !regate && (request!.decision.state !== 'refused' || decideScopeRequest(ground, request!).state !== 'approved')) return work;
+        // A re-gate only adds the tree's evidence to a refusal, so it needs no live attempt (the asker may have released).
+        demand(regate && decideScopeRequest(ground, request!, { nonRepository: offenders }).state === 'refused' || work.lease && work.lease.epoch === request!.epoch && Date.parse(work.lease.expiresAt) > now.getTime(),
           'The requesting attempt no longer holds the lease; a fresh attempt asks afresh');
         const unaided = decideScopeRequest(work, request!).state === 'approved', planned = work.plannedFiles ?? [], revision = work.policyRevision;
         // Only the decisions whose own criteria ground the ask are its grounds; an unrelated held decision
@@ -1552,7 +1567,7 @@ export class Engine {
         // f28c91076299). Decisions that ground it only together are all its grounds.
         const alone = held.filter(entry => decideScopeRequest({ ...work, criteria: [...work.criteria, ...entry.criteria] }, request!).state === 'approved');
         const grounds = alone.length ? alone : held;
-        decision = applyScopeDecision(work, request!, now, ground);
+        decision = applyScopeDecision(work, request!, now, ground, { nonRepository: offenders, treeRead: !!data.treeRead });
         // A widening only the held criteria grounded keeps those decisions current: each still applies when
         // the attempt ends, on this revision, with the entries it added kept (Codex review of f8eb2edf68f2).
         if (held.length && !unaided && work.policyRevision !== revision) {
@@ -1646,7 +1661,10 @@ export class Engine {
             // the same one the loop's `autoscope` computes — recomputed from the item's own
             // criteria — so asking and answering in one transaction grants the asker nothing.
             // The `scope` command stays the path for a session that keeps working while it waits.
-            decision = applyScopeDecision(work, work.scopeRequest, now);
+            // GY-1764: the asker's own reading of which of its paths are no repository file rides
+            // with it, validated and refuse-only exactly as the loop's report is, so this verdict
+            // refuses the ask as its own and never leaves it routable to the approver.
+            decision = applyScopeDecision(work, work.scopeRequest, now, work, { nonRepository: nonRepositoryRead(data.nonRepository, data.paths ?? []) });
             request.state = 'resolved'; request.resolvedAt = now.toISOString();
             request.resolution = `${decision.state}: ${decision.reason}`;
           }

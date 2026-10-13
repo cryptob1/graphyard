@@ -68,7 +68,7 @@ test('unit:scope-request-wait-window — --wait waits as long as the escalation 
   // minutes (GY-1480's approval landed at about six and a half) and reported pending only at its end.
   const start = Date.parse('2026-10-07T21:59:33.000Z');
   const request = { epoch: 1, at: new Date(start).toISOString(), paths: [daemon], reason: 'AC-3 needs the cycle module', requestedBy: implementer.id,
-    decision: { state: 'refused' as const, reason: 'outside what the criteria imply', at: new Date(start).toISOString(), decidedBy: 'graphyard', waitedMs: 0, paths: [daemon], requestedBy: implementer.id, requestedAt: new Date(start).toISOString(), epoch: 1 } };
+    decision: { state: 'refused' as const, reason: 'outside what the criteria imply', at: new Date(start).toISOString(), decidedBy: 'graphyard', treeRead: true, waitedMs: 0, paths: [daemon], requestedBy: implementer.id, requestedAt: new Date(start).toISOString(), epoch: 1 } };
   const work = { id: 'w-1', key: 'GY-9484', plannedFiles: [layout], criteria: [{ id: 'AC-1', text: 'Renders', proofs: ['unit:x'] }], lease: { owner: implementer.id, epoch: 1, expiresAt: new Date(start + 3_600_000).toISOString() }, scopeRequest: request, scopeDecision: request.decision } as unknown as Work;
   assert.equal(scopeRequestOutcome(work, request, start).state, 'pending', 'a rule refusal with the approver is pending');
   let clock = start, polls: number[] = [];
@@ -87,7 +87,7 @@ test('integration:scope-request-survives-epoch-end — a request whose attempt e
   work = await claim(work.id);
   await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths: [daemon], reason: 'AC-1 needs the research worktree, which only the cycle module creates' });
   // The widening rule cannot ground it, so it is the approver's; the loop routes it.
-  work = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch }) as Work;
+  work = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch, treeRead: true }) as Work;
   const asked = work.scopeRequest!;
   assert.equal(asked.decision?.state, 'refused');
   assert.equal(asked.decision?.decidedBy, 'graphyard');
@@ -125,7 +125,7 @@ test('integration:scope-request-survives-epoch-end — a request whose attempt e
   refused = await ok(master.token, 'POST', `work/${refused.id}/ready`, { expectedRevision: refused.revision, reason: 'Ready' }) as Work;
   refused = await claim(refused.id);
   await ok(token(implementer), 'POST', `work/${refused.id}/scope`, { epoch: refused.epoch, paths: [daemon], reason: 'Wanted' });
-  refused = await ok(token(coordinator), 'POST', `work/${refused.id}/autoscope`, { epoch: refused.epoch }) as Work;
+  refused = await ok(token(coordinator), 'POST', `work/${refused.id}/autoscope`, { epoch: refused.epoch, treeRead: true }) as Work;
   const declined = await ok(master.token, 'POST', `work/${refused.id}/decide`, { action: 'requirements', input: decisionInput('requirements', refused, { plannedFiles: [layout, daemon], answers: { epoch: refused.epoch, at: refused.scopeRequest!.at } }), reason: 'The worker asks' });
   await ok(approver.token, 'POST', `work/${refused.id}/approve`, { action: 'refuse', decision: declined.id, reason: 'Not implied by the criteria' });
   await engine.execute(implementer, 'release', refused.id, { epoch: refused.epoch }, randomUUID());
@@ -139,7 +139,7 @@ test('integration:scope-request-survives-epoch-end — a request whose attempt e
   unblocked = await ok(master.token, 'POST', `work/${unblocked.id}/ready`, { expectedRevision: unblocked.revision, reason: 'Ready' }) as Work;
   unblocked = await claim(unblocked.id);
   await ok(token(implementer), 'POST', `work/${unblocked.id}/scope`, { epoch: unblocked.epoch, paths: [daemon], reason: 'Wanted' });
-  await ok(token(coordinator), 'POST', `work/${unblocked.id}/autoscope`, { epoch: unblocked.epoch });
+  await ok(token(coordinator), 'POST', `work/${unblocked.id}/autoscope`, { epoch: unblocked.epoch, treeRead: true });
   await engine.execute(implementer, 'blocked', unblocked.id, { epoch: unblocked.epoch, reason: 'Waiting on the widening' }, randomUUID());
   assert.deepEqual((await reload(unblocked.id)).carriedScopeRequest?.paths, [daemon], 'the blocked attempt carries its ask');
   await engine.execute(operator, 'unblock', unblocked.id, { reason: 'The operator decided the cycle module is out of scope' }, randomUUID());
@@ -161,7 +161,7 @@ test('integration:carried-scope-ask-stays-routed — an ask whose attempt ends r
   work = await ok(master.token, 'POST', `work/${work.id}/ready`, { expectedRevision: work.revision, reason: 'Ready for the attempt' }) as Work;
   work = await claim(work.id);
   await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths: [daemon], reason: 'AC-1 needs the cycle module' });
-  work = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch }) as Work;
+  work = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch, treeRead: true }) as Work;
   const asked = work.scopeRequest!;
   const live = scopeRoutineDecision(work, Date.now(), true)!;
   assert.equal(live.binding, scopeDecisionBinding(asked), 'the loop routes the live ask');
@@ -198,7 +198,7 @@ test('integration:carried-scope-ask-refused — the approver refusing an ask car
   work = await ok(master.token, 'POST', `work/${work.id}/ready`, { expectedRevision: work.revision, reason: 'Ready for the attempt' }) as Work;
   work = await claim(work.id);
   await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths: [daemon], reason: 'Wanted' });
-  work = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch }) as Work;
+  work = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch, treeRead: true }) as Work;
   const asked = work.scopeRequest!;
   await engine.execute(implementer, 'release', work.id, { epoch: work.epoch }, randomUUID());
   let item = await reload(work.id);
@@ -223,7 +223,7 @@ test('integration:carried-scope-ask-claimed-before-answer — an ask a claim inh
     work = await ok(master.token, 'POST', `work/${work.id}/ready`, { expectedRevision: work.revision, reason: 'Ready for the attempt' }) as Work;
     work = await claim(work.id);
     await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths: [daemon], reason: 'AC-1 needs the cycle module' });
-    work = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch }) as Work;
+    work = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch, treeRead: true }) as Work;
     const asked = work.scopeRequest!, live = scopeRoutineDecision(work, Date.now(), true)!;
     const decision = await ok(master.token, 'POST', `work/${work.id}/decide`, { action: 'requirements', input: decisionInput('requirements', work, live.input!), reason: live.reason });
     await engine.execute(implementer, 'release', work.id, { epoch: work.epoch }, randomUUID());

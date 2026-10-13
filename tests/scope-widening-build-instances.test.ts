@@ -222,7 +222,7 @@ const gy1675 = {
 const askedAt1675 = '2026-10-10T22:57:02.161Z', refusedAt1675 = '2026-10-10T22:57:05.907Z', routedAt1675 = Date.parse('2026-10-10T22:57:18.629Z');
 /** The ask of 22:57:02Z as the item held it once the rule refused it: one new file beside 21 planned src paths, under epoch 1's live lease. */
 const request1675 = { epoch: 1, paths: [gy1675.newFile], reason: gy1675.askReason, requestedBy: 'graphyard-claude-1', at: askedAt1675,
-  decision: { state: 'refused' as const, reason: `${gy1675.newFile} is outside what this item's own criteria and the repository's documentation rule imply; an operator decides scope the item does not already carry`, at: refusedAt1675, decidedBy: 'graphyard', waitedMs: 3746, paths: [gy1675.newFile], requestedBy: 'graphyard-claude-1', requestedAt: askedAt1675 } };
+  decision: { state: 'refused' as const, reason: `${gy1675.newFile} is outside what this item's own criteria and the repository's documentation rule imply; an operator decides scope the item does not already carry`, at: refusedAt1675, decidedBy: 'graphyard', treeRead: true, waitedMs: 3746, paths: [gy1675.newFile], requestedBy: 'graphyard-claude-1', requestedAt: askedAt1675 } };
 const item1675 = { id: gy1675.id, key: 'GY-1675', stage: 'build', epoch: 1, criteria: gy1675.criteria, plannedFiles: gy1675.planned, scopeRequest: request1675, lease: { epoch: 1, owner: 'graphyard-claude-1', expiresAt: '2026-10-10T22:59:02.000Z' } } as unknown as Work;
 /** The hand-requested exact-path decision 016ad8f4 (22:58:37Z), approved at 22:59:16Z and refused by the engine's attempt guard. */
 const decision1675 = { id: '016ad8f4-6c97-4d82-99fd-31b59d58bc6b', action: 'requirements' as const, requestedBy: operator, reason: 'GY-1675: add the exact path src/server/control-plane-observation.ts and AC-3 naming its creation: the observation job moves out of src/server/main.ts to keep its module budget' };
@@ -311,7 +311,7 @@ const gy1680 = {
   recorded: { id: 'scope-widening:4aed9d65-e6d4-4850-ab6a-67c3362bb916:2491588', work: 'GY-1680', requestedAt: '2026-10-11T01:23:21.145Z', resolvedAt: null, waitedMs: 50629, sources: [{ seq: 2491588, kind: 'scope' }, { seq: 2491597, kind: 'autoscope' }] },
 };
 const refusal1680 = 'src/cli/master.ts is outside what this item\'s own criteria and the repository\'s documentation rule imply; an operator decides scope the item does not already carry';
-const decision1680 = { at: gy1680.refusedAt, epoch: 1, paths: gy1680.paths, state: 'refused' as const, reason: refusal1680, waitedMs: 9463, decidedBy: 'graphyard', requestedAt: gy1680.askedAt, requestedBy: 'graphyard-opencode-1' };
+const decision1680 = { at: gy1680.refusedAt, epoch: 1, paths: gy1680.paths, state: 'refused' as const, reason: refusal1680, waitedMs: 9463, decidedBy: 'graphyard', treeRead: true, requestedAt: gy1680.askedAt, requestedBy: 'graphyard-opencode-1' };
 const request1680 = { at: gy1680.askedAt, epoch: 1, paths: gy1680.paths, reason: gy1680.askReason, requestedBy: 'graphyard-opencode-1', decision: decision1680 };
 const withDocs = [...gy1680.planned, 'docs/operations.md'], withMaster = [...withDocs, 'src/cli/master.ts'];
 /** GY-1680 as the snapshot held it at 01:24:11Z: the refused ask standing, its attempt's lease live until 01:25:30Z, docs/operations.md already widened by the loop's rule. */

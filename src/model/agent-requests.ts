@@ -39,6 +39,8 @@ export interface AgentRequest {
   requestedBy: string; at: string; reason: string;
   /** scope-request: the paths outside plannedFiles the attempt needs. */
   paths?: string[];
+  /** scope-request: the asked paths the session's reading of the repository tree found to be no repository file (GY-1764); validated and refuse-only, exactly as the `autoscope` command takes the loop's. */
+  nonRepository?: { path: string; nearMiss: string | null; why: 'install-local' | 'untracked' }[];
   /** decision: the two-party decision action an approver agent must approve. */
   action?: string;
   /** escalation: which standing concern the request raises. */
@@ -57,6 +59,7 @@ export const agentRequestSchema = z.object({
   reason: z.string().trim().min(1).max(2000),
   epoch: z.number().int().positive().optional(),
   paths: z.array(z.string().min(1).max(500)).max(50).optional(),
+  nonRepository: z.array(z.object({ path: z.string().min(1).max(1000), nearMiss: z.string().max(300).nullable(), why: z.enum(['install-local', 'untracked']) }).strict()).max(50).optional(),
   action: z.string().trim().min(1).max(100).optional(),
   trigger: z.enum(escalationTriggers).optional(),
   humanDecision: z.enum(humanDecisions).optional(),

@@ -81,7 +81,7 @@ function harness() {
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'no deployment endpoint in this test', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},
-    decideScope: work => ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }) as Promise<Work>,
+    decideScope: work => ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, treeRead: true }) as Promise<Work>,
     // No review finding names anything, so the finding rule judges and grounds nothing.
     reviewFindings: async () => [],
     basePaths: async () => new Set<string>(),
@@ -318,7 +318,7 @@ test('unit:scope-approver-routine — a root-level directory scope is requested 
 test('unit:scope-approver-routine — only a live, additive, rule-refused request the findings did not ground is routed', () => {
   const now = Date.parse('2031-03-01T10:00:00Z');
   const lease = { epoch: 2, owner: 'implementer', expiresAt: '2031-03-01T10:05:00Z' };
-  const refused = { state: 'refused' as const, reason: 'outside', at: '2031-03-01T09:59:00Z', decidedBy: 'graphyard', waitedMs: 1, paths: [helper], requestedBy: 'implementer', requestedAt: '2031-03-01T09:58:00Z' };
+  const refused = { state: 'refused' as const, reason: 'outside', at: '2031-03-01T09:59:00Z', decidedBy: 'graphyard', treeRead: true, waitedMs: 1, paths: [helper], requestedBy: 'implementer', requestedAt: '2031-03-01T09:58:00Z' };
   const base = { key: 'GY-9', stage: 'build', plannedFiles: [layout], criteria, lease, scopeRequest: { epoch: 2, paths: [helper], reason: 'needed', requestedBy: 'implementer', at: '2031-03-01T09:58:00Z', decision: refused } } as unknown as Work;
   assert.equal(scopeRoutineDecision(base, now, true)?.action, 'requirements');
   assert.equal(scopeRoutineDecision(base, now, false), null, 'the review-finding rule is judged first');

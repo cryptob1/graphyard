@@ -63,7 +63,7 @@ function scenario(): Work[] {
     plannedFiles: Array.from({ length: 100 }, (_, index) => `tests/bulk/case-${index}.ts`),
     lease: { owner: 'worker-a', epoch: 2, expiresAt: at(20 * minute) },
     scopeRequest: { epoch: 2, paths: ['src/other/next.ts'], reason: 'The new path moves onto the shared helper too', requestedBy: 'worker-a', at: at(-80 * minute),
-      decision: { state: 'refused', reason: 'no fold represents the ask within the 100 entries plannedFiles holds (101 after folding)', at: at(-79 * minute), decidedBy: 'graphyard', waitedMs: minute, paths: ['src/other/next.ts'], requestedBy: 'worker-a', requestedAt: at(-80 * minute), epoch: 2 } },
+      decision: { state: 'refused', reason: 'no fold represents the ask within the 100 entries plannedFiles holds (101 after folding)', at: at(-79 * minute), decidedBy: 'graphyard', treeRead: true, waitedMs: minute, paths: ['src/other/next.ts'], requestedBy: 'worker-a', requestedAt: at(-80 * minute), epoch: 2 } },
     gates: refusing({ ready: [overCap], build: ['Worker has not submitted implementation for this attempt'] }) });
   const held = make('GY-174', 'Held item', { stage: 'merge', stageEnteredAt: at(-45 * minute), submission: { epoch: 1, pr: 74 } as Work['submission'],
     candidate: { sha: sha('h'), baseSha: sha('b'), pr: 74, branch: 'graphyard/gy-174-1', author: 'worker', createdAt: at(-2 * 60 * minute) } as Work['candidate'],
@@ -95,7 +95,7 @@ test('unit:board-api-matches-dashboard — GET /api/board gives each open item i
   // GY-1388: refused by the rule alone, the ask is the approver's while its routed decision is
   // pending in the ledger, so the card names that decision, never `master scope`, which the engine
   // refuses. Once that decision ends, or none came within the bound, the ask is the master's again.
-  const routed = work.map(item => item.key === 'GY-172' ? { ...item, scopeRequest: { ...item.scopeRequest!, decision: { ...item.scopeRequest!.decision!, decidedBy: 'graphyard' } } } : item);
+  const routed = work.map(item => item.key === 'GY-172' ? { ...item, scopeRequest: { ...item.scopeRequest!, decision: { ...item.scopeRequest!.decision!, decidedBy: 'graphyard', treeRead: true } } } : item);
   const ask = routed.find(item => item.key === 'GY-172')!;
   const ledger = (ended: boolean) => [{ work_id: ask.id, id: 'd-172', at: ask.scopeRequest!.at, epoch: 2, ended }];
   assert.equal(entry(await served(routed, ledger(false)), 'GY-172').command, 'graphyard master decisions GY-172');

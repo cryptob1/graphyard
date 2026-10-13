@@ -56,7 +56,7 @@ import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from 
 import { decisionEventKinds } from './decision-reads.js';
 import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
 import { derivePlannedFiles, plannedFilesRefusal } from '../model/planned-files.js';
-import { baseTree } from '../cli/planned-files-intent.js';
+import { baseTree } from '../cli/planned-files-intent.js'; import { currentBaseTree } from '../executor.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
@@ -113,7 +113,7 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   /** The throughput owner as the control plane holds it now, read before its needs-decision is keyed by its requirements revision (GY-1609). */
   readThroughputOwner?: (owner: Work) => Promise<Work>;
   /** Asks the control plane to decide the item's open scope request and returns the decided document. */
-  decideScope?: (work: Work) => Promise<Work>;
+  decideScope?: (work: Work, nonRepository?: readonly { path: string; nearMiss: string | null; why: 'install-local' | 'untracked' }[], treeRead?: boolean) => Promise<Work>; repositoryFiles?: () => Promise<ReadonlySet<string>>;
   wakeObservation?: (work: Work) => Promise<unknown>; // GY-710: a prioritized `resync` now (GY-1266) that waits on no tick (GY-1286), for a step refused on a stale observation
   /** Wake the item's own observation; the item once a newer reading is saved, else null (GY-793). */
   observe?: (work: Work, waitMs: number) => Promise<Work | null>;
@@ -175,7 +175,7 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * escalates each and, a cycle later, requests the rework. Absent, nothing is escalated.
    */
   exhaustedProofs?: () => Promise<ExhaustedProof[]>;
-  /** The review ledger's planned mechanical fixes (GY-971), one bot round each: each asks for its round's rework decision. */ mechanicalFixes?: () => Promise<MechanicalFixState>;
+  /** The review ledger's planned mechanical fixes (GY-971), one bot round each: each asks for its round's rework decision. */ mechanicalFixes?: () => Promise<MechanicalFixState>; /** GY-1764: reports the planned fix (or none) the review gate's hold reads. */ recordMechanicalPlan?: (work: Work, plan: { reviewId: number; head: string } | null) => Promise<unknown>;
   /** GY-1118: withdraws a capped change request as the reviewer App that posted it (GitHub's review dismissal); absent, it is escalated instead. */
   withdrawReview?: (work: Work, reviewId: number, message: string) => Promise<void>;
   /**
@@ -637,7 +637,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     deferWindow: (work, body) => mutate(`work/${work.id}/window`, body) as Promise<Work>,
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
-    decideScope: work => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }), wakeObservation: work => mutate(`work/${work.id}/resync`, { prioritized: true, wait: false }),
+    decideScope: (work, nonRepository, treeRead) => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, ...(treeRead ? { treeRead } : {}), ...(nonRepository?.length ? { nonRepository } : {}) }), repositoryFiles: async () => (await currentBaseTree(root, current().baseBranch, run)).files, wakeObservation: work => mutate(`work/${work.id}/resync`, { prioritized: true, wait: false }),
     observe: (work, waitMs) => wakeOwnObservation(body => mutate(`work/${work.id}/resync`, { ...body, prioritized: true }, randomUUID()), ms => delay(ms), { waitMs }),
     // No pull request yet means no review finding: the first attempt's scope is the criteria's alone.
     // Only the configured reviewer's and the awaited bot reviewers' words are findings the loop acts on.
@@ -712,7 +712,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
       .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),
-    mechanicalFixes: () => readMechanicalFixState(root),
+    mechanicalFixes: () => readMechanicalFixState(root), recordMechanicalPlan: (work, plan) => mutate(`work/${work.id}/mechanicalplan`, plan ? { ...plan, planned: true } : { reviewId: work.mechanicalPlan?.reviewId ?? 1, head: work.mechanicalPlan?.head ?? work.candidate!.sha, planned: false }),
     requestSmoke: async work => {
       const config = current();
       await run('gh', ['workflow', 'run', config.run.smokeWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,

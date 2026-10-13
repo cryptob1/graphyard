@@ -1,6 +1,9 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 // Namespace imports, so a tree without the change still loads and its cases fail on what they exercise.
@@ -11,6 +14,8 @@ import { decisionInput } from '../src/master.js';
 import * as decisionsModule from '../src/daemon/decisions.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { nonRepositoryPaths, nonRepositoryReason } from '../src/model/scope-repository.js';
+import { decideScopeRequest, routableScopeRequest } from '../src/model/scope.js';
 
 // GY-1484: on GY-1480 the independent approver approved two routed scope widenings, and both settled
 // failed — "The scope request this widening answers is no longer open" — because the worker's wait
@@ -52,7 +57,7 @@ async function claimed(title: string) {
 async function routed(title: string, sha?: string | null) {
   const work = await claimed(title);
   await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths: [daemon], reason: 'AC-1 needs the research worktree, which only the cycle module creates' });
-  const asked = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch }) as Work;
+  const asked = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch, treeRead: true }) as Work;
   assert.equal(asked.scopeRequest?.decision?.decidedBy, 'graphyard', 'the widening rule defers it to the approver');
   const request = asked.scopeRequest!;
   const answers = { epoch: request.epoch, at: request.at, ...(sha === undefined ? {} : { sha }) };
@@ -157,4 +162,146 @@ test('unit:failed-widening-not-stale-counted — a widening that failed only bec
   assert.equal(decisionsModule.uncountedScopeFailure(watch, { state: 'refused', outcome: 'The scope request this widening answers is no longer open' }, unplanned), false, 'a refusal is a judgement');
   assert.equal(decisionsModule.uncountedScopeFailure({ action: 'rework', scope: watch.scope } as never, closed, unplanned), false, 'only a requirements decision');
   assert.equal(decisionsModule.uncountedScopeFailure({ action: 'requirements', scope: null }, closed, unplanned), false, 'only one that answers a scope request');
+});
+
+// GY-1764. A scope ask is checked against the repository tree before it can become an approver decision:
+// GY-1696's worker asked for 'daemon.relea' and 'upgrade.align' (truncated master-status fields) and for
+// '.graphyard/master.json' (the install-local credential), and each ask spent an approver session.
+const tree = new Set(['src/model/scope.ts', 'src/daemon/cycle-scope.ts', 'tests/scope.test.ts', 'docs/master-agent.md', 'README.md', 'package.json']);
+
+test('unit:scope-ask-nonrepository-path-refused — paths that are not repository files are refused naming the path and the near miss', () => {
+  const found = nonRepositoryPaths(['daemon.relea', 'upgrade.align', 'src/model/scope.ts'], tree);
+  assert.deepEqual(found.map(entry => entry.path), ['daemon.relea', 'upgrade.align']);
+  assert.equal(found[0]!.nearMiss, 'daemon.release');
+  assert.equal(found[1]!.nearMiss, 'upgrade.alignedRelease');
+  const reason = nonRepositoryReason(found);
+  assert.match(reason, /daemon\.relea is not a repository file/);
+  assert.match(reason, /did you mean daemon\.release\? daemon\.release is a master-status field, not a file/);
+  assert.deepEqual(nonRepositoryPaths(['nowhere/else/file.ts'], tree).map(entry => entry.path), ['nowhere/else/file.ts'], 'inside no tracked directory');
+  // The rule itself refuses, and the refusal is the evidence gate's, which nothing routes.
+  const verdict = decideScopeRequest({ plannedFiles: ['src/model/scope.ts'], criteria: [{ id: 'AC-1', text: 'x', proofs: [] }] }, { paths: ['daemon.relea'] }, { nonRepository: found });
+  assert.equal(verdict.state, 'refused');
+  assert.equal(verdict.nonRepository, true);
+  assert.match(verdict.reason, /daemon\.release/);
+});
+
+test('unit:scope-ask-install-local-path-refused — the install-local .graphyard/ directory is never a repository path', () => {
+  const found = nonRepositoryPaths(['.graphyard/master.json', '.graphyard/', '.graphyard/worktrees/x/y.ts'], new Set([...tree, '.graphyard/tracked-by-mistake.json']));
+  assert.deepEqual(found.map(entry => [entry.path, entry.why]), [['.graphyard/master.json', 'install-local'], ['.graphyard/', 'install-local'], ['.graphyard/worktrees/x/y.ts', 'install-local']]);
+  assert.match(nonRepositoryReason(found), /\.graphyard\/master\.json is under the install-local \.graphyard\/ directory/);
+});
+
+test('unit:scope-ask-new-file-still-decidable — a file a change will add beside tracked ones, and a directory entry, are not refused', () => {
+  assert.deepEqual(nonRepositoryPaths(['src/model/scope-repository.ts', 'src/daemon/new/deeper/file.ts', 'tests/scope-repository.test.ts', 'docs/', 'src/*.ts', 'src/model/'], tree), []);
+  assert.deepEqual(nonRepositoryPaths(['README.md', 'package.json'], tree), [], 'tracked root files');
+  assert.deepEqual(nonRepositoryPaths(['./src/model/scope.ts', './src/daemon/new-file.ts', './src/*.ts'], tree), [], 'a ./-prefixed tracked or new path stays decidable');
+  assert.deepEqual(nonRepositoryPaths(['./.graphyard/master.json', './nowhere/x.ts'], tree).map(entry => entry.why), ['install-local', 'untracked'], 'a ./ prefix hides neither refusal');
+});
+
+test('integration:decision-refused-gy-1696-replay — a worker\'s ask for truncated field names or the install-local credential is refused in-process and never routed to the approver', async () => {
+  for (const [title, paths] of [['truncated fields', ['daemon.relea', 'upgrade.align']], ['install-local credential', ['.graphyard/master.json']]] as const) {
+    const work = await claimed(`GY-1696 replay: ${title}`);
+    await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths, reason: 'AC-1 is a live observation only a master session can record' });
+    // Base: the loop decides without the tree, the rule defers to the approver, and the ask is routed verbatim.
+    const asked = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch }) as Work;
+    const now = Date.parse(asked.lease!.expiresAt) - 60_000; // inside the lease, from the item's own record
+    assert.equal(routableScopeRequest(asked, now), null, `${title}: a refusal the tree was never read for is not routed to the approver`);
+    assert.equal(decisionsModule.scopeRoutineDecision(asked, now, true), null, `${title}: and forms no requirements decision`);
+    // Candidate: the loop reads the tree, and the same cycle's decision refuses the ask for what it names.
+    const offenders = nonRepositoryPaths(paths, tree);
+    const refused = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch, nonRepository: offenders }) as Work;
+    assert.equal(refused.scopeRequest?.decision?.state, 'refused');
+    assert.equal(refused.scopeRequest?.decision?.nonRepository, true);
+    assert.match(refused.scopeRequest!.decision!.reason, /not a repository file|install-local/);
+    assert.equal(routableScopeRequest(refused, now), null, `${title}: never routed`);
+    assert.equal(decisionsModule.scopeRoutineDecision(refused, now, true), null, `${title}: no approver decision`);
+    assert.deepEqual((await decisions(refused)).filter(decision => decision.action === 'requirements'), [], `${title}: none was requested`);
+  }
+});
+
+// GY-1764 rework, AC-1/AC-3: the replay above posts the offenders itself; these drive the entry point the
+// loop really claims — the executor's approve-scope handler — against the real control plane, once with an
+// injected tree and once with the wiring a shipped executor builds itself from its coordinator checkout.
+const executorEffects = (repositoryFiles?: () => Promise<ReadonlySet<string>>) => ({
+  snapshot: async () => ({ work: (await store.list()) as Work[], now: '2026-10-13T08:30:00.000Z' }),
+  mutate: async (path: string, body: unknown) => (await ok(token(coordinator), 'POST', path, body)) as unknown,
+  agents: () => [], workerCredentials: async () => ({}), producerCredentials: async () => ({}),
+  dispatchWorker: async () => { throw new Error('not reached'); }, launchReview: async () => { throw new Error('not reached'); },
+  launchProducer: async () => { throw new Error('not reached'); }, observeDeployment: async () => { throw new Error('not reached'); },
+  ...(repositoryFiles ? { repositoryFiles } : {}),
+});
+
+async function claimedExecutorAsk(title: string, paths: readonly string[]) {
+  const work = await claimed(`GY-1696 replay: ${title}`);
+  await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths, reason: 'AC-1 is a live observation only a master session can record' });
+  return work;
+}
+
+const executorRow = (work: Work) => ({ key: work.key, work: work.id, kind: 'approve-scope', inputs: { kind: 'approve-scope', epoch: work.epoch } }) as never;
+
+async function refusedNotRouted(work: Work, title: string) {
+  const decided = await reload(work.id);
+  assert.equal(decided.scopeRequest?.decision?.state, 'refused', `${title}: refused`);
+  assert.equal(decided.scopeRequest?.decision?.nonRepository, true, `${title}: as its own verdict`);
+  const now = Date.parse(decided.lease!.expiresAt) - 60_000;
+  assert.equal(routableScopeRequest(decided, now), null, `${title}: the claimed action's refusal is never routed`);
+  assert.equal(decisionsModule.scopeRoutineDecision(decided, now, true), null, `${title}: and forms no requirements decision`);
+  assert.deepEqual((await decisions(decided)).filter(entry => entry.action === 'requirements'), [], `${title}: none was requested`);
+  return decided;
+}
+
+test('integration:approve-scope-executor-claimed-path — a claimed approve-scope action reads the tree, and the control plane refuses what it refutes', async () => {
+  const { controlPlaneHandlers } = await import('../src/executor.js');
+  const tree = new Set(['src/model/scope.ts', 'src/daemon/cycle-scope.ts', 'docs/master-agent.md', 'README.md', 'package.json']);
+  const handlers = controlPlaneHandlers(() => ({}) as never, executorEffects(() => Promise.resolve(tree)) as never);
+  for (const [title, paths] of [['truncated fields', ['daemon.relea', 'upgrade.align']], ['install-local credential', ['.graphyard/master.json']]] as const) {
+    const work = await claimedExecutorAsk(title, paths);
+    const report = await handlers['approve-scope']!(executorRow(work), { id: 'executor-1', host: 'scope-host' }) as string;
+    assert.match(report, /refused — /);
+    await refusedNotRouted(work, title);
+  }
+});
+
+test('integration:approve-scope-executor-default-tree — the executor builds its evidence read from the coordinator checkout it loads from', async () => {
+  const { controlPlaneHandlers } = await import('../src/executor.js');
+  // A clean fake checkout: bin/graphyard.mjs committed, origin/main at it, so the executor's own
+  // baseTree read resolves without a network and the checkout guard finds nothing dirty.
+  const checkout = await temporaryDirectory('executor-checkout');
+  const git = (args: string[]) => execFileSync('git', ['-C', checkout, ...args], { stdio: ['ignore', 'pipe', 'ignore'] });
+  await (await import('node:fs/promises')).mkdir(join(checkout, 'bin'), { recursive: true });
+  await writeFile(join(checkout, 'bin/graphyard.mjs'), '');
+  git(['init', '-q', '-b', 'main', '.']);
+  git(['add', 'bin/graphyard.mjs']);
+  git(['-c', 'user.email=executor@test', '-c', 'user.name=executor', 'commit', '-q', '-m', 'base']);
+  git(['remote', 'add', 'origin', checkout]); // the executor's mandatory `git fetch origin main` resolves against the checkout itself
+  git(['fetch', '-q', 'origin', 'main']);
+  const handlers = controlPlaneHandlers(() => ({ cliPath: join(checkout, 'bin/graphyard.mjs'), baseBranch: 'main' }) as never, executorEffects() as never);
+  for (const paths of [['daemon.relea'], ['.graphyard/master.json']]) {
+    const title = `default tree: ${paths.join(', ')}`;
+    const work = await claimedExecutorAsk(title, paths);
+    await handlers['approve-scope']!(executorRow(work), { id: 'executor-1', host: 'scope-host' });
+    const decided = await refusedNotRouted(work, title);
+    assert.match(decided.scopeRequest!.decision!.reason, /not a repository file|install-local/);
+  }
+});
+
+test('integration:scope-request-command-evidence — the request command answers a scope ask in one transaction with the asker\'s tree evidence, refuse-only', async () => {
+  // The typed scope-request branch applies the rule in the transaction that records the ask; the
+  // evidence rides with it, validated and restricted to the paths the ask names (GY-1764).
+  const work = await claimedExecutorAsk('request command evidence', ['daemon.relea']);
+  const asked = await ok(token(implementer), 'POST', `work/${work.id}/request`, { type: 'scope-request', epoch: work.epoch, paths: ['daemon.relea'], reason: 'AC-1 is a live observation only a master session can record', release: false, nonRepository: [{ path: 'daemon.relea', nearMiss: 'daemon.release', why: 'untracked' }] }) as Work;
+  assert.equal(asked.scopeRequest?.decision?.state, 'refused');
+  assert.equal(asked.scopeRequest?.decision?.nonRepository, true, 'refused as its own verdict, in the transaction that recorded the ask');
+  const now = Date.parse(asked.lease!.expiresAt) - 60_000;
+  assert.equal(routableScopeRequest(asked, now), null, 'never routed to the approver');
+  assert.deepEqual((await decisions(asked)).filter(entry => entry.action === 'requirements'), [], 'no approver session is spent');
+  // A report that names a path the ask does not name is ignored, so a bad report never refuses an ask:
+  // the verdict stays the ordinary rule refusal, which the loop may still put to the approver.
+  const unasked = await claimedExecutorAsk('request command ignores unasked evidence', ['daemon.relea']);
+  const other = await ok(token(implementer), 'POST', `work/${unasked.id}/request`, { type: 'scope-request', epoch: unasked.epoch, paths: ['daemon.relea'], reason: 'AC-1 is a live observation only a master session can record', release: false, nonRepository: [{ path: 'upgrade.align', nearMiss: null, why: 'untracked' }] }) as Work;
+  assert.equal(other.scopeRequest?.decision?.state, 'refused');
+  assert.equal(other.scopeRequest?.decision?.nonRepository, undefined, 'the unasked offender is ignored');
+  assert.equal(routableScopeRequest(other, now), null, 'the typed ask carries no tree reading of the loop\'s, so it is not routable yet');
+  const read = await ok(token(coordinator), 'POST', `work/${unasked.id}/autoscope`, { epoch: unasked.epoch, treeRead: true }) as Work;
+  assert.ok(routableScopeRequest(read, now), 'once the loop read the tree for it, the ordinary refusal is routable, as before');
 });

@@ -15,12 +15,11 @@ import {
 } from './metrics.js';
 import { candidateMovedMeanwhile, decisionFailureKind, decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication, selfHealingDecisionFailure } from './decision-reads.js';
 import { refusedAttestationWatch, type RefusedAttestation } from '../model/rework-ground.js';
-import { record } from './effects.js';
+import { record } from './effects.js'; import { reportMechanicalPlans } from './mechanical-plan-report.js';
 import { adoptedWatch, refusedOnOtherGrounds } from './rework-grounds.js';
 import type { FaultKind } from '../model/fault-classes.js';
 import type { Cycle } from './cycle.js';
-import { baseRefreshConflict } from '../merge-queue.js';
-import { docsSyncRoute } from './docs-sync-route.js';
+import { baseRefreshConflict } from '../merge-queue.js'; import { docsSyncRoute } from './docs-sync-route.js';
 import { throughputDecisionAdopts, throughputRoutineDecision, wakeObservationJob } from './cycle-delivery.js';
 import { createApproverSupervisor } from './cycle-approvers.js';
 import { boundedDecisions, decisionBudget, decisionCallCarried, deferredFirst, settleDeferred } from './decision-budget.js';
@@ -423,7 +422,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const noteWait = async (item: Work, detail: string) => { const waitKey = `wait:rework:${item.id}`; if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
   // GY-1436: one stable wait per held item, naming the docs-sync session, head, base and the end of its bound; that bound, reached or still ahead, ends the loop's idle wait (GY-1622), kept at the latest local time the control plane can reach it (the read's upper clock offset): the cycle it wakes finds the hold ended, at most one round trip late.
   const noteHold = async (item: Work, { wait: detail, deadline }: { wait: string; deadline: string }) => { const bound = Date.parse(deadline); const waitKey = `wait:docs-sync:${item.id}`; if (bound >= clock) bounds.set(item.id, bound + clockOffset.max); if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
-  const mechanical = effects.mechanicalFixes ? await effects.mechanicalFixes().then(read => read.requests, () => []) : []; // GY-971 planned bot rounds
+  const mechanical = effects.mechanicalFixes ? await effects.mechanicalFixes().then(read => read.requests, () => []) : []; // GY-971 planned bot rounds; GY-1764: reported to the review gate, an unreported plan holds its item's decision
+  const planUnreported = await reportMechanicalPlans(snapshot.work, mechanical, effects, clock, async (item, detail) => { const key = `mechanical-plan:${item.id}`; if (detailChanged(state.actions[key], detail)) await note(key, item, 'decision', 'failed', detail); });
   const routinePass = budget.pass(), attestPass = budget.pass();
   // GY-1439: while a close stands requested and unapplied on an item, nothing advances it (closingItems): no
   // bot round, rework, attestation or observation wake moves the revision under the close or spends a round on it.
@@ -437,7 +437,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const refusedByWork = new Map<string, RefusedAttestation[]>();
   for (const watch of Object.values(state.approvals)) if (watch.action === 'attest' && watch.refusal) refusedByWork.set(watch.work, [...refusedByWork.get(watch.work) ?? [], { decision: watch.decision, refusal: watch.refusal }]);
   for (const read of workToProcess) await isolate('decision', read, read.key, async () => { const reached = bounds.get(read.id), released = { at: false }; bounds.delete(read.id); try { await decideItem(read, reached, released); } catch (error) { if (reached !== undefined && !released.at && !bounds.has(read.id)) bounds.set(read.id, reached); throw error; } });
-  async function decideItem(item: Work, reached: number | undefined, released: { at: boolean }) { // the item's bound is re-set below while its hold stands; a throw before the hold read as released puts it back above, so a transient closeStanding or docsSync.hold failure keeps the idle wait ending there (GY-1624)
+  async function decideItem(item: Work, reached: number | undefined, released: { at: boolean }) { if (planUnreported.has(item.id)) return; // the item's bound is re-set below while its hold stands; a throw before the hold read as released puts it back above, so a transient closeStanding or docsSync.hold failure keeps the idle wait ending there (GY-1624)
     const assessment = assessments[item.id];
     // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it, and
     // its decision is requested against that revision: one a partial widening moved past the

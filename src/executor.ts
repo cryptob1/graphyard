@@ -19,6 +19,17 @@ import { launchedSessionHandle, selectReviewerProfile, type ExecutorEffects, typ
 import type { ExecutorRelease } from './executor-fleet.js';
 import { dispatchReserved, profileConcurrency, type HerdrAgent, type MasterConfig, type ProducerProfile, type WorkerProfile } from './master.js';
 import { agentNameReadings, assertNameAvailable, attributeRefusal } from './master-resources.js';
+import { nonRepositoryPaths } from './model/scope-repository.js';
+import { unplannedPaths } from './model/scope.js';
+import { baseTree } from './cli/planned-files-intent.js';
+import { defaultChildRun, type ChildRun } from './child-runner.js';
+
+/** GY-1764: the base tree read after a fetch that succeeded. A failed fetch leaves the last fetched tree, which can lag a base that gained the file asked for, so no terminal refusal may rest on it: the read throws and the ask waits. */
+export async function currentBaseTree(root: string, baseBranch: string, run: ChildRun = defaultChildRun) {
+  try { await run('git', ['fetch', '--quiet', 'origin', baseBranch], { cwd: root, timeoutMs: 30_000 }); }
+  catch (error) { throw new Error(`the base tree of ${baseBranch} could not be refreshed (${error instanceof Error ? error.message : error}); a terminal scope refusal waits for a current read`); }
+  return baseTree(root, baseBranch, run);
+}
 import { agentOwner, loadMasterConfig, type AttentionItem } from './master.js';
 import { processConnectAccounts } from './master/environments.js';
 import { parseCoordinatorCheckout, checkoutGuardApplies, coordinatorCheckoutRefusal, coordinatorCheckoutRoot } from './master/profiles.js';
@@ -71,6 +82,8 @@ export interface ControlPlaneEffects {
   postDeployFiler?: (sha: string) => ReturnType<typeof releasePostDeployFiler>;
   /** Records a launched session's durable handle on the item (AC-8). */
   recordSession?: (work: Work, handle: SessionHandleInput) => Promise<unknown>;
+  /** GY-1764: the base branch's tracked files the approve-scope handler judges a scope ask's paths against; built from the coordinator checkout when absent, injectable so a test supplies its own tree. */
+  repositoryFiles?: () => Promise<ReadonlySet<string>>;
   /** The clock and the wait a fenced worker start retries on (GY-1431); real time when absent. */
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -231,6 +244,10 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     if (!work) throw new Error(`${action.key} is not in the work snapshot this executor can read`);
     return { work, all: snapshot.work, observedAt: snapshot.now };
   };
+  // GY-1764: the approve-scope handler judges a scope ask on the same evidence the loop's scope step
+  // reads once per cycle — the base branch's tracked files, from the coordinator checkout this
+  // executor loaded its modules from. A wiring may supply the read; a test injects its tree.
+  const repositoryFiles = effects.repositoryFiles ?? (checkout ? () => currentBaseTree(checkout.root, config().baseBranch).then(tree => tree.files) : null);
   const herdr = async () => {
     const agents = await effects.agents();
     if (!agents) throw new Error('Herdr session inventory is unavailable; a launch needs it to keep one session per profile');
@@ -376,7 +393,15 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       const { work } = await find(action);
       if (action.inputs.kind !== 'approve-scope') throw new Error('unreachable');
       // The control plane decides it from the item's own criteria; the executor carries no verdict.
-      const decided: Work = await effects.mutate(`work/${work.id}/autoscope`, { epoch: action.inputs.epoch }, randomUUID());
+      // The evidence gate rides along (GY-1764): the base tree read once per claim, exactly as the
+      // loop's scope step reads it once per cycle, so an ask naming what is not a repository file is
+      // refused as this claim's verdict and never routed to the independent approver. A failed read
+      // fails the claim to retry, exactly as the loop's failed read waits a cycle: the rules alone never decide it.
+      const request = work.scopeRequest;
+      const offenders = request && request.epoch === action.inputs.epoch && repositoryFiles
+        ? nonRepositoryPaths(unplannedPaths(work.plannedFiles, request.paths), await repositoryFiles())
+        : [];
+      const decided: Work = await effects.mutate(`work/${work.id}/autoscope`, { epoch: action.inputs.epoch, ...(repositoryFiles ? { treeRead: true } : {}), ...(offenders.length ? { nonRepository: offenders } : {}) }, randomUUID());
       const decision = decided.scopeDecision;
       return `the widening rule decided ${work.key}'s scope request: ${decision?.state ?? 'no decision recorded'} — ${decision?.reason ?? ''}`.slice(0, 2000);
     },

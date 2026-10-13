@@ -365,7 +365,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     page: (n: number) => n === 1 ? 'README.md' : `docs/grown-${n}.md`,
   };
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days, ...(docs ? { docs: { budget: docs.budget, pages: docs.pages } } : {}), ...(options.mainGuard ? { mainGuard: true } : {}) },
-    [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md', ...(docs ? [] : [plan.docsConflict.page])]);
+    // GY-1764: the scope scenarios ask for files a change adds inside directories the base tracks
+    // (tests/, src/soak/, newtop-18/), as a real repository's tree anchors them, so the evidence
+    // gate reads them as decidable and the scenarios exercise the folds they were built for.
+    [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md', ...(docs ? [] : [plan.docsConflict.page]),
+      'tests/soak-wide/.keep', 'newtop-18/.keep']);
   const herdr = failover ? failover.world.herdr : new SimulatedHerdr(() => clock.now());
   // GY-453: approvers as headless Pi runs in the real run registry on disk, the loop restarting
   // (detaching every run) after every other cycle a run is live, and adopting them on the next.
@@ -1930,7 +1934,10 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     // The scope scenarios run the loop's own deciding and widening effects: the rule decides the
     // open requests, and the loop widens on the findings it reads, posting the folded revision.
     ...(options.scope ? {
-      decideScope: (work: Work) => api(principals.operatorAgent, 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }),
+      // GY-1764: the scope soaks run the evidence gate on the loop's own read of the simulated base
+      // branch, so every cycle with an open ask reads the tree once and judges the ask against it.
+      repositoryFiles: async () => new Set(github.files),
+      decideScope: (work: Work, nonRepository?: readonly { path: string; nearMiss: string | null; why: 'install-local' | 'untracked' }[]) => api(principals.operatorAgent, 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, ...(nonRepository?.length ? { nonRepository } : {}) }),
       reviewFindings: async (work: Work) => {
         const named = findings.get(work.key);
         return named ? [{ ground: 'review thread 1', text: `Please also update ${[...named].join(', ')} in this round.` }] : [];
@@ -2045,7 +2052,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       },
     } : {}),
     exhaustedProofs: async () => [...abandoned.values()],
-    ...(mechanicalDay ? { mechanicalFixes: async () => mechanicalFixState(ledger) } : {}),
+    ...(mechanicalDay ? { mechanicalFixes: async () => mechanicalFixState(ledger),
+      recordMechanicalPlan: (work: Work, plan: { reviewId: number; head: string } | null) => api(principals.operatorAgent, 'POST', `work/${work.id}/mechanicalplan`, plan ? { ...plan, planned: true } : { reviewId: work.mechanicalPlan?.reviewId ?? 1, head: work.mechanicalPlan?.head ?? work.candidate!.sha, planned: false }) } : {}),
     // A rework decision waiting on a stale observation wakes the item's own job (GY-793): the real
     // resync, with the observation job run while the step waits, as the control plane runs it. Its
     // waking resync is an observation wake like GY-710's, and counts as one; the polls do not.

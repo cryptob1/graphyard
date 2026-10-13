@@ -60,7 +60,7 @@ async function refusedAt(epoch: number) {
   assert.equal(work.epoch, epoch);
   work = await engine.execute(worker, 'workspace', work.id, { epoch, host: 'scope-host', path: `/tmp/stale-scope/${work.id}`, branch: `graphyard/${work.key.toLowerCase()}-${epoch}` }, id());
   work = await engine.execute(worker, 'scope', work.id, { epoch, paths: ['tests/auto-dispatch.test.ts'], reason: 'The dispatch test fails on this branch' }, id());
-  work = await engine.execute(coordinator, 'autoscope', work.id, { epoch }, id());
+  work = await engine.execute(coordinator, 'autoscope', work.id, { epoch, treeRead: true }, id());
   assert.equal(work.scopeRequest!.decision!.state, 'refused');
   assert.ok(work.blocker!.startsWith(scopeRefusalBlocker));
   assert.ok(ready(work).reasons.some(reason => reason.startsWith(scopeRefusalBlocker)), 'the refusal holds the ready gate while its attempt is live');

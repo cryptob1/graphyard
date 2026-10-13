@@ -101,7 +101,7 @@ function everyRule() {
   const started = widen('GY-started', (before, after) => ({ before: { epoch: 1, plannedFiles: before, submission: { epoch: 1, pr: 7 }, pipeline: { attempts: [{ end: 'submitted' }] } }, intent: { reason: 'plan it', plannedFiles: after }, reason: 'plan it' }), { stage: 'ready' });
   for (const { owner, after, details } of [successor, audited, authored, unstarted, started]) row(owner, 'requirements', 5, operator, details, { work: { key: owner.key, stage: owner.stage, title: owner.title, epoch: owner.epoch, plannedFiles: after, blocker: null } });
   const routed = widen('GY-routed', () => ({}));
-  const routedReason = scopeDecisionReason('GY-routed', { requestedBy: worker, reason: 'the change needs it', decision: { state: 'refused', reason: 'outside the rule', at: at(1), decidedBy: 'graphyard', waitedMs: 0, paths: ['src/b.ts'], requestedBy: worker, requestedAt: at(0) } }, [{ id: 'AC-1', text: 'It works' }], ['src/b.ts'], null);
+  const routedReason = scopeDecisionReason('GY-routed', { requestedBy: worker, reason: 'the change needs it', decision: { state: 'refused', reason: 'outside the rule', at: at(1), decidedBy: 'graphyard', treeRead: true, waitedMs: 0, paths: ['src/b.ts'], requestedBy: worker, requestedAt: at(0) } }, [{ id: 'AC-1', text: 'It works' }], ['src/b.ts'], null);
   row(routed.owner, 'decision.requested', 2, operator, undefined, { payload: { id: uuid('routed'), action: 'requirements', input: { plannedFiles: routed.after }, reason: routedReason } });
   row(routed.owner, 'requirements', 4, operator, { reason: `${routedReason} [decision approved]`.slice(0, 2000), plannedFiles: routed.after, liveScopeWidening: true, before: { plannedFiles: routed.before } }, { work: { key: 'GY-routed', stage: 'build', title: 'GY-routed', plannedFiles: routed.after, blocker: null } });
 
@@ -169,7 +169,7 @@ test('unit:intervention-exemptions-module — the fold consults one ordered list
   const item = { id: uuid('item'), key: 'GY-1', stage: 'build', epoch: 2, lease: null, blocker: 'SCOPE NEEDED', scopeRequest: null } as unknown as Work;
   // GY-1682: a live attempt's additive ask the rule refused ten minutes ago, which the record shows the loop put to the approver (`routed`), still inside the 15-minute bound.
   const refusedAsk = { seq: 1, at: at(50), stage: 'build' as const, kind: 'scope-request' as const, blocked: 'x', paths: ['src/b.ts'], trigger: 'refused-by-loop', epoch: 2, routed: { seq: 2, at: at(51), decision: 'd-scope' }, sources: [] };
-  const refusal = { state: 'refused' as const, reason: 'outside the rule', at: at(51), decidedBy: 'graphyard', waitedMs: 0, paths: ['src/b.ts'], requestedBy: worker, requestedAt: at(50), epoch: 2 };
+  const refusal = { state: 'refused' as const, reason: 'outside the rule', at: at(51), decidedBy: 'graphyard', treeRead: true, waitedMs: 0, paths: ['src/b.ts'], requestedBy: worker, requestedAt: at(50), epoch: 2 };
   const routable = { ...item, plannedFiles: ['src/a.ts'], criteria: [], lease: { owner: worker, epoch: 2, expiresAt: at(90) }, scopeRequest: { epoch: 2, paths: ['src/b.ts'], reason: 'needs it', requestedBy: worker, at: at(50), decision: refusal } } as unknown as Work;
   const lost = { trigger: 'lease-loss' as const, reason: leaseLossReason({ owner: worker, epoch: 2 }), at: at(58), actor: 'graphyard' };
   const requirements = { at: 'requirements', details: {}, reason: 'revised', widened: true, asked: false, routed: [], stage: 'build', work: { epoch: 1, blocker: null }, blockerBefore: null } as const;
@@ -211,6 +211,6 @@ test('unit:intervention-exemptions-module — the fold consults one ordered list
     [{ at: 'escalation-resolved', details: { trigger: 'requirement-weakening', decision: 'd', escalation: { trigger: 'requirement-weakening', at: at(0) } } }, null],
   ];
   for (const [moment, expected] of cases) assert.equal(exemption(moment), expected, JSON.stringify(moment));
-  const routed = scopeDecisionReason('GY-1', { requestedBy: worker, reason: 'needs it', decision: { state: 'refused', reason: 'outside the rule', at: at(1), decidedBy: 'graphyard', waitedMs: 0, paths: ['src/b.ts'], requestedBy: worker, requestedAt: at(0) } }, [{ id: 'AC-1', text: 'It works' }], ['src/b.ts'], null);
+  const routed = scopeDecisionReason('GY-1', { requestedBy: worker, reason: 'needs it', decision: { state: 'refused', reason: 'outside the rule', at: at(1), decidedBy: 'graphyard', treeRead: true, waitedMs: 0, paths: ['src/b.ts'], requestedBy: worker, requestedAt: at(0) } }, [{ id: 'AC-1', text: 'It works' }], ['src/b.ts'], null);
   assert.equal(exemption({ ...requirements, details: { reason: routed }, reason: routed, routed: [routed] }), 'routed-scope-widening');
 });
