@@ -406,3 +406,23 @@ test('manual:fault-class-decision — decision-unanswered|GY-1710 and action:esc
   storeAction(state, 'escalation:decision-unjudged:other', { kind: 'escalation', work: 'GY-9', principal: null, state: 'failed', detail: 'close decision other on GY-9: x', attempts: 1, cycle: 1, at: '2026-10-12T02:17:00.000Z', epoch: null }, undefined);
   assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['decision-unanswered', 'action:escalation']);
 });
+
+test('manual:fault-class-decision — the exhaustion escalation recorded before decision-unanswered opens is absorbed by it, one instance in either order', () => {
+  const id = '65bf0fef-d9c1-4cd2-8467-9f1866b0fd41', state = emptyDaemonState(config());
+  storeAction(state, `escalation:decision-unjudged:${id}`, { kind: 'escalation', work: 'GY-1710', principal: null, state: 'failed', detail: `GY-1710's close decision ${id} is unjudged after 3 approver session(s)`, attempts: 1, cycle: 1, at: '2026-10-12T02:16:40.081Z', epoch: null }, undefined);
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:escalation']);
+  trackFaults(state.faults, [{ kind: 'decision-unanswered', faultClass: 'decision', subject: 'GY-1710', text: `Decision ${id} (close) is unanswered after 41m: approver session is not running` }], '2026-10-12T02:16:50.965Z');
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['decision-unanswered']);
+  assert.deepEqual(Object.keys(state.faults.open), [`decision-unanswered|GY-1710|${Object.keys(state.faults.open)[0].split('|')[2]}`]);
+});
+
+test('manual:fault-class-decision — a goal wait past its bound that quotes an HTTP 503 still counts; only the caught plane-wide error is exempt', async () => {
+  const { acceptanceStep } = await import('../src/daemon/acceptance.js');
+  const state = emptyDaemonState(config());
+  const approved = '2026-10-10T00:00:00.000Z', clock = Date.parse(approved) + 3 * 86_400_000;
+  const goal = { id: 'goal-wait', key: 'GOAL-2', stage: 'accepted', revision: 3, approval: { at: approved }, acceptance: { pr: 1153, outcomes: [] } } as never;
+  const effects = { settings: { enabled: true }, goals: async () => [goal], land: async () => ({ goal, landing: { state: 'waiting', detail: 'GitHub has not merged: HTTP 503 Startup validation has not completed' } }) };
+  await acceptanceStep({ config: config(), state, effects: { acceptance: effects, persist: async () => {} }, now: () => clock, clock, performed: [],
+    isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() } as never);
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:decision']);
+});

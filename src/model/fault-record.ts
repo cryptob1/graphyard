@@ -37,12 +37,25 @@ export function trackFaults(record: FaultRecord, observations: readonly FaultObs
     if (reworded) { record.open[key] = record.open[reworded]; delete record.open[reworded]; }
     const standing = record.open[key] ? record.instances.find(entry => entry.id === record.open[key]) : undefined;
     if (standing) { standing.lastSeenAt = at; standing.text = observation.text.slice(0, 500); continue; }
+    absorbExhaustion(record, observation);
     const instance = instanceOf(observation, at, opened.filter(entry => entry.kind === observation.kind && entry.subject === subject).length);
     record.instances.push(instance); record.open[key] = instance.id; opened.push(instance);
   }
   if (partial !== true) for (const key of Object.keys(record.open)) if (!seen.has(key) && !(partial && partial.has(key.slice(0, key.indexOf('|'))))) delete record.open[key];
   retain(record);
   return opened;
+}
+/**
+ * GY-1751: an approver-exhaustion escalation recorded on the same cycle before `decision-unanswered` opened restates that
+ * stall: the unanswered line takes its place, so one stall is one instance whichever observation came first.
+ */
+function absorbExhaustion(record: FaultRecord, observation: FaultObservation) {
+  const id = observation.kind === 'decision-unanswered' ? /^Decision (\S+) /.exec(observation.text)?.[1] : undefined;
+  if (!id) return;
+  const absorbed = new Set(record.instances.filter(entry => entry.kind === 'action:escalation' && entry.subject === observation.subject && entry.text.includes(id)).map(entry => entry.id));
+  if (!absorbed.size) return;
+  record.instances = record.instances.filter(entry => !absorbed.has(entry.id));
+  for (const refs of [record.open, record.failing]) for (const [key, held] of Object.entries(refs)) if (absorbed.has(held)) delete refs[key];
 }
 /**
  * Links `instance` to the item `key` and keeps, under `linked`, the newest first-seen time of any instance linked
