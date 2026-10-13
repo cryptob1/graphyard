@@ -65,7 +65,7 @@ const verifyServing = async (item: Work, at: string) => {
     observe: async () => ({ source: 'endpoint' as const, sha: serving, at, reason: null, deployed: [item.key], pending: [] }),
     release: () => ({ sha: 'f'.repeat(40), clean: true, repository: 'other/repo', reason: null }),
     emit: async () => assert.fail('nothing is emitted'), repository: 'owner/project', now: () => now,
-    record: async () => {}, file: async (input: any) => { filed.push(input); return { key: `GY-${1720 + filed.length}` }; },
+    record: async () => {}, releaseWork: async () => {}, file: async (input: any) => { filed.push(input); return { key: `GY-${1720 + filed.length}` }; },
     patterns: async () => ({ since: null, projected: '2026-10-15T10:32:39.000Z' }),
   });
   assert.equal(verified.result, 'verified', verified.refusals.join('; '));
@@ -163,7 +163,7 @@ test('unit:post-deploy-follow-up-observation-window — a windowed follow-up rec
     observe: async () => ({ source: 'endpoint' as const, sha: release, at: iso(now), reason: null, deployed: ['GY-1685'], pending: [] }),
     release: () => ({ sha: 'f'.repeat(40), clean: true, repository: 'other/repo', reason: null }),
     emit: async () => assert.fail('nothing is emitted'), repository: 'owner/project', now: () => now,
-    record: async () => {}, file: async (input: any) => { filedByVerify.push(input); return { key: 'GY-1689' }; }, patterns,
+    record: async () => {}, releaseWork: async () => {}, file: async (input: any) => { filedByVerify.push(input); return { key: 'GY-1689' }; }, patterns,
   });
   assert.equal(verified.result, 'verified', verified.refusals.join('; '));
   assert.deepEqual(filedByVerify[0].observationWindow, filed);
@@ -326,7 +326,7 @@ const verifyBehind = async (item: Work, at: string, isolate: ((sha: string) => P
     release: () => ({ sha: '98070f3538'.padEnd(40, '0'), clean: true, repository: extra.checkout ?? managed.repository, reason: null }),
     emit: async () => assert.fail('the coordinator checkout behind the release emits nothing'), ...managed, now: () => now,
     checks: extra.checks ?? (async () => assert.fail('the coordinator checkout behind the release files nothing')),
-    record: async (_work, data) => { recorded.push(data); }, file: async (input: any, requestId: string) => { filed.push({ input, requestId }); return { key: `GY-${1720 + filed.length}` }; },
+    record: async (_work, data) => { recorded.push(data); }, releaseWork: async () => {}, file: async (input: any, requestId: string) => { filed.push({ input, requestId }); return { key: `GY-${1720 + filed.length}` }; },
     patterns: async () => ({ since: null, projected: '2026-10-15T10:32:39.000Z' }), isolate,
   });
   return { verified, filed, recorded };
@@ -454,6 +454,7 @@ const executorVerify = async (item: Work, at: string, postDeployFiler: ((sha: st
     mutate: async (path: string, body: unknown) => { recorded.push([path, body]); return {}; },
     agents: () => [], workerCredentials: async () => ({}), producerCredentials: async () => ({}), dispatchWorker: unusable, launchReview: unusable, launchProducer: unusable,
     observeDeployment: async () => ({ source: 'endpoint' as const, sha, at, reason: null, deployed: [item.key], pending: [] }) as never,
+    releaseWork: async () => {},
     fileWork: async (input: any, requestId: string) => { filed.push({ input, requestId }); return { key: `GY-${1720 + filed.length}` }; },
     now: () => Date.parse(at) + 2_000, ...(postDeployFiler ? { postDeployFiler } : {}),
   });
@@ -551,7 +552,7 @@ async function verifyReal(coordinator: { checkout: string; cliPath: string }, it
   const master = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/private/master.token', cliPath: coordinator.cliPath, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'coordinator-host', masterAgentName: 'graphyard-master-project', run: { deploymentUrl: 'https://graphyard.example/healthz', deploymentShaField: 'commit' } });
   const at = liveNow, filed: { input: any; requestId: string }[] = [], recorded: unknown[] = [];
   const effects = verificationEffects(master, { root: coordinator.checkout, snapshot: async () => ({ work: [item], now: liveNow }), mutate: async (_path, data) => { recorded.push(data); return data; },
-    file: async (input: any, requestId: string) => { filed.push({ input, requestId }); return { key: `GY-${1720 + filed.length}` }; } });
+    releaseWork: async () => {}, file: async (input: any, requestId: string) => { filed.push({ input, requestId }); return { key: `GY-${1720 + filed.length}` }; } });
   // The coordinator's own filer is its checkout's CLI: the stale code, were it ever asked.
   const own = releaseChecks(coordinator.cliPath);
   let ownAsked = 0;
