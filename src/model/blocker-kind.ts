@@ -15,6 +15,12 @@ import { userBusRefusal } from './user-bus.js';
 export function blockerKind(blocker: string): 'sandbox-blocker' | 'workflow-permission' | 'setup' | 'blocker' {
   if (/sandbox|refused path|--add-dir|Operation not permitted/i.test(blocker) && !userBusRefusal.test(blocker)) return 'sandbox-blocker';
   if (/refusing to allow an? .{0,40}App to create or update workflow/i.test(blocker)) return 'workflow-permission';
-  if (/\.graphyard\/master\.json does not exist|worker token holds no master role/i.test(blocker)) return 'setup'; // a step needing the master role from a worker's token: the installation lacks it, retrying cannot grant it (GY-1761)
+  // The master-role refusal — the same shapes blocker-class.ts classes `master-role` (GY-1761): a step
+  // needing the master role from a worker's token, which the installation lacks and retrying cannot
+  // grant — is the installation's setup, so its standing blocker counts as configuration, never a
+  // stalled gate. Restated here, not imported: fault-classes (browser-safe) reads this module, and the
+  // import would close a module-init cycle through blocker-class → human-request → approval → work.
+  // tests/fault-class-stalled-gate.test.ts holds the two patterns together.
+  if (/\.graphyard\/master\.json does not exist|\bholds no master role\b|\bmaster-role session\b/i.test(blocker)) return 'setup';
   return 'blocker';
 }
