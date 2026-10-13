@@ -9,7 +9,7 @@ A `slice-lead` (`product`, `infrastructure`, `docs-experience`) rules on plans, 
 
 The registry picks a `reviewer` account whose model provider (`provider`, else launch kind) differs from the item's newest `worker` session's; same-provider accounts are `skipped` (`shares the implementer's provider P on GY-N`), one at its session limit waited for; else the first eligible same-provider account.
 
-`worker` tries Pi first for low/medium-risk items' first two attempts (ended epochs and failed starts count); high-risk and later attempts wait for a strong account. A Pi start, early exit or confinement failure falls to the next account.
+`worker` tries Pi first for low/medium-risk items' first two attempts (ended epochs and failed starts count); high-risk and later attempts wait for a strong account. A failed Pi start falls to the next account.
 
 ## Escalation
 
