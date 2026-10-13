@@ -238,33 +238,33 @@ const resolved = [{ work: 'GY-1675', trigger: 'operator-widening', open: false }
 const waiting = { work: 'GY-1675', trigger: 'refused-by-loop', open: true };
 const during = '2026-10-10T23:13:10.000Z';
 
-test('manual:pattern-item-owns-scope-widening — a refused ask the record shows no route for is counted from its own instant, on any deployment: GY-1675\'s 21 seconds before the loop\'s own widening read as a third unlinked instance, owned by GY-1682, and the scan and the status read one fold', async () => {
-  // Four seconds after the rule's refusal, nothing on the record says the loop will answer: the ask waits, and both readers see three.
-  assert.deepEqual(buildWidenings(rows, [done1617, live()], during), [waiting, ...resolved]);
-  assert.equal(exemption({ at: 'open-ask', ask, item: live(), now: during }), null, 'no route on the record, no exemption');
-  const folded = foldInterventions(rows, [done1617, live(), gy1682], during).interventions;
-  const pattern = detectPatterns(folded, [done1617, live(), gy1682], policy, during).find(entry => entry.kind === 'scope-widening' && entry.stage === 'build')!;
+test('manual:pattern-item-owns-scope-widening — a refused ask the record shows no route for is the loop\'s while it can still route it and counted from its own instant once it cannot: GY-1675\'s 21 seconds read as nothing, a routable ask past the bound or one nothing can route as a third unlinked instance owned by GY-1682, and the scan and the status read one fold', async () => {
+  const late = new Date(Date.parse(askedAt) + scopeBlockedBudgetMs + 60_000).toISOString();
+  const livePast = { lease: { owner: worker, epoch: 2, expiresAt: '2026-10-11T00:00:00.000Z' } };
+  // GY-1755: four seconds after the rule's refusal the loop has yet to reach its decision step, but the record shows an ask it routes: no instance.
+  assert.deepEqual(buildWidenings(rows, [done1617, live()], during), resolved);
+  assert.equal(exemption({ at: 'open-ask', ask, item: live(), now: during }), 'loop-owes-scope-route');
+  // Past the bound the loop promises, the same ask is counted from its own instant: both readers see three.
+  assert.deepEqual(buildWidenings(rows, [done1617, live(livePast)], late), [waiting, ...resolved]);
+  const record = [done1617, live(livePast)];
+  const folded = foldInterventions(rows, [...record, gy1682], late).interventions;
+  const pattern = detectPatterns(folded, [...record, gy1682], policy, late).find(entry => entry.kind === 'scope-widening' && entry.stage === 'build')!;
   assert.deepEqual({ count: pattern.count, unlinked: pattern.unlinked.length, item: pattern.item?.key }, { count: 3, unlinked: 3, item: 'GY-1682' }, 'crossed and owned: the scan opens nothing beside GY-1682');
-  assert.deepEqual(await attention(computeInterventionReport({ interventions: folded, judgements: [] }, [done1617, live(), gy1682], policy, { days: 7, now: during })), [], 'owned, so master status raises nothing');
+  assert.deepEqual(await attention(computeInterventionReport({ interventions: folded, judgements: [] }, [...record, gy1682], policy, { days: 7, now: late })), [], 'owned, so master status raises nothing');
   // Without GY-1682 the same fold is crossed with no item for both readers: the status names the scan's promise and the scan would open the item — one fold, one fact.
-  const unownedAttention = await attention(computeInterventionReport({ interventions: folded, judgements: [] }, [done1617, live()], policy, { days: 7, now: during }));
+  const unownedAttention = await attention(computeInterventionReport({ interventions: folded, judgements: [] }, record, policy, { days: 7, now: late }));
   assert.equal(unownedAttention.length, 1);
   assert.match(unownedAttention[0].text, /3 scope-widening interventions at the build stage in 7 days crossed the threshold of 3 and no item stands for the pattern yet; the server opens one within a minute/);
-  assert.deepEqual(detectPatterns(folded, [done1617, live()], policy, during).find(entry => entry.kind === 'scope-widening')!.unlinked.length, 3);
+  assert.deepEqual(detectPatterns(folded, record, policy, late).find(entry => entry.kind === 'scope-widening')!.unlinked.length, 3);
+  const open = foldInterventions(rows, record, late).interventions.find(entry => entry.kind === 'scope-widening' && entry.resolvedAt === null)!;
+  assert.deepEqual({ requestedAt: open.requestedAt, waitedMs: open.waitedMs }, { requestedAt: ask.at, waitedMs: Date.parse(late) - Date.parse(ask.at) });
   // After the loop's widening answered the ask, the two stand: the ask was the loop's and left no instance.
   assert.deepEqual(buildWidenings([...rows, loopWidening], [done1617, live({ blocker: null, scopeRequest: null, plannedFiles: widened })], '2026-10-10T23:14:00.000Z'), resolved);
-  // A deployment that routes nothing leaves the record exactly as the 21 seconds did, so its refused ask is read as waiting at once, with its own instant, and keeps waiting past the bound.
-  const late = new Date(Date.parse(askedAt) + scopeBlockedBudgetMs + 60_000).toISOString();
-  const lateRecord = [done1617, live({ lease: { owner: worker, epoch: 2, expiresAt: '2026-10-11T00:00:00.000Z' } })];
-  for (const now of [during, late]) {
-    const counted = buildWidenings(rows, lateRecord, now);
-    assert.deepEqual(counted, [waiting, ...resolved], `waiting at ${now}`);
-    const open = foldInterventions(rows, lateRecord, now).interventions.find(entry => entry.kind === 'scope-widening' && entry.resolvedAt === null)!;
-    assert.deepEqual({ requestedAt: open.requestedAt, waitedMs: open.waitedMs }, { requestedAt: ask.at, waitedMs: Date.parse(now) - Date.parse(ask.at) });
-  }
-  // Refused by the approver, or left by an ended attempt: counted, as before.
+  // Nothing can route a refusal by the approver, or an ask an ended attempt left: counted at once, as before.
   assert.deepEqual(buildWidenings(rows, [done1617, live({ scopeRequest: { ...request, decision: { ...decision, decidedBy: 'graphyard-approver-graphyard' } } })], during), [waiting, ...resolved]);
   assert.deepEqual(buildWidenings(rows, [done1617, live({ lease: null })], during), [waiting, ...resolved]);
+  // A request the fold cannot carry under the plannedFiles cap, or one that rewrites criteria, is never routed (routableScopeRequest): the ask is somebody's to decide at once.
+  assert.deepEqual(buildWidenings(rows, [done1617, live({ scopeRequest: { ...request, criteria: [{ id: 'AC-1', text: 'x', proofs: [] }] } })], during), [waiting, ...resolved]);
 });
 
 test('manual:pattern-item-owns-scope-widening — a refused ask the loop put to the independent approver is the approver\'s while the record shows the decision standing: counted again when the approver declines it, when the decision goes stale, when it waits past the loop\'s bound or when its attempt ends; an approval applies the widening and leaves no instance', () => {
@@ -287,9 +287,12 @@ test('manual:pattern-item-owns-scope-widening — a refused ask the loop put to 
   assert.deepEqual(buildWidenings(applied, [done1617, live({ blocker: null, scopeRequest: null, plannedFiles: widened })], '2026-10-10T23:16:00.000Z'), resolved);
   // A routed decision for another attempt's ask marks nothing: the row names the ask it answers.
   const other = { ...routedDecision, payload: { ...routedDecision.payload, input: { ...routedDecision.payload.input, answers: { epoch: 1, at: '2026-10-10T20:00:00.000Z' } } } };
-  assert.deepEqual(buildWidenings([...rows, other], [done1617, live()], during), [waiting, ...resolved]);
+  // (Read past the bound: within it an unrouted ask is the loop's, loopOwesScopeRoute, whichever decision is on the record.)
+  const nearBound = new Date(Date.parse(askedAt) + scopeBlockedBudgetMs - 1_000).toISOString(), longLease = live({ lease: { owner: worker, epoch: 2, expiresAt: '2026-10-11T00:00:00.000Z' } });
+  assert.deepEqual(buildWidenings([...rows, other], [done1617, longLease], '2026-10-10T23:30:00.000Z'), [waiting, ...resolved]);
+  assert.deepEqual(buildWidenings([...rows, other, routedDecision], [done1617, longLease], nearBound), resolved);
   // A decision naming no ask marks nothing either: the routed reason alone says the loop routed something, not which ask.
-  assert.deepEqual(buildWidenings([...rows, { ...routedDecision, payload: { ...routedDecision.payload, input: { plannedFiles: widened } } }], [done1617, live()], during), [waiting, ...resolved]);
+  assert.deepEqual(buildWidenings([...rows, { ...routedDecision, payload: { ...routedDecision.payload, input: { plannedFiles: widened } } }], [done1617, longLease], '2026-10-10T23:30:00.000Z'), [waiting, ...resolved]);
 });
 
 test('manual:pattern-item-owns-scope-widening — a routed decision answers the ask of its exact identity, epoch and instant, as the server matches it: a worker\'s merged ask in the same attempt has a new instant, so a delayed decision for the earlier ask leaves it counted, and only a decision naming the merged ask holds it for the approver', () => {
@@ -301,7 +304,9 @@ test('manual:pattern-item-owns-scope-widening — a routed decision answers the 
       details: { epoch: 2, before: { blocker: refusal, plannedFiles: withObservation }, decision: { ...decision, at: mergedRefusedAt, paths: merged, requestedAt: mergedAskedAt } }, work: item1675({ epoch: 2, plannedFiles: withObservation, blocker: refusal }) },
   ];
   const mergedRequest = { ...request, at: mergedAskedAt, paths: merged, decision: { ...decision, at: mergedRefusedAt, paths: merged, requestedAt: mergedAskedAt } };
-  const record = [done1617, live({ scopeRequest: mergedRequest })], now = '2026-10-10T23:13:35.000Z';
+  // GY-1755: an unrouted ask is the loop's while it can route it, so the identity of a routed decision is read once the bound has passed.
+  const record = [done1617, live({ scopeRequest: mergedRequest, lease: { owner: worker, epoch: 2, expiresAt: '2026-10-11T00:00:00.000Z' } })], now = new Date(Date.parse(mergedAskedAt) + scopeBlockedBudgetMs + 60_000).toISOString();
+  assert.deepEqual(buildWidenings(mergedRows, [done1617, live({ scopeRequest: mergedRequest })], '2026-10-10T23:13:35.000Z'), resolved, 'within the bound the unrouted merged ask is the loop\'s');
   const answering = (at: string, seq = 2489241) => ({ ...routedDecision, seq, at: '2026-10-10T23:13:30.000Z', payload: { ...routedDecision.payload, input: { plannedFiles: [...widened, 'tests/trial-merge-phases.test.ts'], answers: { epoch: 2, at } } } });
   const open = (ledger: InterventionLedgerRow[]) => foldInterventions(ledger, record, now).interventions.find(entry => entry.kind === 'scope-widening' && entry.resolvedAt === null);
   // The merged ask is the one open ask, counted from its own instant.
@@ -311,9 +316,10 @@ test('manual:pattern-item-owns-scope-widening — a routed decision answers the 
   assert.deepEqual(buildWidenings([...mergedRows, answering(askedAt)], record, now), [waiting, ...resolved], 'the merged ask stays counted');
   assert.equal(open([...mergedRows, answering(askedAt)])!.requestedAt, '2026-10-10T23:13:20.517Z');
   // The decision naming the merged ask holds it for the approver while it stands.
-  assert.deepEqual(buildWidenings([...mergedRows, answering(mergedAskedAt)], record, now), resolved, 'the approver holds the merged ask');
+  const soon = '2026-10-10T23:13:35.000Z';
+  assert.deepEqual(buildWidenings([...mergedRows, answering(mergedAskedAt)], record, soon), resolved, 'the approver holds the merged ask');
   // Both on the record, the earlier one first: only the one naming the merged ask marks it.
-  assert.deepEqual(buildWidenings([...mergedRows, answering(askedAt), answering(mergedAskedAt, 2489242)], record, now), resolved);
+  assert.deepEqual(buildWidenings([...mergedRows, answering(askedAt), answering(mergedAskedAt, 2489242)], record, soon), resolved);
   assert.deepEqual(buildWidenings([...mergedRows, answering(mergedAskedAt), { ...settledRouted('decision.stale', 2489243, '2026-10-10T23:13:33.000Z') }], record, now), [waiting, ...resolved], 'stale, the merged ask is back with whoever decides it');
 });
 

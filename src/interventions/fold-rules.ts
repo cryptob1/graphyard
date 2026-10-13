@@ -115,7 +115,7 @@ const unblock: FoldRule = ({ row, entry, details, stage, source, emit }) => {
  * matched as the server matches it (engine `requirements`, `answers.at === scopeRequest.at`): a
  * worker that adds paths to its refused ask in the same attempt gets a merged ask with a new instant
  * (mergedScopeRequest), and a decision for the earlier one, landing after it, answers nothing on the
- * record — the new ask stays counted from its own instant, not hidden until the loop's bound.
+ * record — the new ask is the loop's to route (loopOwesScopeRoute) and counted once it outlasts the loop's bound.
  */
 const decisionRequested: FoldRule = ({ row, entry, stage }) => {
   entry.reworkDecision = requestedRework(row, stage) ?? entry.reworkDecision;
@@ -137,7 +137,7 @@ const decisionApproved: FoldRule = ({ row, entry }) => {
 const settledDecision: FoldRule = ({ row, entry }) => {
   if (entry.reworkDecision?.id === row.payload?.id) entry.reworkDecision = null;
   if (row.kind === 'decision.applied') return;
-  for (const ask of entry.asks) if (ask.routed?.decision === row.payload?.id) ask.routed = null;
+  for (const ask of entry.asks) if (ask.routed?.decision === row.payload?.id) { ask.routed = null; ask.returned = true; }
 };
 
 /** A rework: one intervention for the asks and decision it answers, unless exempt; a fence it discards is a settlement. */
