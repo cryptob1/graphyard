@@ -6,6 +6,8 @@ import type { ActionRow } from '../src/model/actions.js';
 import { emptyDaemonState, storeAction } from '../src/daemon/state.js';
 import { assertDispatchable } from '../src/master/dispatch.js';
 import { masterConfigSchema } from '../src/master.js';
+import { blockerKind } from '../src/model/blocker-kind.js';
+import { classified } from '../src/model/fault-classes.js';
 import type { Work } from '../src/model.js';
 
 // GY-1758 names this file for its proof: manual:fault-class-stalled-gate. The master loop filed 4
@@ -85,4 +87,12 @@ test('a timed-out close of the throughput owner is a wait, and a server refusal 
   assert.equal(waitReason('Graphyard refused /api/work/GY-4 (503): Operator-agent authorization is unavailable'), false);
   assert.equal(waitReason('Graphyard refused /api/work/GY-4 (502): Application failed to respond'), true);
   assert.ok(actionStall(failing('GY-4', 'Graphyard refused /api/work/GY-4 (503): Operator-agent authorization is unavailable', actionStallThreshold)));
+});
+
+test('GY-1674: a blocker for a step that needs the master role is the installation\'s setup, not a stalled gate', () => {
+  const blocker = "AC-1 needs a doctor-issued master checkout-restore. Blocked command: graphyard master status in this worktree, error: '.graphyard/master.json does not exist: run graphyard install --apply, or graphyard master init --token-stdin'. The worker token holds no master role";
+  assert.equal(blockerKind(blocker), 'setup');
+  assert.equal(classified(blockerKind(blocker)).faultClass, 'configuration');
+  assert.equal(blockerKind('probe refused: plannedFiles do not cover src/a.ts'), 'blocker');
+  assert.equal(classified(blockerKind('probe refused: plannedFiles do not cover src/a.ts')).faultClass, 'stalled-gate');
 });

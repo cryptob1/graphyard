@@ -12,8 +12,9 @@ import { userBusRefusal } from './user-bus.js';
  * is held: on 2 October 2026 GY-793 and GY-1094 were both filed as stalled gates for it, within
  * three minutes of main taking GY-1093's workflow changes.
  */
-export function blockerKind(blocker: string): 'sandbox-blocker' | 'workflow-permission' | 'blocker' {
+export function blockerKind(blocker: string): 'sandbox-blocker' | 'workflow-permission' | 'setup' | 'blocker' {
   if (/sandbox|refused path|--add-dir|Operation not permitted/i.test(blocker) && !userBusRefusal.test(blocker)) return 'sandbox-blocker';
   if (/refusing to allow an? .{0,40}App to create or update workflow/i.test(blocker)) return 'workflow-permission';
+  if (/\.graphyard\/master\.json does not exist|worker token holds no master role/i.test(blocker)) return 'setup'; // a step needing the master role from a worker's token: the installation lacks it, retrying cannot grant it (GY-1761)
   return 'blocker';
 }
