@@ -22,7 +22,9 @@ export async function reportMechanicalPlans(work: readonly Work[], plans: readon
     let failure: unknown = null;
     for (let attempt = 0; attempt < 2; attempt++) { try { await effects.recordMechanicalPlan(item, wanted); failure = null; break; } catch (error) { failure = error; } }
     if (!failure) continue;
-    if (wanted || held) unreported.add(item.id);
+    // Only a plan the ledger still carries blocks the item's decision: one the ledger ceased to plan owes no round, so the decision step
+    // agrees with the ledger (nothing owed) while the stale projection lapses by `mechanicalPlanFreshMs` at the gate.
+    if (wanted) unreported.add(item.id);
     await fail(item, `Could not report ${item.key}'s mechanical plan (${wanted ? `review ${wanted.reviewId} on ${wanted.head.slice(0, 12)}` : 'none'}): ${message(failure)}; the review gate drops the hold once its last confirmation passes ${Math.round(mechanicalPlanFreshMs / 60_000)} minutes old`);
   }
   return unreported;

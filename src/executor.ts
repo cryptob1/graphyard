@@ -388,12 +388,12 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       // The evidence gate rides along (GY-1764): the base tree read once per claim, exactly as the
       // loop's scope step reads it once per cycle, so an ask naming what is not a repository file is
       // refused as this claim's verdict and never routed to the independent approver. A failed read
-      // posts no evidence and leaves the ask to the rules, exactly as the loop's failed read does.
+      // fails the claim to retry, exactly as the loop's failed read waits a cycle: the rules alone never decide it.
       const request = work.scopeRequest;
       const offenders = request && request.epoch === action.inputs.epoch && repositoryFiles
-        ? await repositoryFiles().then(files => nonRepositoryPaths(unplannedPaths(work.plannedFiles, request.paths), files), () => [])
+        ? nonRepositoryPaths(unplannedPaths(work.plannedFiles, request.paths), await repositoryFiles())
         : [];
-      const decided: Work = await effects.mutate(`work/${work.id}/autoscope`, { epoch: action.inputs.epoch, ...(offenders.length ? { nonRepository: offenders } : {}) }, randomUUID());
+      const decided: Work = await effects.mutate(`work/${work.id}/autoscope`, { epoch: action.inputs.epoch, ...(repositoryFiles ? { treeRead: true } : {}), ...(offenders.length ? { nonRepository: offenders } : {}) }, randomUUID());
       const decision = decided.scopeDecision;
       return `the widening rule decided ${work.key}'s scope request: ${decision?.state ?? 'no decision recorded'} — ${decision?.reason ?? ''}`.slice(0, 2000);
     },

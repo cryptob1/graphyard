@@ -227,24 +227,28 @@ export async function scopeStep(cycle: Cycle) {
   };
   // GY-1764: the evidence gate. The base branch's tracked files are read once per cycle, only when an
   // ask is open, outside every transaction; a failed read leaves the ask to the rules as before.
+  // A failed read decides nothing: the ask waits for the next cycle's read, never for the rules alone, so a missing read cannot make it an approver decision.
   let tree: Promise<ReadonlySet<string> | null> | null = null;
-  const offending = async (item: Work, request: ScopeRequestState): Promise<NonRepositoryPath[]> => {
-    if (!effects.repositoryFiles || request.remove?.length || request.criteria?.length) return [];
+  const offending = async (item: Work, request: ScopeRequestState): Promise<NonRepositoryPath[] | null> => {
+    if (!effects.repositoryFiles) return [];
     tree ??= effects.repositoryFiles().catch(() => null);
     const files = await tree;
-    return files ? nonRepositoryPaths(unplannedPaths(item.plannedFiles, request.paths), files) : [];
+    return files ? nonRepositoryPaths(unplannedPaths(item.plannedFiles, request.paths), files) : null;
   };
   for (const item of open) await isolate('scope', item, item.key, async () => {
     const request = item.scopeRequest;
     // A refusal the rule gave without the tree, or a fresh ask, naming no repository file is refused for that (never routed).
-    const gated = request && (!request.decision || request.decision.state === 'refused' && request.decision.decidedBy === 'graphyard' && !request.decision.nonRepository) ? await offending(item, request) : [];
+    const needsTree = !!request && !request.remove?.length && !request.criteria?.length && (!request.decision || request.decision.state === 'refused' && request.decision.decidedBy === 'graphyard' && !request.decision.treeRead);
+    const read = needsTree ? await offending(item, request!) : [];
+    if (read === null) return;
+    const gated = read;
     // A refusal is reconsidered only when the rules as they stand now would approve it — once per
     // policy revision of the item, backing off on failure — so a standing refusal never churns.
-    const redecide = !!request?.decision && (redecidableScopeRefusal(item) || gated.length > 0);
+    const redecide = !!request?.decision && (redecidableScopeRefusal(item) || needsTree && !!effects.repositoryFiles);
     if (request?.decision?.state === 'refused' && !redecide) { await widenOnFindings(item, request); return; }
     if (!effects.decideScope || !request || (request.decision && !redecide)) return;
     // A request whose attempt no longer holds the lease is moot: a fresh attempt asks afresh.
-    if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock) return;
+    if (!(needsTree && effects.repositoryFiles && request.decision) && (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock)) return;
     // One decider per request (GY-955): while an executor holds the control plane's approve-scope
     // row for it, that executor is the decider and the loop reads the outcome on a later cycle. A
     // row nobody has claimed is the loop's to answer, so a fleet serving no approve-scope never waits.
@@ -256,7 +260,7 @@ export async function scopeStep(cycle: Cycle) {
     await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'started',
       detail: `Deciding ${item.key}'s scope request for ${request.paths.length ? namePaths(request.paths) : 'no path'}`, attempts, cycle: state.cycle }, now(), effects.persist);
     try {
-      const decided = await effects.decideScope(item, gated);
+      const decided = await effects.decideScope(item, gated, true);
       const decision = decided.scopeDecision;
       if (!decision) throw new Error('The control plane answered without a decision');
       settled.set(item.id, decided);

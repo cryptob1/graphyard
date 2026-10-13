@@ -133,9 +133,11 @@ export function mergedScopeRequest(pending: ScopeRequestState | null | undefined
  * routed: the revision it would propose is refused by the schema on every attempt, so the refusal
  * stays standing for the operator instead of a doomed decision (GY-630).
  */
+/** GY-1764: a refusal reaches the approver only once the repository tree was read for it; asks that drop paths or rewrite criteria never need the tree. */
+export const evidenced = (request: ScopeRequestState) => !!request.decision?.treeRead || !!request.remove?.length || !!request.criteria?.length;
 export function routableScopeRequest(item: { plannedFiles?: readonly string[]; criteria?: readonly ScopeCriterion[]; scopeRequest?: ScopeRequestState | null; lease?: { epoch: number; expiresAt: string } | null }, now: number) {
   const request = item.scopeRequest;
-  if (!request || request.decision?.state !== 'refused' || request.decision.nonRepository || request.remove?.length || request.criteria?.length) return null;
+  if (!request || request.decision?.state !== 'refused' || request.decision.nonRepository || !evidenced(request) || request.remove?.length || request.criteria?.length) return null;
   // A request whose attempt no longer holds the lease is moot: a fresh attempt asks afresh.
   if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= now) return null;
   return routableWidening(item, request);
@@ -157,7 +159,7 @@ const routableWidening = (item: { plannedFiles?: readonly string[]; criteria?: r
  */
 export function routableCarriedRequest(item: { plannedFiles?: readonly string[]; criteria?: readonly ScopeCriterion[]; scopeRequest?: ScopeRequestState | null; carriedScopeRequest?: ScopeRequestState | null }) {
   const request = item.carriedScopeRequest;
-  if (!request || item.scopeRequest || request.decision?.state !== 'refused' || request.decision.nonRepository || request.decision.decidedBy !== 'graphyard' || request.remove?.length || request.criteria?.length) return null;
+  if (!request || item.scopeRequest || request.decision?.state !== 'refused' || request.decision.nonRepository || request.decision.decidedBy !== 'graphyard' || !evidenced(request) || request.remove?.length || request.criteria?.length) return null;
   return routableWidening(item, request);
 }
 

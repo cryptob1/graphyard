@@ -160,7 +160,7 @@ const commands = {
   // verdict: the decision is recomputed here from the item's own criteria and the repository's
   // documentation rule, exactly as `autosettle` recomputes containment death.
   // GY-1764: the loop's reading of which asked paths are no repository file (read from the base tree outside this transaction); the rule refuses an ask naming them.
-  autoscope: z.object({ epoch, nonRepository: z.array(z.object({ path: z.string().min(1).max(1000), nearMiss: z.string().max(300).nullable(), why: z.enum(['install-local', 'untracked']) }).strict()).max(50).optional() }).strict(),
+  autoscope: z.object({ epoch, treeRead: z.boolean().optional(), nonRepository: z.array(z.object({ path: z.string().min(1).max(1000), nearMiss: z.string().max(300).nullable(), why: z.enum(['install-local', 'untracked']) }).strict()).max(50).optional() }).strict(),
   // The master loop recording that dispatching the item keeps failing for one unchanged cause
   // (GY-1078): the cause becomes the item's blocker, so nothing dispatches it again until an
   // operator clears it. It needs no lease — no attempt is running — and is refused while one is.
@@ -322,7 +322,7 @@ const endedScopeRecord = (request: ScopeRequestState, by: string, now: Date) => 
  * plannedFiles already cover.
  */
 export function carriedScopeRequest(work: Pick<Work, 'plannedFiles'>, request: ScopeRequestState): ScopeRequestState | null {
-  if (request.decision?.state !== 'refused' || request.decision.decidedBy !== 'graphyard' || request.decision.nonRepository || request.remove?.length || request.criteria?.length) return null; // GY-1764: the tree refuted these paths, so a later attempt's ask starts clean
+  if (request.decision?.state !== 'refused' || request.decision.decidedBy !== 'graphyard' || request.decision.nonRepository || !request.decision.treeRead || request.remove?.length || request.criteria?.length) return null; // GY-1764: the tree refuted these paths, so a later attempt's ask starts clean
   const paths = unplannedPaths(work.plannedFiles, request.paths);
   return paths.length ? { ...request, paths } : null;
 }
@@ -348,7 +348,7 @@ const attemptEndingCommands = new Set<string>(['submit', 'release', 'rework', 'r
 export function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest']>, now: Date, ground: Parameters<typeof decideScopeRequest>[0] = work, options: Parameters<typeof decideScopeRequest>[2] = {}): ScopeDecision {
   const verdict = decideScopeRequest(ground, request, options);
   const decision: ScopeDecision = { state: verdict.state, reason: verdict.reason, at: now.toISOString(), decidedBy: 'graphyard',
-    waitedMs: Math.max(0, now.getTime() - Date.parse(request.at)), paths: verdict.paths, requestedBy: request.requestedBy, requestedAt: request.at, epoch: request.epoch, ...(verdict.nonRepository ? { nonRepository: true } : {}) };
+    waitedMs: Math.max(0, now.getTime() - Date.parse(request.at)), paths: verdict.paths, requestedBy: request.requestedBy, requestedAt: request.at, epoch: request.epoch, ...(verdict.nonRepository ? { nonRepository: true } : {}), ...(verdict.nonRepository || options.treeRead ? { treeRead: true } : {}) };
   work.scopeDecision = decision;
   // An applied request is answered and cleared, exactly as an operator widening clears it;
   // a refused one stays open, carrying its refusal, because someone still has to decide it.
@@ -1556,9 +1556,10 @@ export class Engine {
         const ground = { ...work, criteria: [...work.criteria, ...held.flatMap(decision => decision.criteria)] };
         const offenders = nonRepositoryRead(data.nonRepository, request!.paths);
         // The evidence gate (GY-1764) re-decides a refusal the rule gave before the loop had read the tree: the ask is then refused for the paths it names that are no repository file.
-        const regate = !!offenders.length && request!.decision?.state === 'refused' && request!.decision.decidedBy === 'graphyard' && !request!.decision.nonRepository;
+        const regate = (!!offenders.length || !!data.treeRead) && !request!.decision?.treeRead && request!.decision?.state === 'refused' && request!.decision.decidedBy === 'graphyard' && !request!.decision.nonRepository;
         if (request!.decision && !regate && (request!.decision.state !== 'refused' || decideScopeRequest(ground, request!).state !== 'approved')) return work;
-        demand(work.lease && work.lease.epoch === request!.epoch && Date.parse(work.lease.expiresAt) > now.getTime(),
+        // A re-gate only adds the tree's evidence to a refusal, so it needs no live attempt (the asker may have released).
+        demand(regate && decideScopeRequest(ground, request!, { nonRepository: offenders }).state === 'refused' || work.lease && work.lease.epoch === request!.epoch && Date.parse(work.lease.expiresAt) > now.getTime(),
           'The requesting attempt no longer holds the lease; a fresh attempt asks afresh');
         const unaided = decideScopeRequest(work, request!).state === 'approved', planned = work.plannedFiles ?? [], revision = work.policyRevision;
         // Only the decisions whose own criteria ground the ask are its grounds; an unrelated held decision
@@ -1566,7 +1567,7 @@ export class Engine {
         // f28c91076299). Decisions that ground it only together are all its grounds.
         const alone = held.filter(entry => decideScopeRequest({ ...work, criteria: [...work.criteria, ...entry.criteria] }, request!).state === 'approved');
         const grounds = alone.length ? alone : held;
-        decision = applyScopeDecision(work, request!, now, ground, { nonRepository: offenders });
+        decision = applyScopeDecision(work, request!, now, ground, { nonRepository: offenders, treeRead: !!data.treeRead });
         // A widening only the held criteria grounded keeps those decisions current: each still applies when
         // the attempt ends, on this revision, with the entries it added kept (Codex review of f8eb2edf68f2).
         if (held.length && !unaided && work.policyRevision !== revision) {

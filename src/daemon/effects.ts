@@ -113,7 +113,7 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   /** The throughput owner as the control plane holds it now, read before its needs-decision is keyed by its requirements revision (GY-1609). */
   readThroughputOwner?: (owner: Work) => Promise<Work>;
   /** Asks the control plane to decide the item's open scope request and returns the decided document. */
-  decideScope?: (work: Work, nonRepository?: readonly { path: string; nearMiss: string | null; why: 'install-local' | 'untracked' }[]) => Promise<Work>; repositoryFiles?: () => Promise<ReadonlySet<string>>;
+  decideScope?: (work: Work, nonRepository?: readonly { path: string; nearMiss: string | null; why: 'install-local' | 'untracked' }[], treeRead?: boolean) => Promise<Work>; repositoryFiles?: () => Promise<ReadonlySet<string>>;
   wakeObservation?: (work: Work) => Promise<unknown>; // GY-710: a prioritized `resync` now (GY-1266) that waits on no tick (GY-1286), for a step refused on a stale observation
   /** Wake the item's own observation; the item once a newer reading is saved, else null (GY-793). */
   observe?: (work: Work, waitMs: number) => Promise<Work | null>;
@@ -637,7 +637,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     deferWindow: (work, body) => mutate(`work/${work.id}/window`, body) as Promise<Work>,
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
-    decideScope: (work, nonRepository) => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, ...(nonRepository?.length ? { nonRepository } : {}) }), repositoryFiles: async () => (await baseTree(root, current().baseBranch, run)).files, wakeObservation: work => mutate(`work/${work.id}/resync`, { prioritized: true, wait: false }),
+    decideScope: (work, nonRepository, treeRead) => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, ...(treeRead ? { treeRead } : {}), ...(nonRepository?.length ? { nonRepository } : {}) }), repositoryFiles: async () => (await baseTree(root, current().baseBranch, run)).files, wakeObservation: work => mutate(`work/${work.id}/resync`, { prioritized: true, wait: false }),
     observe: (work, waitMs) => wakeOwnObservation(body => mutate(`work/${work.id}/resync`, { ...body, prioritized: true }, randomUUID()), ms => delay(ms), { waitMs }),
     // No pull request yet means no review finding: the first attempt's scope is the criteria's alone.
     // Only the configured reviewer's and the awaited bot reviewers' words are findings the loop acts on.

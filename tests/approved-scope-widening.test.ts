@@ -57,7 +57,7 @@ async function claimed(title: string) {
 async function routed(title: string, sha?: string | null) {
   const work = await claimed(title);
   await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths: [daemon], reason: 'AC-1 needs the research worktree, which only the cycle module creates' });
-  const asked = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch }) as Work;
+  const asked = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch, treeRead: true }) as Work;
   assert.equal(asked.scopeRequest?.decision?.decidedBy, 'graphyard', 'the widening rule defers it to the approver');
   const request = asked.scopeRequest!;
   const answers = { epoch: request.epoch, at: request.at, ...(sha === undefined ? {} : { sha }) };
@@ -205,8 +205,8 @@ test('integration:decision-refused-gy-1696-replay — a worker\'s ask for trunca
     // Base: the loop decides without the tree, the rule defers to the approver, and the ask is routed verbatim.
     const asked = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch }) as Work;
     const now = Date.parse(asked.lease!.expiresAt) - 60_000; // inside the lease, from the item's own record
-    assert.ok(routableScopeRequest(asked, now), `${title}: without the tree the ask is routed to the approver`);
-    assert.ok(decisionsModule.scopeRoutineDecision(asked, now, true), `${title}: and becomes a requirements decision`);
+    assert.equal(routableScopeRequest(asked, now), null, `${title}: a refusal the tree was never read for is not routed to the approver`);
+    assert.equal(decisionsModule.scopeRoutineDecision(asked, now, true), null, `${title}: and forms no requirements decision`);
     // Candidate: the loop reads the tree, and the same cycle's decision refuses the ask for what it names.
     const offenders = nonRepositoryPaths(paths, tree);
     const refused = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch, nonRepository: offenders }) as Work;
@@ -300,5 +300,7 @@ test('integration:scope-request-command-evidence — the request command answers
   const other = await ok(token(implementer), 'POST', `work/${unasked.id}/request`, { type: 'scope-request', epoch: unasked.epoch, paths: ['daemon.relea'], reason: 'AC-1 is a live observation only a master session can record', release: false, nonRepository: [{ path: 'upgrade.align', nearMiss: null, why: 'untracked' }] }) as Work;
   assert.equal(other.scopeRequest?.decision?.state, 'refused');
   assert.equal(other.scopeRequest?.decision?.nonRepository, undefined, 'the unasked offender is ignored');
-  assert.ok(routableScopeRequest(other, now), 'the ordinary refusal stays routable, as before');
+  assert.equal(routableScopeRequest(other, now), null, 'the typed ask carries no tree reading of the loop\'s, so it is not routable yet');
+  const read = await ok(token(coordinator), 'POST', `work/${unasked.id}/autoscope`, { epoch: unasked.epoch, treeRead: true }) as Work;
+  assert.ok(routableScopeRequest(read, now), 'once the loop read the tree for it, the ordinary refusal is routable, as before');
 });

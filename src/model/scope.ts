@@ -84,6 +84,8 @@ export interface ScopeDecision {
   epoch?: number;
   /** The refusal is the evidence gate's (GY-1764): the ask names no repository file, so it is never routed to the approver. */
   nonRepository?: boolean;
+  /** The repository tree was read for this decision (GY-1764): only a refusal so evidenced may be routed to the approver, so a missing read never turns an ask into an approver decision. */
+  treeRead?: boolean;
 }
 
 /**
@@ -183,7 +185,7 @@ export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; p
 export function decideScopeRequest(
   item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; observation?: { files?: readonly string[] } | null } & FollowUpSource,
   request: Pick<ScopeRequestState, 'paths' | 'remove' | 'criteria'>,
-  options: { documentation?: readonly string[]; documentationConsumers?: readonly string[]; nonRepository?: readonly NonRepositoryPath[] } = {},
+  options: { documentation?: readonly string[]; documentationConsumers?: readonly string[]; nonRepository?: readonly NonRepositoryPath[]; treeRead?: boolean } = {},
 ): ScopeVerdict {
   // Paths the current planned scope already covers are no widening at all, so the decision is
   // about the rest: a master revision between the request and this decision narrows the ask
