@@ -20,6 +20,8 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { Store } from '../src/store.js';
 import { dispatchable } from '../src/coordination.js';
+import { decisionPrecondition } from '../src/model/approval.js';
+import { throughputOwnerItem } from '../src/throughput.js';
 import { postDeployChecks } from '../src/master-verification.js';
 import { server } from '../src/server.js';
 import { importAt } from './helpers/base-tree.js';
@@ -710,4 +712,53 @@ test('manual:intervention-pattern-escalation-build — GY-1723 against the base 
   assert.deepEqual(onCandidate.body, { accepted: true, ignored: 'no open job' });
   assert.equal(onCandidate.logged.length, 1, 'the reason is logged with the delivery ID');
   assert.match(onCandidate.logged[0]!, /\(check_run\) accepted without wake: no open job$/);
+});
+
+// GY-1760 names this file for its proof too: three build-stage escalations in the week to 2026-10-13 were a worker blocking on an item nobody could build.
+//   - GY-1750 (blocked#2541650): the throughput owner, filed in the backlog "never released to a worker", was released by hand; a worker was dispatched and blocked
+//     with "Nothing to implement". The control plane now refuses to release it, by the release command and by a release decision alike.
+//   - GY-1696 (blocked#2541694) and GY-1674 (blocked#2541601): a worker met a step only the master role takes (`master status` without .graphyard/master.json). GY-1761 makes
+//     that blocker's class master-role, a hand-off to a master-role identity; the dispatch side of the same two items (a post-deploy reading no code worker can record) is GY-1762's.
+async function replay1750(tree: string | null, name: string) {
+  const { Engine, Store, interventions } = await plane(tree);
+  const store = await databaseFor(name, Store);
+  const engine = new Engine(store, [15368], 120, 'owner/escalation-build'); engine.submissionObserver = null;
+  const { reason: _reason, ...owner } = throughputOwnerItem('21d470571dca'.padEnd(40, '0'), 3);
+  let work = await engine.execute(operator, 'create', null, { ...owner, reason: _reason, policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: [] }, randomUUID());
+  let refusal: string | null = null;
+  try { work = await engine.execute(operator, 'ready', work.id, {}, randomUUID()); } catch (error) { refusal = error instanceof Error ? error.message : String(error); }
+  let claimed = false;
+  if (!refusal) {
+    work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID()); claimed = true;
+    work = await engine.execute(implementer, 'blocked', work.id, { epoch: work.epoch, reason: 'Nothing to implement: this is a loop-owned verification item.' }, randomUUID());
+  }
+  const now = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime();
+  const folded = interventions.foldInterventions((await interventions.readInterventionLedger(store.pool, { workId: work.id })).rows, [work], new Date(now).toISOString()).interventions;
+  return { refusal, work, ready: work.ready, claimed, escalations: folded.filter((entry: { kind: string }) => entry.kind === 'escalation').length };
+}
+
+test('manual:intervention-pattern-escalation-build — GY-1750 against the base and the candidate: the base releases the throughput owner, a worker claims it and blocks, an escalation; the candidate refuses the release by command and by decision', async () => {
+  const onBase = await replay1750(base, 'gy1750_base');
+  assert.equal(onBase.refusal, null, 'the base releases it');
+  assert.ok(onBase.claimed, 'and a worker claims an item it cannot build');
+  assert.equal(onBase.escalations, 1, 'the instance reproduces: its blocked report is an open escalation');
+
+  const onCandidate = await replay1750(null, 'gy1750_candidate');
+  assert.match(onCandidate.refusal ?? '', /loop-owned/);
+  assert.equal(onCandidate.ready, false, 'it stays in the backlog');
+  assert.equal(onCandidate.escalations, 0, 'no worker is ever dispatched, so none blocks');
+
+  const owner = onCandidate.work;
+  assert.match(decisionPrecondition('release', { expectedRevision: owner.revision }, owner) ?? '', /loop-owned/, 'a release decision is refused at its precondition too');
+  assert.equal(decisionPrecondition('release', { expectedRevision: 1 }, { ...owner, revision: 1, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves'] }] } as Work), null, 'an item with a code criterion releases as before');
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1696 and GY-1674 against the base and the candidate: the base reads a master-role refusal as genuine, awaiting someone; the candidate classes it master-role, handed to a master-role identity', async () => {
+  const texts = ["Observation made but cannot be submitted. Blocked command: graphyard master status in this worktree, error: '.graphyard/master.json does not exist'. A master-role session should record manual:checkout-restore-clears-drift-pin-on-serving-release from this reading.",
+    "AC-1 needs a doctor-issued master checkout-restore. Blocked command: graphyard master status in this worktree, error: '.graphyard/master.json does not exist: run graphyard install --apply, or graphyard master init --token-stdin'. The worker token holds no master role."];
+  const onBase = await importAt<typeof import('../src/model/blocker-class.js')>(base, 'src/model/blocker-class.ts');
+  for (const text of texts) {
+    assert.equal(onBase.classifyBlocker(text).class, 'genuine', 'the base has no class for it');
+    assert.equal(classifyBlocker(text).class, 'master-role');
+  }
 });
