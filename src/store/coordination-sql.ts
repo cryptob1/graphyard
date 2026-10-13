@@ -85,7 +85,8 @@ const relevantEvidence = `((entry->>'sha' = r.head AND entry->>'baseSha' IS NOT 
  * reader of finished sessions belongs on the full snapshot, or must unsettle what it reads.
  */
 export const coordinationDocument = ({ keep, settled }: { keep: number; settled: boolean }) => `d.document - 'pipeline' - 'evidence' - 'observation' - 'queueHistory' - 'actionQueue' - 'autoDispatch' - 'sessions'
-  ${settled ? '' : `|| CASE WHEN ${object("d.document->'pipeline'")} AND d.document->'pipeline' ? 'reworkRounds' THEN jsonb_build_object('reworkRounds', d.document->'pipeline'->'reworkRounds') ELSE '{}'::jsonb END`}
+  ${settled ? '' : `|| CASE WHEN ${object("d.document->'pipeline'")} AND d.document->'pipeline' ? 'reworkRounds' THEN jsonb_build_object('reworkRounds', d.document->'pipeline'->'reworkRounds') ELSE '{}'::jsonb END
+  || CASE WHEN ${object("d.document->'pipeline'")} AND jsonb_typeof(d.document->'pipeline'->'attempts') = 'array' THEN jsonb_build_object('attemptCount', jsonb_array_length(d.document->'pipeline'->'attempts')) ELSE '{}'::jsonb END`}
   || jsonb_build_object('evidence', (SELECT COALESCE(jsonb_agg(entry - 'artifacts' - 'scopeFiles' - 'provenance' ORDER BY position), '[]'::jsonb) FROM jsonb_array_elements(${array("d.document->'evidence'")}) WITH ORDINALITY AS e(entry, position) WHERE ${relevantEvidence}))
   || CASE WHEN d.document ? 'observation' THEN jsonb_build_object('observation', CASE WHEN ${object("d.document->'observation'")} THEN (d.document->'observation') - 'scopeFiles' ELSE d.document->'observation' END) ELSE '{}'::jsonb END
   || CASE WHEN jsonb_typeof(d.document->'queueHistory') = 'array' THEN jsonb_build_object('queueHistory', ${tail("d.document->'queueHistory'", keep)}) ELSE '{}'::jsonb END

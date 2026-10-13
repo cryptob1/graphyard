@@ -76,6 +76,15 @@ const flagValues = (args: string[], ...flags: string[]) => args.flatMap((arg, in
 const probeProfile = 'graphyard-launch-probe';
 
 export const runtimeSandboxes: Record<string, RuntimeSandbox> = {
+  // Pi has no filesystem sandbox of its own (GY-1746): it runs under the coordinator's read-only-mount
+  // confinement with its worktree writable, so it restricts nothing itself, is granted nothing, and
+  // is probed as itself behind that confinement. A host that cannot apply the confinement refuses
+  // the launch, as for any runtime without a sandbox.
+  pi: {
+    mode: () => null,
+    grant: () => [],
+    probe: (_args, _cwd, script) => ({ command: script[0], args: script.slice(1) }),
+  },
   codex: {
     mode: args => {
       const mode = flagValue(args, '--sandbox', '-s');
