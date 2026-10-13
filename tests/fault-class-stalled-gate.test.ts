@@ -79,3 +79,10 @@ test('a repeated plane-wide-shaped failure of a call that is not the control pla
   storeAction(state, 'deployment:x', { kind: 'deployment', work: 'GY-8', principal: null, epoch: 1, state: 'failed', detail, attempts: 1, cycle: 1, at: stamp(1) });
   assert.ok(state.actions['deployment:x'].faultClass);
 });
+
+test('a timed-out close of the throughput owner is a wait, and a server refusal with its own error body is not', () => {
+  assert.equal(waitReason('Could not close GY-4: The operation was aborted due to timeout'), true);
+  assert.equal(waitReason('Graphyard refused /api/work/GY-4 (503): Operator-agent authorization is unavailable'), false);
+  assert.equal(waitReason('Graphyard refused /api/work/GY-4 (502): Application failed to respond'), true);
+  assert.ok(actionStall(failing('GY-4', 'Graphyard refused /api/work/GY-4 (503): Operator-agent authorization is unavailable', actionStallThreshold)));
+});
