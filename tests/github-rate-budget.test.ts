@@ -8,7 +8,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server/index.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { CHECK_NAME, GitHub, comparePage, webhookCorroboration, webhookDeliveryLogMs, webhookDeliveryLogTightMs, webhookState, type WebhookDeliveryAttempt, type WebhookDeliveryLog, mergePathReserve, observationBand, observationCadence, observationCadenceMs, processJob, reserveDecision, steadyStateInterval, steadyStateShare } from '../src/github.js';
+import { CHECK_NAME, GitHub, comparePage, mergeDeliveryLogs, webhookCorroboration, webhookDeliveryLogMs, webhookDeliveryLogTightMs, webhookState, type WebhookDeliveryAttempt, type WebhookDeliveryLog, mergePathReserve, observationBand, observationCadence, observationCadenceMs, processJob, reserveDecision, steadyStateInterval, steadyStateShare } from '../src/github.js';
 import { evaluate, type Principal, type Work } from '../src/model.js';
 import { exhaustionAttention, githubBudgetAttention, pauseAttention, webhookAttention } from '../src/cli/github-budget-attention.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -1016,4 +1016,14 @@ test('manual:fault-class-configuration — GY-1765: a restarted plane keeps its 
   assert.equal(covered.coveredFrom, null, 'the persisted reads cover the 24h window');
   assert.equal(webhookState({ lastDeliveryAt: new Date(T).toISOString(), ...covered }, T + 24 * hour), 'answered');
   assert.ok(last!.attempts.length > 240 && last!.attempts.length <= 5_000);
+});
+
+test('manual:fault-class-configuration — GY-1765: two deliveries sharing a second, status, event and repository are both kept when their delivery ids differ', () => {
+  const at = '2026-10-10T12:00:00.000Z', now = Date.parse(at) + 60_000;
+  const a = { id: '1', at, statusCode: 500, event: 'check_run', installationId: 2, repositoryId: 77 }, b = { ...a, id: '2' };
+  const previous = { observedAt: at, attempts: [a], coversFrom: at, error: null };
+  const merged = mergeDeliveryLogs(previous, { observedAt: new Date(now).toISOString(), attempts: [b, a], coversFrom: at, error: null }, now);
+  assert.deepEqual(merged.attempts.map(attempt => attempt.id).sort(), ['1', '2']);
+  // A repeated read of the same delivery is still one attempt.
+  assert.equal(mergeDeliveryLogs(merged, { ...merged, observedAt: new Date(now + 1000).toISOString() }, now + 1000).attempts.length, 2);
 });

@@ -618,7 +618,7 @@ export function appJwt(appId: number, privateKey: string, now = Date.now()) {
  * records only the deliveries that can wake a job, so a receipts gap alone cannot tell an hour
  * GitHub had nothing to send from a webhook that is failing; this log is GitHub's own account.
  */
-export interface WebhookDeliveryAttempt { at: string; statusCode: number; event: string; installationId: number | null; repositoryId: number | null }
+export interface WebhookDeliveryAttempt { id?: string | null; at: string; statusCode: number; event: string; installationId: number | null; repositoryId: number | null }
 export interface WebhookDeliveryLog {
   /** When the log was last read successfully; null until a read succeeds. */
   observedAt: string | null;
@@ -647,7 +647,7 @@ export function mergeDeliveryLogs(previous: WebhookDeliveryLog | null, fresh: We
   const seen = new Set<string>(), merged: WebhookDeliveryAttempt[] = [];
   const cut = now - webhookDeliveryRetentionMs;
   for (const attempt of [...fresh.attempts, ...previous.attempts].sort((a, b) => Date.parse(b.at) - Date.parse(a.at))) {
-    const id = `${attempt.at}|${attempt.statusCode}|${attempt.event}|${attempt.installationId}|${attempt.repositoryId}`;
+    const id = attempt.id ? `id:${attempt.id}` : `${attempt.at}|${attempt.statusCode}|${attempt.event}|${attempt.installationId}|${attempt.repositoryId}`;
     if (seen.has(id) || Date.parse(attempt.at) < cut) continue;
     seen.add(id); merged.push(attempt);
   }
@@ -1001,7 +1001,7 @@ export class GitHub {
         for (const entry of body as any[]) {
           const at = typeof entry?.delivered_at === 'string' ? Date.parse(entry.delivered_at) : NaN;
           if (!Number.isFinite(at)) continue;
-          attempts.push({ at: new Date(at).toISOString(), statusCode: Number.isInteger(entry.status_code) ? entry.status_code : 0, event: String(entry.event ?? ''),
+          attempts.push({ id: Number.isSafeInteger(entry.id) || (typeof entry.id === 'string' && entry.id) ? String(entry.id) : null, at: new Date(at).toISOString(), statusCode: Number.isInteger(entry.status_code) ? entry.status_code : 0, event: String(entry.event ?? ''),
             installationId: Number.isInteger(entry.installation_id) ? entry.installation_id : null, repositoryId: Number.isInteger(entry.repository_id) ? entry.repository_id : null });
         }
         const oldest = attempts.length ? Date.parse(attempts[attempts.length - 1].at) : null;
