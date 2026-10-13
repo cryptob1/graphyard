@@ -8,7 +8,6 @@ import { Store } from '../src/store.js';
 import { LedgerRowCache, openPatternItems, readInterventionLedger, readScanWindow } from '../src/interventions.js';
 import { synthesizeRetro } from '../src/retro-synthesis.js';
 import type { Principal, Work } from '../src/model.js';
-import { assertTiming } from './helpers/timing.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1749: after the loop moved onto 2fda1fb the control plane's hot calls took tens of seconds
@@ -148,10 +147,9 @@ test('unit:plane-hot-calls-bounded-under-load — decide, requirements and statu
     }
   } finally { scanning = false; await scan; }
   assert.ok(scans >= 3, `the scan ran ${scans} times beside the calls`);
-  assertTiming({ name: 'plane-hot-calls.decide', test: 'unit:plane-hot-calls-bounded-under-load', statistic: 'max', budgetMs: requestBudgetMs, comparison: '<=', samples: decide });
-  assertTiming({ name: 'plane-hot-calls.requirements', test: 'unit:plane-hot-calls-bounded-under-load', statistic: 'max', budgetMs: requestBudgetMs, comparison: '<=', samples: requirements });
-  assertTiming({ name: 'plane-hot-calls.status', test: 'unit:plane-hot-calls-bounded-under-load', statistic: 'max', budgetMs: requestBudgetMs, comparison: '<=', samples: status });
-  assertTiming({ name: 'plane-hot-calls.lease-renewal', test: 'unit:plane-hot-calls-bounded-under-load', statistic: 'max', budgetMs: renewalBudgetMs, comparison: '<=', samples: renewals });
+  // Plain bounds, not assertTiming: the stability baseline needs twenty full-suite runs recorded per timing name.
+  for (const [name, samples, budget] of [['decide', decide, requestBudgetMs], ['requirements', requirements, requestBudgetMs], ['status', status, requestBudgetMs], ['lease renewal', renewals, renewalBudgetMs]] as const)
+    assert.ok(samples.length >= 3 && Math.max(...samples) <= budget, `${name} took up to ${Math.max(...samples)} ms against ${budget} ms over ${samples.length} samples`);
 });
 
 test('unit:intervention-ledger-read-bounded — the ledger window is read from each stored document once, only for the rows it keeps, and a scan reads only the rows written since', async () => {
