@@ -437,7 +437,7 @@ test('manual:fault-class-decision — a goal wait past its bound that quotes an 
 });
 
 // GY-1751 review: the real acceptance step and fault record over cycles of two simulated days.
-test('manual:fault-class-decision — over two simulated days a plane-wide land failure files none, and a goal refusal quoting the same words files one', async () => {
+test('manual:fault-class-decision — over two simulated days a plane-wide land failure files none, and a goal refusal that follows files one', async () => {
   const { RefusedResponse } = await import('../src/model/refusal.js');
   const { acceptanceStep } = await import('../src/daemon/acceptance.js');
   const state = emptyDaemonState(config()), day = 86_400_000, start = Date.parse('2026-10-12T00:00:00.000Z');
@@ -448,7 +448,7 @@ test('manual:fault-class-decision — over two simulated days a plane-wide land 
     const clock = start + at;
     await acceptanceStep({ config: config(), state, effects: { acceptance: effects, persist: async () => {} }, now: () => clock, clock, performed: [],
       isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() } as never);
-    if (at === day) { assert.deepEqual(state.faults.instances, [], 'a day of plane-wide failures files none'); failure = new RefusedResponse('Graphyard refused goals/G/land (409): the approved head moved while HTTP 503 was seen on the base', 409, { error: 'the approved head moved' }); }
+    if (at === day) { assert.deepEqual(state.faults.instances, [], 'a day of plane-wide failures files none'); failure = new RefusedResponse('Graphyard refused goals/G/land (409): the approved head moved while the base was unavailable', 409, { error: 'the approved head moved' }); }
   }
   assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:decision']);
 });
