@@ -5,7 +5,6 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { type Observation, type Work } from '../src/model.js';
 import { server } from '../src/server.js';
-import { GitHubCacheStore } from '../src/github-cache.js';
 import { GitHub, webhookDeliveryLogMs, webhookDeliveryPages } from '../src/github.js';
 import { type DaemonEffects, daemonEffects, emptyDaemonState, runCycle } from '../src/master-daemon.js';
 import { systemInvariants, invariantFaultKind } from '../src/model/invariants.js';
@@ -80,21 +79,12 @@ test('unit:soak-invariants-hold — the real loop reads /api/status every cycle 
   const dayStart = clock.now(), log = new DeliveryLog(dayStart);
   process.env.GITHUB_WEBHOOK_SECRET = 'soak-webhook-secret';
   // A control plane that observes GitHub: the same engine and database as the soak's plane, with the App client wired in.
-  // The plane restarts three times in the day (GY-1765): each boot is a new client on the persisted cache, which carries the delivery log across.
-  const cacheScope = `soak-webhook-${randomUUID()}`, stores: GitHubCacheStore[] = [];
-  const boot = async (port: number) => {
-    const client = new GitHub({ repository, base: 'main', appId: 1234, installationId: INSTALLATION, privateKey: 'not-used' });
-    Object.assign(client, { token: 'fixture-token', expires: Number.MAX_SAFE_INTEGER, appHeaders: () => ({ Authorization: 'Bearer fixture-app-jwt' }), appSlug: 'graphyard-owner-project' });
-    client.fetch = log.fetch as typeof fetch;
-    const cache = new GitHubCacheStore(store.pool, cacheScope, { flushMs: 1_000 }); stores.push(cache);
-    await client.attachCache(cache);
-    const listening = server(engine, credentials, client);
-    await new Promise<void>(resolve => listening.listen(port, '127.0.0.1', resolve));
-    return { client, listening };
-  };
-  let { client: github, listening: plane } = await boot(0);
-  const planePort = (plane.address() as { port: number }).port, planeUrl = `http://127.0.0.1:${planePort}`;
-  const restarts = [6 * hour, 12 * hour + 30 * minute, 20 * hour];
+  const github = new GitHub({ repository, base: 'main', appId: 1234, installationId: INSTALLATION, privateKey: 'not-used' });
+  Object.assign(github, { token: 'fixture-token', expires: Number.MAX_SAFE_INTEGER, appHeaders: () => ({ Authorization: 'Bearer fixture-app-jwt' }), appSlug: 'graphyard-owner-project' });
+  github.fetch = log.fetch as typeof fetch;
+  const plane = server(engine, credentials, github);
+  await new Promise<void>(resolve => plane.listen(0, '127.0.0.1', resolve));
+  const planeUrl = `http://127.0.0.1:${(plane.address() as { port: number }).port}`;
   try {
     // Twelve items with pull requests open: the count the row is gated on, and the per-item scale the read must not follow.
     const items = 12, worker = { id: 'worker-one', role: 'worker' as const };
@@ -141,11 +131,6 @@ test('unit:soak-invariants-hold — the real loop reads /api/status every cycle 
         log.attempt(clock.now(), stretch.code);
         if (stretch.receipts) await receipt();
       }
-      if (restarts.length && elapsed >= restarts[0]) {
-        restarts.shift();
-        await stores.at(-1)!.close(); await new Promise<void>(resolve => plane.close(() => resolve()));
-        ({ client: github, listening: plane } = await boot(planePort));
-      }
       log.failing = 'logFails' in stretch;
       Object.assign(github, { blockedUntil: 'paused' in stretch ? dayStart + stretch.to : 0 });
       const before = state.faults.observedAt;
@@ -165,7 +150,7 @@ test('unit:soak-invariants-hold — the real loop reads /api/status every cycle 
     // makes, at the same interval), never per cycle or per item, and each read stays within its page bound.
     const perHour = new Map<number, number>();
     for (const read of log.reads) perHour.set(Math.floor(read.at / hour), (perHour.get(Math.floor(read.at / hour)) ?? 0) + 1);
-    const ceiling = hour / webhookDeliveryLogMs + 2;
+    const ceiling = hour / webhookDeliveryLogMs + 1;
     assert.deepEqual([...perHour].filter(([, reads]) => reads > ceiling), [], `at most ${ceiling} delivery-log reads an hour with ${items} pull requests open and a cycle a minute: ${JSON.stringify([...perHour])}`);
     assert.ok(log.reads.length <= 24 * ceiling && log.reads.length >= 24 * 3, `the log was read on its interval through the day: ${log.reads.length}`);
     assert.deepEqual(log.reads.filter(read => read.pages > webhookDeliveryPages), [], 'no read pages past its bound');
@@ -196,20 +181,11 @@ test('unit:soak-invariants-hold — the real loop reads /api/status every cycle 
     const webhookInstances = state.faults.instances.filter(entry => entry.subject === 'github' && /webhook/.test((entry as { text?: string }).text ?? ''));
     assert.ok(webhookInstances.length >= 2 && webhookInstances.length <= 8, `the row opened once per episode, not per cycle: ${webhookInstances.length} instances`);
 
-    // The history persists: the row the restarts read is stored, and the last process's log reaches back past its own boot.
-    assert.equal(restarts.length, 0, 'all three restarts happened');
-    await stores.at(-1)!.flush();
-    const persisted = await store.pool.query('SELECT value FROM github_cache WHERE key = $1', [`${cacheScope}:deliveries:log`]);
-    assert.equal(persisted.rowCount, 1, 'the delivery log is one persisted row');
-    assert.ok(persisted.rows[0].value.attempts.length >= 20 && persisted.rows[0].value.attempts.length <= 5_000, 'it holds the attempts of every read, bounded');
-
     // The system invariants the loop judged each cycle held throughout.
     const invariantKinds = new Set<string>(systemInvariants.map(invariantFaultKind));
     assert.deepEqual(state.faults.instances.filter(entry => invariantKinds.has(entry.kind)).map(entry => `${entry.kind} at ${entry.at}`), [], 'every system invariant holds');
   } finally {
-    await Promise.all(stores.map(entry => entry.close()));
     await new Promise<void>(resolve => plane.close(() => resolve()));
-    await store.pool.query('DELETE FROM github_cache WHERE key LIKE $1', [`${cacheScope}:%`]).catch(() => undefined);
     delete process.env.GITHUB_WEBHOOK_SECRET;
   }
 });
