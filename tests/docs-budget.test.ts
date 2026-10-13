@@ -73,7 +73,8 @@ function baseCount(): DocsBudgetBase {
 }
 /** Facts a criterion requires a budgeted page to state, so trimming for the budget cannot drop them. */
 const REQUIRED_STATEMENTS: [string, RegExp][] = [
-  ['docs/master-agent-reference.md', /decisions step stays within 10 s a cycle/],
+  ['docs/master-agent-reference.md', /decisions step keeps its two-fifths interval budget \(30 s floor\)/],
+  ['docs/master-agent-reference.md', /each approver call is bound to 10 s or the budget left/],
   ['docs/master-agent-reference.md', /history whose ledger has not moved is kept, not read/],
   // GY-1518: the delivery redesign page keeps the merger setting's two values and the one rule.
   ['docs/delivery-redesign.md', /`github` \(default\) or `control-plane`/],

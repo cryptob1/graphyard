@@ -8,10 +8,11 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server/index.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { CHECK_NAME, GitHub, comparePage, webhookCorroboration, webhookDeliveryLogMs, webhookDeliveryLogTightMs, webhookState, type WebhookDeliveryAttempt, type WebhookDeliveryLog, mergePathReserve, observationBand, observationCadence, observationCadenceMs, processJob, reserveDecision, steadyStateInterval, steadyStateShare } from '../src/github.js';
+import { CHECK_NAME, GitHub, comparePage, mergeDeliveryLogs, webhookCorroboration, webhookDeliveryLogMs, webhookDeliveryLogTightMs, webhookState, type WebhookDeliveryAttempt, type WebhookDeliveryLog, mergePathReserve, observationBand, observationCadence, observationCadenceMs, processJob, reserveDecision, steadyStateInterval, steadyStateShare } from '../src/github.js';
 import { evaluate, type Principal, type Work } from '../src/model.js';
 import { exhaustionAttention, githubBudgetAttention, pauseAttention, webhookAttention } from '../src/cli/github-budget-attention.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { GitHubCacheStore } from '../src/github-cache.js';
 import { baseChangeFiles, baseMoveWakes } from '../src/observation-priority.js';
 import { simulateObservationScheduler } from '../src/observation-simulation.js';
 import { baseMoveSubjects, webhookSubjects } from '../src/server/routes/github.js';
@@ -695,40 +696,45 @@ test('unit:webhook-deliveries-read-cached — the delivery log is one app-level 
   github.fetch = api.fetch;
   const recovered = await github.webhookDeliveries(now + 4 * webhookDeliveryLogTightMs + webhookDeliveryLogMs);
   assert.deepEqual([recovered.error, recovered.attempts.length, api.deliveryReads], [null, 1, 4]);
+  // Reads of a new client: a client carries its earlier reads forward (GY-1765), and these judge one read's own boundary.
+  let fresh = api.client();
   // A busy log is paged back to the lookback and no further.
   let pages = 0; const pageAt = now + 5 * webhookDeliveryLogTightMs;
-  github.fetch = async (url: unknown) => {
+  fresh.fetch = async (url: unknown) => {
     const page = Number(new URL(String(url)).searchParams.get('cursor') ?? 0); pages++;
     const body = Array.from({ length: 100 }, (_, index) => ({ delivered_at: new Date(pageAt - (page * 100 + index) * 90_000).toISOString(), status_code: 202, event: 'check_run', installation_id: 2 }));
     return new Response(JSON.stringify(body), { status: 200, headers: { link: `<https://api.github.com/app/hook/deliveries?per_page=100&cursor=${page + 1}>; rel="next"` } });
   };
-  const paged = await github.webhookDeliveries(pageAt);
+  const paged = await fresh.webhookDeliveries(pageAt);
   assert.equal(pages, 3, 'six hours at one attempt per 90 seconds is three pages'); assert.equal(paged.coversFrom, paged.attempts[paged.attempts.length - 1].at, 'stopped at the lookback with older pages left, it is complete back to its oldest attempt');
   // A log too busy for the page bound says how far back it is complete.
-  pages = 0; github.fetch = async (url: unknown) => {
+  fresh = api.client();
+  pages = 0; fresh.fetch = async (url: unknown) => {
     const page = Number(new URL(String(url)).searchParams.get('cursor') ?? 0); pages++;
     const body = Array.from({ length: 100 }, (_, index) => ({ delivered_at: new Date(pageAt + webhookDeliveryLogTightMs - (page * 100 + index) * 1000).toISOString(), status_code: 202, event: 'check_run', installation_id: 2 }));
     return new Response(JSON.stringify(body), { status: 200, headers: { link: `<https://api.github.com/app/hook/deliveries?per_page=100&cursor=${page + 1}>; rel="next"` } });
   };
-  const bounded = await github.webhookDeliveries(pageAt + webhookDeliveryLogTightMs);
+  const bounded = await fresh.webhookDeliveries(pageAt + webhookDeliveryLogTightMs);
   assert.equal(pages, 5); assert.equal(bounded.coversFrom, bounded.attempts[bounded.attempts.length - 1].at);
   // A read stopped at the lookback while GitHub still has older pages keeps its boundary too: a
   // receipts gap older than the lookback is not complete back to its last receipt.
+  fresh = api.client();
   pages = 0; const lookbackAt = pageAt + 2 * webhookDeliveryLogTightMs;
-  github.fetch = async (url: unknown) => {
+  fresh.fetch = async (url: unknown) => {
     const page = Number(new URL(String(url)).searchParams.get('cursor') ?? 0); pages++;
     const body = Array.from({ length: 100 }, (_, index) => ({ delivered_at: new Date(lookbackAt - (page * 100 + index) * 90_000).toISOString(), status_code: 202, event: 'check_run', installation_id: 2 }));
     return new Response(JSON.stringify(body), { status: 200, headers: { link: `<https://api.github.com/app/hook/deliveries?per_page=100&cursor=${page + 1}>; rel="next"` } });
   };
-  const lookedBack = await github.webhookDeliveries(lookbackAt);
+  const lookedBack = await fresh.webhookDeliveries(lookbackAt);
   assert.equal(pages, 3); assert.equal(lookedBack.coversFrom, lookedBack.attempts[lookedBack.attempts.length - 1].at, 'the lookback, not the log, ended the read');
   const oldGap = webhookCorroboration(lookedBack, new Date(lookbackAt - 8 * 3_600_000).toISOString(), lookbackAt, { installationId: 2, repositoryId: null });
   assert.deepEqual([oldGap.coveredFrom, webhookState({ lastDeliveryAt: new Date(lookbackAt - 8 * 3_600_000).toISOString(), ...oldGap }, lookbackAt)], [lookedBack.coversFrom, 'unverified']);
   const recentGap = webhookCorroboration(lookedBack, new Date(lookbackAt - 2 * 3_600_000).toISOString(), lookbackAt, { installationId: 2, repositoryId: null });
   assert.deepEqual([recentGap.coveredFrom, webhookState({ lastDeliveryAt: new Date(lookbackAt - 2 * 3_600_000).toISOString(), ...recentGap }, lookbackAt)], [null, 'answered'], 'a gap inside the lookback is covered');
   // The last page GitHub has, with no next link, is complete whatever its age.
-  pages = 0; github.fetch = async () => { pages++; return new Response(JSON.stringify([{ delivered_at: new Date(lookbackAt - 10 * 3_600_000).toISOString(), status_code: 202, event: 'push', installation_id: 2 }]), { status: 200 }); };
-  const exhausted = await github.webhookDeliveries(lookbackAt + webhookDeliveryLogTightMs);
+  fresh = api.client();
+  pages = 0; fresh.fetch = async () => { pages++; return new Response(JSON.stringify([{ delivered_at: new Date(lookbackAt - 10 * 3_600_000).toISOString(), status_code: 202, event: 'push', installation_id: 2 }]), { status: 200 }); };
+  const exhausted = await fresh.webhookDeliveries(lookbackAt + webhookDeliveryLogTightMs);
   assert.deepEqual([pages, exhausted.coversFrom], [1, null]);
 });
 
@@ -975,4 +981,49 @@ test('manual:fault-class-resources — GY-1272: the 5 October merge burst replay
   assert.ok(spentOnBase > api.limit, `the base spends ${spentOnBase} of ${api.limit} requests in the hour`);
   // CANDIDATE: the same hour stays under the budget's 500-request warning floor.
   assert.ok(spentOnCandidate < api.limit - 500, `the candidate spends ${spentOnCandidate} of ${api.limit} requests in the hour`);
+});
+
+
+test('manual:fault-class-configuration — GY-1765: a restarted plane keeps its delivery log, so a 24h webhook reading is obtainable without an App JWT in the sandbox', async () => {
+  // GY-1724's instance: after a restart /api/status covered only the window since the restart (coveredFrom set), never 24h.
+  const hour = 3_600_000, T = Date.parse('2026-10-10T00:00:00Z');
+  // The table the plane's database keeps: a restart builds a new store that reads only what an earlier one wrote.
+  const table = new Map<string, unknown>();
+  const database = { query: async (text: string, values?: any[]) => {
+    if (text.startsWith('INSERT')) { (values![0] as string[]).forEach((key, index) => table.set(key, JSON.parse((values![3] as string[])[index]))); return { rows: [], rowCount: 1 }; }
+    if (text.startsWith('SELECT value FROM github_cache')) return table.has(values![0]) ? { rows: [{ value: table.get(values![0]) }], rowCount: 1 } : { rows: [], rowCount: 0 };
+    return { rows: [], rowCount: 0 };
+  } } as any;
+  const busy = (read: number) => async (url: unknown) => {
+    const page = Number(new URL(String(url)).searchParams.get('cursor') ?? 0);
+    const body = Array.from({ length: 100 }, (_, index) => ({ delivered_at: new Date(read - (page * 100 + index) * 90_000).toISOString(), status_code: 202, event: 'check_run', installation_id: 2 }));
+    return new Response(JSON.stringify(body), { status: 200, headers: { link: `<https://api.github.com/app/hook/deliveries?per_page=100&cursor=${page + 1}>; rel="next"` } });
+  };
+  const api = new Api(); const reads = [T, T + 4 * hour, T + 8 * hour, T + 12 * hour, T + 16 * hour, T + 20 * hour, T + 24 * hour];
+  const window = (log: WebhookDeliveryLog, at: number) => webhookCorroboration(log, new Date(at - 24 * hour).toISOString(), at, { installationId: 2, repositoryId: null });
+  // Base: every read a new process with no memory.
+  let last: WebhookDeliveryLog | null = null;
+  for (const at of reads) { const process = api.client(); process.fetch = busy(at) as any; last = await process.webhookDeliveries(at); }
+  assert.notEqual(window(last!, T + 24 * hour).coveredFrom, null, 'a read alone reaches back six hours, not 24');
+  // Candidate: each restart starts from the log the last process persisted.
+  for (const at of reads) {
+    const store = new GitHubCacheStore(database, 'scope', { flushMs: 60_000 }), process = api.client();
+    await process.attachCache(store); process.fetch = busy(at) as any; last = await process.webhookDeliveries(at);
+    await store.close();
+  }
+  assert.ok([...table.keys()].some(key => key.startsWith('scope:deliveries:')), 'the log is a persisted row, which each restarted process reads');
+  const covered = window(last!, T + 24 * hour);
+  assert.equal(covered.coveredFrom, null, 'the persisted reads cover the 24h window');
+  assert.equal(webhookState({ lastDeliveryAt: new Date(T).toISOString(), ...covered }, T + 24 * hour), 'answered');
+  assert.ok(last!.attempts.length > 240 && last!.attempts.length <= 5_000);
+});
+
+test('manual:fault-class-configuration — GY-1765: two deliveries sharing a second, status, event and repository are both kept when their delivery ids differ', () => {
+  const at = '2026-10-10T12:00:00.000Z', now = Date.parse(at) + 60_000;
+  const a = { id: '1', at, statusCode: 500, event: 'check_run', installationId: 2, repositoryId: 77 }, b = { ...a, id: '2' };
+  const previous = { observedAt: at, attempts: [a], coversFrom: at, error: null };
+  const merged = mergeDeliveryLogs(previous, { observedAt: new Date(now).toISOString(), attempts: [b, a], coversFrom: at, error: null }, now);
+  assert.deepEqual(merged.attempts.map(attempt => attempt.id).sort(), ['1', '2']);
+  // A repeated read of the same delivery is still one attempt.
+  assert.equal(mergeDeliveryLogs(merged, { ...merged, observedAt: new Date(now + 1000).toISOString() }, now + 1000).attempts.length, 2);
 });
