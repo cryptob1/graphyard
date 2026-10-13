@@ -37,7 +37,7 @@ export type ExemptionMoment =
   /** An `autosettle` or `recover` row lowering the item's containment fence. */
   | { at: 'settlement'; kind: string; details: Record<string, any>; when: string }
   /** An ask still open past the last row, on the item as the current record holds it, judged at the fold's own instant. */
-  | { at: 'open-ask'; ask: Ask; item: Work; now: string }
+  | { at: 'open-ask'; ask: Ask; item: Work; now: string; routes?: boolean }
   /** An escalation still standing on the item past the last row. */
   | { at: 'open-escalation'; item: Work; escalation: Escalation; now: string }
   /** An `escalation.resolved` row: the trigger, the escalation it resolved and the decision that resolved it. */
@@ -278,12 +278,15 @@ export const approverHoldsScopeRequest = rule('approver-holds-scope-request', mo
  * or a one-path or non-additive ask nothing will judge again — and never before it.
  */
 export const scopeRefusalWithinBound = rule('scope-refusal-within-bound', moment => moment.at === 'open-ask' && !moment.ask.routed && refusedScopeAskInCycle(moment));
-/** A live attempt's refused scope ask inside the loop's bound, whichever decision the record holds on it: the loop's cycle, or the attempt's narrower re-ask to make. */
+/**
+ * A live attempt's refused scope ask inside the loop's bound, whichever decision the record holds on it: the loop's cycle, or the attempt's narrower re-ask to make.
+ * `routes` is whether the loop can route a refused ask at all (the fault pass's `scopeRoutes`): without it nothing will route the ask, so it stands at once, as the fault pass stands it.
+ */
 function refusedScopeAskInCycle(moment: Extract<ExemptionMoment, { at: 'open-ask' }>) {
   if (moment.ask.kind !== 'scope-request' || moment.ask.trigger !== 'refused-by-loop') return false;
   const { item } = moment, request = item.scopeRequest, now = Date.parse(moment.now);
   if (!request || !item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= now) return false;
-  return request.decision?.state === 'refused' && !standingScopeRequest(item, now);
+  return request.decision?.state === 'refused' && !standingScopeRequest(item, now, moment.routes ?? true);
 }
 /** A lease-loss reconciliation will settle on the record once its bound passes waits on nobody (GY-1393). */
 export const leaseLossResolve = rule('lease-loss-resolve', moment => moment.at === 'open-escalation' && !!endedLeaseLoss(moment.item, moment.escalation)

@@ -203,3 +203,11 @@ test('manual:intervention-pattern-scope-widening-build — the other three linke
   assert.equal(counted.length, instances.length, 'the rows alone still hold all four');
   assert.ok(detectPatterns(counted, gone, policy, detectedAt).find(entry => entry.kind === 'scope-widening' && entry.stage === 'build')!.count >= policy.threshold, 'judged standing, they cross it as they did');
 });
+
+test('manual:intervention-pattern-scope-widening-build — a loop that cannot route a refused ask stands it at once, as the fault pass does: the fold counts it inside the bound when routes is false', () => {
+  for (const entry of linked.slice(0, 3)) {
+    assert.equal(exemption({ ...moment(entry, detectedAt), routes: false }), null, `${entry.key}: no route, so no in-bound exemption`);
+    assert.equal(foldInterventions(entry.rows, [entry.work], detectedAt, { routes: false }).interventions.filter(item => item.kind === 'scope-widening').length, 1, `${entry.key}: counted without a route`);
+    assert.deepEqual(foldInterventions(entry.rows, [entry.work], detectedAt, { routes: true }).interventions.filter(item => item.kind === 'scope-widening'), [], `${entry.key}: uncounted with a route`);
+  }
+});

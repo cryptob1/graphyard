@@ -11,9 +11,10 @@ export const ms = (from: string, to: string) => Math.max(0, Date.parse(to) - Dat
  * Fold the ledger rows into interventions and judgements. `work` is the current snapshot: it
  * names items, decides the stage of a row that embeds no document, and settles what is still
  * open — an ask the fold saw opened but whose item no longer carries a blocker was met by a
- * command the fold does not read, so it is not reported as waiting.
+ * command the fold does not read, so it is not reported as waiting. `options.routes` is whether the
+ * loop can route a refused scope ask (default: it can); a deployment that cannot has such an ask counted at once.
  */
-export function foldInterventions(rows: InterventionLedgerRow[], work: readonly Work[], now: string): { interventions: Intervention[]; judgements: Judgement[] } {
+export function foldInterventions(rows: InterventionLedgerRow[], work: readonly Work[], now: string, options: { routes?: boolean } = {}): { interventions: Intervention[]; judgements: Judgement[] } {
   const items = new Map(work.map(item => [item.id, item]));
   // The items the record closes as a duplicate of each key (GY-1719): their plan is carried in, not decided anew.
   const duplicates = new Map<string, Work[]>();
@@ -86,7 +87,7 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
     if (!item || item.stage === 'done') continue;
     const row = { seq: 0, workId: id, actor: '', kind: 'open', at: now, details: {} };
     const open = (kind: InterventionKind, fields: EmitFields) => emit(row, kind, { ...fields, resolvedAt: null, resolvedBy: null, resolution: null });
-    for (const ask of entry.asks) if (!exemption({ at: 'open-ask', ask, item, now })) open(ask.kind === 'scope-request' ? 'scope-widening' : 'escalation', { requestedAt: ask.at, blocked: ask.blocked, stage: ask.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: ask.trigger ?? ask.kind, sources: ask.sources });
+    for (const ask of entry.asks) if (!exemption({ at: 'open-ask', ask, item, now, routes: options.routes })) open(ask.kind === 'scope-request' ? 'scope-widening' : 'escalation', { requestedAt: ask.at, blocked: ask.blocked, stage: ask.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: ask.trigger ?? ask.kind, sources: ask.sources });
     if (entry.reworkDecision && !exemption({ at: 'open-rework', decision: entry.reworkDecision, asked: false, grounds: item, candidate: item.candidate })) open('rework', { id: `rework:${id}:${entry.reworkDecision.id}`, requestedAt: entry.reworkDecision.at, blocked: item.candidate ? `candidate ${item.candidate.sha.slice(0, 12)} (PR #${item.candidate.pr})` : `attempt ${item.epoch}`, stage: entry.reworkDecision.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'decision', sources: [{ seq: entry.reworkDecision.seq, kind: 'decision.requested' }] });
     if (entry.bypass) open('bypass', { requestedAt: entry.bypass.at, blocked: entry.bypass.blocked, stage: entry.bypass.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'refused-reconciliation', sources: [{ seq: entry.bypass.seq, kind: 'merge.reconciliation.refused' }] });
     if (entry.quarantine?.concernAt && item.containmentQuarantine) open('containment-settlement', { requestedAt: entry.quarantine.concernAt, blocked: `containment fence of epoch ${entry.quarantine.epoch}`, stage: entry.quarantine.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'unsettled', sources: [{ seq: entry.quarantine.seq, kind: 'quarantine' }] });

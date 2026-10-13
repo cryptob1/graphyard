@@ -1,4 +1,5 @@
 // Concern: the interventions report — the window's counts, trend, costliest items and the recurring kind-at-stage patterns.
+import type pg from 'pg';
 import type { Stage, Work } from '../model.js';
 import { handFiledPatterns, interventionKinds, interventionWindows, patternCause, patternHoldDays, patternInstancesShown, type Intervention, type InterventionKind, type InterventionPolicy, type InterventionReport, type InterventionWindow, type Judgement, type PatternCause, type PatternOwner, type PatternRow, type UnderThreshold } from '../model/interventions.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
@@ -195,6 +196,16 @@ export function detectPatterns(interventions: Intervention[], work: readonly Wor
 export const windowStart = (now: string, days: number) => new Date(Date.parse(now) - days * day).toISOString();
 
 /**
+ * Whether the loop can route a refused scope ask (GY-1755): the loop routes only with its operator-agent
+ * and approver identities (`master autonomy`), which the server holds as two live operator-agent
+ * records. Fewer, and nothing will route the ask, so the report counts it as the fault pass stands it.
+ */
+export async function readLoopRoutes(pool: Pick<pg.Pool, 'query'>) {
+  const { rows } = await pool.query("SELECT count(*)::int AS live FROM operator_agents WHERE document->>'revokedAt' IS NULL");
+  return rows[0].live >= 2;
+}
+
+/**
  * The read behind the API and the CLI: the ledger folded against the current snapshot, then
  * reported over the window. It is bounded by its window in SQL (GY-422): the ledger rows are those
  * written inside the report window or the recurrence policy's, whichever reaches further back, and
@@ -210,7 +221,7 @@ export async function readInterventionReport(store: Store, policy: InterventionP
   const { rows, truncated, retainedFrom } = await readInterventionLedger(store.reportPool, { limit: options.limit, since });
   await readAbsorbedPlans(store.reportPool, rows);
   const reach = ledgerReach(retainedFrom, truncated, since, snapshot.now);
-  const folded = foldInterventions(rows, snapshot.work, snapshot.now);
+  const folded = foldInterventions(rows, snapshot.work, snapshot.now, { routes: await readLoopRoutes(store.reportPool) });
   const report = computeInterventionReport(folded, snapshot.work, policy, { days, now: snapshot.now, kind: options.kind, stage: options.stage, work: options.work, reach });
   return { ...report, ledger: { rows: rows.length, truncated, oldest: rows[0]?.at ?? null, since, reach }, kinds: interventionKinds, windows: interventionWindows };
 }

@@ -8,7 +8,7 @@ import { boundedSnapshot } from '../store/bounded-snapshot.js';
 import { LedgerRowCache, readAbsorbedPlans, readInterventionLedger } from './ledger.js';
 import type { Store } from '../store.js';
 import { foldInterventions } from './fold.js';
-import { detectPatterns, windowStart } from './report.js';
+import { detectPatterns, readLoopRoutes, windowStart } from './report.js';
 
 /**
  * Whether the server runs the pattern scan (GY-1372). On by default (GY-1381): the scan reads the
@@ -53,7 +53,7 @@ export async function readScanWindow(store: Store, policy: InterventionPolicy, o
   const now = options.now ?? snapshot.now;
   const { rows, truncated } = await readInterventionLedger(store.reportPool, { limit: options.limit, since: windowStart(now, policy.windowDays), cache: options.cache });
   await readAbsorbedPlans(store.reportPool, rows);
-  return { snapshot, now, rows, truncated };
+  return { snapshot, now, rows, truncated, routes: await readLoopRoutes(store.reportPool) };
 }
 export type ScanWindow = Awaited<ReturnType<typeof readScanWindow>>;
 
@@ -70,8 +70,8 @@ const minutes = (value: number) => `${Math.round(value / 60_000)} min`;
  */
 export async function openPatternItems(engine: Engine, policy: InterventionPolicy, options: { now?: string; actor?: Principal; limit?: number; window?: ScanWindow } = {}) {
   // Detection reads the policy window of the ledger and nothing older (GY-422).
-  const { snapshot, now, rows, truncated } = options.window ?? await readScanWindow(engine.store, policy, options);
-  const folded = foldInterventions(rows, snapshot.work, now);
+  const { snapshot, now, rows, truncated, routes } = options.window ?? await readScanWindow(engine.store, policy, options);
+  const folded = foldInterventions(rows, snapshot.work, now, { routes });
   const opened: Work[] = [];
   for (const pattern of detectPatterns(folded.interventions, snapshot.work, policy, now)) {
     if (pattern.item || pattern.unlinked.length < policy.threshold) continue;
