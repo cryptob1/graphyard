@@ -195,6 +195,12 @@ export type Dispatched = Awaited<ReturnType<typeof dispatchWork>>;
 export interface Failover { root: string; master: MasterConfig; world: FailoverWorld; dispatches: Dispatched[]; samples: LaunchSample[];
   /** GY-1523: every real dispatch the launcher refused before claiming, with the day's instant and the launcher's words. */
   refused?: { key: string; at: number; error: string }[] }
+/** GY-1746: a failover day whose launches choose their account through the agent registry. */
+export type RegistryFailover = Failover & {
+  /** The fleet probe whose registry decides each launch's account instead of the profile's local accounts. */
+  probe?: import('../../src/fleet.js').FleetProbe;
+  /** The lane the day dispatches its items as; the simulated items ride the high lane otherwise. */
+  lane?: 'low' | 'medium' | 'high' }
 
 /**
  * The Herdr side of the failover day: the panes the real `dispatchWork` creates live in the same

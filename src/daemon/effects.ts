@@ -4,7 +4,6 @@ import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { productionEnvironmentFromEnv } from '../flow-analytics.js';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import type { DecisionSituation } from '../model/approval.js';
@@ -61,7 +60,7 @@ import { baseTree } from '../cli/planned-files-intent.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
-import { observeDeployment, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
+import { observeDeployment, deploymentEnvironmentName, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
 import { mainWatchFreezeFromEnv, mainWatchReads, type MainWatchReads } from './main-watch.js';
 import { shadowReads, shadowVerdictBody, shadowVerdictKey, type ShadowReads } from './cycle-shadow.js';
 import { mergeRecordKey, mergeWriterReads, type MergeWriterReads } from './cycle-merge-writer.js';
@@ -694,7 +693,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // GY-1524: the executor merges in this checkout's object store, pushes with the install's deploy key alone, records each step as the coordinator under one key per (step, commits), and acts only while the recorded merger is control-plane (read before every merge decision).
     get mergeWriter() { const config = current(); return mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger }); },
     publishProductionEnvironment: async () => {
-      const environment = current().run.productionEnvironment ?? productionEnvironmentFromEnv();
+      const environment = deploymentEnvironmentName(current(), root);
       if (environment === publishedEnvironment) return;
       await mutate('production-environment', { environment });
       publishedEnvironment = environment;

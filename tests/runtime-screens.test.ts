@@ -243,7 +243,8 @@ test('unit:start-failure-fallback-visible — a worker role the agent registry d
     const client: FleetClient = {
       document: async () => structuredClone(registry),
       select: async request => {
-        const choice = chooseSession(registry, request, clock);
+        // A registry that predates the request's `exclude` (GY-1746) chooses the failed account again: the launcher's own guard still ends the dispatch.
+        const choice = chooseSession(registry, { ...request, exclude: [] }, clock);
         if (!choice.account) return { selected: false, reason: choice.reason, skipped: choice.skipped, session: null, account: null, runtime: null, model: null, revision: registry.revision };
         const session: FleetSession = { id: `session-${chosen.length + 1}`, role: request.role, account: choice.account.name, runtime: choice.runtime.name, model: choice.model.name, host: request.host, work: request.work, principal: request.principal, group: request.group,
           selectedAt: at, selectedBy: 'master', reason: choice.reason, skipped: choice.skipped, endedAt: null, endReason: null };

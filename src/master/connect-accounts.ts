@@ -158,7 +158,7 @@ export async function processConnectAccounts(config: Pick<MasterConfig, 'url' | 
       const name = environment.name, home = environment.home;
       const report = async (healthy: boolean, error: string | null, research = false) => {
         await fleetRequest(config, `agent-registry/connect/${connect.id}/result`, { body: healthy ? { state: 'healthy', name, home, ...(research ? { research: true } : {}) } : { state: 'failed', name, error: error!.slice(0, 2000) }, fetch: fetcher });
-        const joined = connectDefaultRoles(provider.tier).filter(role => role !== 'research' || research);
+        const joined = connectDefaultRoles(provider.tier, provider.runtime).filter(role => role !== 'research' || research);
         reports.push({ id: connect.id, provider: provider.id, state: healthy ? 'healthy' : 'failed', detail: healthy ? `${name} joined ${joined.join(', ')}` : error!.slice(0, 500) });
       };
       // Research is this host's own configuration (GY-409 AC-4): a cheap account joins it only
