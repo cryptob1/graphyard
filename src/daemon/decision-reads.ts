@@ -18,12 +18,6 @@ export const emptyHeldDecisions = (): HeldDecisions => ({ seq: null, histories: 
 export const decisionReadConcurrency = 8;
 /** How long the decisions step's control-plane reads may take in all, from the step's start (GY-1241). */
 export const decisionReadDeadlineMs = 10_000;
-/** How long one owed decision's approver call may take before the step returns and carries it to the next cycle (GY-1766). */
-export const decisionCallBoundMs = 10_000;
-/** The decide calls still unanswered when their bound passed, by work id, per kept state: the retry waits on the call, it never sends a second. */
-const deciding = new WeakMap<HeldDecisions, Map<string, Promise<unknown>>>();
-/** GY-1766. A decision call that passed its per-decision bound: the decision stays owed, with its attempt recorded, and is retried next cycle. */
-export const decisionCallCarried = (detail: string) => / ms per-decision bound passed before .+ answered; the decision stays owed and is retried next cycle/.test(detail);
 /**
  * GY-1293. A request that failed only because its history read missed the step's deadline: its
  * read was still started, so it is asked again on the next cycle, never on the widening backoff.
@@ -138,28 +132,12 @@ export async function decisionReads(effects: DaemonEffects, held: HeldDecisions,
     return pending;
   };
   const moves = (item: Work) => { held.histories.delete(item.id); reading.delete(item.id); };
-  const callBoundMs = effects.decisionCallBoundMs ?? decisionCallBoundMs;
-  const pendingCalls = deciding.get(held) ?? deciding.set(held, new Map()).get(held)!;
-  /** A decide call bounded to the per-decision bound; one that outlives it settles by itself, and its retry joins it instead of sending a second (applied once). */
-  const decide = (item: Work, ...rest: Parameters<NonNullable<DaemonEffects['decide']>> extends [Work, ...infer R] ? R : never) => {
-    let call = pendingCalls.get(item.id) as ReturnType<NonNullable<DaemonEffects['decide']>> | undefined;
-    if (!call) {
-      moves(item);
-      const made = call = effects.decide!(item, ...rest);
-      const done = () => { moves(item); if (pendingCalls.get(item.id) === made) pendingCalls.delete(item.id); };
-      made.then(done, done);
-      pendingCalls.set(item.id, made);
-    }
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const expired = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`the decisions step's ${callBoundMs} ms per-decision bound passed before ${item.key}'s decision call answered; the decision stays owed and is retried next cycle`)), callBoundMs); timer.unref?.(); });
-    return Promise.race([call, expired]).finally(() => clearTimeout(timer));
-  };
   const writes = <A extends unknown[], R>(call: ((item: Work, ...rest: A) => Promise<R>) | undefined) =>
     call && ((item: Work, ...rest: A) => { moves(item); const made = call(item, ...rest); made.then(() => moves(item), () => moves(item)); return made; });
   const reads: DaemonEffects = new Proxy(effects, { get: (target, property, receiver) => {
     if (property === 'decisions') return target.decisions && read;
     // Each by its own type: one call over their union would infer `writes`'s arguments from whichever member TypeScript orders first.
-    if (property === 'decide') return target.decide && decide;
+    if (property === 'decide') return writes(target.decide);
     if (property === 'withdraw') return writes(target.withdraw);
     if (property === 'resume') return writes(target.resume);
     return Reflect.get(target, property, receiver);

@@ -51,7 +51,7 @@ test('unit:decisions-step-bounded-per-decision — a decide call that does not a
   const work = item('GY-1766'), sent: string[] = [];
   const state = emptyDaemonState(config());
   const started = performance.now();
-  const result = await runCycle(config(), state, effects(work, { decide: async (_target, action) => { sent.push(action); return new Promise(() => {}); }, decisionCallBoundMs: 30 }), () => clock);
+  const result = await runCycle(config(), state, effects(work, { decide: async (_target, action) => { sent.push(action); return new Promise(() => {}); }, decisionCallBoundMs: 30 } as Partial<DaemonEffects>), () => clock);
   assert.ok(performance.now() - started < 5_000, 'the step returned instead of waiting on the call');
   assert.deepEqual(sent, ['rework']);
   const recorded = result.actions.filter(action => action.kind === 'decision' && action.work === 'GY-1766');
@@ -65,7 +65,7 @@ test('unit:decisions-step-applies-once — a retry joins the call still in fligh
   const work = item('GY-1766'), sent: string[] = [];
   let answer!: (value: { id: string }) => void;
   const slow = new Promise<{ id: string }>(resolve => { answer = resolve; });
-  const fx = effects(work, { decide: async (_target, action) => { sent.push(action); return slow; }, decisionCallBoundMs: 20 });
+  const fx = effects(work, { decide: async (_target, action) => { sent.push(action); return slow; }, decisionCallBoundMs: 20 } as Partial<DaemonEffects>);
   const state = emptyDaemonState(config());
   await runCycle(config(), state, fx, () => clock);
   await runCycle(config(), state, fx, () => clock + 60_000);
@@ -74,7 +74,7 @@ test('unit:decisions-step-applies-once — a retry joins the call still in fligh
   await slow;
 
   const quick = emptyDaemonState(config()), asked: string[] = [];
-  await runCycle(config(), quick, effects(work, { decide: async (_target, action) => { asked.push(action); return { id: 'decision-2' }; }, decisionCallBoundMs: 5_000 }), () => clock);
+  await runCycle(config(), quick, effects(work, { decide: async (_target, action) => { asked.push(action); return { id: 'decision-2' }; }, decisionCallBoundMs: 5_000 } as Partial<DaemonEffects>), () => clock);
   assert.deepEqual(asked, ['rework']);
   assert.deepEqual(Object.values(quick.approvals).map(watch => watch.decision), ['decision-2'], 'an answer inside the bound opens its watch exactly as before');
 });
