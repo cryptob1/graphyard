@@ -212,11 +212,19 @@ test('manual:intervention-pattern-scope-widening-build — a loop that cannot ro
   }
 });
 
-test('manual:intervention-pattern-scope-widening-build — readLoopRoutes needs a deciding and an approving live agent, not any two', async () => {
+test('manual:intervention-pattern-scope-widening-build — readLoopRoutes needs a distinct operator and approver pair, not one agent or any two', async () => {
   const { readLoopRoutes } = await import('../src/interventions/report.js');
-  const pool = (requests: boolean | null, approves: boolean | null) => ({ query: async (text: string) => { assert.match(text, /decision:rework/); assert.match(text, /decision:approve/); assert.match(text, /revokedAt/); return { rows: [{ requests, approves }] }; } }) as never;
-  assert.equal(await readLoopRoutes(pool(true, true)), true);
-  assert.equal(await readLoopRoutes(pool(true, false)), false, 'two agents that only decide do not route');
-  assert.equal(await readLoopRoutes(pool(false, true)), false);
-  assert.equal(await readLoopRoutes(pool(null, null)), false, 'no live agents');
+  const { masterOperatorCapabilities, approverAgentCapabilities } = await import('../src/master/harness.js');
+  const pool = (routes: boolean | null) => ({ query: async (text: string, params: string[]) => {
+    assert.match(text, /a\.id <> r\.id/, 'the requester and approver are different agents');
+    assert.match(text, /revokedAt/);
+    assert.deepEqual(JSON.parse(params[0]!), [...masterOperatorCapabilities]);
+    assert.deepEqual(JSON.parse(params[1]!), [...approverAgentCapabilities]);
+    assert.match(text, /NOT \(r\.document->'capabilities' \? 'decision:approve'\)/, 'the requester does not itself approve');
+    assert.match(text, /NOT \(a\.document->'capabilities' \? 'decision:rework'\)/, 'the approver does not itself request');
+    return { rows: routes === null ? [] : [{ routes }] };
+  } }) as never;
+  assert.equal(await readLoopRoutes(pool(true)), true);
+  assert.equal(await readLoopRoutes(pool(false)), false);
+  assert.equal(await readLoopRoutes(pool(null)), false, 'no row');
 });

@@ -1,4 +1,5 @@
 // Concern: the interventions report — the window's counts, trend, costliest items and the recurring kind-at-stage patterns.
+import { masterOperatorCapabilities, approverAgentCapabilities } from '../master/harness.js';
 import type pg from 'pg';
 import type { Stage, Work } from '../model.js';
 import { handFiledPatterns, interventionKinds, interventionWindows, patternCause, patternHoldDays, patternInstancesShown, type Intervention, type InterventionKind, type InterventionPolicy, type InterventionReport, type InterventionWindow, type Judgement, type PatternCause, type PatternOwner, type PatternRow, type UnderThreshold } from '../model/interventions.js';
@@ -197,16 +198,19 @@ export const windowStart = (now: string, days: number) => new Date(Date.parse(no
 
 /**
  * Whether the loop can route a refused scope ask (GY-1755). The daemon routes when it holds the decision
- * effects (`effects.decide` and `effects.approver`), which exist only with the operator-agent and approver
- * identities `master autonomy` provisions. The server sees those as live operator-agent records by
- * capability: one that requests decisions (`decision:rework`) and one that approves them (`decision:approve`).
- * Two unrelated live agents do not make an ask routable; without both, the report counts it as the fault pass does.
+ * effects (`effects.decide` and `effects.approver`), which exist only with the two identities `master autonomy`
+ * provisions: the master operator (every `masterOperatorCapabilities`) and a separate approver holding
+ * `approverAgentCapabilities` alone. The server sees them as two distinct live operator-agent records of
+ * those shapes; one agent that both requests and approves, or an agent lacking the operator set, does not
+ * make an ask routable, and without a routable pair the report counts it as the fault pass does.
  */
 export async function readLoopRoutes(pool: Pick<pg.Pool, 'query'>) {
-  const { rows } = await pool.query(`SELECT
-    bool_or(document->'capabilities' ? 'decision:rework') AS requests, bool_or(document->'capabilities' ? 'decision:approve') AS approves
-    FROM operator_agents WHERE document->>'revokedAt' IS NULL`);
-  return !!rows[0]?.requests && !!rows[0]?.approves;
+  const { rows } = await pool.query(`SELECT EXISTS (SELECT 1 FROM operator_agents r JOIN operator_agents a ON a.id <> r.id
+    WHERE r.document->>'revokedAt' IS NULL AND a.document->>'revokedAt' IS NULL
+      AND r.document->'capabilities' @> $1::jsonb AND NOT (r.document->'capabilities' ? 'decision:approve')
+      AND a.document->'capabilities' @> $2::jsonb AND NOT (a.document->'capabilities' ? 'decision:rework')) AS routes`,
+  [JSON.stringify(masterOperatorCapabilities), JSON.stringify(approverAgentCapabilities)]);
+  return rows[0]?.routes === true;
 }
 
 /**
