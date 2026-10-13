@@ -12,10 +12,10 @@
   - Escalation: declared human runs `graphyard resolve GY-N TRIGGER "reason"` ([settling](delegation.md#who-may-settle-what)).
   - Expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission); retry: [rework](operations-reference.md#submitted-implementation-needs-rework); fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
   - Late-fault waits: 30min: owed `request-rework` (`owed-decision`), unwatched decision, owed escalation/blocker, stale non-release, `actorless` head behind base; 10min: containment past grace; 15min: watched decision after approver launch; once: unre-asked refusal (`decision-refused`).
-  - Plane-wide failures (502–504, refused, timeout) retry faultless (`plane-unavailable`); slow fault/deployment reads defer (`faults:deferred`, `deployment:deferred`); `loop-cost` names the slowest. An acceptance call meeting one is no `decision` fault; exhaustion escalation joins `decision-unanswered` (GY-1751).
+  - Plane-wide failures (502–504, refused, timeout) retry faultless (`plane-unavailable`); slow fault/deployment reads defer (`faults:deferred`, `deployment:deferred`); `loop-cost` names the slowest.
   - A failed producer-runnable manual proof returns to worker, never to an operator escalation; one no producer may run needs operator witness, an unexecuted one an attestation.
 - **Merge refused**: wait or repair, never bypass; `BLOCKED` retries head-bound 10min, `merge-blocked` 30min quotes GitHub. **Merged outside**: [bypass](operations-reference.md#merge-bypass). **Wrong evidence**: [revoke](operations-reference.md#accepted-evidence-turns-out-to-be-wrong). **GitHub paused/webhook silent**: [budget](operations-reference.md#github-request-budget). **Smoke failed**: [delivered](operations-reference.md#delivered-with-a-failed-smoke-proof).
-- **Main ahead of production**: [deployment incident](deployment.md#production-deployment-observation). An up-to-date release takes no locks; migrating release fails fast within health check, touching only tables whose DDL changed since its per-table digest, retrying deadlocks and lock waits with backoff in one 30-second budget, waiting ≤3 s per lock.
+- **Main ahead of production**: [deployment incident](deployment.md#production-deployment-observation). An up-to-date release takes no coordination locks; a migrating release fails fast within health check, touching only tables whose DDL changed since its per-table digest, retrying deadlocks and expired lock waits with backoff in one 30-second lock budget, each attempt waiting ≤3 s per lock so live writes never queue longer.
 - **Diagnosis `waiting`**: [provider quota](master-agent.md#research-and-diagnosis). **Loop down**: [loop](operations-reference.md#master-coordination-loop). **Self-proving change**: [bootstrap](operations-reference.md#bootstrap-mode-for-a-self-proving-change).
 
 ## Recovery recipes
@@ -29,7 +29,7 @@ systemctl --user restart graphyard-master-OWNER-NAME                    # loop d
 graphyard master checkout-restore "reason"                              # dirty, drifted or diverged
 ```
 
-Never attest an unconfirmed stop; merged work changes only via follow-ups. Outside its namespace `master status` judges the loop by stall bound; stalled/absent: stop hand-started loops, install `examples/master/graphyard-master.service`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-master`.
+Never attest a stop you have not confirmed; merged work changes only via follow-ups. Outside its namespace `master status` judges the loop by stall bound; stalled/absent: stop hand-started loops, install `examples/master/graphyard-master.service`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-master`.
 
 ## Worker host keyring proxy
 
