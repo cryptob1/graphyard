@@ -260,6 +260,7 @@
     "tests/no-wall-clock-time-bombs.test.ts": 1000,
     "tests/soak-diagnosis-refusals.test.ts": 25000,
     "tests/soak-silent-exhaustion.test.ts": 2500,
+    "tests/soak-intervention-pattern-escalation-build.test.ts": 1892,
     "tests/stale-close-convergence.test.ts": 1902,
     "tests/vanished-reviewer-slot.test.ts": 1500,
     "tests/stale-release-decision.test.ts": 1874,
