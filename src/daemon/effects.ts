@@ -452,7 +452,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     if (!config.operatorAgent) throw new Error('No master operator-agent identity is provisioned; run graphyard master autonomy --admin-token-stdin --apply so the loop can request routine decisions');
     const token = await agentToken(root, config, 'operatorAgent');
     const response = await fetcher(`${config.url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30_000) });
-    const result = await response.json();
+    // GY-1751: a proxy's empty or HTML 502-504 keeps its status instead of throwing a SyntaxError.
+    const text = await response.text();
+    let result: any; try { result = JSON.parse(text); } catch { result = response.ok ? undefined : { text: text.slice(0, 200) }; }
     // The body is kept on the error: a decision refusal names the standing refused decision as a field (GY-265).
     // GY-1713: the message carries error and zod issues so diagnosis/doctor attention names the field.
     if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${refusedBodyDetail(result)}`, response.status, result);
