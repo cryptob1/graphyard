@@ -678,10 +678,8 @@ export const clampCount = (value: number, max: number) => Math.min(max, Math.max
  */
 export function storeAction(state: DaemonState, key: string, action: Omit<DaemonAction, 'faultClass'> & { faultClass?: unknown }, faultKind: FaultKind | null = daemonActionFaultKind(action.kind)): DaemonAction {
   const { faultClass: _, ...rest } = action;
-  if (unansweredStands(state.faults, key)) faultKind = null;
-  const failed = faultKind !== null && (rest.state === 'failed' || rest.state === 'indeterminate');
-  const fault = faultKind === null ? null : classified(faultKind);
-  const entry = daemonActionSchema.parse({ ...rest, detail: boundDetail(rest.detail), attempts: clampCount(rest.attempts, 1000), ...(failed && fault ? { faultClass: fault.faultClass } : {}) });
+  const fault = faultKind === null || unansweredStands(state.faults, key) ? null : classified(faultKind);
+  const entry = daemonActionSchema.parse({ ...rest, detail: boundDetail(rest.detail), attempts: clampCount(rest.attempts, 1000), ...(fault && (rest.state === 'failed' || rest.state === 'indeterminate') ? { faultClass: fault.faultClass } : {}) });
   if (fault) { dispatchRun(state.faults.failing, key, entry.state); noteActionOutcome(state.faults, key, entry.state, { ...fault, subject: entry.work ?? key, text: entry.detail }, entry.at); }
   state.actions[key] = entry;
   return entry;
