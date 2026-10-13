@@ -94,7 +94,8 @@ function harness(options: { resume?: DaemonEffects['resume'] } = {}) {
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: fixtureNow, reason: 'no deployment endpoint', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},
-    decideScope: work => ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }) as Promise<Work>,
+    decideScope: (work, _nonRepository, treeRead) => ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, ...(treeRead ? { treeRead } : {}) }) as Promise<Work>,
+    repositoryFiles: async () => new Set([layout, helper, extra]),
     reviewFindings: async () => [],
     basePaths: async () => new Set<string>(),
     widenScope: async () => ({}),
@@ -129,7 +130,7 @@ test('unit:standing-requirements-adopted-no-fault — a covering plannedFiles st
     key: 'GY-1700', stage: 'build', policyRevision: 2, plannedFiles: [layout],
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:layout'] }],
     scopeRequest: { epoch: 4, at, paths: [helper], reason: 'needed', requestedBy: 'worker',
-      decision: { state: 'refused', reason: 'No rule implies it', at, decidedBy: 'graphyard' } },
+      decision: { state: 'refused', reason: 'No rule implies it', at, decidedBy: 'graphyard', treeRead: true } },
     lease: { owner: 'worker', epoch: 4, expiresAt: '2026-10-11T16:00:00.000Z' },
   } as Work, Date.parse('2026-10-11T14:48:00.000Z'), true)!;
   assert.equal(decision.action, 'requirements');
@@ -159,7 +160,7 @@ test('unit:scope-budget-holds-during-quarantine-held-decision — a routed ask a
   const askedAt = '2026-10-11T14:47:50.740Z';
   const later = Date.parse(askedAt) + scopeBlockedBudgetMs + 60_000;
   const request = { epoch: 4, at: askedAt, paths: [helper], reason: 'needed', requestedBy: 'worker',
-    decision: { state: 'refused' as const, reason: 'No rule', at: askedAt, decidedBy: 'graphyard' as const } };
+    decision: { state: 'refused' as const, reason: 'No rule', at: askedAt, decidedBy: 'graphyard' as const, treeRead: true } };
   const base = {
     id: 'work-1700', key: 'GY-1700', stage: 'build' as const, plannedFiles: [layout],
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:layout'] }],
@@ -186,7 +187,7 @@ test('unit:scope-budget-holds-during-quarantine-held-decision — cold start dis
   const askedAt = '2026-10-11T14:47:50.740Z';
   const later = Date.parse(askedAt) + scopeBlockedBudgetMs + 60_000;
   const request = { epoch: 4, at: askedAt, paths: [helper], reason: 'needed', requestedBy: 'worker',
-    decision: { state: 'refused' as const, reason: 'No rule', at: askedAt, decidedBy: 'graphyard' as const } };
+    decision: { state: 'refused' as const, reason: 'No rule', at: askedAt, decidedBy: 'graphyard' as const, treeRead: true } };
   const item = {
     id: 'work-1700-cold', key: 'GY-1700', stage: 'build' as const, plannedFiles: [layout],
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:layout'] }],
@@ -214,7 +215,7 @@ test('unit:scope-budget-holds-during-quarantine-held-decision — a cold-start h
   const askedAt = '2026-10-11T14:47:50.740Z';
   const later = Date.parse(askedAt) + scopeBlockedBudgetMs + 60_000;
   const request = { epoch: 4, at: askedAt, paths: [helper], reason: 'needed', requestedBy: 'worker',
-    decision: { state: 'refused' as const, reason: 'No rule', at: askedAt, decidedBy: 'graphyard' as const } };
+    decision: { state: 'refused' as const, reason: 'No rule', at: askedAt, decidedBy: 'graphyard' as const, treeRead: true } };
   const item = {
     id: 'work-1700-unread', key: 'GY-1700', stage: 'build' as const, plannedFiles: [layout],
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:layout'] }],
@@ -489,7 +490,7 @@ test('unit:scope-budget-holds-during-quarantine-held-decision — a failed cover
     masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [],
   }) as MasterConfig;
   const scope = { epoch: 4, at: askedAt, requestedBy: 'worker', paths: [helper], reason: 'needs helper',
-    decision: { state: 'refused' as const, reason: 'No rule', at: askedAt, decidedBy: 'graphyard' as const } };
+    decision: { state: 'refused' as const, reason: 'No rule', at: askedAt, decidedBy: 'graphyard' as const, treeRead: true } };
   const work = {
     id: 'work-1702', key: 'GY-1702', stage: 'build' as const, plannedFiles: [layout], policyRevision: 1, epoch: 4,
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:layout'] }], title: 't', description: '', type: 'bug' as const, priority: 1,
@@ -518,7 +519,7 @@ test('unit:scope-budget-holds-during-quarantine-held-decision — a failed cover
   }];
   let decideCalls = 0;
   const ask = () => ({ epoch: 4, at: askedAt, requestedBy: 'worker', paths: [helper], reason: 'needs helper',
-    decision: { state: 'refused' as const, reason: 'No rule', at: askedAt, decidedBy: 'graphyard' as const } });
+    decision: { state: 'refused' as const, reason: 'No rule', at: askedAt, decidedBy: 'graphyard' as const, treeRead: true } });
   const at = (clock: number) => ({ ...live, updatedAt: new Date(clock).toISOString(), lease: { ...live.lease!, expiresAt: new Date(clock + 60_000).toISOString() }, scopeRequest: ask() }) as Work;
   const fx = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),

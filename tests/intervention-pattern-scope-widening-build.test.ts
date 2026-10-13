@@ -213,7 +213,7 @@ const rows: InterventionLedgerRow[] = [
   { seq: 2489231, workId: gy1675, actor: worker, kind: 'scope', at: '2026-10-10T23:12:58.720Z', stageBefore: 'build',
     details: { epoch: 2, paths: asked, reason: 'Answering review of 6defae905bcd: docs/delivery-redesign.md must state the trial\'s new phase conditions; the three tests cover the findings' }, work: item1675({ epoch: 2, plannedFiles: withObservation, blocker: null }) },
   { seq: 2489236, workId: gy1675, actor: 'graphyard-master', kind: 'autoscope', at: '2026-10-10T23:13:06.568Z', stageBefore: 'build',
-    details: { epoch: 2, before: { blocker: null, plannedFiles: withObservation }, decision: { at: refusedAt, epoch: 2, paths: asked, state: 'refused', reason: refusalReason, waitedMs: 8245, decidedBy: 'graphyard', requestedAt: askedAt, requestedBy: worker } }, work: item1675({ epoch: 2, plannedFiles: withObservation, blocker: refusal }) },
+    details: { epoch: 2, before: { blocker: null, plannedFiles: withObservation }, decision: { at: refusedAt, epoch: 2, paths: asked, state: 'refused', reason: refusalReason, waitedMs: 8245, decidedBy: 'graphyard', treeRead: true, requestedAt: askedAt, requestedBy: worker } }, work: item1675({ epoch: 2, plannedFiles: withObservation, blocker: refusal }) },
 ];
 const loopWidening: InterventionLedgerRow = { seq: 2489250, workId: gy1675, actor: operator, kind: 'requirements', at: '2026-10-10T23:13:27.272Z', stageBefore: 'build',
   details: { before: { plannedFiles: withObservation }, intent: { reason: `${groundedWideningReason('GY-1675')}a review finding names it: docs/delivery-redesign.md, tests/trial-merge.test.ts, tests/submit-head.test.ts, tests/soak-control-plane-observation.test.ts`, plannedFiles: widened }, reason: `${groundedWideningReason('GY-1675')}a review finding names it`, liveScopeWidening: true },
@@ -227,7 +227,7 @@ const settledRouted = (kind: string, seq: number, at: string): InterventionLedge
 const approverWidening: InterventionLedgerRow = { seq: 2489260, workId: gy1675, actor: operator, kind: 'requirements', at: '2026-10-10T23:15:00.000Z', stageBefore: 'build',
   details: { before: { plannedFiles: withObservation }, plannedFiles: widened, reason: `${routedReason} [approved by graphyard-approver-graphyard]`, liveScopeWidening: true }, work: item1675({ epoch: 2, plannedFiles: widened, blocker: null }) };
 const done1617 = { id: gy1617, key: 'GY-1617', title: 'GY-1617', stage: 'done' } as unknown as Work;
-const decision = { state: 'refused', reason: refusalReason, at: refusedAt, decidedBy: 'graphyard', waitedMs: 8245, paths: asked, requestedBy: worker, requestedAt: askedAt, epoch: 2 };
+const decision = { state: 'refused', reason: refusalReason, at: refusedAt, decidedBy: 'graphyard', treeRead: true, waitedMs: 8245, paths: asked, requestedBy: worker, requestedAt: askedAt, epoch: 2 };
 const request = { epoch: 2, paths: asked, reason: 'Answering review of 6defae905bcd', requestedBy: worker, at: askedAt, decision };
 /** GY-1675 as the record held it while the refused ask stood, with a live epoch-2 lease. */
 const live = (fields: Record<string, unknown> = {}) => ({ id: gy1675, ...item1675({ epoch: 2, plannedFiles: withObservation, blocker: refusal }), criteria: [{ id: 'AC-1', text: 'The stranded commits land through a gated pull request', proofs: ['manual:stranded-commits-land'] }],

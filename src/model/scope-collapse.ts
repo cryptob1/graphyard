@@ -134,7 +134,7 @@ export function mergedScopeRequest(pending: ScopeRequestState | null | undefined
  * stays standing for the operator instead of a doomed decision (GY-630).
  */
 /** GY-1764: a refusal reaches the approver only once the repository tree was read for it; asks that drop paths or rewrite criteria never need the tree. */
-export const evidenced = (request: ScopeRequestState) => !!request.decision?.treeRead || !!request.remove?.length || !!request.criteria?.length;
+export const evidenced = (request: ScopeRequestState) => !!request.decision?.treeRead || !!request.decision && request.decision.decidedBy !== 'graphyard' || !!request.remove?.length || !!request.criteria?.length;
 export function routableScopeRequest(item: { plannedFiles?: readonly string[]; criteria?: readonly ScopeCriterion[]; scopeRequest?: ScopeRequestState | null; lease?: { epoch: number; expiresAt: string } | null }, now: number) {
   const request = item.scopeRequest;
   if (!request || request.decision?.state !== 'refused' || request.decision.nonRepository || !evidenced(request) || request.remove?.length || request.criteria?.length) return null;

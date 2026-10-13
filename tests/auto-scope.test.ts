@@ -88,7 +88,7 @@ const loopEffects = (overrides: Partial<DaemonEffects> = {}, skewMs = 0): Daemon
   observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'no deployment endpoint in this test', deployed: [], pending: [] }),
   recordDeployment: async () => {},
   requestSmoke: () => {},
-  decideScope: work => ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }) as Promise<Work>,
+  decideScope: work => ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, treeRead: true }) as Promise<Work>,
   persist: async () => {},
   ...overrides,
 });
@@ -166,14 +166,14 @@ test('integration:auto-scope-approval — the loop decides an implied additive r
   // The control plane decides; the caller does not. A coordinator asking again for an answered
   // request gets the item and the decision it recorded (GY-955), and nothing is decided twice.
   const decidedItem = await reload(work.id);
-  const repeated = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
+  const repeated = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch, treeRead: true });
   assert.equal(repeated.status, 200, JSON.stringify(repeated.body));
   assert.deepEqual(repeated.body.scopeDecision, decidedItem.scopeDecision);
   assert.equal(repeated.body.revision, decidedItem.revision, 'the standing answer rewrites nothing');
-  const otherEpoch = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch + 1 });
+  const otherEpoch = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch + 1, treeRead: true });
   assert.equal(otherEpoch.status, 404, JSON.stringify(otherEpoch.body));
   assert.match(otherEpoch.body.error, /No scope request is open/);
-  const byWorker = await call(token(implementer), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
+  const byWorker = await call(token(implementer), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch, treeRead: true });
   assert.equal(byWorker.status, 403, JSON.stringify(byWorker.body));
 });
 
@@ -352,7 +352,7 @@ test('integration:scope-redecision — a refusal the current rules would approve
   // A standing refusal the rules still give is not rewritten, by the loop or by a direct call.
   await cycle(state);
   assert.equal(scopeAction(state, work, asked.scopeRequest!.at).attempts, 1);
-  const still = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
+  const still = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch, treeRead: true });
   assert.equal(still.status, 200, JSON.stringify(still.body));
   assert.deepEqual(still.body.scopeRequest.decision, work.scopeRequest!.decision, 'answered with the standing refusal (GY-955)');
   assert.equal(still.body.revision, work.revision, 'never rewritten');
@@ -377,7 +377,7 @@ test('integration:scope-redecision — a refusal the current rules would approve
   // An approval is never re-decided.
   await cycle(state);
   assert.equal((await reload(work.id)).policyRevision, work.policyRevision);
-  const again = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
+  const again = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch, treeRead: true });
   assert.equal(again.status, 200, JSON.stringify(again.body));
   assert.equal(again.body.scopeDecision.state, 'approved', 'answered with the recorded approval');
   assert.equal(again.body.policyRevision, work.policyRevision);
@@ -793,14 +793,14 @@ test('unit:review-named-and-pinning-tests-granted — a file an unresolved revie
 const failedScope = (state: DaemonState) => Object.values(state.actions).filter(action => action.kind === 'scope' && action.state === 'failed');
 /** The snapshot the loop polled before an executor decided: what makes its later post the duplicate. */
 const staleSnapshot = async (skewMs = 0) => { const snapshot = await ok(token(coordinator), 'GET', 'work-snapshot'); return { work: snapshot.work as Work[], now: new Date(Date.parse(snapshot.now) + skewMs).toISOString() }; };
-const executorDecides = (work: Work) => ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch }) as Promise<Work>;
+const executorDecides = (work: Work) => ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch, treeRead: true }) as Promise<Work>;
 
 test('unit:autoscope-answers-standing-decision — autoscope on a decided request answers with its standing decision, and on a cleared one with the recorded scopeDecision, never the 422', async () => {
   let work = await claimed('standing decision');
   await request(work, { paths: ['src/ci-guard.ts'], reason: 'Wider than the item' });
   const refused = await executorDecides(work);
   assert.equal(refused.scopeRequest!.decision!.state, 'refused');
-  const again = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
+  const again = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch, treeRead: true });
   assert.equal(again.status, 200, JSON.stringify(again.body));
   assert.doesNotMatch(JSON.stringify(again.body), /still refuse this scope request/);
   assert.deepEqual(again.body.scopeRequest.decision, refused.scopeRequest!.decision, 'the standing refusal, unchanged');
@@ -811,15 +811,15 @@ test('unit:autoscope-answers-standing-decision — autoscope on a decided reques
   const approved = await executorDecides(work);
   assert.equal(approved.scopeRequest, null);
   assert.equal(approved.scopeDecision!.state, 'approved');
-  const answered = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
+  const answered = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch, treeRead: true });
   assert.equal(answered.status, 200, JSON.stringify(answered.body));
   assert.deepEqual(answered.body.scopeDecision, approved.scopeDecision);
   assert.equal(answered.body.policyRevision, approved.policyRevision, 'decided once, applied once');
   work = await reload(work.id);
   assert.equal(work.revision, approved.revision);
   // Authority is unchanged: only a coordinator asks, and only for the asking attempt.
-  assert.equal((await call(token(implementer), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch })).status, 403);
-  assert.equal((await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch + 1 })).status, 404);
+  assert.equal((await call(token(implementer), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch, treeRead: true })).status, 403);
+  assert.equal((await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch + 1, treeRead: true })).status, 404);
 });
 
 test('unit:scope-decided-once-not-failed — an executor deciding between the loop\'s snapshot and its scope step leaves a done action and no failure; a held approve-scope row keeps the loop from posting at all', async () => {

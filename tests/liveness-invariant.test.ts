@@ -81,7 +81,7 @@ async function candidate(evidence: 'pass' | 'fail' | null, extra: Partial<Observ
 async function refusedScope() {
   const w = await claimed();
   await engine.execute(worker, 'scope', w.id, { epoch: w.epoch, paths: ['web/unrelated.tsx'], reason: 'The page is easier to change here too' }, id());
-  const decided = await engine.execute(coordinator, 'autoscope', w.id, { epoch: w.epoch }, id());
+  const decided = await engine.execute(coordinator, 'autoscope', w.id, { epoch: w.epoch, treeRead: true }, id());
   assert.equal(decided.scopeRequest?.decision?.state, 'refused', 'the rule refused a path the item does not imply');
   return decided;
 }

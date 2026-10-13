@@ -86,7 +86,7 @@ const instances = [
 
 /** The widening rule's refusal, as each autoscope row holds it (GY-1751's names the merged ask's four paths). */
 const ruleRefusal = (askedAt: string, epoch: number, worker: string, refusedAt: string, paths: readonly string[]) => ({
-  at: refusedAt, epoch, paths: [...paths], state: 'refused' as const, reason: refusalReason([...paths]), waitedMs: 1000, decidedBy: 'graphyard', requestedAt: askedAt, requestedBy: worker,
+  at: refusedAt, epoch, paths: [...paths], state: 'refused' as const, reason: refusalReason([...paths]), waitedMs: 1000, decidedBy: 'graphyard', treeRead: true, requestedAt: askedAt, requestedBy: worker,
 });
 
 /** The item as the snapshot held it at the detection instant, and the rows the detection-time read of the ledger held: every row written after the detection is absent, as it was absent then. */

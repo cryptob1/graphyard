@@ -79,7 +79,7 @@ function baseScopeBudget(work: Work[], now: number, routes = false) {
 function gy1700(at: string, standingState: 'requested' | 'held' = 'requested'): Work {
   const request: ScopeRequestState = {
     epoch: 4, at: askedAt, paths: [testFile], reason: 'AC-0 needs the soft-accept test', requestedBy: 'graphyard-claude-1',
-    decision: { state: 'refused', reason: 'No rule implies tests/webhook-soft-accept.test.ts', at: askedAt, decidedBy: 'graphyard', waitedMs: 0, paths: [testFile], requestedBy: 'graphyard-claude-1', requestedAt: askedAt, epoch: 4 },
+    decision: { state: 'refused', reason: 'No rule implies tests/webhook-soft-accept.test.ts', at: askedAt, decidedBy: 'graphyard', treeRead: true, waitedMs: 0, paths: [testFile], requestedBy: 'graphyard-claude-1', requestedAt: askedAt, epoch: 4 },
   };
   return {
     id: '00000000-0000-4000-8000-000000001700', key: 'GY-1700', title: 'Webhook soft-accept', description: '', type: 'bug', priority: 2,

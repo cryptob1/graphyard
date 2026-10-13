@@ -68,7 +68,7 @@ function harness() {
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'no deployment endpoint in this test', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},
-    decideScope: work => ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }) as Promise<Work>,
+    decideScope: work => ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, treeRead: true }) as Promise<Work>,
     reviewFindings: async () => [],
     basePaths: async () => new Set<string>(),
     widenScope: async () => { throw new Error('no review finding grounds this ask'); },
@@ -108,7 +108,7 @@ test('unit:scope-request-new-file — one new file beside 21 planned src paths i
   // The decision the loop routes to the approver proposes the exact path, never the broad-scope exception.
   const now = Date.parse('2031-03-01T10:00:00Z');
   const lease = { epoch: 1, owner: 'implementer', expiresAt: '2031-03-01T10:05:00Z' };
-  const refused = { state: 'refused' as const, reason: 'outside', at: '2031-03-01T09:59:00Z', decidedBy: 'graphyard', waitedMs: 1, paths: [newFile], requestedBy: 'implementer', requestedAt: '2031-03-01T09:58:00Z' };
+  const refused = { state: 'refused' as const, reason: 'outside', at: '2031-03-01T09:59:00Z', decidedBy: 'graphyard', treeRead: true, waitedMs: 1, paths: [newFile], requestedBy: 'implementer', requestedAt: '2031-03-01T09:58:00Z' };
   const item = { key: 'GY-9', stage: 'build', plannedFiles: planned, criteria, lease, scopeRequest: { epoch: 1, paths: [newFile], reason: 'Move the job out of src/server/main.ts', requestedBy: 'implementer', at: '2031-03-01T09:58:00Z', decision: refused } } as unknown as Work;
   const decision = scopeRoutineDecision(item, now, true)!;
   assert.equal(decision.action, 'requirements');

@@ -53,7 +53,7 @@ test('unit:soak-held-requirements-wait — over three simulated days matching qu
     const path = `src/widget/Extra-${n}.tsx`;
     const scopeRequest: ScopeRequestState | null = kind === 'quarantine-only' || kind === 'match-apply' || kind === 'match-fail' || kind === 'cover-fail' || kind === 'nonmatch'
       ? { epoch: 1, at: askedAt, paths: [path], reason: 'AC-1 needs the extra module', requestedBy: 'worker',
-          decision: { state: 'refused', reason: `No rule implies ${path}`, at: askedAt, decidedBy: 'graphyard' } } as ScopeRequestState
+          decision: { state: 'refused', reason: `No rule implies ${path}`, at: askedAt, decidedBy: 'graphyard', treeRead: true } } as ScopeRequestState
       : null;
     return { key: `GY-${1702 + n}`, n, epoch: 1, live: true, policyRevision: 1, plannedFiles: [layout], kind, scopeRequest, quarantine: kind !== 'nonmatch', askedAt };
   });
@@ -151,7 +151,7 @@ test('unit:soak-held-requirements-wait — over three simulated days matching qu
       // Fresh attempt re-opens the ask so the loop must request a widening now that the hold is gone.
       item.live = true; item.epoch = 2; item.quarantine = false;
       item.scopeRequest = { epoch: 2, at: iso(now), paths: [`src/widget/Extra-${item.n}.tsx`], reason: 'still needs the extra', requestedBy: 'worker',
-        decision: { state: 'refused', reason: 'No rule', at: iso(now), decidedBy: 'graphyard' } } as ScopeRequestState;
+        decision: { state: 'refused', reason: 'No rule', at: iso(now), decidedBy: 'graphyard', treeRead: true } } as ScopeRequestState;
     }
 
     const { actions } = await runCycle(config, state, effects, () => now);
@@ -222,7 +222,7 @@ test('unit:soak-approved-resume-race — over three simulated days a still-appro
       key: `GY-${1710 + n}`, n, epoch: 1, live: true, policyRevision: 1, plannedFiles: [layout] as string[],
       scopeRequest: {
         epoch: 1, at: askedAt, paths: [path], reason: 'AC-1 needs the resume module', requestedBy: 'worker',
-        decision: { state: 'refused' as const, reason: `No rule implies ${path}`, at: askedAt, decidedBy: 'graphyard' as const },
+        decision: { state: 'refused' as const, reason: `No rule implies ${path}`, at: askedAt, decidedBy: 'graphyard' as const, treeRead: true },
       } as ScopeRequestState | null,
       askedAt, path,
     };

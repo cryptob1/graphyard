@@ -39,7 +39,7 @@ test('unit:soak-carried-scope-ask — over three simulated days asks carried pas
   // The world: items in build whose attempt 1 asked for a file the widening rule refused and then
   // ended (submitted or released) before any approver judged it, so the ask is carried to the item.
   const ask = (n: number): ScopeRequestState => ({ epoch: 1, at: iso(start - (5 + n) * minute), paths: [`src/daemon/cycle-widget-${n}.ts`], reason: 'AC-1 needs the cycle module', requestedBy: 'worker',
-    decision: { state: 'refused', reason: `No rule implies src/daemon/cycle-widget-${n}.ts`, at: iso(start - (4 + n) * minute), decidedBy: 'graphyard' } } as ScopeRequestState);
+    decision: { state: 'refused', reason: `No rule implies src/daemon/cycle-widget-${n}.ts`, at: iso(start - (4 + n) * minute), decidedBy: 'graphyard', treeRead: true } } as ScopeRequestState);
   // GY-1605..1607 are claimed by attempt 2 two minutes in, after the loop routed their ask and before the approver judges it.
   const items: Item[] = [0, 1, 2, 3, 4, 5, 6, 7].map(n => ({ key: `GY-${1600 + n}`, plannedFiles: [layout], asked: ask(n), open: true, scopeDecision: null, policyRevision: 2, refuse: n === 3 || n === 6, claimAt: n >= 5 ? start + 2 * minute : null }));
   const decisions = new Map<string, Decision[]>(items.map(item => [item.key, []]));

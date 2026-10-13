@@ -217,7 +217,7 @@ const config = () => masterConfigSchema.parse({ version: 1, url: 'http://127.0.0
 const lease = { epoch: 3, owner: 'worker', expiresAt: iso(600_000) };
 const asked = iso(-300_000);
 const refusedRequest = (paths: string[]) => ({ epoch: 3, paths, reason: 'The delivery change reaches these files', requestedBy: 'worker', at: asked,
-  decision: { state: 'refused', reason: 'outside what the criteria imply', at: iso(-200_000), decidedBy: 'graphyard', waitedMs: 100_000, paths, requestedBy: 'worker', requestedAt: asked, epoch: 3 } });
+  decision: { state: 'refused', reason: 'outside what the criteria imply', at: iso(-200_000), decidedBy: 'graphyard', treeRead: true, waitedMs: 100_000, paths, requestedBy: 'worker', requestedAt: asked, epoch: 3 } });
 
 function item(extra: Partial<Work> = {}): Work {
   return {
@@ -350,7 +350,7 @@ test('manual:fault-class-scope — GY-1287: a refused scope request reaches its 
   const paths = ['src/master/dispatch.ts', 'src/master.ts', 'src/model/session-state.ts', 'src/master/status.ts', 'src/daemon/state.ts', 'tests/session-liveness-launch-window.test.ts'];
   const asked1287 = iso(-150_000);
   const request = (epoch: number, at: string) => ({ epoch, paths, reason: 'AC-1 needs the launch window fixed', requestedBy: 'worker', at,
-    decision: { state: 'refused', reason: 'outside what the criteria imply', at: iso(-10_000), decidedBy: 'graphyard', waitedMs: 140_000, paths, requestedBy: 'worker', requestedAt: at, epoch } });
+    decision: { state: 'refused', reason: 'outside what the criteria imply', at: iso(-10_000), decidedBy: 'graphyard', treeRead: true, waitedMs: 140_000, paths, requestedBy: 'worker', requestedAt: at, epoch } });
   // The workers' supervisors renew their leases throughout, so each stays live past the scope budget.
   const criteria = [{ id: 'AC-1', text: 'The shared cause of the recurring faults is removed', proofs: ['manual:fault-class-session-liveness'] }];
   const renewed = (epoch: number) => ({ epoch, owner: 'worker', expiresAt: iso(3_600_000) });
@@ -516,7 +516,7 @@ test('integration:routed-scope-ask-not-pre-empted — GY-1388: a hand widening o
   let work = await claimed('routed ask');
   const path = 'src/elsewhere/Helper.ts';
   await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths: [path], reason: 'The change calls the helper there' });
-  work = await engine.execute(operator, 'autoscope', work.id, { epoch: work.epoch }, randomUUID());
+  work = await engine.execute(operator, 'autoscope', work.id, { epoch: work.epoch, treeRead: true }, randomUUID());
   assert.equal(work.scopeRequest?.decision?.state, 'refused');
   assert.equal(work.scopeRequest?.decision?.decidedBy, 'graphyard');
   const refusal = /scope request is the independent approver's to judge: the loop routes it as a requirements decision within 15 minutes of the rule's refusal.*graphyard master decisions/;

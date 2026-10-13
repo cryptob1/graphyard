@@ -76,7 +76,7 @@ test('unit:soak-invariants-hold — over three simulated days, decisions held th
   /** The worker asks for a file the widening rule refused: the loop would route it to the approver as a `requirements` decision. */
   const ask = (item: Item) => {
     item.scopeRequest = { epoch: item.epoch, at: iso(now), paths: [`src/daemon/cycle-widget-${item.n}.ts`], reason: 'AC-1 needs the cycle module', requestedBy: 'worker',
-      decision: { state: 'refused', reason: `No rule implies src/daemon/cycle-widget-${item.n}.ts`, at: iso(now + 1_000), decidedBy: 'graphyard' } } as ScopeRequestState;
+      decision: { state: 'refused', reason: `No rule implies src/daemon/cycle-widget-${item.n}.ts`, at: iso(now + 1_000), decidedBy: 'graphyard', treeRead: true } } as ScopeRequestState;
   };
   /** A hand widening while the decision is held: the revision moves first, so the hold settles stale when the attempt ends. */
   const widen = (item: Item) => { item.plannedFiles = [...item.plannedFiles, `src/widget/Extra-${item.n}.tsx`]; item.policyRevision++; };
@@ -270,7 +270,7 @@ test('unit:soak-covering-scope-adopt — over two simulated days, covering asks 
   };
   const ask = (item: CoverItem) => {
     item.scopeRequest = { epoch: item.epoch, at: iso(now), paths: [item.cover], reason: 'AC-1 needs the cover module', requestedBy: 'worker',
-      decision: { state: 'refused', reason: `No rule implies ${item.cover}`, at: iso(now + 1_000), decidedBy: 'graphyard' } } as ScopeRequestState;
+      decision: { state: 'refused', reason: `No rule implies ${item.cover}`, at: iso(now + 1_000), decidedBy: 'graphyard', treeRead: true } } as ScopeRequestState;
   };
   const closeAsk = (item: CoverItem) => { item.scopeRequest = null; };
   const end = (item: CoverItem) => {
