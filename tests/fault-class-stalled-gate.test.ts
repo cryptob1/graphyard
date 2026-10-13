@@ -69,3 +69,13 @@ test('the dispatch refusal for a parked item is the text the wait is read from',
   const work = { key: 'GY-1666', humanRequest: { id: 'r-1', kind: 'goals-and-priorities', needed: 'x', answer: null } } as unknown as Work;
   assert.throws(() => assertDispatchable(work, [work], stamp(0)), error => waitReason((error as Error).message));
 });
+
+test('a repeated plane-wide-shaped failure of a call that is not the control plane\'s stays a fault and a stall', () => {
+  const state = emptyDaemonState(config);
+  const detail = 'Deployment endpoint is unreachable: The operation was aborted due to timeout';
+  assert.equal(waitReason(detail), false);
+  assert.equal(waitReason('GitHub answered HTTP 503'), false);
+  assert.ok(actionStall(failing('GY-8', detail, actionStallThreshold)));
+  storeAction(state, 'deployment:x', { kind: 'deployment', work: 'GY-8', principal: null, epoch: 1, state: 'failed', detail, attempts: 1, cycle: 1, at: stamp(1) });
+  assert.ok(state.actions['deployment:x'].faultClass);
+});

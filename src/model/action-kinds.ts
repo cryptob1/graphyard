@@ -185,9 +185,16 @@ export function handoffWaitBound(reason: string): number | null {
 }
 
 /**
+ * The wording of a failure of a call to the Graphyard control plane itself: the blocker probe's record, the launch refused
+ * for an unreadable merge writer or rework decisions, the agent registry, a refused Graphyard request. A timeout or 5xx
+ * without it (the deployment endpoint, GitHub) is another service's and stays a fault.
+ */
+const controlPlaneCall = /\b(?:Could not record|merge writer could not be read|rework decisions of \S+ could not be read|agent registry|control plane|Graphyard refused)\b/i;
+
+/**
  * Whether a failure reason is a wait, not a fault (GY-1758): a dispatch refused because the item is
- * parked on a human-only decision, whose text names the answer that resumes it, or a failure of the
- * whole plane (`planeWideFailure`), which fails every step that meets it. Repeating is what such a
+ * parked on a human-only decision, whose text names the answer that resumes it, or a failure of a call to the
+ * control plane that is plane-wide (`planeWideFailure`), which fails every step that meets it. Repeating is what such a
  * reason does while the wait stands, so a run of it is never a stall and files no fault instance.
  */
-export const waitReason = (reason: string | null | undefined) => !!reason && (reason.includes(dispatchHumanWait) || planeWideFailure(reason));
+export const waitReason = (reason: string | null | undefined) => !!reason && (reason.includes(dispatchHumanWait) || (controlPlaneCall.test(reason) && planeWideFailure(reason)));
