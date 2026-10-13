@@ -170,10 +170,18 @@ test('manual:fault-class-scope — a request the product does not settle still s
   // Past the fifteen-minute bound the loop promises, a request still open is a fault whatever is deciding it.
   const late = new Date(Date.parse(first.requestedAt) + 16 * minute).toISOString();
   assert.deepEqual(scopeFaults(standing(first, late), late).map(fault => fault.kind), ['scope-request']);
-  // A refusal nothing will judge again — the independent approver's own — is a fault at once.
+  // GY-1757: the independent approver's refusal of an additive ask is the live attempt's to act on inside the bound, whatever its wording.
   const refused = standing(instances[8]);
   refused.scopeRequest!.decision = { ...refused.scopeRequest!.decision!, decidedBy: 'graphyard-approver-graphyard' };
-  assert.deepEqual(scopeFaults(refused, instances[8].observedAt).map(fault => fault.kind), ['scope-request']);
+  refused.scopeRequest!.paths = ['src/x.ts', 'src/y.ts'];
+  assert.deepEqual(scopeFaults(refused, instances[8].observedAt).map(fault => fault.kind), []);
+  // An ask of one path has nothing narrower to re-ask, so the approver's refusal stands at once, whatever it says.
+  for (const reason of ['Do not re-request narrower; this file is unrelated.', 'Refused as filed; re-request narrower.']) {
+    const single = standing(instances[8]);
+    single.scopeRequest!.paths = ['src/x.ts'];
+    single.scopeRequest!.decision = { ...single.scopeRequest!.decision!, decidedBy: 'graphyard-approver-graphyard', reason };
+    assert.deepEqual(scopeFaults(single, instances[8].observedAt).map(fault => fault.kind), ['scope-request']);
+  }
   // So is a rule refusal of an ask that is not purely additive: it is never routed to the approver.
   const narrowing = standing(instances[8]);
   narrowing.scopeRequest!.remove = ['docs/'];
@@ -411,4 +419,43 @@ test(`manual:fault-class-scope — scope-request|GY-1705|${gy1705At}: the wall-c
   assert.ok(derivePlannedFiles({ plannedFiles: planned, criteria }, tree).plannedFiles.includes(noWallClockGatePath));
   assert.equal(decideScopeRequest(item, { paths: ask }).state, 'approved');
   assert.ok(!derivePlannedFiles({ plannedFiles: planned, criteria }, tree).plannedFiles.includes('docs/'), 'documentation.paths stay widen-time implications');
+});
+
+const narrowerReason = 'Refused as filed; re-request narrower. The ask names files the criteria do not need.';
+function approverRefused(reason: string) {
+  const work = standing(instances[8]);
+  work.scopeRequest!.decision = { ...work.scopeRequest!.decision!, decidedBy: 'graphyard-approver-graphyard', reason };
+  work.scopeRequest!.paths = ['src/x.ts', 'src/y.ts']; // a narrower ask exists only when the ask names several paths
+  return work;
+}
+
+test('unit:standing-re-requestable-settling — GY-1757: an approver refusal of an additive multi-path ask on a live lease inside the bound is not standing, whatever its wording', () => {
+  const entry = instances[8];
+  for (const wording of [narrowerReason, 'Please ask again for fewer files', 'Refused as filed; ask only for src/x.ts', 'Do not re-request narrower; this file is unrelated'])
+    assert.deepEqual(scopeFaults(approverRefused(wording), entry.observedAt).map(fault => fault.kind), [], wording);
+});
+
+test('unit:standing-re-requestable-bound-stands — GY-1757: the same refusal stands once the bound passes, and not when the lease has ended', () => {
+  const entry = instances[8];
+  const late = new Date(Date.parse(entry.requestedAt) + 16 * minute).toISOString();
+  const work = approverRefused(narrowerReason);
+  work.lease = { ...work.lease!, expiresAt: new Date(Date.parse(late) + 10 * minute).toISOString() };
+  assert.deepEqual(scopeFaults(work, late).map(fault => fault.kind), ['scope-request']);
+  assert.deepEqual(workFaults(approverRefused(narrowerReason), Date.parse(entry.observedAt) + 20 * minute).filter(fault => fault.subject === entry.subject && fault.text.includes('plannedFiles')).length, 0, 'an expired lease is moot, as today');
+});
+
+test('unit:standing-dead-ends-stand — GY-1757: no approver route, a non-additive ask and a one-path ask still stand at once', () => {
+  const entry = instances[8];
+  const narrowing = approverRefused(narrowerReason);
+  narrowing.scopeRequest!.remove = ['docs/'];
+  assert.deepEqual(scopeFaults(narrowing, entry.observedAt).map(fault => fault.kind), ['scope-request'], 'a non-additive ask cannot be narrowed by re-asking');
+  for (const wording of ['Do not re-request narrower; this file is unrelated', narrowerReason]) {
+    const single = approverRefused(wording);
+    single.scopeRequest!.paths = ['src/x.ts'];
+    assert.deepEqual(scopeFaults(single, entry.observedAt).map(fault => fault.kind), ['scope-request'], `a one-path ask has nothing narrower to re-ask: ${wording}`);
+  }
+  const ruleRefused = standing(entry);
+  ruleRefused.scopeRequest!.remove = ['docs/'];
+  assert.deepEqual(scopeFaults(ruleRefused, entry.observedAt).map(fault => fault.kind), ['scope-request']);
+  assert.equal(workFaults(standing(entry), Date.parse(entry.observedAt), false).filter(fault => fault.subject === entry.subject).length, 1, 'with no approver route');
 });

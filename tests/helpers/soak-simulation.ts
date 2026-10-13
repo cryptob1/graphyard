@@ -198,6 +198,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   readiness?: { from: number; to: number };
   /** GY-1751: with `acceptance`, the plane answers the acceptance role's draft post the startup-readiness 503 in this window (ms from the day's start), then answers. */
   acceptanceOutage?: { from: number; to: number };
+  /** GY-1758: in this window (ms from the day's start) the plane times out the loop's blocker-probe record and every dispatch is refused as an item parked on a human-only decision, cycle after cycle; both are waits, then they resolve. */
+  waits?: { from: number; to: number };
   /**
    * GY-1561: item `item`'s first `launches` launches are blocked on a dialog before the runtime starts. The
    * loop's own `registeredLaunch` ends each one's record ("the launch failed before the session started",
@@ -2182,6 +2184,14 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       return [];
     };
   }
+  // GY-1758: a plane-wide timeout of the blocker-probe record and a dispatch refused for a human-only park, repeating each cycle.
+  const waitsDay = { timeouts: 0, parked: 0 };
+  if (options.waits) {
+    const window = options.waits, inWindow = () => clock.now() - dayStart >= window.from && clock.now() - dayStart < window.to;
+    const record = effects.recordBlockerProbe, launch = effects.dispatch;
+    if (record) effects.recordBlockerProbe = (work, body) => { if (!inWindow()) return record(work, body); waitsDay.timeouts++; throw new Error('The operation was aborted due to timeout'); };
+    effects.dispatch = (work, ...rest) => { if (!inWindow()) return launch(work, ...rest); waitsDay.parked++; throw new Error(`Dispatch waits on a human-only decision (goals and priorities); graphyard answer ${work.key} 00000000-0000-4000-8000-000000000000 ANSWER resumes it`); };
+  }
   // The loop publishes the master's merge-queue settings each cycle they change (GY-330, GY-498,
   // GY-500, GY-516), exactly as daemonEffects wires it; the day records what was published, when.
   // ---- GY-811: the containment day. The work snapshot takes 6 s to read, as it does on a loaded
@@ -3350,7 +3360,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: existsSync(tmpRoot) ? readdirSync(tmpRoot) : [] };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { observationWindowDay: windowDay, blockedHoldDay: holdDay, unmatchedRefusals, capAnswers, readinessDay, outageDay, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
+  return { observationWindowDay: windowDay, blockedHoldDay: holdDay, unmatchedRefusals, capAnswers, readinessDay, waitsDay, outageDay, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, limitMenuDay, menuReset, menuNotice, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, githubStatusReads, credentialReads, blockerRecords, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },

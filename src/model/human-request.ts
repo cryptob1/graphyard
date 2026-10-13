@@ -122,6 +122,8 @@ export const retainedHumanRequests = 20;
 
 /** The blocker a parked item carries, and the prefix the answer clears it by. */
 export const humanRequestBlocker = 'Waiting on a human-only decision';
+/** How dispatch's refusal of an item parked on a human opens (assertDispatchable): a designed wait whose text names the answer that resumes it. */
+export const dispatchHumanWait = 'Dispatch waits on a human-only decision';
 export const describeHumanRequest = (request: Pick<HumanRequest, 'kind' | 'needed'>) => `${humanRequestBlocker} (${humanDecisionLabel[request.kind]}): ${request.needed}`;
 export const parkedOnHuman = (work: { humanRequest?: HumanRequest | null }) => !!work.humanRequest && !work.humanRequest.answer;
 

@@ -10,7 +10,7 @@ import { Delivery } from '../delivery.js';
 import { ProofGrants } from '../proof-grants.js';
 import { artifactBackendFromEnv, artifactCapacityFromEnv } from '../artifacts.js';
 import { projectFlow } from '../flow-analytics.js';
-import { openPatternItems, startPatternScan } from '../interventions.js';
+import { LedgerRowCache, openPatternItems, readScanWindow, startPatternScan } from '../interventions.js';
 import { startRetroIndexWatch, synthesizeRetro } from '../retro-synthesis.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
@@ -151,10 +151,13 @@ export async function main(options: MainOptions = {}) {
     // A recurring intervention becomes work on its own (GY-98), once a minute and beside the tick,
     // never in it (GY-1381): its ledger read held the whole tick on 2026-09-23. On unless
     // GRAPHYARD_INTERVENTION_PATTERNS=0.
+    // The window is read once and shared by both, and the rows it projected are kept for the next scan (GY-1749).
+    const scanned = new LedgerRowCache();
     scanning = startPatternScan(async () => {
-      for (const work of (await openPatternItems(engine, http.services.interventionPolicy)).opened) console.log(`Opened ${work.key} for a recurring intervention pattern: ${work.title}`);
+      const window = await readScanWindow(engine.store, http.services.interventionPolicy, { cache: scanned });
+      for (const work of (await openPatternItems(engine, http.services.interventionPolicy, { window })).opened) console.log(`Opened ${work.key} for a recurring intervention pattern: ${work.title}`);
       // The same window read by cause (GY-970): drafts for independent approval, never work items.
-      for (const artefact of (await synthesizeRetro(engine.store, http.services.interventionPolicy)).drafted) console.log(`Drafted retro artefact ${artefact.id} (${artefact.kind}) for ${artefact.pattern.label}`);
+      for (const artefact of (await synthesizeRetro(engine.store, http.services.interventionPolicy, { window })).drafted) console.log(`Drafted retro artefact ${artefact.id} (${artefact.kind}) for ${artefact.pattern.label}`);
     }, { failed: error => console.error('intervention pattern scan failed', error instanceof Error ? error.message : 'unknown') });
   };
   const [handle] = http.listeners('request') as ((req: IncomingMessage, res: ServerResponse) => void)[];

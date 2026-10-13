@@ -1,3 +1,4 @@
+import { assertGhNotPaused, ghPausedUntil, notePossibleGhRateLimit } from './gh-pause.js';
 import { createHash, createSign, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, realpath, writeFile } from 'node:fs/promises';
@@ -895,6 +896,17 @@ function withdrawnSinceSettled(record: ReviewRecord, observation: Work['observat
 export const answeredByPendingReview = (error: unknown, request: { sha: string }) =>
   (error as { reviewSessionPending?: boolean } | null)?.reviewSessionPending === true && (error as ReviewSessionPending).pending.sha === request.sha ? (error as ReviewSessionPending).pending : null;
 
+/**
+ * A GitHub-backed read of a reviewer launch (the head commit) while the gh login is
+ * rate-limited: refused before it is attempted, so the launch is deferred to a later pass rather than spending
+ * the quota; a rate-limit refusal of its own starts the pause.
+ */
+async function pausedGhRead<T>(dependencies: { run?: ChildRun; now?: () => Date }, read: () => Promise<T>): Promise<T> {
+  const at = (dependencies.now ?? (() => new Date()))().getTime();
+  assertGhNotPaused(at);
+  try { return await read(); } catch (error) { await notePossibleGhRateLimit(error, dependencies.run ?? defaultChildRun, at); throw error; }
+}
+
 export async function launchReview(root: string, work: Work, profileName: string | undefined, agents: { name?: string }[], observedAt: string, dependencies: {
   run?: ChildRun;
   mint?: (credential: ReviewerCredential, repository: string) => Promise<{ token: string; expiresAt: string }>;
@@ -933,6 +945,8 @@ export async function launchReview(root: string, work: Work, profileName: string
   // the API as the launch's one-time token.
   const postMerge = dependencies.postMerge;
   const plane = !!postMerge || work.observation?.source === 'control-plane';
+  // A GitHub-backed launch (token mint, commit and thread reads) is deferred while the gh login is rate-limited, before any record is reserved.
+  if (!plane && !dependencies.mint) assertGhNotPaused((dependencies.now ?? (() => new Date()))().getTime());
   if (!config.reviewer && !plane) throw new Error('Register the reviewer GitHub App with master reviewer setup or master reviewer bind before launching a review');
   // The App is narrowed once, for the launch closure below as much as for this line.
   const reviewerApp = config.reviewer ?? null;
@@ -951,7 +965,7 @@ export async function launchReview(root: string, work: Work, profileName: string
   // anything is started, so a second launcher — in this process or another — finds it and stands down.
   // A head that follows an approval's planned mechanical fix is read as that round's bot commit and
   // verified (GY-971); a relaunch of the same head is shown what its first session was.
-  const observeCommit = dependencies.observeCommit ?? (dependencies.mint || plane ? undefined : (sha: string) => observeGitHubCommit(config.repository, sha, dependencies.run ?? defaultChildRun));
+  const observeCommit = dependencies.observeCommit ?? (dependencies.mint || plane ? undefined : (sha: string) => pausedGhRead(dependencies, () => observeGitHubCommit(config.repository, sha, dependencies.run ?? defaultChildRun)));
   const known = (await readReviewLedger(root)).reviews;
   const submitter = submittingPrincipal(work);
   const freshRead = known.find(entry => entry.key === work.key && entry.sha === binding.sha && entry.freshRead)?.freshRead
@@ -1345,6 +1359,7 @@ async function closeReviewSession(root: string, record: ReviewRecord, dependenci
 // snapshot, a session whose head is no longer the candidate is cancelled the same way, with the
 // reason on the record.
 type ObservedVerdict = { state: string; reviewer: string; reviewId: number; submittedAt: string } | null;
+const unread = Symbol('unread');
 export async function reconcileReviews(root: string, config: MasterConfig, dependencies: {
   run?: ChildRun;
   /** `answered` holds the verdict ids an earlier session of the same head already recorded. */
@@ -1382,7 +1397,17 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   if (!config.reviewer && !ledger.reviews.some(record => record.mode === 'control-plane')) return { reviews: ledger.reviews, changed: 0, threads: [] as string[], released: [] as { pane: string; agentName: string }[] };
   const before = new Map(ledger.reviews.map(record => [record.id, JSON.stringify(record)]));
   const reviewer = config.reviewer ? `${config.reviewer.slug}[bot]` : 'control-plane';
-  const observe = dependencies.observe ?? ((record: ReviewRecord, identity: string, answered: Set<number>) => observeReviewVerdict(config.repository, record, identity, dependencies.run ?? defaultChildRun, answered));
+  const readVerdict = dependencies.observe ?? ((record: ReviewRecord, identity: string, answered: Set<number>) => observeReviewVerdict(config.repository, record, identity, dependencies.run ?? defaultChildRun, answered));
+  // A GitHub read that fails (the gh login's rate limit, a timeout) is that read's failure, not the pass's:
+  // it throwing out of here failed the dispatcher tick, so no session launched for any item until GitHub
+  // answered. The record stays as it was for the next pass, and the rest of the pass makes no further
+  // read, which would fail the same way; a record without a read is never judged unanswered.
+  let readFailed = false;
+  const observe = async (record: ReviewRecord, identity: string, answered: Set<number>): Promise<ObservedVerdict | typeof unread> => {
+    if (readFailed) return unread;
+    try { assertGhNotPaused((dependencies.now ?? (() => new Date()))().getTime()); return await readVerdict(record, identity, answered); }
+    catch (error) { readFailed = true; await notePossibleGhRateLimit(error, dependencies.run ?? defaultChildRun, (dependencies.now ?? (() => new Date()))().getTime()); return unread; }
+  };
   const now = (dependencies.now ?? (() => new Date()))();
   // The retry goes through the same confirmed delivery as the launch: a prompt the stopped
   // session never visibly accepts throws, and the grace period records it failed as before.
@@ -1406,7 +1431,9 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     }
     const answered = new Set(ledger.reviews.filter(entry => entry.id !== record.id && entry.key === record.key && entry.sha === record.sha && entry.verdict).map(entry => entry.verdict!.reviewId));
     // A control-plane session's verdict is on the item (`reviewLaunch.verdict`, server/review-verdict.ts), never on GitHub.
-    const verdict = record.verdict ?? (record.mode === 'control-plane' ? controlPlaneVerdict(record, dependencies.work) : await observe(record, reviewer, answered)) ?? undefined;
+    const observed = record.verdict ?? (record.mode === 'control-plane' ? controlPlaneVerdict(record, dependencies.work) : await observe(record, reviewer, answered));
+    if (observed === unread) continue;
+    const verdict = observed ?? undefined;
     const refusedLaunch = !verdict && record.mode === 'control-plane' ? controlPlaneRefusal(record, dependencies.work) : null;
     // A dismissed approval is not an answer: the session is recorded unanswered, with the
     // dismissal and its cause, so the request is relaunched exactly as any other unanswered
@@ -1526,7 +1553,8 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     // Only past the cap is a change request ever withdrawn; before it, the head goes back to a worker.
     if (record.verdict.state === 'CHANGES_REQUESTED' && !(owner && pastReviewCap(owner, reviewRoundCapOf(config)))) continue;
     if (!request || request.state !== 'requested' || request.sha !== record.sha || request.baseSha !== record.baseSha || request.policyRevision !== record.policyRevision) continue;
-    if ((await observe(record, reviewer, new Set()))?.state !== 'DISMISSED') continue;
+    const reread = await observe(record, reviewer, new Set());
+    if (reread === unread || reread?.state !== 'DISMISSED') continue;
     record.verdict = { ...record.verdict, state: 'DISMISSED' };
     record.state = 'failed'; record.resolution = dismissalResolution(record, dependencies.work); record.closedAt = now.toISOString();
     changed++;
@@ -1541,14 +1569,18 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   const record = dependencies.recordIntervention ?? (dependencies.observe ? undefined : coordinatorIntervention(config));
   // Threads, mechanical rounds and fresh reads are GitHub's; a control-plane record has none of them.
   const githubRecords = ledger.reviews.filter(entry => entry.mode !== 'control-plane');
-  const mechanical = await planMechanicalFixes(githubRecords, dependencies.work, config.repository, threadsRun, now);
-  const judged = await judgeFreshReads(githubRecords, config.repository, threadsRun, record, now);
+  // After a failed verdict read this pass reads nothing more from GitHub: the reads below would fail the
+  // same way, and a failed mechanical-plan read is recorded as a permanent fallback, a thread resolution
+  // spends its bounded attempts. The next pass does all of it.
+  const downstreamRun = readFailed || ghPausedUntil((dependencies.now ?? (() => new Date()))().getTime()) ? undefined : threadsRun;
+  const mechanical = await planMechanicalFixes(githubRecords, dependencies.work, config.repository, downstreamRun, now);
+  const judged = await judgeFreshReads(githubRecords, config.repository, downstreamRun, record, now);
   changed += mechanical.changed + judged.changed;
-  const threads = await resolveApprovedThreads(githubRecords, reviewer, config.repository, dependencies.work, threadsRun, now);
+  const threads = await resolveApprovedThreads(githubRecords, reviewer, config.repository, dependencies.work, downstreamRun, now);
   changed += threads.changed;
   // The threads the approval judged FOLLOW-UP are nits: each is answered with a reply and resolved,
   // so conversation resolution no longer holds the merge on them; nothing is filed (GY-1249).
-  const followUps = await resolveApprovedFollowUps(root, githubRecords, reviewer, config.repository, dependencies.work, threadsRun, now, dependencies.followUpLock, dependencies.ledgerLock);
+  const followUps = await resolveApprovedFollowUps(root, githubRecords, reviewer, config.repository, dependencies.work, downstreamRun, now, dependencies.followUpLock, dependencies.ledgerLock);
   changed += followUps.changed;
   // A request the control plane no longer holds open releases its records to the retention window.
   if (dependencies.work) changed += releaseClosedRequests(ledger.reviews, dependencies.work, now);

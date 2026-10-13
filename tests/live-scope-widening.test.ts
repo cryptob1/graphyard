@@ -1,3 +1,4 @@
+import { ChildProcessError } from '../src/child-runner.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
@@ -541,4 +542,75 @@ test('integration:routed-scope-ask-not-pre-empted — GY-1388: a hand widening o
   const applied = await approveScopeRequest(process.cwd(), masterScopeConfig(), [work.key], { coordinator: snapshotRead }) as Work;
   assert.ok(applied.plannedFiles.includes(path));
   assert.ok(applied.lease && applied.lease.epoch === work.epoch, 'the attempt keeps its lease');
+});
+
+// GY-1757: transport failures of the loop's own calls judge nothing about the ask.
+const abort = () => Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+const gh = () => new Error('Command failed: gh api --paginate --slurp repos/o/r/pulls/1/reviews?per_page=100\ngh: API rate limit exceeded for user ID 1.');
+
+test('unit:widen-transient-abort-stored — GY-1757: a widen whose control-plane call aborts on timeout is stored for retry, no instance', async () => {
+  assert.match(transientScopeRefusal(abort()) ?? '', /transport/);
+  const control = plane(item({ key: 'GY-1757', scopeRequest: refusedRequest(['docs/delivery.md']) } as Partial<Work>));
+  control.fail.push(abort());
+  const state = emptyDaemonState(config());
+  await cycle(state, effects(control, { baseSuccessions: undefined, replan: undefined, reviewFindings: async () => [], baseText: async () => null }));
+  const failed = Object.values(state.actions).find(action => action.work === 'GY-1757' && action.state === 'failed');
+  assert.match(failed?.detail ?? '', /so it is retried next cycle on a fresh read/);
+  assert.deepEqual(scopeFaults(state), []);
+});
+
+test('unit:widen-transient-gh-stored — GY-1757: a gh CLI failure reading the findings is stored for retry, no instance', async () => {
+  assert.match(transientScopeRefusal(gh()) ?? '', /transport/);
+  assert.equal(transientScopeRefusal(new Error('Command failed: gh pr view\nunknown flag')), null);
+  const control = plane(item({ key: 'GY-1757', scopeRequest: refusedRequest(['docs/delivery.md']) } as Partial<Work>));
+  const state = emptyDaemonState(config());
+  await cycle(state, effects(control, { baseSuccessions: undefined, replan: undefined, reviewFindings: async () => { throw gh(); }, baseText: async () => null }));
+  assert.deepEqual(scopeFaults(state), []);
+});
+
+test('integration:widen-transient-second-run-counts — GY-1757: the second consecutive failure of the same run is exactly one instance', async () => {
+  const control = plane(item({ key: 'GY-1757', scopeRequest: refusedRequest(['docs/delivery.md']) } as Partial<Work>));
+  const state = emptyDaemonState(config());
+  const failing = effects(control, { baseSuccessions: undefined, replan: undefined, reviewFindings: async () => { throw gh(); }, baseText: async () => null });
+  await cycle(state, failing);
+  assert.deepEqual(scopeFaults(state), []);
+  await cycle(state, failing, clock + 60_000);
+  assert.deepEqual(scopeFaults(state).map(instance => [instance.kind, instance.subject]), [['action:scope', 'GY-1757']]);
+});
+
+test('unit:replan-transient-stored — GY-1757: a successor re-plan failing in transport is stored for retry, no instance', async () => {
+  const control = plane(item({ key: 'GY-1757' } as Partial<Work>));
+  const state = emptyDaemonState(config());
+  await cycle(state, effects(control, { baseSuccessions: async () => { throw abort(); }, replan: async () => { throw abort(); } }));
+  assert.deepEqual(scopeFaults(state), []);
+});
+
+test('integration:scope-class-1756-instances-quiet — GY-1757: a widen timeout, a gh rate limit and a re-request-narrower refusal open no scope instance', async () => {
+  const timed = plane(item({ key: 'GY-1748', scopeRequest: refusedRequest(['docs/delivery.md']) } as Partial<Work>));
+  timed.fail.push(abort());
+  const limited = plane(item({ key: 'GY-1746', id: 'work-gy-1746', scopeRequest: refusedRequest(['docs/delivery.md']) } as Partial<Work>));
+  const state = emptyDaemonState(config());
+  await cycle(state, effects(timed, { baseSuccessions: undefined, replan: undefined, reviewFindings: async () => [], baseText: async () => null }));
+  await cycle(state, effects(limited, { baseSuccessions: undefined, replan: undefined, reviewFindings: async () => { throw gh(); }, baseText: async () => null }));
+  assert.deepEqual(scopeFaults(state), []);
+});
+
+test('unit:widen-transient-gh-timeout — GY-1757: the bounded gh runner\'s timeout is transient; another command\'s is not', () => {
+  const killed = (command: string) => new ChildProcessError(command, ['api'], { stdout: '', stderr: '', status: null, signal: 'SIGKILL', timedOut: true, timeoutMs: 90000 });
+  assert.match(transientScopeRefusal(killed('gh')) ?? '', /transport/);
+  assert.equal(transientScopeRefusal(killed('git')), null);
+});
+
+test('integration:widen-gh-timeout-first-quiet-second-counts — GY-1757: a bounded gh timeout opens an instance only on the second consecutive failure', async () => {
+  const killed = () => new ChildProcessError('gh', ['api', 'x'], { stdout: '', stderr: '', status: null, signal: 'SIGKILL', timedOut: true, timeoutMs: 90000 });
+  const control = plane(item({ key: 'GY-1757', scopeRequest: refusedRequest(['docs/delivery.md']) } as Partial<Work>));
+  const state = emptyDaemonState(config());
+  const failing = effects(control, { baseSuccessions: undefined, replan: undefined, reviewFindings: async () => { throw killed(); }, baseText: async () => null });
+  await cycle(state, failing);
+  assert.deepEqual(scopeFaults(state), []);
+  await cycle(state, failing, clock + 60_000);
+  assert.equal(scopeFaults(state).length, 1);
+  const replanState = emptyDaemonState(config());
+  await cycle(replanState, effects(plane(item({ key: 'GY-1757' } as Partial<Work>)), { baseSuccessions: async () => { throw killed(); }, replan: async () => { throw killed(); } }));
+  assert.deepEqual(scopeFaults(replanState), []);
 });

@@ -193,9 +193,13 @@ export function standingScopeRequest(work: Pick<Work, 'scopeRequest' | 'lease' |
   if (!request || !work.lease || work.lease.epoch !== request.epoch || Date.parse(work.lease.expiresAt) <= now) return false; /* an expired attempt's request is moot (owed-report's rule) */
   if (now - Date.parse(request.at) > scopeBlockedBudgetMs) return true;
   if (request.decision?.state !== 'refused') return false;
+  // GY-1757: the independent approver's refusal of an additive ask that names several paths leaves the live
+  // attempt a narrower ask to make within the bound; this is read from the ask's structure, never from the
+  // refusal's prose. A one-path ask has nothing narrower to re-ask and no route will judge it again, so its
+  // refusal stands at once, as does a non-additive one. The bound branch above catches an ask that sticks.
+  if (request.decision.decidedBy !== 'graphyard' && !request.remove?.length && !request.criteria?.length && request.paths.length > 1) return false;
   return !(routes && request.decision.decidedBy === 'graphyard' && routableScopeRequest(work, now));
 }
-
 /**
  * `reclaimInMotion`, which the loop passes (daemon/faults.ts attemptReclaimInMotion, GY-1557): an
  * attempt past the worker bound that the loop's own reclaim remedy is still due to end, or ended

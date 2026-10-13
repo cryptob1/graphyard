@@ -1,3 +1,4 @@
+import { assertGhNotPaused, GhPausedError, notePossibleGhRateLimit } from './gh-pause.js';
 import { randomUUID } from 'node:crypto';
 import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
@@ -1216,6 +1217,8 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
             wakeSettlement(item, answered.answered.at);
             wait('review', item, review, `reviewer session ${answered.agentName} already answered with ${answered.answered.state} (review ${answered.answered.reviewId}); ${launchWaitWording.settles}`, answered.answered.at);
           }
+          // A launch deferred by the gh rate-limit pause is a wait, never a failure: nothing is counted against the request, and it launches on the first tick after the pause.
+          else if (error instanceof GhPausedError) { delete cursor.failures[review.id]; wait('review', item, review, message(error)); }
           else if (!outOfCapacity('review', item, review, error)) refuse('review', item, review, error);
         }
         await persist();
@@ -1518,12 +1521,13 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
       const pending = headReviewerInFlight.get(key);
       if (pending) return pending;
       const read = (async () => {
+        assertGhNotPaused(at);
         const output = String(await run('gh', ['api', '--paginate', `repos/${current().repository}/pulls/${request.pr}/reviews?per_page=100`, '--jq', '.[] | [.user.login, .commit_id] | @tsv']));
         const logins = [...new Set(output.split('\n').map(line => line.split('\t')).filter(([login, sha]) => login && sha === request.sha).map(([login]) => login))];
         headReviewerReads.set(key, { at, logins });
         for (const [entry, value] of headReviewerReads) if (at - value.at > 3_600_000) headReviewerReads.delete(entry);
         return logins;
-      })().finally(() => headReviewerInFlight.delete(key));
+      })().catch(async error => { await notePossibleGhRateLimit(error, run, at); throw error; }).finally(() => headReviewerInFlight.delete(key));
       headReviewerInFlight.set(key, read);
       return read;
     },
@@ -1541,6 +1545,7 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
       const lines = (output: unknown) => String(output).split('\n').map(line => line.split('\t'));
       const rows = (output: unknown) => lines(output).filter(([login, time]) => login && time && wanted.has(login.toLowerCase()));
       const activity = (async () => {
+        assertGhNotPaused(at);
         const comments = rows(await run('gh', ['api', `repos/${repository}/issues/comments?sort=created&direction=desc&per_page=100`, '--jq', '.[] | [.user.login, .created_at, ((.body // "") | .[0:300] | gsub("[\\t\\n\\r]"; " "))] | @tsv']))
           .map(([login, time, body]): BotActivity => ({ login, kind: 'comment', at: time, body }));
         // Each bot's latest notice, or the one the last judgment still holds when it aged out of the
@@ -1557,7 +1562,7 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
         return [...comments, ...reviews];
       })();
       botActivityRead = { key, at, activity };
-      activity.catch(() => { if (botActivityRead?.activity === activity) botActivityRead = null; });
+      activity.catch(error => { if (botActivityRead?.activity === activity) botActivityRead = null; return notePossibleGhRateLimit(error, run, at); });
       return activity;
     },
     // The handle goes where every Graphyard reader already looks, so watching a reviewer or
