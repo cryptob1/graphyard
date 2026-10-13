@@ -561,6 +561,10 @@ test('integration:owed-decision-gy-1761-replay — approval 5499583025 of 632185
   assert.match(held ?? '', /Approval 5499583025 of 632185dd17dd names 2 findings classified mechanical/);
   const { mechanicalPlanFreshMs } = await import('../src/mechanical-findings.js');
   assert.equal(mechanicalReviewHold({ ...gy1761, mechanicalPlan: { reviewId: 5499583025, head, at: new Date(sevenOhOne - mechanicalPlanFreshMs - 1).toISOString() } }, sevenOhOne), null, 'a stale confirmation holds nothing');
+  // Two approvals on the head both name mechanical findings and the ledger planned the later one: the hold is for that one.
+  const earlier = { ...review, id: 5499583024, submittedAt: '2026-10-13T06:20:00.000Z' };
+  const twoApprovals = { ...gy1761, observation: { ...gy1761.observation!, reviews: [earlier, review] }, mechanicalPlan: { reviewId: 5499583025, head, at: '2026-10-13T07:00:00.000Z' } } as unknown as Work;
+  assert.match(mechanicalReviewHold(twoApprovals, sevenOhOne) ?? '', /Approval 5499583025 of 632185dd17dd/, 'the planned later approval holds the head');
 });
 
 // GY-1764 rework, AC-2: the loop's report of the review ledger's mechanical plan is the one write the

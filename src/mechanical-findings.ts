@@ -308,10 +308,11 @@ const plannedFor = (work: Work, review: { id?: number }, now: number) => !!work.
  */
 export function mechanicalReviewHold(work: Work, now: number): string | null {
   const approval = bindingApproval(work);
-  const review = approval && work.observation?.reviews.find(entry => entry.state === 'APPROVED' && entry.sha === approval.sha && (entry.mechanical ?? 0) > 0 && !!entry.submittedAt);
+  // Several approvals on the head may name mechanical findings; the hold is for the one the ledger planned.
+  const review = approval && work.observation?.reviews.find(entry => entry.state === 'APPROVED' && entry.sha === approval.sha && (entry.mechanical ?? 0) > 0 && !!entry.submittedAt && plannedFor(work, entry, now));
   // GY-1764: the hold reads the one source the decision step reads — a planned fix for this approval in the review ledger,
   // reported as `mechanicalPlan`. An approval with no plan (follow-ups already filed, a fresh read present, the plan read failed) holds nothing.
-  if (!review || !plannedFor(work, review, now)) return null;
+  if (!review) return null;
   const until = Date.parse(review.submittedAt!) + mechanicalRoundStartMs;
   if (!(now < until)) return null;
   const count = review.mechanical!;
