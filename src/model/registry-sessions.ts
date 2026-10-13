@@ -317,4 +317,3 @@ function roleAttention(role: FleetRoleView, live: FleetSession[]): string[] {
   const idle = role.role === 'master' ? [] : live.filter(session => session.role === role.role && !session.work);
   return idle.length ? [`role ${role.role} is at its concurrency limit (${role.live} of ${role.concurrency} live) with ${idle.length} session${idle.length === 1 ? '' : 's'} carrying no work: ${idle.map(session => `${session.id} (${session.account})`).join(', ')}`] : [];
 }
-export { piAttempts, workerOrder, workerPreference } from './worker-preference.js';

@@ -33,7 +33,7 @@ function fleet(): AgentRegistry {
   }, { actor: 'operator', at: new Date().toISOString() }).registry;
 }
 // Imported when a case runs, so a checkout without the rule fails the case rather than the file.
-const { workerPreference } = await import('../src/model/registry-sessions.js').then(module => module as unknown as { workerPreference?: (work: object) => 'fast' | 'strong' }).then(module => ({ workerPreference: module.workerPreference ?? (() => 'fast' as const) }));
+const { workerPreference } = await import('../src/model/worker-preference.js').then(module => module as unknown as { workerPreference?: (work: object) => 'fast' | 'strong' }).then(module => ({ workerPreference: module.workerPreference ?? (() => 'fast' as const) }));
 const pick = (registry: AgentRegistry, work: object, exclude: string[] = []) =>
   chooseSession(registry, { role: 'worker', host, prefer: workerPreference(work), exclude } as never, Date.now());
 

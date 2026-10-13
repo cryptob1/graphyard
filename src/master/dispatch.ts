@@ -12,7 +12,7 @@ import { sweepExpiredWorkerCredentials, withdrawWorkerCredential, workerCredenti
 import { assertNoApprovalOptOut } from '../harness.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { documentationWorkerSection } from '../model/documentation.js';
-import { workerPreference } from '../model/registry-sessions.js';
+import { workerPreference } from '../model/worker-preference.js';
 import { observationWindowHold, servingReleaseProof, type Work } from '../model.js';
 import { type ConsentAnswer, type ConsentHold, consentHoldAttention, consentHoldMs, writeConsentHold } from '../consent-prompt.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';

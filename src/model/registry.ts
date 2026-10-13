@@ -203,9 +203,8 @@ export const selectionRequestSchema = z.object({
   principal: z.string().trim().min(1).max(200).nullable().default(null),
   /** The proof group a producer request answers; every other role names none. */
   group: z.string().trim().min(1).max(40).nullable().default(null),
-  /** Which runtimes a worker is tried on first (GY-1746): `fast` tries Pi accounts before the rest of the role's order, `strong` tries every other runtime before Pi; null keeps the role's own order. */
+  /** Which runtimes a worker is tried on first (GY-1746): `fast` tries Pi accounts before the rest of the role's order, `strong` tries every other runtime before Pi; null keeps the role's own order. `exclude` lists accounts this dispatch already failed to start a session on, passed over so the next account takes the launch. */
   prefer: z.enum(['fast', 'strong']).nullable().default(null),
-  /** Accounts this dispatch already tried and could not start a session on; the choice passes over them so the next account of the role takes the launch. */
   exclude: z.array(entryName).max(50).default([]),
   /** What the executor just observed about the accounts that live on its host. */
   observations: z.array(z.object({ account: entryName, quota: quotaObservationSchema, smoke: smokeObservationSchema.optional() }).strict()).max(200).default([]),
