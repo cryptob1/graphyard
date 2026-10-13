@@ -1199,7 +1199,8 @@ export class Engine {
         this.refuseRenewedDeferral(work!, all);
       }
       demandWork(work);
-      // GY-1760: an item only the loop's own measurement can satisfy is never released to a worker, whoever asks.
+      // GY-1760: an item only the master side can satisfy — the loop's own measurement, or a
+      // master-role session's observation of the master checkout — is never released to a worker, whoever asks.
       if (command === 'ready') { const owned = loopOwnedRefusal(work!); demand(!owned, owned!, 409); }
       // A lease past its expiry that a recorded server-side renewal fault still covers stays live (GY-558).
       await this.renewalGrace(db, work, now);
