@@ -5,7 +5,8 @@ import type { Principal, Work } from '../model.js';
 import { postDeployProofPrefix } from '../model/post-merge-proofs.js';
 import { interventionKindLabel, type InterventionPattern, type InterventionPolicy } from '../model/interventions.js';
 import { boundedSnapshot } from '../store/bounded-snapshot.js';
-import { readAbsorbedPlans, readInterventionLedger } from './ledger.js';
+import { LedgerRowCache, readAbsorbedPlans, readInterventionLedger } from './ledger.js';
+import type { Store } from '../store.js';
 import { foldInterventions } from './fold.js';
 import { detectPatterns, windowStart } from './report.js';
 
@@ -40,6 +41,22 @@ export function startPatternScan(scan: () => Promise<void>, options: { intervalM
   return { stop: async () => { stopped = true; clearInterval(timer); await running; }, run, get running() { return running !== null; } };
 }
 
+/**
+ * The policy window of the ledger and the board it folds against, read once for a scan (GY-1749). The
+ * pattern scan and the retro synthesis beside it fold the same window; each read it for itself, twice a
+ * minute, and every read decompressed the stored document of each of its rows. A scan reads it once,
+ * hands it to both, and keeps the rows it projected (`cache`) for the next scan: what it reads again is
+ * the rows written since.
+ */
+export async function readScanWindow(store: Store, policy: InterventionPolicy, options: { now?: string; limit?: number; cache?: LedgerRowCache } = {}) {
+  const snapshot = await boundedSnapshot(store.reportPool);
+  const now = options.now ?? snapshot.now;
+  const { rows, truncated } = await readInterventionLedger(store.reportPool, { limit: options.limit, since: windowStart(now, policy.windowDays), cache: options.cache });
+  await readAbsorbedPlans(store.reportPool, rows);
+  return { snapshot, now, rows, truncated };
+}
+export type ScanWindow = Awaited<ReturnType<typeof readScanWindow>>;
+
 /** The control plane acting as itself when it opens work from feedback; the ledger names it as every other control-plane write is named. */
 export const controlPlaneActor: Principal = { id: 'graphyard', role: 'admin', sessionKind: 'ai' };
 const minutes = (value: number) => `${Math.round(value / 60_000)} min`;
@@ -51,12 +68,9 @@ const minutes = (value: number) => `${Math.round(value / 60_000)} min`;
  * that item is open nothing is opened again for the pattern; instances an item already links
  * never count towards a second one.
  */
-export async function openPatternItems(engine: Engine, policy: InterventionPolicy, options: { now?: string; actor?: Principal; limit?: number } = {}) {
-  const snapshot = await boundedSnapshot(engine.store.reportPool);
-  const now = options.now ?? snapshot.now;
+export async function openPatternItems(engine: Engine, policy: InterventionPolicy, options: { now?: string; actor?: Principal; limit?: number; window?: ScanWindow } = {}) {
   // Detection reads the policy window of the ledger and nothing older (GY-422).
-  const { rows, truncated } = await readInterventionLedger(engine.store.reportPool, { limit: options.limit, since: windowStart(now, policy.windowDays) });
-  await readAbsorbedPlans(engine.store.reportPool, rows);
+  const { snapshot, now, rows, truncated } = options.window ?? await readScanWindow(engine.store, policy, options);
   const folded = foldInterventions(rows, snapshot.work, now);
   const opened: Work[] = [];
   for (const pattern of detectPatterns(folded.interventions, snapshot.work, policy, now)) {

@@ -21,8 +21,8 @@
  */
 
 export { interventionDecisionReachMs, interventionLedgerSince, loopSettledInBound, reworkGroundsSql, windowOutcomes } from './intervention-exemptions.js';
-export { interventionLedgerKinds, interventionLedgerLimit, readInterventionLedger, type InterventionLedgerRow } from './interventions/ledger.js';
+export { interventionLedgerKinds, interventionLedgerLimit, LedgerRowCache, readInterventionLedger, type InterventionLedgerRow } from './interventions/ledger.js';
 export { foldInterventions } from './interventions/fold.js';
 export { computeInterventionReport, detectPatterns, readInterventionReport } from './interventions/report.js';
-export { controlPlaneActor, interventionScan, interventionScanVariable, openPatternItems, patternScanIntervalMs, startPatternScan } from './interventions/patterns.js';
+export { controlPlaneActor, interventionScan, interventionScanVariable, openPatternItems, patternScanIntervalMs, readScanWindow, startPatternScan, type ScanWindow } from './interventions/patterns.js';
 export { judgementToWork, recordIntervention, recordJudgement } from './interventions/records.js';
