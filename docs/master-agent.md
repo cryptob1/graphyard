@@ -21,11 +21,11 @@ Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `
 
 **Instead of closing sessions by hand:** do nothing for a finished or dead session (`graphyard master run --once` sweeps); attach to an overlong one with its handle's command. Never mark another session's handle finished to free a slot. The loop and `master approver` relaunch never-started approvers (`done`, still-screened `idle`) past the start bound, slot ended first; hand-launched, replaced panes [bind](master-agent-sessions.md#the-start-bound-reads-the-pane).
 
-`blocked` frees its slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) self-clear, probed: `github-credential`, `sandbox-path` confined as next worker; `github-outage` githubstatus.com (shared, ≤1/min), then confined dry-run push/PR read; `control-plane-error` plane health; `outside-scope-test-failure` base moved; `runtime-denial`, `worktree-mismatch` lease ended; `dispatch-failure` profile launchable, `runtime-exhaustion` dispatchable account; `host-supervisor` loop's host; `master-role` a master-role identity runs the step, then unblocks; `planned-file-scope`, `needs-decision` approver. `genuine`/`human-only` escalate.
+`blocked` frees its slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) self-clear, probed: `github-credential`, `sandbox-path` confined as next worker; `github-outage` githubstatus.com, then confined dry-run push/PR read; `control-plane-error` plane health; `outside-scope-test-failure` base moved; `runtime-denial`, `worktree-mismatch` lease ended; `dispatch-failure` profile launchable, `runtime-exhaustion` dispatchable account; `host-supervisor` loop's host; `master-role` a master-role identity runs the step, then unblocks; `planned-file-scope`, `needs-decision` approver. `genuine`/`human-only` escalate.
 
 ### System invariants
 
-Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). Thresholds: `invariants` in `.graphyard/master.json`.
+Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). Thresholds: `invariants` in `.graphyard/master.json`; `tests/soak-*.test.ts` enforce.
 
 ## Research and diagnosis
 
