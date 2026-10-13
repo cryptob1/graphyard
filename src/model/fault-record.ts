@@ -53,6 +53,8 @@ function settleHeld(record: FaultRecord) {
     if (record.instances.includes(instance)) record.failing[key] = instance.id;
   }
 }
+/** Whether this observation left the `decision-unanswered` source unread (a failed or cut read), so an escalation's absorbing line may be missing. */
+const unansweredUnread = (partial: boolean | ReadonlySet<string>) => partial === true || (partial !== false && partial.has('decision-unanswered'));
 /**
  * One cycle's observations against the record. A fault that stood last cycle and still stands is
  * the same instance (its `lastSeenAt` moves); one not seen before, or seen again after it cleared,
@@ -77,7 +79,7 @@ export function trackFaults(record: FaultRecord, observations: readonly FaultObs
     record.instances.push(instance); record.open[key] = instance.id; opened.push(instance);
     absorbEscalation(record, observation);
   }
-  settleHeld(record);
+  if (!unansweredUnread(partial)) settleHeld(record); // a partial observation may not have read the unanswered line, so it settles nothing
   if (partial !== true) for (const key of Object.keys(record.open)) if (!seen.has(key) && !(partial && partial.has(key.slice(0, key.indexOf('|'))))) delete record.open[key];
   retain(record);
   return opened;

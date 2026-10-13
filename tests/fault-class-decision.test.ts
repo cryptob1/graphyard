@@ -501,3 +501,13 @@ test('manual:fault-class-decision — a merge-writer status read that met the pl
   assert.deepEqual(state.faults.instances, []);
   clearDrafts();
 });
+
+test('manual:fault-class-decision — a partial observation settles no held escalation; the next full one does', () => {
+  const id = '66666666-d9c1-4cd2-8467-9f1866b0fd41', state = emptyDaemonState(config());
+  exhaust(state, id, '2026-10-12T02:16:50.000Z');
+  trackFaults(state.faults, [], '2026-10-12T02:16:55.000Z', true);
+  trackFaults(state.faults, [], '2026-10-12T02:17:55.000Z', new Set(['decision-unanswered']));
+  assert.equal(state.faults.instances.length, 0);
+  trackFaults(state.faults, [], '2026-10-12T02:18:55.000Z');
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:escalation']);
+});
