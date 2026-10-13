@@ -206,8 +206,17 @@ test('manual:intervention-pattern-scope-widening-build — the other three linke
 
 test('manual:intervention-pattern-scope-widening-build — a loop that cannot route a refused ask stands it at once, as the fault pass does: the fold counts it inside the bound when routes is false', () => {
   for (const entry of linked.slice(0, 3)) {
-    assert.equal(exemption({ ...moment(entry, detectedAt), routes: false }), null, `${entry.key}: no route, so no in-bound exemption`);
+    assert.equal(exemption({ ...moment(entry, detectedAt), routes: false } as ExemptionMoment), null, `${entry.key}: no route, so no in-bound exemption`);
     assert.equal(foldInterventions(entry.rows, [entry.work], detectedAt, { routes: false }).interventions.filter(item => item.kind === 'scope-widening').length, 1, `${entry.key}: counted without a route`);
     assert.deepEqual(foldInterventions(entry.rows, [entry.work], detectedAt, { routes: true }).interventions.filter(item => item.kind === 'scope-widening'), [], `${entry.key}: uncounted with a route`);
   }
+});
+
+test('manual:intervention-pattern-scope-widening-build — readLoopRoutes needs a deciding and an approving live agent, not any two', async () => {
+  const { readLoopRoutes } = await import('../src/interventions/report.js');
+  const pool = (requests: boolean | null, approves: boolean | null) => ({ query: async (text: string) => { assert.match(text, /decision:rework/); assert.match(text, /decision:approve/); assert.match(text, /revokedAt/); return { rows: [{ requests, approves }] }; } }) as never;
+  assert.equal(await readLoopRoutes(pool(true, true)), true);
+  assert.equal(await readLoopRoutes(pool(true, false)), false, 'two agents that only decide do not route');
+  assert.equal(await readLoopRoutes(pool(false, true)), false);
+  assert.equal(await readLoopRoutes(pool(null, null)), false, 'no live agents');
 });

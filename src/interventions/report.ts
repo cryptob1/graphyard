@@ -196,13 +196,17 @@ export function detectPatterns(interventions: Intervention[], work: readonly Wor
 export const windowStart = (now: string, days: number) => new Date(Date.parse(now) - days * day).toISOString();
 
 /**
- * Whether the loop can route a refused scope ask (GY-1755): the loop routes only with its operator-agent
- * and approver identities (`master autonomy`), which the server holds as two live operator-agent
- * records. Fewer, and nothing will route the ask, so the report counts it as the fault pass stands it.
+ * Whether the loop can route a refused scope ask (GY-1755). The daemon routes when it holds the decision
+ * effects (`effects.decide` and `effects.approver`), which exist only with the operator-agent and approver
+ * identities `master autonomy` provisions. The server sees those as live operator-agent records by
+ * capability: one that requests decisions (`decision:rework`) and one that approves them (`decision:approve`).
+ * Two unrelated live agents do not make an ask routable; without both, the report counts it as the fault pass does.
  */
 export async function readLoopRoutes(pool: Pick<pg.Pool, 'query'>) {
-  const { rows } = await pool.query("SELECT count(*)::int AS live FROM operator_agents WHERE document->>'revokedAt' IS NULL");
-  return rows[0].live >= 2;
+  const { rows } = await pool.query(`SELECT
+    bool_or(document->'capabilities' ? 'decision:rework') AS requests, bool_or(document->'capabilities' ? 'decision:approve') AS approves
+    FROM operator_agents WHERE document->>'revokedAt' IS NULL`);
+  return !!rows[0]?.requests && !!rows[0]?.approves;
 }
 
 /**
