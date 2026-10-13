@@ -139,6 +139,9 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause, now = 
   if (manual) return agentOwner('master', `graphyard master decide ${key} attest '{"proof":"${manual}"}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
   if (first?.name === 'review') return agentOwner('reviewer', driven ? `The reviewer session judges it; ${reviewNext}` : `The reviewer session judges it; graphyard master review ${key} relaunches a refused review`);
   if (first?.name === 'merge' && work.stage === 'merge') return agentOwner('master', `Nothing to run by hand: GitHub merges ${key} once its merge gate passes`);
+  // A master-role refusal is not a cause anyone clears (GY-1761): the token's role is by design, so the
+  // step itself is what a master-role identity takes — this session, or a doctor run — then the unblock.
+  if (blocker?.class === 'master-role') return agentOwner('master', `The blocker names a step only the master role can take: run that master command from a master-role identity — this session, or a doctor run, in the coordinator checkout where .graphyard/master.json and the master role live — then graphyard master unblock ${key} REASON`);
   if (work.blocker) return agentOwner('master', `Clear the cause, then graphyard master unblock ${key} REASON; a cause that needs money, a third-party account or a person's credential goes to the human`);
   return agentOwner('master', `graphyard diagnose ${key}`);
 }

@@ -165,7 +165,7 @@ export function doctorDue(state: { doctor: { runs: DoctorRunRecord[] } }, clock:
 export function doctorPrompt(config: { repository: string; cliPath: string }, input: DoctorInput) {
   const cli = config.cliPath.startsWith('node ') ? config.cliPath : `node ${config.cliPath}`, b = doctorBounds;
   const checklist = [
-    `- blocked: an item blocked for more than ${b.blockedMinutes} min`,
+    `- blocked: an item blocked for more than ${b.blockedMinutes} min; a blocker naming the master-role refusal ('.graphyard/master.json does not exist', 'no master role') is a step only a master-role identity can take: run the master command it names from this checkout yourself — you hold the master role, and checkout-restore is sanctioned — then ${cli} master unblock GY-N with a quoted reason`,
     `- worker: an attempt holding its lease for more than ${b.workerMinutes} min without a submission`,
     `- ci: required checks not settled for more than ${b.ciMinutes} min`,
     `- review-request: a review request standing more than ${b.reviewRequestMinutes} min after green CI`,
