@@ -233,7 +233,7 @@ test('unit:observation-window-holds-dispatch — a released follow-up is not dis
     const account = actionAccount(item, all, new Date(at));
     assert.equal(account.action, null, `no action at ${at}`);
     assert.deepEqual([account.gate, account.refusal, account.wait?.kind, account.wait?.on], ['build', 'Worker has not submitted implementation for this attempt', 'window', null]);
-    assert.match(account.wait!.detail, new RegExp(`^GY-1689 waits for its observation window: the reading it owes can first exist at ${notBefore} \\(GY-1685 merged at .*\\); the loop dispatches it then$`));
+    assert.match(account.wait!.detail, new RegExp(`^GY-1689 waits for the loop's reading of .*, which can first exist at ${notBefore} \\(GY-1685 merged at .*\\); the loop records it, and no worker is dispatched$`));
     assert.equal(nextAction(item, all, new Date(at)), null);
     const queued = { ...item, actionQueue: { actions: [], history: [] } } as Work;
     assert.deepEqual(reconcileActions(queued, [gy1685, queued], new Date(at)), [], 'the dispatch step is asked for nothing');
