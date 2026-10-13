@@ -1,4 +1,4 @@
-import { assertGhNotPaused, notePossibleGhRateLimit } from './gh-pause.js';
+import { assertGhNotPaused, GhPausedError, notePossibleGhRateLimit } from './gh-pause.js';
 import { randomUUID } from 'node:crypto';
 import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
@@ -1217,6 +1217,8 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
             wakeSettlement(item, answered.answered.at);
             wait('review', item, review, `reviewer session ${answered.agentName} already answered with ${answered.answered.state} (review ${answered.answered.reviewId}); ${launchWaitWording.settles}`, answered.answered.at);
           }
+          // A launch deferred by the gh rate-limit pause is a wait, never a failure: nothing is counted against the request, and it launches on the first tick after the pause.
+          else if (error instanceof GhPausedError) { delete cursor.failures[review.id]; wait('review', item, review, message(error)); }
           else if (!outOfCapacity('review', item, review, error)) refuse('review', item, review, error);
         }
         await persist();
