@@ -61,7 +61,7 @@ function closedItem(index: number, now: Date): Work {
 }
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 61;
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 64;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('plane-hot-calls'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('hot_calls');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/hot_calls`); await store.init();
@@ -148,8 +148,9 @@ test('unit:plane-hot-calls-bounded-under-load — decide, requirements and statu
     }
   } finally { scanning = false; await scan; }
   assert.ok(scans >= 3, `the scan ran ${scans} times beside the calls`);
-  for (const [name, samples] of Object.entries({ decide, requirements, status }))
-    assertTiming({ name: `plane-hot-calls.${name}`, test: 'unit:plane-hot-calls-bounded-under-load', statistic: 'max', budgetMs: requestBudgetMs, comparison: '<=', samples });
+  assertTiming({ name: 'plane-hot-calls.decide', test: 'unit:plane-hot-calls-bounded-under-load', statistic: 'max', budgetMs: requestBudgetMs, comparison: '<=', samples: decide });
+  assertTiming({ name: 'plane-hot-calls.requirements', test: 'unit:plane-hot-calls-bounded-under-load', statistic: 'max', budgetMs: requestBudgetMs, comparison: '<=', samples: requirements });
+  assertTiming({ name: 'plane-hot-calls.status', test: 'unit:plane-hot-calls-bounded-under-load', statistic: 'max', budgetMs: requestBudgetMs, comparison: '<=', samples: status });
   assertTiming({ name: 'plane-hot-calls.lease-renewal', test: 'unit:plane-hot-calls-bounded-under-load', statistic: 'max', budgetMs: renewalBudgetMs, comparison: '<=', samples: renewals });
 });
 
