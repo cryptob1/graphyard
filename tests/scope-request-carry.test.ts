@@ -256,12 +256,3 @@ test('integration:carried-scope-ask-claimed-before-answer — an ask a claim inh
     assert.equal(scopeRoutineDecision(item, Date.now(), true), null, 'nothing is left to route');
   }
 });
-
-// GY-1764: a refusal the repository tree supplied the evidence for is no pending widening; a later attempt asks afresh.
-test('unit:non-repository-refusal-not-carried', async () => {
-  const { carriedScopeRequest } = await import('../src/engine.js');
-  const decision = { state: 'refused', reason: 'daemon.release is a master-status field, not a file', at: '2026-10-13T08:00:00.000Z', decidedBy: 'graphyard', waitedMs: 0, paths: ['daemon.release'], requestedBy: 'w', requestedAt: '2026-10-13T07:59:00.000Z', epoch: 1 };
-  const ask = { epoch: 1, at: decision.requestedAt, paths: ['daemon.release'], reason: 'r', requestedBy: 'w', decision };
-  assert.equal(carriedScopeRequest({ plannedFiles: ['src/a.ts'] }, { ...ask, decision: { ...decision, nonRepository: true } } as any), null, 'an evidence-gated refusal ends with its attempt');
-  assert.deepEqual(carriedScopeRequest({ plannedFiles: ['src/a.ts'] }, ask as any)?.paths, ['daemon.release'], 'an ordinary graphyard refusal still carries');
-});

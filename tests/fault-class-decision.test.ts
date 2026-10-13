@@ -730,3 +730,12 @@ test('integration:scope-evidence-gate-repeated-cycles — the loop reads the tre
   // the refused asks themselves, which the worker re-asks or finishes without, as the refusal says.
   assert.deepEqual(state.faults.instances.map(entry => entry.kind).filter(kind => /decision|escalation/.test(kind)), [], 'no decision fault opens for any of them');
 });
+
+// GY-1764: a refusal the repository tree supplied the evidence for is no pending widening; a later attempt asks afresh.
+test('unit:non-repository-refusal-not-carried', async () => {
+  const { carriedScopeRequest } = await import('../src/engine.js');
+  const decision = { state: 'refused', reason: 'daemon.release is a master-status field, not a file', at: '2026-10-13T08:00:00.000Z', decidedBy: 'graphyard', waitedMs: 0, paths: ['daemon.release'], requestedBy: 'w', requestedAt: '2026-10-13T07:59:00.000Z', epoch: 1 };
+  const ask = { epoch: 1, at: decision.requestedAt, paths: ['daemon.release'], reason: 'r', requestedBy: 'w', decision };
+  assert.equal(carriedScopeRequest({ plannedFiles: ['src/a.ts'] }, { ...ask, decision: { ...decision, nonRepository: true } } as any), null, 'an evidence-gated refusal ends with its attempt');
+  assert.deepEqual(carriedScopeRequest({ plannedFiles: ['src/a.ts'] }, ask as any)?.paths, ['daemon.release'], 'an ordinary graphyard refusal still carries');
+});
