@@ -575,8 +575,9 @@ export const connectProvider = (id: string): ConnectProvider | null => connectPr
  * command, and the host's result is what reports it — the card never claims a placement the
  * fleet cannot launch.
  */
-export function connectDefaultRoles(tier: ConnectProvider['tier']): readonly string[] {
-  return tier === 'fast' ? ['research', 'worker', 'approver', 'producer'] : ['worker', 'reviewer'];
+export function connectDefaultRoles(tier: ConnectProvider['tier'], runtime?: string): readonly string[] {
+  // Only a Pi account joins the worker role among the cheap ones: worker dispatch treats every other runtime as strong (GY-1746).
+  return tier === 'fast' ? ['research', ...(runtime === 'pi' ? ['worker'] : []), 'approver', 'producer'] : ['worker', 'reviewer'];
 }
 
 /**

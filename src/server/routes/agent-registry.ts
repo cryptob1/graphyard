@@ -274,7 +274,7 @@ function connectAccountRoutes(): import('../routes.js').Route[] {
         // appended to its own research configuration, never a placement the fleet cannot launch.
         const result = resultSchema.parse(data);
         const provider = connectProvider(connect.provider)!;
-        const placement = connectDefaultRoles(provider.tier).filter(role => role !== 'research' || (provider.tier === 'fast' && result.research === true));
+        const placement = connectDefaultRoles(provider.tier, provider.runtime).filter(role => role !== 'research' || (provider.tier === 'fast' && result.research === true));
         demand(result.state !== 'healthy' || !!result.name && !!result.home, 'A healthy connect names the account and its login home', 400);
         await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, `${connectEventPrefix}result`, JSON.stringify({ connect: { id, at, state: result.state, name: result.name, home: result.home, error: result.error, placement } })]);
         if (result.state === 'failed') return { id, state: 'failed' as const, error: result.error };

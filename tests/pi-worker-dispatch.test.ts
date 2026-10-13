@@ -185,7 +185,8 @@ test('unit:pi-launch-failure-falls-back — a Pi launch that never starts, or is
 
 test('unit:pi-default-worker-roles — a Pi account joins the worker role by default on connection and in a discovery proposal', async () => {
   const { connectDefaultRoles } = await import('../src/fleet.js');
-  assert.ok(connectDefaultRoles('fast').includes('worker'));
+  assert.ok(connectDefaultRoles('fast', 'pi').includes('worker'));
+  assert.ok(!connectDefaultRoles('fast', 'opencode').includes('worker'), 'a Settings-connected fast OpenCode account stays out of the worker role');
   const { proposedRuntimeRoles } = await import('../src/model/registry-proposal.js');
   assert.ok(proposedRuntimeRoles.pi?.includes('worker'));
 });
@@ -194,6 +195,14 @@ test('unit:pi-coordination-view-attempts — the coordination view keeps the att
   const { coordinationWork } = await import('../src/server/work-view.js') as any;
   const view = coordinationWork?.({ key: 'GY-1', stage: 'ready', evidence: [], pipeline: { reworkRounds: 0, attempts: [{}, {}] } }, { evidence: 0, dispatchHistory: 0, queueHistory: 0, actionHistory: 0, sessions: 0 });
   assert.equal(view?.attemptCount, 2);
+});
+
+test('unit:pi-coordination-projection-attempts — the saved-document projection keeps the attempt count a worker preference reads', async () => {
+  const { coordinationProjection } = await import('../src/store/locked-read.js');
+  const { workerPreference } = await import('../src/model/worker-preference.js');
+  const projected = coordinationProjection({ key: 'GY-1', lane: 'low', stage: 'ready', evidence: [], pipeline: { reworkRounds: 0, attempts: [{}, {}] } } as any) as any;
+  assert.equal(projected.attemptCount, 2);
+  assert.equal(workerPreference(projected), 'strong', 'two ended attempts and no rework round still send the third to the strong profiles');
 });
 
 test('unit:pi-old-server-selection — a control plane that rejects the preference fields is asked again without them', async () => {
