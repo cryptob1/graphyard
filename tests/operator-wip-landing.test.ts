@@ -46,7 +46,6 @@ test('unit:complete-pushes-graphyard-branch — a failed push is reported, not t
 test('unit:worktree-pushes-local-candidate — a local head at the candidate sha is pushed when the fetch fails; another sha refuses', async () => {
   const { submittedBranchRefusal } = await import('../src/master/worktrees.js');
   const { origin, work } = await repository('graphyard/gy-3-1');
-  const sha = git(work, 'rev-parse', 'HEAD');
   const run = ((command: string, args: string[], options: { cwd: string }) => {
     if (args[0] === 'fetch') throw new Error('fatal: couldn\'t find remote ref');
     const result = spawnSync(command, args, { cwd: options.cwd, encoding: 'utf8' });
@@ -54,7 +53,12 @@ test('unit:worktree-pushes-local-candidate — a local head at the candidate sha
     return result.stdout;
   }) as never;
   const remote = 'refs/remotes/origin/graphyard/gy-3-1';
-  assert.equal(await submittedBranchRefusal(work, 'graphyard/gy-3-1', remote, sha, run), null);
+  git(work, 'update-ref', remote, git(work, 'rev-parse', 'HEAD~0'));
+  git(work, 'commit', '--allow-empty', '-m', 'second');
+  const second = git(work, 'rev-parse', 'HEAD');
+  assert.equal(await submittedBranchRefusal(work, 'graphyard/gy-3-1', remote, second, run), null);
+  // The remote-tracking ref the worktree starts from names the pushed candidate, however narrow the fetch refspec.
+  assert.equal(git(work, 'rev-parse', remote), second);
   assert.match(remoteHeads(origin), /graphyard\/gy-3-1/);
   const moved = await submittedBranchRefusal(work, 'graphyard/gy-3-1', remote, 'b'.repeat(40), run);
   assert.match(moved!, /^Git worktree creation failed while fetching graphyard\/gy-3-1: /);
