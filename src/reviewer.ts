@@ -1345,6 +1345,7 @@ async function closeReviewSession(root: string, record: ReviewRecord, dependenci
 // snapshot, a session whose head is no longer the candidate is cancelled the same way, with the
 // reason on the record.
 type ObservedVerdict = { state: string; reviewer: string; reviewId: number; submittedAt: string } | null;
+const unread = Symbol('unread');
 export async function reconcileReviews(root: string, config: MasterConfig, dependencies: {
   run?: ChildRun;
   /** `answered` holds the verdict ids an earlier session of the same head already recorded. */
@@ -1382,7 +1383,16 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   if (!config.reviewer && !ledger.reviews.some(record => record.mode === 'control-plane')) return { reviews: ledger.reviews, changed: 0, threads: [] as string[], released: [] as { pane: string; agentName: string }[] };
   const before = new Map(ledger.reviews.map(record => [record.id, JSON.stringify(record)]));
   const reviewer = config.reviewer ? `${config.reviewer.slug}[bot]` : 'control-plane';
-  const observe = dependencies.observe ?? ((record: ReviewRecord, identity: string, answered: Set<number>) => observeReviewVerdict(config.repository, record, identity, dependencies.run ?? defaultChildRun, answered));
+  const readVerdict = dependencies.observe ?? ((record: ReviewRecord, identity: string, answered: Set<number>) => observeReviewVerdict(config.repository, record, identity, dependencies.run ?? defaultChildRun, answered));
+  // A GitHub read that fails (the gh login's rate limit, a timeout) is that read's failure, not the pass's:
+  // it throwing out of here failed the dispatcher tick, so no session launched for any item until GitHub
+  // answered. The record stays as it was for the next pass, and the rest of the pass makes no further
+  // read, which would fail the same way; a record without a read is never judged unanswered.
+  let readFailed = false;
+  const observe = async (record: ReviewRecord, identity: string, answered: Set<number>): Promise<ObservedVerdict | typeof unread> => {
+    if (readFailed) return unread;
+    try { return await readVerdict(record, identity, answered); } catch { readFailed = true; return unread; }
+  };
   const now = (dependencies.now ?? (() => new Date()))();
   // The retry goes through the same confirmed delivery as the launch: a prompt the stopped
   // session never visibly accepts throws, and the grace period records it failed as before.
@@ -1406,7 +1416,9 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     }
     const answered = new Set(ledger.reviews.filter(entry => entry.id !== record.id && entry.key === record.key && entry.sha === record.sha && entry.verdict).map(entry => entry.verdict!.reviewId));
     // A control-plane session's verdict is on the item (`reviewLaunch.verdict`, server/review-verdict.ts), never on GitHub.
-    const verdict = record.verdict ?? (record.mode === 'control-plane' ? controlPlaneVerdict(record, dependencies.work) : await observe(record, reviewer, answered)) ?? undefined;
+    const observed = record.verdict ?? (record.mode === 'control-plane' ? controlPlaneVerdict(record, dependencies.work) : await observe(record, reviewer, answered));
+    if (observed === unread) continue;
+    const verdict = observed ?? undefined;
     const refusedLaunch = !verdict && record.mode === 'control-plane' ? controlPlaneRefusal(record, dependencies.work) : null;
     // A dismissed approval is not an answer: the session is recorded unanswered, with the
     // dismissal and its cause, so the request is relaunched exactly as any other unanswered
@@ -1526,7 +1538,8 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     // Only past the cap is a change request ever withdrawn; before it, the head goes back to a worker.
     if (record.verdict.state === 'CHANGES_REQUESTED' && !(owner && pastReviewCap(owner, reviewRoundCapOf(config)))) continue;
     if (!request || request.state !== 'requested' || request.sha !== record.sha || request.baseSha !== record.baseSha || request.policyRevision !== record.policyRevision) continue;
-    if ((await observe(record, reviewer, new Set()))?.state !== 'DISMISSED') continue;
+    const reread = await observe(record, reviewer, new Set());
+    if (reread === unread || reread?.state !== 'DISMISSED') continue;
     record.verdict = { ...record.verdict, state: 'DISMISSED' };
     record.state = 'failed'; record.resolution = dismissalResolution(record, dependencies.work); record.closedAt = now.toISOString();
     changed++;
