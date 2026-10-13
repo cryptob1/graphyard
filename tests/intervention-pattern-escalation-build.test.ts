@@ -609,7 +609,7 @@ for (const key of ['GY-1722', 'GY-1725'] as const) {
     assert.deepEqual([held.blocker, held.lease, held.epoch], [null, null, 0], 'no attempt started and nothing was recorded against it');
     assert.equal(onCandidate.escalations, 0, 'nothing escalates: the instance does not recur');
     assert.equal(onCandidate.dispatchable(onCandidate.now), false, 'the loop holds it until the reading can exist');
-    assert.equal(onCandidate.dispatchable(onCandidate.notBefore + 60_000), true, 'and dispatches it once the instant passes');
+    assert.equal(onCandidate.dispatchable(onCandidate.notBefore + 60_000), false, 'and past the instant it is owed to the loop\'s reading, never dispatched to a code worker (GY-1762)');
   });
 }
 
@@ -639,7 +639,7 @@ test('manual:intervention-pattern-escalation-build — GY-1725 as it stands, alr
   await store.pool.query(`UPDATE work_items SET document = document - 'observationWindow' WHERE id=$1`, [filed.id]);
   const stripped = (await store.list()).find((item: Work) => item.id === filed.id)! as Work;
   assert.deepEqual([stripped.ready, stripped.blocker, stripped.observationWindow], [true, null, undefined]);
-  assert.equal(dispatchable(stripped, now), true, 'the stale document reads as dispatchable');
+  assert.equal(dispatchable(stripped, now), false, 'the stale document is a loop-owned observation (GY-1762), so no worker is dispatched even without its window');
   // A claim the control plane rejects before judging it writes nothing: neither a caller without claim
   // authority nor a key already answered for another command may record the window or its history.
   const history = async () => (await store.pool.query('SELECT count(*)::int AS n FROM events WHERE work_id=$1', [filed.id])).rows[0].n as number;
@@ -655,7 +655,7 @@ test('manual:intervention-pattern-escalation-build — GY-1725 as it stands, alr
   assert.equal(held.observationWindow?.notBefore, new Date(notBefore).toISOString(), 'the refused claim persisted the window it derived');
   assert.deepEqual([held.lease, held.epoch], [null, 0], 'and started no attempt');
   assert.equal(dispatchable(held, now), false, 'so the loop holds it inside the window');
-  assert.equal(dispatchable(held, notBefore + 60_000), true, 'and dispatches it once the reading can exist');
+  assert.equal(dispatchable(held, notBefore + 60_000), false, 'and past the instant the loop\'s reading is owed, never a code worker (GY-1762)');
 });
 
 test('manual:intervention-pattern-escalation-build — GY-1722 when the intervention report projects its reading later than the merge-based bound: the derived window is the report\'s, so the follow-up is held until the reading can exist, not released at merge plus 7 days', { timeout: 300_000 }, async () => {
@@ -672,7 +672,7 @@ test('manual:intervention-pattern-escalation-build — GY-1722 when the interven
   assert.deepEqual([window?.notBefore, window?.basis], [projected, 'intervention-report'], 'create persists the report\'s bound, not the criterion\'s');
   assert.match(refusal ?? '', new RegExp(`can first exist at ${projected}`));
   assert.equal(dispatchable(filed, notBefore + 60_000), false, 'past the criterion bound the follow-up is still held');
-  assert.equal(dispatchable(filed, Date.parse(projected) + 60_000), true, 'and is dispatched once the report bound passes');
+  assert.equal(dispatchable(filed, Date.parse(projected) + 60_000), false, 'and past the report bound the reading is the loop\'s, never a code worker (GY-1762)');
   // A follow-up already ready without its window: the refused claim records the report's bound too.
   await store.pool.query(`UPDATE work_items SET document = document - 'observationWindow' WHERE id=$1`, [filed.id]);
   await assert.rejects(engine.execute(implementer, 'claim', filed.id, {}, randomUUID()), new RegExp(`can first exist at ${projected}`));
