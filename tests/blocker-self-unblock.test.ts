@@ -131,9 +131,10 @@ const incidents: [string, BlockerClass][] = [
   ["Cannot push: 'git push -u origin HEAD' was denied by the runtime permission prompt", 'runtime-denial'],
   ["Worker session's usage limit was reached before the rework could be verified", 'runtime-exhaustion'],
   ["git push failed: ! [remote rejected] HEAD -> graphyard/gy-1461-1 (Internal Server Error)", 'github-outage'],
+  ["Blocked command: graphyard master status in this worktree, error: '.graphyard/master.json does not exist: run graphyard install --apply, or graphyard master init --token-stdin'. The worker token holds no master role, so the checkout-restore cannot be issued or observed from here", 'master-role'],
 ];
 
-test('unit:blocker-classified — the 2026-09-30 blocker texts fall into their named classes, unrecognised text is genuine, and only genuine and human-only need someone', () => {
+test('unit:blocker-classified — the 2026-09-30 blocker texts fall into their named classes, unrecognised text is genuine, and only genuine, human-only and master-role need someone', () => {
   for (const [text, expected] of incidents) assert.equal(classifyBlocker(text).class, expected, text);
   assert.deepEqual([...new Set(incidents.map(([, expected]) => expected))].sort(), [...blockerClasses].sort(), 'every class is covered');
   // What each routine class carries for the loop to act on.
@@ -158,7 +159,7 @@ test('unit:blocker-classified — the 2026-09-30 blocker texts fall into their n
   assert.equal(classifyBlocker('anything at all', { humanRequest: true }).class, 'human-only');
   assert.equal(classifyBlocker('').class, 'genuine');
   assert.equal(classifyBlocker('Environment, not the item: the codex sandbox cannot write /srv/wt/.git/FETCH_HEAD, so required command \'sync GY-1\' failed: EROFS').path, '/srv/wt/.git/FETCH_HEAD');
-  for (const name of blockerClasses) assert.equal(needsSomeone(name), name === 'genuine' || name === 'human-only', name);
+  for (const name of blockerClasses) assert.equal(needsSomeone(name), name === 'genuine' || name === 'human-only' || name === 'master-role', name);
   assert.deepEqual([...environmentalBlockerClasses].sort(), ['control-plane-error', 'dispatch-failure', 'github-credential', 'github-outage', 'host-supervisor', 'outside-scope-test-failure', 'runtime-denial', 'runtime-exhaustion', 'sandbox-path', 'worktree-mismatch']);
 });
 
@@ -409,7 +410,7 @@ test('unit:scope-blocker-becomes-decision — a planned-file-scope blocker becom
   assert.equal((await reload(waiting.id)).blocker, null, 'cleared once no decision stands requested');
 });
 
-test('unit:blocked-board-shows-class — the board and master status show each blocked item\'s class, last probe and next probe, count only genuine and human-only as needing someone, and docs/master-agent.md names the classes', async () => {
+test('unit:blocked-board-shows-class — the board and master status show each blocked item\'s class, last probe and next probe, count only genuine, human-only and master-role as needing someone, and docs/master-agent.md names the classes', async () => {
   const loop = harness(() => { throw Object.assign(new Error('probe failed'), { stderr: 'fatal: could not read Username for https://github.com' }); });
   const state = emptyDaemonState(loopConfig());
   const routine = await block(await claimed('Board: credential'), `${incidents[0][0]} (board)`);
