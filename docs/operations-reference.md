@@ -48,7 +48,7 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 | `steady` | unchanged: 5min, stretched by fleet bound; review requests ≤10min
 | `idle` | awaiting dispatch/escalation: 5min, stretched
 
-Unchanged non-merge candidates spend **≤40%** (`steadyStateShare`).
+Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`).
 
 ### The merge-path reserve
 
@@ -56,11 +56,11 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ### What an observation costs
 
-~10 requests uncached; none unchanged.
+~10 requests uncached; unchanged, none.
 
 ### What a pause means for gates
 
-`403`/`429` pauses stop requests; gates read the last observation; GitHub merges on branch protection, recorded on resume ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
+`403`/`429` pauses stop requests; gates read the last observation until it lifts; GitHub merges on branch protection, recorded on resume ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
 
 ### Reading the budget
 
@@ -68,7 +68,7 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ### Webhook liveness
 
-`webhooks` checks receipts against GitHub's delivery log (cached 5min/15 tight; merged by delivery id into 48h of attempts in `github_cache`, surviving restarts): `lastAttemptAt`/`windowSince`/`coveredFrom`/`attemptsInWindow`/`failedAttempts`/`failedStatusCodes`/`deliveryLogAt`/`deliveryLogError`. `state`: `delivering` (<1h), `failing` (non-2xx; proved-foreign 403 excused), `quiet`, `answered` (2xx), `unverified` (read failed/`coveredFrom` after `windowSince`). Open PRs cite `https://github.com/settings/apps/APP-SLUG`.
+`webhooks` checks receipts against GitHub's delivery log (cached 5min/15; merged by delivery id into persisted 48h attempts): `lastAttemptAt`/`windowSince`/`coveredFrom`/`attemptsInWindow`/`failedAttempts`/`failedStatusCodes`/`deliveryLogAt`/`deliveryLogError`. `state`: `delivering` (<1h), `failing` (non-2xx; proved-foreign 403 excused), `quiet`, `answered` (2xx), `unverified` (read failed/`coveredFrom` after `windowSince`). Open PRs cite `https://github.com/settings/apps/APP-SLUG`.
 
 ## Control-plane resources
 
