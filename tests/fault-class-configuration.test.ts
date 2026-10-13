@@ -642,3 +642,39 @@ for (const instance of switchoverInstances) {
     assert.ok(configurationFaults(silent).some(fault => fault.subject === instance.subject), 'a fleet silent past the window is still reported');
   });
 }
+
+// GY-1765: the class's other three instances, each run against the serving release that recorded it and against the candidate.
+// Instances 3-4 were recorded by the release before GY-1761 (PR #1167's merge), whose classifier read the recorded master-role refusal as a genuine blocker and a setup fault for the operator.
+const servingRelease = '7eefa971614153c714fb46c6dcc4512ad4d36b8c';
+const gy1674Recorded = "Blocked command: graphyard master status in this worktree, error: '.graphyard/master.json does not exist: run graphyard install --apply'. The worker token holds no master role, so the checkout-restore cannot be issued or observed from here.";
+const gy1696Recorded = "blocked on epoch 2: AC-1 is a live observation that only a master-role session can record. Blocked command: graphyard master status in this worktree (GY-1696-2), error: '.graphyard/master.json does not exist: run graphyard install --apply, or graphyard master init --token-stdin'.";
+for (const [key, recorded] of [['GY-1674', gy1674Recorded], ['GY-1696', gy1696Recorded]] as const) {
+  test(`manual:fault-class-configuration — setup|${key}|2026-10-13T07:39:48.821Z: the serving release left its recorded master-role refusal to the operator; the candidate hands the step to a master-role identity`, async () => {
+    const { importAt } = await import('./helpers/base-tree.js');
+    const base = await importAt(servingRelease, 'src/model/blocker-class.ts');
+    const baseKind = await importAt(servingRelease, 'src/model/blocker-kind.ts');
+    const { classifyBlocker } = await import('../src/model/blocker-class.js');
+    const { blockerKind } = await import('../src/model/blocker-kind.js');
+    assert.equal(base.classifyBlocker(recorded).class, 'genuine', 'the serving release did not recognise the refusal: it stood as a blocker for the master to read');
+    assert.equal(base.needsSomeone(base.classifyBlocker(recorded).class), true);
+    assert.equal(classifyBlocker(recorded).class, 'master-role', 'the candidate classes it as the master-role step');
+    assert.equal(blockerKind(recorded), 'setup');
+    assert.notEqual(baseKind.blockerKind(recorded), blockerKind(recorded), 'the fault kind it is filed under changed with the classifier');
+  });
+}
+
+test('manual:fault-class-configuration — setup|setup|2026-10-12T22:43:03.250Z: run on the release serving then and on the candidate, a host with no install admin credential gets the same one-time administrator step, a credential only a person can issue', async () => {
+  const { importAt } = await import('./helpers/base-tree.js');
+  const { provisionReleaseFiling, releaseFilingAdministratorStep } = await import('../src/master/release-filing.js');
+  const base = await importAt('2fda1fb43a971b45238d2b93f7b52c02c27ca179', 'src/master/release-filing.ts');
+  const master = { url: 'https://graphyard.example', repository: 'owner/project' };
+  // The instance reproduces at the release serving it, and the candidate answers it the same way: the fault is the missing human credential, named once as the administrator's step, not a master retry.
+  for (const module of [base, { provisionReleaseFiling, releaseFilingAdministratorStep }]) {
+    const unavailable = await module.provisionReleaseFiling(master, { apply: true }, { adminToken: async () => null });
+    assert.equal(unavailable.state, 'unavailable');
+    assert.equal(unavailable.next, module.releaseFilingAdministratorStep('owner/project'));
+    const failed = await module.provisionReleaseFiling(master, { apply: true }, { adminToken: async () => { throw new Error('unreadable'); } });
+    assert.deepEqual([failed.state, failed.next], ['failed', 'graphyard master setup --apply'], 'a failure is retried by the loop\'s own setup run');
+  }
+  assert.equal((await provisionReleaseFiling(master, { apply: true }, { adminToken: async () => null })).next, (await base.provisionReleaseFiling(master, { apply: true }, { adminToken: async () => null })).next);
+});

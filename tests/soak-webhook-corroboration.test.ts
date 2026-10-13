@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { type Observation, type Work } from '../src/model.js';
 import { server } from '../src/server.js';
 import { GitHub, webhookDeliveryLogMs, webhookDeliveryPages } from '../src/github.js';
+import { GitHubCacheStore } from '../src/github-cache.js';
 import { type DaemonEffects, daemonEffects, emptyDaemonState, runCycle } from '../src/master-daemon.js';
 import { systemInvariants, invariantFaultKind } from '../src/model/invariants.js';
 import { type BudgetStatus, githubBudgetAttention } from '../src/cli/github-budget-attention.js';
@@ -82,6 +83,16 @@ test('unit:soak-invariants-hold — the real loop reads /api/status every cycle 
   const github = new GitHub({ repository, base: 'main', appId: 1234, installationId: INSTALLATION, privateKey: 'not-used' });
   Object.assign(github, { token: 'fixture-token', expires: Number.MAX_SAFE_INTEGER, appHeaders: () => ({ Authorization: 'Bearer fixture-app-jwt' }), appSlug: 'graphyard-owner-project' });
   github.fetch = log.fetch as typeof fetch;
+  // The plane's persisted cache (GY-1765): a restart drops the client's memory and builds a new store over the same table, so the delivery log the next read starts from is the persisted row.
+  let cache = new GitHubCacheStore(store.pool, 'soak-webhook', { flushMs: 1_000 });
+  await github.attachCache(cache);
+  const restarts = [3 * hour + 17 * minute, 9 * hour + 41 * minute, 14 * hour + 5 * minute, 17 * hour + 30 * minute, 20 * hour + 11 * minute];
+  const restart = async () => {
+    await cache.close();
+    cache = new GitHubCacheStore(store.pool, 'soak-webhook', { flushMs: 1_000 });
+    Object.assign(github, { deliveryLog: null, deliveryRead: null });
+    await github.attachCache(cache);
+  };
   const plane = server(engine, credentials, github);
   await new Promise<void>(resolve => plane.listen(0, '127.0.0.1', resolve));
   const planeUrl = `http://127.0.0.1:${(plane.address() as { port: number }).port}`;
@@ -102,7 +113,7 @@ test('unit:soak-invariants-hold — the real loop reads /api/status every cycle 
     await writeFile(credentialFile, token(principals.coordinator), { mode: 0o600 });
     const config = { ...soakConfig, url: planeUrl, credentialFile, workers: [] };
     const real = daemonEffects(root, config, { snapshot: async () => ({ work: await store.list(), now: new Date().toISOString() }), mutate: async () => ({}), run: async () => { throw new Error('no child processes in this soak'); } });
-    const seen: { elapsed: number; stretch: Stretch['name']; state: string; failedAttempts: number; statusMs: number; rows: string[] }[] = [];
+    const seen: { elapsed: number; stretch: Stretch['name']; state: string; failedAttempts: number; coveredFrom: string | null; statusMs: number; rows: string[] }[] = [];
     // The status the loop last read, and when it began: the rows and the stretch are judged against
     // that read, never a second one the wall-clock part of the simulated clock may carry past a cache
     // interval, and never at the cycle's time when the loop is still served a read in flight.
@@ -131,6 +142,7 @@ test('unit:soak-invariants-hold — the real loop reads /api/status every cycle 
         log.attempt(clock.now(), stretch.code);
         if (stretch.receipts) await receipt();
       }
+      if (restarts.includes(elapsed)) await restart();
       log.failing = 'logFails' in stretch;
       Object.assign(github, { blockedUntil: 'paused' in stretch ? dayStart + stretch.to : 0 });
       const before = state.faults.observedAt;
@@ -139,7 +151,7 @@ test('unit:soak-invariants-hold — the real loop reads /api/status every cycle 
       if (state.faults.observedAt !== before && cycleStatus) {
         const status = cycleStatus.value, readAt = cycleStatus.at - dayStart;
         const rows = state.faults.instances.filter(entry => entry.subject === 'github' && Object.values(state.faults.open).includes(entry.id)).map(entry => (entry as { text?: string }).text ?? entry.kind);
-        seen.push({ elapsed: readAt, stretch: stretchAt(readAt).name, state: status.webhooks.state, failedAttempts: status.webhooks.failedAttempts, statusMs, rows });
+        seen.push({ elapsed: readAt, stretch: stretchAt(readAt).name, state: status.webhooks.state, failedAttempts: status.webhooks.failedAttempts, coveredFrom: status.webhooks.coveredFrom ?? null, statusMs, rows });
       }
       clock.advance(minute); await store.pool.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]);
     }
@@ -177,6 +189,15 @@ test('unit:soak-invariants-hold — the real loop reads /api/status every cycle 
     assert.ok(unverified.length && unverified.every(entry => entry.rows.some(row => /could not be read/.test(row)) && !entry.rows.some(row => /broken/.test(row))), 'an unreadable or paused log raises the unverified row, never the broken one');
     assert.ok(settled.filter(entry => entry.stretch === 'redelivering').every(entry => !rowed(entry)), 'a delivery that arrives clears the row');
 
+    // Restarts: the log a restarted plane starts from is the persisted row, so the corroboration never falls back to the window since the restart.
+    // A read of the quiet stretch before the last receipt's hour has gone is the one a restart could have narrowed; none reads covered only since a restart.
+    const restartedAt = restarts.map(at => dayStart + at);
+    assert.deepEqual(seen.filter(entry => entry.coveredFrom && restartedAt.some(at => Math.abs(Date.parse(entry.coveredFrom!) - at) < 2 * webhookDeliveryLogMs)).map(entry => `+${entry.elapsed / minute} min covered from ${entry.coveredFrom}`), [], 'no reading covers only the window since a restart');
+    const finalReads = seen.filter(entry => entry.elapsed >= 22 * hour);
+    assert.ok(finalReads.length && finalReads.every(entry => entry.coveredFrom === null || Date.parse(entry.coveredFrom) <= dayStart + 22 * hour - 24 * hour + 6 * hour + hour), `the end of the day reads the day's coverage across ${restarts.length} restarts: ${JSON.stringify(finalReads.slice(-1))}`);
+    const persisted = await store.pool.query(`SELECT count(*)::int AS rows FROM github_cache WHERE key LIKE 'soak-webhook:deliveries:%'`);
+    assert.equal(persisted.rows[0].rows, 1, 'the delivery log is one persisted row however many cycles, items and restarts');
+
     // No churn: one standing fault per episode, not one per cycle.
     const webhookInstances = state.faults.instances.filter(entry => entry.subject === 'github' && /webhook/.test((entry as { text?: string }).text ?? ''));
     assert.ok(webhookInstances.length >= 2 && webhookInstances.length <= 8, `the row opened once per episode, not per cycle: ${webhookInstances.length} instances`);
@@ -186,6 +207,7 @@ test('unit:soak-invariants-hold — the real loop reads /api/status every cycle 
     assert.deepEqual(state.faults.instances.filter(entry => invariantKinds.has(entry.kind)).map(entry => `${entry.kind} at ${entry.at}`), [], 'every system invariant holds');
   } finally {
     await new Promise<void>(resolve => plane.close(() => resolve()));
+    await cache.close();
     delete process.env.GITHUB_WEBHOOK_SECRET;
   }
 });
