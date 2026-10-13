@@ -661,7 +661,7 @@ test('integration:mechanical-plan-report-blocks-decision — an item whose plann
   for (let step = 0; step < 3; step++, now += 2 * minute) await daemon.runCycle(config(), state, effects, () => now);
   assert.ok(decisions().length > before, 'once the report lands the round forms its decision');
 });
-test('integration:mechanical-plan-report-clear-blocks-decision — a held plan the ledger no longer carries, whose clearing cannot be reported, owes no decision and does not hold the item's decisions', async () => {
+test('integration:mechanical-plan-report-clear-blocks-decision — a held plan the ledger no longer carries, whose clearing cannot be reported, owes no decision and does not hold its decisions', async () => {
   const { mechanicalReviewHold } = await import('../src/mechanical-findings.js');
   const minute = 60_000, start = Date.parse('2026-10-13T08:00:00.000Z');
   const iso = (at: number) => new Date(at).toISOString();
