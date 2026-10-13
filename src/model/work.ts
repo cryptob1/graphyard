@@ -101,17 +101,19 @@ export function observationWindowHold(work: { observationWindow?: ObservationWin
  * GY-1762: what a loop-owned observation item waits for, or null. A system-driven item whose every
  * criterion is a manual post-deploy proof (declared `manual:post-deploy/…` or a follow-up's
  * `…-on-serving-release`) has no code for a worker to write: its only work is the live reading the
- * loop records. It waits for that reading, or for its observation window to close, and holds no
- * worker; with a code criterion, or any other proof, it is dispatched as before.
+ * loop records. It holds no worker while the reading is unrecorded: before its observation window
+ * closes it waits for the instant (`due: false`); from then on, or with no window, the reading is
+ * owed now (`due: true`) and the item is escalated for it, never dispatched. Only a recorded trusted
+ * reading ends the wait. With a code criterion, or any other proof, it is dispatched as before.
  */
-export function loopObservation(work: Pick<Work, 'systemDriven' | 'criteria' | 'evidence' | 'stage'> & { observationWindow?: ObservationWindow | null }, now: Date): { waitingFor: string } | null {
+export function loopObservation(work: Pick<Work, 'systemDriven' | 'criteria' | 'evidence' | 'stage'> & { observationWindow?: ObservationWindow | null }, now: Date): { waitingFor: string; due: boolean } | null {
   if (work.systemDriven !== true || work.stage === 'done' || !work.criteria.length) return null;
   const proofs = work.criteria.flatMap(criterion => criterion.proofs);
   if (!proofs.length || work.criteria.some(criterion => !criterion.proofs.length) || !proofs.every(proof => postDeployProof(proof) || servingReleaseProof(proof))) return null;
   const window = work.observationWindow;
-  if (window && Date.parse(window.notBefore) <= now.getTime()) return null;
   if (proofs.every(proof => work.evidence.some(entry => entry.proof === proof && entry.trusted && !entry.revocation))) return null;
-  return { waitingFor: window ? `the loop's reading of ${proofs.join(', ')}, which can first exist at ${window.notBefore} (${window.detail})` : `the loop's reading of ${proofs.join(', ')} on the serving release` };
+  const due = !window || Date.parse(window.notBefore) <= now.getTime();
+  return { due, waitingFor: due ? `the loop's reading of ${proofs.join(', ')} on the serving release, which is owed now` : `the loop's reading of ${proofs.join(', ')}, which can first exist at ${window!.notBefore} (${window!.detail})` };
 }
 // The `decision:*` capabilities request a two-party decision (see model/approval.ts); an agent
 // holding one still needs a second, independent agent holding `decision:approve` to apply it.

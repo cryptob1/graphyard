@@ -271,7 +271,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : mergeRefusal ? [`GitHub refused the merge request for ${work.key} at ${mergeRefusal.head.slice(0, 12)} since ${mergeRefusal.at}: ${mergeRefusal.reason}`, 'merge-refused']
       : baseRefresh && !work.blocker ? [null, null]
       // A follow-up held on its observation window (GY-1698) is waiting for the instant, not stalled at its gate.
-      : (observationWindow?.waiting || observing) && !work.blocker && !active ? [null, null]
+      : (observationWindow?.waiting || (observing && !observing.due)) && !work.blocker && !active ? [null, null]
       : work.blocker || dwellMs > 3_600_000 ? [first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour`, 'gate'] : [null, null];
     const attentionOwner = cause ? workAttentionOwner(work, cause, now) : null;
     if (cause) causes.set(work.key, cause);
@@ -282,7 +282,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // The observation window a windowed post-deploy follow-up carries (GY-1698): `waiting` while it holds the dispatch.
       observationWindow,
       // The loop's observation an all-manual post-deploy item waits for (GY-1762): counted as waiting, never ready.
-      observing: observing ? observing.waitingFor : null,
+      observing: observing ? observing.waitingFor : null, observationDue: !!observing?.due,
       // Set only for an item GitHub merged though its gates had not passed: the merge, the violation and
       // the last refused reconciliation, so the row reads as stuck rather than as a candidate.
       merged,

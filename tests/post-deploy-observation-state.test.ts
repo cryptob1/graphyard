@@ -32,7 +32,7 @@ test('unit:observation-item-not-dispatched — the dispatcher skips an all-manua
   assert.equal(dispatchable(withCode, now), true);
   assert.equal(dispatchable(handDriven, now), true);
   assert.deepEqual(dispatchSchedule([observing, withCode, handDriven], now).order.map(entry => entry.key).sort(), ['GY-2', 'GY-3']);
-  assert.equal(nextAction(observing, [observing], new Date(now))?.kind, undefined);
+  assert.notEqual(nextAction(observing, [observing], new Date(now))?.kind, 'dispatch');
   assert.equal(nextAction(withCode, [withCode], new Date(now))?.kind, 'dispatch');
 });
 
@@ -47,10 +47,15 @@ test('unit:observation-item-counted-waiting — it counts as waiting with what i
   assert.match(row('GY-4').observing!, new RegExp(`first exist at ${iso(now + 6 * hour)}`));
   assert.equal(row('GY-2').observing, null);
 
-  // The wait ends when the loop records the reading, or when the window closes.
+  // The window closing makes the reading owed, not the item dispatchable: only a recorded trusted reading ends the wait.
   const read = item(5, { evidence: [{ proof: 'manual:post-deploy/rate-on-serving-release', trusted: true }] as never });
   assert.equal(loopObservation(read, new Date(now)), null);
-  assert.equal(loopObservation(windowed, new Date(now + 7 * hour)), null);
+  assert.deepEqual((loopObservation(windowed, new Date(now + 7 * hour)) as { due: boolean }).due, true);
+  assert.deepEqual((loopObservation(windowed, new Date(now)) as { due: boolean }).due, false);
+  const later = new Date(now + 7 * hour);
+  assert.equal(dispatchable(windowed, later.getTime()), false);
+  assert.equal(nextAction(windowed, [windowed], later)?.kind, 'escalate');
+  assert.equal(nextAction(item(1), [item(1)], new Date(now))?.kind, 'escalate', 'an unwindowed one owes its reading at once');
   const after = buildMasterStatus({ now: iso(now + 7 * hour), work: [windowed, read] } as never, [], []);
-  assert.deepEqual([after.counts.ready, after.counts.waiting], [2, 0]);
+  assert.deepEqual([after.counts.ready, after.counts.waiting], [1, 1]);
 });

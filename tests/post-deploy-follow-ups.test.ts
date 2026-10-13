@@ -259,19 +259,30 @@ test('unit:observation-window-holds-dispatch — a released follow-up is not dis
   const stale = buildMasterStatus({ work: [gy1685, unwindowed], now: '2026-10-14T06:39:55.000Z' }, [], []).work.find(entry => entry.key === 'GY-1689')!;
   assert.equal(stale.attention, 'Worker has not submitted implementation for this attempt');
 
-  // Once the instant passes the same computation names the dispatch, and the queue requests it as Graphyard: no master session.
+  // Once the instant passes a hand-driven one is named a dispatch, and the queue requests it as Graphyard: no master session.
+  const hand = released(releasedAt, { systemDriven: false }), handAll = [gy1685, hand];
   for (const at of [notBefore, '2026-10-18T09:00:00.000Z']) {
-    const account = actionAccount(item, all, new Date(at));
+    const account = actionAccount(hand, handAll, new Date(at));
     assert.equal(account.action?.kind, 'dispatch', `dispatched at ${at}`);
     assert.deepEqual(account.action!.inputs, { kind: 'dispatch', target: 'implementation', epoch: 0, priority: 1, plannedFiles: [] });
-    const queued = { ...item, actionQueue: { actions: [], history: [] } } as Work;
+    const queued = { ...hand, actionQueue: { actions: [], history: [] } } as Work;
     const transitions = reconcileActions(queued, [gy1685, queued], new Date(at));
     assert.deepEqual(transitions.map(entry => [entry.event, entry.action.kind, entry.action.requestedBy]), [['requested', 'dispatch', 'graphyard']]);
-    assert.equal(dispatchable(item, Date.parse(at)), true, `dispatchable at ${at}`);
-    assert.doesNotThrow(() => assertDispatchable(item, all, at));
+    assert.equal(dispatchable(hand, Date.parse(at)), true, `dispatchable at ${at}`);
+    assert.doesNotThrow(() => assertDispatchable(hand, handAll, at));
     const later = buildMasterStatus({ work: all, now: at }, [], []).work.find(entry => entry.key === 'GY-1689')!;
     assert.equal(later.observationWindow!.waiting, false);
-    assert.equal(plainStatus(item, Date.parse(at)).sentence, 'Waiting for someone to pick this up');
+    assert.equal(plainStatus(hand, Date.parse(at)).sentence, 'Waiting for someone to pick this up');
+  }
+  // GY-1762: the system-driven one is never dispatched, even once its window has closed: the reading is owed
+  // to the loop (an escalation), the item stays counted waiting, and only a recorded trusted reading ends that.
+  for (const at of [notBefore, '2026-10-18T09:00:00.000Z']) {
+    const account = actionAccount(item, all, new Date(at));
+    assert.equal(account.action?.kind, 'escalate', `owed, not dispatched, at ${at}`);
+    assert.equal(dispatchable(item, Date.parse(at)), false, `not dispatchable at ${at}`);
+    assert.throws(() => assertDispatchable(item, all, at), /Dispatch waits for the loop's observation/);
+    const later = buildMasterStatus({ work: all, now: at }, [], []);
+    assert.deepEqual([later.counts.ready, later.counts.waiting], [0, 1]);
   }
   // A worker holding the item is the session the build gate waits for, window or none; the hold never offers it to a second worker.
   const leased = { ...item, epoch: 1, lease: { owner: 'graphyard-codex-1', epoch: 1, expiresAt: '2026-10-11T07:10:00.000Z' } } as Work;
@@ -297,11 +308,12 @@ test('unit:observation-window-holds-dispatch — a released follow-up is not dis
     assert.deepEqual([entry.observationWindow!.waiting, entry.observationWindow!.notBefore, entry.attention], [true, live, null]);
     assert.equal(plainStatus(gy1724, Date.parse(at)).sentence, `Waiting for its observation window — the reading it owes can first exist at ${live}`);
   }
+  // GY-1762: past the instant the reading is owed to the loop; the item is escalated for it, never dispatched.
   for (const at of [live, '2026-10-13T08:00:00.000Z']) {
-    assert.equal(actionAccount(gy1724, pair, new Date(at)).action?.kind, 'dispatch', `GY-1724 is dispatched at ${at}`);
+    assert.equal(actionAccount(gy1724, pair, new Date(at)).action?.kind, 'escalate', `GY-1724's reading is owed at ${at}`);
     const queued = { ...gy1724, actionQueue: { actions: [], history: [] } } as Work;
-    assert.deepEqual(reconcileActions(queued, [gy1700, queued], new Date(at)).map(entry => [entry.event, entry.action.kind, entry.action.requestedBy]), [['requested', 'dispatch', 'graphyard']]);
-    assert.doesNotThrow(() => assertDispatchable(gy1724, pair, at));
+    assert.ok(reconcileActions(queued, [gy1700, queued], new Date(at)).every(entry => entry.action.kind !== 'dispatch'));
+    assert.throws(() => assertDispatchable(gy1724, pair, at), /Dispatch waits for the loop's observation/);
   }
 });
 

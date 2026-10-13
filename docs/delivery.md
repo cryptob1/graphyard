@@ -78,4 +78,4 @@ Only complete listings verify (`POST /api/delivery/notify` hints); sweeps (`grap
 
 `POST /api/validation/result` binds manifest, signature, measurements; mismatches record `attribution-undermined`, voiding passes (`GET /api/analytics/attribution`).
 
-An all-manual post-deploy systemDriven item is never dispatched: `master status` counts it `waiting`.
+A systemDriven item whose criteria are all manual post-deploy proofs is never dispatched: `master status` counts it `waiting` until a trusted reading is recorded; before its window closes it waits for the instant, after it the queue names the reading owed (`escalate`).
