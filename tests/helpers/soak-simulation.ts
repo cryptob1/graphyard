@@ -5,6 +5,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { wakeFromWebhook } from '../../src/store.js';
+import { closeWork } from '../../src/server/close.js';
 import { GitHub, idleObservationSeconds, processJob } from '../../src/github.js';
 import { GitHubCacheStore } from '../../src/github-cache.js';
 import { GitHubChargeLedger } from '../../src/github-charges.js';
@@ -317,7 +318,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * 98070f3538 filed GY-1721..GY-1725); the served release's isolated checkout carries the current filer.
    * `windowHours` makes the criterion a live window of that many hours instead of a rate per `windowDays`.
    */
-  observationWindow?: { item: number; windowDays: number; filedAfterMs: number; unwindowed?: boolean; staleCoordinator?: boolean; windowHours?: number };
+  observationWindow?: { item: number; windowDays: number; filedAfterMs: number; unwindowed?: boolean; staleCoordinator?: boolean; windowHours?: number;
+    /** GY-1762: the intervention report reads the pattern under its threshold (since the parent's merge) only `lagMs` after the follow-up's reading can first exist; the loop then takes the reading and closes the follow-up. */
+    reads?: { lagMs: number } };
   /**
    * GY-1740: one post-deploy follow-up per entry of `hours`, filed as verify-deployment files them and
    * blocked by its first worker on a reading that cannot exist before the day's start plus that many
@@ -1878,6 +1881,14 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     ...(hostDay ? { healHostSupervision: allow => healUserSupervision(hostDay.root, { systemctl: hostSystemctl, loginctl: hostLoginctl, masked: () => false, platform: 'linux',
       wait: async ms => { fenced.drift += ms; await moveClock(ms); } }, allow) } : {}),
     measureThroughput,
+    ...(options.observationWindow?.reads ? {
+      readPattern: async () => {
+        const parent = (await store.list()).find(item => item.id === windowDay!.parent.id), follow = windowDay!.followUp;
+        const readable = !!parent?.delivery && !!follow?.observationWindow && clock.now() >= Date.parse(follow.observationWindow.notBefore) + options.observationWindow!.reads!.lagMs;
+        return { since: readable ? parent!.delivery!.mergedAt : null, projected: null };
+      },
+      closeObservation: async (item: Work, reason: string, key: string) => closeWork({ engine, repository, principals: everyone } as never, principals.operatorAgent, item.id, { kind: 'obsolete', reason }, key) as Promise<Work>,
+    } : {}),
     agents: () => { finishDuringCycle(); return headless ? withRunnerAgents(herdr.list()) as ReturnType<SimulatedHerdr['list']> : herdr.list(); },
     herdr: () => ({ agents: headless ? withRunnerAgents(herdr.list()) as ReturnType<SimulatedHerdr['list']> : herdr.list(), available: true }),
     ...(headless ? { adoptRuns: () => adoptRuns(headless.root, { approver: async owner => ({ options: approverRunOptions('', String(owner.context.decision), {}, 30 * minute),
@@ -3238,7 +3249,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
             release: () => ({ sha: staleCoordinatorSha, clean: true, repository: 'owner/project', reason: null }),
             emit: async () => assert.fail('the coordinator checkout behind the release emits nothing'),
             isolate: async sha => ({ release: { sha, clean: true, repository: 'owner/project', reason: null }, emit: async () => loopInstructions, checks: localPostDeployChecks, dispose: async () => {} }),
-            checks: staleFiler, record: async () => {}, file: file as never, patterns,
+            checks: staleFiler, record: async () => {}, file: file as never, releaseWork: async () => {}, patterns,
           });
           assert.equal(verified.result, 'verified', verified.refusals.join('; '));
           windowDay.staleFilings += 1;

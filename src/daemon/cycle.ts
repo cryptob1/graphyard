@@ -21,6 +21,7 @@ import { baseFailureStep } from './cycle-base-failures.js';
 import { flakeStep } from './cycle-flakes.js';
 import { reviewCapStep } from './cycle-review-cap.js';
 import { deploymentStep, mergeStep, shepherdStep } from './cycle-delivery.js';
+import { observationStep } from './cycle-observation.js';
 import { faultStep } from './faults.js';
 import { doctorStep } from './doctor.js';
 import { triageBacklogStep } from './cycle-triage.js';
@@ -272,6 +273,8 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   spent('merge');
 
   await timings.step('deployment verification', () => deploymentStep(cycle));
+  // 7a'. The reading a loop-owned post-deploy observation item owes (GY-1762): taken from the intervention report, closing the item.
+  await timings.step('observations', () => cycle.isolate('deployment', null, 'observation readings', () => observationStep(cycle)));
   // 7a''''. The main watch (GY-1519): main's first-parent history since the last promotion, read from
   //         the coordinator checkout, classified against the merge ledger, deliveries, reverts and
   //         direct-merge windows; an unknown commit is reported once, and freezes promotion when asked.
