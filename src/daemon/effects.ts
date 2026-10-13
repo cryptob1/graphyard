@@ -56,8 +56,7 @@ import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from 
 import { decisionEventKinds } from './decision-reads.js';
 import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
 import { derivePlannedFiles, plannedFilesRefusal } from '../model/planned-files.js';
-import { baseTree } from '../cli/planned-files-intent.js';
-import { currentBaseTree } from '../executor.js';
+import { baseTree } from '../cli/planned-files-intent.js'; import { currentBaseTree } from '../executor.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
