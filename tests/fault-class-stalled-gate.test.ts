@@ -158,6 +158,9 @@ test('the master-role refusal is its own blocker class, handed to a master-role 
   for (const text of [
     "'.graphyard/master.json does not exist: run graphyard install --apply, or graphyard master init --token-stdin'",
     'The worker token holds no master role, so the checkout-restore cannot be issued or observed from here',
+    'The worker token has no master role, so the checkout-restore cannot be issued',
+    'no master role',
+    'Blocked: this identity has No Master Role here',
     'Needs a master-role session to observe and record manual:checkout-restore-clears-dirty-checkout-on-serving-release',
   ]) {
     assert.equal(classifyBlocker(text).class, 'master-role', text);

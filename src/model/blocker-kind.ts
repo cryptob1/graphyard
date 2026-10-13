@@ -21,6 +21,6 @@ export function blockerKind(blocker: string): 'sandbox-blocker' | 'workflow-perm
   // stalled gate. Restated here, not imported: fault-classes (browser-safe) reads this module, and the
   // import would close a module-init cycle through blocker-class → human-request → approval → work.
   // tests/fault-class-stalled-gate.test.ts holds the two patterns together.
-  if (/\.graphyard\/master\.json does not exist|\bholds no master role\b|\bmaster-role session\b/i.test(blocker)) return 'setup';
+  if (/\.graphyard\/master\.json does not exist|\bno master role\b|\bmaster-role session\b/i.test(blocker)) return 'setup';
   return 'blocker';
 }

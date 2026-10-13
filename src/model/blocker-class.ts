@@ -129,7 +129,7 @@ const decisionWait = /\b(?:needs?|await\w*|waits?|waiting|requested|pending|laun
  * master-role session a criterion names as its only route. The worker that met it cannot retry past it and no probe can grant
  * the role, so the class is a hand-off: a master-role identity takes the step itself, then unblocks the item.
  */
-export const masterRoleBlocker = /\.graphyard\/master\.json does not exist|\bholds no master role\b|\bmaster-role session\b/i;
+export const masterRoleBlocker = /\.graphyard\/master\.json does not exist|\bno master role\b|\bmaster-role session\b/i;
 const commitToken = /\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{7,40}\b/g;
 // After the word "commit" any abbreviation is one, all digits or all letters included.
 const namedCommit = /\bcommit\s+([0-9a-f]{7,40})\b/gi;
