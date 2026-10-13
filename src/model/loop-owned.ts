@@ -41,7 +41,7 @@ export const loopOwnedRefusal = (work: Pick<Work, 'key' | 'criteria' | 'plannedF
  * next action names who records the reading. Any other cause on the same item is actionable — an unrelated failure, or a fault a named remedy could answer (a configuration missing and
  * owed its restore) — so its blocker stands for whoever can act on it, however the item is shaped.
  */
-const workerCannotServe = /\bnot a worker\b|\bcannot\b[^.\n]{0,80}\bby a worker\b|\bworker token holds no master role\b|\bfrom a worker session\b|\bobtainable from this sandbox\b|\bneeds? a master(?:-role)?\b|\bmaster-role session\b|\ba worker does not hold\b|\bbrowser sign-in\b|\boperator-supplied\b/i;
+const workerCannotServe = /\bnot a worker(?:'s)?(?=\s*(?:[(,;:]|\.(?:\s|$)|$|to\b|reading\b|observation\b|proof\b|authority\b))|\bcannot\b[^.\n]{0,80}\bby a worker\b|\bworker token holds no master role\b|\bfrom a worker session\b|\bobtainable from this sandbox\b|\bneeds? a master(?:-role)?\b|\bmaster-role session\b|\ba worker does not hold\b|\bbrowser sign-in\b|\boperator-supplied\b/i;
 
 /**
  * GY-1768: whether an item with a standing worker blocker has nothing left for a worker: it is loop-owned (GY-1760) or only waits for the loop's own post-deploy reading (GY-1762), no

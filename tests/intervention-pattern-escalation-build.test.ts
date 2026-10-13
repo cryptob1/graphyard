@@ -867,6 +867,7 @@ for (const key of ['GY-1696', 'GY-1674'] as const) for (const replayBase of repl
     const mastered = owned('manual:checkout-restore-clears-drift-pin-on-serving-release');
     for (const [standing, why] of [
       ['.graphyard/master.json does not exist: run graphyard install --apply', 'the master checkout configuration actually missing: the restore it names is owed, so the report is actionable'],
+      ['This is not a worker limitation; the production webhook is returning invalid data and the delivery handler must be fixed.', 'a negated mention of a worker is a genuine fault, not the worker\'s inability'],
       ['npm run build failed: FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory', 'an unrelated failure of the item itself'],
     ] as const) {
       assert.equal(needsSomeone(classOf(standing)), true, standing);
