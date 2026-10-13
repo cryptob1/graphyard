@@ -1231,7 +1231,10 @@ export class Engine {
       if (command !== 'create' && !containmentCleanup.includes(command) && !postDeployment && !deliveredSessionClosure) demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
       if (command === 'mechanicalplan') {
         demand(['coordinator', 'admin'].includes(actor.role), 'Coordinator permission required', 403);
-        work.mechanicalPlan = data.planned ? { reviewId: data.reviewId, head: data.head } : null;
+        // `at` is the control plane's own instant of the report: the review gate holds only while the loop
+        // confirmed the plan this recently, so a report whose write or ledger read keeps failing cannot
+        // keep holding a head the ledger no longer plans a round for (GY-1764).
+        work.mechanicalPlan = data.planned ? { reviewId: data.reviewId, head: data.head, at: now.toISOString() } : null;
       }
       if (command === 'rereview') {
         if (actor.role !== 'admin') { demand(actor.role === 'worker', 'Worker or operator required', 403); activeLease(work, actor, data.epoch, now); }
@@ -1653,7 +1656,10 @@ export class Engine {
             // the same one the loop's `autoscope` computes — recomputed from the item's own
             // criteria — so asking and answering in one transaction grants the asker nothing.
             // The `scope` command stays the path for a session that keeps working while it waits.
-            decision = applyScopeDecision(work, work.scopeRequest, now);
+            // GY-1764: the asker's own reading of which of its paths are no repository file rides
+            // with it, validated and refuse-only exactly as the loop's report is, so this verdict
+            // refuses the ask as its own and never leaves it routable to the approver.
+            decision = applyScopeDecision(work, work.scopeRequest, now, work, { nonRepository: nonRepositoryRead(data.nonRepository, data.paths ?? []) });
             request.state = 'resolved'; request.resolvedAt = now.toISOString();
             request.resolution = `${decision.state}: ${decision.reason}`;
           }

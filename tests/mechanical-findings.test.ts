@@ -5,7 +5,7 @@ import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { appliedMechanicalRework, botCommitSubject, botCommitSubjectPattern, classifyFinding, judgeBotCommit, mechanicalFixPlan, mechanicalFixRequests, mechanicalRoundStartMs, parseClassifiedFindings, planMechanicalFix, readMechanicalFixRequests, verifyBotCommit, type BotCommitObservation, type MechanicalFixPlan } from '../src/mechanical-findings.js';
+import { appliedMechanicalRework, botCommitSubject, botCommitSubjectPattern, classifyFinding, judgeBotCommit, mechanicalFixPlan, mechanicalFixRequests, mechanicalPlanFreshMs, mechanicalRoundStartMs, parseClassifiedFindings, planMechanicalFix, readMechanicalFixRequests, verifyBotCommit, type BotCommitObservation, type MechanicalFixPlan } from '../src/mechanical-findings.js';
 import { evaluate } from '../src/model/gates.js';
 import { refusalAction } from '../src/model/refusal-mapping.js';
 import { gateRefusalCatalogue } from '../src/model/refusal-catalogue.js';
@@ -19,7 +19,7 @@ import { interventionKinds, interventionPolicyDefaults, interventionRecordSchema
 import type { Observation, Work } from '../src/model.js';
 import { expandTypedCommand, requestOf, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): the 2026-09-30 commit and verdict instants are already past their 60-minute mechanical bound and only recorded; the holds asserted come from approvals stamped new Date() and judged at Date.now().
+// Time-bomb allowance (GY-1694): the 2026-09-30 commit and verdict instants are already past their 60-minute mechanical bound and only recorded; the holds asserted come from approvals stamped new Date() and judged at Date.now(). The plan report's stamps (planOf, and the hold-freshness test's one Date.now() every plan instant derives from) are the loop's own report of a ledger the test just read, judged against the same reading.
 
 // GY-971. A review finding is mechanical (typo, docs placement, formatting, naming) or substantive
 // (behaviour, criteria, scope). An approved head's mechanical findings become one worker-class bot
@@ -103,10 +103,10 @@ const recordOf = (records: ReviewRecord[], sha: string) => records.find(record =
 /** An approval of `sha` as the observation records it: `mechanical` counts its nits classified mechanical (none on a bot commit's head). */
 const approvalOf = (sha: string, id: number, mechanical?: number, submittedAt = new Date().toISOString()) => ({ reviewer, sha, state: 'APPROVED', id, submittedAt, ...(mechanical ? { mechanical } : {}) });
 /** The review gate's refusals for the item at `now`: what GitHub's merge of the head waits on. */
-/** The item as the control plane holds it once the loop has reported the ledger's plan for its candidate (what the loop's plan report does). */
+/** The item as the control plane holds it once the loop has reported the ledger's plan for its candidate (what the loop's plan report does); the plane stamps `at` on the report it accepts. */
 const planOf = (work: Work, requests: readonly { key: string; head: string; reviewId: number }[]): Work => {
   const plan = requests.find(request => request.key === work.key && request.head === work.candidate?.sha);
-  return { ...work, mechanicalPlan: plan ? { reviewId: plan.reviewId, head: plan.head } : null };
+  return { ...work, mechanicalPlan: plan ? { reviewId: plan.reviewId, head: plan.head, at: new Date().toISOString() } : null };
 };
 const reviewRefusals = (work: Work, now = Date.now()) => evaluate(work, [work], new Date(now), []).gates.find(gate => gate.name === 'review')!.reasons;
 
@@ -369,12 +369,18 @@ test('unit:mechanical-mislabel-caught — a substantive finding misclassified as
 
 // GY-1764. The review gate's hold and the decision step's rework read one source: a planned fix for the approval in the review ledger.
 const planned901 = { key: 'GY-7', pr: 7, head: H, reviewId: 901, epoch: 1, at: '2026-09-30T12:00:00.000Z', mechanical: [], substantive: [], paths: ['docs/widget.md'] };
-test('unit:mechanical-hold-requires-planned-fix — an approval naming mechanical nits holds its head only while the ledger holds a planned fix for that approval', () => {
+test('unit:mechanical-hold-requires-planned-fix — an approval naming mechanical nits holds its head only while the ledger holds a planned fix for that approval, confirmed this cycle', () => {
+  const now = Date.now();
   const nitted = item(H, 1, [approvalOf(H, 901, 4)]);
   assert.equal(reviewRefusals(nitted).length, 0, 'the observation alone holds nothing');
-  assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 900, head: H } }).length, 0, 'a plan for another approval holds nothing');
-  assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 901, head: B } }).length, 0, 'a plan for another head holds nothing');
-  assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 901, head: H } }).length, 1, 'a planned fix for this approval holds the head');
+  assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 900, head: H, at: new Date(now).toISOString() } }).length, 0, 'a plan for another approval holds nothing');
+  assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 901, head: B, at: new Date(now).toISOString() } }).length, 0, 'a plan for another head holds nothing');
+  assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 901, head: H, at: new Date(now).toISOString() } }).length, 1, 'a planned fix for this approval holds the head');
+  // GY-1764 rework: the projection is the loop's report of the ledger, and the gate holds only while the loop
+  // could confirm it. A plan whose confirmation instant is past `mechanicalPlanFreshMs` — the loop's write
+  // refused, its ledger read failing — holds nothing, so the head is not held a review the ledger no longer plans.
+  assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 901, head: H, at: new Date(now - mechanicalPlanFreshMs - 60_000).toISOString() } }).length, 0, 'a stale confirmation holds nothing');
+  assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 901, head: H, at: 'not-a-date' } }).length, 0, 'an unstamped projection holds nothing');
 });
 
 test('unit:mechanical-hold-released-without-plan — an approval whose follow-ups were filed, whose fresh read exists or whose plan read failed holds nothing and owes no request-rework', () => {

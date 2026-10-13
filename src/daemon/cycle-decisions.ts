@@ -17,6 +17,7 @@ import {
 import { candidateMovedMeanwhile, decisionFailureKind, decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication, selfHealingDecisionFailure } from './decision-reads.js';
 import { refusedAttestationWatch, type RefusedAttestation } from '../model/rework-ground.js';
 import { record } from './effects.js';
+import { mechanicalPlanFreshMs } from '../mechanical-findings.js';
 import { adoptedWatch, refusedOnOtherGrounds } from './rework-grounds.js';
 import type { FaultKind } from '../model/fault-classes.js';
 import type { Cycle } from './cycle.js';
@@ -425,12 +426,19 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const noteHold = async (item: Work, { wait: detail, deadline }: { wait: string; deadline: string }) => { const bound = Date.parse(deadline); const waitKey = `wait:docs-sync:${item.id}`; if (bound >= clock) bounds.set(item.id, bound + clockOffset.max); if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
   const mechanical = effects.mechanicalFixes ? await effects.mechanicalFixes().then(read => read.requests, () => []) : []; // GY-971 planned bot rounds
   // GY-1764: the review gate holds an approved head for its bot round only on the plan the ledger holds, so the loop reports it: the plan for the item's candidate, or its absence once the plan settles.
+  // A projection the loop last confirmed within `mechanicalPlanFreshMs` is current; an older one is
+  // re-reported, so the gate never holds on evidence a failed write or ledger read left stale — and
+  // a report that cannot be written is a visible, retried failure, never a silent one.
   if (effects.recordMechanicalPlan && effects.mechanicalFixes) for (const item of snapshot.work) {
     if (item.stage === 'done' || !item.candidate) continue;
     const plan = mechanical.find(entry => entry.key === item.key && entry.head === item.candidate!.sha && entry.pr === item.candidate!.pr && entry.epoch === item.epoch);
     const wanted = plan ? { reviewId: plan.reviewId, head: plan.head } : null, held = item.mechanicalPlan ?? null;
-    if (wanted?.reviewId === held?.reviewId && wanted?.head === held?.head) continue;
-    await effects.recordMechanicalPlan(item, wanted).catch(() => undefined);
+    if (wanted?.reviewId === held?.reviewId && wanted?.head === held?.head && held && clock - Date.parse(held.at) < mechanicalPlanFreshMs) continue;
+    try { await effects.recordMechanicalPlan(item, wanted); } catch (error) {
+      const key = `mechanical-plan:${item.id}`;
+      const detail = `Could not report ${item.key}'s mechanical plan (${wanted ? `review ${wanted.reviewId} on ${wanted.head.slice(0, 12)}` : 'none'}): ${message(error)}; the review gate drops the hold once its last confirmation passes ${Math.round(mechanicalPlanFreshMs / 60_000)} minutes old`;
+      if (detailChanged(state.actions[key], detail)) await note(key, item, 'decision', 'failed', detail);
+    }
   }
   const routinePass = budget.pass(), attestPass = budget.pass();
   // GY-1439: while a close stands requested and unapplied on an item, nothing advances it (closingItems): no

@@ -885,7 +885,7 @@ export const allowances: Record<string, Allowance> = {
   'tests/master-supervision.test.ts': { why: 'the 2026-10-07 upgrade.last.at is a cursor record loopSupervisorEvidence', dates: ['2026-10-07'], readings: 6 },
   'tests/master-verification.test.ts': { why: 'the 2030-01-01 clock is passed as `now` to assessDeploymentVerification ', dates: ['2030-01-01'], readings: 8 },
   'tests/master.test.ts': { why: 'every 2030-01-01 instant is judged at a 2030 `now`/observedAt the test p', dates: ['2029-12-31', '2030-01-01'], readings: 2 },
-  'tests/mechanical-findings.test.ts': { why: 'the 2026-09-30 commit and verdict instants are already past their 60-min', dates: ['2026-09-30'], readings: 12 },
+  'tests/mechanical-findings.test.ts': { why: "Time-bomb allowance (GY-1694): the 2026-09-30 commit and verdict instants are already past their 60-minute mechanical bound and only recorded; the holds asserted come from approvals stamped new Date() and judged at Date.now(). The plan report's stamps (planOf, and the hold-freshness test's one Date.now() every plan instant derives from) are the loop's own report of a ledger the test just read, judged against the same reading.", dates: ['2026-09-30'], readings: 14 },
   'tests/merge-executor-owner.test.ts': { why: 'the 2026-09-20 merge instant is a recorded observation the status only r', dates: ['2026-09-20'], readings: 5 },
   'tests/merge-queue-removed.test.ts': { why: 'the 2026-10-05 instant is the explicit `now` of evaluate() over a legacy', dates: ['2026-10-05'], readings: 1 },
   'tests/merger-setting.test.ts': { why: 'the 2026-10-08 `since` is a string mergerDoctorLine only renders; new Da', dates: ['2026-10-08'], readings: 1 },

@@ -550,7 +550,137 @@ test('integration:owed-decision-gy-1761-replay — approval 5499583025 of 632185
   assert.equal(mechanicalReviewHold(gy1761, sevenOhOne), null, 'no plan, no hold');
   assert.equal(decisions.neededDecision(gy1761, { autoMerge: true } as never, undefined, [], []), null, 'and no mechanical rework is owed');
   assert.ok(sevenOhOne - Date.parse('2026-10-13T06:25:05.685Z') > reworkDecisionWaitBoundMs, 'the instance stood past the bound at 07:00:34Z');
-  // The same approval with a planned fix is held, as GY-971 intends, and owes its round.
-  const held = mechanicalReviewHold({ ...gy1761, mechanicalPlan: { reviewId: 5499583025, head } }, sevenOhOne);
+  // The same approval with a planned fix the loop confirmed this cycle is held, as GY-971 intends, and owes its round;
+  // one whose confirmation the loop can no longer renew — the sync write refused, the ledger read failing — holds nothing,
+  // so the gate cannot retain a hold the ledger stopped backing (GY-1764 rework, AC-2).
+  const held = mechanicalReviewHold({ ...gy1761, mechanicalPlan: { reviewId: 5499583025, head, at: '2026-10-13T07:00:00.000Z' } }, sevenOhOne);
   assert.match(held ?? '', /Approval 5499583025 of 632185dd17dd names 2 findings classified mechanical/);
+  const { mechanicalPlanFreshMs } = await import('../src/mechanical-findings.js');
+  assert.equal(mechanicalReviewHold({ ...gy1761, mechanicalPlan: { reviewId: 5499583025, head, at: new Date(sevenOhOne - mechanicalPlanFreshMs - 1).toISOString() } }, sevenOhOne), null, 'a stale confirmation holds nothing');
+});
+
+// GY-1764 rework, AC-2: the loop's report of the review ledger's mechanical plan is the one write the
+// review gate's hold stands on, so a report that cannot be written is a visible, retried failure — and
+// a hold whose confirmation the loop cannot renew is dropped, never retained past its evidence.
+test('integration:mechanical-plan-report-surfaced — a refused plan report is a failed action row that retries, and the hold drops while the report stands unconfirmed', async () => {
+  const { mechanicalReviewHold } = await import('../src/mechanical-findings.js');
+  const minute = 60_000, start = Date.parse('2026-10-13T08:00:00.000Z');
+  const iso = (at: number) => new Date(at).toISOString();
+  const head = '632185dd17dd'.padEnd(40, '0');
+  const review = { reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'APPROVED', id: 5499583025, submittedAt: iso(start - 35 * minute), mechanical: 2 };
+  const candidate = { sha: head, baseSha: '1'.repeat(40), pr: 1169, branch: 'graphyard/gy-1761-1', author: 'implementer' };
+  const state = emptyDaemonState(config());
+  // The plane as the loop reports to it: the item, its accepted plan report, and the ledger's standing plan.
+  // `reworkRequested` keeps the round's own rework decision out of the way: this step is the plan report.
+  let confirmedAt = iso(start - 11 * minute);
+  const attempts: ({ reviewId: number; head: string } | null)[] = [];
+  const work = (): Work => ({
+    id: 'work-1761', key: 'GY-1761', title: 'GY-1761', description: '', type: 'bug', priority: 2, dependencies: [], plannedFiles: ['src/'],
+    criteria: [{ id: 'AC-1', text: 'It works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 3, policyRevision: 1,
+    createdAt: iso(start - hour(2)), updatedAt: iso(start), stageEnteredAt: iso(start - hour(1)), ready: true, epoch: 1, lease: null, workspaces: [],
+    candidate, submission: { epoch: 1, pr: 1169 }, reworkRequested: true, scenarioRequirements: [], evidence: [], blocker: null, violations: [], scopeRequest: null, gates: [],
+    observation: { candidate, reviews: [review], checks: [], merged: false, prState: 'open', draft: false, at: iso(start - 30 * minute) },
+    mechanicalPlan: { reviewId: 5499583025, head, at: confirmedAt },
+  } as unknown as Work);
+  const effects = {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: [work()], now: iso(now) }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    persist: async () => {},
+    mechanicalFixes: async () => ({ requests: [{ key: 'GY-1761', pr: 1169, head, reviewId: 5499583025, epoch: 1, at: iso(start - 35 * minute), mechanical: [], substantive: [], paths: ['src/widget.ts'] }] }),
+    recordMechanicalPlan: async (item: Work, plan: { reviewId: number; head: string } | null) => {
+      attempts.push(plan);
+      if (attempts.length <= 2) throw new Error('the control plane refused work/work-1761/mechanicalplan (503): plane-wide outage');
+      confirmedAt = iso(now);
+      return { ...item, mechanicalPlan: plan ? { ...plan, at: confirmedAt } : null };
+    },
+  } as unknown as Parameters<typeof daemon.runCycle>[2];
+  let now = start;
+  const faultsBefore = state.faults.instances.length;
+  for (let step = 0; step < 4; step++, now += 2 * minute) await daemon.runCycle(config(), state, effects, () => now);
+  assert.deepEqual(attempts.slice(0, 3), [{ reviewId: 5499583025, head }, { reviewId: 5499583025, head }, { reviewId: 5499583025, head }], 'the stale report is retried until the plane accepts it');
+  const row = Object.entries(state.actions).find(([key]) => key.startsWith('mechanical-plan:'));
+  assert.ok(row, 'the refused report is on the record');
+  assert.equal(row![1].state, 'failed');
+  assert.match(row![1].detail, /mechanical plan \(review 5499583025/);
+  assert.match(row![1].detail, /503\): plane-wide outage/);
+  assert.deepEqual(state.faults.instances.slice(faultsBefore).map(entry => entry.kind).filter(kind => /decision|escalation/.test(kind)), [], 'a refused plan report is not a decision fault');
+  assert.deepEqual(attempts.slice(3), [], 'a confirmed report is not re-reported while it stays fresh');
+  // The gate reads the same projection: held while the confirmation stands, dropped once it cannot be renewed.
+  assert.match(mechanicalReviewHold(work(), start) ?? '', /names 2 findings classified mechanical/);
+  assert.equal(mechanicalReviewHold({ ...work(), mechanicalPlan: { reviewId: 5499583025, head, at: iso(start - 11 * minute) } } as Work, start), null, 'a stale confirmation holds nothing');
+});
+function hour(count: number) { return count * 60 * 60_000; }
+
+// GY-1764 rework, AC-1/AC-3: the replay above injects the classifier's verdict; this one runs the real
+// loop's scope step over repeated cycles, heads and items — the loop reads the tree once per cycle, the
+// plane decides from what the loop posted, and no approver decision is ever formed for what the tree refutes.
+test('integration:scope-evidence-gate-repeated-cycles — the loop reads the tree once per cycle, refuses non-repository asks in-process, approves decidable new files, and routes nothing', async () => {
+  const { decideScopeRequest } = await import('../src/model/scope.js');
+  const minute = 60_000, start = Date.parse('2026-10-13T08:20:00.000Z');
+  const iso = (at: number) => new Date(at).toISOString();
+  const tree = ['src/widget.ts', 'docs/guide.md', 'README.md', 'package.json'];
+  const asked = iso(start - 5 * minute);
+  const item = (key: string, paths: string[], criterion: string): Work => ({
+    id: `work-${key}`, key, title: key, description: '', type: 'feature', priority: 1, dependencies: [], plannedFiles: ['src/widget.ts'],
+    criteria: [{ id: 'AC-1', text: criterion, proofs: ['unit:x'] }], policy: { checks: ['test'], review: true }, stage: 'build', ready: true,
+    epoch: 1, revision: 10, policyRevision: 2, createdAt: iso(start - 2 * hour(1)), updatedAt: iso(start), stageEnteredAt: iso(start - hour(1)),
+    lease: { owner: 'worker', epoch: 1, expiresAt: iso(start + 30 * minute) }, workspaces: [], submission: null, candidate: null,
+    scenarioRequirements: [], blocker: null, violations: [], evidence: [], observation: null, gates: [],
+    scopeRequest: { epoch: 1, at: asked, paths, reason: 'the round needs these', requestedBy: 'worker' },
+  } as unknown as Work);
+  // The plane as the loop's `autoscope` leaves it: the verdict recomputed here from the item and the evidence posted.
+  const plane = new Map<string, Work>([
+    ['GY-1696', item('GY-1696', ['daemon.relea', 'upgrade.align'], 'The live observation is recorded by a master session')],
+    ['GY-1697', item('GY-1697', ['.graphyard/master.json'], 'The credential the master reads exists')],
+    ['GY-1698', item('GY-1698', ['src/soak/new-check.ts'], 'src/soak/new-check.ts behaves for the item')],
+  ]);
+  const posted: [string, string[]][] = [];
+  let treeReads = 0;
+  const effects = {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: [...plane.values()], now: iso(now) }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    persist: async () => {}, reviewFindings: async () => [], basePaths: async (paths: string[]) => new Set(paths),
+    repositoryFiles: async () => { treeReads++; return new Set(tree); },
+    decideScope: async (work: Work, nonRepository?: readonly { path: string; nearMiss: string | null; why: 'install-local' | 'untracked' }[]) => {
+      posted.push([work.key, (nonRepository ?? []).map(entry => entry.path)]);
+      const request = work.scopeRequest!;
+      const verdict = decideScopeRequest(work, request, { nonRepository });
+      const decision = { state: verdict.state, reason: verdict.reason, at: iso(now), decidedBy: 'graphyard', waitedMs: 0, paths: verdict.paths, requestedBy: request.requestedBy, requestedAt: request.at, epoch: request.epoch, ...(verdict.nonRepository ? { nonRepository: true } : {}) };
+      const decided: Work = { ...work, scopeDecision: decision, ...(verdict.state === 'approved'
+        ? { scopeRequest: null, plannedFiles: [...(work.plannedFiles ?? []), ...verdict.paths] }
+        : { scopeRequest: { ...request, decision } }) };
+      plane.set(work.key, decided);
+      return decided;
+    },
+  } as unknown as Parameters<typeof daemon.runCycle>[2];
+  let now = start;
+  const state = emptyDaemonState(config());
+  const violations: string[] = [];
+  for (let step = 0; step < 5; step++, now += 2 * minute) {
+    await daemon.runCycle(config(), state, effects, () => now);
+    for (const check of state.invariants.report as { holds: boolean; line: string }[]) if (!check.holds) violations.push(`cycle ${step}: ${check.line}`);
+  }
+  assert.equal(treeReads, 1, 'the tree is read once for the cycle with open asks, not once per item');
+  assert.deepEqual(posted.map(([key, paths]) => [key, paths]), [
+    ['GY-1696', ['daemon.relea', 'upgrade.align']],
+    ['GY-1697', ['.graphyard/master.json']],
+    ['GY-1698', []],
+  ], 'the loop posts the offenders it read, and nothing for the decidable new file');
+  const a = plane.get('GY-1696')!, b = plane.get('GY-1697')!, c = plane.get('GY-1698')!;
+  assert.equal(a.scopeRequest!.decision!.nonRepository, true, 'A: refused as its own verdict');
+  assert.match(a.scopeRequest!.decision!.reason, /daemon\.release is a master-status field, not a file/);
+  assert.equal(b.scopeRequest!.decision!.nonRepository, true, 'B: the install-local credential is refused as its own verdict');
+  assert.match(b.scopeRequest!.decision!.reason, /install-local \.graphyard\/ directory/);
+  assert.equal(c.scopeRequest, null, 'C: a new file inside a tracked directory is approved across the same read');
+  assert.ok(c.plannedFiles!.includes('src/soak/new-check.ts'));
+  assert.deepEqual(Object.values(state.approvals).filter(watch => watch.action === 'requirements').map(watch => watch.work), [], 'no requirements decision is requested for what the tree refutes');
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  // The decision class this item removes is silent here: no requirements decision is requested, so no
+  // approver session, no escalation and no decision fault forms — the standing scope-request faults are
+  // the refused asks themselves, which the worker re-asks or finishes without, as the refusal says.
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind).filter(kind => /decision|escalation/.test(kind)), [], 'no decision fault opens for any of them');
 });

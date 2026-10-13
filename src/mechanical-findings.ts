@@ -294,8 +294,11 @@ export async function readMechanicalFixState(root: string): Promise<MechanicalFi
 /** The planned fixes alone; none when the ledger cannot be read. */
 export const readMechanicalFixRequests = (root: string): Promise<MechanicalFixRequest[]> => readMechanicalFixState(root).then(state => state.requests, () => []);
 
-/** Whether the ledger's reported plan is for this approval of the item's current candidate (GY-1764). */
-const plannedFor = (work: Work, review: { id?: number }) => !!work.mechanicalPlan && work.mechanicalPlan.head === work.candidate?.sha && (review.id === undefined || review.id === work.mechanicalPlan.reviewId);
+/** Whether the ledger's reported plan is for this approval of the item's current candidate (GY-1764), confirmed against the ledger within `mechanicalPlanFreshMs` of `now`: a projection the loop can no longer synchronize — its write refused, its ledger read failing — holds nothing, so the gate never retains a hold the ledger stopped backing. */
+export const mechanicalPlanFreshMs = 10 * 60_000;
+const plannedFor = (work: Work, review: { id?: number }, now: number) => !!work.mechanicalPlan && work.mechanicalPlan.head === work.candidate?.sha
+  && (review.id === undefined || review.id === work.mechanicalPlan.reviewId)
+  && Number.isFinite(Date.parse(work.mechanicalPlan.at ?? '')) && now - Date.parse(work.mechanicalPlan.at) < mechanicalPlanFreshMs;
 /**
  * The review gate's hold (GY-971): GitHub merges a head once build, review and required checks pass
  * (docs/delivery.md), so an approval naming nits classified mechanical does not pass the gate until
@@ -308,7 +311,7 @@ export function mechanicalReviewHold(work: Work, now: number): string | null {
   const review = approval && work.observation?.reviews.find(entry => entry.state === 'APPROVED' && entry.sha === approval.sha && (entry.mechanical ?? 0) > 0 && !!entry.submittedAt);
   // GY-1764: the hold reads the one source the decision step reads — a planned fix for this approval in the review ledger,
   // reported as `mechanicalPlan`. An approval with no plan (follow-ups already filed, a fresh read present, the plan read failed) holds nothing.
-  if (!review || !plannedFor(work, review)) return null;
+  if (!review || !plannedFor(work, review, now)) return null;
   const until = Date.parse(review.submittedAt!) + mechanicalRoundStartMs;
   if (!(now < until)) return null;
   const count = review.mechanical!;
