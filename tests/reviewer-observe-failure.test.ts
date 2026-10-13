@@ -11,6 +11,8 @@ import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { bindReviewer, launchReview, reconcileReviews, saveReviewerProfile } from '../src/reviewer.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { assertGhNotPaused, ghPausedUntil, notePossibleGhRateLimit, resetGhPause } from '../src/gh-pause.js';
 
 // GY-1752: each test is named for the proof it produces: integration:review-read-failure-contained.
 
@@ -67,6 +69,7 @@ test('integration:review-read-failure-contained — a GitHub read that fails (ra
     const request = item.autoDispatch!.review!;
     await launchReview(root, item, 'claude-reviewer', [], at, { run, mint, requestId: request.id });
     for (const message of ['gh: API rate limit exceeded for user ID 4241869. (HTTP 403)', 'The operation was aborted due to timeout']) {
+      resetGhPause();
       let reads = 0;
       const pass = await reconcileReviews(root, config, { run, work: [item], observe: () => { reads++; throw new Error(message); } });
       assert.equal(reads, 1, 'after one failed read the pass reads no more');
@@ -77,5 +80,61 @@ test('integration:review-read-failure-contained — a GitHub read that fails (ra
     const settled = (await reconcileReviews(root, config, { run, work: [item], observe: () => approval })).reviews[0];
     assert.equal(settled.state, 'completed');
     assert.equal(settled.verdict!.state, 'APPROVED');
-  } finally { await cleanup(); }
+  } finally { resetGhPause(); await cleanup(); }
+});
+
+test('integration:review-read-failure-contained — a dispatcher tick whose review read is rate limited completes and still launches the reviewer another item is waiting for', async () => {
+  const { root, config, cleanup } = await reviewerRoot();
+  resetGhPause();
+  try {
+    await saveReviewerProfile(root, { name: 'claude-reviewer-2', agentName: 'review-claude-2', kind: 'claude' });
+    const stub = stubs(() => []);
+    const ghCalls: string[][] = [];
+    const run = (command: string, args: string[]) => {
+      if (command === 'gh') { ghCalls.push(args); if (args[1] === 'rate_limit') return String(Math.floor(Date.now() / 1000) + 1800); throw new Error('gh: API rate limit exceeded for user ID 4241869. (HTTP 403)'); }
+      return stub.run(command, args);
+    };
+    const at = new Date().toISOString();
+    const pending = work({}, at);
+    reconcileAutoDispatch(pending, [pending], new Date());
+    await launchReview(root, pending, 'claude-reviewer-2', [], at, { run: stub.run, mint: stub.mint, requestId: pending.autoDispatch!.review!.id });
+    // The base's tick: the pending session's read throws out of reconcileReviews and fails the whole tick.
+    const second = work({ id: 'work-85', key: 'GY-85' }, at);
+    second.candidate = { ...second.candidate!, sha: H2, pr: 85, branch: 'graphyard/gy-85-1' };
+    second.observation = observation(second.candidate!, at);
+    reconcileAutoDispatch(second, [pending, second], new Date());
+    const tick = await runDispatchTick(config, emptyDispatchCursor(config), {
+      snapshot: async () => ({ work: [pending, second], now: at }), agents: () => [],
+      credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
+      reconcileReviews: (items, agents) => reconcileReviews(root, config, { run, work: items, agents }), reconcileProducers: async () => ({ producers: [] }),
+      launchReview: (target, dispatch, profile, herdr, observedAt) => launchReview(root, target, profile.name, herdr, observedAt, { run: stub.run, mint: stub.mint, requestId: dispatch.id }),
+      launchProducer: async () => { throw new Error('no producer is under test'); }, persist: async () => {},
+    } satisfies DispatchEffects);
+    assert.ok(tick.launched.some(launch => launch.work === 'GY-85' && launch.kind === 'review'), JSON.stringify(tick));
+    assert.equal(ghCalls.filter(args => args[1] !== 'rate_limit').length, 1, 'the refused read is not repeated within the pass');
+    // The next tick makes no gh read at all until the reset the login reported.
+    const before = ghCalls.length;
+    await reconcileReviews(root, config, { run, work: [pending, second] });
+    assert.equal(ghCalls.length, before, 'no gh read while the pause stands');
+    assert.ok(ghPausedUntil() > Date.now() + 1_000_000, 'the pause runs to the reported reset');
+  } finally { resetGhPause(); await cleanup(); }
+});
+
+test('integration:review-read-failure-contained — the dispatcher’s own gh reads are skipped while the pause stands and resume at the reset', async () => {
+  resetGhPause();
+  try {
+    const t0 = 1_800_000_000_000;
+    const calls: string[][] = [];
+    const run = (_command: string, args: string[]) => { calls.push(args); if (args[1] === 'rate_limit') return String(Math.floor(t0 / 1000) + 600); throw new Error('gh: API rate limit exceeded'); };
+    assert.equal(await notePossibleGhRateLimit(new Error('HTTP 500'), run, t0), false, 'another failure starts no pause');
+    assert.equal(ghPausedUntil(t0), 0);
+    assert.equal(await notePossibleGhRateLimit(new Error('gh: API rate limit exceeded for user ID 4241869. (HTTP 403)'), run, t0), true);
+    assert.equal(ghPausedUntil(t0), t0 + 601_000);
+    assert.throws(() => assertGhNotPaused(t0 + 60_000), /paused until/);
+    assert.doesNotThrow(() => assertGhNotPaused(t0 + 602_000), 'reads resume at the reset');
+    // Without a readable reset the pause is a fixed five minutes.
+    resetGhPause();
+    await notePossibleGhRateLimit(new Error('API rate limit exceeded'), () => { throw new Error('also refused'); }, t0);
+    assert.equal(ghPausedUntil(t0), t0 + 300_000);
+  } finally { resetGhPause(); }
 });

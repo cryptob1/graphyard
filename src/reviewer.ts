@@ -1,3 +1,4 @@
+import { assertGhNotPaused, notePossibleGhRateLimit } from './gh-pause.js';
 import { createHash, createSign, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, realpath, writeFile } from 'node:fs/promises';
@@ -1391,7 +1392,8 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   let readFailed = false;
   const observe = async (record: ReviewRecord, identity: string, answered: Set<number>): Promise<ObservedVerdict | typeof unread> => {
     if (readFailed) return unread;
-    try { return await readVerdict(record, identity, answered); } catch { readFailed = true; return unread; }
+    try { assertGhNotPaused((dependencies.now ?? (() => new Date()))().getTime()); return await readVerdict(record, identity, answered); }
+    catch (error) { readFailed = true; await notePossibleGhRateLimit(error, dependencies.run ?? defaultChildRun, (dependencies.now ?? (() => new Date()))().getTime()); return unread; }
   };
   const now = (dependencies.now ?? (() => new Date()))();
   // The retry goes through the same confirmed delivery as the launch: a prompt the stopped
