@@ -21,7 +21,7 @@ Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `
 
 **Instead of closing sessions by hand:** do nothing for a finished or dead session (`graphyard master run --once` sweeps); attach to an overlong one with its handle's command. Never mark another session's handle finished to free a slot. The loop and `master approver` relaunch never-started approvers (`done`, still-screened `idle`) past the start bound, slot ended first; hand-launched, replaced panes [bind](master-agent-sessions.md#the-start-bound-reads-the-pane).
 
-`blocked` frees its slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) self-clear, probed: `github-credential`, `sandbox-path` confined as next worker; `github-outage` githubstatus.com, then confined dry-run push/PR read; `control-plane-error` plane health; `outside-scope-test-failure` base moved; `runtime-denial`, `worktree-mismatch` lease ended; `dispatch-failure` profile launchable, `runtime-exhaustion` dispatchable account; `host-supervisor` loop's host; `master-role` a master-role identity runs the step, then unblocks; `planned-file-scope`, `needs-decision` approver. `genuine`/`human-only` escalate.
+`blocked` frees its slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) self-clear: `github-credential`, `sandbox-path`, `github-outage`, `control-plane-error`, `outside-scope-test-failure`, `runtime-denial`, `worktree-mismatch`, `dispatch-failure`, `runtime-exhaustion`, `host-supervisor`; `master-role` a master-role identity runs it and unblocks; `planned-file-scope`, `needs-decision` approver. `genuine`/`human-only` escalate, but a loop-held item's unleased inability report clears itself.
 
 ### System invariants
 
