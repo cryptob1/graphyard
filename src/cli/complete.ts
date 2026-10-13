@@ -71,6 +71,19 @@ export function completionBody(args: readonly string[], headOf: () => string): {
 }
 
 /**
+ * GY-1753 AC-1: push the repository's current branch to origin with upstream when it is a
+ * `graphyard/` branch, so the PR head exists for a worker whose own push was refused; any other
+ * branch (or a detached HEAD) pushes nothing. A failed push is returned, never thrown: `complete`'s own
+ * refusals still run, and then it refuses to submit a head the remote does not hold.
+ */
+export function pushGraphyardBranch(root: string, git: typeof spawnSync = spawnSync): { pushed: string | null; failure?: string } {
+  const branch = String(git('git', ['-C', root, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' }).stdout ?? '').trim();
+  if (!branch.startsWith('graphyard/')) return { pushed: null };
+  const pushed = git('git', ['-C', root, 'push', '--quiet', '-u', 'origin', branch], { encoding: 'utf8' });
+  return pushed.status === 0 ? { pushed: branch } : { pushed: null, failure: String(pushed.stderr ?? pushed.error ?? '').trim() };
+}
+
+/**
  * `complete GY-N EPOCH PR`, or `complete GY-N EPOCH --head [SHA]` while the control plane is the
  * merge writer (GY-1523): submit the implementation and end the lease. Beside the control
  * plane's answer it reports the worker's own verification of HEAD (`graphyard verify GY-N`): which
@@ -96,9 +109,13 @@ export const completeCommand: CliCommand = {
     '                                control plane allocates its change number and ends the lease',
   ],
   run: async (context, work) => {
+    let push: { pushed: string | null; failure?: string } = { pushed: null };
+    try { push = pushGraphyardBranch(context.repositoryRoot()); } catch { /* no readable worktree: nothing to push; the head read below reports it */ }
     let verification: Awaited<ReturnType<typeof selfVerification>> | { state: 'unavailable'; reason: string };
     try { verification = await selfVerification(context.repositoryRoot(), work.key); } catch (error: any) { verification = { state: 'unavailable', reason: `the worktree could not be read: ${error.message}` }; }
     const body = completionBody(context.args, () => worktreeHead(context.repositoryRoot())), requestId = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();
+    // A failed push leaves the remote head at an earlier commit: nothing is submitted (and no lease ended) for it.
+    if (push.failure !== undefined) throw new Error(`complete refused: pushing the graphyard/ branch failed, so the pull request would not hold this head: ${push.failure || 'git push failed'}`);
     const submitted = await submitThroughPause(() => context.api(`work/${work.id}/submit`, body, requestId));
     context.print({ ...submitted, selfVerification: verification });
   },

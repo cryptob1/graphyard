@@ -271,6 +271,8 @@ export function coordinationProjection(document: Work): Work {
   const out: Record<string, any> = { ...rest };
   // Of the timeline only its rework-round count, kept beside it: the review-round cap reads it (GY-1389).
   if (isObject(pipeline) && 'reworkRounds' in pipeline) out.reworkRounds = pipeline.reworkRounds;
+  // And the count of attempts made, which worker dispatch reads (GY-1746).
+  if (isObject(pipeline) && Array.isArray(pipeline.attempts)) out.attemptCount = pipeline.attempts.length;
   out.evidence = arrayOf(evidence).filter(relevant).map(entry => { if (!isObject(entry)) return entry; const { artifacts: _a, scopeFiles: _s, provenance: _p, ...kept } = entry; return kept; });
   if ('observation' in doc) out.observation = isObject(observation) ? (({ scopeFiles: _s, ...kept }) => kept)(observation) : observation;
   if (Array.isArray(queueHistory)) out.queueHistory = lastOf(queueHistory, keep);

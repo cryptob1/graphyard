@@ -1,8 +1,9 @@
 import type { Work } from './work.js';
 import { fleetRoles, rolePolicy } from './registry.js';
 import { exhaustedTwin, foldObservation } from './account-quota.js';
-import type { AccountSmoke, AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, RolePolicy, RunOutcome, SelectionRequest, SessionSkip } from './registry.js';
+import type { AccountSmoke, AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRole, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, RolePolicy, RunOutcome, SelectionRequest, SessionSkip } from './registry.js';
 import { accountProvider, busyDifferentProvider, sameProviderFallback, sharedProviderSkip, type ReviewDiversity } from './review-diversity.js';
+import { workerOrder } from './worker-preference.js';
 import { deriveAccountPlan, groupAccountsByPlan, type FleetPlanView } from '../provider-usage.js';
 
 /**
@@ -207,7 +208,7 @@ export interface SessionRefusal { account: null; reason: string; skipped: Sessio
  * waited for, and with none the first same-provider account serves with the fallback recorded.
  * Pure: the registry passed in already carries the executor's fresh observations and only live sessions.
  */
-export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRequest, 'role' | 'host'>, now: number, diversity: ReviewDiversity | null = null): SessionChoice | SessionRefusal {
+export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRequest, 'role' | 'host'> & Partial<Pick<SelectionRequest, 'prefer' | 'exclude'>>, now: number, diversity: ReviewDiversity | null = null): SessionChoice | SessionRefusal {
   const role = registry.roles.find(entry => entry.name === request.role);
   if (!role) return { account: null, reason: `role ${request.role} is not configured in the agent registry`, skipped: [] };
   if (!role.accounts.length) return { account: null, reason: `role ${request.role} names no account`, skipped: [] };
@@ -223,9 +224,9 @@ export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRe
     return { account, runtime, model, policy, skipped: passed,
       reason: `${account.name} is the first eligible account for ${role.name} (preference ${index + 1} of ${role.accounts.length}; ${running.length + 1} of ${role.concurrency} concurrent)${note}${passed.length ? ` — passed over ${passed.map(entry => entry.reason).join('; ')}` : ''}` };
   };
-  for (const [index, name] of role.accounts.entries()) {
+  for (const [index, name] of workerOrder(registry, role, request.prefer ?? null).entries()) {
     const account = registry.accounts.find(entry => entry.name === name);
-    const refusal = account ? accountIneligibility(registry, account, now, request.host) ?? roleIneligibility(account, role.name, now) : `${name} is not a registered account`;
+    const refusal = request.exclude?.includes(name) ? `${name} already failed to start a session under this dispatch` : account ? accountIneligibility(registry, account, now, request.host) ?? roleIneligibility(account, role.name, now) : `${name} is not a registered account`;
     const differs = !!diverse && !!account && accountProvider(registry, account) !== diverse.provider;
     if (refusal) {
       skipped.push({ account: name, reason: refusal });
@@ -316,4 +317,3 @@ function roleAttention(role: FleetRoleView, live: FleetSession[]): string[] {
   const idle = role.role === 'master' ? [] : live.filter(session => session.role === role.role && !session.work);
   return idle.length ? [`role ${role.role} is at its concurrency limit (${role.live} of ${role.concurrency} live) with ${idle.length} session${idle.length === 1 ? '' : 's'} carrying no work: ${idle.map(session => `${session.id} (${session.account})`).join(', ')}`] : [];
 }
-
