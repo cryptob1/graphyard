@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { dispatchable } from '../src/coordination.js';
 import { buildMasterStatus } from '../src/master.js';
 import { dispatchSchedule } from '../src/master/status.js';
+import { upNextHold } from '../src/model/board.js';
 import { actionAccount, nextAction } from '../src/model/next-action.js';
 import * as model from '../src/model.js';
 import type { Work } from '../src/model.js';
@@ -36,6 +37,26 @@ test('unit:observation-item-not-dispatched — the dispatcher skips an all-manua
   assert.equal(nextAction(withCode, [withCode], new Date(now))?.kind, 'dispatch');
 });
 
+const reading = (extra: object = {}) => ({ proof: 'manual:post-deploy/rate-on-serving-release', trusted: true, result: 'pass', policyRevision: 1, sha: 'a'.repeat(40), at: iso(now), ...extra });
+
+test('unit:observation-class-needs-the-follow-up-reading — a head-anchored code criterion on a -on-serving-release proof is dispatched as before; a failed, expired or other-release reading does not end the wait; a due or expired-window wait is a hold on the board', () => {
+  const filed = 'From this head against the serving release aaaaaaaaaaaa that carries GY-9\'s merge bbbbbbbbbbbb: the rate holds';
+  const follow = (extra: Partial<Work> = {}) => item(6, { criteria: [{ id: 'AC-1', text: filed, proofs: ['manual:rate-on-serving-release'] }], ...extra });
+  const codeLike = item(7, { criteria: [{ id: 'AC-1', text: 'From this head the dispatcher skips it', proofs: ['manual:skip-on-serving-release'] }] });
+  assert.equal(loopObservation(codeLike, new Date(now)), null);
+  assert.equal(dispatchable(codeLike, now), true);
+  assert.ok(loopObservation(follow(), new Date(now)));
+  const proof = 'manual:rate-on-serving-release';
+  for (const bad of [{ result: 'fail' }, { expiresAt: iso(now - hour) }, { sha: 'c'.repeat(40) }, { policyRevision: 0 }, { revocation: { at: iso(now), actor: 'x', reason: 'y' } }]) {
+    assert.ok(loopObservation(follow({ evidence: [reading({ proof, ...bad })] as never }), new Date(now)), JSON.stringify(bad));
+  }
+  assert.equal(loopObservation(follow({ evidence: [reading({ proof, sha: 'a'.repeat(40) })] as never }), new Date(now)), null);
+  const due = follow();
+  assert.match(upNextHold(due, [due], now)?.text ?? '', /reading of manual:rate-on-serving-release/);
+  const lapsed = follow({ observationWindow: { notBefore: iso(now - hour), basis: 'criterion-window', detail: 'd' } });
+  assert.match(upNextHold(lapsed, [lapsed], now)?.text ?? '', /owed now/);
+});
+
 test('unit:observation-item-counted-waiting — it counts as waiting with what it waits for, and as ready again once the wait has ended', () => {
   const snapshot = (...work: Work[]) => buildMasterStatus({ now: iso(now), work } as never, [], []);
   const windowed = item(4, { observationWindow: { notBefore: iso(now + 6 * hour), basis: 'criterion-window', detail: 'merged 7 days before' } });
@@ -48,7 +69,7 @@ test('unit:observation-item-counted-waiting — it counts as waiting with what i
   assert.equal(row('GY-2').observing, null);
 
   // The window closing makes the reading owed, not the item dispatchable: only a recorded trusted reading ends the wait.
-  const read = item(5, { evidence: [{ proof: 'manual:post-deploy/rate-on-serving-release', trusted: true }] as never });
+  const read = item(5, { evidence: [reading()] as never });
   assert.equal(loopObservation(read, new Date(now)), null);
   // The recorded reading ends the wait, never the exclusion: the still-open item is not handed to a worker.
   assert.equal(dispatchable(read, now), false);

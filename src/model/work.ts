@@ -102,10 +102,13 @@ export function observationWindowHold(work: { observationWindow?: ObservationWin
  * leaves worker dispatch, before or after its reading is recorded: a recorded reading ends the wait,
  * not the fact that there is no code for a worker to write.
  */
+const followUpReading = /^From this head against the serving release [0-9a-f]+ that carries /;
 export function loopObservationProofs(work: Pick<Work, 'systemDriven' | 'criteria' | 'stage'>): string[] | null {
   if (work.systemDriven !== true || work.stage === 'done' || !work.criteria.length) return null;
   const proofs = work.criteria.flatMap(criterion => criterion.proofs);
-  if (!proofs.length || work.criteria.some(criterion => !criterion.proofs.length) || !proofs.every(proof => postDeployProof(proof) || servingReleaseProof(proof))) return null;
+  // A `-on-serving-release` proof alone is not the class (createSchema admits it on a head-anchored code criterion): the criterion must be the follow-up's own filed text.
+  const observed = (criterion: { text: string; proofs: string[] }) => criterion.proofs.every(proof => postDeployProof(proof) || (servingReleaseProof(proof) && followUpReading.test(criterion.text)));
+  if (!proofs.length || work.criteria.some(criterion => !criterion.proofs.length || !observed(criterion))) return null;
   return proofs;
 }
 /**
@@ -117,11 +120,15 @@ export function loopObservationProofs(work: Pick<Work, 'systemDriven' | 'criteri
  * owed now (`due: true`) and the item is escalated for it, never dispatched. Only a recorded trusted
  * reading ends the wait. With a code criterion, or any other proof, it is dispatched as before.
  */
-export function loopObservation(work: Pick<Work, 'systemDriven' | 'criteria' | 'evidence' | 'stage'> & { observationWindow?: ObservationWindow | null }, now: Date): { waitingFor: string; due: boolean } | null {
+export function loopObservation(work: Pick<Work, 'systemDriven' | 'criteria' | 'evidence' | 'stage' | 'policyRevision'> & { observationWindow?: ObservationWindow | null }, now: Date): { waitingFor: string; due: boolean } | null {
   const proofs = loopObservationProofs(work);
   if (!proofs) return null;
   const window = work.observationWindow;
-  if (proofs.every(proof => work.evidence.some(entry => entry.proof === proof && entry.trusted && !entry.revocation))) return null;
+  // Only a passing, unexpired, current-policy reading of the serving release the follow-up names, taken once its window opened, ends the wait.
+  const release = work.criteria.map(criterion => /serving release ([0-9a-f]{12})/.exec(criterion.text)?.[1]).find(Boolean);
+  const recorded = (proof: string) => work.evidence.some(entry => entry.proof === proof && entry.trusted && !entry.revocation && entry.result === 'pass' && entry.policyRevision === work.policyRevision
+    && (!entry.expiresAt || Date.parse(entry.expiresAt) > now.getTime()) && (!release || entry.sha.startsWith(release)) && (!window || Date.parse(entry.at) >= Date.parse(window.notBefore)));
+  if (proofs.every(recorded)) return null;
   const due = !window || Date.parse(window.notBefore) <= now.getTime();
   return { due, waitingFor: due ? `the loop's reading of ${proofs.join(', ')} on the serving release, which is owed now` : `the loop's reading of ${proofs.join(', ')}, which can first exist at ${window!.notBefore} (${window!.detail})` };
 }
