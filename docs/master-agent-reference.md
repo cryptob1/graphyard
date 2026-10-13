@@ -45,7 +45,7 @@ Unacted producer requests (unstarted, refused, launch-exited) relaunch on untrie
 
 ## Shadow merge gate
 
-`run.shadowGate` (`enabled` true, `timeoutMinutes` 20): each cycle trial-merges, builds, affected-tests the oldest untried head credential-free in empty sticky tmp-reclaimed `TMPDIR` (`gy-t*`), pushing nothing; `shadow.verdict` (failing: runner-ran files; 4000-char `logTail`) joins GitHub's outcome in status `shadowGate` (`shadow-only-fail`/`shadow-missed`: one line each); errors/timeouts/poisoning record nothing; third timeout one line. `GET /api/shadow-disagreements`, `/api/shadow-explanations?pair=KEY:HEAD:BASETIP`.
+`run.shadowGate` (`enabled` true, `timeoutMinutes` 20): each cycle trial-merges, builds, affected-tests oldest untried head credential-free in sticky tmp-reclaimed `TMPDIR` (`gy-t*`) pushing nothing; `shadow.verdict` (failing: runner-ran files, 4000-char `logTail`) joins GitHub's outcome in `shadowGate` (`shadow-only-fail`/`shadow-missed`: a line each, merger `github` only); errors/timeouts/poisoning record nothing; third timeout one line. `GET /api/shadow-disagreements`, `/api/shadow-explanations?pair=KEY:HEAD:BASETIP`.
 
 ## Pipeline speed
 

@@ -1,6 +1,7 @@
 // Concern: the shadow merge gate's pure parts — which head is tried next, how a shadow verdict compares with GitHub's, and the report.
 import type { Work } from '../model.js';
 import type { AttentionItem } from '../master/attention.js';
+import type { MergerMode } from '../merger-mode.js';
 
 export const shadowOutcomes = ['agree-pass', 'agree-fail', 'shadow-only-fail', 'shadow-missed', 'pending'] as const;
 export type ShadowOutcome = typeof shadowOutcomes[number];
@@ -147,9 +148,12 @@ export const shadowPairExplained = (verdict: Pick<ShadowVerdict, 'key' | 'head' 
 /**
  * `master status` attention: one line per standing (key, head, baseTip) disagreement that has no
  * explanation yet (GY-1560). A later head of the same item does not drop an earlier unexplained
- * pair; only an explanation does. Report only until explained.
+ * pair; only an explanation does. Report only until explained. Once the control plane is the merger
+ * (GY-1748) the switch these lines ask to be explained before has happened: the verdicts stay on
+ * the record and in the item's history, and no line is raised.
  */
-export function shadowGateAttention(verdicts: readonly ShadowVerdict[], explanations: readonly ShadowExplanationRef[] = []): AttentionItem[] {
+export function shadowGateAttention(verdicts: readonly ShadowVerdict[], explanations: readonly ShadowExplanationRef[] = [], merger: MergerMode = 'github'): AttentionItem[] {
+  if (merger === 'control-plane') return [];
   const newest = new Map<string, ShadowVerdict>();
   for (const verdict of [...verdicts].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
     // The ledger's copy of a pair carries the cause the cursor's may lack, and either way the line names it. The ledger reads
