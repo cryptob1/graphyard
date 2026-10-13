@@ -84,6 +84,17 @@ export function localAncestry(root: string, baseBranch: string, run: ChildRun) {
  * the retention and every delivery is derived again.
  */
 /**
+ * GY-1753 AC-3: the production environment deployments are read under: the run's
+ * `productionEnvironment`, else an explicit GRAPHYARD_PRODUCTION_ENVIRONMENT, else `github-pages` when the
+ * repository carries a pages-deploy.yml `production`. An explicitly set GRAPHYARD_PRODUCTION_ENVIRONMENT wins over the workflow.
+ */
+export function deploymentEnvironmentName(config: Pick<MasterConfig, 'run'>, root: string, env: NodeJS.ProcessEnv = process.env): string {
+  if (config.run.productionEnvironment) return config.run.productionEnvironment;
+  if (env.GRAPHYARD_PRODUCTION_ENVIRONMENT === undefined && existsSync(join(root, '.github', 'workflows', 'pages-deploy.yml'))) return 'github-pages';
+  return productionEnvironmentFromEnv(env);
+}
+
+/**
  * Whether a GitHub deployment's environment is the configured production environment (the master
  * run's `productionEnvironment`, else GRAPHYARD_PRODUCTION_ENVIRONMENT, else `production`), compared as the provider's whole
  * identity. Railway names the GitHub environment `<project> / <environment>`, and one repository can
@@ -177,7 +188,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
     // first, until a release answers or a bound is reached.
     const releaseAncestry = localAncestry(options.root, config.baseBranch, run);
     let production: string;
-    try { production = config.run.productionEnvironment ?? productionEnvironmentFromEnv(); } catch (error) { return unavailable(message(error)); }
+    try { production = deploymentEnvironmentName(config, options.root); } catch (error) { return unavailable(message(error)); }
     let listed = 0, exhausted = false;
     // Whether a production deployment newer than the one being read has been listed: a release
     // Railway marked inactive is served only while nothing newer was deployed to production.
