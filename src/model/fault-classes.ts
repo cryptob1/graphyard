@@ -193,8 +193,13 @@ export function standingScopeRequest(work: Pick<Work, 'scopeRequest' | 'lease' |
   if (!request || !work.lease || work.lease.epoch !== request.epoch || Date.parse(work.lease.expiresAt) <= now) return false; /* an expired attempt's request is moot (owed-report's rule) */
   if (now - Date.parse(request.at) > scopeBlockedBudgetMs) return true;
   if (request.decision?.state !== 'refused') return false;
+  // GY-1757: an approver's refusal that directs a narrower re-request is the live attempt's to act on
+  // within the bound, which this far is held; the bound branch above catches one that sticks.
+  if (request.decision.decidedBy !== 'graphyard' && !request.remove?.length && !request.criteria?.length && reRequestableRefusal(request.decision.reason)) return false;
   return !(routes && request.decision.decidedBy === 'graphyard' && routableScopeRequest(work, now));
 }
+/** True when a refusal's reason directs the asking attempt to ask again, narrower (the approver's 'Refused as filed; re-request narrower'). */
+export const reRequestableRefusal = (reason: string | null | undefined) => /re-?request(?:ed)?\b[^.]{0,40}\bnarrow|narrower\s+re-?request/i.test(reason ?? '');
 
 /**
  * `reclaimInMotion`, which the loop passes (daemon/faults.ts attemptReclaimInMotion, GY-1557): an

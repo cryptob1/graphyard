@@ -381,7 +381,20 @@ const transientScopeRetry = 'so it is retried next cycle on a fresh read';
 export function transientScopeRefusal(error: unknown): string | null {
   if (error instanceof RefusedResponse && error.status >= 500) return 'the control plane answered 5xx';
   if (/Policy revision changed; reload before revising/.test(message(error))) return 'the item moved past the revision the loop read';
+  if (!(error instanceof RefusedResponse) && transportFailure(error)) return 'the call failed in transport: a timeout, a network error or a gh rate limit';
   return null;
+}
+/**
+ * GY-1757. True for a failure of the call itself, which judged nothing about the item's scope: a
+ * control-plane fetch aborted on timeout, a network error, or a gh CLI call that failed (rate limit
+ * or network). A refusal the plane answered is never one.
+ */
+function transportFailure(error: unknown): boolean {
+  const name = error instanceof Error ? error.name : '';
+  const text = message(error);
+  if (name === 'TimeoutError' || name === 'AbortError') return true;
+  if (/The operation was aborted|operation timed out|fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(text)) return true;
+  return /^Command failed: gh /.test(text) && /rate limit|timeout|timed out|connection|network|could not resolve|HTTP 5\d\d|EOF/i.test(text);
 }
 /** What a widening refused for an ask no longer open says, so its record reads as the handled outcome it is (GY-1348). */
 export const supersededScopeNote = 'answered, withdrawn or re-asked meanwhile; the fresh ask is judged on its own';
