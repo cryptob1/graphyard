@@ -1,4 +1,4 @@
-import { bootstrapObligations, currentEvidence, evidenceBindsCandidate, grantsAuthorize, inheritedObligations, observationWindowHold, pathScope, pathScopeContains, pathScopesOverlap, type BootstrapObligation, type ProofAuthority, type Stage, type Work } from './model.js';
+import { bootstrapObligations, currentEvidence, evidenceBindsCandidate, grantsAuthorize, inheritedObligations, observationWindowHold, loopObservationProofs, pathScope, pathScopeContains, pathScopesOverlap, type BootstrapObligation, type ProofAuthority, type Stage, type Work } from './model.js';
 import { namedPaths } from './model/scope.js';
 import { loopOwned } from './model/loop-owned.js';
 import { behindBaseHold } from './model/behind-base.js';
@@ -65,9 +65,9 @@ export function concurrentOverlap(work: Work, all: Work[], now: number): Overlap
   });
 }
 
-/** Ready to be offered a worker: released, unblocked, unclaimed, not submitted unless rework was requested, past any observation window (GY-1698), and not loop-owned (GY-1760: an item only the master side can satisfy is never offered, so the board's dispatchable count matches what dispatch launches). */
+/** Ready to be offered a worker: released, unblocked, unclaimed, not submitted unless rework was requested, past any observation window (GY-1698), not a loop-owned observation the loop reads itself (GY-1762), and not loop-owned (GY-1760: an item only the master side can satisfy is never offered, so the board's dispatchable count matches what dispatch launches). */
 export const dispatchable = (work: Work, now: number) => work.stage !== 'done' && work.ready && !work.blocker && !claimedNow(work, now) && (!work.submission || !!work.reworkRequested)
-  && !observationWindowHold(work, new Date(now)) && !loopOwned(work);
+  && !observationWindowHold(work, new Date(now)) && !loopObservationProofs(work) && !loopOwned(work);
 
 /** A directory scope at the repository root (`src/`, `docs/`, `tests/`, `/`): it overlaps almost everything. */
 export const broadScope = (scope: string) => { const { path, prefix } = pathScope(scope); return prefix && path.split('/').filter(Boolean).length <= 1; };
