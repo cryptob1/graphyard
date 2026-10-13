@@ -493,8 +493,10 @@ export function acceptanceEffects(config: MasterConfig, root: string, calls: Cal
   const asApprover = async (path: string, body: unknown, key: string) => {
     const response = await calls.fetcher(`${config.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${await agentToken(root, config, 'approver')}`, 'Content-Type': 'application/json', 'Idempotency-Key': key },
       body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
-    const result = await response.json();
-    if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
+    // GY-1751: a proxy's non-JSON 502-504 keeps its status, so the plane's outage is told from the server's own refusal.
+    const text = await response.text();
+    let result: any; try { result = JSON.parse(text); } catch { result = response.ok ? undefined : { text: clip(text, 200) }; }
+    if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`, response.status, result);
     return result;
   };
   const read = async (pr: number): Promise<PullRequestState> => {
