@@ -2,6 +2,7 @@
 import { deferBoundMs, servingReleaseProof, type Work } from '../model.js';
 import { notBeforeInstants } from '../model/plain-status.js';
 import { blockerClassMeaning, environmentalBlockerClasses, itemBlockerClass, itemSpecificPlaneError, maxAutomaticClears, needsSomeone, uncoveredBlockerPaths, unrepresentableScope, type BlockerClassification } from '../model/blocker-class.js';
+import { loopHeldBlocker } from '../model/loop-owned.js';
 import { scopeRefusalBlocker } from '../model/scope.js';
 import { approvalWatchSchema, message, type DaemonAction } from './state.js';
 import { handWatchPrefix } from './cycle-decisions.js';
@@ -142,7 +143,9 @@ export async function blockerStep(cycle: Cycle) {
     const standing = (detail: string) => detailChanged(state.actions[key], detail) ? note(key, item, 'done', detail) : Promise.resolve(null);
     // Handed to the master (or the human): reported once, as the cycle's action, when it first stands.
     const handOver = async (detail: string) => { const noted = await standing(detail); if (noted) performed.push(noted); };
-    if (needsSomeone(classification.class)) { await handOver(`${item.key} is blocked (${classification.class}: ${blockerClassMeaning[classification.class]}); it needs someone: ${blocker}`); return; }
+    // GY-1768: a worker's blocked report on an item only the loop can serve is moot — it is off the dispatch board — so the loop clears it rather than leave an escalation open for a master's hand.
+    const loopHeld = loopHeldBlocker(item, classification.class, clock);
+    if (needsSomeone(classification.class) && !loopHeld) { await handOver(`${item.key} is blocked (${classification.class}: ${blockerClassMeaning[classification.class]}); it needs someone: ${blocker}`); return; }
     // A refused scope request is the scope step's to put to the approver; its answer clears it.
     if (blocker.startsWith(scopeRefusalBlocker)) return;
     if (unrepresentableScope(item, classification)) {
@@ -163,7 +166,8 @@ export async function blockerStep(cycle: Cycle) {
     }
 
     let result: BlockerProbeResult | null = null;
-    if (environmentalBlockerClasses.includes(classification.class)) {
+    if (loopHeld) result = { probe: 'the item is held for the loop, not a worker', passed: true, detail: `${item.key} plans no code a worker can write and its remaining proof is recorded by the master side or the loop's own reading, so a worker's blocked report is moot; its next action names who records the reading` };
+    else if (environmentalBlockerClasses.includes(classification.class)) {
       result = launchableClass(classification) ? launchableProbe(cycle, classification.class === 'runtime-exhaustion') : await probe(item, classification);
       if (!result) return;
       // A cause that keeps failing its probe is reported to the master once it has failed for

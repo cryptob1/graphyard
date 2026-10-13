@@ -1,4 +1,4 @@
-import { servingReleaseProof, type Work } from './work.js';
+import { servingReleaseProof, loopObservationProofs, type Work } from './work.js';
 
 /**
  * GY-1760: the proofs only the master side of the house records. A throughput owner
@@ -34,3 +34,12 @@ export const loopOwned = (work: Pick<Work, 'criteria' | 'plannedFiles'>) => {
 export const loopOwnedRefusal = (work: Pick<Work, 'key' | 'criteria' | 'plannedFiles'>) => loopOwned(work)
   ? `${work.key} is loop-owned: it plans no files and every proof it owes is recorded by the master side (the loop's own throughput measurement, or a master-role session's observation of the master checkout), so a worker has nothing to build, no observation it can take, and no pull request to submit. It stays off the dispatch board; a master-role session records the observation and the item closes without a worker. Releasing or dispatching it would only end in a worker's blocked report`
   : null;
+
+/**
+ * GY-1768: whether an item with a standing worker blocker has nothing left for a worker: it is loop-owned (GY-1760) or only waits for the loop's own post-deploy reading (GY-1762), and no
+ * attempt holds it. A `blocked` report recorded before those guards (or by an attempt already running when they shipped) says the reading cannot be taken from a sandbox, which is the very
+ * reason the item is off the dispatch board; left standing it is an open escalation until a master unblocks it by hand. The loop clears it instead, and the item's own next action
+ * (`escalate`, the loop's reading owed) names who records the reading. Only a blocker no routine class explains qualifies: a human's decision wait stays.
+ */
+export const loopHeldBlocker = (work: Pick<Work, 'systemDriven' | 'criteria' | 'plannedFiles' | 'stage' | 'description' | 'lease'>, blockerClass: string, now: number) =>
+  (blockerClass === 'genuine' || blockerClass === 'master-role') && (!work.lease || Date.parse(work.lease.expiresAt) <= now) && (loopOwned(work) || !!loopObservationProofs(work));

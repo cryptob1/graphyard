@@ -822,3 +822,30 @@ for (const key of ['GY-1696', 'GY-1674'] as const) for (const replayBase of repl
     assert.throws(() => assertDispatchable(released, [released], new Date(onBase.at).toISOString()), /loop-owned/, 'and a hand dispatch is refused with the same words');
   });
 }
+
+// GY-1768: eight build-stage escalations in the week to 2026-10-13 (GY-1696 ×3, GY-1674 ×3, GY-1725, GY-1724) were workers' `blocked` reports on items only the loop or a master-role
+// session can serve. GY-1760 and GY-1762 stopped new dispatches; the reports already recorded stood open until a master unblocked each by hand (GY-1696's and GY-1674's were each
+// unblocked and re-dispatched once). The loop now clears such a blocker itself (loopHeldBlocker), so none waits on a person; the item's next action names who records the reading.
+{
+  const release = 'ba607f8a809ed20fea15387e1934425cacbfef9f';
+  const followUp = (proof: string, plannedFiles: string[]) => ({ systemDriven: true, stage: 'ready', lease: null, plannedFiles, description: `Post-deploy follow-up: post-deploy:e03bc94f-82f4-481d-a443-4b4e6abe9eb6:AC-2:manual:post-deploy/webhook-deliveries-clean-24h:${release}`,
+    criteria: [{ id: 'AC-1', text: 'observed', proofs: [proof] }] }) as unknown as Work;
+  const owned = (proof: string) => ({ systemDriven: true, stage: 'ready', lease: null, plannedFiles: [], description: '', criteria: [{ id: 'AC-1', text: 'observed', proofs: [proof] }] }) as unknown as Work;
+  const instances: [string, Work, string][] = [
+    ['GY-1696', owned('manual:checkout-restore-clears-drift-pin-on-serving-release'), '.graphyard/master.json does not exist: run graphyard install --apply'],
+    ['GY-1674', owned('manual:checkout-restore-clears-dirty-checkout-on-serving-release'), 'A master-role session should record manual:checkout-restore-clears-dirty-checkout-on-serving-release'],
+    ['GY-1724', followUp('manual:webhook-deliveries-clean-24h-on-serving-release', []), 'no 24h reading is obtainable from this sandbox: the advanced delivery log needs a GitHub browser sign-in'],
+    ['GY-1725', followUp('manual:github-budget-attention-row-clears-on-serving-release', ['verification/post-deploy-github-budget-row.md']), 'The remaining AC-1 demands cannot be produced by a worker; needs an operator-supplied delivery-log export'],
+  ];
+  for (const [key, work, report] of instances) test(`manual:intervention-pattern-escalation-build — ${key}: a worker's blocked report on an item held for the loop is cleared by the loop, not left for a master`, async () => {
+    const { loopHeldBlocker } = await import('../src/model/loop-owned.js');
+    const { itemBlockerClass } = await import('../src/model/blocker-class.js');
+    const blockerClass = itemBlockerClass({ blocker: report, humanRequest: null })!.class;
+    const now = Date.parse('2026-10-13T11:00:00Z');
+    assert.ok(needsSomeone(blockerClass), 'before: the class is one that waits for someone (genuine or master-role), the open escalation');
+    assert.equal(loopHeldBlocker(work, blockerClass, now), true, 'after: the loop clears it');
+    assert.equal(loopHeldBlocker({ ...work, lease: { owner: 'w', epoch: 1, expiresAt: '2026-10-13T12:00:00Z' } } as Work, blockerClass, now), false, 'never while an attempt still holds the item');
+    assert.equal(loopHeldBlocker(work, 'human-only', now), false, 'a human-only wait is not the loop\'s to clear');
+    assert.equal(loopHeldBlocker({ ...work, criteria: [...work.criteria, { id: 'AC-2', text: 'code', proofs: ['integration:behaves'] }], plannedFiles: ['src/x.ts'] } as Work, blockerClass, now), false, 'an item with a code criterion keeps its blocker for its worker');
+  });
+}
