@@ -2,14 +2,13 @@
 // structural item filed per recurring class.
 import { createHash } from 'node:crypto';
 import type { Work } from '../model.js';
-import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, releaseOvertakenLinks, standingScopeRequest, statusFaults, noteActionOutcome, trackFaults, unboundedAttemptKey, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
-import { heldEscalation, unansweredStands } from '../model/fault-record.js';
+import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, releaseOvertakenLinks, standingScopeRequest, statusFaults, trackFaults, unboundedAttemptKey, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
 import { forgetDoneLinks, linkInstance } from '../model/fault-record.js';
 import { buildMasterStatus, diskThresholdBytes, type AttentionItem, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { hostMemoryAttention } from '../master-resources.js';
 import { qualifyTimingFailures, type CheckAnnotations } from '../cli/timing-failures.js';
-import { type DaemonAction, type DaemonState, daemonActionFaultKind, faultActionKey, message } from './state.js';
+import { type DaemonAction, type DaemonState, faultActionKey, message } from './state.js';
 export { unboundedAttemptKey };
 import type { UnsubmittedAttempt } from '../model/attempt-bound.js';
 import { readyToRetry } from './sessions.js';
@@ -616,7 +615,6 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
     agents: herdrRead.available ? seen : null, build: controlPlane?.build?.commit ?? null });
   trackFaults(state.faults, [...cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available, scopeRoutes: !!effects.decide && !!effects.approver }), ...invariantFaults(invariants)],
     new Date(clock).toISOString(), partial || (herdrRead.available ? false : new Set<string>([...herdrFaultKinds, invariantFaultKind('lingering-sessions')])));
-  settleEscalations(state, lastObservedAt);
   // GY-1357: the filings and the diagnoses' moves share what the observation left of the budget.
   await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed, filings);
   await fileDocsTrim(state, effects, snapshot.work, reported?.docs, now, performed, filings);
@@ -625,19 +623,6 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
   //     to be observed within the budget would only time out the diagnoses' requests too: they wait for the next cycle.
   if (!unreadSources.length) await diagnosisStep(budgetedCycle(cycle, filings));
   await noteCarried(cycle, filings.carried);
-}
-
-/**
- * GY-1751: an approver-exhaustion escalation is recorded as an instance only once an observation has had the chance to find its
- * decision's unanswered line (storeAction holds it): the line standing, or opening in the same observation, is the one instance;
- * with none, the exhausted run stands as its own. `since` is the observation before this one, so a row settles once.
- */
-export function settleEscalations(state: DaemonState, since: string | undefined) {
-  for (const [key, action] of Object.entries(state.actions)) {
-    if (!heldEscalation(key, action.state) || state.faults.failing[key] || (since && action.at <= since) || unansweredStands(state.faults, key)) continue;
-    const fault = classified(daemonActionFaultKind(action.kind));
-    noteActionOutcome(state.faults, key, action.state, { ...fault, subject: action.work ?? key, text: action.detail }, action.at);
-  }
 }
 
 const carriedNone = 'The faults step fitted every filing and decision request in its budget';

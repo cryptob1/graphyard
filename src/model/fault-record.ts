@@ -15,7 +15,7 @@ const instanceOf = (observation: FaultObservation, at: string, nth = 0): FaultIn
 function retain(record: FaultRecord) { // drops the oldest past the bound: first those no standing fault or failing run names, then any, so the bound holds
   for (const spare of [new Set([...Object.values(record.open), ...Object.values(record.failing)]), new Set<string>()]) { let excess = record.instances.length - retainedFaultInstances;
     if (excess > 0) record.instances.splice(0, record.instances.length, ...record.instances.filter(entry => excess <= 0 || spare.has(entry.id) || excess-- <= 0)); }
-  const kept = new Set(record.instances.map(entry => entry.id)); for (const refs of [record.open, record.failing]) for (const key of Object.keys(refs)) if (!kept.has(refs[key])) delete refs[key];
+  const kept = new Set(record.instances.map(entry => entry.id)); for (const refs of [record.open, record.failing]) for (const key of Object.keys(refs)) if (!kept.has(refs[key]) && !refs[key].startsWith('held:')) delete refs[key];
 }
 /** The decision a `decision-unanswered` line is about. */
 const unansweredDecision = (observation: { kind: string; text: string }) => observation.kind === 'decision-unanswered' ? /^Decision (\S+) \(/.exec(observation.text)?.[1] : undefined;
@@ -33,13 +33,25 @@ export function unansweredStands(record: Pick<FaultRecord, 'open' | 'instances'>
   const decision = action.slice(prefix.length);
   return Object.values(record.open).some(id => { const entry = record.instances.find(instance => instance.id === id); return entry && unansweredDecision(entry) === decision; });
 }
-/** An exhaustion escalation's failing run: held out of the record until the next full observation (settleEscalations), when its unanswered line is or is not standing. */
-export const heldEscalation = (key: string, outcome: string) => key.startsWith(exhaustionEscalationKey('')) && (outcome === 'failed' || outcome === 'indeterminate');
+/** An exhaustion escalation's failing run: held out of the instances (as `held:` JSON under `failing`) until a full observation has looked for its decision's unanswered line (settleHeld). */
+const heldEscalation = (key: string, outcome: string) => key.startsWith(exhaustionEscalationKey('')) && (outcome === 'failed' || outcome === 'indeterminate');
+const heldPrefix = 'held:';
 function absorbEscalation(record: FaultRecord, observation: FaultObservation) {
   const decision = unansweredDecision(observation), id = decision && record.failing[exhaustionEscalationKey(decision)];
   if (!id) return;
-  record.instances = record.instances.filter(entry => entry.id !== id);
+  if (!id.startsWith(heldPrefix)) record.instances = record.instances.filter(entry => entry.id !== id);
   delete record.failing[exhaustionEscalationKey(decision)];
+}
+/** Held escalations no unanswered line absorbed in this observation are the exhausted runs they are: each becomes its instance once. */
+function settleHeld(record: FaultRecord) {
+  for (const [key, held] of Object.entries(record.failing)) {
+    if (!held.startsWith(heldPrefix)) continue;
+    const { observation, at } = JSON.parse(held.slice(heldPrefix.length)) as { observation: FaultObservation; at: string };
+    delete record.failing[key];
+    if (unansweredStands(record, key)) continue;
+    const instance = noteFault(record, observation, at);
+    if (record.instances.includes(instance)) record.failing[key] = instance.id;
+  }
 }
 /**
  * One cycle's observations against the record. A fault that stood last cycle and still stands is
@@ -65,6 +77,7 @@ export function trackFaults(record: FaultRecord, observations: readonly FaultObs
     record.instances.push(instance); record.open[key] = instance.id; opened.push(instance);
     absorbEscalation(record, observation);
   }
+  settleHeld(record);
   if (partial !== true) for (const key of Object.keys(record.open)) if (!seen.has(key) && !(partial && partial.has(key.slice(0, key.indexOf('|'))))) delete record.open[key];
   retain(record);
   return opened;
@@ -98,6 +111,8 @@ export function noteFault(record: FaultRecord, observation: FaultObservation, at
 export function noteActionOutcome(record: FaultRecord, action: string, outcome: 'started' | 'done' | 'failed' | 'indeterminate' | 'waiting', observation: FaultObservation, at: string): FaultInstance | null {
   if (outcome === 'done') { delete record.failing[action]; return null; }
   if (outcome === 'started' || outcome === 'waiting') return null;
+  if (heldEscalation(action, outcome) && !record.failing[action]) { record.failing[action] = `${heldPrefix}${JSON.stringify({ observation, at })}`; return null; }
+  if (record.failing[action]?.startsWith(heldPrefix)) return null;
   const standing = record.failing[action] ? record.instances.find(entry => entry.id === record.failing[action]) : undefined;
   if (standing) { standing.lastSeenAt = at; return null; }
   const instance = noteFault(record, observation, at);

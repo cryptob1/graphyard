@@ -6,7 +6,6 @@ import type { Work } from '../src/model.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { storeAction } from '../src/daemon/state.js';
 import { trackFaults } from '../src/model/fault-record.js';
-import { settleEscalations } from '../src/daemon/faults.js';
 import { containmentInMotion, containmentSettleWaitBoundMs, cycleFaults, emptyDaemonState, reworkDecisionInMotion, reworkDecisionWaitBoundMs } from '../src/master-daemon.js';
 // GY-1337's own exports are read through namespaces, so the base exercise runs these replays and each fails on its assertion.
 import * as daemon from '../src/master-daemon.js';
@@ -415,7 +414,7 @@ test('manual:fault-class-decision — an exhaustion escalation whose decision wa
   storeAction(state, `escalation:decision-unjudged:${id}`, { kind: 'escalation', work: 'GY-1710', principal: null, state: 'failed', detail: 'close decision: not judged', attempts: 1, cycle: 1, at: '2026-10-12T02:16:50.965Z', epoch: null }, undefined);
   // The decision settles before any successful observation: no unanswered line ever stands.
   trackFaults(state.faults, [], '2026-10-12T02:17:40.000Z');
-  settleEscalations(state, undefined);
+  trackFaults(state.faults, [], '2026-10-12T02:17:50.000Z');
   assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:escalation'], 'the real exhausted run is not dropped');
 });
 
@@ -463,7 +462,6 @@ test('manual:fault-class-decision — an escalation recorded before its unanswer
   exhaust(state, id, '2026-10-12T02:16:50.000Z');
   assert.equal(state.faults.instances.length, 0, 'nothing counts before an observation has looked for the unanswered line');
   trackFaults(state.faults, [{ kind: 'decision-unanswered', faultClass: 'decision', subject: 'GY-1710', text: stall(id) }], '2026-10-12T02:16:55.000Z');
-  settleEscalations(state, '2026-10-12T02:16:00.000Z');
   assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['decision-unanswered']);
 });
 
@@ -472,14 +470,13 @@ test('manual:fault-class-decision — a standing unanswered line that names anot
   trackFaults(state.faults, [{ kind: 'decision-unanswered', faultClass: 'decision', subject: 'GY-1710', text: stall(first) }], '2026-10-12T02:00:00.000Z');
   exhaust(state, second, '2026-10-12T02:10:00.000Z');
   trackFaults(state.faults, [{ kind: 'decision-unanswered', faultClass: 'decision', subject: 'GY-1710', text: stall(second) }], '2026-10-12T02:11:00.000Z');
-  settleEscalations(state, '2026-10-12T02:05:00.000Z');
   assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['decision-unanswered']);
 });
 
 test('manual:fault-class-decision — an exhausted run whose decision was never unanswered is an instance once, however often it settles', () => {
   const id = '55555555-d9c1-4cd2-8467-9f1866b0fd41', state = emptyDaemonState(config());
   exhaust(state, id, '2026-10-12T02:16:50.000Z');
-  settleEscalations(state, '2026-10-12T02:16:00.000Z'); settleEscalations(state, '2026-10-12T02:16:00.000Z');
+  trackFaults(state.faults, [], '2026-10-12T02:16:55.000Z'); trackFaults(state.faults, [], '2026-10-12T02:17:55.000Z');
   assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:escalation']);
 });
 
