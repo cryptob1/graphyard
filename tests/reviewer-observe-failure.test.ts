@@ -175,3 +175,16 @@ test('integration:review-read-failure-contained — a secondary-limit refusal pa
     assert.equal(ghPausedUntil(t0), t0 + 300_000);
   } finally { resetGhPause(); }
 });
+
+test('integration:review-read-failure-contained — a GitHub-backed reviewer launch is deferred while the pause stands, before any record or gh call', async () => {
+  resetGhPause();
+  const { root, cleanup } = await reviewerRoot();
+  try {
+    const t0 = Date.now();
+    await notePossibleGhRateLimit(new Error('gh: API rate limit exceeded'), () => { throw new Error('refused'); }, t0);
+    const { calls, run } = stubs(() => []);
+    await assert.rejects(launchReview(root, work(), 'claude-reviewer', [], iso(0), { run, now: () => new Date(t0 + 1000) }), /gh reads are paused/);
+    assert.deepEqual(calls, [], 'no gh or herdr call was made');
+    assert.equal((await readFile(join(root, '.graphyard', 'review-ledger.json'), 'utf8').catch(() => '{"reviews":[]}')).includes('GY-84'), false, 'no record was reserved');
+  } finally { resetGhPause(); await cleanup(); }
+});

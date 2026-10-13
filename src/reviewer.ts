@@ -896,6 +896,17 @@ function withdrawnSinceSettled(record: ReviewRecord, observation: Work['observat
 export const answeredByPendingReview = (error: unknown, request: { sha: string }) =>
   (error as { reviewSessionPending?: boolean } | null)?.reviewSessionPending === true && (error as ReviewSessionPending).pending.sha === request.sha ? (error as ReviewSessionPending).pending : null;
 
+/**
+ * A GitHub-backed read of a reviewer launch (the head commit) while the gh login is
+ * rate-limited: refused before it is attempted, so the launch is deferred to a later pass rather than spending
+ * the quota; a rate-limit refusal of its own starts the pause.
+ */
+async function pausedGhRead<T>(dependencies: { run?: ChildRun; now?: () => Date }, read: () => Promise<T>): Promise<T> {
+  const at = (dependencies.now ?? (() => new Date()))().getTime();
+  assertGhNotPaused(at);
+  try { return await read(); } catch (error) { await notePossibleGhRateLimit(error, dependencies.run ?? defaultChildRun, at); throw error; }
+}
+
 export async function launchReview(root: string, work: Work, profileName: string | undefined, agents: { name?: string }[], observedAt: string, dependencies: {
   run?: ChildRun;
   mint?: (credential: ReviewerCredential, repository: string) => Promise<{ token: string; expiresAt: string }>;
@@ -934,6 +945,8 @@ export async function launchReview(root: string, work: Work, profileName: string
   // the API as the launch's one-time token.
   const postMerge = dependencies.postMerge;
   const plane = !!postMerge || work.observation?.source === 'control-plane';
+  // A GitHub-backed launch (token mint, commit and thread reads) is deferred while the gh login is rate-limited, before any record is reserved.
+  if (!plane && !dependencies.mint) assertGhNotPaused((dependencies.now ?? (() => new Date()))().getTime());
   if (!config.reviewer && !plane) throw new Error('Register the reviewer GitHub App with master reviewer setup or master reviewer bind before launching a review');
   // The App is narrowed once, for the launch closure below as much as for this line.
   const reviewerApp = config.reviewer ?? null;
@@ -952,7 +965,7 @@ export async function launchReview(root: string, work: Work, profileName: string
   // anything is started, so a second launcher — in this process or another — finds it and stands down.
   // A head that follows an approval's planned mechanical fix is read as that round's bot commit and
   // verified (GY-971); a relaunch of the same head is shown what its first session was.
-  const observeCommit = dependencies.observeCommit ?? (dependencies.mint || plane ? undefined : (sha: string) => observeGitHubCommit(config.repository, sha, dependencies.run ?? defaultChildRun));
+  const observeCommit = dependencies.observeCommit ?? (dependencies.mint || plane ? undefined : (sha: string) => pausedGhRead(dependencies, () => observeGitHubCommit(config.repository, sha, dependencies.run ?? defaultChildRun)));
   const known = (await readReviewLedger(root)).reviews;
   const submitter = submittingPrincipal(work);
   const freshRead = known.find(entry => entry.key === work.key && entry.sha === binding.sha && entry.freshRead)?.freshRead
