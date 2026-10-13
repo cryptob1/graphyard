@@ -15,9 +15,11 @@ import { applyWorkDelta, type DeltaOp } from './store/snapshot-delta.js';
  * pattern adds or edits one rule here rather than a condition inside the fold.
  */
 
-/** A worker's open ask: a scope request or a blocked report, until something answers it. */
-/** `epoch`: the attempt a scope request was raised by; `routed`: the widening decision the loop put to the independent approver for it, while it stands (GY-1682). */
-/** `askedAt`: the instant the server stamped the scope request with (`scopeRequest.at`, read off the refusal that made the ask `refused-by-loop`), the half of its identity beside `epoch` a routed decision names (`askIdentity`); the row's own instant (`at`) is written later and differs. */
+/**
+ * A worker's open ask: a scope request or a blocked report, until something answers it.
+ * `epoch`: the attempt a scope request was raised by; `routed`: the widening decision the loop put to the independent approver for it, while it stands (GY-1682).
+ * `askedAt`: the instant the server stamped the scope request with (`scopeRequest.at`, read off the refusal that made the ask `refused-by-loop`), the half of its identity beside `epoch` a routed decision names (`askIdentity`); the row's own instant (`at`) is written later and differs.
+ */
 export interface Ask { seq: number; at: string; stage: Stage | null; kind: 'scope-request' | 'blocked-report'; blocked: string; paths: string[]; trigger?: string; epoch?: number | null; askedAt?: string | null; routed?: { seq: number; at: string; decision: string } | null; sources: { seq: number; kind: string }[] }
 /** A rework decision the fold has seen requested and not yet settled. */
 export interface ReworkDecision { seq: number; at: string; id: string; stage: Stage | null; binding: string | null; loopRequested: boolean; approvedBy: string | null; self?: boolean }
