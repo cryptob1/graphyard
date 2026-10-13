@@ -41,7 +41,7 @@ Unacted producer requests (unstarted, refused, launch-exited) relaunch on untrie
 
 ## Fault classes
 
-`faultClass` (`master status` `faults`): recurring classes file one item each; instances predating a delivered class item's landing (not opening) link there; triage proposes closing items holding only those, withdrawn on post-landing links; doctor matches standing/cover; a resource at bound files `resource:ID`; also `fleet-capacity`, `unanswered-request` (past `settledAnswerGraceMs`), `configuration`, `decision-unanswered` (not `loop-silence`), and `unclassified` unless (`plane-unavailable`, `fix-item`, `decision-stale`, `overlong-session`). Review unlaunched 15min: `concurrency-starved`, `review-settlement`, `launch-review`. Unanswering planes: `plane-unavailable` (`planeWaitMs` ≠ loop-cost/cycle-p90). Pre-start launch failures: one.
+`faultClass` (`master status` `faults`): recurring classes file one item each; instances predating a delivered class item's landing (not opening) link there; triage proposes closing items holding only those, withdrawn on post-landing links; doctor matches standing/cover; a resource at bound files `resource:ID`; also `fleet-capacity`, `unanswered-request` (past `settledAnswerGraceMs`), `configuration`, `decision-unanswered`, and `unclassified` unless (`plane-unavailable`, `fix-item`, `decision-stale`, `overlong-session`). Review unlaunched 15min: `concurrency-starved`, `review-settlement`, `launch-review`. Unanswering planes: `plane-unavailable` (`planeWaitMs` ≠ loop-cost/cycle-p90). Pre-start launch failures: one.
 
 ## Shadow merge gate
 
@@ -51,4 +51,4 @@ Unacted producer requests (unstarted, refused, launch-exited) relaunch on untrie
 
 Target (10+ deliveries): submit→merge p50 ≤30 minutes, p90 ≤60 minutes. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; verdict `speed.submitToMerge`; `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
 
-Loop's decisions step stays within 10 s a cycle: one `decision.*` ledger read names moved items; a history whose ledger has not moved is kept, not read. Standing/held/approved-resume waits stay live (no fault); quarantine pauses matching held asks (history-held before measure; unknown on read failure); covering fail clears; 5xx/stale/GitHub-read-failure (rate limit, timeout) retries unless moot, never a scope fault on one; stale-revision re-computes.
+Loop's decisions step stays within 10 s a cycle: one `decision.*` ledger read names moved items; a history whose ledger has not moved is kept, not read. Standing/held/approved-resume waits stay live (no fault); quarantine pauses matching held asks; covering fail clears; 5xx/stale/GitHub-read-failure (rate limit, timeout) retries unless moot, a first never a scope fault; stale-revision re-computes.
