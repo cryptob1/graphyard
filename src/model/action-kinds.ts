@@ -1,5 +1,7 @@
 import type { ProducerGroup } from './dispatch.js';
 import { endedRuntimeStates } from './sessions.js';
+import { planeWideFailure } from './blocker-class.js';
+import { dispatchHumanWait } from './human-request.js';
 
 /**
  * The action vocabulary: the kinds themselves, the typed inputs each carries, and where the
@@ -181,3 +183,11 @@ export function handoffWaitBound(reason: string): number | null {
   if (workerSlotWait(reason)) return workerSlotWaitBoundMs;
   return null;
 }
+
+/**
+ * Whether a failure reason is a wait, not a fault (GY-1758): a dispatch refused because the item is
+ * parked on a human-only decision, whose text names the answer that resumes it, or a failure of the
+ * whole plane (`planeWideFailure`), which fails every step that meets it. Repeating is what such a
+ * reason does while the wait stands, so a run of it is never a stall and files no fault instance.
+ */
+export const waitReason = (reason: string | null | undefined) => !!reason && (reason.includes(dispatchHumanWait) || planeWideFailure(reason));

@@ -1,7 +1,7 @@
 import type { Work } from './work.js';
 import type { NextActionKind } from './next-action.js';
 import type { ActionRecord, ActionRow } from './actions.js';
-import { handoffWaitBound } from './action-kinds.js';
+import { handoffWaitBound, waitReason } from './action-kinds.js';
 
 /**
  * What the rows say about themselves.
@@ -116,7 +116,7 @@ export function actionStall(row: ActionRow): ActionStall | null {
   }
   const run: ActionRecord[] = [];
   for (const entry of failures) { if (run.length && entry.reason !== run[0].reason) break; run.push(entry); }
-  if (run.length < actionStallThreshold) return null;
+  if (run.length < actionStallThreshold || waitReason(run[0].reason)) return null;
   // A reason naming a handoff in progress (`handoffWaitBound`) repeats because the effect has not
   // landed yet, not because the attempt cannot succeed: it is a stall only once the run outlasts
   // the bound the component delivering it keeps (GY-1090). A run that fills the row's whole

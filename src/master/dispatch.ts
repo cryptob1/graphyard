@@ -10,7 +10,7 @@ import { concurrentOverlap, resourceConflicts } from '../coordination.js';
 import { type SandboxExec, WorkerSandboxError, verifyWorkerSandbox, workerPaths, writablePaths, grantWorkerPaths } from '../worker-sandbox.js';
 import { sweepExpiredWorkerCredentials, withdrawWorkerCredential, workerCredentialDirectory, workerCredentialEnvironment, workerCredentialRoot } from '../worker-credential.js';
 import { assertNoApprovalOptOut } from '../harness.js';
-import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
+import { parkedOnHuman, humanDecisionLabel, answerCommand, dispatchHumanWait } from '../model/human-request.js';
 import { documentationWorkerSection } from '../model/documentation.js';
 import { workerPreference } from '../model/worker-preference.js';
 import { observationWindowHold, servingReleaseProof, type Work } from '../model.js';
@@ -176,7 +176,7 @@ export const describeOverlap = (overlap: ReturnType<typeof concurrentOverlap>) =
 export function assertDispatchable(work: Work, allWork: Work[], observedAt: string) {
   const now = Date.parse(observedAt);
   if (!Number.isFinite(now)) throw new Error('Dispatch requires a valid Graphyard snapshot clock');
-  if (parkedOnHuman(work)) throw new Error(`Dispatch waits on a human-only decision (${humanDecisionLabel[work.humanRequest!.kind]}); ${answerCommand(work.key, work.humanRequest!)} resumes it`);
+  if (parkedOnHuman(work)) throw new Error(`${dispatchHumanWait} (${humanDecisionLabel[work.humanRequest!.kind]}); ${answerCommand(work.key, work.humanRequest!)} resumes it`);
   if (!work.ready || work.blocker) throw new Error('Dispatch requires released work without a blocker');
   if (work.children?.length) throw new Error(`${work.key} was split into ${work.children.join(', ')} before dispatch; it is delivered when they are and is never dispatched itself`);
   const fenced = containmentHold(work, now);
