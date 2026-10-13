@@ -408,6 +408,11 @@ test('unit:transient-scope-refusal — only a 5xx response or a stale revision i
   assert.equal(transientScopeRefusal(refused('x', 409, 'Policy revision changed; reload before revising')), 'the item moved past the revision the loop read');
   assert.equal(transientScopeRefusal(refused('x', 409, 'Task is quarantined by unverified containment from epoch 3; requirements remain immutable until settlement or stopped-worker recovery')), null);
   assert.equal(transientScopeRefusal(refused('x', 409, 'Operator agents cannot remove planned-file containment')), null);
+  // GY-1756: the loop's GitHub reads fail on rate limits and timeouts (GY-1746, GY-1748); neither judges scope.
+  assert.equal(transientScopeRefusal(new Error('Command failed: gh api --paginate --slurp repos/o/r/pulls/1158/reviews?per_page=100\ngh: API rate limit exceeded for user ID 4241869.')), 'GitHub could not be read');
+  assert.equal(transientScopeRefusal(new Error('The operation was aborted due to timeout')), 'GitHub could not be read');
+  assert.equal(transientScopeRefusal(refused('x', 409, 'Operator agents cannot remove planned-file containment')), null);
+  assert.equal(scopeRefusalFault('GitHub could not be read', undefined), null);
   assert.equal(scopeRefusalFault('the control plane answered 5xx', undefined), null);
   assert.equal(scopeRefusalFault('the control plane answered 5xx', { state: 'failed', detail: 'Could not widen GY-1 (the control plane answered 5xx, so it is retried next cycle on a fresh read): …' }), undefined);
   assert.equal(scopeRefusalFault(null, undefined), undefined);

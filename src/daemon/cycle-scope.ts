@@ -9,6 +9,7 @@ import { type Successor, successorGround, successorsOf } from '../model/successo
 import { findingScope, type ReviewFinding } from '../review-scope.js';
 import { guardBroadScope } from '../master.js';
 import { RefusedResponse } from '../model/refusal.js';
+import { ChildProcessError } from '../child-runner.js';
 import { message, scopeMeasurementSchema } from './state.js';
 import { scopeKey } from './reconcile.js';
 import { discoverHeldScopeAskMarks, scopeBudget, syncHeldScopeAskMarks } from './metrics.js';
@@ -380,7 +381,13 @@ const transientScopeRetry = 'so it is retried next cycle on a fresh read';
  */
 export function transientScopeRefusal(error: unknown): string | null {
   if (error instanceof RefusedResponse && error.status >= 500) return 'the control plane answered 5xx';
-  if (/Policy revision changed; reload before revising/.test(message(error))) return 'the item moved past the revision the loop read';
+  const text = message(error);
+  if (/Policy revision changed; reload before revising/.test(text)) return 'the item moved past the revision the loop read';
+  // GY-1756. A GitHub-side read failure (a rate limit, a timed-out call: GY-1746 on 12 October 2026
+  // and GY-1748) says nothing about the item's scope; the next cycle reads the findings again.
+  // The runner's own timeout (child-runner.ts) words it "did not finish within Nms and was killed" and sets timedOut.
+  if (error instanceof ChildProcessError && error.timedOut) return 'GitHub could not be read';
+  if (!(error instanceof RefusedResponse) && /API rate limit exceeded|secondary rate limit|operation was aborted due to timeout|timed? ?out|ETIMEDOUT|ECONNRESET|gh: .*(?:HTTP 5\d\d|Bad Gateway|Service Unavailable)/i.test(text)) return 'GitHub could not be read';
   return null;
 }
 /** What a widening refused for an ask no longer open says, so its record reads as the handled outcome it is (GY-1348). */

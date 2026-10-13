@@ -16,6 +16,7 @@ import { peerModuleGround, importingTestGround, noWallClockGatePath } from '../s
 import { automaticScopeGrounds } from '../src/daemon/cycle-scope.js';
 import { derivePlannedFiles } from '../src/model/work.js';
 import { RefusedResponse } from '../src/model/refusal.js';
+import { ChildProcessError } from '../src/child-runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-10-01..06 scope-request stamps are ledger fixtures judged on Date.parse(observedAt) handed to cycleFaults, runCycle and workFaults; the one new Date() stamps a request judged by paths alone. GY-1706's 11 October instances are derived as offsets from those stamps, never written as calendar literals.
 
@@ -411,4 +412,36 @@ test(`manual:fault-class-scope — scope-request|GY-1705|${gy1705At}: the wall-c
   assert.ok(derivePlannedFiles({ plannedFiles: planned, criteria }, tree).plannedFiles.includes(noWallClockGatePath));
   assert.equal(decideScopeRequest(item, { paths: ask }).state, 'approved');
   assert.ok(!derivePlannedFiles({ plannedFiles: planned, criteria }, tree).plannedFiles.includes('docs/'), 'documentation.paths stay widen-time implications');
+});
+
+// GY-1756 — three scope faults between 2026-10-12T22:56Z and 2026-10-13T00:06Z. Two were the loop's
+// GitHub read of the review findings (widening step 2a) failing: the runner's own timeout on
+// GY-1748 ("gh api ... did not finish within 90000ms and was killed", a ChildProcessError with
+// timedOut) and "gh: API rate limit exceeded" on GY-1746. Neither judges the item's scope, yet each
+// was filed as action:scope. Against the base the first failure records a scope fault; against the
+// candidate it is a retried transient with no fault, and the next cycle widens on the fresh read.
+const gy1756 = [
+  { subject: 'GY-1748', observedAt: '2026-10-12T22:56:19.647Z', error: () => new ChildProcessError('gh', ['api', '--paginate', '--slurp', 'repos/owner/project/pulls/1158/reviews?per_page=100'], { stdout: '', stderr: '', status: null, signal: 'SIGTERM', timedOut: true, timeoutMs: 90_000 }) },
+  { subject: 'GY-1746', observedAt: '2026-10-12T23:51:08.609Z', error: () => new Error('Command failed: gh api --paginate --slurp repos/owner/project/pulls/1150/reviews?per_page=100\ngh: API rate limit exceeded for user ID 4241869. If you reach out to GitHub Support for help, please include the request ID.') },
+];
+for (const entry of gy1756) test(`manual:fault-class-scope — action:scope|${entry.subject}|${entry.observedAt}: a failed GitHub read of the findings is a retried transient, never a scope fault`, async () => {
+  const at = Date.parse(entry.observedAt);
+  const work = standing({ id: entry.subject, subject: entry.subject, observedAt: entry.observedAt, epoch: 1, requestedAt: new Date(at - 10 * minute).toISOString(), refusedAt: new Date(at - 9 * minute).toISOString(),
+    paths: ['src/daemon/cycle-dispatch.ts'], plannedFiles: ['src/daemon/cycle-scope.ts'], settled: 'widened on the next cycle\'s read' });
+  const widened: string[] = [];
+  const effects = {
+    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [work], now: new Date(at).toISOString() }), closeSession: () => {}, dispatch: async () => {},
+    requestProof: () => {}, observeDeployment: async () => ({ source: 'unavailable', sha: null, at: entry.observedAt, reason: 'replay', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    reviewFindings: async () => { throw entry.error(); },
+    basePaths: async (paths: string[]) => new Set(paths),
+    widenScope: async (item: Work) => { widened.push(item.key); return item; },
+  } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config());
+  await runCycle(config(), state, effects, () => at);
+  const scope = Object.values(state.actions).filter(action => action.kind === 'scope' && action.work === entry.subject);
+  assert.deepEqual(scope.map(action => action.state), ['failed'], JSON.stringify(scope));
+  assert.match(scope[0].detail, /GitHub could not be read, so it is retried next cycle on a fresh read/);
+  assert.deepEqual(state.faults.instances.filter(instance => instance.kind === 'action:scope'), [], 'the first failed read files no scope fault');
+  assert.deepEqual(widened, [], 'nothing was widened on a read that failed');
 });
