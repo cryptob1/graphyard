@@ -78,4 +78,4 @@ Only complete listings verify (`POST /api/delivery/notify` hints); `graphyard de
 
 `POST /api/validation/result` binds manifest, signature, measurements; mismatches record `attribution-undermined`, voiding passes (`GET /api/analytics/attribution`).
 
-A systemDriven item of only manual post-deploy proofs is never dispatched: `master status` counts it `waiting` until read, then escalates it.
+A systemDriven item of only manual post-deploy proofs is never dispatched: `master status` counts it `waiting` until read, then escalates it. A follow-up (its `Post-deploy follow-up:` request identity, not criterion wording) is read only by a trusted passing record on its full serving release, based on the parent's merge, skipping nothing; otherwise it still waits.

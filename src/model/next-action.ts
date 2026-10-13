@@ -238,7 +238,7 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
       // A loop-owned observation item names its own wait below: it is never dispatched, at the instant or after.
       if (window && !loopObservationProofs(work)) return waits({ kind: 'window', on: null, detail: `${key} waits for its observation window: the reading it owes can first exist at ${window.notBefore} (${window.detail}); the loop dispatches it then` }, failing.name, refusal);
       // GY-1762: nothing a code worker can do; the loop's own reading ends the wait.
-      const observing = loopObservation(work, now);
+      const observing = loopObservation(work, now, all);
       // Once the reading can exist it is owed: the operator-proof escalation carries it, still never a code worker.
       if (observing?.due) return make('escalate', `${key} owes ${observing.waitingFor}; no code worker can record it`, { kind: 'escalate', trigger: 'operator-proof', detail: observing.waitingFor }, `observation:${work.epoch}`, failing.name, refusal);
       if (observing) return waits({ kind: 'window', on: null, detail: `${key} waits for ${observing.waitingFor}; the loop records it, and no worker is dispatched` }, failing.name, refusal);

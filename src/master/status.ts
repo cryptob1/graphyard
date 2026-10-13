@@ -181,7 +181,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const dwellMs = now - Date.parse(work.stageEnteredAt);
     // The earliest instant the item's reading can exist (GY-1698), and whether it still holds the dispatch.
     // GY-1762: waiting on the loop's own live reading, not ready for a worker.
-    const observing = work.stage === 'ready' && !work.blocker && !active ? loopObservation(work, new Date(now)) : null;
+    const observing = work.stage === 'ready' && !work.blocker && !active ? loopObservation(work, new Date(now), snapshot.work) : null;
     const observationWindow = work.observationWindow ? { ...work.observationWindow, waiting: !!observationWindowHold(work, new Date(now)) } : null;
     const review = reviewState(work);
     const assessed = containment[work.id];

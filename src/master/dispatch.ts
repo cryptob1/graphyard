@@ -192,7 +192,7 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   const window = observationWindowHold(work, new Date(now));
   if (window) throw new Error(`Dispatch waits for its observation window: the reading it owes can first exist at ${window.notBefore} (${window.detail})`);
   // GY-1762: an item whose only work is the loop's own live reading has nothing a code worker can do.
-  const observing = loopObservation(work, new Date(now));
+  const observing = loopObservation(work, new Date(now), allWork);
   if (observing) throw new Error(`Dispatch waits for the loop's observation: ${observing.waitingFor}`);
   if (loopObservationProofs(work)) throw new Error('Dispatch refused: the loop records this item\'s reading itself and no code worker can finish it');
   // Planned-file overlap holds nothing: dispatch is optimistic, and the merge queue and a sync

@@ -164,7 +164,7 @@ export function upNextHold(work: Work, all: Work[], now: number): { kind: 'depen
   const dependency = work.gates.find(gate => gate.name === 'ready')?.reasons.find(reason => reason.startsWith('Dependency '));
   if (dependency) return { kind: 'dependency', text: plainReason(dependency, 'ready').text };
   const window = observationWindowHold(work, new Date(now)); if (window) return { kind: 'window', text: `Waiting for its observation window: the reading it owes can first exist at ${window.notBefore}` };
-  const observing = loopObservation(work, new Date(now)); if (observing) return { kind: 'observation', text: `Waiting for ${observing.waitingFor}; no builder is assigned` };
+  const observing = loopObservation(work, new Date(now), all); if (observing) return { kind: 'observation', text: `Waiting for ${observing.waitingFor}; no builder is assigned` };
   const held = resourceConflicts(work, all, now);
   if (!held.length) return null;
   return { kind: 'resource', text: `Waiting for ${[...new Set(held.map(entry => entry.key))].join(', ')} to release ${[...new Set(held.map(entry => entry.resource))].join(', ')}: an exclusive resource it needs` };

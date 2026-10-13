@@ -9,7 +9,7 @@ import * as model from '../src/model.js';
 import type { Work } from '../src/model.js';
 
 // Read at call time, so a tree without the export fails a test case rather than the file's import.
-const loopObservation = (work: Work, at: Date) => (model as unknown as { loopObservation: (work: Work, at: Date) => unknown }).loopObservation(work, at);
+const loopObservation = (work: Work, at: Date, all: unknown[] = []) => (model as unknown as { loopObservation: (work: Work, at: Date, all: unknown[]) => unknown }).loopObservation(work, at, all);
 
 // GY-1762: a systemDriven item whose criteria are all manual post-deploy proofs has no code for a worker:
 // it is not dispatched, and it counts as waiting on the loop's reading, not as ready.
@@ -37,23 +37,28 @@ test('unit:observation-item-not-dispatched — the dispatcher skips an all-manua
   assert.equal(nextAction(withCode, [withCode], new Date(now))?.kind, 'dispatch');
 });
 
-const reading = (extra: object = {}) => ({ proof: 'manual:post-deploy/rate-on-serving-release', trusted: true, result: 'pass', policyRevision: 1, sha: 'a'.repeat(40), at: iso(now), ...extra });
+const reading = (extra: object = {}) => ({ proof: 'manual:post-deploy/rate-on-serving-release', trusted: true, result: 'pass', policyRevision: 1, sha: 'a'.repeat(40), baseSha: 'm'.repeat(40), executed: 1, skipped: 0, at: iso(now), ...extra });
 
 test('unit:observation-class-needs-the-follow-up-reading — a head-anchored code criterion on a -on-serving-release proof is dispatched as before; a failed, expired or other-release reading does not end the wait; a due or expired-window wait is a hold on the board', () => {
-  const filed = 'From this head against the serving release aaaaaaaaaaaa that carries GY-9\'s merge bbbbbbbbbbbb: the rate holds';
-  const follow = (extra: Partial<Work> = {}) => item(6, { criteria: [{ id: 'AC-1', text: filed, proofs: ['manual:rate-on-serving-release'] }], ...extra });
-  const codeLike = item(7, { criteria: [{ id: 'AC-1', text: 'From this head the dispatcher skips it', proofs: ['manual:skip-on-serving-release'] }] });
+  const proof = 'manual:rate-on-serving-release', parent = { id: '11111111-1111-4111-8111-111111111111', delivery: { mergeSha: 'm'.repeat(40) } };
+  const request = `post-deploy:${parent.id}:AC-1:${proof}:${'a'.repeat(40)}`;
+  const follow = (extra: Partial<Work> = {}) => item(6, { description: `Post-deploy follow-up: ${request}\n\nowed`, criteria: [{ id: 'AC-1', text: 'The rate holds', proofs: [proof] }], ...extra });
+  const read = (work: Work) => loopObservation(work, new Date(now), [parent]);
+  const codeLike = item(7, { criteria: [{ id: 'AC-1', text: `From this head against the serving release aaaaaaaaaaaa that carries GY-9's merge bbbbbbbbbbbb: the dispatcher skips it`, proofs: ['manual:skip-on-serving-release'] }] });
   assert.equal(loopObservation(codeLike, new Date(now)), null);
   assert.equal(dispatchable(codeLike, now), true);
-  assert.ok(loopObservation(follow(), new Date(now)));
-  const proof = 'manual:rate-on-serving-release';
-  for (const bad of [{ result: 'fail' }, { expiresAt: iso(now - hour) }, { sha: 'c'.repeat(40) }, { policyRevision: 0 }, { revocation: { at: iso(now), actor: 'x', reason: 'y' } }]) {
-    assert.ok(loopObservation(follow({ evidence: [reading({ proof, ...bad })] as never }), new Date(now)), JSON.stringify(bad));
+  assert.ok(read(follow()));
+  for (const bad of [{ result: 'fail' }, { expiresAt: iso(now - hour) }, { sha: 'c'.repeat(40) }, { sha: `${'a'.repeat(12)}${'c'.repeat(28)}` }, { baseSha: 'n'.repeat(40) }, { skipped: 1 }, { policyRevision: 0 }, { revocation: { at: iso(now), actor: 'x', reason: 'y' } }]) {
+    assert.ok(read(follow({ evidence: [reading({ proof, ...bad })] as never })), JSON.stringify(bad));
   }
-  assert.equal(loopObservation(follow({ evidence: [reading({ proof, sha: 'a'.repeat(40) })] as never }), new Date(now)), null);
+  assert.equal(read(follow({ evidence: [reading({ proof })] as never })), null);
+  assert.ok(loopObservation(follow({ evidence: [reading({ proof })] as never }), new Date(now)), 'an unknown parent binds nothing');
   // A later failed reading of the same proof and release withdraws an earlier pass.
-  assert.ok(loopObservation(follow({ evidence: [reading({ proof, at: iso(now - 2 * hour) }), reading({ proof, result: 'fail', at: iso(now - hour) })] as never }), new Date(now)));
-  assert.equal(loopObservation(follow({ evidence: [reading({ proof, result: 'fail', at: iso(now - 2 * hour) }), reading({ proof, at: iso(now - hour) })] as never }), new Date(now)), null);
+  assert.ok(read(follow({ evidence: [reading({ proof, at: iso(now - 2 * hour) }), reading({ proof, result: 'fail', at: iso(now - hour) })] as never })));
+  assert.equal(read(follow({ evidence: [reading({ proof, result: 'fail', at: iso(now - 2 * hour) }), reading({ proof, at: iso(now - hour) })] as never })), null);
+  // The criterion's wording alone is not the class: without the filer's request identity it is dispatched.
+  const imitation = item(8, { description: '', criteria: [{ id: 'AC-1', text: codeLike.criteria[0].text, proofs: [proof] }] });
+  assert.equal(loopObservation(imitation, new Date(now)), null);
   const due = follow();
   assert.match(upNextHold(due, [due], now)?.text ?? '', /reading of manual:rate-on-serving-release/);
   const lapsed = follow({ observationWindow: { notBefore: iso(now - hour), basis: 'criterion-window', detail: 'd' } });
