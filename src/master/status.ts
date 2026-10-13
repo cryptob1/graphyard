@@ -272,6 +272,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : baseRefresh && !work.blocker ? [null, null]
       // A follow-up held on its observation window (GY-1698) is waiting for the instant, not stalled at its gate.
       : (observationWindow?.waiting || (observing && !observing.due)) && !work.blocker && !active ? [null, null]
+      // The reading is owed now (GY-1762): the loop's own, never a worker's submission the build gate is waiting for.
+      : observing?.due && !work.blocker && !active ? [`${work.key} owes ${observing.waitingFor}; no code worker can record it, so it is escalated for the reading`, 'gate']
       : work.blocker || dwellMs > 3_600_000 ? [first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour`, 'gate'] : [null, null];
     const attentionOwner = cause ? workAttentionOwner(work, cause, now) : null;
     if (cause) causes.set(work.key, cause);

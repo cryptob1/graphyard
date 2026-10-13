@@ -235,7 +235,8 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
       // GY-1698: a released follow-up whose reading cannot exist yet is not offered to a worker; the
       // wait is due at the recorded instant, and this same computation names the dispatch past it.
       const window = observationWindowHold(work, now);
-      if (window) return waits({ kind: 'window', on: null, detail: `${key} waits for its observation window: the reading it owes can first exist at ${window.notBefore} (${window.detail}); the loop dispatches it then` }, failing.name, refusal);
+      // A loop-owned observation item names its own wait below: it is never dispatched, at the instant or after.
+      if (window && !loopObservationProofs(work)) return waits({ kind: 'window', on: null, detail: `${key} waits for its observation window: the reading it owes can first exist at ${window.notBefore} (${window.detail}); the loop dispatches it then` }, failing.name, refusal);
       // GY-1762: nothing a code worker can do; the loop's own reading ends the wait.
       const observing = loopObservation(work, now);
       // Once the reading can exist it is owed: the operator-proof escalation carries it, still never a code worker.

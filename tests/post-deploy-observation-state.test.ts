@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { dispatchable } from '../src/coordination.js';
 import { buildMasterStatus } from '../src/master.js';
 import { dispatchSchedule } from '../src/master/status.js';
-import { nextAction } from '../src/model/next-action.js';
+import { actionAccount, nextAction } from '../src/model/next-action.js';
 import * as model from '../src/model.js';
 import type { Work } from '../src/model.js';
 
@@ -61,4 +61,15 @@ test('unit:observation-item-counted-waiting — it counts as waiting with what i
   assert.equal(nextAction(item(1), [item(1)], new Date(now))?.kind, 'escalate', 'an unwindowed one owes its reading at once');
   const after = buildMasterStatus({ now: iso(now + 7 * hour), work: [windowed, read] } as never, [], []);
   assert.deepEqual([after.counts.ready, after.counts.waiting], [1, 1]);
+});
+
+test('unit:observation-wait-names-reading — a windowed wait names the observation due then, never a dispatch; a due one is attention for the reading, not a missing submission', () => {
+  const windowed = item(4, { observationWindow: { notBefore: iso(now + 6 * hour), basis: 'criterion-window', detail: 'merged 7 days before' } });
+  const wait = actionAccount(windowed, [windowed], new Date(now)).wait!;
+  assert.match(wait.detail, /first exist at/);
+  assert.doesNotMatch(wait.detail, /dispatches it then/);
+  const later = iso(now + 7 * hour);
+  const row = buildMasterStatus({ now: later, work: [windowed] } as never, [], []).work[0]!;
+  assert.match(row.attention!, /owes the loop's reading/);
+  assert.doesNotMatch(row.attention!, /has not submitted/);
 });
