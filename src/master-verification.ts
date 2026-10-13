@@ -198,6 +198,8 @@ export interface VerificationEffects {
    * agent, never the coordinator: files the follow-up an owed post-deploy verification needs (GY-1660), returning the created item.
    */
   file?: (input: NonNullable<PostDeployCheck['followUp']>['input'], requestId: string) => Promise<{ key?: string } | unknown>;
+  /** Releases a filed follow-up from backlog as the same operator agent (GY-1747): the observation that the release serves the delivery is its release. */
+  releaseWork?: (key: string) => Promise<void>;
   /** The intervention report's under-threshold reading for a pattern (GY-1698): the follow-up's observation window is taken from it. */
   patterns?: PatternReader;
   /** The coordinator checkout's own filer, used only when it is at the observed release's commit (or has none to compare); `postDeployChecks` by default. */
@@ -263,6 +265,11 @@ export async function verifyDeployment(work: Work, effects: VerificationEffects,
     const deferred = postDeploy.filter(check => check.deferred);
     // A deferred filing leaves the delivery unobserved for the same reason: the attempt that can run the release's filer files it.
     if (deferred.length) return result({ ...assessment, verifiable: false, refusals: deferred.map(check => `${check.criterion} (${check.proof}) owes its post-deploy follow-up ${check.requestId}, whose filing is deferred: ${check.deferred}`) }, null, postDeploy);
+    // GY-1747: the serving release being observed releases its follow-ups from backlog, before the record, so a failed release retries.
+    const filed = postDeploy.filter(check => check.followUp && !snapshot.work.some(item => item.key === check.followUp && item.ready));
+    // Authority is owed only for a follow-up still unreleased; without it a filed follow-up would stay in backlog once this action is recorded away, so the delivery stays unobserved.
+    if (filed.length && !effects.releaseWork) return result({ ...assessment, verifiable: false, refusals: filed.map(check => `${check.criterion} (${check.proof}) has a filed post-deploy follow-up, and this master has no operator-agent identity to release it from backlog with`) }, null, postDeploy);
+    for (const check of filed) await effects.releaseWork!(check.followUp!);
     const existing = current.delivery!.deployment?.sha === assessment.record!.sha;
     if (!existing) await effects.record(current, assessment.record!);
     return result(assessment, existing ? 'existing' : 'now', postDeploy);
@@ -430,5 +437,13 @@ export function verificationEffects(config: MasterConfig, deps: { root: string; 
     record: (work, data) => deps.mutate(`work/${work.id}/deployment`, data),
     checks: localPostDeployChecks,
     ...(deps.file ? { file: deps.file } : {}),
+    // GY-1747: a master that can file a follow-up as its operator agent releases it as that agent, so the CLI path releases what the executor's does.
+    ...(deps.file ? { releaseWork: async (key: string) => {
+      const item = (await deps.snapshot()).work.find(entry => entry.key === key);
+      if (!item || item.stage !== 'backlog' || item.ready) return;
+      const { agentToken } = await import('./master/autonomy.js');
+      const response = await fetch(`${config.url}/api/work/${item.id}/ready`, { method: 'POST', body: JSON.stringify({ expectedRevision: item.revision, reason: 'the release serving the delivery is observed deployed' }), headers: { Authorization: `Bearer ${await agentToken(deps.root, config, 'operatorAgent')}`, 'Content-Type': 'application/json', 'Idempotency-Key': `release-${item.id}-${item.revision}` }, signal: AbortSignal.timeout(30_000) });
+      if (!response.ok) { const body = await response.json().catch(() => null) as { error?: unknown } | null; throw new Error(typeof body?.error === 'string' ? body.error : `releasing ${key} returned ${response.status}`); }
+    } } : {}),
   };
 }

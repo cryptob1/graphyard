@@ -81,7 +81,7 @@ export async function operationsCommand(session: MasterSession, effects: Recover
       build: entry.build, tests: entry.tests, conflict: entry.conflict ?? [], durationMs: 0, at: entry.at, outcome: entry.outcome,
       ...(entry.cause ? { cause: entry.cause } : {}),
     }));
-    const shadowAttention = shadowGateAttention([...(state?.shadow ?? []), ...standingVerdicts], explanations);
+    const shadowAttention = shadowGateAttention([...(state?.shadow ?? []), ...standingVerdicts], explanations, coordinator?.mergeWriter?.merger === 'control-plane' ? 'control-plane' : 'github');
     // GY-1603: a loop holding the lock outside this install's unit, which the unit's own run is refused on.
     const refusal = await readLockRefusal(root);
     const holder = refusal && state?.lock ? unsupervisedHolderAttention({ refusal, lock: state.lock, hostId: master.hostId, unit: await supervisingUnit(root, master, { host: effects.host }).catch(() => null) }) : null;

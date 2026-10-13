@@ -255,7 +255,7 @@ test('unit:post-deploy-criteria — master verify-deployment checks a declared c
     release: () => ({ sha: 'f'.repeat(40), clean: true, repository: 'other/repo', reason: null }),
     emit: async () => assert.fail('nothing is emitted'), repository: 'owner/project', now: () => now,
     record: async (_work: Work, data: unknown) => { assert.equal(filed.length, 1, 'filed before the record'); records.push(data); },
-    file: async (input: any, requestId: string) => { filed.push({ input, requestId }); return { key: 'GY-43' }; },
+    releaseWork: async () => {}, file: async (input: any, requestId: string) => { filed.push({ input, requestId }); return { key: 'GY-43' }; },
   };
   // A filing that fails leaves the delivery unobserved, so the retry files it.
   await assert.rejects(verifyDeployment(work[0], { ...effects, file: async () => { throw new Error('refused'); } }), /refused/);
@@ -297,6 +297,7 @@ test('unit:post-deploy-criteria — the loop\'s verify-deployment files an owed 
     agents: () => [], workerCredentials: async () => ({}), producerCredentials: async () => ({}),
     dispatchWorker: unusable, launchReview: unusable, launchProducer: unusable,
     observeDeployment: async () => ({ source: 'endpoint' as const, sha: release, at: new Date().toISOString(), reason: null, deployed: ['GY-42'], pending: [] }) as never,
+    releaseWork: async () => {},
     ...(fileWork ? { fileWork } : {}),
   });
   const identity = { host: 'host-1', executor: 'executor-1' } as never;
