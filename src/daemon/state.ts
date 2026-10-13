@@ -10,8 +10,7 @@ import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustion
 import { boundDetail } from './decisions.js';
 import { waitReason } from '../model/action-kinds.js'; import { timingsSchema } from '../master/timings.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
-import { unansweredStands } from '../model/fault-record.js';
-import { docsSyncWatchSchema, routedConflictSchema } from '../model/docs-sync.js';
+import { docsSyncWatchSchema, routedConflictSchema } from '../model/docs-sync.js'; import { unansweredStands } from '../model/fault-record.js';
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
 import { itemClockSchema, latencySampleSchema } from './latency-clock.js';
