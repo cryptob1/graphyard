@@ -141,6 +141,8 @@ export async function scopeStep(cycle: Cycle) {
   };
   const widenOnFindings = async (item: Work, request: ScopeRequestState): Promise<string | null> => {
     if (!(effects.reviewFindings || effects.baseSuccessions || effects.baseText) || !effects.widenScope || request.remove?.length || request.criteria?.length) return null;
+    // GY-1764: a terminal non-repository refusal is never widened on a finding, a successor or a criterion.
+    if (request.decision?.nonRepository) return null;
     if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock) return null;
     const paths = (request.decision?.paths?.length ? request.decision.paths : request.paths).filter(path => !(item.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
     if (!paths.length) return null;

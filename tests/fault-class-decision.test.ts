@@ -760,12 +760,16 @@ test('integration:scope-evidence-gate-repeated-cycles — the loop reads the tre
   ]);
   const posted: [string, string[]][] = [];
   let treeReads = 0;
+  const widened: string[] = [];
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [...plane.values()], now: iso(now) }),
     closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
-    persist: async () => {}, reviewFindings: async () => [], basePaths: async (paths: string[]) => new Set(paths),
+    persist: async () => {}, basePaths: async (paths: string[]) => new Set(paths),
+    // A finding naming each offender would ground an automatic widening; a terminal non-repository refusal must never reach it.
+    reviewFindings: async () => [{ ground: 'review finding', text: 'daemon.relea upgrade.align and .graphyard/master.json need changes' }],
+    widenScope: async (work: Work) => { widened.push(work.key); return work; },
     repositoryFiles: async () => { treeReads++; return new Set(tree); },
     decideScope: async (work: Work, nonRepository?: readonly { path: string; nearMiss: string | null; why: 'install-local' | 'untracked' }[], treeRead?: boolean) => {
       posted.push([work.key, (nonRepository ?? []).map(entry => entry.path)]);
@@ -800,6 +804,7 @@ test('integration:scope-evidence-gate-repeated-cycles — the loop reads the tre
   assert.equal(c.scopeRequest, null, 'C: a new file inside a tracked directory is approved across the same read');
   assert.ok(c.plannedFiles!.includes('src/soak/new-check.ts'));
   assert.deepEqual(Object.values(state.approvals).filter(watch => watch.action === 'requirements').map(watch => watch.work), [], 'no requirements decision is requested for what the tree refutes');
+  assert.ok(!widened.includes('GY-1696') && !widened.includes('GY-1697'), 'a standing non-repository refusal is never widened on a finding');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
   // The decision class this item removes is silent here: no requirements decision is requested, so no
   // approver session, no escalation and no decision fault forms — the standing scope-request faults are
@@ -815,4 +820,23 @@ test('unit:non-repository-refusal-not-carried', async () => {
   assert.equal(carriedScopeRequest({ plannedFiles: ['src/a.ts'] }, { ...ask, decision: { ...decision, nonRepository: true } } as any), null, 'an evidence-gated refusal ends with its attempt');
   assert.deepEqual(carriedScopeRequest({ plannedFiles: ['src/a.ts'] }, ask as any)?.paths, ['daemon.release'], 'an ordinary graphyard refusal the tree was read for still carries');
   assert.equal(carriedScopeRequest({ plannedFiles: ['src/a.ts'] }, { ...ask, decision } as any), null, 'a refusal the tree was never read for is not carried to the approver');
+});
+
+// GY-1764 rework, AC-2: a ledger read that fails reads as no plan, so a held projection is cleared on that very cycle, retried
+// until the clear lands; the failure of the clear is a visible failed action, never a quiet hold.
+test('unit:mechanical-plan-cleared-on-failed-read', async () => {
+  const { reportMechanicalPlans } = await import('../src/daemon/mechanical-plan-report.js');
+  const at = '2026-10-13T08:00:00.000Z', clock = Date.parse(at) + 30_000;
+  const item = { id: 'w', key: 'GY-1', stage: 'review', epoch: 1, candidate: { sha: 'abc', pr: 1 }, mechanicalPlan: { reviewId: 7, head: 'abc', at } } as unknown as Work;
+  const sent: unknown[] = [], failures: string[] = [] as string[];
+  let refuse = 1;
+  const effects = { mechanicalFixes: () => {}, recordMechanicalPlan: async (_: Work, plan: unknown) => { sent.push(plan); if (refuse-- > 0) throw new Error('503'); } };
+  const unreported = await reportMechanicalPlans([item], [], effects, clock, async (_, detail) => { failures.push(detail); });
+  assert.deepEqual(sent, [null, null], 'the clear is retried within the cycle until it lands');
+  assert.equal(unreported.size, 0, 'a cleared plan owes no round');
+  assert.deepEqual(failures, [], 'a landed clear is no failure');
+  refuse = 9; sent.length = 0;
+  const later: string[] = [];
+  await reportMechanicalPlans([item], [], effects, clock, async (_, detail) => { later.push(detail); });
+  assert.equal(later.length, 1, 'a clear that cannot land is a visible failure');
 });
