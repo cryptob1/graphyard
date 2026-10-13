@@ -409,6 +409,21 @@ test('manual:fault-class-decision — decision-unanswered|GY-1710 and action:esc
   assert.deepEqual(fresh.faults.instances.map(entry => entry.kind), ['decision-unanswered']);
 });
 
+test('manual:fault-class-decision — an exhaustion escalation whose decision was never observed unanswered stays an instance', () => {
+  const id = '11111111-d9c1-4cd2-8467-9f1866b0fd41', state = emptyDaemonState(config());
+  storeAction(state, `escalation:decision-unjudged:${id}`, { kind: 'escalation', work: 'GY-1710', principal: null, state: 'failed', detail: 'close decision: not judged', attempts: 1, cycle: 1, at: '2026-10-12T02:16:50.965Z', epoch: null }, undefined);
+  // The decision settles before any successful observation: no unanswered line ever stands.
+  trackFaults(state.faults, [], '2026-10-12T02:17:40.000Z');
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:escalation'], 'the real exhausted run is not dropped');
+});
+
+test('manual:fault-class-decision — an acceptance failure from a GitHub child process is a decision fault even when it quotes a 502', async () => {
+  const { ChildProcessError } = await import('../src/child-runner.js');
+  const failure = new ChildProcessError('gh', ['pr', 'close', '1153'], { stdout: '', stderr: 'HTTP 502 Bad Gateway', status: 1, signal: null, timedOut: false });
+  const state = await landFailure(failure, 'goal-gh');
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:decision']);
+});
+
 test('manual:fault-class-decision — a goal wait past its bound that quotes an HTTP 503 still counts; only the caught plane-wide error is exempt', async () => {
   const { acceptanceStep } = await import('../src/daemon/acceptance.js');
   const state = emptyDaemonState(config());

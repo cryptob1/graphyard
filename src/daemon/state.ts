@@ -9,6 +9,7 @@ import { diagnosisRecordSchema, diagnosisSettled, retainedDiagnoses } from '../r
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
 import { boundDetail } from './decisions.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
+import { unansweredStands } from '../model/fault-record.js';
 import { timingsSchema } from '../master/timings.js';
 import { docsSyncWatchSchema, routedConflictSchema } from '../model/docs-sync.js';
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
@@ -677,7 +678,7 @@ export const clampCount = (value: number, max: number) => Math.min(max, Math.max
  */
 export function storeAction(state: DaemonState, key: string, action: Omit<DaemonAction, 'faultClass'> & { faultClass?: unknown }, faultKind: FaultKind | null = daemonActionFaultKind(action.kind)): DaemonAction {
   const { faultClass: _, ...rest } = action;
-  if (restatesUnanswered(key)) faultKind = null;
+  if (unansweredStands(state.faults, key)) faultKind = null;
   const failed = faultKind !== null && (rest.state === 'failed' || rest.state === 'indeterminate');
   const fault = faultKind === null ? null : classified(faultKind);
   const entry = daemonActionSchema.parse({ ...rest, detail: boundDetail(rest.detail), attempts: clampCount(rest.attempts, 1000), ...(failed && fault ? { faultClass: fault.faultClass } : {}) });
@@ -685,12 +686,6 @@ export function storeAction(state: DaemonState, key: string, action: Omit<Daemon
   state.actions[key] = entry;
   return entry;
 }
-/**
- * GY-1751: an approver-exhaustion escalation (`escalation:decision-unjudged:ID`) restates the stall that `decision-unanswered`
- * counts for the same decision (10 s apart on GY-1710's close decision). The two are observed in either order within a
- * cycle, so the escalation never opens an instance of its own: one stall is one instance, the unanswered line's.
- */
-const restatesUnanswered = (key: string) => key.startsWith('escalation:decision-unjudged:');
 /**
  * GY-1287: an item's dispatch row is keyed by the epoch it was offered at (`dispatch:ID:EPOCH`), and
  * a launch that fails after its claim advances that epoch, so the item's next dispatch writes a new

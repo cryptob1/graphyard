@@ -24,13 +24,19 @@ test('unit:soak-invariants-hold — across cycles an acceptance draft post met b
   assert.deepEqual(Object.values(day.state.actions).filter(action => action.kind === 'decision' && action.state === 'failed' && action.faultClass), [], 'the failed acceptance notes carry no fault class');
 });
 
-test('unit:soak-invariants-hold — an approver that never judges a hand-requested release is one stall: its exhaustion escalation opens no instance of its own', { timeout: 600_000 }, async () => {
+test('unit:soak-invariants-hold — an approver that never judges a hand-requested release is one stall: its exhaustion escalation is one instance with the unanswered line, and never lost', { timeout: 600_000 }, async () => {
   const day = await simulateDay({ hours: 5, handApprovers: true });
   assert.deepEqual(day.violations, [], 'every system invariant holds');
   assert.deepEqual(day.failures, [], 'no cycle failed');
   assert.ok(day.spent.size > 0, 'an approver was given up on');
   const escalations = Object.entries(day.state.actions).filter(([key]) => key.startsWith('escalation:decision-unjudged:'));
   assert.ok(escalations.length > 0, 'the exhaustion escalation was raised');
-  assert.deepEqual(escalations.filter(([, action]) => action.faultClass), [], 'none of them opens a fault');
-  assert.deepEqual(day.state.faults.instances.filter(instance => instance.kind === 'action:escalation' && /decision-unjudged/.test(instance.id)), [], 'and no instance carries one');
+  // One stall is one instance: the decision-unanswered line when it was observed, else the escalation itself; never both, never neither.
+  for (const [key] of escalations) {
+    const decision = key.slice('escalation:decision-unjudged:'.length);
+    const unanswered = day.state.faults.instances.filter(instance => instance.kind === 'decision-unanswered' && instance.text.startsWith(`Decision ${decision} (`));
+    const own = day.state.faults.instances.filter(instance => instance.id === day.state.faults.failing[key]);
+    assert.ok(unanswered.length + own.length >= 1, `${key}: the exhausted run is not dropped from recurrence`);
+    assert.ok(!(unanswered.length && own.length), `${key}: the stall is not counted twice`);
+  }
 });

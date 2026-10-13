@@ -17,6 +17,28 @@ function retain(record: FaultRecord) { // drops the oldest past the bound: first
     if (excess > 0) record.instances.splice(0, record.instances.length, ...record.instances.filter(entry => excess <= 0 || spare.has(entry.id) || excess-- <= 0)); }
   const kept = new Set(record.instances.map(entry => entry.id)); for (const refs of [record.open, record.failing]) for (const key of Object.keys(refs)) if (!kept.has(refs[key])) delete refs[key];
 }
+/** The decision a `decision-unanswered` line is about. */
+const unansweredDecision = (observation: { kind: string; text: string }) => observation.kind === 'decision-unanswered' ? /^Decision (\S+) \(/.exec(observation.text)?.[1] : undefined;
+/** The action key of the approver-exhaustion escalation that restates a decision's stall. */
+export const exhaustionEscalationKey = (decision: string) => `escalation:decision-unjudged:${decision}`;
+/**
+ * GY-1751: an approver-exhaustion escalation restates the stall `decision-unanswered` counts for the same decision, so one stall is
+ * one instance. Whichever is observed second is the restatement: the escalation is not counted while the unanswered line stands
+ * (`unansweredStands`), and an unanswered line opening after the escalation's instance absorbs it. An escalation whose decision was
+ * settled or never observed unanswered stays the instance it is.
+ */
+export function unansweredStands(record: Pick<FaultRecord, 'open' | 'instances'>, action: string) {
+  const prefix = exhaustionEscalationKey('');
+  if (!action.startsWith(prefix)) return false;
+  const decision = action.slice(prefix.length);
+  return Object.values(record.open).some(id => { const entry = record.instances.find(instance => instance.id === id); return entry && unansweredDecision(entry) === decision; });
+}
+function absorbEscalation(record: FaultRecord, observation: FaultObservation) {
+  const decision = unansweredDecision(observation), id = decision && record.failing[exhaustionEscalationKey(decision)];
+  if (!id) return;
+  record.instances = record.instances.filter(entry => entry.id !== id);
+  delete record.failing[exhaustionEscalationKey(decision)];
+}
 /**
  * One cycle's observations against the record. A fault that stood last cycle and still stands is
  * the same instance (its `lastSeenAt` moves); one not seen before, or seen again after it cleared,
@@ -39,6 +61,7 @@ export function trackFaults(record: FaultRecord, observations: readonly FaultObs
     if (standing) { standing.lastSeenAt = at; standing.text = observation.text.slice(0, 500); continue; }
     const instance = instanceOf(observation, at, opened.filter(entry => entry.kind === observation.kind && entry.subject === subject).length);
     record.instances.push(instance); record.open[key] = instance.id; opened.push(instance);
+    absorbEscalation(record, observation);
   }
   if (partial !== true) for (const key of Object.keys(record.open)) if (!seen.has(key) && !(partial && partial.has(key.slice(0, key.indexOf('|'))))) delete record.open[key];
   retain(record);

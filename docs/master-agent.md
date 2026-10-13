@@ -29,7 +29,7 @@ Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linger
 
 ## Research and diagnosis
 
-`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get diagnostician (`run.diagnostician`; none for parks); fix `plannedFiles` as `master create`; quota refusals wait `retryAt` (`daemon.diagnoses`); `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3×, then escalated (`decision-stale`); raced/delivered, [plane-wide](operations.md#incident-decision-tree) requests retry faultless; refused `create` 409/400 is `fix-item`; matching close 409 adopted, mismatched held (GY-1713); overlong/`limit-wait` (GY-1705); no `loop` fault for restart-lost diagnoses, approver refusals, nor `merge` for base conflicts <30m.
+`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get diagnostician (`run.diagnostician`; none for parks); fix `plannedFiles` as `master create`; quota refusals wait `retryAt` (`daemon.diagnoses`); `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3×, then escalated (`decision-stale`); raced/delivered, [plane-wide](operations.md#incident-decision-tree) requests retry faultless; refused `create` 409/400 is `fix-item`; matching close 409 adopted, mismatched held (GY-1713); overlong/`limit-wait` (GY-1705); no `loop` fault for restart-lost diagnoses, approver refusals, nor `merge` for base conflicts <30m (GY-1751: nor a `decision` fault for an acceptance control-plane call that met a plane-wide 503, nor a second instance for an approver-exhaustion escalation once `decision-unanswered` counts the same stall).
 
 ## Machine-filed backlog
 
