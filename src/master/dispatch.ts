@@ -11,6 +11,7 @@ import { type SandboxExec, WorkerSandboxError, verifyWorkerSandbox, workerPaths,
 import { sweepExpiredWorkerCredentials, withdrawWorkerCredential, workerCredentialDirectory, workerCredentialEnvironment, workerCredentialRoot } from '../worker-credential.js';
 import { assertNoApprovalOptOut } from '../harness.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, dispatchHumanWait } from '../model/human-request.js';
+import { loopOwnedRefusal } from '../model/loop-owned.js';
 import { documentationWorkerSection } from '../model/documentation.js';
 import { workerPreference } from '../model/worker-preference.js';
 import { loopObservation, loopObservationProofs, observationWindowHold, servingReleaseProof, type Work } from '../model.js';
@@ -178,6 +179,11 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   if (!Number.isFinite(now)) throw new Error('Dispatch requires a valid Graphyard snapshot clock');
   if (parkedOnHuman(work)) throw new Error(`${dispatchHumanWait} (${humanDecisionLabel[work.humanRequest!.kind]}); ${answerCommand(work.key, work.humanRequest!)} resumes it`);
   if (!work.ready || work.blocker) throw new Error('Dispatch requires released work without a blocker');
+  // GY-1760: an item only the master side can satisfy is never handed to a worker — not by the
+  // loop's dispatch step, not by a hand launch — whoever released it, so its master-only steps
+  // never reach a worker that must block on them.
+  const loopOwned = loopOwnedRefusal(work);
+  if (loopOwned) throw new Error(loopOwned);
   if (work.children?.length) throw new Error(`${work.key} was split into ${work.children.join(', ')} before dispatch; it is delivered when they are and is never dispatched itself`);
   const fenced = containmentHold(work, now);
   if (fenced) throw new Error(fenced);

@@ -56,6 +56,7 @@ import { blockedAttemptMarker, partialWorkSchema, retainedExhaustions, type Exha
 import { credentialBlockedReason, credentialFailure } from './worker-credential.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordAssignmentStart, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 import { dispatchFailureBlockAfter } from './daemon/dispatch-failures.js';
+import { loopOwnedRefusal } from './model/loop-owned.js';
 import { assertDecisionAuthority, foldDecisions, liveLeaseRevisionRefusal, quarantinedRevisionRefusal, requiredDecisionCapabilities, type Decision, type HeldApplication } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
 import { deliverSplitParent, splitChildRevisionRefusal } from './decomposition.js';
@@ -1198,6 +1199,9 @@ export class Engine {
         this.refuseRenewedDeferral(work!, all);
       }
       demandWork(work);
+      // GY-1760: an item only the master side can satisfy — the loop's own measurement, or a
+      // master-role session's observation of the master checkout — is never released to a worker, whoever asks.
+      if (command === 'ready') { const owned = loopOwnedRefusal(work!); demand(!owned, owned!, 409); }
       // A lease past its expiry that a recorded server-side renewal fault still covers stays live (GY-558).
       await this.renewalGrace(db, work, now);
       if (actor.role === 'operator-agent') {
