@@ -198,8 +198,14 @@ export function standingScopeRequest(work: Pick<Work, 'scopeRequest' | 'lease' |
   if (request.decision.decidedBy !== 'graphyard' && !request.remove?.length && !request.criteria?.length && reRequestableRefusal(request.decision.reason)) return false;
   return !(routes && request.decision.decidedBy === 'graphyard' && routableScopeRequest(work, now));
 }
-/** True when a refusal's reason directs the asking attempt to ask again, narrower (the approver's 'Refused as filed; re-request narrower'). */
-export const reRequestableRefusal = (reason: string | null | undefined) => /re-?request(?:ed)?\b[^.]{0,40}\bnarrow|narrower\s+re-?request/i.test(reason ?? '');
+/**
+ * True when a refusal's reason directs the asking attempt to ask again, narrower or smaller (the approver's
+ * 'Refused as filed; re-request narrower', 'Please ask again for fewer files', 'Submit a smaller scope request').
+ * A direction to re-ask (re-request, ask/submit/file again, a new ask) paired with a reduction (narrow, smaller, fewer, less, reduce).
+ */
+const reAskDirection = /re-?(?:request|ask|submit|file)|\b(?:ask|request|submit|file|resubmit)\w*\s+(?:it\s+|this\s+)?(?:again|anew|afresh)|\b(?:a|the)\s+(?:new|fresh|revised|narrower|smaller)\s+(?:scope\s+)?(?:ask|request)|\b(?:narrower|smaller)\s+(?:scope\s+)?(?:ask|request)/i;
+const reduction = /\b(?:narrow\w*|smaller|fewer|less|reduc\w*|trim\w*|minimal)\b/i;
+export const reRequestableRefusal = (reason: string | null | undefined) => { const text = reason ?? ''; return reAskDirection.test(text) && reduction.test(text); };
 
 /**
  * `reclaimInMotion`, which the loop passes (daemon/faults.ts attemptReclaimInMotion, GY-1557): an

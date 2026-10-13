@@ -423,6 +423,11 @@ function approverRefused(reason: string) {
 test('unit:standing-re-requestable-settling — GY-1757: an approver refusal directing a narrower re-request on a live lease inside the bound is not standing', () => {
   const entry = instances[8];
   assert.equal(reRequestableRefusal(narrowerReason), true);
+  for (const wording of ['Please ask again for fewer files', 'Submit a smaller scope request.', 'Re-ask with a narrower set of paths', 'File the request again, trimmed to the criteria'])
+    assert.equal(reRequestableRefusal(wording), true, wording);
+  for (const wording of ['The ask is refused: it is outside the item', 'Refused: narrower is not possible, non-additive']) assert.equal(reRequestableRefusal(wording), false, wording);
+  for (const wording of ['Please ask again for fewer files', 'Submit a smaller scope request'])
+    assert.deepEqual(scopeFaults(approverRefused(wording), entry.observedAt).map(fault => fault.kind), [], wording);
   assert.equal(reRequestableRefusal('outside what this item\'s own criteria imply'), false);
   assert.deepEqual(scopeFaults(approverRefused(narrowerReason), entry.observedAt).map(fault => fault.kind), []);
 });

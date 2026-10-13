@@ -3,7 +3,7 @@
 
 ## Items, scope and human waits
 
-Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON`; auto-granted if grounded (docs; criteria/follow-up/finding paths; `web/`/`browser-tests/` for `docs/` planners; pinning tests; symbol defs; successors; companions: budget, timing/wall-clock gates, `manual:fault-class-*`, importing tests, imports). Else `approve-scope` (standing decisions or approver); `master scope GY-N [--allow-broad-scope] REASON` applies refused ones save the approver's (`master decisions`); `--wait` ≤15 min. Ending attempts close requests `attempt ended` (one awaiting the approver carries over); `master unblock GY-N` closes stale/carried. `held`: requirements approved mid-attempt apply when it ends; never re-request. Covering: no-`answers` revision planning the ask is watched (held; ask close never withdraws; bound skips; fail clears it). Human: `park GY-N EPOCH KIND NEEDED --ask ASK [--step STEP]… --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you)); `graphyard answer GY-N …`; [host-doable](deployment.md) asks refused.
+Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON`; auto-granted if grounded (docs; criteria/follow-up/finding paths; `web/`/`browser-tests/` for `docs/` planners; pinning tests; symbol defs; successors; companions: budget, timing/wall-clock gates, `manual:fault-class-*`, importing tests, imports). Else `approve-scope`; `master scope GY-N [--allow-broad-scope] REASON` applies refused ones save the approver's (`master decisions`); `--wait` ≤15 min. Transport-failed widens retry; a second consecutive one counts once; an approver's narrower re-ask refusal stands past 15 min. Ending attempts close requests `attempt ended` (one awaiting the approver carries over); `master unblock GY-N` closes carried. `held`: requirements approved mid-attempt apply when it ends; never re-request. Covering: no-`answers` revision planning the ask is watched (held; ask close never withdraws; bound skips; fail clears). Human: `park GY-N EPOCH KIND NEEDED --ask ASK [--step STEP]… --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you)); `graphyard answer GY-N …`; [host-doable](deployment.md) refused.
 
 ## Promotion to autonomy
 
@@ -11,7 +11,7 @@ Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON`; auto-gran
 
 ## Conflict avoidance
 
-Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)); `git merge-tree` reports `conflicts`. Approvals survive base refreshes ([carry](github.md#bindings-and-carry)); one on current head dismissed `The merge-base changed after approval.` is restored, never re-posted. A branch must never keep another item's unlanded commits (build gate refuses): `git reset --hard REVIEWED_HEAD`, `sync GY-N`, `restore-branch GY-N EPOCH`.
+Dispatch is optimistic, smallest planned scope first ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)); `git merge-tree` reports `conflicts`. Approvals survive base refreshes ([carry](github.md#bindings-and-carry)); one on current head dismissed `The merge-base changed after approval.` is restored, never re-posted. A branch keeping another item's unlanded commits is refused at build: `git reset --hard REVIEWED_HEAD`, `sync GY-N`, `restore-branch GY-N EPOCH`.
 
 ## GitHub administration through the browser
 
@@ -27,9 +27,9 @@ Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/
 
 ## Typed actions and executors
 
-`nextAction` (one per item): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`; judgements: `actions.needsHuman`. `graphyard init` starts `graphyard-executor@N`; `master executors restart` moves stale slots to current release; verified deployments advance clean checkouts, restart executors and loop (dirty: `upgrade`; claim refusals 15 min: loop alone). Fenced or claim-renewing executors live; presence upserts from `serves`. `resync` needs a newer observation. `dispatch`/`request-review` complete when a session already answers the head; busy profiles stall after 30min. Three failures, unchanged reason: stalled rather than retrying (fleet looks idle); in no count and no list, but in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate. Ticks requeue ownerless items (`liveness.violations`).
+`nextAction` (one per item): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`; judgements: `actions.needsHuman`. `graphyard init` starts `graphyard-executor@N`; `master executors restart` moves stale slots to current release; verified deployments advance clean checkouts, restart executors and loop (dirty: `upgrade`; claim refusals 15 min: loop alone). Fenced or claim-renewing executors live. `resync` needs a newer observation. `dispatch`/`request-review` complete when a session already answers the head; busy profiles stall after 30min. Three failures, unchanged reason: stalled rather than retrying (fleet looks idle); in no count and no list, but in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate. Ticks requeue ownerless items (`liveness.violations`).
 
-Declared slot not `active` (systemd, else `PRINCIPAL@HOST/N` presence): `resources` fault naming `journalctl --user -u graphyard-executor@N.service` unless stopped <2min. `--install` needs `Restart=always`, `RestartSec` ≤60s. Worker starts fenced <2min retry after lapse; longer fail, named.
+Declared slot not `active`: `resources` fault naming `journalctl --user -u graphyard-executor@N.service` unless stopped <2min. `--install` needs `Restart=always`, `RestartSec` ≤60s. Worker starts fenced <2min retry after lapse; longer fail, named.
 
 ## Recovery
 
@@ -37,7 +37,7 @@ Dead supervisor fences item; `containment` lists survivors' pid, cmdline and cwd
 
 ### Producer-runtime faults
 
-Unacted producer requests (unstarted, refused, launch-exited) relaunch on untried profile.
+Unacted producer requests relaunch on untried profile.
 
 ## Fault classes
 
