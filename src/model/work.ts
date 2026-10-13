@@ -18,6 +18,7 @@ import type { DecompositionRecord } from '../decomposition.js';
 import type { Closure } from './closure.js';
 import type { PendingFollowUps, TriageRecord } from './machine-backlog.js';
 import { proofSchema } from './proof.js';
+import { postDeployProof } from './post-merge-proofs.js';
 import { closedQuestionsSchema } from './closed-question.js';
 import { workOriginSchema, type WorkOrigin } from './interventions.js';
 import { demand } from './refusal.js';
@@ -95,6 +96,22 @@ export const deferBoundMs = 30 * 24 * 3_600_000;
 export function observationWindowHold(work: { observationWindow?: ObservationWindow | null }, now: Date): ObservationWindow | null {
   const window = work.observationWindow;
   return window && Date.parse(window.notBefore) > now.getTime() ? window : null;
+}
+/**
+ * GY-1762: what a loop-owned observation item waits for, or null. A system-driven item whose every
+ * criterion is a manual post-deploy proof (declared `manual:post-deploy/…` or a follow-up's
+ * `…-on-serving-release`) has no code for a worker to write: its only work is the live reading the
+ * loop records. It waits for that reading, or for its observation window to close, and holds no
+ * worker; with a code criterion, or any other proof, it is dispatched as before.
+ */
+export function loopObservation(work: Pick<Work, 'systemDriven' | 'criteria' | 'evidence' | 'stage'> & { observationWindow?: ObservationWindow | null }, now: Date): { waitingFor: string } | null {
+  if (work.systemDriven !== true || work.stage === 'done' || !work.criteria.length) return null;
+  const proofs = work.criteria.flatMap(criterion => criterion.proofs);
+  if (!proofs.length || work.criteria.some(criterion => !criterion.proofs.length) || !proofs.every(proof => postDeployProof(proof) || servingReleaseProof(proof))) return null;
+  const window = work.observationWindow;
+  if (window && Date.parse(window.notBefore) <= now.getTime()) return null;
+  if (proofs.every(proof => work.evidence.some(entry => entry.proof === proof && entry.trusted && !entry.revocation))) return null;
+  return { waitingFor: window ? `the loop's reading of ${proofs.join(', ')}, which can first exist at ${window.notBefore} (${window.detail})` : `the loop's reading of ${proofs.join(', ')} on the serving release` };
 }
 // The `decision:*` capabilities request a two-party decision (see model/approval.ts); an agent
 // holding one still needs a second, independent agent holding `decision:approve` to apply it.

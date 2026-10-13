@@ -217,8 +217,9 @@ test('unit:observation-window-holds-dispatch — a released follow-up is not dis
   assert.equal(item.gates.find(gate => !gate.passed)?.name, 'build', 'released, its dependency delivered, the build gate is what refuses');
   assert.equal(item.observationWindow!.notBefore, notBefore);
 
-  // Before the fix the follow-up carried no window, and the same item dispatched at once.
-  const unwindowed = released(releasedAt, { observationWindow: undefined });
+  // Before the fix the follow-up carried no window, and the same item dispatched at once. A system-driven one
+  // is now held by the loop's own observation (GY-1762); a hand-driven one still dispatches.
+  const unwindowed = released(releasedAt, { observationWindow: undefined, systemDriven: false });
   const before = actionAccount(unwindowed, [gy1685, unwindowed], new Date(releasedAt));
   assert.equal(before.action?.kind, 'dispatch');
   assert.match(before.action!.reason, /^GY-1689 is ready and unassigned: Worker has not submitted implementation for this attempt/);

@@ -6,7 +6,7 @@ import { deliveryState } from './delivery.js';
 import { isDelivered } from './closure.js';
 import { openAgentRequests } from './agent-requests.js';
 import { refusalAction, reviewStandstill } from './refusal-mapping.js';
-import { observationWindowHold, type Work } from './work.js';
+import { loopObservation, observationWindowHold, type Work } from './work.js';
 import { nextActionLlmRoles, type NextAction, type NextActionInputs, type NextActionKind } from './action-kinds.js';
 import type { ActionAccount, ActionWait } from './action-account.js';
 import { carriedAction, type OpenAction } from './concerns.js';
@@ -236,6 +236,9 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
       // wait is due at the recorded instant, and this same computation names the dispatch past it.
       const window = observationWindowHold(work, now);
       if (window) return waits({ kind: 'window', on: null, detail: `${key} waits for its observation window: the reading it owes can first exist at ${window.notBefore} (${window.detail}); the loop dispatches it then` }, failing.name, refusal);
+      // GY-1762: nothing a code worker can do; the loop's own reading ends the wait.
+      const observing = loopObservation(work, now);
+      if (observing) return waits({ kind: 'window', on: null, detail: `${key} waits for ${observing.waitingFor}; the loop records it, and no worker is dispatched` }, failing.name, refusal);
       return make('dispatch', `${key} is ready and unassigned: ${refusal}`, dispatchInputs(work), `dispatch:${work.epoch}`, failing.name, refusal);
     }
     // A review refusal the reviewer's own reading already answered says "approval is required"
