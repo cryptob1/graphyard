@@ -153,7 +153,7 @@ test('unit:intervention-exemptions-module — the fold consults one ordered list
   assert.deepEqual(interventionExemptions.map(entry => entry.name), [
     'approved-autoscope', 'successor-replan', 'audited-scope-widening', 'routed-scope-widening', 'unstarted-replan', 'criteria-implied-widening',
     'routine-rework-ground', 'lane-rework-ground', 'failed-check-round', 'loop-rework-round',
-    'direct-merge-window', 'loop-autosettle-in-bound', 'answered-off-ledger', 'undecided-scope-request', 'approver-holds-scope-request', 'lease-loss-resolve', 'approved-decision-weakening',
+    'direct-merge-window', 'loop-autosettle-in-bound', 'answered-off-ledger', 'undecided-scope-request', 'approver-holds-scope-request', 'scope-refusal-within-bound', 'lease-loss-resolve', 'approved-decision-weakening',
   ]);
   assert.ok(interventionExemptions.every(entry => typeof entry.exempts === 'function'), 'one predicate per rule');
   const fold = source('src/interventions.ts');
@@ -196,9 +196,12 @@ test('unit:intervention-exemptions-module — the fold consults one ordered list
     [{ at: 'open-ask', ask: { seq: 1, at: at(0), stage: 'build', kind: 'scope-request', blocked: 'x', paths: ['a'], sources: [] }, item, now: at(60) }, 'undecided-scope-request'],
     [{ at: 'open-ask', ask: { seq: 1, at: at(0), stage: 'build', kind: 'scope-request', blocked: 'x', paths: ['a'], trigger: 'refused-by-loop', sources: [] }, item, now: at(60) }, null],
     [{ at: 'open-ask', ask: refusedAsk, item: routable, now: at(60) }, 'approver-holds-scope-request'],
-    // No route on the record (a deployment that routes nothing, or the seconds before the loop's own answer), past the bound the loop promises, refused by the approver, or left by an ended attempt: the ask is somebody's to decide.
-    [{ at: 'open-ask', ask: { ...refusedAsk, routed: null }, item: routable, now: at(60) }, null],
+    // No route on the record yet is the loop's own within its bound (GY-1755), and so is a multi-path additive ask the approver declined: both leave the live attempt something to settle inside the bound, which the fault pass does not stand (standingScopeRequest). Past the bound the loop promises, a one-path or non-additive ask the approver declined, or an ask an ended attempt left: the ask is somebody's to decide.
+    [{ at: 'open-ask', ask: { ...refusedAsk, routed: null }, item: routable, now: at(60) }, 'scope-refusal-within-bound'],
+    [{ at: 'open-ask', ask: { ...refusedAsk, routed: null }, item: routable, now: at(70) }, null],
+    [{ at: 'open-ask', ask: { ...refusedAsk, routed: null }, item: { ...routable, lease: null } as Work, now: at(60) }, null],
     [{ at: 'open-ask', ask: refusedAsk, item: routable, now: at(70) }, null],
+    [{ at: 'open-ask', ask: { ...refusedAsk, routed: null, paths: ['src/b.ts', 'src/c.ts'] }, item: { ...routable, scopeRequest: { ...(routable.scopeRequest as object), paths: ['src/b.ts', 'src/c.ts'], decision: { ...refusal, decidedBy: 'graphyard-approver-graphyard' } } } as Work, now: at(60) }, 'scope-refusal-within-bound'],
     [{ at: 'open-ask', ask: refusedAsk, item: { ...routable, scopeRequest: { ...(routable.scopeRequest as object), decision: { ...refusal, decidedBy: 'graphyard-approver-graphyard' } } } as Work, now: at(60) }, null],
     [{ at: 'open-ask', ask: refusedAsk, item: { ...routable, lease: null } as Work, now: at(60) }, null],
     [{ at: 'open-escalation', item, escalation: lost, now: at(60) }, 'lease-loss-resolve'],
