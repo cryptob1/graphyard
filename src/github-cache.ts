@@ -17,6 +17,8 @@ import { GitHubChargeLedger } from './github-charges.js';
  *   kinds, so ETag churn never evicts them: the newest-used `maxImmutableRows` rows and
  *   `maxImmutableBytes` of values. A compare keyed by a base tip that has moved on stops being
  *   read, ages out, and is deleted; a value over `maxValueBytes` stays in the hot layer only.
+ * - The webhook delivery log (GY-1765) is one `deliveries` row, read once with `lookup` after a restart so a 24h
+ *   reading survives it; it is pruned with the other kinds.
  * - Reads happen once, at attach; writes are batched write-behind on a timer, one pool query at
  *   a time, so the cache never holds more than one of the pool's connections. Plain pool queries
  *   only: never inside a coordination transaction and never under the advisory lock.
@@ -26,7 +28,7 @@ import { GitHubChargeLedger } from './github-charges.js';
  * - A database failure never fails an observation: the maps stay as they are and the adapter
  *   asks GitHub, exactly as it did before the cache was persisted.
  */
-export type GitHubCacheKind = 'etag' | 'ancestry' | 'blob' | 'history' | 'immutable';
+export type GitHubCacheKind = 'etag' | 'ancestry' | 'blob' | 'history' | 'immutable' | 'deliveries';
 /** The map operations `load` needs; the adapter's etag and immutable maps are byte-bounded caches (src/github-response-cache.ts). */
 interface LoadableMap<V> { readonly size: number; has(key: string): boolean; set(key: string, value: V): unknown; delete(key: string): boolean; keys(): IterableIterator<string> }
 export interface GitHubCacheMaps {
@@ -70,7 +72,7 @@ export class GitHubCacheStore {
     console.error(`GitHub cache ${what} failed; requests fall back to GitHub: ${error instanceof Error ? error.message : String(error)}`);
   }
   /** Fill the maps from the table, newest last so each map's insertion order stays its recency order. Never throws. */
-  async load(maps: GitHubCacheMaps, caps: Record<Exclude<GitHubCacheKind, 'immutable'>, number> & { immutable?: number }): Promise<number> {
+  async load(maps: GitHubCacheMaps, caps: Record<'etag' | 'ancestry' | 'blob' | 'history', number> & { immutable?: number }): Promise<number> {
     try {
       const prefix = `${this.scope.replace(/[\\%_]/g, '\\$&')}:%`;
       const rows = (await this.pool.query(`SELECT key, kind, etag, value FROM (
@@ -89,7 +91,7 @@ ORDER BY updated_at, key`, [prefix, caps.etag, caps.ancestry, caps.blob, caps.hi
         else continue;
         loaded++;
       }
-      for (const kind of Object.keys(caps) as GitHubCacheKind[]) {
+      for (const kind of Object.keys(caps) as (keyof typeof caps)[]) {
         const map = maps[kind] as LoadableMap<unknown> | undefined;
         while (map && map.size > (caps[kind] ?? 0)) map.delete(map.keys().next().value!);
       }
