@@ -109,8 +109,8 @@ export const completeCommand: CliCommand = {
     '                                control plane allocates its change number and ends the lease',
   ],
   run: async (context, work) => {
-    let push: { pushed: string | null; failure?: string };
-    try { push = pushGraphyardBranch(context.repositoryRoot()); } catch (error: any) { push = { pushed: null, failure: String(error?.message ?? error) }; }
+    let push: { pushed: string | null; failure?: string } = { pushed: null };
+    try { push = pushGraphyardBranch(context.repositoryRoot()); } catch { /* no readable worktree: nothing to push; the head read below reports it */ }
     let verification: Awaited<ReturnType<typeof selfVerification>> | { state: 'unavailable'; reason: string };
     try { verification = await selfVerification(context.repositoryRoot(), work.key); } catch (error: any) { verification = { state: 'unavailable', reason: `the worktree could not be read: ${error.message}` }; }
     const body = completionBody(context.args, () => worktreeHead(context.repositoryRoot())), requestId = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();

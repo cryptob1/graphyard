@@ -752,21 +752,11 @@ export async function releaseUnderFailure(mutate: (name: string, data: unknown) 
 
 /** GY-860 AC-2: why a rework workspace may not start from the submitted PR branch, or null when it may. */
 export async function submittedBranchRefusal(root: string, branch: string, remoteBranch: string, candidateSha: string | undefined, run: ChildRun): Promise<string | null> {
-  try {
-    await run('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:${remoteBranch}`], { cwd: root });
-    const remoteSha = String(await run('git', ['rev-parse', '--verify', remoteBranch], { cwd: root })).trim();
-    return !candidateSha || remoteSha !== candidateSha ? submittedBranchMoved : null;
-  } catch (error) {
-    // GY-1753 AC-2: a local-only head at the candidate sha is pushed so the remote holds it; any other local sha refuses.
-    try {
-      const localSha = String(await run('git', ['rev-parse', '--verify', `refs/heads/${branch}`], { cwd: root })).trim();
-      if (candidateSha && localSha === candidateSha) {
-        await run('git', ['push', '--quiet', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], { cwd: root });
-        return null;
-      }
-    } catch { /* fall through to the fetch refusal */ }
-    return `Git worktree creation failed while fetching ${branch}: ${failureText(error)}`;
-  }
+  try { await run('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:${remoteBranch}`], { cwd: root });
+    const remoteSha = String(await run('git', ['rev-parse', '--verify', remoteBranch], { cwd: root })).trim(); return !candidateSha || remoteSha !== candidateSha ? submittedBranchMoved : null;
+  } catch (error) { // GY-1753 AC-2: a local-only head at the candidate sha is pushed; any other local sha refuses.
+    const pushed = await (async () => { const sha = String(await run('git', ['rev-parse', '--verify', `refs/heads/${branch}`], { cwd: root })).trim(); if (!candidateSha || sha !== candidateSha) return false; await run('git', ['push', '--quiet', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], { cwd: root }); return true; })().catch(() => false);
+    return pushed ? null : `Git worktree creation failed while fetching ${branch}: ${failureText(error)}`; }
 }
 
 /**
