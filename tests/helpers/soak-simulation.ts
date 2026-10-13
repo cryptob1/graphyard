@@ -86,7 +86,6 @@ import { itemLane, laneSpeedTargets, lanes } from '../../src/model/policy.js';
 import { type MechanicalFixRequest, appliedMechanicalRework, freshReadFor, mechanicalFixRequests, mechanicalFixState } from '../../src/mechanical-findings.js';
 import { mechanicalHoldPattern } from '../../src/model/refusal-catalogue.js';
 import { type InterventionRecordInput } from '../../src/model/interventions.js';
-import { RefusedResponse } from '../../src/model/refusal.js';
 import { type DiagnosisRun, type Failover, type RegistryFailover, MANUAL, type MainGuardDay, PROOF, api, basePlan, blockerPlan, bulk18, coordinatorRoot, diagnosisRunner, engine, everyone, extraFile, extraWorkers, file, files, fixture, id, loopAgent, padded, principals, remedyItem, repository, reviewerApps, scopePlan, sideDayLeftovers, soakConfig, soakSessionDirectory, soakWorktreeRoot, store, token, url, workers } from './soak-plane.js';
 
 /**
