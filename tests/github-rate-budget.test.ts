@@ -986,8 +986,14 @@ test('manual:fault-class-resources — GY-1272: the 5 October merge burst replay
 
 test('manual:fault-class-configuration — GY-1765: a restarted plane keeps its delivery log, so a 24h webhook reading is obtainable without an App JWT in the sandbox', async () => {
   // GY-1724's instance: after a restart /api/status covered only the window since the restart (coveredFrom set), never 24h.
-  const hour = 3_600_000, T = Date.parse('2030-01-02T00:00:00Z');
-  const stub = { query: async () => ({ rows: [], rowCount: 0 }) } as any;
+  const hour = 3_600_000, T = Date.parse('2026-10-10T00:00:00Z');
+  // The table the plane's database keeps: a restart builds a new store that reads only what an earlier one wrote.
+  const table = new Map<string, unknown>();
+  const database = { query: async (text: string, values?: any[]) => {
+    if (text.startsWith('INSERT')) { (values![0] as string[]).forEach((key, index) => table.set(key, JSON.parse((values![3] as string[])[index]))); return { rows: [], rowCount: 1 }; }
+    if (text.startsWith('SELECT value FROM github_cache')) return table.has(values![0]) ? { rows: [{ value: table.get(values![0]) }], rowCount: 1 } : { rows: [], rowCount: 0 };
+    return { rows: [], rowCount: 0 };
+  } } as any;
   const busy = (read: number) => async (url: unknown) => {
     const page = Number(new URL(String(url)).searchParams.get('cursor') ?? 0);
     const body = Array.from({ length: 100 }, (_, index) => ({ delivered_at: new Date(read - (page * 100 + index) * 90_000).toISOString(), status_code: 202, event: 'check_run', installation_id: 2 }));
@@ -1000,11 +1006,14 @@ test('manual:fault-class-configuration — GY-1765: a restarted plane keeps its 
   for (const at of reads) { const process = api.client(); process.fetch = busy(at) as any; last = await process.webhookDeliveries(at); }
   assert.notEqual(window(last!, T + 24 * hour).coveredFrom, null, 'a read alone reaches back six hours, not 24');
   // Candidate: each restart starts from the log the last process persisted.
-  const store = new GitHubCacheStore(stub, 'scope', { flushMs: 60_000 });
-  for (const at of reads) { const process = api.client(); process.attachCache(store); process.fetch = busy(at) as any; last = await process.webhookDeliveries(at); }
+  for (const at of reads) {
+    const store = new GitHubCacheStore(database, 'scope', { flushMs: 60_000 }), process = api.client();
+    await process.attachCache(store); process.fetch = busy(at) as any; last = await process.webhookDeliveries(at);
+    await store.close();
+  }
+  assert.ok([...table.keys()].some(key => key.startsWith('scope:deliveries:')), 'the log is a persisted row, which each restarted process reads');
   const covered = window(last!, T + 24 * hour);
   assert.equal(covered.coveredFrom, null, 'the persisted reads cover the 24h window');
   assert.equal(webhookState({ lastDeliveryAt: new Date(T).toISOString(), ...covered }, T + 24 * hour), 'answered');
   assert.ok(last!.attempts.length > 240 && last!.attempts.length <= 5_000);
-  await store.close();
 });

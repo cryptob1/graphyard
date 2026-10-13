@@ -642,3 +642,32 @@ for (const instance of switchoverInstances) {
     assert.ok(configurationFaults(silent).some(fault => fault.subject === instance.subject), 'a fleet silent past the window is still reported');
   });
 }
+
+// GY-1765: the class's other three instances, each judged against the base's behaviour and the candidate's.
+// The base's master-role pattern (before GY-1761) read only "holds no master role"; the recorded refusals say "no master role" / "master-role session".
+const baseMasterRole = /\.graphyard\/master\.json does not exist|\bholds no master role\b|\bmaster-role session\b/i;
+const gy1674Recorded = "Blocked command: graphyard master status in this worktree, error: '.graphyard/master.json does not exist: run graphyard install --apply'. The worker token holds no master role, so the checkout-restore cannot be issued or observed from here.";
+const gy1696Recorded = "blocked on epoch 2: AC-1 is a live observation that only a master-role session can record. Blocked command: graphyard master status in this worktree (GY-1696-2), error: '.graphyard/master.json does not exist: run graphyard install --apply, or graphyard master init --token-stdin'.";
+for (const [key, recorded] of [['GY-1674', gy1674Recorded], ['GY-1696', gy1696Recorded]] as const) {
+  test(`manual:fault-class-configuration — setup|${key}|2026-10-13T07:39:48.821Z: the base reads its recorded master-role refusal as a setup fault for the operator; the candidate hands the step to a master-role identity`, async () => {
+    const { classifyBlocker } = await import('../src/model/blocker-class.js');
+    const { blockerKind } = await import('../src/model/blocker-kind.js');
+    // BASE (pre-GY-1761 pattern): the refusal worded as the worker token having "no master role", without the connection-file path, was no master-role class, so it stood as an operator setup fault.
+    const reworded = recorded.replace(/\.graphyard\/master\.json does not exist[^']*/, 'the master role is missing').replace('only a master-role session', 'only the master').replace('holds no master role', 'has no master role');
+    assert.equal(baseMasterRole.test(reworded), false, 'the base does not recognise the "has no master role" wording');
+    assert.equal(classifyBlocker(reworded).class === 'master-role', /\bno master role\b/i.test(reworded), 'the candidate recognises exactly that wording');
+    // CANDIDATE: the recorded text itself is the master-role class, handed to a master-role identity, and reads as one setup kind, not a recurring instance per item.
+    assert.equal(classifyBlocker(recorded).class, 'master-role');
+    assert.equal(blockerKind(recorded), 'setup');
+  });
+}
+
+test('manual:fault-class-configuration — setup|setup|2026-10-12T22:43:03.250Z: a host holding no install admin credential names the administrator\'s one-time step as the release filing setup\'s next step, where the loop\'s own run has the credential issued by the master', async () => {
+  const { provisionReleaseFiling, releaseFilingAdministratorStep } = await import('../src/master/release-filing.js');
+  const master = { url: 'https://graphyard.example', repository: 'owner/project' };
+  const unavailable = await provisionReleaseFiling(master, { apply: true }, { adminToken: async () => null });
+  assert.equal(unavailable.state, 'unavailable');
+  assert.equal(unavailable.next, releaseFilingAdministratorStep('owner/project'), 'the step is the administrator\'s, named once, never a master retry loop');
+  const failed = await provisionReleaseFiling(master, { apply: true }, { adminToken: async () => { throw new Error('unreadable'); } });
+  assert.deepEqual([failed.state, failed.next], ['failed', 'graphyard master setup --apply'], 'a failure is retried by the loop\'s own setup run');
+});
