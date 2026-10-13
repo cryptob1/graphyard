@@ -33,9 +33,9 @@ function fleet(): AgentRegistry {
   }, { actor: 'operator', at: new Date().toISOString() }).registry;
 }
 // Imported when a case runs, so a checkout without the rule fails the case rather than the file.
-const { workerPreference } = await import('../src/model/worker-preference.js').then(module => module as unknown as { workerPreference?: (work: object) => 'fast' | 'strong' }).then(module => ({ workerPreference: module.workerPreference ?? (() => 'fast' as const) }));
+const { workerPreference } = await import('../src/model/worker-preference.js').then(module => module as unknown as { workerPreference?: (work: object, startFailures?: number) => 'fast' | 'strong' }).then(module => ({ workerPreference: module.workerPreference ?? (() => 'fast' as const) }));
 const pick = (registry: AgentRegistry, work: object, exclude: string[] = []) =>
-  chooseSession(registry, { role: 'worker', host, prefer: workerPreference(work), exclude } as never, Date.now());
+  chooseSession(registry, { role: 'worker', host, prefer: workerPreference(work, exclude.length), exclude } as never, Date.now());
 
 test('unit:pi-worker-confined — the pi runtime is known to the worker sandbox and a Pi worker is probed behind the coordinator confinement; a host that cannot confine it refuses the launch', async () => {
   const pi = runtimeSandboxes.pi;
@@ -78,10 +78,15 @@ test('unit:pi-first-worker-order — a low or medium risk item on its first two 
   assert.equal(fallback.account?.name, 'claude-b');
   assert.match(fallback.skipped.map(entry => entry.account).join(), /pi-a,pi-b/);
 
-  // Pi accounts only wait behind the strong ones for a strong item; with the strong accounts spent they still serve it.
+  // A strong item is held when no strong account is eligible: Pi never takes it.
   const strongSpent = structuredClone(registry);
   for (const account of strongSpent.accounts.filter(entry => entry.runtime !== 'pi')) account.enabled = false;
-  assert.equal(pick(strongSpent, { lane: 'high', pipeline: { reworkRounds: 0 } }).account?.name, 'pi-a');
+  const held = pick(strongSpent, { lane: 'high', pipeline: { reworkRounds: 0 } });
+  assert.equal(held.account, null, 'a high risk item waits for a strong account instead of falling to Pi');
+  // The attempt count the coordination view keeps (the view drops the pipeline) counts as attempts, and so do launches this dispatch already spent.
+  assert.equal(pick(registry, { lane: 'low', attemptCount: 2 }).account?.name, 'claude-b');
+  assert.equal(pick(registry, { lane: 'low', attemptCount: 1 }).account?.name, 'pi-a');
+  assert.equal(workerPreference({ lane: 'low', attemptCount: 0 }, 2), 'strong', 'two failed Pi starts leave the third launch to the strong accounts');
 
   // Other roles keep their stored order whatever is preferred.
   registry.roles.push({ name: 'reviewer', accounts: ['claude-b', 'pi-a'], concurrency: 2 } as AgentRegistry['roles'][number]);
@@ -89,7 +94,7 @@ test('unit:pi-first-worker-order — a low or medium risk item on its first two 
 });
 
 /** A Herdr world on which the listed runtimes never come up (their pane keeps echoing the command), and a pi launch can be refused outright. */
-function world(healthy: Set<string>, refusePi?: string) {
+function world(healthy: Set<string>, refusePi?: string, exitPi = false) {
   const kinds: string[] = [];
   let typedCommand = '', now = Date.now();
   const json = (result: unknown) => JSON.stringify({ result });
@@ -104,7 +109,8 @@ function world(healthy: Set<string>, refusePi?: string) {
     if (args[0] === 'pane' && args[1] === 'list') return json({ panes: [] });
     const kind = kinds.at(-1);
     if (!kind) return json({});
-    if (args[0] === 'pane' && args[1] === 'read') return healthy.has(kind) ? `${kind} ready\n` : `vish@host ~/code/project ❯ ${typedCommand}\n`;
+    if (args[0] === 'pane' && args[1] === 'process-info') return json({ process_info: kind === 'pi' && exitPi ? { shell_pid: 10, foreground_process_group_id: 10 } : { shell_pid: 10, foreground_process_group_id: 11, foreground_processes: [] } });
+    if (args[0] === 'pane' && args[1] === 'read') return kind === 'pi' && exitPi ? `vish@host ~/code/project ❯ ${typedCommand}\npi: command not found\nvish@host ~/code/project ❯\n` : healthy.has(kind) ? `${kind} ready\n` : `vish@host ~/code/project ❯ ${typedCommand}\n`;
     if (args[0] === 'agent' && args[1] === 'get') return healthy.has(kind) ? json({ agent: { agent: kind, agent_status: 'idle', pane_id: args[2] } }) : JSON.stringify({ error: { code: 'agent_not_found', message: `agent target ${args[2]} not found` } });
     if (args[0] === 'agent' && args[1] === 'rename') return json({ agent: { agent: kind, name: args[3] } });
     return json({});
@@ -130,13 +136,13 @@ test('unit:pi-launch-failure-falls-back — a Pi launch that never starts, or is
     criteria: [{ id: 'AC-3', text: 'Fallback', proofs: ['unit:pi-launch-failure-falls-back'] }], policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null,
     reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [] } as any;
 
-  const dispatch = async (refusePi?: string) => {
+  const dispatch = async (refusePi?: string, exitPi = false, piAccounts = ['pi-a', 'pi-b']) => {
     const at = new Date().toISOString();
     await mkdir(dirname(master.credentialFile), { recursive: true });
     let registry: AgentRegistry = applyRegistryMutation(emptyRegistry(), 'apply', { runtimes: proposedRuntimes.filter(runtime => ['pi', 'claude'].includes(runtime.name)),
       models: [{ name: 'glm', id: 'zai/glm-5.3' }, { name: 'opus', id: 'claude-opus-5' }],
-      accounts: [{ name: 'claude-b', runtime: 'claude', model: 'opus', credential: { host: hostId, home: null } }, { name: 'pi-a', runtime: 'pi', model: 'glm', credential: { host: hostId, home: null } }, { name: 'pi-b', runtime: 'pi', model: 'glm', credential: { host: hostId, home: null } }],
-      roles: [{ name: 'worker', accounts: ['claude-b', 'pi-a', 'pi-b'], concurrency: 4 }], reason: 'fixture' }, { actor: 'operator', at }).registry;
+      accounts: [{ name: 'claude-b', runtime: 'claude', model: 'opus', credential: { host: hostId, home: null } }, ...piAccounts.map(name => ({ name, runtime: 'pi', model: 'glm', credential: { host: hostId, home: null } }))],
+      roles: [{ name: 'worker', accounts: ['claude-b', ...piAccounts], concurrency: 4 }], reason: 'fixture' }, { actor: 'operator', at }).registry;
     const chosen: string[] = [], ended: string[] = [];
     const client: FleetClient = {
       document: async () => structuredClone(registry),
@@ -153,7 +159,7 @@ test('unit:pi-launch-failure-falls-back — a Pi launch that never starts, or is
     };
     let claims = 0;
     const prepare = async () => ({ epoch: ++claims, path: join(root, 'assigned'), base: 'c'.repeat(40) });
-    const herdr = world(new Set(['claude']), refusePi);
+    const herdr = world(new Set(['claude']), refusePi, exitPi);
     const dispatched = await dispatchWork(root, item, profile, [], herdr.run, [item], prepare, async () => {}, 5_000, at, { start: herdr.bounds(), probe: { registry: client, quota: false, cacheMs: 0, now: () => Date.parse(at) } as never });
     return { dispatched, kinds: herdr.kinds, chosen, ended, claims };
   };
@@ -168,4 +174,40 @@ test('unit:pi-launch-failure-falls-back — a Pi launch that never starts, or is
   assert.deepEqual(refused.kinds, ['pi', 'pi', 'claude']);
   assert.equal(refused.dispatched.account!.environment, 'claude-b');
   assert.deepEqual(refused.dispatched.fallback!.failed.map(failure => [failure.account, failure.kind]), [['pi-a', 'pi'], ['pi-b', 'pi']], 'the refusal is recorded on each Pi account the dispatch passed over');
+  // A Pi session that exits back to the shell before it is ready also falls through.
+  const exited = await dispatch(undefined, true);
+  assert.deepEqual(exited.kinds, ['pi', 'pi', 'claude']);
+  assert.deepEqual(exited.dispatched.fallback!.failed.map(failure => failure.account), ['pi-a', 'pi-b']);
+  // Three Pi accounts: the two launches the dispatch spent on Pi are all it gets; the third launch goes to the strong account.
+  const three = await dispatch(undefined, true, ['pi-a', 'pi-b', 'pi-c']);
+  assert.deepEqual(three.kinds, ['pi', 'pi', 'claude'], 'no third Pi start within one dispatch');
+});
+
+test('unit:pi-default-worker-roles — a Pi account joins the worker role by default on connection and in a discovery proposal', async () => {
+  const { connectDefaultRoles } = await import('../src/fleet.js');
+  assert.ok(connectDefaultRoles('fast').includes('worker'));
+  const { proposedRuntimeRoles } = await import('../src/model/registry-proposal.js');
+  assert.ok(proposedRuntimeRoles.pi?.includes('worker'));
+});
+
+test('unit:pi-coordination-view-attempts — the coordination view keeps the attempts already made', async () => {
+  const { coordinationWork } = await import('../src/server/work-view.js') as any;
+  const view = coordinationWork?.({ key: 'GY-1', stage: 'ready', evidence: [], pipeline: { reworkRounds: 0, attempts: [{}, {}] } }, { evidence: 0, dispatchHistory: 0, queueHistory: 0, actionHistory: 0, sessions: 0 });
+  assert.equal(view?.attemptCount, 2);
+});
+
+test('unit:pi-old-server-selection — a control plane that rejects the preference fields is asked again without them', async () => {
+  const { httpFleetClient } = await import('../src/fleet.js');
+  const holder = await temporaryDirectory('pi-old-server'), credentialFile = join(holder, 'token');
+  await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+  const bodies: any[] = [];
+  const fetcher = (async (_url: string, init: any) => {
+    const body = JSON.parse(init.body); bodies.push(body);
+    return 'prefer' in body ? new Response(JSON.stringify({ error: 'Unrecognized key: prefer' }), { status: 400 }) : new Response(JSON.stringify({ selected: false }), { status: 200 });
+  }) as unknown as typeof fetch;
+  const client = httpFleetClient({ url: 'https://graphyard.example', credentialFile }, fetcher);
+  const result = await client.select({ role: 'worker', host, work: 'GY-1', group: null, principal: null, prefer: 'fast', exclude: ['pi-a'], observations: [] });
+  assert.equal(result.selected, false);
+  assert.equal(bodies.length, 2);
+  assert.ok(!('prefer' in bodies[1]) && !('exclude' in bodies[1]));
 });

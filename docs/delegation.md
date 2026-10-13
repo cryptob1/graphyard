@@ -3,13 +3,13 @@
 
 ## Authority boundaries
 
-An AI `slice-lead` (`product`, `infrastructure`, `docs-experience`) rules on plans, sends back, escalates; never implements, reviews, proves or merges (`lead.action.refused`). `reject-plan`/`send-back` hold merging (**lead hold**) until that lead's `approve-plan` with `"supersedes": "RULING-ID"` or `rework`. Producers ever assigned item or in its slice: `evidence.producer.refused`. [Limits](deployment.md#variables).
+A `slice-lead` (`product`, `infrastructure`, `docs-experience`) rules on plans, sends back, escalates; never implements, reviews, proves or merges (`lead.action.refused`). `reject-plan`/`send-back` hold merging (**lead hold**) until that lead's `approve-plan` with `"supersedes": "RULING-ID"` or `rework`. Producers ever assigned item or slice: `evidence.producer.refused`. [Limits](deployment.md#variables).
 
 ## Reviewer provider diversity
 
-The registry picks a `reviewer` account whose model provider (`provider`, else launch kind) differs from the item's newest `worker` session's; same-provider accounts are `skipped` (`shares the implementer's provider P on GY-N`), one at its session limit waited for; else the first eligible same-provider account serves.
+The registry picks a `reviewer` account whose model provider (`provider`, else launch kind) differs from the item's newest `worker` session's; same-provider accounts are `skipped` (`shares the implementer's provider P on GY-N`), one at its session limit waited for; else the first eligible same-provider account.
 
-`worker` tries Pi first for low/medium-risk items' first two attempts (any ended epoch counts), else other runtimes; a Pi start or confinement failure falls to the next account. `install` seats Pi there.
+`worker` tries Pi first for low/medium-risk items' first two attempts (ended epochs and failed starts count); high-risk and later attempts wait for a strong account. A Pi start, early exit or confinement failure falls to the next account.
 
 ## Escalation
 

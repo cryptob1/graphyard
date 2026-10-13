@@ -260,7 +260,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
         if (accounts && !accounts.length)
           throw new Error(`${describeStartFailures(startFailures, null)}; no further account of profile ${profile.name} to fall back to`, { cause: startError });
         try {
-          selected = await selectAccount(config, 'worker', accounts && accounts.length < (profile.accounts?.length ?? 0) ? { ...profile, accounts } : profile, { ...clock, ...options.probe, work: work.key, prefer: workerPreference(work), exclude: startFailures.map(failure => failure.account) });
+          selected = await selectAccount(config, 'worker', accounts && accounts.length < (profile.accounts?.length ?? 0) ? { ...profile, accounts } : profile, { ...clock, ...options.probe, work: work.key, prefer: workerPreference(work, startFailures.length), exclude: startFailures.map(failure => failure.account) });
         } catch (error) {
           if (!startFailures.length || !(error instanceof NoHealthyAccountError)) throw error;
           throw new Error(`${describeStartFailures(startFailures, null)}; no further account of profile ${profile.name} could be launched: ${failureText(error).slice(0, 300)}`, { cause: error });
@@ -311,7 +311,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
           // profile's next account takes the launch rather than the dispatch dying silently (GY-417).
           // GY-1746: a Pi launch refused before its session started — the sandbox probe failing, or the host unable to confine it — likewise moves the same dispatch to the next account.
           const piRefused = launch.kind === 'pi' && (error instanceof WorkerSandboxError || /never starts a session unconfined|cannot be launched/.test(failureText(error)));
-          if (!chosen.account || !(piRefused || error instanceof SessionStartError && ['never started', 'still starting'].includes(error.startCase))) throw error;
+          if (!chosen.account || !(piRefused || error instanceof SessionStartError && ['never started', 'still starting', ...launch.kind === 'pi' ? ['exited'] : []].includes(error.startCase))) throw error;
           startError = error;
           const failure: AccountStartFailure = { account: chosen.account.name, kind: launch.kind ?? 'unknown', reason: failureText(error).slice(0, 500), at: new Date().toISOString() };
           await recordAccountStartFailure(config, failure.account, failure.kind, failure.reason).catch(() => {});

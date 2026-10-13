@@ -139,7 +139,12 @@ export async function fleetRequest(config: Required<Pick<FleetConfig, 'url'>> & 
 
 export function httpFleetClient(config: Required<Pick<FleetConfig, 'url'>> & Pick<FleetConfig, 'credentialFile'>, fetcher: typeof fetch = fetch, timeoutMs = fleetRequestTimeoutMs): FleetClient {
   const call = (path: string, body?: unknown) => fleetRequest(config, path, { body, fetch: fetcher, timeoutMs });
-  return { document: () => call('agent-registry/document'), select: request => call('agent-registry/select', request), end: async (session, reason, outcome) => { await call(`agent-registry/sessions/${session}/end`, { reason, ...(outcome ? { outcome } : {}) }); },
+  return { document: () => call('agent-registry/document'), select: request => call('agent-registry/select', request).catch(error => {
+    // A control plane served before this coordinator rejects the fields it does not know (GY-1746); the selection is asked again in the older form.
+    if (!(request.prefer || request.exclude?.length) || !/answered 400/.test(error instanceof Error ? error.message : '')) throw error;
+    const { prefer: _prefer, exclude: _exclude, ...older } = request;
+    return call('agent-registry/select', older);
+  }), end: async (session, reason, outcome) => { await call(`agent-registry/sessions/${session}/end`, { reason, ...(outcome ? { outcome } : {}) }); },
     observe: request => call('agent-registry/observe', request) };
 }
 
@@ -571,7 +576,7 @@ export const connectProvider = (id: string): ConnectProvider | null => connectPr
  * fleet cannot launch.
  */
 export function connectDefaultRoles(tier: ConnectProvider['tier']): readonly string[] {
-  return tier === 'fast' ? ['research', 'approver', 'producer'] : ['worker', 'reviewer'];
+  return tier === 'fast' ? ['research', 'worker', 'approver', 'producer'] : ['worker', 'reviewer'];
 }
 
 /**
