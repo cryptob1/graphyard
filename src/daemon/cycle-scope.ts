@@ -9,6 +9,7 @@ import { type Successor, successorGround, successorsOf } from '../model/successo
 import { findingScope, type ReviewFinding } from '../review-scope.js';
 import { guardBroadScope } from '../master.js';
 import { RefusedResponse } from '../model/refusal.js';
+import { ChildProcessError } from '../child-runner.js';
 import { message, scopeMeasurementSchema } from './state.js';
 import { scopeKey } from './reconcile.js';
 import { discoverHeldScopeAskMarks, scopeBudget, syncHeldScopeAskMarks } from './metrics.js';
@@ -392,7 +393,7 @@ export function transientScopeRefusal(error: unknown): string | null {
 function transportFailure(error: unknown): boolean {
   const name = error instanceof Error ? error.name : '';
   const text = message(error);
-  if (name === 'TimeoutError' || name === 'AbortError') return true;
+  if (name === 'TimeoutError' || name === 'AbortError' || (error instanceof ChildProcessError && error.timedOut && error.command === 'gh')) return true;
   if (/The operation was aborted|operation timed out|fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(text)) return true;
   return /^Command failed: gh /.test(text) && /rate limit|timeout|timed out|connection|network|could not resolve|HTTP 5\d\d|EOF/i.test(text);
 }

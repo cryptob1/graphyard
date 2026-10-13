@@ -1,3 +1,4 @@
+import { ChildProcessError } from '../src/child-runner.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
@@ -592,4 +593,24 @@ test('integration:scope-class-1756-instances-quiet — GY-1757: a widen timeout,
   await cycle(state, effects(timed, { baseSuccessions: undefined, replan: undefined, reviewFindings: async () => [], baseText: async () => null }));
   await cycle(state, effects(limited, { baseSuccessions: undefined, replan: undefined, reviewFindings: async () => { throw gh(); }, baseText: async () => null }));
   assert.deepEqual(scopeFaults(state), []);
+});
+
+test('unit:widen-transient-gh-timeout — GY-1757: the bounded gh runner\'s timeout is transient; another command\'s is not', () => {
+  const killed = (command: string) => new ChildProcessError(command, ['api'], { stdout: '', stderr: '', status: null, signal: 'SIGKILL', timedOut: true, timeoutMs: 90000 });
+  assert.match(transientScopeRefusal(killed('gh')) ?? '', /transport/);
+  assert.equal(transientScopeRefusal(killed('git')), null);
+});
+
+test('integration:widen-gh-timeout-first-quiet-second-counts — GY-1757: a bounded gh timeout opens an instance only on the second consecutive failure', async () => {
+  const killed = () => new ChildProcessError('gh', ['api', 'x'], { stdout: '', stderr: '', status: null, signal: 'SIGKILL', timedOut: true, timeoutMs: 90000 });
+  const control = plane(item({ key: 'GY-1757', scopeRequest: refusedRequest(['docs/delivery.md']) } as Partial<Work>));
+  const state = emptyDaemonState(config());
+  const failing = effects(control, { baseSuccessions: undefined, replan: undefined, reviewFindings: async () => { throw killed(); }, baseText: async () => null });
+  await cycle(state, failing);
+  assert.deepEqual(scopeFaults(state), []);
+  await cycle(state, failing, clock + 60_000);
+  assert.equal(scopeFaults(state).length, 1);
+  const replanState = emptyDaemonState(config());
+  await cycle(replanState, effects(plane(item({ key: 'GY-1757' } as Partial<Work>)), { baseSuccessions: async () => { throw killed(); }, replan: async () => { throw killed(); } }));
+  assert.deepEqual(scopeFaults(replanState), []);
 });

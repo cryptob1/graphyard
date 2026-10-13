@@ -9,7 +9,7 @@ import type { Work } from '../src/model.js';
 import type { WorkOrigin } from '../src/model/interventions.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { cycleFaults, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { workFaults, reRequestableRefusal } from '../src/model/fault-classes.js';
+import { workFaults } from '../src/model/fault-classes.js';
 import { scopeRequestAttention } from '../src/cli/owed-report.js';
 import { decideScopeRequest, followUpPaths, impliedScopes, namedPaths, plannedCompanions, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
 import { peerModuleGround, importingTestGround, noWallClockGatePath } from '../src/model/scope-companions.js';
@@ -170,10 +170,10 @@ test('manual:fault-class-scope — a request the product does not settle still s
   // Past the fifteen-minute bound the loop promises, a request still open is a fault whatever is deciding it.
   const late = new Date(Date.parse(first.requestedAt) + 16 * minute).toISOString();
   assert.deepEqual(scopeFaults(standing(first, late), late).map(fault => fault.kind), ['scope-request']);
-  // A refusal nothing will judge again — the independent approver's own — is a fault at once.
+  // GY-1757: the independent approver's refusal of an additive ask is the live attempt's to act on inside the bound, whatever its wording.
   const refused = standing(instances[8]);
   refused.scopeRequest!.decision = { ...refused.scopeRequest!.decision!, decidedBy: 'graphyard-approver-graphyard' };
-  assert.deepEqual(scopeFaults(refused, instances[8].observedAt).map(fault => fault.kind), ['scope-request']);
+  assert.deepEqual(scopeFaults(refused, instances[8].observedAt).map(fault => fault.kind), []);
   // So is a rule refusal of an ask that is not purely additive: it is never routed to the approver.
   const narrowing = standing(instances[8]);
   narrowing.scopeRequest!.remove = ['docs/'];
@@ -420,16 +420,10 @@ function approverRefused(reason: string) {
   return work;
 }
 
-test('unit:standing-re-requestable-settling — GY-1757: an approver refusal directing a narrower re-request on a live lease inside the bound is not standing', () => {
+test('unit:standing-re-requestable-settling — GY-1757: an approver refusal of an additive ask on a live lease inside the bound is not standing, whatever its wording', () => {
   const entry = instances[8];
-  assert.equal(reRequestableRefusal(narrowerReason), true);
-  for (const wording of ['Please ask again for fewer files', 'Submit a smaller scope request.', 'Re-ask with a narrower set of paths', 'File the request again, trimmed to the criteria'])
-    assert.equal(reRequestableRefusal(wording), true, wording);
-  for (const wording of ['The ask is refused: it is outside the item', 'Refused: narrower is not possible, non-additive']) assert.equal(reRequestableRefusal(wording), false, wording);
-  for (const wording of ['Please ask again for fewer files', 'Submit a smaller scope request'])
+  for (const wording of [narrowerReason, 'Please ask again for fewer files', 'Refused as filed; ask only for src/x.ts', 'Do not re-request narrower; this file is unrelated'])
     assert.deepEqual(scopeFaults(approverRefused(wording), entry.observedAt).map(fault => fault.kind), [], wording);
-  assert.equal(reRequestableRefusal('outside what this item\'s own criteria imply'), false);
-  assert.deepEqual(scopeFaults(approverRefused(narrowerReason), entry.observedAt).map(fault => fault.kind), []);
 });
 
 test('unit:standing-re-requestable-bound-stands — GY-1757: the same refusal stands once the bound passes, and not when the lease has ended', () => {
@@ -441,14 +435,13 @@ test('unit:standing-re-requestable-bound-stands — GY-1757: the same refusal st
   assert.deepEqual(workFaults(approverRefused(narrowerReason), Date.parse(entry.observedAt) + 20 * minute).filter(fault => fault.subject === entry.subject && fault.text.includes('plannedFiles')).length, 0, 'an expired lease is moot, as today');
 });
 
-test('unit:standing-dead-ends-stand — GY-1757: no approver route, a non-additive ask and a plain approver refusal still stand at once', () => {
+test('unit:standing-dead-ends-stand — GY-1757: no approver route, a non-additive ask still stand at once', () => {
   const entry = instances[8];
-  assert.deepEqual(scopeFaults(approverRefused('The ask is refused: it is outside the item'), entry.observedAt).map(fault => fault.kind), ['scope-request']);
   const narrowing = approverRefused(narrowerReason);
   narrowing.scopeRequest!.remove = ['docs/'];
   assert.deepEqual(scopeFaults(narrowing, entry.observedAt).map(fault => fault.kind), ['scope-request'], 'a non-additive ask cannot be narrowed by re-asking');
   const ruleRefused = standing(entry);
   ruleRefused.scopeRequest!.remove = ['docs/'];
   assert.deepEqual(scopeFaults(ruleRefused, entry.observedAt).map(fault => fault.kind), ['scope-request']);
-  assert.equal(workFaults(approverRefused('plain'), Date.parse(entry.observedAt), false).filter(fault => fault.subject === entry.subject).length, 1, 'with no approver route');
+  assert.equal(workFaults(standing(entry), Date.parse(entry.observedAt), false).filter(fault => fault.subject === entry.subject).length, 1, 'with no approver route');
 });

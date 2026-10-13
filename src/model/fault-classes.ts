@@ -193,20 +193,12 @@ export function standingScopeRequest(work: Pick<Work, 'scopeRequest' | 'lease' |
   if (!request || !work.lease || work.lease.epoch !== request.epoch || Date.parse(work.lease.expiresAt) <= now) return false; /* an expired attempt's request is moot (owed-report's rule) */
   if (now - Date.parse(request.at) > scopeBlockedBudgetMs) return true;
   if (request.decision?.state !== 'refused') return false;
-  // GY-1757: an approver's refusal that directs a narrower re-request is the live attempt's to act on
-  // within the bound, which this far is held; the bound branch above catches one that sticks.
-  if (request.decision.decidedBy !== 'graphyard' && !request.remove?.length && !request.criteria?.length && reRequestableRefusal(request.decision.reason)) return false;
+  // GY-1757: the independent approver's refusal of an additive ask is the live attempt's to act on within
+  // the bound (re-ask narrower, or report the blocker); this is read from the decision's structure, never
+  // from its prose. The bound branch above catches an ask that sticks; a non-additive ask cannot be re-asked.
+  if (request.decision.decidedBy !== 'graphyard' && !request.remove?.length && !request.criteria?.length) return false;
   return !(routes && request.decision.decidedBy === 'graphyard' && routableScopeRequest(work, now));
 }
-/**
- * True when a refusal's reason directs the asking attempt to ask again, narrower or smaller (the approver's
- * 'Refused as filed; re-request narrower', 'Please ask again for fewer files', 'Submit a smaller scope request').
- * A direction to re-ask (re-request, ask/submit/file again, a new ask) paired with a reduction (narrow, smaller, fewer, less, reduce).
- */
-const reAskDirection = /re-?(?:request|ask|submit|file)|\b(?:ask|request|submit|file|resubmit)\w*\s+(?:it\s+|this\s+)?(?:again|anew|afresh)|\b(?:a|the)\s+(?:new|fresh|revised|narrower|smaller)\s+(?:scope\s+)?(?:ask|request)|\b(?:narrower|smaller)\s+(?:scope\s+)?(?:ask|request)/i;
-const reduction = /\b(?:narrow\w*|smaller|fewer|less|reduc\w*|trim\w*|minimal)\b/i;
-export const reRequestableRefusal = (reason: string | null | undefined) => { const text = reason ?? ''; return reAskDirection.test(text) && reduction.test(text); };
-
 /**
  * `reclaimInMotion`, which the loop passes (daemon/faults.ts attemptReclaimInMotion, GY-1557): an
  * attempt past the worker bound that the loop's own reclaim remedy is still due to end, or ended
