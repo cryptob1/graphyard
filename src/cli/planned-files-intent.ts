@@ -3,28 +3,19 @@ import { wholeDocument } from '../model/work-summary.js';
 import { randomUUID } from 'node:crypto';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { decisionInput, type MasterConfig } from '../master.js';
-import { derivePlannedFiles, plannedFilesRefusal, postDeployCriterionRefusal, postDeployOnlyRefusal, type Work } from '../model/work.js';
-import { askedScopes } from '../model/scope-collapse.js';
+import { derivePlannedFiles, plannedFilesRefusal, type Work } from '../model/work.js';
 
 /**
  * The files of the base branch an item will be worked on, read from the coordinator checkout
  * after a best-effort fetch: the remote-tracking branch when there is one, the local branch
  * otherwise. Unreadable, it refuses — plannedFiles is never recorded against a tree nobody read.
  */
-export async function currentBaseTree(root: string, baseBranch: string, run: ChildRun = defaultChildRun) {
-  const tree = await baseTree(root, baseBranch, run);
-  if (tree.fresh === false) throw new Error(`the base tree of ${baseBranch} could not be refreshed; a terminal scope refusal waits for a current read`);
-  return tree;
-}
-
 export async function baseTree(root: string, baseBranch: string, run: ChildRun = defaultChildRun) {
-  // `fresh` is true only when this call's fetch succeeded: a tree read after a failed fetch may lag the base (GY-1764).
-  let fresh = true;
-  try { await run('git', ['fetch', '--quiet', 'origin', baseBranch], { cwd: root, timeoutMs: 30_000 }); } catch { fresh = false; /* resolve against the last fetched base */ }
+  try { await run('git', ['fetch', '--quiet', 'origin', baseBranch], { cwd: root, timeoutMs: 30_000 }); } catch { /* resolve against the last fetched base */ }
   for (const [ref, name] of [[`refs/remotes/origin/${baseBranch}`, `origin/${baseBranch}`], [`refs/heads/${baseBranch}`, baseBranch]]) {
     try {
       const listed = await run('git', ['ls-tree', '-r', '--name-only', '-z', ref], { cwd: root, maxBuffer: 64 * 1024 * 1024 });
-      return { ref: name, fresh, files: new Set(String(listed).split('\0').filter(Boolean)) };
+      return { ref: name, files: new Set(String(listed).split('\0').filter(Boolean)) };
     } catch { /* try the next ref */ }
   }
   throw new Error(`plannedFiles cannot be resolved: neither origin/${baseBranch} nor ${baseBranch} is readable in ${root}`);
@@ -33,12 +24,11 @@ export async function baseTree(root: string, baseBranch: string, run: ChildRun =
 /**
  * `master create FILE REASON` and `master requirements GY-N FILE REASON` (GY-140): plannedFiles
  * is resolved against the base branch before the intent is recorded. A planned path the tree does
- * not hold, which no criterion describes creating and no open scope ask of the item names, refuses the item naming it; every file a
+ * not hold, which no criterion describes creating, refuses the item naming it; every file a
  * criterion names that the tree holds is carried in, and reported with the criterion that named it.
- * A criterion whose outcome is a live-install observation is refused unless declared post-deploy (GY-1660).
  */
 export async function derivedIntent(root: string, config: Pick<MasterConfig, 'baseBranch'>, id: 'create' | 'requirements', args: string[],
-  deps: { coordinator: (path: string) => Promise<any>; mutate: (path: string, data: unknown, requestId?: string, credential?: string) => Promise<any>; token: () => Promise<string>; tree?: (root: string, baseBranch: string, run?: ChildRun) => Promise<{ ref: string; files: Set<string>; fresh?: boolean }> }) {
+  deps: { coordinator: (path: string) => Promise<any>; mutate: (path: string, data: unknown, requestId?: string, credential?: string) => Promise<any>; token: () => Promise<string>; tree?: typeof baseTree }) {
   const file = id === 'create' ? args[0] : args[1], reason = args.slice(id === 'create' ? 1 : 2).join(' ').trim();
   if (!file || id === 'requirements' && !args[0]) throw new Error(id === 'create' ? 'Use master create FILE REASON' : 'Use master requirements GY-N FILE REASON');
   if (!reason) throw new Error(`master ${id} needs a REASON; every agent decision is attributable`);
@@ -48,14 +38,9 @@ export async function derivedIntent(root: string, config: Pick<MasterConfig, 'ba
   const work = listed && await wholeDocument(listed, deps.coordinator);
   if (id === 'requirements' && !work) throw new Error(`Unknown work item ${args[0]}`);
   const intent = work ? decisionInput('requirements', work, input) : input;
-  // GY-1660: an undeclared live-install observation is refused at a requirements revision as at create, before anything is read or posted;
-  // so is an item of nothing but declared verifications (GY-1685).
-  const postDeploy = postDeployCriterionRefusal(intent.criteria ?? []) ?? postDeployOnlyRefusal(intent.criteria ?? []);
-  if (postDeploy) throw new Error(postDeploy);
   const tree = await (deps.tree ?? baseTree)(root, config.baseBranch);
-  // A new file the item's open scope ask names, or a directory the ask's fold produces, is the worker's to create (GY-1676): planned without a criterion rewrite.
-  const derived = derivePlannedFiles({ plannedFiles: intent.plannedFiles ?? [], criteria: intent.criteria ?? [] }, tree.files, work ? askedScopes(work) : []);
-  if (derived.missing.length) throw new Error(plannedFilesRefusal(derived.missing, tree.ref, derived.misnamed));
+  const derived = derivePlannedFiles({ plannedFiles: intent.plannedFiles ?? [], criteria: intent.criteria ?? [] }, tree.files);
+  if (derived.missing.length) throw new Error(plannedFilesRefusal(derived.missing, tree.ref));
   const result = await deps.mutate(work ? `work/${work.id}/requirements` : 'work', { ...intent, plannedFiles: derived.plannedFiles, reason }, process.env.GRAPHYARD_REQUEST_ID ?? randomUUID(), await deps.token());
   return { ...result, plannedFilesDerived: { base: tree.ref, added: derived.added } };
 }

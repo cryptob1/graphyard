@@ -1042,3 +1042,15 @@ test('unit:auto-scope-superseded-widening-still-refused — the engine still ref
   assert.equal(supersededScopeAsk(plane('Operator agents cannot remove planned-file containment')), null);
   assert.equal(supersededScopeAsk(new Error(superseded.body.error)), null, 'a message merely quoting the refusal is not it');
 });
+
+// GY-1764: a terminal nonRepository refusal rests on a tree read after a successful fetch; a failed fetch leaves a possibly lagging tree, so the ask waits.
+test('unit:current-base-tree — a failed fetch makes the tree unreadable for a terminal refusal, and a later successful fetch sees a file the base gained', async () => {
+  const { currentBaseTree } = await import('../src/executor.js');
+  const runner = (fetchFails: boolean, files: string[]) => (async (_cmd: string, args: string[]) => {
+    if (args[0] === 'fetch') { if (fetchFails) throw new Error('network down'); return ''; }
+    return `${files.join('\0')}\0`;
+  }) as never;
+  await assert.rejects(currentBaseTree('/r', 'main', runner(true, ['a.ts'])), /could not be refreshed/);
+  const tree = await currentBaseTree('/r', 'main', runner(false, ['a.ts', 'new-root.md']));
+  assert.ok(tree.files.has('new-root.md'));
+});
