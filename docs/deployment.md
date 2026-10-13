@@ -41,7 +41,7 @@ Railway deploys `release/production` in ~1min. `/healthz` `commit` at tip: `grap
 
 #### Production environment name
 
-Railway reports `<project> / production`. Startup takes `production.environment`, else `GRAPHYARD_PRODUCTION_ENVIRONMENT` (`.railway/railway.ts`), else `production`; applies at restart. Check the startup line `production observation via GitHub deployments to NAME` or `production.providerDescription`.
+Railway reports `<project> / production`. Startup takes `production.environment`, else `github-pages` if `.github/workflows/pages-deploy.yml` exists, else `GRAPHYARD_PRODUCTION_ENVIRONMENT`, else `production`; applies at restart. Check `production.providerDescription`.
 
 ### Webhook delivery
 

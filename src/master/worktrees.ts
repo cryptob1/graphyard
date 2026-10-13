@@ -756,7 +756,17 @@ export async function submittedBranchRefusal(root: string, branch: string, remot
     await run('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:${remoteBranch}`], { cwd: root });
     const remoteSha = String(await run('git', ['rev-parse', '--verify', remoteBranch], { cwd: root })).trim();
     return !candidateSha || remoteSha !== candidateSha ? submittedBranchMoved : null;
-  } catch (error) { return `Git worktree creation failed while fetching ${branch}: ${failureText(error)}`; }
+  } catch (error) {
+    // GY-1753 AC-2: a local-only head at the candidate sha is pushed so the remote holds it; any other local sha refuses.
+    try {
+      const localSha = String(await run('git', ['rev-parse', '--verify', `refs/heads/${branch}`], { cwd: root })).trim();
+      if (candidateSha && localSha === candidateSha) {
+        await run('git', ['push', '--quiet', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], { cwd: root });
+        return null;
+      }
+    } catch { /* fall through to the fetch refusal */ }
+    return `Git worktree creation failed while fetching ${branch}: ${failureText(error)}`;
+  }
 }
 
 /**
