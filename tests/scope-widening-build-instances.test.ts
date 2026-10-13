@@ -351,9 +351,13 @@ test('manual:intervention-pattern-scope-widening-build — GY-1680 against the c
   assert.equal(wideningSettlement(answered1680[1].details, [routedReason1680]), 'routed-approver');
   const settled = { ...item1680, plannedFiles: withMaster, scopeRequest: { ...request1680, decision: { ...decision1680, state: 'approved' as const, decidedBy: approver } }, blocker: null } as unknown as Work;
   assert.deepEqual(widenings([...held1680, ...answered1680], [settled], '2026-10-11T01:30:00.000Z'), []);
-  // The loop's grounded widening of docs/operations.md answered only that path; the ask stayed open for src/cli/master.ts, and a deployment that routes nothing leaves it counted from its own instant.
-  assert.deepEqual(widenings(held1680.slice(0, 3), [item1680], gy1680.detectedAt).map(asRecorded), [gy1680.recorded]);
-  // A route naming another ask — a later instant of the same epoch — holds nothing: the identity is the ask's epoch and instant, as the engine matches it.
+  // The loop's grounded widening of docs/operations.md answered only that path; the ask stayed open for src/cli/master.ts. GY-1755: unrouted on a live attempt inside the bound the loop promises, it is the loop's to route (scope-refusal-within-bound) and no instance at the scan's instant.
+  assert.deepEqual(widenings(held1680.slice(0, 3), [item1680], gy1680.detectedAt), []);
+  // A route naming another ask — a later instant of the same epoch — holds nothing: the identity is the ask's epoch and instant, as the engine matches it. GY-1755: within the bound the unrouted ask is the loop's either way, and with the attempt gone (nothing will route or re-ask it) it is counted from its own instant, its identity the scan recorded.
   const other = { ...held1680[3], payload: { ...held1680[3].payload, input: { ...held1680[3].payload.input, answers: { at: '2026-10-11T01:23:50.000Z', epoch: 1 } } } };
-  assert.deepEqual(widenings([...held1680.slice(0, 3), other], [item1680], gy1680.detectedAt).map(asRecorded), [gy1680.recorded]);
+  assert.deepEqual(widenings([...held1680.slice(0, 3), other], [item1680], gy1680.detectedAt), []);
+  const gone1680 = { ...item1680, lease: null } as unknown as Work, past1680 = '2026-10-11T01:26:00.000Z';
+  const counted1680 = widenings([...held1680.slice(0, 3), other], [gone1680], past1680).map(asRecorded);
+  assert.deepEqual(counted1680.map(entry => ({ requestedAt: entry.requestedAt, sources: entry.sources })), [{ requestedAt: gy1680.recorded.requestedAt, sources: gy1680.recorded.sources }]);
+  assert.equal(counted1680[0].waitedMs, Date.parse(past1680) - Date.parse(gy1680.askedAt));
 });

@@ -18,7 +18,7 @@ import { applyWorkDelta, type DeltaOp } from './store/snapshot-delta.js';
 /** A worker's open ask: a scope request or a blocked report, until something answers it. */
 /** `epoch`: the attempt a scope request was raised by; `routed`: the widening decision the loop put to the independent approver for it, while it stands (GY-1682). */
 /** `askedAt`: the instant the server stamped the scope request with (`scopeRequest.at`, read off the refusal that made the ask `refused-by-loop`), the half of its identity beside `epoch` a routed decision names (`askIdentity`); the row's own instant (`at`) is written later and differs. */
-export interface Ask { seq: number; at: string; stage: Stage | null; kind: 'scope-request' | 'blocked-report'; blocked: string; paths: string[]; trigger?: string; epoch?: number | null; askedAt?: string | null; routed?: { seq: number; at: string; decision: string } | null; returned?: boolean; sources: { seq: number; kind: string }[] }
+export interface Ask { seq: number; at: string; stage: Stage | null; kind: 'scope-request' | 'blocked-report'; blocked: string; paths: string[]; trigger?: string; epoch?: number | null; askedAt?: string | null; routed?: { seq: number; at: string; decision: string } | null; sources: { seq: number; kind: string }[] }
 /** A rework decision the fold has seen requested and not yet settled. */
 export interface ReworkDecision { seq: number; at: string; id: string; stage: Stage | null; binding: string | null; loopRequested: boolean; approvedBy: string | null; self?: boolean }
 
@@ -253,27 +253,35 @@ export const undecidedScopeRequest = rule('undecided-scope-request', moment => m
  * never exempts). The judgement is the fault pass's own of a live attempt's request
  * (standingScopeRequest, GY-1085): one that has waited past the bound the loop promises, or that
  * nothing will judge again, is somebody's to decide and stays a signal, as does one whose attempt has
- * ended. A refused ask the record shows no route for is `loopOwesScopeRoute`'s while the loop can still route it.
+ * ended. A refused ask the record shows no route for is `scopeRefusalWithinBound`'s while the loop's
+ * cycle still holds it.
  */
-export const approverHoldsScopeRequest = rule('approver-holds-scope-request', moment => moment.at === 'open-ask' && !!moment.ask.routed && refusedRoutableAsk(moment));
+export const approverHoldsScopeRequest = rule('approver-holds-scope-request', moment => moment.at === 'open-ask' && !!moment.ask.routed && refusedScopeAskInCycle(moment));
 /**
- * GY-1755: the seconds to minutes between the rule's refusal (autoscope, in the loop's scope step) and
- * the decision.requested row (its decision step, later in the same cycle, behind dispatch and
- * reclaim) are the loop's own cycle, not a person's wait. GY-1746, GY-1747, GY-1752 and GY-1751 each
- * sat refused 36 s to 8 min with no route on the record; the 7-day pattern read all four as scope
- * widenings, though every one was routed on the loop's next decision step and widened by the
- * approver. The record shows what the loop will do: a live attempt's additive ask the rule refused
- * and a fold can carry is routable. It stays the loop's within the bound it promises
- * (standingScopeRequest); past it, when nothing could route it, or when a routed decision settled without
- * applying (`returned`), it is somebody's to decide and counted.
+ * GY-1755: a live attempt's refused ask inside the bound the loop promises is the control plane's own
+ * cycle, not a person's wait, however its routing stands. The seconds to minutes between the rule's
+ * refusal (autoscope, in the loop's scope step) and the decision.requested row (its decision step,
+ * later in the same cycle, behind dispatch and reclaim) are the loop's own: GY-1746, GY-1747 and
+ * GY-1752 each sat refused 37 s to 3 min 42 s with no route on the record when the 7-day pattern read
+ * them. And an ask the independent approver answered without applying is the same cycle still:
+ * GY-1751's route stood from 00:02:17 and the approver declined it at 00:04:16, five minutes before
+ * the pattern read the item — the decline settled the routed decision, and `answerScopeRequest`
+ * rewrote the ask's decision as the approver's refusal, so the routed-ask exemption stopped matching
+ * and the fold counted the whole span from the ask's own instant, though a multi-path additive ask a
+ * decline leaves the live attempt a narrower ask to make within the bound, which the fault pass does
+ * not stand (standingScopeRequest, GY-1757). The base exempted only a routed and held ask
+ * (approver-holds-scope-request) and counted every other refused ask from its own instant, so it read
+ * all four as scope widenings. The fold now judges a refused ask as the fault pass does: it is
+ * counted exactly when `standingScopeRequest` stands it — past the bound, after the attempt's end,
+ * or a one-path or non-additive ask nothing will judge again — and never before it.
  */
-export const loopOwesScopeRoute = rule('loop-owes-scope-route', moment => moment.at === 'open-ask' && !moment.ask.routed && !moment.ask.returned && refusedRoutableAsk(moment));
-/** A live attempt's scope request the rule refused, which the loop can put to the approver and has not yet outlasted its bound. */
-function refusedRoutableAsk(moment: Extract<ExemptionMoment, { at: 'open-ask' }>) {
+export const scopeRefusalWithinBound = rule('scope-refusal-within-bound', moment => moment.at === 'open-ask' && !moment.ask.routed && refusedScopeAskInCycle(moment));
+/** A live attempt's refused scope ask inside the loop's bound, whichever decision the record holds on it: the loop's cycle, or the attempt's narrower re-ask to make. */
+function refusedScopeAskInCycle(moment: Extract<ExemptionMoment, { at: 'open-ask' }>) {
   if (moment.ask.kind !== 'scope-request' || moment.ask.trigger !== 'refused-by-loop') return false;
   const { item } = moment, request = item.scopeRequest, now = Date.parse(moment.now);
   if (!request || !item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= now) return false;
-  return request.decision?.state === 'refused' && request.decision.decidedBy === 'graphyard' && !standingScopeRequest(item, now);
+  return request.decision?.state === 'refused' && !standingScopeRequest(item, now);
 }
 /** A lease-loss reconciliation will settle on the record once its bound passes waits on nobody (GY-1393). */
 export const leaseLossResolve = rule('lease-loss-resolve', moment => moment.at === 'open-escalation' && !!endedLeaseLoss(moment.item, moment.escalation)
@@ -293,7 +301,7 @@ export const approvedDecisionWeakening = rule('approved-decision-weakening', mom
 export const interventionExemptions: readonly InterventionExemption[] = [
   approvedAutoscope, successorReplan, auditedScopeWidening, routedScopeWidening, unstartedReplan, criteriaImpliedWidening,
   routineReworkGround, laneReworkGround, failedCheckRound, loopReworkRound,
-  directMergeWindow, loopAutosettleInBound, answeredOffLedger, undecidedScopeRequest, approverHoldsScopeRequest, loopOwesScopeRoute, leaseLossResolve, approvedDecisionWeakening,
+  directMergeWindow, loopAutosettleInBound, answeredOffLedger, undecidedScopeRequest, approverHoldsScopeRequest, scopeRefusalWithinBound, leaseLossResolve, approvedDecisionWeakening,
 ];
 
 /** The name of the first rule that exempts the moment, or null when it is a signal. */
