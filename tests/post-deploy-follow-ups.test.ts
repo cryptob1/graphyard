@@ -552,7 +552,8 @@ async function verifyReal(coordinator: { checkout: string; cliPath: string }, it
   const master = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/private/master.token', cliPath: coordinator.cliPath, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'coordinator-host', masterAgentName: 'graphyard-master-project', run: { deploymentUrl: 'https://graphyard.example/healthz', deploymentShaField: 'commit' } });
   const at = liveNow, filed: { input: any; requestId: string }[] = [], recorded: unknown[] = [];
   const effects = verificationEffects(master, { root: coordinator.checkout, snapshot: async () => ({ work: [item], now: liveNow }), mutate: async (_path, data) => { recorded.push(data); return data; },
-    releaseWork: async () => {}, file: async (input: any, requestId: string) => { filed.push({ input, requestId }); return { key: `GY-${1720 + filed.length}` }; } });
+    file: async (input: any, requestId: string) => { filed.push({ input, requestId }); return { key: `GY-${1720 + filed.length}` }; } });
+  effects.releaseWork = async () => {};
   // The coordinator's own filer is its checkout's CLI: the stale code, were it ever asked.
   const own = releaseChecks(coordinator.cliPath);
   let ownAsked = 0;
