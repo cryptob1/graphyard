@@ -322,7 +322,7 @@ const endedScopeRecord = (request: ScopeRequestState, by: string, now: Date) => 
  * plannedFiles already cover.
  */
 export function carriedScopeRequest(work: Pick<Work, 'plannedFiles'>, request: ScopeRequestState): ScopeRequestState | null {
-  if (request.decision?.state !== 'refused' || request.decision.decidedBy !== 'graphyard' || request.remove?.length || request.criteria?.length) return null;
+  if (request.decision?.state !== 'refused' || request.decision.decidedBy !== 'graphyard' || request.decision.nonRepository || request.remove?.length || request.criteria?.length) return null; // GY-1764: the tree refuted these paths, so a later attempt's ask starts clean
   const paths = unplannedPaths(work.plannedFiles, request.paths);
   return paths.length ? { ...request, paths } : null;
 }

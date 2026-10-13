@@ -429,12 +429,18 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // A projection the loop last confirmed within `mechanicalPlanFreshMs` is current; an older one is
   // re-reported, so the gate never holds on evidence a failed write or ledger read left stale — and
   // a report that cannot be written is a visible, retried failure, never a silent one.
+  // A planned round whose report could not be written leaves the gate without its hold, so the item forms no decision from the ledger this cycle: the report is retried first, and the item waits for the cycle that confirms it.
+  const planUnreported = new Set<string>();
   if (effects.recordMechanicalPlan && effects.mechanicalFixes) for (const item of snapshot.work) {
     if (item.stage === 'done' || !item.candidate) continue;
     const plan = mechanical.find(entry => entry.key === item.key && entry.head === item.candidate!.sha && entry.pr === item.candidate!.pr && entry.epoch === item.epoch);
     const wanted = plan ? { reviewId: plan.reviewId, head: plan.head } : null, held = item.mechanicalPlan ?? null;
     if (wanted?.reviewId === held?.reviewId && wanted?.head === held?.head && held && clock - Date.parse(held.at) < mechanicalPlanFreshMs) continue;
-    try { await effects.recordMechanicalPlan(item, wanted); } catch (error) {
+    let failure: unknown = null;
+    for (let attempt = 0; attempt < 2; attempt++) { try { await effects.recordMechanicalPlan(item, wanted); failure = null; break; } catch (error) { failure = error; } }
+    if (failure) {
+      const error = failure;
+      if (wanted) planUnreported.add(item.id);
       const key = `mechanical-plan:${item.id}`;
       const detail = `Could not report ${item.key}'s mechanical plan (${wanted ? `review ${wanted.reviewId} on ${wanted.head.slice(0, 12)}` : 'none'}): ${message(error)}; the review gate drops the hold once its last confirmation passes ${Math.round(mechanicalPlanFreshMs / 60_000)} minutes old`;
       if (detailChanged(state.actions[key], detail)) await note(key, item, 'decision', 'failed', detail);
@@ -453,7 +459,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const refusedByWork = new Map<string, RefusedAttestation[]>();
   for (const watch of Object.values(state.approvals)) if (watch.action === 'attest' && watch.refusal) refusedByWork.set(watch.work, [...refusedByWork.get(watch.work) ?? [], { decision: watch.decision, refusal: watch.refusal }]);
   for (const read of workToProcess) await isolate('decision', read, read.key, async () => { const reached = bounds.get(read.id), released = { at: false }; bounds.delete(read.id); try { await decideItem(read, reached, released); } catch (error) { if (reached !== undefined && !released.at && !bounds.has(read.id)) bounds.set(read.id, reached); throw error; } });
-  async function decideItem(item: Work, reached: number | undefined, released: { at: boolean }) { // the item's bound is re-set below while its hold stands; a throw before the hold read as released puts it back above, so a transient closeStanding or docsSync.hold failure keeps the idle wait ending there (GY-1624)
+  async function decideItem(item: Work, reached: number | undefined, released: { at: boolean }) { if (planUnreported.has(item.id)) return; // the item's bound is re-set below while its hold stands; a throw before the hold read as released puts it back above, so a transient closeStanding or docsSync.hold failure keeps the idle wait ending there (GY-1624)
     const assessment = assessments[item.id];
     // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it, and
     // its decision is requested against that revision: one a partial widening moved past the
