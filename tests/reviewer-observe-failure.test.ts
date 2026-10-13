@@ -188,3 +188,23 @@ test('integration:review-read-failure-contained — a GitHub-backed reviewer lau
     assert.equal((await readFile(join(root, '.graphyard', 'review-ledger.json'), 'utf8').catch(() => '{"reviews":[]}')).includes('GY-84'), false, 'no record was reserved');
   } finally { resetGhPause(); await cleanup(); }
 });
+
+test('integration:review-read-failure-contained — a pause already standing at the start of a pass defers the thread, mechanical-plan and fresh-read reads and their permanent effects', async () => {
+  const { root, config, cleanup } = await reviewerRoot();
+  resetGhPause();
+  try {
+    const stub = stubs(() => []);
+    const at = new Date().toISOString();
+    const item = work({}, at);
+    reconcileAutoDispatch(item, [item], new Date());
+    await launchReview(root, item, 'claude-reviewer', [], at, { run: stub.run, mint: stub.mint, requestId: item.autoDispatch!.review!.id });
+    await reconcileReviews(root, config, { run: stub.run, work: [item], observe: () => ({ state: 'APPROVED', reviewer, reviewId: 12, submittedAt: iso(0) }) });
+    await notePossibleGhRateLimit(new Error('gh: API rate limit exceeded'), () => { throw new Error('refused'); }, Date.now());
+    const ghCalls: string[][] = [];
+    const run = (command: string, args: string[]) => { if (command !== 'gh') return stub.run(command, args); ghCalls.push(args); throw new Error('gh: API rate limit exceeded'); };
+    // The request no longer stands, so the dismissal re-read is skipped and only the downstream reads remain.
+    const pass = await reconcileReviews(root, config, { run, work: [{ ...item, autoDispatch: undefined } as Work] });
+    assert.deepEqual(ghCalls, [], 'no gh read while the pause stands');
+    assert.equal(pass.reviews[0].mechanicalFix, undefined, 'no permanent fallback is recorded');
+  } finally { resetGhPause(); await cleanup(); }
+});

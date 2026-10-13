@@ -1,4 +1,4 @@
-import { assertGhNotPaused, notePossibleGhRateLimit } from './gh-pause.js';
+import { assertGhNotPaused, ghPausedUntil, notePossibleGhRateLimit } from './gh-pause.js';
 import { createHash, createSign, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, realpath, writeFile } from 'node:fs/promises';
@@ -1572,7 +1572,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   // After a failed verdict read this pass reads nothing more from GitHub: the reads below would fail the
   // same way, and a failed mechanical-plan read is recorded as a permanent fallback, a thread resolution
   // spends its bounded attempts. The next pass does all of it.
-  const downstreamRun = readFailed ? undefined : threadsRun;
+  const downstreamRun = readFailed || ghPausedUntil((dependencies.now ?? (() => new Date()))().getTime()) ? undefined : threadsRun;
   const mechanical = await planMechanicalFixes(githubRecords, dependencies.work, config.repository, downstreamRun, now);
   const judged = await judgeFreshReads(githubRecords, config.repository, downstreamRun, record, now);
   changed += mechanical.changed + judged.changed;
