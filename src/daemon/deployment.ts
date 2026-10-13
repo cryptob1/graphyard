@@ -85,12 +85,13 @@ export function localAncestry(root: string, baseBranch: string, run: ChildRun) {
  */
 /**
  * GY-1753 AC-3: the production environment deployments are read under: the run's
- * `productionEnvironment`, else `github-pages` when the repository carries a pages-deploy.yml
- * workflow, else GRAPHYARD_PRODUCTION_ENVIRONMENT or `production`.
+ * `productionEnvironment`, else an explicit GRAPHYARD_PRODUCTION_ENVIRONMENT, else `github-pages` when the
+ * repository carries a pages-deploy.yml `production`. An explicitly set GRAPHYARD_PRODUCTION_ENVIRONMENT wins over the workflow.
  */
 export function deploymentEnvironmentName(config: Pick<MasterConfig, 'run'>, root: string, env: NodeJS.ProcessEnv = process.env): string {
-  return config.run.productionEnvironment
-    ?? (existsSync(join(root, '.github', 'workflows', 'pages-deploy.yml')) ? 'github-pages' : productionEnvironmentFromEnv(env));
+  if (config.run.productionEnvironment) return config.run.productionEnvironment;
+  if (env.GRAPHYARD_PRODUCTION_ENVIRONMENT === undefined && existsSync(join(root, '.github', 'workflows', 'pages-deploy.yml'))) return 'github-pages';
+  return productionEnvironmentFromEnv(env);
 }
 
 /**
