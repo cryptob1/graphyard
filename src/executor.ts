@@ -21,7 +21,7 @@ import { dispatchReserved, profileConcurrency, type HerdrAgent, type MasterConfi
 import { agentNameReadings, assertNameAvailable, attributeRefusal } from './master-resources.js';
 import { nonRepositoryPaths } from './model/scope-repository.js';
 import { unplannedPaths } from './model/scope.js';
-import { baseTree } from './cli/planned-files-intent.js';
+import { currentBaseTree } from './cli/planned-files-intent.js';
 import { agentOwner, loadMasterConfig, type AttentionItem } from './master.js';
 import { processConnectAccounts } from './master/environments.js';
 import { parseCoordinatorCheckout, checkoutGuardApplies, coordinatorCheckoutRefusal, coordinatorCheckoutRoot } from './master/profiles.js';
@@ -239,7 +239,7 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
   // GY-1764: the approve-scope handler judges a scope ask on the same evidence the loop's scope step
   // reads once per cycle — the base branch's tracked files, from the coordinator checkout this
   // executor loaded its modules from. A wiring may supply the read; a test injects its tree.
-  const repositoryFiles = effects.repositoryFiles ?? (checkout ? () => baseTree(checkout.root, config().baseBranch).then(tree => tree.files) : null);
+  const repositoryFiles = effects.repositoryFiles ?? (checkout ? () => currentBaseTree(checkout.root, config().baseBranch).then(tree => tree.files) : null);
   const herdr = async () => {
     const agents = await effects.agents();
     if (!agents) throw new Error('Herdr session inventory is unavailable; a launch needs it to keep one session per profile');
