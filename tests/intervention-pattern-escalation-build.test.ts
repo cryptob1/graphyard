@@ -329,11 +329,13 @@ test('manual:intervention-pattern-escalation-build — GY-1567 review: a spent r
 // (20a58c6a42) had since given their follow-ups the instant they wait for, so each reproduces on the
 // commit before its fix, and the base and the candidate both file it held.
 const base = '47220a5adbdc7486f362eda80d4f8eafee0face4';
-// GY-1760's linked instances (GY-1750, GY-1696, GY-1674) are replayed against the two bases this pull request is judged on:
-// e642d302bd1d, the base its first review named, and f398a2a0b34d, the main tip the branch syncs onto for the next head. Both predate
+// GY-1760's linked instances (GY-1750, GY-1696, GY-1674) are replayed against the bases this pull request is judged on:
+// e642d302bd1d, the base its first review named, and f398a2a0b34d, the main tip an earlier head synced onto. Both predate
 // the guard, so each shows the instance reproducing before the change and not after. GY-1689 and GY-1723 stay on their own `base`
 // above: the candidate-side behaviour they contrast (the defer command, the ignored-redelivery reason) landed between the commits, so either newer base would not reproduce them.
 const replayBases = ['e642d302bd1d367b9f56df53417bcf2143f6e285', 'f398a2a0b34dfb76b48205178601413067989731'];
+// GY-1768's loop-held clear landed after GY-1760's guard, so its instances are also replayed against 4a22286618, the merge base of the current head: it carries the guard, not the clear.
+const clearReplayBases = [...replayBases, '4a22286618406b0ac0394fa4c2481d90720e7963'];
 const day = 86_400_000;
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const implementer: Principal = { id: 'implementer', role: 'worker', sessionKind: 'ai' };
@@ -888,7 +890,7 @@ for (const key of ['GY-1696', 'GY-1674'] as const) for (const replayBase of repl
     return { engine, store, held };
   }
 
-  for (const [key, shape, report] of instances) for (const replayBase of replayBases) {
+  for (const [key, shape, report] of instances) for (const replayBase of clearReplayBases) {
     test(`manual:intervention-pattern-escalation-build — ${key} against the base ${replayBase.slice(0, 7)} and the candidate: the base blocker step hands the standing report to a master, an open escalation; the candidate's step clears it through the server's probe route, so the instance cannot recur`, { timeout: 300_000 }, async () => {
       assert.equal(needsSomeone(classOf(report)), true, 'the class is one that waits for someone: the open escalation');
 
