@@ -9,7 +9,7 @@ Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge
 
 `master restart` (stalled loop) runs `systemctl --user restart graphyard-master.service` if the [unit](onboarding.md#the-loop-must-be-supervised)'s ExecStart is node `cliPath` (or pin) `master run`, else detached; never from [dirty/non-forward checkouts](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level). [Confined](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level): a loop request.
 
-**Cycle cadence.** Loop sleeps `run.intervalSeconds` (≤30 s if actionable); dispatcher ticks wake it per new subject, ≥`run.dispatchIntervalSeconds` apart.
+**Cycle cadence.** Loop sleeps `run.intervalSeconds` (≤30 s if actionable); dispatcher ticks wake it per new subject.
 
 ### System-driven items
 
@@ -21,19 +21,19 @@ Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `
 
 **Instead of closing sessions by hand:** do nothing for a finished or dead session (`graphyard master run --once` sweeps); attach to an overlong one with its handle's command. Never mark another session's handle finished to free a slot. The loop and `master approver` relaunch never-started approvers (`done`, still-screened `idle`) past the start bound, slot ended first; hand-launched, replaced panes [bind](master-agent-sessions.md#the-start-bound-reads-the-pane).
 
-`blocked` frees its slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) self-clear, probed: `github-credential`, `sandbox-path` confined as next worker; `github-outage` githubstatus.com (shared, ≤1/min), then confined dry-run push/PR read; `control-plane-error` plane health; `outside-scope-test-failure` base moved; `runtime-denial`, `worktree-mismatch` lease ended; `dispatch-failure` profile launchable, `runtime-exhaustion` dispatchable account; `host-supervisor` loop's host; `master-role` a master-role identity (master session or doctor run, from the coordinator checkout) takes the master-command step itself, then unblocks; `planned-file-scope`, `needs-decision` approver. `genuine`/`human-only` escalate.
+`blocked` frees its slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) self-clear, probed: `github-credential`, `sandbox-path` confined as next worker; `github-outage` githubstatus.com (shared, ≤1/min), then confined dry-run push/PR read; `control-plane-error` plane health; `outside-scope-test-failure` base moved; `runtime-denial`, `worktree-mismatch` lease ended; `dispatch-failure` profile launchable, `runtime-exhaustion` dispatchable account; `host-supervisor` loop's host; `master-role` a master-role identity runs the step, then unblocks; `planned-file-scope`, `needs-decision` approver. `genuine`/`human-only` escalate.
 
 ### System invariants
 
-Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). Thresholds: `invariants` in `.graphyard/master.json`; `tests/soak-*.test.ts` enforce.
+Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). Thresholds: `invariants` in `.graphyard/master.json`.
 
 ## Research and diagnosis
 
-`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get diagnostician (`run.diagnostician`; none for parks); fix `plannedFiles` as `master create`; quota refusals wait `retryAt` (`daemon.diagnoses`); `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3×, then escalated (`decision-stale`); raced/delivered, [plane-wide](operations.md#incident-decision-tree) requests retry faultless; refused `create` 409/400 is `fix-item`; matching close 409 adopted, mismatched held (GY-1713); overlong/`limit-wait` (GY-1705); no `loop` fault for restart-lost diagnoses, approver refusals, nor `merge` for base conflicts <30m.
+`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get diagnostician (`run.diagnostician`; none for parks); fix `plannedFiles` as `master create`; quota refusals wait `retryAt` (`daemon.diagnoses`); `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3×, then `decision-stale`; raced/delivered, [plane-wide](operations.md#incident-decision-tree) requests retry faultless; refused `create` 409/400 is `fix-item`; matching close 409 adopted, mismatched held; no `loop` fault for restart-lost diagnoses, approver refusals, nor `merge` for base conflicts <30m.
 
 ## Machine-filed backlog
 
-Review follow-ups fixed in-PR; Pi (`run.research`, `triageConcurrency` 2) triages follow-ups, faults.
+Review follow-ups fixed in-PR; Pi (`run.research`) triages follow-ups, faults.
 
 ## Automatic dispatch at submit
 
