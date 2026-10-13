@@ -13,6 +13,8 @@ Verifies GY-1700 AC-3 (merge a14965e4ad9a) on the serving release ba607f8a809e, 
 
 I did not observe a raised row on this release, so there was no raise-then-clear transition to witness; the row was never present after the deploy. The delivery that clears it is the continuous stream above.
 
+The raise-then-clear transition itself is pinned by `integration:webhook-liveness-visible` (tests/github-rate-budget.test.ts:512): `webhookAttention` raises the row for a silent hour with pull requests open (line 521), then returns `[]` once a delivery arrives (line 533). The same file's `unit:webhook-attention-fires-on-failed-attempts` and `unit:webhook-attention-202-only-stays-silent` pin the raise and no-raise sides. A live raise would need the App webhook to fail for an hour, which this item must not induce on the serving release, and the App delivery log (`GET /app/hook/deliveries`) needs the App JWT, which a worker does not hold. So the live transition is unobserved and stated as such; the criterion's clearing clause rests on the test above plus the delivering state read on the serving release.
+
 ## No re-fire across the window
 
 Interval-wide evidence of delivery activity across 2026-10-12T07:34Z..2026-10-13T07:34Z, from GitHub's side (each is a webhook delivery to the control plane):
