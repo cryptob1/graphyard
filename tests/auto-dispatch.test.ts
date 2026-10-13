@@ -14,6 +14,7 @@ import { buildMasterStatus, loadMasterConfig, masterInstructions, masterConfigSc
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, saveReviewLedger, staleReviewReason, summarizeReviews } from '../src/reviewer.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { GhPausedError } from '../src/gh-pause.js';
 import { readProducerLedger } from '../src/producer.js';
 import { attributePersistFailure, bounded, capacityReasonLimit, cursorTextLimit, dispatchCursorPath, dispatchCursorSchema, dispatchEffects, dispatchFailureAttention, dispatchFailureLimit, dispatchFailureReasonLimit, dispatchRetryMinMs, dispatchSummary, emptyDispatchCursor, InstantExitError, readDispatchCursor, repairDispatchCursor, runAutoDispatch, runDispatchTick, selectReviewerProfile, watchInstantExit, writeDispatchCursor, type CursorRepair, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
 import { exhaustionReportSchema } from '../src/model/capacity.js';
@@ -341,6 +342,21 @@ test('integration:auto-dispatch-producers — one tick launches exactly one revi
     assert.ok(result.ticks.length >= 2 && result.ticks.length <= 8, `ticks: ${result.ticks.length}`);
     assert.equal(loopLog.length, 1, 'the loop launched the request once across its ticks');
     assert.ok(Date.parse(loopEffects.reviews[0].requestedAt) - Date.parse(loopItem.autoDispatch!.review!.requestedAt) < 30_000 || true);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('integration:auto-dispatch-producers — a review launch deferred by the gh rate-limit pause waits and counts no failure', async () => {
+  const directory = await temporaryDirectory('dispatch-loop');
+  try {
+    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const config = masterConfig(token);
+    const cursor = emptyDispatchCursor(config);
+    const effects = stubEffects(() => [requestedWork()], [], { launchReview: async () => { throw new GhPausedError(clock + 600_000); } });
+    for (let tick = 0; tick < 3; tick++) {
+      const result = await runDispatchTick(config, cursor, effects, () => clock + tick * 1000);
+      assert.deepEqual(result.refused, []); assert.match(result.waiting.find(entry => entry.kind === 'review')!.reason, /gh reads are paused/);
+    }
+    assert.deepEqual(cursor.failures, {});
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
