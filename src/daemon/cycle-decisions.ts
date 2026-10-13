@@ -1,5 +1,4 @@
 // Concern: cycle step 4c — request and supervise the routine decisions and their approver sessions.
-import type { DaemonEffects } from './effects.js';
 import { observationWaker } from '../master/base-break-refresh.js';
 import { decisionSituation, uncitedRefusals } from '../model/approval.js';
 import type { Work } from '../model.js';
@@ -11,9 +10,8 @@ import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './
 import { readyToRetry } from './sessions.js';
 import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
 import {
-  bindHeldSupervisedAsk, clearCoveringAdoptIfGone, coveringAdoptLeftAskOpen, coveringScopeAdoptWatch, heldAdoptWatch,
-  heldDecisionRefusal, heldDecisionNamedIn, heldWaitDetail, heldWaitMarker, heldWaitScope, approvedResumePendingDetail,
-  markHeldScopeAsk, clearHeldScopeAsk, syncHeldScopeAskMarks, staleRevisionDecideRefusal, staleRevisionDecideNote, staleRevisionDecideDetail,
+  bindHeldSupervisedAsk, clearCoveringAdoptIfGone, coveringAdoptLeftAskOpen, coveringScopeAdoptWatch, heldAdoptWatch, heldDecisionRefusal, heldDecisionNamedIn, heldWaitDetail, heldWaitMarker, heldWaitScope,
+  approvedResumePendingDetail, markHeldScopeAsk, clearHeldScopeAsk, syncHeldScopeAskMarks, staleRevisionDecideRefusal, staleRevisionDecideNote, staleRevisionDecideDetail,
 } from './metrics.js';
 import { candidateMovedMeanwhile, decisionFailureKind, decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication, selfHealingDecisionFailure } from './decision-reads.js';
 import { refusedAttestationWatch, type RefusedAttestation } from '../model/rework-ground.js';
@@ -25,41 +23,19 @@ import { baseRefreshConflict } from '../merge-queue.js';
 import { docsSyncRoute } from './docs-sync-route.js';
 import { throughputDecisionAdopts, throughputRoutineDecision, wakeObservationJob } from './cycle-delivery.js';
 import { createApproverSupervisor } from './cycle-approvers.js';
-import { decisionBudget, deferredFirst, settleDeferred } from './decision-budget.js';
+import { boundedDecisions, decisionBudget, decisionCallCarried, deferredFirst, settleDeferred } from './decision-budget.js';
 import { staleReleaseStep } from './stale-releases.js';
 import { closeStanding, closingItems, recordingWrites, staleCloseStep } from './stale-closes.js';
 /** The approval-watch key prefix of a hand-launched approver, re-exported for the blocker step (GY-403). */
 export { handWatchPrefix };
 const holdBounds = new WeakMap<DaemonState, Map<string, number>>(); // GY-1622: per loop cursor, each held item's docs-sync hold bound on the local clock; an item the step did not reach this cycle (put off by its budget) keeps the one it last left; one already passed locally while its hold stood is a zero wait, so the next cycle re-reads it; one exactly a wait away still binds, so the guard's time comes off it. `bound` is the earliest bound when it ends this wait, `next` the earliest whether or not it does: one just beyond the wait still caps the sleep left after the checkout guard
-/** How long one owed decision's approver call may take before the step returns and carries it to the next cycle (GY-1766). */
-export const decisionCallBoundMs = 10_000;
-/** GY-1766. A decision call that passed its per-decision bound: the decision stays owed, with its attempt recorded, and is retried next cycle. */
-const decisionCallCarried = (detail: string) => / ms per-decision bound passed before .+ answered; the decision stays owed and is retried next cycle/.test(detail);
-/** The decide calls unanswered when their bound passed, by work id, per kept state: the retry joins the call and never sends a second (applied once). */
-const deciding = new WeakMap<object, Map<string, Promise<unknown>>>();
-function boundedDecisions(effects: DaemonEffects, kept: object, boundMs: number): DaemonEffects {
-  const decide = effects.decide;
-  if (!decide) return effects;
-  const pending = deciding.get(kept) ?? deciding.set(kept, new Map()).get(kept)!;
-  return new Proxy(effects, { get: (target, property, receiver) => property !== 'decide' ? Reflect.get(target, property, receiver) : (item: Work, ...rest: Parameters<typeof decide> extends [Work, ...infer R] ? R : never) => {
-    let call = pending.get(item.id) as ReturnType<typeof decide> | undefined;
-    if (!call) {
-      const made = call = decide.call(target, item, ...rest), done = () => { if (pending.get(item.id) === made) pending.delete(item.id); };
-      made.then(done, done);
-      pending.set(item.id, made);
-    }
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const expired = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`the decisions step's ${boundMs} ms per-decision bound passed before ${item.key}'s decision call answered; the decision stays owed and is retried next cycle`)), boundMs); timer.unref?.(); });
-    return Promise.race([call, expired]).finally(() => clearTimeout(timer));
-  } });
-}
 export const holdBoundWait = (state: DaemonState, wait: number, at: number) => { const bounds = holdBounds.get(state); const next = bounds?.size ? Math.min(...bounds.values()) : null; return next !== null && next - at <= wait ? { wait: Math.max(0, next - at), bound: next, next } : { wait, bound: null, next }; };
 /** Step 4c: request and supervise the routine decisions. */
 export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, { capacities, approversSpent }: { capacities: RoleCapacity[]; approversSpent: boolean }) {
   const { config, state, now, snapshot, clock, clockOffset, performed, isolate, agents, open } = cycle;
   // The items this step writes, which the stale-close step leaves to the next cycle's read (GY-1439).
-  const written = new Set<string>();
-  const effects = recordingWrites(boundedDecisions(await decisionReads(cycle.effects, cycle.heldDecisions, snapshot.work, Object.values(state.approvals), clock, cycle.effects.decisionReadDeadlineMs), cycle.heldDecisions, (cycle.effects as { decisionCallBoundMs?: number }).decisionCallBoundMs ?? decisionCallBoundMs), written);
+  const written = new Set<string>(); let budgetLeft = (): number => Number.POSITIVE_INFINITY; // the step budget every call below is capped by, bound where the budget is made; no decide call runs before it
+  const effects = recordingWrites(boundedDecisions(await decisionReads(cycle.effects, cycle.heldDecisions, snapshot.work, Object.values(state.approvals), clock, cycle.effects.decisionReadDeadlineMs), cycle.heldDecisions, now, () => budgetLeft()), written);
   // 4c. Routine decisions: request with the master's operator-agent identity, launch an independent approver, supervise every cycle (see `approvalStep`).
   const stamp = new Date(clock).toISOString(), bounds = holdBounds.get(state) ?? new Map<string, number>(); holdBounds.set(state, bounds); for (const id of bounds.keys()) if (!snapshot.work.some(work => work.id === id)) bounds.delete(id);
   const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now(), faultKind?: FaultKind | null) =>
@@ -251,10 +227,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s ${decision.action} decision ${heldId} is approved and held; the control plane applies it when the attempt ends, so nothing is requested`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
         return;
       }
-      if (decisionCallCarried(message(error))) {
-        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver in time: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, null));
-        return;
-      }
+      if (decisionCallCarried(message(error))) return void performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver in time: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, null));
       if (staleRevisionDecideRefusal(error)) {
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}; ${staleRevisionDecideNote}, so the request is re-computed next cycle against the applied revision`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, null));
         return;
@@ -403,7 +376,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       : `${step.detail}; ${item.key} still needs it, so it is requested again`);
     await request(item, decision, key, coveringGone ? null : watch);
   };
-  const needed = new Set<string>(), unattestable = new Set<string>(), budget = decisionBudget(state, now, (config.run.intervalSeconds ?? 20) * 1000);
+  const needed = new Set<string>(), unattestable = new Set<string>(), budgetStartedAt = now(), budget = decisionBudget(state, now, (config.run.intervalSeconds ?? 20) * 1000); budgetLeft = () => Math.max(0, budget.budgetMs - (now() - budgetStartedAt)); // GY-1766 review: the budget bounds every approver call below as well as the items this step reaches
   const pause = githubPause(snapshot.jobs, clock);
   // A scope request is judged by the review-finding rule (step 2a) before it is the approver's: the
   // findings for this request and policy revision were read and named none of it. A loop that
