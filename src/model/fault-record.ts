@@ -33,8 +33,6 @@ export function unansweredStands(record: Pick<FaultRecord, 'open' | 'instances'>
   const decision = action.slice(prefix.length);
   return Object.values(record.open).some(id => { const entry = record.instances.find(instance => instance.id === id); return entry && unansweredDecision(entry) === decision; });
 }
-/** An exhaustion escalation's failing run: held out of the record until the next full observation (settleEscalations), when its unanswered line is or is not standing. */
-export const heldEscalation = (key: string, outcome: string) => key.startsWith(exhaustionEscalationKey('')) && (outcome === 'failed' || outcome === 'indeterminate');
 function absorbEscalation(record: FaultRecord, observation: FaultObservation) {
   const decision = unansweredDecision(observation), id = decision && record.failing[exhaustionEscalationKey(decision)];
   if (!id) return;
@@ -60,7 +58,7 @@ export function trackFaults(record: FaultRecord, observations: readonly FaultObs
     const alone = standingOn.get(where(observation.kind, subject)), reworded = !record.open[key] && observed.get(where(observation.kind, subject)) === 1 && alone?.length === 1 ? alone[0] : undefined;
     if (reworded) { record.open[key] = record.open[reworded]; delete record.open[reworded]; }
     const standing = record.open[key] ? record.instances.find(entry => entry.id === record.open[key]) : undefined;
-    if (standing) { standing.lastSeenAt = at; standing.text = observation.text.slice(0, 500); absorbEscalation(record, observation); continue; } // a standing line that now names another decision restates that decision's escalation
+    if (standing) { standing.lastSeenAt = at; standing.text = observation.text.slice(0, 500); continue; }
     const instance = instanceOf(observation, at, opened.filter(entry => entry.kind === observation.kind && entry.subject === subject).length);
     record.instances.push(instance); record.open[key] = instance.id; opened.push(instance);
     absorbEscalation(record, observation);

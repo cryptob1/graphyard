@@ -9,7 +9,7 @@ import { diagnosisRecordSchema, diagnosisSettled, retainedDiagnoses } from '../r
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
 import { boundDetail } from './decisions.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
-import { heldEscalation, unansweredStands } from '../model/fault-record.js';
+import { unansweredStands } from '../model/fault-record.js';
 import { timingsSchema } from '../master/timings.js';
 import { docsSyncWatchSchema, routedConflictSchema } from '../model/docs-sync.js';
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
@@ -680,7 +680,7 @@ export function storeAction(state: DaemonState, key: string, action: Omit<Daemon
   const { faultClass: _, ...rest } = action;
   const fault = faultKind === null || unansweredStands(state.faults, key) ? null : classified(faultKind);
   const entry = daemonActionSchema.parse({ ...rest, detail: boundDetail(rest.detail), attempts: clampCount(rest.attempts, 1000), ...(fault && (rest.state === 'failed' || rest.state === 'indeterminate') ? { faultClass: fault.faultClass } : {}) });
-  if (fault && !heldEscalation(key, entry.state)) { dispatchRun(state.faults.failing, key, entry.state); noteActionOutcome(state.faults, key, entry.state, { ...fault, subject: entry.work ?? key, text: entry.detail }, entry.at); }
+  if (fault) { dispatchRun(state.faults.failing, key, entry.state); noteActionOutcome(state.faults, key, entry.state, { ...fault, subject: entry.work ?? key, text: entry.detail }, entry.at); }
   state.actions[key] = entry;
   return entry;
 }

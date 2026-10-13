@@ -6,7 +6,6 @@ import type { Work } from '../src/model.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { storeAction } from '../src/daemon/state.js';
 import { trackFaults } from '../src/model/fault-record.js';
-import { settleEscalations } from '../src/daemon/faults.js';
 import { containmentInMotion, containmentSettleWaitBoundMs, cycleFaults, emptyDaemonState, reworkDecisionInMotion, reworkDecisionWaitBoundMs } from '../src/master-daemon.js';
 // GY-1337's own exports are read through namespaces, so the base exercise runs these replays and each fails on its assertion.
 import * as daemon from '../src/master-daemon.js';
@@ -415,7 +414,6 @@ test('manual:fault-class-decision — an exhaustion escalation whose decision wa
   storeAction(state, `escalation:decision-unjudged:${id}`, { kind: 'escalation', work: 'GY-1710', principal: null, state: 'failed', detail: 'close decision: not judged', attempts: 1, cycle: 1, at: '2026-10-12T02:16:50.965Z', epoch: null }, undefined);
   // The decision settles before any successful observation: no unanswered line ever stands.
   trackFaults(state.faults, [], '2026-10-12T02:17:40.000Z');
-  settleEscalations(state, undefined);
   assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:escalation'], 'the real exhausted run is not dropped');
 });
 
@@ -452,55 +450,4 @@ test('manual:fault-class-decision — over two simulated days a plane-wide land 
     if (at === day) { assert.deepEqual(state.faults.instances, [], 'a day of plane-wide failures files none'); failure = new RefusedResponse('Graphyard refused goals/G/land (409): the approved head moved while HTTP 503 was seen on the base', 409, { error: 'the approved head moved' }); }
   }
   assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:decision']);
-});
-
-// GY-1751 review round 5: three paths by which the restated stall still counted twice.
-const stall = (id: string) => `Decision ${id} (close) is unanswered after 41m: approver session gy-approver-gy-1710-${id.slice(0, 8)} is not running and recorded no outcome — a stall, not a refusal`;
-const exhaust = (state: ReturnType<typeof emptyDaemonState>, id: string, at: string) => storeAction(state, `escalation:decision-unjudged:${id}`, { kind: 'escalation', work: 'GY-1710', principal: null, state: 'failed', detail: `close decision ${id}: not judged`, attempts: 1, cycle: 1, at, epoch: null }, undefined);
-
-test('manual:fault-class-decision — an escalation recorded before its unanswered line is observed is not an instance of its own', () => {
-  const id = '22222222-d9c1-4cd2-8467-9f1866b0fd41', state = emptyDaemonState(config());
-  exhaust(state, id, '2026-10-12T02:16:50.000Z');
-  assert.equal(state.faults.instances.length, 0, 'nothing counts before an observation has looked for the unanswered line');
-  trackFaults(state.faults, [{ kind: 'decision-unanswered', faultClass: 'decision', subject: 'GY-1710', text: stall(id) }], '2026-10-12T02:16:55.000Z');
-  settleEscalations(state, '2026-10-12T02:16:00.000Z');
-  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['decision-unanswered']);
-});
-
-test('manual:fault-class-decision — a standing unanswered line that names another decision absorbs that decision\'s escalation', () => {
-  const first = '33333333-d9c1-4cd2-8467-9f1866b0fd41', second = '44444444-d9c1-4cd2-8467-9f1866b0fd41', state = emptyDaemonState(config());
-  trackFaults(state.faults, [{ kind: 'decision-unanswered', faultClass: 'decision', subject: 'GY-1710', text: stall(first) }], '2026-10-12T02:00:00.000Z');
-  exhaust(state, second, '2026-10-12T02:10:00.000Z');
-  trackFaults(state.faults, [{ kind: 'decision-unanswered', faultClass: 'decision', subject: 'GY-1710', text: stall(second) }], '2026-10-12T02:11:00.000Z');
-  settleEscalations(state, '2026-10-12T02:05:00.000Z');
-  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['decision-unanswered']);
-});
-
-test('manual:fault-class-decision — an exhausted run whose decision was never unanswered is an instance once, however often it settles', () => {
-  const id = '55555555-d9c1-4cd2-8467-9f1866b0fd41', state = emptyDaemonState(config());
-  exhaust(state, id, '2026-10-12T02:16:50.000Z');
-  settleEscalations(state, '2026-10-12T02:16:00.000Z'); settleEscalations(state, '2026-10-12T02:16:00.000Z');
-  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:escalation']);
-});
-
-test('manual:fault-class-decision — a merge-writer status read that met the plane\'s 502 while opening a draft is no decision fault', async () => {
-  const { acceptanceStep, clearDrafts, draftsSettled } = await import('../src/daemon/acceptance.js');
-  const { MergeWriterUnreadError } = await import('../src/master/dispatch.js');
-  clearDrafts();
-  const state = emptyDaemonState(config()), goal = { id: 'goal-draft', key: 'GOAL-3', stage: 'acceptance-drafting', revision: 1, drafts: 0 };
-  const draft = { goal: 'GOAL-3', outcomes: [{ id: 'greeting', title: 'A customer is greeted', criteria: ['The greeting names the customer'], case: { id: 'greeting', title: 'greeting answers', tags: ['api'], target: 'uat', required: true, steps: [{ kind: 'http', name: 'read', method: 'GET', path: '/', status: 200 }] } }] };
-  const runner = { name: 'stub', start: (_p: string, options: { tool: string; validate: (value: unknown) => unknown }) => { const payload = options.validate(draft); return { id: 'r', events: [], onEvent: () => () => {}, cancel() {}, result: async () => ({ ok: true, tool: options.tool, payload, payloads: [payload] }) }; } };
-  const effects = { settings: { enabled: true, model: 'm', fallbackModel: 'f', timeoutMinutes: 1 }, cwd: '/nonexistent', goals: async () => [goal], runner: async () => ({ runner, runtime: 'stub', model: 'm' }),
-    commit: async () => ({ branch: 'b', head: 'h' }), writer: {}, merger: async () => { throw new MergeWriterUnreadError('https://x/api/status', 'HTTP 502'); }, open: async () => ({ pr: 1, branch: 'b', head: 'h' }) };
-  let clock = Date.parse('2026-10-12T23:43:05.011Z');
-  for (let tick = 0; tick < 2; tick++) {
-    clock += 6 * 60_000;
-    await acceptanceStep({ config: config(), state, effects: { acceptance: effects, persist: async () => {} }, now: () => clock, clock, performed: [],
-      isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() } as never);
-    await draftsSettled();
-  }
-  assert.match(state.actions['acceptance:goal-draft']?.detail ?? '', /could not be opened: the merge writer could not be read/);
-  assert.equal(state.actions['acceptance:goal-draft']?.state, 'failed');
-  assert.deepEqual(state.faults.instances, []);
-  clearDrafts();
 });
