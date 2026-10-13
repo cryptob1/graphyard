@@ -51,6 +51,9 @@ test('unit:observation-class-needs-the-follow-up-reading — a head-anchored cod
     assert.ok(loopObservation(follow({ evidence: [reading({ proof, ...bad })] as never }), new Date(now)), JSON.stringify(bad));
   }
   assert.equal(loopObservation(follow({ evidence: [reading({ proof, sha: 'a'.repeat(40) })] as never }), new Date(now)), null);
+  // A later failed reading of the same proof and release withdraws an earlier pass.
+  assert.ok(loopObservation(follow({ evidence: [reading({ proof, at: iso(now - 2 * hour) }), reading({ proof, result: 'fail', at: iso(now - hour) })] as never }), new Date(now)));
+  assert.equal(loopObservation(follow({ evidence: [reading({ proof, result: 'fail', at: iso(now - 2 * hour) }), reading({ proof, at: iso(now - hour) })] as never }), new Date(now)), null);
   const due = follow();
   assert.match(upNextHold(due, [due], now)?.text ?? '', /reading of manual:rate-on-serving-release/);
   const lapsed = follow({ observationWindow: { notBefore: iso(now - hour), basis: 'criterion-window', detail: 'd' } });

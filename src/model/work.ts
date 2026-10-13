@@ -126,8 +126,13 @@ export function loopObservation(work: Pick<Work, 'systemDriven' | 'criteria' | '
   const window = work.observationWindow;
   // Only a passing, unexpired, current-policy reading of the serving release the follow-up names, taken once its window opened, ends the wait.
   const release = work.criteria.map(criterion => /serving release ([0-9a-f]{12})/.exec(criterion.text)?.[1]).find(Boolean);
-  const recorded = (proof: string) => work.evidence.some(entry => entry.proof === proof && entry.trusted && !entry.revocation && entry.result === 'pass' && entry.policyRevision === work.policyRevision
-    && (!entry.expiresAt || Date.parse(entry.expiresAt) > now.getTime()) && (!release || entry.sha.startsWith(release)) && (!window || Date.parse(entry.at) >= Date.parse(window.notBefore)));
+  // The newest such reading decides: a later failed or expired reading of the same proof and release withdraws an earlier pass.
+  const recorded = (proof: string) => {
+    const readings = work.evidence.filter(entry => entry.proof === proof && entry.trusted && !entry.revocation && entry.policyRevision === work.policyRevision
+      && (!release || entry.sha.startsWith(release)) && (!window || Date.parse(entry.at) >= Date.parse(window.notBefore)));
+    const latest = readings.reduce<typeof readings[number] | null>((best, entry) => !best || Date.parse(entry.at) >= Date.parse(best.at) ? entry : best, null);
+    return !!latest && latest.result === 'pass' && (!latest.expiresAt || Date.parse(latest.expiresAt) > now.getTime());
+  };
   if (proofs.every(recorded)) return null;
   const due = !window || Date.parse(window.notBefore) <= now.getTime();
   return { due, waitingFor: due ? `the loop's reading of ${proofs.join(', ')} on the serving release, which is owed now` : `the loop's reading of ${proofs.join(', ')}, which can first exist at ${window!.notBefore} (${window!.detail})` };
