@@ -1556,14 +1556,18 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   const record = dependencies.recordIntervention ?? (dependencies.observe ? undefined : coordinatorIntervention(config));
   // Threads, mechanical rounds and fresh reads are GitHub's; a control-plane record has none of them.
   const githubRecords = ledger.reviews.filter(entry => entry.mode !== 'control-plane');
-  const mechanical = await planMechanicalFixes(githubRecords, dependencies.work, config.repository, threadsRun, now);
-  const judged = await judgeFreshReads(githubRecords, config.repository, threadsRun, record, now);
+  // After a failed verdict read this pass reads nothing more from GitHub: the reads below would fail the
+  // same way, and a failed mechanical-plan read is recorded as a permanent fallback, a thread resolution
+  // spends its bounded attempts. The next pass does all of it.
+  const downstreamRun = readFailed ? undefined : threadsRun;
+  const mechanical = await planMechanicalFixes(githubRecords, dependencies.work, config.repository, downstreamRun, now);
+  const judged = await judgeFreshReads(githubRecords, config.repository, downstreamRun, record, now);
   changed += mechanical.changed + judged.changed;
-  const threads = await resolveApprovedThreads(githubRecords, reviewer, config.repository, dependencies.work, threadsRun, now);
+  const threads = await resolveApprovedThreads(githubRecords, reviewer, config.repository, dependencies.work, downstreamRun, now);
   changed += threads.changed;
   // The threads the approval judged FOLLOW-UP are nits: each is answered with a reply and resolved,
   // so conversation resolution no longer holds the merge on them; nothing is filed (GY-1249).
-  const followUps = await resolveApprovedFollowUps(root, githubRecords, reviewer, config.repository, dependencies.work, threadsRun, now, dependencies.followUpLock, dependencies.ledgerLock);
+  const followUps = await resolveApprovedFollowUps(root, githubRecords, reviewer, config.repository, dependencies.work, downstreamRun, now, dependencies.followUpLock, dependencies.ledgerLock);
   changed += followUps.changed;
   // A request the control plane no longer holds open releases its records to the retention window.
   if (dependencies.work) changed += releaseClosedRequests(ledger.reviews, dependencies.work, now);

@@ -7,8 +7,11 @@ let pausedUntil = 0;
 
 /** True when the error is gh's refusal for the login's quota (primary or secondary), not a failure of the read itself. */
 export function isGhRateLimit(error: unknown): boolean {
-  const text = error instanceof Error ? `${error.message}\n${(error as { stderr?: unknown }).stderr ?? ''}` : String(error);
-  return refusal.test(text);
+  return refusal.test(errorText(error));
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? `${error.message}\n${(error as { stderr?: unknown }).stderr ?? ''}` : String(error);
 }
 
 /** The epoch milliseconds until which gh reads are paused, 0 when none are. */
@@ -33,6 +36,9 @@ export function assertGhNotPaused(now: number = Date.now()): void {
 export async function notePossibleGhRateLimit(error: unknown, run: ChildRun, now: number = Date.now()): Promise<boolean> {
   if (!isGhRateLimit(error)) return false;
   let until = now + fallbackMs;
+  // A secondary limit or abuse-detection refusal is not the primary quota: its reset is not `core.reset`, and
+  // the probe is itself a request, so the fixed backoff stands without it.
+  if (/secondary rate limit|abuse detection/i.test(errorText(error))) { pausedUntil = Math.max(pausedUntil, until); return true; }
   try {
     const reset = Number(String(await run('gh', ['api', 'rate_limit', '--jq', '.resources.core.reset'])).trim());
     if (Number.isFinite(reset) && reset * 1000 > now) until = Math.min(reset * 1000 + 1000, now + ceilingMs);

@@ -138,3 +138,40 @@ test('integration:review-read-failure-contained — the dispatcher’s own gh re
     assert.equal(ghPausedUntil(t0), t0 + 300_000);
   } finally { resetGhPause(); }
 });
+
+test('integration:review-read-failure-contained — after a rate-limited verdict read an eligible completed approval triggers no further GitHub work in the pass', async () => {
+  const { root, config, cleanup } = await reviewerRoot();
+  resetGhPause();
+  try {
+    const stub = stubs(() => []);
+    const at = new Date().toISOString();
+    const item = work({}, at);
+    reconcileAutoDispatch(item, [item], new Date());
+    await launchReview(root, item, 'claude-reviewer', [], at, { run: stub.run, mint: stub.mint, requestId: item.autoDispatch!.review!.id });
+    const approval = { state: 'APPROVED', reviewer, reviewId: 12, submittedAt: iso(0) };
+    await reconcileReviews(root, config, { run: stub.run, work: [item], observe: () => approval });
+    const ghCalls: string[][] = [];
+    const run = (command: string, args: string[]) => {
+      if (command !== 'gh') return stub.run(command, args);
+      ghCalls.push(args);
+      if (args[1] === 'rate_limit') return String(Math.floor(Date.now() / 1000) + 1800);
+      throw new Error('gh: API rate limit exceeded for user ID 4241869. (HTTP 403)');
+    };
+    const pass = await reconcileReviews(root, config, { run, work: [item] });
+    assert.equal(pass.reviews[0].state, 'completed');
+    assert.equal(pass.reviews[0].mechanicalFix, undefined, 'no permanent fallback is recorded from a refused read');
+    assert.equal(ghCalls.filter(args => args[1] !== 'rate_limit').length, 1, JSON.stringify(ghCalls));
+  } finally { resetGhPause(); await cleanup(); }
+});
+
+test('integration:review-read-failure-contained — a secondary-limit refusal pauses for the fixed backoff without reading the primary reset', async () => {
+  resetGhPause();
+  try {
+    const t0 = 1_800_000_000_000;
+    const calls: string[][] = [];
+    const run = (_command: string, args: string[]) => { calls.push(args); return String(Math.floor(t0 / 1000) + 3000); };
+    assert.equal(await notePossibleGhRateLimit(new Error('You have exceeded a secondary rate limit'), run, t0), true);
+    assert.equal(calls.length, 0);
+    assert.equal(ghPausedUntil(t0), t0 + 300_000);
+  } finally { resetGhPause(); }
+});
