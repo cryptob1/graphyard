@@ -273,7 +273,8 @@ test('integration:approve-scope-executor-default-tree — the executor builds it
   git(['init', '-q', '-b', 'main', '.']);
   git(['add', 'bin/graphyard.mjs']);
   git(['-c', 'user.email=executor@test', '-c', 'user.name=executor', 'commit', '-q', '-m', 'base']);
-  git(['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+  git(['remote', 'add', 'origin', checkout]); // the executor's mandatory `git fetch origin main` resolves against the checkout itself
+  git(['fetch', '-q', 'origin', 'main']);
   const handlers = controlPlaneHandlers(() => ({ cliPath: join(checkout, 'bin/graphyard.mjs'), baseBranch: 'main' }) as never, executorEffects() as never);
   for (const paths of [['daemon.relea'], ['.graphyard/master.json']]) {
     const title = `default tree: ${paths.join(', ')}`;

@@ -295,7 +295,7 @@ export async function readMechanicalFixState(root: string): Promise<MechanicalFi
 export const readMechanicalFixRequests = (root: string): Promise<MechanicalFixRequest[]> => readMechanicalFixState(root).then(state => state.requests, () => []);
 
 /** Whether the ledger's reported plan is for this approval of the item's current candidate (GY-1764), confirmed against the ledger within `mechanicalPlanFreshMs` of `now`: a projection the loop can no longer synchronize — its write refused, its ledger read failing — holds nothing, so the gate never retains a hold the ledger stopped backing. */
-export const mechanicalPlanFreshMs = 10 * 60_000;
+export const mechanicalPlanFreshMs = 5 * 60_000;
 const plannedFor = (work: Work, review: { id?: number }, now: number) => !!work.mechanicalPlan && work.mechanicalPlan.head === work.candidate?.sha
   && (review.id === undefined || review.id === work.mechanicalPlan.reviewId)
   && Number.isFinite(Date.parse(work.mechanicalPlan.at ?? '')) && now - Date.parse(work.mechanicalPlan.at) < mechanicalPlanFreshMs;

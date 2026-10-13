@@ -613,7 +613,7 @@ test('integration:mechanical-plan-report-surfaced — a refused plan report is a
   assert.deepEqual(attempts.slice(3), [], 'a confirmed report is not re-reported while it stays fresh');
   // The gate reads the same projection: held while the confirmation stands, dropped once it cannot be renewed.
   assert.match(mechanicalReviewHold(work(), start) ?? '', /names 2 findings classified mechanical/);
-  assert.equal(mechanicalReviewHold({ ...work(), mechanicalPlan: { reviewId: 5499583025, head, at: iso(start - 11 * minute) } } as Work, start), null, 'a stale confirmation holds nothing');
+  assert.equal(mechanicalReviewHold({ ...work(), mechanicalPlan: { reviewId: 5499583025, head, at: iso(start - 6 * minute) } } as Work, start), null, 'a stale confirmation holds nothing');
 });
 test('integration:mechanical-plan-report-blocks-decision — an item whose planned round cannot be reported forms no decision from the ledger until the report lands', async () => {
   const { mechanicalReviewHold } = await import('../src/mechanical-findings.js');
