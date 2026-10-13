@@ -559,7 +559,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   for (const [index, after] of (options.blockedHolds?.hours ?? []).entries()) {
     const notBefore = dayStart + after * hour, instant = new Date(notBefore).toISOString(), worker = { id: workers[index % workers.length].principal, role: 'worker' as const };
     let work = await engine.execute(principals.operator, 'create', null, { title: `Post-deploy verification of soak release ${days}-${index}`, type: 'chore', priority: 1,
-      criteria: [{ id: 'AC-1', text: `From this head against the serving release: the escalation rate at the build stage stays below 3 over ${after} hours of live activity`, proofs: ['manual:intervention-pattern-escalation-build-on-serving-release'] }] }, id());
+      criteria: [{ id: 'AC-1', text: `From this head against the serving release 0123456789ab that carries the change: the escalation rate at the build stage stays below 3 over ${after} hours of live activity`, proofs: ['manual:intervention-pattern-escalation-build-on-serving-release'] }] }, id());
     work = await engine.execute(worker, 'claim', (await engine.execute(principals.operator, 'ready', work.id, {}, id())).id, {}, id());
     work = await engine.execute(worker, 'blocked', work.id, { epoch: work.epoch, reason: `AC-1's reading cannot exist yet: its ${after}-hour window on the serving release has not elapsed; not before ${instant} can it be observed` }, id());
     holdDay!.seeded.push({ id: work.id, key: work.key, notBefore });

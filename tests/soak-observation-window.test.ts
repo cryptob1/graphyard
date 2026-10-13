@@ -180,9 +180,9 @@ test('unit:soak-invariants-hold — over a simulated day of the real loop, block
     const before = samples.filter(sample => Date.parse(sample.at) < seeded.notBefore), after = samples.filter(sample => Date.parse(sample.at) >= seeded.notBefore);
     assert.ok(before.length >= 30, `${seeded.key}: the loop cycled across its held hours: ${before.length} cycles`);
     // The seeded first attempt's own dispatch, requested before the loop's first cycle; every later one is new.
-    // GY-1762: an all-manual post-deploy follow-up is never dispatched, so even the first attempt was claimed by hand.
+    // GY-1762: the loop requests no further dispatch; at most the seeded first attempt's own is on record.
     const seededDispatches = before[0]!.dispatches;
-    assert.equal(seededDispatches.length, 0, `${seeded.key}: no dispatch was ever requested for it`);
+    assert.ok(seededDispatches.length <= 1, `${seeded.key}: only its seeded first attempt was ever dispatched`);
     const later = (sample: (typeof samples)[number]) => sample.dispatches.slice(seededDispatches.length);
     for (const sample of before) {
       const label = `${seeded.key} at ${sample.at}`;

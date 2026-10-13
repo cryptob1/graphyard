@@ -14,7 +14,7 @@ Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`
 - Failed candidates file a [hold](validation.md#release-holds) per failed outcome, else a follow-up (`release follow-up ID` retries) as the [filing credential](#release-filing-credential).
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records advisory `rc-soak/ID` (promotion ignores it).
 
-**The master loop drives promotion** (`promote=true`) once main differs from the last `rc-production/` and cut SHAs, nothing queued, and `run.promoteEveryMinutes` (`master config promoteEveryMinutes=N`; 10, `0` off) passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`, `GRAPHYARD_PRODUCTION_URL`; no workflow; managed repositories run [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. A `GRAPHYARD_UAT_STATIC` site's passing [merge-writer](delivery-redesign.md#merge-writer) trials run pre-build required/uat cases served uncredentialed: failing/secret-declaring required ones, or none runnable, fail it; timeouts/errors re-queue; `mergeLedger.trial.preview` records. `release GY-N EPOCH` leases. Needs `vars.UAT_URL`/`PRODUCTION_URL`, `GRAPHYARD_UAT_TOKEN`/`RELEASE_TOKEN`/`E2E_RECORD_TOKEN`.
+**The master loop drives promotion** (`promote=true`) once main differs from the last `rc-production/` and cut SHAs, nothing queued, and `run.promoteEveryMinutes` (`master config promoteEveryMinutes=N`; 10, `0` off) passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`, `GRAPHYARD_PRODUCTION_URL`; no workflow; managed repositories run [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. A `GRAPHYARD_UAT_STATIC` site's passing [merge-writer](delivery-redesign.md#merge-writer) trials run pre-build required/uat cases served uncredentialed: failing/secret-declaring required ones, or none runnable, fail it; timeouts/errors re-queue; `mergeLedger.trial.preview` records. `release status` lists candidates; `release GY-N EPOCH` leases. Needs `vars.UAT_URL`/`PRODUCTION_URL`, `GRAPHYARD_UAT_TOKEN`/`RELEASE_TOKEN`/`E2E_RECORD_TOKEN`.
 
 ### Release filing credential
 
@@ -28,7 +28,7 @@ Required: `typecheck`, `test` (`ci.yml`) under ten minutes; per candidate `relea
 
 ### One delivery path
 
-Exact-head gates merge; [candidates](#release-candidates) deploy. [The redesign](delivery-redesign.md): only Graphyard writes main.
+Exact-head gates merge; [candidates](#release-candidates) deploy; [the redesign](delivery-redesign.md): only Graphyard writes main.
 
 ### Main guard
 
@@ -78,4 +78,4 @@ Only complete listings verify (`POST /api/delivery/notify` hints); `graphyard de
 
 `POST /api/validation/result` binds manifest, signature, measurements; mismatches record `attribution-undermined`, voiding passes (`GET /api/analytics/attribution`).
 
-A systemDriven item of only manual post-deploy proofs is never dispatched: `master status` counts it `waiting` until its reading is recorded; once the window closes it `escalate`s. A recorded reading ends the wait (the item then counts ready) but never releases it to a worker: it is escalated for closing.
+A systemDriven item of only manual post-deploy proofs is never dispatched: `master status` counts it `waiting` until read, then escalates it.
