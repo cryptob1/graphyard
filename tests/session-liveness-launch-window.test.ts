@@ -152,7 +152,7 @@ test('unit:dispatch-failure-run — GY-717 instance 2: an item\'s dispatch failu
   const fail = (epoch: number, at: string, detail: string) => storeAction(state, `dispatch:id-717:${epoch}`, { kind: 'dispatch', work: 'GY-717', principal: 'graphyard-cursor-2', epoch, state: 'failed', detail, attempts: 1, cycle: 1, at });
   fail(48, '2026-10-05T09:27:21.599Z', `Dispatch of GY-717 to claude-quaternary failed: ${lapsed}`);
   // The failed launch's claim advanced the item to epoch 49, so the retry writes a new row.
-  fail(49, '2026-10-05T09:27:55.918Z', 'Dispatch of GY-717 to claude-quaternary failed: The agent registry answered 503: Startup validation has not completed; retry shortly');
+  fail(49, '2026-10-05T09:27:55.918Z', 'Dispatch of GY-717 to claude-quaternary failed: the worktree could not be prepared');
   assert.equal(state.faults.instances.filter(entry => entry.kind === 'action:dispatch').length, 1, 'one run of one item\'s dispatch is one instance (the base counted two)');
   assert.deepEqual(Object.keys(state.faults.failing), ['dispatch:id-717:49'], 'the run moved onto the current row');
   storeAction(state, 'dispatch:id-717:49', { kind: 'dispatch', work: 'GY-717', principal: 'graphyard-codex-1', epoch: 49, state: 'done', detail: 'Dispatched GY-717', attempts: 2, cycle: 2, at: '2026-10-05T09:29:59.596Z' });

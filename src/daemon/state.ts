@@ -8,8 +8,8 @@ import { runRecordSchema } from '../runner/types.js';
 import { diagnosisRecordSchema, diagnosisSettled, retainedDiagnoses } from '../runner/payloads.js';
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
 import { boundDetail } from './decisions.js';
+import { waitReason } from '../model/action-kinds.js'; import { timingsSchema } from '../master/timings.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
-import { timingsSchema } from '../master/timings.js';
 import { docsSyncWatchSchema, routedConflictSchema } from '../model/docs-sync.js';
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
@@ -678,7 +678,7 @@ export const clampCount = (value: number, max: number) => Math.min(max, Math.max
 export function storeAction(state: DaemonState, key: string, action: Omit<DaemonAction, 'faultClass'> & { faultClass?: unknown }, faultKind: FaultKind | null = daemonActionFaultKind(action.kind)): DaemonAction {
   const { faultClass: _, ...rest } = action;
   const failed = faultKind !== null && (rest.state === 'failed' || rest.state === 'indeterminate');
-  const fault = faultKind === null ? null : classified(faultKind);
+  const fault = faultKind === null || (faultKind.startsWith('action:') && waitReason(rest.detail)) ? null : classified(faultKind);
   const entry = daemonActionSchema.parse({ ...rest, detail: boundDetail(rest.detail), attempts: clampCount(rest.attempts, 1000), ...(failed && fault ? { faultClass: fault.faultClass } : {}) });
   if (fault) { dispatchRun(state.faults.failing, key, entry.state); noteActionOutcome(state.faults, key, entry.state, { ...fault, subject: entry.work ?? key, text: entry.detail }, entry.at); }
   state.actions[key] = entry;
