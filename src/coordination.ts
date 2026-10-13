@@ -1,4 +1,4 @@
-import { bootstrapObligations, currentEvidence, evidenceBindsCandidate, grantsAuthorize, inheritedObligations, observationWindowHold, loopObservation, pathScope, pathScopeContains, pathScopesOverlap, type BootstrapObligation, type ProofAuthority, type Stage, type Work } from './model.js';
+import { bootstrapObligations, currentEvidence, evidenceBindsCandidate, grantsAuthorize, inheritedObligations, observationWindowHold, loopObservationProofs, pathScope, pathScopeContains, pathScopesOverlap, type BootstrapObligation, type ProofAuthority, type Stage, type Work } from './model.js';
 import { namedPaths } from './model/scope.js';
 import { behindBaseHold } from './model/behind-base.js';
 import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh } from './merge-queue.js';
@@ -66,7 +66,7 @@ export function concurrentOverlap(work: Work, all: Work[], now: number): Overlap
 
 /** Ready to be offered a worker: released, unblocked, unclaimed, not submitted unless rework was requested, and past any observation window (GY-1698). */
 export const dispatchable = (work: Work, now: number) => work.stage !== 'done' && work.ready && !work.blocker && !claimedNow(work, now) && (!work.submission || !!work.reworkRequested)
-  && !observationWindowHold(work, new Date(now)) && !loopObservation(work, new Date(now));
+  && !observationWindowHold(work, new Date(now)) && !loopObservationProofs(work);
 
 /** A directory scope at the repository root (`src/`, `docs/`, `tests/`, `/`): it overlaps almost everything. */
 export const broadScope = (scope: string) => { const { path, prefix } = pathScope(scope); return prefix && path.split('/').filter(Boolean).length <= 1; };

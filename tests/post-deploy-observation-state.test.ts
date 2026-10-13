@@ -50,6 +50,9 @@ test('unit:observation-item-counted-waiting — it counts as waiting with what i
   // The window closing makes the reading owed, not the item dispatchable: only a recorded trusted reading ends the wait.
   const read = item(5, { evidence: [{ proof: 'manual:post-deploy/rate-on-serving-release', trusted: true }] as never });
   assert.equal(loopObservation(read, new Date(now)), null);
+  // The recorded reading ends the wait, never the exclusion: the still-open item is not handed to a worker.
+  assert.equal(dispatchable(read, now), false);
+  assert.notEqual(nextAction(read, [read], new Date(now))?.kind, 'dispatch');
   assert.deepEqual((loopObservation(windowed, new Date(now + 7 * hour)) as { due: boolean }).due, true);
   assert.deepEqual((loopObservation(windowed, new Date(now)) as { due: boolean }).due, false);
   const later = new Date(now + 7 * hour);

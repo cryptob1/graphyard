@@ -98,6 +98,17 @@ export function observationWindowHold(work: { observationWindow?: ObservationWin
   return window && Date.parse(window.notBefore) > now.getTime() ? window : null;
 }
 /**
+ * GY-1762: the proofs of a loop-owned observation item, or null for any other item. The class never
+ * leaves worker dispatch, before or after its reading is recorded: a recorded reading ends the wait,
+ * not the fact that there is no code for a worker to write.
+ */
+export function loopObservationProofs(work: Pick<Work, 'systemDriven' | 'criteria' | 'stage'>): string[] | null {
+  if (work.systemDriven !== true || work.stage === 'done' || !work.criteria.length) return null;
+  const proofs = work.criteria.flatMap(criterion => criterion.proofs);
+  if (!proofs.length || work.criteria.some(criterion => !criterion.proofs.length) || !proofs.every(proof => postDeployProof(proof) || servingReleaseProof(proof))) return null;
+  return proofs;
+}
+/**
  * GY-1762: what a loop-owned observation item waits for, or null. A system-driven item whose every
  * criterion is a manual post-deploy proof (declared `manual:post-deploy/…` or a follow-up's
  * `…-on-serving-release`) has no code for a worker to write: its only work is the live reading the
@@ -107,9 +118,8 @@ export function observationWindowHold(work: { observationWindow?: ObservationWin
  * reading ends the wait. With a code criterion, or any other proof, it is dispatched as before.
  */
 export function loopObservation(work: Pick<Work, 'systemDriven' | 'criteria' | 'evidence' | 'stage'> & { observationWindow?: ObservationWindow | null }, now: Date): { waitingFor: string; due: boolean } | null {
-  if (work.systemDriven !== true || work.stage === 'done' || !work.criteria.length) return null;
-  const proofs = work.criteria.flatMap(criterion => criterion.proofs);
-  if (!proofs.length || work.criteria.some(criterion => !criterion.proofs.length) || !proofs.every(proof => postDeployProof(proof) || servingReleaseProof(proof))) return null;
+  const proofs = loopObservationProofs(work);
+  if (!proofs) return null;
   const window = work.observationWindow;
   if (proofs.every(proof => work.evidence.some(entry => entry.proof === proof && entry.trusted && !entry.revocation))) return null;
   const due = !window || Date.parse(window.notBefore) <= now.getTime();

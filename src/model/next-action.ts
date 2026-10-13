@@ -6,7 +6,7 @@ import { deliveryState } from './delivery.js';
 import { isDelivered } from './closure.js';
 import { openAgentRequests } from './agent-requests.js';
 import { refusalAction, reviewStandstill } from './refusal-mapping.js';
-import { loopObservation, observationWindowHold, type Work } from './work.js';
+import { loopObservation, loopObservationProofs, observationWindowHold, type Work } from './work.js';
 import { nextActionLlmRoles, type NextAction, type NextActionInputs, type NextActionKind } from './action-kinds.js';
 import type { ActionAccount, ActionWait } from './action-account.js';
 import { carriedAction, type OpenAction } from './concerns.js';
@@ -241,6 +241,8 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
       // Once the reading can exist it is owed: the operator-proof escalation carries it, still never a code worker.
       if (observing?.due) return make('escalate', `${key} owes ${observing.waitingFor}; no code worker can record it`, { kind: 'escalate', trigger: 'operator-proof', detail: observing.waitingFor }, `observation:${work.epoch}`, failing.name, refusal);
       if (observing) return waits({ kind: 'window', on: null, detail: `${key} waits for ${observing.waitingFor}; the loop records it, and no worker is dispatched` }, failing.name, refusal);
+      // The reading is recorded but the item is still open: it still has no code for a worker, so it goes to the operator to close.
+      if (loopObservationProofs(work)) return make('escalate', `${key} has its reading recorded and is still open; no code worker can finish it, so it needs closing`, { kind: 'escalate', trigger: 'operator-proof', detail: 'the loop-owned observation reading is recorded; close the item' }, `observation-recorded:${work.epoch}`, failing.name, refusal);
       return make('dispatch', `${key} is ready and unassigned: ${refusal}`, dispatchInputs(work), `dispatch:${work.epoch}`, failing.name, refusal);
     }
     // A review refusal the reviewer's own reading already answered says "approval is required"

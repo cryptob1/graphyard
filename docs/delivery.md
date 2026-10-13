@@ -78,4 +78,4 @@ Only complete listings verify (`POST /api/delivery/notify` hints); `graphyard de
 
 `POST /api/validation/result` binds manifest, signature, measurements; mismatches record `attribution-undermined`, voiding passes (`GET /api/analytics/attribution`).
 
-A systemDriven item of only manual post-deploy proofs is never dispatched: `master status` counts it `waiting` until its reading is recorded; once the window closes it `escalate`s.
+A systemDriven item of only manual post-deploy proofs is never dispatched: `master status` counts it `waiting` until its reading is recorded; once the window closes it `escalate`s. A recorded reading ends the wait (the item then counts ready) but never releases it to a worker: it is escalated for closing.
