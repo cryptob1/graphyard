@@ -28,6 +28,7 @@ import { baseRefreshConflict } from '../merge-queue.js';
 import { mergeBaseDismissal } from '../merge-base-ancestry.js';
 import { containmentInMotion, containmentSettleWaitBoundMs } from '../model/containment.js';
 import { openAction } from '../model/next-action.js';
+import { mechanicalReviewHold } from '../mechanical-findings.js';
 import { carriedDecision } from '../model/concerns.js';
 import { masterTurnWaitBoundMs } from './decisions.js';
 import { blockedAttemptMarker } from '../model/capacity.js';
@@ -101,7 +102,7 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
         && !(item.kind === 'base-conflict' && baseConflictInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'merge-base-dismissed' && mergeBaseDismissalInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'stalled-step' && reworkDecisionInMotion(byKey.get(item.subject), now))
-        && !(item.kind === 'owed-decision' && owedReworkLine(byKey.get(item.subject), item.text) && reworkDecisionInMotion(byKey.get(item.subject), now))
+        && !(item.kind === 'owed-decision' && owedReworkLine(byKey.get(item.subject), item.text) && (reworkDecisionInMotion(byKey.get(item.subject), now) || mechanicalRoundHeld(byKey.get(item.subject), now)))
         && !(item.kind === 'owed-decision' && owedEscalationInMotion(byKey.get(item.subject), item.text, now))
         && !(item.kind === 'owed-decision' && owedContainmentLine(byKey.get(item.subject), item.text) && !standingFence(byKey.get(item.subject), now))
         && !(item.inMotionUntil && Date.parse(item.inMotionUntil) > now))
@@ -205,6 +206,13 @@ export function owedReworkLine(work: Work | undefined, text: string): boolean {
   const decision = action?.kind === 'request-rework' ? action.needsHuman?.decision : undefined;
   return !!decision && text.includes(decision);
 }
+/**
+ * GY-1763. Whether the item's review gate is inside the GY-971 mechanical-fix hold: the approval names
+ * findings the worker bot fixes before the reviewer's fresh read, and the hold's own deadline (the
+ * round's start bound after the approval) has not passed. A rework owed meanwhile is that round's
+ * wait, which its rulebook bounds itself; GY-1761's line counted at 35m, 25m before the hold ended.
+ */
+export const mechanicalRoundHeld = (work: Work | undefined, now: number): boolean => !!work && mechanicalReviewHold(work, now) !== null;
 /** How long a rework decision (a new head owed by `request-rework`) may stay owed before it counts as a decision fault (GY-1251). */
 export const reworkDecisionWaitBoundMs = 30 * 60_000;
 /**

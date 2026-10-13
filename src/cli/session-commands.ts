@@ -2,6 +2,7 @@ import { constants as cryptoConstants, createDecipheriv, createPublicKey, genera
 import { chmod, link, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { execFileSync } from 'node:child_process';
 import type { Work } from '../model.js';
 import { hostDoableAsk, hostDoableRefusal, parkRefusal, type HostDoableAsk, type HumanRequestRow } from '../model/human-request.js';
 import { configHome } from '../install/secrets.js';
@@ -43,6 +44,8 @@ export const scopeRequestCommand: CliCommand = {
     if (args[1] === '-') return print(await workMutation(context, work)('scope', { epoch, paths: [], reason: 'Withdrawn by the worker' }));
     if (args[1] === '--wait' && args.length === 2) return print(await awaitScopeOutcome(context, work, epoch));
     const { paths, reason, wait } = scopeRequestArgs(args.slice(1));
+    const impossible = impossibleScopePaths(paths, trackedFiles());
+    if (impossible.length) throw new Error(`scope-request names ${impossible.map(path => `'${path}'`).join(', ')}, which cannot be repository files: a PATH is a tracked file or directory, or a new file under a tracked directory, never local state under .graphyard/ or a truncated name. The approver would refuse it; check the spelling with git ls-files`);
     const filed = await workMutation(context, work)('scope', { epoch, paths, reason });
     if (!wait) return print(filed);
     // `--wait` among the paths files the request first and then waits on it, as the first-position
@@ -50,6 +53,33 @@ export const scopeRequestCommand: CliCommand = {
     return print(await awaitScopeOutcome(context, filed as Work, epoch));
   },
 };
+
+/** The files git tracks in the current worktree; null when git cannot say, which leaves the paths to the approver. */
+function trackedFiles(): string[] | null {
+  try { return execFileSync('git', ['ls-files'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] }).split('\n').filter(Boolean); }
+  catch { return null; }
+}
+
+/**
+ * GY-1763. The requested paths that cannot be repository files, so the request is refused at filing
+ * rather than routed to an approver who must refuse it (and the refusal counted as a decision fault,
+ * GY-1696: truncated field names `daemon.relea`, and the local credential file `.graphyard/master.json`).
+ * A path is acceptable when it is a tracked file or directory, or a new file under a tracked directory
+ * (or a root file with a source or config extension); local state under `.graphyard/` or `.git/` never is.
+ * With no tracked listing nothing is judged.
+ */
+export function impossibleScopePaths(paths: readonly string[], tracked: readonly string[] | null): string[] {
+  if (!tracked) return [];
+  const files = new Set(tracked), dirs = new Set(tracked.flatMap(file => file.split('/').slice(0, -1).map((_, index, parts) => parts.slice(0, index + 1).join('/'))));
+  return paths.filter(raw => {
+    const path = raw.replace(/^\.\//, '').replace(/\/+$/, '');
+    if (/^\.(graphyard|git)(\/|$)/.test(path)) return true;
+    if (files.has(path) || dirs.has(path)) return false;
+    const parts = path.split('/');
+    if (parts.length === 1) return !/\.(ts|tsx|js|mjs|cjs|json|md|ya?ml|toml|sh|css|html)$/.test(path);
+    return !parts.slice(0, -1).some((_, index) => dirs.has(parts.slice(0, index + 1).join('/')));
+  });
+}
 
 /**
  * The arguments of a scope request after EPOCH: PATH... before `--`, the REASON after it. `--wait`
