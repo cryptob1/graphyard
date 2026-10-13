@@ -8,6 +8,7 @@ import { storeAction } from '../src/daemon/state.js';
 import { trackFaults } from '../src/model/fault-record.js';
 import { containmentInMotion, containmentSettleWaitBoundMs, cycleFaults, emptyDaemonState, reworkDecisionInMotion, reworkDecisionWaitBoundMs } from '../src/master-daemon.js';
 // GY-1337's own exports are read through namespaces, so the base exercise runs these replays and each fails on its assertion.
+import { mechanicalRoundHeld } from '../src/daemon/faults.js';
 import * as daemon from '../src/master-daemon.js';
 import * as decisionReport from '../src/cli/decision-report.js';
 import { terminalDecisions } from '../src/cli/decision-report.js';
@@ -510,4 +511,21 @@ test('manual:fault-class-decision — a partial observation settles no held esca
   assert.equal(state.faults.instances.length, 0);
   trackFaults(state.faults, [], '2026-10-12T02:18:55.000Z');
   assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:escalation']);
+});
+
+// GY-1763: owed-decision|GY-1761|2026-10-13T07:00:34.946Z. The rework head was owed 35m, past the 30m
+// bound, but the approval (06:25Z) named two findings classified mechanical, so the review gate held the
+// head until the bot round or 07:25Z (GY-971): a wait that rulebook bounds itself, counted as a fault.
+test('manual:fault-class-decision — owed-decision|GY-1761|2026-10-13T07:00:34.946Z is no fault while the mechanical-fix hold is running', () => {
+  const at = '2026-10-13T07:00:34.946Z', sha = '632185dd17dd'.padEnd(40, '0'), baseSha = '1'.repeat(40);
+  const work = standing({ subject: 'GY-1761', detail: 'x', owedMs: 35 * 60_000, owed: '35m' }, new Date(Date.parse(at) - 35 * 60_000).toISOString());
+  Object.assign(work, { candidate: { ...work.candidate, sha, baseSha },
+    observation: { candidate: { sha, baseSha }, reviews: [{ id: 5499583025, sha, state: 'APPROVED', reviewer: 'graphyard-reviewer[bot]', mechanical: 2, submittedAt: '2026-10-13T06:25:00.000Z' }] } });
+  assert.equal(reworkDecisionInMotion(work, Date.parse(at)), false);
+  assert.equal(mechanicalRoundHeld(work, Date.parse(at)), true);
+  assert.deepEqual(decisionFaults(work, at).faults.map(fault => fault.kind), []);
+  // Once the hold's own deadline has passed the owed rework counts again.
+  const late = '2026-10-13T07:26:00.000Z';
+  assert.equal(mechanicalRoundHeld(work, Date.parse(late)), false);
+  assert.deepEqual(decisionFaults(work, late).faults.map(fault => fault.kind), ['owed-decision']);
 });
