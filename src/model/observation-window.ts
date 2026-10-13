@@ -121,24 +121,3 @@ export function filedFollowUpWindow(item: Pick<Work, 'description' | 'createdAt'
   const served = Math.min(...[recorded, Date.parse(item.createdAt)].filter(Number.isFinite));
   return observationWindowFor(delivered, criterion, request!.proof, projections[request!.proof], Number.isFinite(served) ? served : undefined);
 }
-
-/**
- * GY-1762: what the loop itself can read of an observation item whose reading is owed. Only a declared
- * intervention-pattern proof is machine-readable: the report holds the pattern under its threshold
- * since an instant, and the reading exists once the criterion's window has run from that instant. The
- * item is `satisfied` when every proof reads so; otherwise `owed` names what is still unread, and the
- * item stays escalated for a person's reading, never dispatched.
- */
-export function observationReading(work: Pick<Work, 'criteria'>, now: Date, projections: PatternProjections): { satisfied: true; reason: string } | { satisfied: false; owed: string } {
-  const proofs = [...new Set(work.criteria.flatMap(criterion => criterion.proofs))], readings: string[] = [];
-  for (const proof of proofs) {
-    const pattern = patternOfProof(proof.replace(/^manual:(.+)-on-serving-release$/, (_, name: string) => `${postDeployProofPrefix}${name}`));
-    if (!pattern) return { satisfied: false, owed: `${proof} names no intervention-pattern reading the loop can take` };
-    const criterion = work.criteria.find(entry => entry.proofs.includes(proof))!, since = projections[proof]?.since ? Date.parse(projections[proof]!.since!) : null;
-    const days = criterionWindowDays(criterion.text) ?? 0;
-    if (since === null || !Number.isFinite(since)) return { satisfied: false, owed: `the intervention report does not yet read ${pattern.kind} at ${pattern.stage === 'none' ? 'no stage' : `the ${pattern.stage} stage`} under its threshold` };
-    if (since + days * day > now.getTime()) return { satisfied: false, owed: `the report reads ${pattern.kind} under its threshold since ${new Date(since).toISOString()}, and the ${days}-day window runs until ${new Date(since + days * day).toISOString()}` };
-    readings.push(`${pattern.kind} at ${pattern.stage === 'none' ? 'no stage' : `the ${pattern.stage} stage`} under its threshold since ${new Date(since).toISOString()}`);
-  }
-  return { satisfied: true, reason: `the loop read the intervention report: ${readings.join('; ')}, so the window each criterion names has run` };
-}

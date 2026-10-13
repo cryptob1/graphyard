@@ -7,7 +7,7 @@ Records environments' intended releases, observers verifying ([rollback](recover
 
 Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`, `release/production` (moved only by `graphyard release`) to candidates' exact SHAs.
 
-- `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N first-parent merges since the last candidate (`GRAPHYARD_RC_MAX_PRS`, 10; the rest queue); `.github/workflows/release-candidate.yml` cuts on loop dispatch.
+- `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N first-parent merges since the last candidate (`GRAPHYARD_RC_MAX_PRS`, 10; the rest queue, failed candidate's successor first); `.github/workflows/release-candidate.yml` cuts on loop dispatch (cron fallback).
 - `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*` credentials), refused while an unjudged candidate <4 h old serves.
 - `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser`, suites ([below](#pre-merge-gate-and-release-candidate-validation); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`.
 - `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`; `release verify --url URL` confirms.
@@ -32,11 +32,11 @@ Exact-head gates merge; [candidates](#release-candidates) deploy. [The redesign]
 
 ### Main guard
 
-Every 30 s the main guard reruns, then reverts, merges failing required checks their parents passed. The [revert approver App](deployment.md#variables) approves only green exact inverses; a third refusal abandons (`approval-refused`).
+Every 30 s the main guard reruns, then reverts, merges failing required checks their parents passed (`graphyard-revert/`). The [revert approver App](deployment.md#variables) approves only green exact inverses; a third refusal abandons (`approval-refused`).
 
 ## Managed repositories
 
-`init --scan` splits checks; `--apply` renders `graphyard-release-candidate.yml` (cut on `candidateSchedule`, `--candidate-cron CRON|off`) and `graphyard-promotion.yml`. `deploy.adapter`: `railway` (`deploy.project`) or `command` (`deploy.uat`/`deploy.production` with `GRAPHYARD_CANDIDATE_SHA`; unset renders none). `--delivery per-pr` keeps per-PR checks; `install --plan` lists resources (`human`: `--apply --create-environments`).
+`init --scan` splits checks (`delivery.mergeGate`, per-candidate); `--apply` renders `graphyard-release-candidate.yml` (cut on `candidateSchedule`, `--candidate-cron CRON|off`) and `graphyard-promotion.yml`. `deploy.adapter`: `railway` (`deploy.project`) or `command` (`deploy.uat`/`deploy.production` with `GRAPHYARD_CANDIDATE_SHA`; unset renders none); UAT's `/healthz` reports `commit` or `revision`. `--delivery per-pr` keeps per-PR checks; `install --plan` lists resources (`human`: `--apply --create-environments`).
 
 ```json
 {"kind":"environment","id":"production","expectedRevision":0,"repository":"owner/repository","url":"https://app.example.test","instance":"production-cluster","immutable":true,"services":["api","web"],"resources":["production-smoke-account"],"delivery":{"freshnessSeconds":300,"approvalRequired":true}}
@@ -72,10 +72,10 @@ Observers `POST /api/delivery/observe`:
 {"registration":{"id":"production-observer","revision":1},"epoch":4,"environment":{"id":"production","revision":1},"expectedGeneration":4,"snapshotId":"railway:snapshot:01J8Q4Z0Y3","observedAt":"2026-09-18T20:15:07Z","validFrom":"2026-09-18T20:12:31Z","validTo":"2026-09-18T20:15:07Z","services":[{"service":"api","complete":true,"deployment":{"id":"dep-a1","status":"success","deployedAt":"2026-09-18T20:12:31Z"},"instances":[{"instance":"api-1","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","measurement":"host-attestation","healthy":true}]},{"service":"web","complete":true,"deployment":{"id":"dep-w7","status":"success","deployedAt":"2026-09-18T20:12:40Z"},"instances":[{"instance":"web-1","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","measurement":"host-attestation","healthy":true}]}]}
 ```
 
-Only complete listings verify (`POST /api/delivery/notify` hints); `graphyard delivery sweep` verifies generations per `freshnessSeconds`.
+Only complete listings verify (`POST /api/delivery/notify` hints); `graphyard delivery sweep` verifies generations per `freshnessSeconds`; `graphyard delivery` shows state.
 
 `master status` `delivery`: `readyToMerged`, `mergedToProduction`, `stages` p50/p90 (`24h`/`7d`); 7-day p90 over `deliverySpeed` (2 h; merged→production 45 min) raises attention.
 
 `POST /api/validation/result` binds manifest, signature, measurements; mismatches record `attribution-undermined`, voiding passes (`GET /api/analytics/attribution`).
 
-An all-manual post-deploy systemDriven item is never dispatched: `master status` counts it `waiting`, then `escalate`s once its window closes; the loop reads the intervention report, closes it (obsolete) when the pattern's window has run, and leaves unreadable proofs to a person.
+A systemDriven item of only manual post-deploy proofs is never dispatched: `master status` counts it `waiting` until its reading is recorded; once the window closes it `escalate`s.

@@ -59,15 +59,3 @@ test('unit:observation-item-counted-waiting — it counts as waiting with what i
   const after = buildMasterStatus({ now: iso(now + 7 * hour), work: [windowed, read] } as never, [], []);
   assert.deepEqual([after.counts.ready, after.counts.waiting], [1, 1]);
 });
-
-test('unit:observation-item-counted-waiting — the loop reads an intervention-pattern proof from the report only once its window has run, and names what it cannot read', async () => {
-  const reading = async (work: Pick<Work, 'criteria'>, at: Date, projections: Record<string, { since: string | null; projected: string | null } | null>) =>
-    (await import('../src/model/observation-window.js') as unknown as { observationReading: (...args: unknown[]) => { satisfied: boolean; owed?: string } }).observationReading(work, at, projections);
-  const proof = 'manual:intervention-pattern-escalation-build-on-serving-release';
-  const criteria = [{ id: 'AC-1', text: 'The escalation rate at the build stage is below 3 per 7 days', proofs: [proof] }];
-  const since = iso(now - 8 * 24 * hour);
-  assert.equal((await reading({ criteria }, new Date(now), { [proof]: { since, projected: null } })).satisfied, true);
-  assert.match((await reading({ criteria }, new Date(now), { [proof]: { since: iso(now - 2 * 24 * hour), projected: null } })).owed!, /7-day window runs until/);
-  assert.match((await reading({ criteria }, new Date(now), { [proof]: { since: null, projected: iso(now) } })).owed!, /does not yet read/);
-  assert.match((await reading({ criteria: manual }, new Date(now), {})).owed!, /names no intervention-pattern reading/);
-});
