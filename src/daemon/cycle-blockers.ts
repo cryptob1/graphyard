@@ -143,8 +143,9 @@ export async function blockerStep(cycle: Cycle) {
     const standing = (detail: string) => detailChanged(state.actions[key], detail) ? note(key, item, 'done', detail) : Promise.resolve(null);
     // Handed to the master (or the human): reported once, as the cycle's action, when it first stands.
     const handOver = async (detail: string) => { const noted = await standing(detail); if (noted) performed.push(noted); };
-    // GY-1768: a worker's blocked report on an item only the loop can serve is moot — it is off the dispatch board — so the loop clears it rather than leave an escalation open for a master's hand.
-    const loopHeld = loopHeldBlocker(item, classification.class, clock);
+    // GY-1768: a worker's blocked report whose cause is only that a worker cannot take the reading the item owes is moot on an item held for the loop — it is off the dispatch board — so
+    // the loop clears it rather than leave an escalation open for a master's hand; any actionable fault on the same item keeps its blocker.
+    const loopHeld = loopHeldBlocker(item, blocker, classification.class, clock);
     if (needsSomeone(classification.class) && !loopHeld) { await handOver(`${item.key} is blocked (${classification.class}: ${blockerClassMeaning[classification.class]}); it needs someone: ${blocker}`); return; }
     // A refused scope request is the scope step's to put to the approver; its answer clears it.
     if (blocker.startsWith(scopeRefusalBlocker)) return;
@@ -166,7 +167,7 @@ export async function blockerStep(cycle: Cycle) {
     }
 
     let result: BlockerProbeResult | null = null;
-    if (loopHeld) result = { probe: 'the item is held for the loop, not a worker', passed: true, detail: `${item.key} plans no code a worker can write and its remaining proof is recorded by the master side or the loop's own reading, so a worker's blocked report is moot; its next action names who records the reading` };
+    if (loopHeld) result = { probe: 'the report says a worker cannot take the reading, and the item is held for the loop', passed: true, detail: `${item.key} plans no code a worker can write and its remaining proof is recorded by the master side or the loop's own reading, so its blocked report's cause — the worker could not take the reading it owes — is moot; its next action names who records the reading` };
     else if (environmentalBlockerClasses.includes(classification.class)) {
       result = launchableClass(classification) ? launchableProbe(cycle, classification.class === 'runtime-exhaustion') : await probe(item, classification);
       if (!result) return;

@@ -59,7 +59,7 @@ export async function recordBlockerProbe(services: Services, actor: Principal, i
       } else if (classification.class === 'needs-decision') {
         const standing = ((await decisionsByWork(db, [work!.id]))[work!.id] ?? []).filter(decision => decision.state === 'requested');
         demand(!standing.length, `decision ${standing[0]?.id} still stands requested`, 409);
-      } else demand(environmentalBlockerClasses.includes(classification.class) || loopHeldBlocker(work!, classification.class, now.getTime()), `A ${classification.class} blocker is not cleared by a probe`, 409);
+      } else demand(environmentalBlockerClasses.includes(classification.class) || loopHeldBlocker(work!, data.blocker, classification.class, now.getTime()), `A ${classification.class} blocker is not cleared by a probe`, 409);
     }
     const probe: BlockerProbe = { blocker: data.blocker, class: data.class, probe: data.probe, result: data.result, detail: data.detail, at: now.toISOString(), nextAt: data.result === 'pass' ? null : data.nextAt, clears: data.result === 'pass' ? clears + 1 : clears };
     work!.blockerProbe = probe;

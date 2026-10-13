@@ -1,16 +1,17 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { blockerView, classifyBlocker, environmentalBlockerClasses, needsSomeone } from '../src/model/blocker-class.js';
+import { blockerView, classifyBlocker, environmentalBlockerClasses, itemBlockerClass, needsSomeone } from '../src/model/blocker-class.js';
 import { assertDispatchable as candidateAssertDispatchable } from '../src/master.js';
 import { githubDegraded, githubStatusMs, probeBlocker, sharedGithubStatus } from '../src/daemon/blocker-probes.js';
 import { readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { join } from 'node:path';
-import { launchableProbe } from '../src/daemon/cycle-blockers.js';
+import { blockerStep, launchableProbe } from '../src/daemon/cycle-blockers.js';
+import { emptyDaemonState } from '../src/daemon/state.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import { uncoveredBlockerPaths } from '../src/model/blocker-class.js';
-import { branchRewriteGuidance, inspectProfileAccounts, selectAccount, workerPrompt, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { branchRewriteGuidance, inspectProfileAccounts, masterConfigSchema, selectAccount, workerPrompt, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { loopUnitName } from '../src/supervisor.js';
 import { docsHeadroom, docsTrimItem, docsTrimLatitude, docsWordBudgetOf } from '../src/model/documentation.js';
 import { workerPushPermissions } from '../src/worker-credential.js';
@@ -19,7 +20,9 @@ import type { Principal, Work } from '../src/model.js';
 import { createHmac, randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
-import { Store } from '../src/store.js';
+import { Store, save } from '../src/store.js';
+import { recordBlockerProbe } from '../src/server/blocker-probe.js';
+import { loopHeldBlocker } from '../src/model/loop-owned.js';
 import { dispatchable } from '../src/coordination.js';
 import { decisionPrecondition } from '../src/model/approval.js';
 import { throughputOwnerItem } from '../src/throughput.js';
@@ -825,27 +828,103 @@ for (const key of ['GY-1696', 'GY-1674'] as const) for (const replayBase of repl
 
 // GY-1768: eight build-stage escalations in the week to 2026-10-13 (GY-1696 ×3, GY-1674 ×3, GY-1725, GY-1724) were workers' `blocked` reports on items only the loop or a master-role
 // session can serve. GY-1760 and GY-1762 stopped new dispatches; the reports already recorded stood open until a master unblocked each by hand (GY-1696's and GY-1674's were each
-// unblocked and re-dispatched once). The loop now clears such a blocker itself (loopHeldBlocker), so none waits on a person; the item's next action names who records the reading.
+// unblocked and re-dispatched once). The loop now clears such a report itself (loopHeldBlocker) — and only such a report: its cause must be the worker's inability to take the reading
+// the item owes, not any fault an item of that shape happens to carry. Each linked instance is replayed through the paths that produced it: the base blocker step leaves the standing
+// report as an open escalation for a master; the candidate's blocker step, recording its pass through the server's own probe route, clears it, so the instance cannot recur.
 {
+  const heldClock = Date.parse('2026-10-13T11:00:00Z');
+  const heldConfig = masterConfigSchema.parse({ version: 1, url: 'http://127.0.0.1:1', credentialFile: '/nonexistent/escalation-build.token', cliPath: 'bin/graphyard.mjs',
+    repository: 'owner/escalation-build', baseBranch: 'main', githubAppId: 1, hostId: 'escalation-build-host', masterAgentName: 'master', workers: [] });
+  const heldCycle = (open: Work[], effects: Record<string, unknown>, state = emptyDaemonState(heldConfig)) => {
+    const performed: any[] = [];
+    const cycle = { config: heldConfig, state, effects: { persist: async () => {}, ...effects }, now: () => heldClock, clock: heldClock, performed, open, agents: [],
+      isolate: async (_kind: string, _item: unknown, _name: string, body: () => Promise<unknown>) => body(), launcher: { busy: () => false } } as unknown as Cycle;
+    return { cycle, performed };
+  };
+  const classOf = (report: string) => itemBlockerClass({ blocker: report, humanRequest: null })!.class;
   const release = 'ba607f8a809ed20fea15387e1934425cacbfef9f';
   const followUp = (proof: string, plannedFiles: string[]) => ({ systemDriven: true, stage: 'ready', lease: null, plannedFiles, description: `Post-deploy follow-up: post-deploy:e03bc94f-82f4-481d-a443-4b4e6abe9eb6:AC-2:manual:post-deploy/webhook-deliveries-clean-24h:${release}`,
     criteria: [{ id: 'AC-1', text: 'observed', proofs: [proof] }] }) as unknown as Work;
   const owned = (proof: string) => ({ systemDriven: true, stage: 'ready', lease: null, plannedFiles: [], description: '', criteria: [{ id: 'AC-1', text: 'observed', proofs: [proof] }] }) as unknown as Work;
+  // The four linked reports, as each worker's ledger row recorded its cause: on GY-1696 and GY-1674 the master-side reading a worker cannot take, on GY-1724 and GY-1725 the reading that
+  // needs a browser sign-in or an App credential no worker holds.
   const instances: [string, Work, string][] = [
-    ['GY-1696', owned('manual:checkout-restore-clears-drift-pin-on-serving-release'), '.graphyard/master.json does not exist: run graphyard install --apply'],
-    ['GY-1674', owned('manual:checkout-restore-clears-dirty-checkout-on-serving-release'), 'A master-role session should record manual:checkout-restore-clears-dirty-checkout-on-serving-release'],
-    ['GY-1724', followUp('manual:webhook-deliveries-clean-24h-on-serving-release', []), 'no 24h reading is obtainable from this sandbox: the advanced delivery log needs a GitHub browser sign-in'],
-    ['GY-1725', followUp('manual:github-budget-attention-row-clears-on-serving-release', ['verification/post-deploy-github-budget-row.md']), 'The remaining AC-1 demands cannot be produced by a worker; needs an operator-supplied delivery-log export'],
+    ['GY-1696', owned('manual:checkout-restore-clears-drift-pin-on-serving-release'), "blocked on epoch 3: AC-1 is a live observation (manual:checkout-restore-clears-drift-pin-on-serving-release) whose proof authority is operator/production-operator-admin/production-acceptance-producer, not a worker (graphyard diagnose GY-1696). The item has no plannedFiles and no diff, so there is no PR to submit. Blocked command: graphyard master status in this worktree, error: '.graphyard/master.json does not exist: run graphyard install --apply, or graphyard master init --token-stdin'. A master-role session should record that proof from this reading."],
+    ['GY-1674', owned('manual:checkout-restore-clears-dirty-checkout-on-serving-release'), "AC-1 needs a doctor-issued master checkout-restore and a reading of master status (escalation:dirty-checkout cleared, daemon.upgrade.alignedRelease past ccc0a314). Blocked command: graphyard master status in this worktree (GY-1674-3), error: '.graphyard/master.json does not exist: run graphyard install --apply, or graphyard master init --token-stdin'. The worker token holds no master role, so the restore cannot be issued or observed from a worker session; this needs a master session to observe and record the proof."],
+    ['GY-1724', followUp('manual:webhook-deliveries-clean-24h-on-serving-release', []), "The 24h window has elapsed (07:34Z 10-12..10-13) but no 24h reading is obtainable from this sandbox: the App's advanced delivery log needs a GitHub browser sign-in, and gh api /app returns 401 (no App JWT). No code change is owed; a master/operator with an App-authenticated session must read the log for the window and record manual:webhook-deliveries-clean-24h-on-serving-release."],
+    ['GY-1725', followUp('manual:github-budget-attention-row-clears-on-serving-release', ['verification/post-deploy-github-budget-row.md']), "The reviewer's remaining AC-1 demands cannot be produced by a worker: a live raise-then-clear transition would need the App webhook failing for an hour, which must not be induced on the serving release, and GET /app/hook/deliveries needs the App JWT, which a worker does not hold. The note already states both limits; what AC-1 still owes is an operator-supplied delivery-log export for the window."],
   ];
-  for (const [key, work, report] of instances) test(`manual:intervention-pattern-escalation-build — ${key}: a worker's blocked report on an item held for the loop is cleared by the loop, not left for a master`, async () => {
-    const { loopHeldBlocker } = await import('../src/model/loop-owned.js');
-    const { itemBlockerClass } = await import('../src/model/blocker-class.js');
-    const blockerClass = itemBlockerClass({ blocker: report, humanRequest: null })!.class;
-    const now = Date.parse('2026-10-13T11:00:00Z');
-    assert.ok(needsSomeone(blockerClass), 'before: the class is one that waits for someone (genuine or master-role), the open escalation');
-    assert.equal(loopHeldBlocker(work, blockerClass, now), true, 'after: the loop clears it');
-    assert.equal(loopHeldBlocker({ ...work, lease: { owner: 'w', epoch: 1, expiresAt: '2026-10-13T12:00:00Z' } } as Work, blockerClass, now), false, 'never while an attempt still holds the item');
-    assert.equal(loopHeldBlocker(work, 'human-only', now), false, 'a human-only wait is not the loop\'s to clear');
-    assert.equal(loopHeldBlocker({ ...work, criteria: [...work.criteria, { id: 'AC-2', text: 'code', proofs: ['integration:behaves'] }], plannedFiles: ['src/x.ts'] } as Work, blockerClass, now), false, 'an item with a code criterion keeps its blocker for its worker');
+
+  test('manual:intervention-pattern-escalation-build — each linked report names a worker that cannot take the reading it owes, and is held for the loop on its unleased item', () => {
+    for (const [key, shape, report] of instances) {
+      assert.equal(needsSomeone(classOf(report)), true, `${key}: the class waits for someone, the open escalation`);
+      assert.equal(loopHeldBlocker(shape, report, classOf(report), heldClock), true, `${key}: the loop clears it`);
+      assert.equal(loopHeldBlocker({ ...shape, lease: { owner: 'w', epoch: 1, expiresAt: '2026-10-13T12:00:00Z' } } as Work, report, classOf(report), heldClock), false, `${key}: never while an attempt still holds the item`);
+    }
   });
+
+  test('manual:intervention-pattern-escalation-build — the loop-held clear reads the report\'s cause, not the item\'s shape: a configuration actually missing, an unrelated failure, a human wait and an item with code keep their blockers', () => {
+    const mastered = owned('manual:checkout-restore-clears-drift-pin-on-serving-release');
+    for (const [standing, why] of [
+      ['.graphyard/master.json does not exist: run graphyard install --apply', 'the master checkout configuration actually missing: the restore it names is owed, so the report is actionable'],
+      ['npm run build failed: FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory', 'an unrelated failure of the item itself'],
+    ] as const) {
+      assert.equal(needsSomeone(classOf(standing)), true, standing);
+      assert.equal(loopHeldBlocker(mastered, standing, classOf(standing), heldClock), false, why);
+    }
+    assert.equal(loopHeldBlocker(mastered, instances[0]![2], 'human-only', heldClock), false, 'a human-only wait is not the loop\'s to clear');
+    assert.equal(loopHeldBlocker({ ...mastered, criteria: [...mastered.criteria, { id: 'AC-2', text: 'code', proofs: ['integration:behaves'] }], plannedFiles: ['src/x.ts'] } as Work, instances[0]![2], classOf(instances[0]![2]), heldClock), false, 'an item with a code criterion keeps its blocker for its worker');
+  });
+
+  /** The linked item in the candidate's control plane, carrying its blocked report as the ledger row left it when the release guards landed: one `blocked` row, one reason. */
+  async function heldItem(name: string, shape: Work, report: string) {
+    const store = await databaseFor(name, Store);
+    const engine = new Engine(store, [15368], 120, 'owner/escalation-build'); engine.submissionObserver = null;
+    const created = await engine.execute(operator, 'create', null, { title: `Post-deploy verification held for the loop (${name})`, type: 'chore', systemDriven: true,
+      plannedFiles: [...(shape.plannedFiles ?? [])], criteria: structuredClone(shape.criteria), ...(shape.description ? { description: shape.description } : {}) }, randomUUID()) as Work;
+    await store.transaction(async (db, now) => save(db, { ...created, blocker: report }, implementer.id, 'blocked', now, { epoch: created.epoch, reason: report }));
+    const held = (await store.list()).find(item => item.id === created.id)!;
+    return { engine, store, held };
+  }
+
+  for (const [key, shape, report] of instances) for (const replayBase of replayBases) {
+    test(`manual:intervention-pattern-escalation-build — ${key} against the base ${replayBase.slice(0, 7)} and the candidate: the base blocker step hands the standing report to a master, an open escalation; the candidate's step clears it through the server's probe route, so the instance cannot recur`, { timeout: 300_000 }, async () => {
+      assert.equal(needsSomeone(classOf(report)), true, 'the class is one that waits for someone: the open escalation');
+
+      // The base: its blocker step reads the report as needing someone and hands it over; the item keeps the blocker and no probe runs.
+      const base = await importAt<typeof import('../src/daemon/cycle-blockers.js')>(replayBase, 'src/daemon/cycle-blockers.ts');
+      const baseState = await importAt<typeof import('../src/daemon/state.js')>(replayBase, 'src/daemon/state.ts');
+      const probed: { key: string; result: string }[] = [];
+      const onBase = heldCycle([{ ...shape, blocker: report }], { recordBlockerProbe: async (item: Work, probe: { result: string }) => { probed.push({ key: item.key, result: probe.result }); } }, baseState.emptyDaemonState(heldConfig));
+      await base.blockerStep(onBase.cycle);
+      const handed = onBase.performed.filter(action => action.kind === 'blocker' && /it needs someone/.test(action.detail));
+      assert.equal(handed.length, 1, `the standing report is handed over: ${JSON.stringify(onBase.performed)}`);
+      assert.deepEqual(probed, [], 'the base records no path past the class');
+      assert.equal((onBase.cycle.open[0] as Work).blocker, report, 'the item keeps its blocker: the instance reproduces');
+
+      // The candidate: the same report on the same item in the control plane. The loop's blocker step records its pass through the route, which clears the blocker.
+      const { engine, store, held } = await heldItem(`${key.replace('-', '').toLowerCase()}_held_${replayBase.slice(0, 7)}`, shape, report);
+      const cleared: string[] = [];
+      const onCandidate = heldCycle([held], { recordBlockerProbe: async (item: Work, body: Record<string, unknown>) => {
+        const updated = await recordBlockerProbe({ engine } as never, coordinator, item.id, body, randomUUID()) as Work;
+        cleared.push(updated.key);
+        return updated;
+      } });
+      await blockerStep(onCandidate.cycle);
+      assert.deepEqual(cleared, [held.key], 'the loop recorded its probe on the item');
+      const reloaded = (await store.list()).find(item => item.id === held.id)!;
+      assert.equal(reloaded.blocker, null, 'the pass cleared the blocker');
+      assert.equal(reloaded.blockerProbe?.result, 'pass');
+      const events = (await store.pool.query('SELECT kind FROM events WHERE work_id=$1 ORDER BY seq', [held.id])).rows.map(row => row.kind as string);
+      assert.ok(events.includes('blocker.cleared'), `the route recorded the clear: ${events.join(', ')}`);
+      assert.equal(blockerView(reloaded), null, 'the board asks nobody: the escalation is gone');
+
+      // The instance cannot recur: the fold reads no open escalation on the item, and a further cycle probes and hands over nothing.
+      const folded = foldInterventions((await readInterventionLedger(store.pool, { workId: held.id })).rows, [reloaded], new Date(heldClock).toISOString()).interventions;
+      assert.deepEqual(folded.filter(entry => entry.kind === 'escalation' && entry.resolvedAt === null).map(entry => entry.blocked), [], 'no open escalation stands: the loop answered the report off the ledger');
+      const again = heldCycle([reloaded], { recordBlockerProbe: async () => { throw new Error('no probe runs on an item whose report is gone'); } });
+      await blockerStep(again.cycle);
+      assert.deepEqual(again.performed, [], 'and a further cycle hands over nothing');
+    });
+  }
 }
