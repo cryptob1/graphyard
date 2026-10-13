@@ -1,4 +1,4 @@
-import { observationWindowHold, type Work } from './work.js';
+import { loopObservation, observationWindowHold, type Work } from './work.js';
 import { isClosed } from './closure.js';
 import { deliveryState } from './delivery.js';
 import { answerCommand, parkedOnHuman, type HumanRequestRow } from './human-request.js';
@@ -160,10 +160,11 @@ export function nextActor(work: Work, group: Group | null, now: number, release:
 
 /** Why an Up next item waits for no worker (GY-172): an unshipped dependency, a future observation window (GY-1740), or an exclusive resource
  * another claimed item holds, as the dispatcher's own `resourceConflicts` applies it; planned-file overlap holds nothing. Null: a free builder takes it. */
-export function upNextHold(work: Work, all: Work[], now: number): { kind: 'dependency' | 'resource' | 'window'; text: string } | null {
+export function upNextHold(work: Work, all: Work[], now: number): { kind: 'dependency' | 'resource' | 'window' | 'observation'; text: string } | null {
   const dependency = work.gates.find(gate => gate.name === 'ready')?.reasons.find(reason => reason.startsWith('Dependency '));
   if (dependency) return { kind: 'dependency', text: plainReason(dependency, 'ready').text };
   const window = observationWindowHold(work, new Date(now)); if (window) return { kind: 'window', text: `Waiting for its observation window: the reading it owes can first exist at ${window.notBefore}` };
+  const observing = loopObservation(work, new Date(now), all); if (observing) return { kind: 'observation', text: `Waiting for ${observing.waitingFor}; no builder is assigned` };
   const held = resourceConflicts(work, all, now);
   if (!held.length) return null;
   return { kind: 'resource', text: `Waiting for ${[...new Set(held.map(entry => entry.key))].join(', ')} to release ${[...new Set(held.map(entry => entry.resource))].join(', ')}: an exclusive resource it needs` };

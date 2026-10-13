@@ -56,6 +56,7 @@ import { terminalDecisions } from '../../src/cli/decision-report.js';
 import { Launcher } from '../../src/daemon/cycle.js';
 import { wakeOwnObservation } from '../../src/master/base-break-refresh.js';
 import { buildMasterStatus } from '../../src/master/status.js';
+import { nextAction } from '../../src/model/next-action.js';
 import * as faultsStep from '../../src/daemon/faults.js';
 import { type ReportedAttention, docsHeadroomStatus, docsWordCountAt } from '../../src/daemon/faults.js';
 import { docsTrimTitle } from '../../src/model/documentation.js';
@@ -550,7 +551,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     parent: items[options.observationWindow.item - 1], windowDays: options.observationWindow.windowDays, proof: windowedPatternProof,
     followUp: null as Work | null, filedAt: null as number | null, releasedAt: null as number | null, filings: 0, staleFilings: 0, created: [] as string[],
     deferred: [] as { at: number; epoch: number; notBefore: string }[],
-    samples: [] as { elapsed: number; at: string; stage: string; waiting: boolean | null; attention: string | null; attentionRows: number; sentence: string; dispatches: { requestedBy: string; at: string }[]; lease: string | null; sessions: number; masterLive: boolean; faults: string[]; escalations: string[] }[],
+    samples: [] as { elapsed: number; at: string; stage: string; waiting: boolean | null; attention: string | null; attentionRows: number; sentence: string; dispatches: { requestedBy: string; at: string }[]; lease: string | null; sessions: number; masterLive: boolean; faults: string[]; escalations: string[]; counted: 'ready' | 'waiting' | null; next: string | null }[],
   } : null;
   // ---- GY-1740: blocked, unleased post-deploy follow-ups whose recorded blockers name future instants. ----
   const holdDay = options.blockedHolds ? { seeded: [] as { id: string; key: string; notBefore: number }[], windows: [] as { key: string; at: number; notBefore: string }[], final: [] as Work[],
@@ -558,7 +559,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   for (const [index, after] of (options.blockedHolds?.hours ?? []).entries()) {
     const notBefore = dayStart + after * hour, instant = new Date(notBefore).toISOString(), worker = { id: workers[index % workers.length].principal, role: 'worker' as const };
     let work = await engine.execute(principals.operator, 'create', null, { title: `Post-deploy verification of soak release ${days}-${index}`, type: 'chore', priority: 1,
-      criteria: [{ id: 'AC-1', text: `From this head against the serving release: the escalation rate at the build stage stays below 3 over ${after} hours of live activity`, proofs: ['manual:intervention-pattern-escalation-build-on-serving-release'] }] }, id());
+      criteria: [{ id: 'AC-1', text: `From this head against the serving release 0123456789ab that carries the change: the escalation rate at the build stage stays below 3 over ${after} hours of live activity`, proofs: ['manual:intervention-pattern-escalation-build-on-serving-release'] }] }, id());
     work = await engine.execute(worker, 'claim', (await engine.execute(principals.operator, 'ready', work.id, {}, id())).id, {}, id());
     work = await engine.execute(worker, 'blocked', work.id, { epoch: work.epoch, reason: `AC-1's reading cannot exist yet: its ${after}-hour window on the serving release has not elapsed; not before ${instant} can it be observed` }, id());
     holdDay!.seeded.push({ id: work.id, key: work.key, notBefore });
@@ -3237,7 +3238,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
             release: () => ({ sha: staleCoordinatorSha, clean: true, repository: 'owner/project', reason: null }),
             emit: async () => assert.fail('the coordinator checkout behind the release emits nothing'),
             isolate: async sha => ({ release: { sha, clean: true, repository: 'owner/project', reason: null }, emit: async () => loopInstructions, checks: localPostDeployChecks, dispose: async () => {} }),
-            checks: staleFiler, record: async () => {}, file: file as never, patterns,
+            checks: staleFiler, record: async () => {}, file: file as never, releaseWork: async () => {}, patterns,
           });
           assert.equal(verified.result, 'verified', verified.refusals.join('; '));
           windowDay.staleFilings += 1;
@@ -3264,6 +3265,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
           const waiting = row ? row.observationWindow?.waiting ?? null : observationWindowHold(current, new Date(at)) !== null;
           windowDay.samples.push({ elapsed, at: new Date(at).toISOString(), stage: current.stage, waiting, attention: row?.attention ?? null,
             attentionRows: status.attentionItems.filter(entry => entry.subject === current.key).length, sentence: plainStatus(current, at).sentence,
+            // GY-1762: how the status counts it, and the kind of action the queue computes for it.
+            counted: row && row.stage === 'ready' ? (row.observing ? 'waiting' : 'ready') : null, next: nextAction(current, all, new Date(at))?.kind ?? null,
             dispatches: [...(current.actionQueue?.actions ?? []), ...(current.actionQueue?.history ?? [])].filter(action => action.kind === 'dispatch').map(action => ({ requestedBy: action.requestedBy, at: action.requestedAt })),
             lease: current.lease?.owner ?? null, sessions: sessions.filter(session => session.key === current.key).length, masterLive: !!herdr.byName(config.masterAgentName!) || !!state.master.session,
             faults: state.faults.instances.filter(instance => instance.subject === current.key).map(instance => instance.kind),

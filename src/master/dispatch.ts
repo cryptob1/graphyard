@@ -11,9 +11,10 @@ import { type SandboxExec, WorkerSandboxError, verifyWorkerSandbox, workerPaths,
 import { sweepExpiredWorkerCredentials, withdrawWorkerCredential, workerCredentialDirectory, workerCredentialEnvironment, workerCredentialRoot } from '../worker-credential.js';
 import { assertNoApprovalOptOut } from '../harness.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, dispatchHumanWait } from '../model/human-request.js';
+import { loopOwnedRefusal } from '../model/loop-owned.js';
 import { documentationWorkerSection } from '../model/documentation.js';
 import { workerPreference } from '../model/worker-preference.js';
-import { observationWindowHold, servingReleaseProof, type Work } from '../model.js';
+import { loopObservation, loopObservationProofs, observationWindowHold, servingReleaseProof, type Work } from '../model.js';
 import { type ConsentAnswer, type ConsentHold, consentHoldAttention, consentHoldMs, writeConsentHold } from '../consent-prompt.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { atomicPrivateWrite, loadMasterConfig, readCredentialFile, readWorkerCredential } from './config.js';
@@ -178,6 +179,11 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   if (!Number.isFinite(now)) throw new Error('Dispatch requires a valid Graphyard snapshot clock');
   if (parkedOnHuman(work)) throw new Error(`${dispatchHumanWait} (${humanDecisionLabel[work.humanRequest!.kind]}); ${answerCommand(work.key, work.humanRequest!)} resumes it`);
   if (!work.ready || work.blocker) throw new Error('Dispatch requires released work without a blocker');
+  // GY-1760: an item only the master side can satisfy is never handed to a worker — not by the
+  // loop's dispatch step, not by a hand launch — whoever released it, so its master-only steps
+  // never reach a worker that must block on them.
+  const loopOwned = loopOwnedRefusal(work);
+  if (loopOwned) throw new Error(loopOwned);
   if (work.children?.length) throw new Error(`${work.key} was split into ${work.children.join(', ')} before dispatch; it is delivered when they are and is never dispatched itself`);
   const fenced = containmentHold(work, now);
   if (fenced) throw new Error(fenced);
@@ -191,6 +197,10 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   // queue's nextAction wait — a released follow-up whose reading cannot exist yet must not be claimed.
   const window = observationWindowHold(work, new Date(now));
   if (window) throw new Error(`Dispatch waits for its observation window: the reading it owes can first exist at ${window.notBefore} (${window.detail})`);
+  // GY-1762: an item whose only work is the loop's own live reading has nothing a code worker can do.
+  const observing = loopObservation(work, new Date(now), allWork);
+  if (observing) throw new Error(`Dispatch waits for the loop's observation: ${observing.waitingFor}`);
+  if (loopObservationProofs(work)) throw new Error('Dispatch refused: the loop records this item\'s reading itself and no code worker can finish it');
   // Planned-file overlap holds nothing: dispatch is optimistic, and the merge queue and a sync
   // round integrate whichever of two overlapping items lands second.
 }

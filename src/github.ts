@@ -618,7 +618,7 @@ export function appJwt(appId: number, privateKey: string, now = Date.now()) {
  * records only the deliveries that can wake a job, so a receipts gap alone cannot tell an hour
  * GitHub had nothing to send from a webhook that is failing; this log is GitHub's own account.
  */
-export interface WebhookDeliveryAttempt { at: string; statusCode: number; event: string; installationId: number | null; repositoryId: number | null }
+export interface WebhookDeliveryAttempt { id?: string | null; at: string; statusCode: number; event: string; installationId: number | null; repositoryId: number | null }
 export interface WebhookDeliveryLog {
   /** When the log was last read successfully; null until a read succeeds. */
   observedAt: string | null;
@@ -633,6 +633,32 @@ export interface WebhookDeliveryLog {
 export const webhookDeliveryLogMs = 5 * 60_000, webhookDeliveryLogTightMs = 15 * 60_000;
 /** How far back a read pages, and its page bound: one page covers a quiet stretch, a busy one stops at the bound. */
 export const webhookDeliveryLookbackMs = 6 * 3_600_000, webhookDeliveryPages = 5;
+/** How long the attempts of past reads are kept and persisted (GY-1765), so a reading covers a 24h window across restarts; and the most kept. */
+export const webhookDeliveryRetentionMs = 48 * 3_600_000, webhookDeliveryRetained = 5_000;
+/**
+ * Folds a fresh read into the log kept from earlier reads (GY-1765). The attempts are the union,
+ * newest first, within the retention. The merged log is complete back to the earlier boundary when
+ * the fresh read reaches the previous read's instant (no attempt can have been missed in between),
+ * otherwise only back to the fresh read's own boundary. Attempts trimmed by the retention move the
+ * boundary up to the cut.
+ */
+export function mergeDeliveryLogs(previous: WebhookDeliveryLog | null, fresh: WebhookDeliveryLog, now: number): WebhookDeliveryLog {
+  if (!previous?.observedAt || !fresh.observedAt) return fresh;
+  const seen = new Set<string>(), merged: WebhookDeliveryAttempt[] = [];
+  const cut = now - webhookDeliveryRetentionMs;
+  for (const attempt of [...fresh.attempts, ...previous.attempts].sort((a, b) => Date.parse(b.at) - Date.parse(a.at))) {
+    const id = attempt.id ? `id:${attempt.id}` : `${attempt.at}|${attempt.statusCode}|${attempt.event}|${attempt.installationId}|${attempt.repositoryId}`;
+    if (seen.has(id) || Date.parse(attempt.at) < cut) continue;
+    seen.add(id); merged.push(attempt);
+  }
+  const kept = merged.slice(0, webhookDeliveryRetained);
+  const reaches = fresh.coversFrom === null || Date.parse(fresh.coversFrom) <= Date.parse(previous.observedAt);
+  let from: number | null = fresh.coversFrom === null ? null : reaches ? previous.coversFrom === null ? null : Date.parse(previous.coversFrom) : Date.parse(fresh.coversFrom!);
+  const trimmed = merged.length > kept.length || [...fresh.attempts, ...previous.attempts].some(attempt => Date.parse(attempt.at) < cut);
+  if (trimmed) from = Math.max(from ?? cut, cut);
+  if (merged.length > kept.length) from = Math.max(from ?? 0, Date.parse(kept[kept.length - 1].at));
+  return { observedAt: fresh.observedAt, attempts: kept, coversFrom: from === null ? null : new Date(from).toISOString(), error: null };
+}
 /** The corroboration the `/api/status` webhooks block carries (GY-1649). */
 export interface WebhookCorroboration {
   /** The newest attempt GitHub logged for this repository, whatever it was answered. */
@@ -939,7 +965,15 @@ export class GitHub {
     const ttl = budgetTight(this.budget(now)) ? webhookDeliveryLogTightMs : webhookDeliveryLogMs;
     if (cached && now - cached.at < ttl) return cached.log;
     if (now < this.blockedUntil) return { ...(cached?.log ?? { observedAt: null, attempts: [], coversFrom: null }), error: `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate limit` };
-    this.deliveryRead ??= this.readWebhookDeliveries(now, cached?.log ?? null).then(log => { this.deliveryLog = { at: now, log }; return log; }).finally(() => { this.deliveryRead = null; });
+    this.deliveryRead ??= (async () => {
+      // After a restart the previous reads come back from the persisted cache (GY-1765).
+      const previous = cached?.log ?? await this.persistedDeliveries();
+      const read = await this.readWebhookDeliveries(now, previous);
+      const log = read.error ? read : mergeDeliveryLogs(previous, read, now);
+      this.deliveryLog = { at: now, log };
+      if (!log.error && log.observedAt) this.persisted?.put('deliveries', 'log', log);
+      return log;
+    })().finally(() => { this.deliveryRead = null; });
     // A status read waits for a slow read only briefly; it is served the previous log meanwhile.
     let timer: NodeJS.Timeout | undefined;
     const waited = new Promise<WebhookDeliveryLog>(resolve => { timer = setTimeout(() => resolve(cached?.log ?? { observedAt: null, attempts: [], coversFrom: null, error: 'GitHub\'s webhook delivery log is still being read' }), this.deliveryWaitMs); timer.unref?.(); });
@@ -949,6 +983,10 @@ export class GitHub {
   deliveryWaitMs = 3_000;
   private deliveryLog: { at: number; log: WebhookDeliveryLog } | null = null;
   private deliveryRead: Promise<WebhookDeliveryLog> | null = null;
+  private async persistedDeliveries(): Promise<WebhookDeliveryLog | null> {
+    const stored = await this.persisted?.lookup('deliveries', 'log');
+    return stored && Array.isArray(stored.attempts) && typeof stored.observedAt === 'string' ? { observedAt: stored.observedAt, attempts: stored.attempts, coversFrom: typeof stored.coversFrom === 'string' ? stored.coversFrom : null, error: null } : null;
+  }
   private async readWebhookDeliveries(now: number, previous: WebhookDeliveryLog | null): Promise<WebhookDeliveryLog> {
     const attempts: WebhookDeliveryAttempt[] = [];
     let url: string | null = 'https://api.github.com/app/hook/deliveries?per_page=100';
@@ -963,7 +1001,7 @@ export class GitHub {
         for (const entry of body as any[]) {
           const at = typeof entry?.delivered_at === 'string' ? Date.parse(entry.delivered_at) : NaN;
           if (!Number.isFinite(at)) continue;
-          attempts.push({ at: new Date(at).toISOString(), statusCode: Number.isInteger(entry.status_code) ? entry.status_code : 0, event: String(entry.event ?? ''),
+          attempts.push({ id: Number.isSafeInteger(entry.id) || (typeof entry.id === 'string' && entry.id) ? String(entry.id) : null, at: new Date(at).toISOString(), statusCode: Number.isInteger(entry.status_code) ? entry.status_code : 0, event: String(entry.event ?? ''),
             installationId: Number.isInteger(entry.installation_id) ? entry.installation_id : null, repositoryId: Number.isInteger(entry.repository_id) ? entry.repository_id : null });
         }
         const oldest = attempts.length ? Date.parse(attempts[attempts.length - 1].at) : null;

@@ -5,7 +5,7 @@ import { hotFileSet } from '../daemon/hotspots.js';
 import type { ConflictReport } from '../conflicts.js';
 import { standingCapacity, describeCapacity, quotaRoles } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, openHumanRequests } from '../model/human-request.js';
-import { type Work, carriedBindings, describeGround, observationWindowHold, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance } from '../model.js';
+import { type Work, carriedBindings, describeGround, observationWindowHold, loopObservation, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance } from '../model.js';
 import { containmentAttestation, containmentGraceMs } from '../quarantine.js';
 import { pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, restoredApproval, refusedReconciliation, blockedPastProbe } from '../merge-queue.js';
 import { MERGE_PROTOCOL } from '../protocol-version.js';
@@ -180,6 +180,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const mergeable = mergeAuthorized(work);
     const dwellMs = now - Date.parse(work.stageEnteredAt);
     // The earliest instant the item's reading can exist (GY-1698), and whether it still holds the dispatch.
+    // GY-1762: waiting on the loop's own live reading, not ready for a worker.
+    const observing = work.stage === 'ready' && !work.blocker && !active ? loopObservation(work, new Date(now), snapshot.work) : null;
     const observationWindow = work.observationWindow ? { ...work.observationWindow, waiting: !!observationWindowHold(work, new Date(now)) } : null;
     const review = reviewState(work);
     const assessed = containment[work.id];
@@ -269,7 +271,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : mergeRefusal ? [`GitHub refused the merge request for ${work.key} at ${mergeRefusal.head.slice(0, 12)} since ${mergeRefusal.at}: ${mergeRefusal.reason}`, 'merge-refused']
       : baseRefresh && !work.blocker ? [null, null]
       // A follow-up held on its observation window (GY-1698) is waiting for the instant, not stalled at its gate.
-      : observationWindow?.waiting && !work.blocker && !active ? [null, null]
+      : (observationWindow?.waiting || (observing && !observing.due)) && !work.blocker && !active ? [null, null]
+      // The reading is owed now (GY-1762): the loop's own, never a worker's submission the build gate is waiting for.
+      : observing?.due && !work.blocker && !active ? [`${work.key} owes ${observing.waitingFor}; no code worker can record it, so it is escalated for the reading`, 'gate']
       : work.blocker || dwellMs > 3_600_000 ? [first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour`, 'gate'] : [null, null];
     const attentionOwner = cause ? workAttentionOwner(work, cause, now) : null;
     if (cause) causes.set(work.key, cause);
@@ -279,6 +283,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       lane: work.lane ?? null, speedTarget: work.speedTarget ?? null,
       // The observation window a windowed post-deploy follow-up carries (GY-1698): `waiting` while it holds the dispatch.
       observationWindow,
+      // The loop's observation an all-manual post-deploy item waits for (GY-1762): counted as waiting, never ready.
+      observing: observing ? observing.waitingFor : null, observationDue: !!observing?.due,
       // Set only for an item GitHub merged though its gates had not passed: the merge, the violation and
       // the last refused reconciliation, so the row reads as stuck rather than as a candidate.
       merged,
@@ -340,7 +346,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   const remedyItems: AttentionItem[] = remedies.map(entry => ({ subject: entry.key, text: entry.text, ...classified('unrunnable-remedy'),
     ...agentOwner('master', `Create a work item that lets the ${entry.role} run \`${entry.command}\` (or has the control plane perform it); the ${entry.role} harness rule ${entry.rule} denies it`) }));
   return { observedAt: snapshot.now,
-    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + supervised.attentionItems.length + remedyItems.length + capacityItems.length + concurrencyItems.length + installation.attention.length + registry.attentionItems.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
+    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready' && !row.observing).length, waiting: rows.filter(row => row.stage === 'ready' && row.observing).length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + supervised.attentionItems.length + remedyItems.length + capacityItems.length + concurrencyItems.length + installation.attention.length + registry.attentionItems.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
       // Candidates the guarded merge could take once their gates pass, and the items GitHub already
       // merged though their gates had not passed, which are never candidates and wait on a reconciliation.
       mergeCandidates: rows.filter(row => row.stage === 'merge' && !row.merged).length, mergedUnreconciled: rows.filter(row => row.merged && !row.merged.reverted).length, revertedDeliveries: rows.filter(row => row.merged?.reverted).length,

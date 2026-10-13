@@ -7,6 +7,7 @@ import { standingEscalations } from './escalation.js';
 import { closureKinds } from './closure.js';
 import { createSchema, escalationTriggers, operatorCapability, type OperatorCapability, type Principal, type Work } from './work.js';
 import { baseRefreshConflict } from '../merge-queue.js';
+import { loopOwnedRefusal } from './loop-owned.js';
 import { judgedSame, situatedDecisionActions, type DecisionSituation } from './decision-situation.js';
 export { decisionSituation, judgedSame, situatedDecisionActions, situationLabel, supersededSituation, type DecisionSituation } from './decision-situation.js';
 
@@ -265,6 +266,7 @@ export function decisionPrecondition(action: DecisionAction, input: any, work: W
   if (work.stage === 'done') return 'Delivered work is immutable; create a follow-up task';
   if ((action === 'release' || action === 'unblock' || action === 'resolve' || (action === 'close' && input.expectedRevision !== undefined)) && input.expectedRevision !== work.revision) return `Task revision changed (now ${work.revision}); reload and request again`;
   if (action === 'release' && (work.stage !== 'backlog' || work.ready)) return 'Only unreleased backlog work can be released';
+  if (action === 'release') { const owned = loopOwnedRefusal(work); if (owned) return owned; }
   if (action === 'unblock' && !work.blocker) return 'Task has no blocker to clear';
   if (action === 'resolve' && !standingEscalations(work).some(entry => entry.trigger === input.trigger)) return `No standing ${input.trigger} escalation; standing: ${standingEscalations(work).map(entry => entry.trigger).join(', ') || 'none'}`;
   if (action === 'requirements' && input.expectedPolicyRevision !== work.policyRevision) return `Policy revision changed (now ${work.policyRevision}); reload and request again`;

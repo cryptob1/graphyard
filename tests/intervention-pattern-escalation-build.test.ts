@@ -1,6 +1,7 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { blockerView, classifyBlocker, environmentalBlockerClasses, needsSomeone } from '../src/model/blocker-class.js';
+import { assertDispatchable as candidateAssertDispatchable } from '../src/master.js';
 import { githubDegraded, githubStatusMs, probeBlocker, sharedGithubStatus } from '../src/daemon/blocker-probes.js';
 import { readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -20,6 +21,8 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { Store } from '../src/store.js';
 import { dispatchable } from '../src/coordination.js';
+import { decisionPrecondition } from '../src/model/approval.js';
+import { throughputOwnerItem } from '../src/throughput.js';
 import { postDeployChecks } from '../src/master-verification.js';
 import { server } from '../src/server.js';
 import { importAt } from './helpers/base-tree.js';
@@ -323,6 +326,11 @@ test('manual:intervention-pattern-escalation-build — GY-1567 review: a spent r
 // (20a58c6a42) had since given their follow-ups the instant they wait for, so each reproduces on the
 // commit before its fix, and the base and the candidate both file it held.
 const base = '47220a5adbdc7486f362eda80d4f8eafee0face4';
+// GY-1760's linked instances (GY-1750, GY-1696, GY-1674) are replayed against the two bases this pull request is judged on:
+// e642d302bd1d, the base its first review named, and f398a2a0b34d, the main tip the branch syncs onto for the next head. Both predate
+// the guard, so each shows the instance reproducing before the change and not after. GY-1689 and GY-1723 stay on their own `base`
+// above: the candidate-side behaviour they contrast (the defer command, the ignored-redelivery reason) landed between the commits, so either newer base would not reproduce them.
+const replayBases = ['e642d302bd1d367b9f56df53417bcf2143f6e285', 'f398a2a0b34dfb76b48205178601413067989731'];
 const day = 86_400_000;
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const implementer: Principal = { id: 'implementer', role: 'worker', sessionKind: 'ai' };
@@ -348,6 +356,7 @@ async function plane(tree: string | null) {
     Engine: (await load('src/engine.ts', { Engine })).Engine, Store: (await load('src/store.ts', { Store })).Store,
     interventions: await load('src/interventions.ts', { foldInterventions, readInterventionLedger }), dispatchable: (await load('src/coordination.ts', { dispatchable })).dispatchable,
     server: (await load('src/server.ts', { server })).server, postDeployChecks: (await load('src/master-verification.ts', { postDeployChecks })).postDeployChecks,
+    assertDispatchable: (await load('src/master/dispatch.ts', { assertDispatchable: candidateAssertDispatchable })).assertDispatchable,
   };
 }
 type Plane = Awaited<ReturnType<typeof plane>>;
@@ -609,7 +618,7 @@ for (const key of ['GY-1722', 'GY-1725'] as const) {
     assert.deepEqual([held.blocker, held.lease, held.epoch], [null, null, 0], 'no attempt started and nothing was recorded against it');
     assert.equal(onCandidate.escalations, 0, 'nothing escalates: the instance does not recur');
     assert.equal(onCandidate.dispatchable(onCandidate.now), false, 'the loop holds it until the reading can exist');
-    assert.equal(onCandidate.dispatchable(onCandidate.notBefore + 60_000), true, 'and dispatches it once the instant passes');
+    assert.equal(onCandidate.dispatchable(onCandidate.notBefore + 60_000), false, 'and past the instant it is owed to the loop\'s reading, never dispatched to a code worker (GY-1762)');
   });
 }
 
@@ -639,7 +648,7 @@ test('manual:intervention-pattern-escalation-build — GY-1725 as it stands, alr
   await store.pool.query(`UPDATE work_items SET document = document - 'observationWindow' WHERE id=$1`, [filed.id]);
   const stripped = (await store.list()).find((item: Work) => item.id === filed.id)! as Work;
   assert.deepEqual([stripped.ready, stripped.blocker, stripped.observationWindow], [true, null, undefined]);
-  assert.equal(dispatchable(stripped, now), true, 'the stale document reads as dispatchable');
+  assert.equal(dispatchable(stripped, now), false, 'the stale document is a loop-owned observation (GY-1762), so no worker is dispatched even without its window');
   // A claim the control plane rejects before judging it writes nothing: neither a caller without claim
   // authority nor a key already answered for another command may record the window or its history.
   const history = async () => (await store.pool.query('SELECT count(*)::int AS n FROM events WHERE work_id=$1', [filed.id])).rows[0].n as number;
@@ -655,7 +664,7 @@ test('manual:intervention-pattern-escalation-build — GY-1725 as it stands, alr
   assert.equal(held.observationWindow?.notBefore, new Date(notBefore).toISOString(), 'the refused claim persisted the window it derived');
   assert.deepEqual([held.lease, held.epoch], [null, 0], 'and started no attempt');
   assert.equal(dispatchable(held, now), false, 'so the loop holds it inside the window');
-  assert.equal(dispatchable(held, notBefore + 60_000), true, 'and dispatches it once the reading can exist');
+  assert.equal(dispatchable(held, notBefore + 60_000), false, 'and past the instant the loop\'s reading is owed, never a code worker (GY-1762)');
 });
 
 test('manual:intervention-pattern-escalation-build — GY-1722 when the intervention report projects its reading later than the merge-based bound: the derived window is the report\'s, so the follow-up is held until the reading can exist, not released at merge plus 7 days', { timeout: 300_000 }, async () => {
@@ -672,7 +681,7 @@ test('manual:intervention-pattern-escalation-build — GY-1722 when the interven
   assert.deepEqual([window?.notBefore, window?.basis], [projected, 'intervention-report'], 'create persists the report\'s bound, not the criterion\'s');
   assert.match(refusal ?? '', new RegExp(`can first exist at ${projected}`));
   assert.equal(dispatchable(filed, notBefore + 60_000), false, 'past the criterion bound the follow-up is still held');
-  assert.equal(dispatchable(filed, Date.parse(projected) + 60_000), true, 'and is dispatched once the report bound passes');
+  assert.equal(dispatchable(filed, Date.parse(projected) + 60_000), false, 'and past the report bound the reading is the loop\'s, never a code worker (GY-1762)');
   // A follow-up already ready without its window: the refused claim records the report's bound too.
   await store.pool.query(`UPDATE work_items SET document = document - 'observationWindow' WHERE id=$1`, [filed.id]);
   await assert.rejects(engine.execute(implementer, 'claim', filed.id, {}, randomUUID()), new RegExp(`can first exist at ${projected}`));
@@ -711,3 +720,105 @@ test('manual:intervention-pattern-escalation-build — GY-1723 against the base 
   assert.equal(onCandidate.logged.length, 1, 'the reason is logged with the delivery ID');
   assert.match(onCandidate.logged[0]!, /\(check_run\) accepted without wake: no open job$/);
 });
+
+// GY-1760 names this file for its proof too: three build-stage escalations in the week to 2026-10-13 were a worker blocking on an item nobody could build. Each is replayed against
+// the pull request's specified base and the candidate through the path that produced it: release, dispatch, a worker's attempt, a blocked report, an escalation.
+//   - GY-1750 (blocked#2541650): the throughput owner, filed in the backlog "never released to a worker", was released by hand; a worker was dispatched and blocked
+//     with "Nothing to implement". The control plane now refuses to release it, by the ready command and by a release decision alike.
+//   - GY-1696 (blocked#2541694) and GY-1674 (blocked#2541601): a chore whose single criterion observes the master checkout on the serving release
+//     (manual:checkout-restore-…-on-serving-release), with no planned files: GY-1696's worker made its observation and could not submit (no diff, no pull request), and
+//     GY-1674's could not observe at all (`.graphyard/master.json does not exist`; the worker token holds no master role). The base hands both to a worker; the candidate
+//     refuses the release and the dispatch itself, so the master-only step is taken by the master-role session that owns it, never by a dispatched worker.
+async function replay1750(tree: string | null, name: string) {
+  const { Engine, Store, interventions } = await plane(tree);
+  const store = await databaseFor(name, Store);
+  const engine = new Engine(store, [15368], 120, 'owner/escalation-build'); engine.submissionObserver = null;
+  const { reason: _reason, ...owner } = throughputOwnerItem('21d470571dca'.padEnd(40, '0'), 3);
+  let work = await engine.execute(operator, 'create', null, { ...owner, reason: _reason, policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: [] }, randomUUID());
+  let refusal: string | null = null;
+  try { work = await engine.execute(operator, 'ready', work.id, {}, randomUUID()); } catch (error) { refusal = error instanceof Error ? error.message : String(error); }
+  let claimed = false;
+  if (!refusal) {
+    work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID()); claimed = true;
+    work = await engine.execute(implementer, 'blocked', work.id, { epoch: work.epoch, reason: 'Nothing to implement: this is a loop-owned verification item.' }, randomUUID());
+  }
+  const now = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime();
+  const folded = interventions.foldInterventions((await interventions.readInterventionLedger(store.pool, { workId: work.id })).rows, [work], new Date(now).toISOString()).interventions;
+  return { refusal, work, ready: work.ready, claimed, escalations: folded.filter((entry: { kind: string }) => entry.kind === 'escalation').length };
+}
+
+for (const replayBase of replayBases) {
+  test(`manual:intervention-pattern-escalation-build — GY-1750 against the base ${replayBase.slice(0, 7)} and the candidate: the base releases the throughput owner, a worker claims it and blocks, an escalation; the candidate refuses the release by command and by decision`, async () => {
+    const onBase = await replay1750(replayBase, `gy1750_base_${replayBase.slice(0, 7)}`);
+  assert.equal(onBase.refusal, null, 'the base releases it');
+  assert.ok(onBase.claimed, 'and a worker claims an item it cannot build');
+  assert.equal(onBase.escalations, 1, 'the instance reproduces: its blocked report is an open escalation');
+
+  const onCandidate = await replay1750(null, `gy1750_candidate_${replayBase.slice(0, 7)}`);
+  assert.match(onCandidate.refusal ?? '', /loop-owned/);
+  assert.equal(onCandidate.ready, false, 'it stays in the backlog');
+  assert.equal(onCandidate.escalations, 0, 'no worker is ever dispatched, so none blocks');
+
+  const owner = onCandidate.work;
+  assert.match(decisionPrecondition('release', { expectedRevision: owner.revision }, owner) ?? '', /loop-owned/, 'a release decision is refused at its precondition too');
+  assert.equal(decisionPrecondition('release', { expectedRevision: 1 }, { ...owner, revision: 1, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves'] }] } as Work), null, 'an item with a code criterion releases as before');
+  });
+}
+
+/** GY-1696 and GY-1674 as filed: a chore whose single criterion observes the master checkout on the serving release, no planned files, nothing to build, and the blocked report its worker recorded. */
+const masterObservations = {
+  'GY-1696': {
+    criteria: [{ id: 'AC-1', text: 'From this head against the serving release 9f1dd9476b77 that carries GY-1680\'s merge 2b1810f5c00b: the doctor-issued master checkout-restore against a clean drifted checkout clears escalation:dirty-checkout, observed in master status', proofs: ['manual:checkout-restore-clears-drift-pin-on-serving-release'] }],
+    blocked: 'Observation made but cannot be submitted. Blocked command: graphyard complete GY-1696 1 --head, error: \'A head is submitted only while the control plane is the merge writer; this install\'s merger is github, so push the branch and complete GY-1696 1 with its pull request number\'. The item has no plannedFiles and this branch has no diff, so there is no pull request to submit. A master-role session should record manual:checkout-restore-clears-drift-pin-on-serving-release from this reading.' },
+  'GY-1674': {
+    criteria: [{ id: 'AC-1', text: 'From this head against the serving release 215bf18e6492: a doctor-issued master checkout-restore completes end to end: escalation:dirty-checkout clears and daemon.upgrade.alignedRelease advances past ccc0a314, observed in master status', proofs: ['manual:checkout-restore-clears-dirty-checkout-on-serving-release'] }],
+    blocked: 'AC-1 needs a doctor-issued master checkout-restore and a reading of master status. Blocked command: graphyard master status in this worktree, error: \'.graphyard/master.json does not exist: run graphyard install --apply, or graphyard master init --token-stdin\'. The worker token holds no master role, so the checkout-restore cannot be issued or observed from here. Needs a master-role session to observe and record manual:checkout-restore-clears-dirty-checkout-on-serving-release.' },
+};
+
+/** One master-observation item on one tree: created as filed, released if the tree allows it, and — where the dispatch gate still offers it — claimed and blocked as its worker was. */
+async function replayMasterObservation(tree: string | null, name: string, key: keyof typeof masterObservations) {
+  const instance = masterObservations[key];
+  const { Engine, Store, interventions, dispatchable, assertDispatchable } = await plane(tree);
+  const store = await databaseFor(name, Store);
+  const engine = new Engine(store, [15368], 120, 'owner/escalation-build'); engine.submissionObserver = null;
+  let work = await engine.execute(operator, 'create', null, { title: `Post-deploy verification of ${key}'s checkout-restore observation`, type: 'chore', plannedFiles: [], criteria: instance.criteria.map(criterion => ({ ...criterion })) }, randomUUID()) as Work;
+  const now = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime();
+  let readyRefusal: string | null = null, dispatchRefusal: string | null = null, released: Work | null = null, claimed = false;
+  try { work = await engine.execute(operator, 'ready', work.id, {}, randomUUID()) as Work; released = work; }
+  catch (error) { readyRefusal = error instanceof Error ? error.message : String(error); }
+  if (released) {
+    try { assertDispatchable(released, [released], new Date(now).toISOString()); } catch (error) { dispatchRefusal = error instanceof Error ? error.message : String(error); }
+    if (!dispatchRefusal) {
+      work = await engine.execute(implementer, 'claim', released.id, {}, randomUUID()) as Work; claimed = true;
+      work = await engine.execute(implementer, 'blocked', work.id, { epoch: work.epoch, reason: instance.blocked }, randomUUID()) as Work;
+    }
+  }
+  const folded = interventions.foldInterventions((await interventions.readInterventionLedger(store.pool, { workId: work.id })).rows, [work], new Date(now).toISOString()).interventions;
+  return { readyRefusal, dispatchRefusal, released, work, ready: work.ready, claimed, at: now,
+    escalations: folded.filter((entry: { kind: string }) => entry.kind === 'escalation').length,
+    dispatchable: (candidate: Work, at: number) => dispatchable(candidate, at) as boolean };
+}
+
+for (const key of ['GY-1696', 'GY-1674'] as const) for (const replayBase of replayBases) {
+  test(`manual:intervention-pattern-escalation-build — ${key} against the base ${replayBase.slice(0, 7)} and the candidate: the base releases the master-checkout observation and dispatches it, so its worker blocks, an escalation; the candidate refuses the release and the dispatch, so the step stays with the master-role session`, async () => {
+    const onBase = await replayMasterObservation(replayBase, `${key.replace('-', '').toLowerCase()}_obs_base_${replayBase.slice(0, 7)}`, key);
+    assert.equal(onBase.readyRefusal, null, 'the base releases it');
+    assert.equal(onBase.dispatchRefusal, null, 'and its dispatch gate offers it: a worker is handed the master-only step');
+    assert.ok(onBase.claimed, 'the worker claims an item it cannot observe or submit');
+    assert.equal(onBase.escalations, 1, 'so its blocked report is an open escalation: the instance reproduces');
+
+    const onCandidate = await replayMasterObservation(null, `${key.replace('-', '').toLowerCase()}_obs_candidate_${replayBase.slice(0, 7)}`, key);
+    assert.match(onCandidate.readyRefusal ?? '', /loop-owned/, 'the candidate refuses the release by command');
+    assert.equal(onCandidate.ready, false, 'it never leaves the backlog');
+    assert.equal(onCandidate.escalations, 0, 'no worker is ever dispatched, so none blocks: the instance cannot recur');
+    assert.match(decisionPrecondition('release', { expectedRevision: onCandidate.work.revision }, onCandidate.work) ?? '', /loop-owned/, 'a release decision is refused at its precondition too');
+
+    // GY-1696 stands released on the live board, so the refusal cannot only guard the release: an item
+    // released before this change is withheld from every worker still — the loop's dispatchable filter
+    // and a hand dispatch alike, judged on the base's released document by the candidate's gates.
+    const { dispatchable, assertDispatchable } = await plane(null);
+    const released = onBase.released!;
+    assert.equal(dispatchable(released, onBase.at), false, 'the dispatchable filter withholds the released legacy item from the board');
+    assert.throws(() => assertDispatchable(released, [released], new Date(onBase.at).toISOString()), /loop-owned/, 'and a hand dispatch is refused with the same words');
+  });
+}
