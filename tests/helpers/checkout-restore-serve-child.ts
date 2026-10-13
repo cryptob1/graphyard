@@ -17,7 +17,8 @@ import fs, { existsSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { checkoutRestoreGrantVariable } from '../../src/cli/checkout-restore-release.js';
+import { daemonStatePath } from '../../src/daemon/state.js';
+import { checkoutRestoreGrantVariable, lockedLoop } from '../../src/cli/checkout-restore-release.js';
 import { ancestorPids, serveCheckoutRestoreAct } from '../../src/cli/checkout-restore-serve.js';
 import { checkoutWriterScan, freezeCheckoutWriters } from '../../src/cli/checkout-writers.js';
 
@@ -55,6 +56,8 @@ if (args[0] !== 'master' || args[1] !== 'checkout-restore' || args[2] !== '--ser
 try {
   const uid = process.getuid!();
   const output = await serveCheckoutRestoreAct(args.slice(3), {
+    // GY-1745: the release a diverged HEAD moves onto is the fixture snapshot's HEAD, not this worktree's, which the fixture's object store lacks.
+    ...(snapshot ? { diverge: async (config: { baseBranch: string }, _root: string, _run: unknown) => ({ base: `refs/remotes/origin/${config.baseBranch}`, loaded: (await lockedLoop(daemonStatePath(config as never)))?.loaded ?? null, serving: git('rev-parse', 'HEAD')! }) } : {}),
     ...(loopPid ? { ancestors: () => [process.pid, ...ancestorPids(), loopPid] } : {}),
     quiesce: async directory => {
       frozenAt = Date.now();
