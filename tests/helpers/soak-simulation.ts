@@ -2044,7 +2044,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       },
     } : {}),
     exhaustedProofs: async () => [...abandoned.values()],
-    ...(mechanicalDay ? { mechanicalFixes: async () => mechanicalFixState(ledger) } : {}),
+    ...(mechanicalDay ? { mechanicalFixes: async () => mechanicalFixState(ledger),
+      recordMechanicalPlan: (work: Work, plan: { reviewId: number; head: string } | null) => api(principals.operatorAgent, 'POST', `work/${work.id}/mechanicalplan`, plan ? { ...plan, planned: true } : { reviewId: work.mechanicalPlan?.reviewId ?? 1, head: work.mechanicalPlan?.head ?? work.candidate!.sha, planned: false }) } : {}),
     // A rework decision waiting on a stale observation wakes the item's own job (GY-793): the real
     // resync, with the observation job run while the step waits, as the control plane runs it. Its
     // waking resync is an observation wake like GY-710's, and counts as one; the polls do not.

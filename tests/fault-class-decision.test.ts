@@ -511,3 +511,46 @@ test('manual:fault-class-decision — a partial observation settles no held esca
   trackFaults(state.faults, [], '2026-10-12T02:18:55.000Z');
   assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:escalation']);
 });
+
+// GY-1764 names this file for GY-1763's two instances (decision class, subjects GY-1696 and GY-1761): decision formation had no
+// evidence gate. Each is replayed as the item stood; the candidate forms no decision the evidence refutes.
+test('integration:fault-class-decision-gy-1763-replay — GY-1696\'s two ask shapes produce no approver decision and no decision-refused fault', async () => {
+  const { nonRepositoryPaths } = await import('../src/model/scope-repository.js');
+  const { decideScopeRequest } = await import('../src/model/scope.js');
+  const tree = new Set(['src/model/scope.ts', 'src/daemon/cycle-scope.ts', 'README.md']);
+  const at = '2026-10-13T05:26:00.000Z', now = Date.parse('2026-10-13T05:26:30.000Z');
+  const criteria = [{ id: 'AC-1', text: 'The live observation is recorded by a master session', proofs: ['manual:checkout-restore'] }];
+  for (const paths of [['daemon.relea', 'upgrade.align'], ['.graphyard/master.json']]) {
+    const request = { epoch: 1, paths, reason: 'AC-1 needs the live fields', requestedBy: 'graphyard-opencode-1', at };
+    const standing = (decision: ReturnType<typeof decideScopeRequest> & { decidedBy?: string }) => ({
+      key: 'GY-1696', stage: 'build', plannedFiles: [] as string[], criteria, lease: { epoch: 1, expiresAt: '2026-10-13T06:26:00.000Z' },
+      scopeRequest: { ...request, decision: { state: decision.state, reason: decision.reason, paths, at, decidedBy: 'graphyard', waitedMs: 0, requestedBy: request.requestedBy, requestedAt: at, epoch: 1, ...(decision.nonRepository ? { nonRepository: true } : {}) } },
+    } as unknown as Work);
+    // Base: the rule judges implication alone, refuses the ask, and the loop routes it to the approver, who refuses it (decision-refused).
+    const base = standing(decideScopeRequest({ plannedFiles: [], criteria }, request));
+    assert.ok(decisions.scopeRoutineDecision(base, now, true), `${paths.join(', ')}: the base routes the ask to the approver`);
+    // Candidate: the evidence gate refuses it in-process, with the offending path named, and nothing is routed.
+    const gated = decideScopeRequest({ plannedFiles: [], criteria }, request, { nonRepository: nonRepositoryPaths(paths, tree) });
+    assert.equal(gated.state, 'refused');
+    assert.ok(paths.some(path => gated.reason.includes(path)), gated.reason);
+    assert.equal(decisions.scopeRoutineDecision(standing(gated), now, true), null, `${paths.join(', ')}: no approver decision is formed`);
+  }
+});
+
+test('integration:owed-decision-gy-1761-replay — approval 5499583025 of 632185dd with no ledger plan holds nothing and owes no decision past reworkDecisionWaitBoundMs', async () => {
+  const { mechanicalReviewHold } = await import('../src/mechanical-findings.js');
+  const head = '632185dd17dd'.padEnd(40, '0'), submittedAt = '2026-10-13T06:25:00.000Z';
+  const review = { reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'APPROVED', id: 5499583025, submittedAt, mechanical: 2 };
+  const candidate = { sha: head, baseSha: '1'.repeat(40), pr: 1169, branch: 'graphyard/gy-1761-1', author: 'implementer' };
+  const gy1761 = { id: 'work-1761', key: 'GY-1761', stage: 'review', epoch: 1, criteria: [{ id: 'AC-1', text: 'It works', proofs: ['unit:works'] }], evidence: [], gates: [], dependencies: [], workspaces: [], lastAssignment: { owner: 'implementer', epoch: 1 }, implementers: ['implementer'], reworkRequested: false, policy: { checks: ['test'], review: true, reviewProvider: 'github' }, candidate, submission: { epoch: 1, pr: 1169 },
+    observation: { candidate, reviews: [review], checks: [], merged: false, prState: 'open', draft: false, at: submittedAt } } as unknown as Work;
+  const sevenOhOne = Date.parse('2026-10-13T07:00:34.946Z');
+  // Base: the gate held from the observation's review entry alone, until 07:25:00Z, while the ledger planned nothing (mechanicalFix null, follow-ups filed 06:24:59.869Z).
+  // Candidate: the ledger reports no plan, so there is no hold and no owed request-rework to outlast the bound.
+  assert.equal(mechanicalReviewHold(gy1761, sevenOhOne), null, 'no plan, no hold');
+  assert.equal(decisions.neededDecision(gy1761, { autoMerge: true } as never, undefined, [], []), null, 'and no mechanical rework is owed');
+  assert.ok(sevenOhOne - Date.parse('2026-10-13T06:25:05.685Z') > reworkDecisionWaitBoundMs, 'the instance stood past the bound at 07:00:34Z');
+  // The same approval with a planned fix is held, as GY-971 intends, and owes its round.
+  const held = mechanicalReviewHold({ ...gy1761, mechanicalPlan: { reviewId: 5499583025, head } }, sevenOhOne);
+  assert.match(held ?? '', /Approval 5499583025 of 632185dd17dd names 2 findings classified mechanical/);
+});

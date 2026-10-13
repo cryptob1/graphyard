@@ -173,6 +173,8 @@ export interface Work extends Create {
   criteria: Criterion[];
   retiredCriterionIds?: string[];
   formalReviewResetRequired?: boolean;
+  /** The planned mechanical-fix round the review ledger holds for the current candidate (GY-1764): the only ground that holds an approved head for its bot round. */
+  mechanicalPlan?: { reviewId: number; head: string } | null;
   formalReviewBaseline?: { pr: number; policyRevision: number; reviewIds: number[] };
   // Append-only identities that have held an assignment. Trusted proof producers
   // must stay independent of every one of them, not only the latest assignment.

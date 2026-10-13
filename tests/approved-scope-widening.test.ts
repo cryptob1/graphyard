@@ -11,6 +11,8 @@ import { decisionInput } from '../src/master.js';
 import * as decisionsModule from '../src/daemon/decisions.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { nonRepositoryPaths, nonRepositoryReason } from '../src/model/scope-repository.js';
+import { decideScopeRequest, routableScopeRequest } from '../src/model/scope.js';
 
 // GY-1484: on GY-1480 the independent approver approved two routed scope widenings, and both settled
 // failed — "The scope request this widening answers is no longer open" — because the worker's wait
@@ -157,4 +159,57 @@ test('unit:failed-widening-not-stale-counted — a widening that failed only bec
   assert.equal(decisionsModule.uncountedScopeFailure(watch, { state: 'refused', outcome: 'The scope request this widening answers is no longer open' }, unplanned), false, 'a refusal is a judgement');
   assert.equal(decisionsModule.uncountedScopeFailure({ action: 'rework', scope: watch.scope } as never, closed, unplanned), false, 'only a requirements decision');
   assert.equal(decisionsModule.uncountedScopeFailure({ action: 'requirements', scope: null }, closed, unplanned), false, 'only one that answers a scope request');
+});
+
+// GY-1764. A scope ask is checked against the repository tree before it can become an approver decision:
+// GY-1696's worker asked for 'daemon.relea' and 'upgrade.align' (truncated master-status fields) and for
+// '.graphyard/master.json' (the install-local credential), and each ask spent an approver session.
+const tree = new Set(['src/model/scope.ts', 'src/daemon/cycle-scope.ts', 'tests/scope.test.ts', 'docs/master-agent.md', 'README.md', 'package.json']);
+
+test('unit:scope-ask-nonrepository-path-refused — paths that are not repository files are refused naming the path and the near miss', () => {
+  const found = nonRepositoryPaths(['daemon.relea', 'upgrade.align', 'src/model/scope.ts'], tree);
+  assert.deepEqual(found.map(entry => entry.path), ['daemon.relea', 'upgrade.align']);
+  assert.equal(found[0]!.nearMiss, 'daemon.release');
+  assert.equal(found[1]!.nearMiss, 'upgrade.alignedRelease');
+  const reason = nonRepositoryReason(found);
+  assert.match(reason, /daemon\.relea is not a repository file/);
+  assert.match(reason, /did you mean daemon\.release\? daemon\.release is a master-status field, not a file/);
+  assert.deepEqual(nonRepositoryPaths(['nowhere/else/file.ts'], tree).map(entry => entry.path), ['nowhere/else/file.ts'], 'inside no tracked directory');
+  // The rule itself refuses, and the refusal is the evidence gate's, which nothing routes.
+  const verdict = decideScopeRequest({ plannedFiles: ['src/model/scope.ts'], criteria: [{ id: 'AC-1', text: 'x', proofs: [] }] }, { paths: ['daemon.relea'] }, { nonRepository: found });
+  assert.equal(verdict.state, 'refused');
+  assert.equal(verdict.nonRepository, true);
+  assert.match(verdict.reason, /daemon\.release/);
+});
+
+test('unit:scope-ask-install-local-path-refused — the install-local .graphyard/ directory is never a repository path', () => {
+  const found = nonRepositoryPaths(['.graphyard/master.json', '.graphyard/', '.graphyard/worktrees/x/y.ts'], new Set([...tree, '.graphyard/tracked-by-mistake.json']));
+  assert.deepEqual(found.map(entry => [entry.path, entry.why]), [['.graphyard/master.json', 'install-local'], ['.graphyard/', 'install-local'], ['.graphyard/worktrees/x/y.ts', 'install-local']]);
+  assert.match(nonRepositoryReason(found), /\.graphyard\/master\.json is under the install-local \.graphyard\/ directory/);
+});
+
+test('unit:scope-ask-new-file-still-decidable — a file a change will add beside tracked ones, and a directory entry, are not refused', () => {
+  assert.deepEqual(nonRepositoryPaths(['src/model/scope-repository.ts', 'src/daemon/new/deeper/file.ts', 'tests/scope-repository.test.ts', 'docs/', 'src/*.ts', 'src/model/'], tree), []);
+  assert.deepEqual(nonRepositoryPaths(['README.md', 'package.json'], tree), [], 'tracked root files');
+});
+
+test('integration:decision-refused-gy-1696-replay — a worker\'s ask for truncated field names or the install-local credential is refused in-process and never routed to the approver', async () => {
+  for (const [title, paths] of [['truncated fields', ['daemon.relea', 'upgrade.align']], ['install-local credential', ['.graphyard/master.json']]] as const) {
+    const work = await claimed(`GY-1696 replay: ${title}`);
+    await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths, reason: 'AC-1 is a live observation only a master session can record' });
+    // Base: the loop decides without the tree, the rule defers to the approver, and the ask is routed verbatim.
+    const asked = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch }) as Work;
+    const now = Date.parse(asked.lease!.expiresAt) - 60_000; // inside the lease, from the item's own record
+    assert.ok(routableScopeRequest(asked, now), `${title}: without the tree the ask is routed to the approver`);
+    assert.ok(decisionsModule.scopeRoutineDecision(asked, now, true), `${title}: and becomes a requirements decision`);
+    // Candidate: the loop reads the tree, and the same cycle's decision refuses the ask for what it names.
+    const offenders = nonRepositoryPaths(paths, tree);
+    const refused = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch, nonRepository: offenders }) as Work;
+    assert.equal(refused.scopeRequest?.decision?.state, 'refused');
+    assert.equal(refused.scopeRequest?.decision?.nonRepository, true);
+    assert.match(refused.scopeRequest!.decision!.reason, /not a repository file|install-local/);
+    assert.equal(routableScopeRequest(refused, now), null, `${title}: never routed`);
+    assert.equal(decisionsModule.scopeRoutineDecision(refused, now, true), null, `${title}: no approver decision`);
+    assert.deepEqual((await decisions(refused)).filter(decision => decision.action === 'requirements'), [], `${title}: none was requested`);
+  }
 });

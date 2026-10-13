@@ -2,6 +2,7 @@
 import type { Work } from '../model.js';
 import { type ScopeRequestState, companionGround, decideScopeRequest, itemDocumentationPaths, pathScope, pathScopeContains, pinningTestGround, plannedFilesMax, redecidableScopeRefusal, routableScopeRequest, scopeDecisionBinding, testFile, unplannedPaths } from '../model/scope.js';
 import { importingTestGround, newProofTestGround, peerModuleGround } from '../model/scope-companions.js';
+import { type NonRepositoryPath, nonRepositoryPaths } from '../model/scope-repository.js';
 import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import { groundedWideningReason } from '../model/scope-provenance.js';
 import { barrelSuccessorGround, criterionSymbolGround, criterionSymbols, criterionTestGround, phraseCallees } from '../model/criterion-scope.js';
@@ -224,11 +225,22 @@ export async function scopeStep(cycle: Cycle) {
       return null;
     }
   };
+  // GY-1764: the evidence gate. The base branch's tracked files are read once per cycle, only when an
+  // ask is open, outside every transaction; a failed read leaves the ask to the rules as before.
+  let tree: Promise<ReadonlySet<string> | null> | null = null;
+  const offending = async (item: Work, request: ScopeRequestState): Promise<NonRepositoryPath[]> => {
+    if (!effects.repositoryFiles || request.remove?.length || request.criteria?.length) return [];
+    tree ??= effects.repositoryFiles().catch(() => null);
+    const files = await tree;
+    return files ? nonRepositoryPaths(unplannedPaths(item.plannedFiles, request.paths), files) : [];
+  };
   for (const item of open) await isolate('scope', item, item.key, async () => {
     const request = item.scopeRequest;
+    // A refusal the rule gave without the tree, or a fresh ask, naming no repository file is refused for that (never routed).
+    const gated = request && (!request.decision || request.decision.state === 'refused' && request.decision.decidedBy === 'graphyard' && !request.decision.nonRepository) ? await offending(item, request) : [];
     // A refusal is reconsidered only when the rules as they stand now would approve it — once per
     // policy revision of the item, backing off on failure — so a standing refusal never churns.
-    const redecide = !!request?.decision && redecidableScopeRefusal(item);
+    const redecide = !!request?.decision && (redecidableScopeRefusal(item) || gated.length > 0);
     if (request?.decision?.state === 'refused' && !redecide) { await widenOnFindings(item, request); return; }
     if (!effects.decideScope || !request || (request.decision && !redecide)) return;
     // A request whose attempt no longer holds the lease is moot: a fresh attempt asks afresh.
@@ -244,7 +256,7 @@ export async function scopeStep(cycle: Cycle) {
     await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'started',
       detail: `Deciding ${item.key}'s scope request for ${request.paths.length ? namePaths(request.paths) : 'no path'}`, attempts, cycle: state.cycle }, now(), effects.persist);
     try {
-      const decided = await effects.decideScope(item);
+      const decided = await effects.decideScope(item, gated);
       const decision = decided.scopeDecision;
       if (!decision) throw new Error('The control plane answered without a decision');
       settled.set(item.id, decided);

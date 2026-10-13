@@ -424,6 +424,14 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // GY-1436: one stable wait per held item, naming the docs-sync session, head, base and the end of its bound; that bound, reached or still ahead, ends the loop's idle wait (GY-1622), kept at the latest local time the control plane can reach it (the read's upper clock offset): the cycle it wakes finds the hold ended, at most one round trip late.
   const noteHold = async (item: Work, { wait: detail, deadline }: { wait: string; deadline: string }) => { const bound = Date.parse(deadline); const waitKey = `wait:docs-sync:${item.id}`; if (bound >= clock) bounds.set(item.id, bound + clockOffset.max); if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
   const mechanical = effects.mechanicalFixes ? await effects.mechanicalFixes().then(read => read.requests, () => []) : []; // GY-971 planned bot rounds
+  // GY-1764: the review gate holds an approved head for its bot round only on the plan the ledger holds, so the loop reports it: the plan for the item's candidate, or its absence once the plan settles.
+  if (effects.recordMechanicalPlan && effects.mechanicalFixes) for (const item of snapshot.work) {
+    if (item.stage === 'done' || !item.candidate) continue;
+    const plan = mechanical.find(entry => entry.key === item.key && entry.head === item.candidate!.sha && entry.pr === item.candidate!.pr && entry.epoch === item.epoch);
+    const wanted = plan ? { reviewId: plan.reviewId, head: plan.head } : null, held = item.mechanicalPlan ?? null;
+    if (wanted?.reviewId === held?.reviewId && wanted?.head === held?.head) continue;
+    await effects.recordMechanicalPlan(item, wanted).catch(() => undefined);
+  }
   const routinePass = budget.pass(), attestPass = budget.pass();
   // GY-1439: while a close stands requested and unapplied on an item, nothing advances it (closingItems): no
   // bot round, rework, attestation or observation wake moves the revision under the close or spends a round on it.
