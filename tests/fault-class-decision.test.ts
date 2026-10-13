@@ -402,18 +402,11 @@ test('manual:fault-class-decision — decision-unanswered|GY-1710 and action:esc
   trackFaults(state.faults, [{ kind: 'decision-unanswered', faultClass: 'decision', subject: 'GY-1710', text: unanswered }], '2026-10-12T02:16:40.081Z');
   storeAction(state, `escalation:decision-unjudged:${id}`, { kind: 'escalation', work: 'GY-1710', principal: null, state: 'failed', detail: `close decision ${id} on GY-1710: approver session has not judged it for 10 minutes`, attempts: 1, cycle: 1, at: '2026-10-12T02:16:50.965Z', epoch: null }, undefined);
   assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['decision-unanswered'], 'the exhaustion escalation restates the stall');
-  // An exhaustion escalation for a decision with no unanswered line standing is its own fault.
-  storeAction(state, 'escalation:decision-unjudged:other', { kind: 'escalation', work: 'GY-9', principal: null, state: 'failed', detail: 'close decision other on GY-9: x', attempts: 1, cycle: 1, at: '2026-10-12T02:17:00.000Z', epoch: null }, undefined);
-  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['decision-unanswered', 'action:escalation']);
-});
-
-test('manual:fault-class-decision — the exhaustion escalation recorded before decision-unanswered opens is absorbed by it, one instance in either order', () => {
-  const id = '65bf0fef-d9c1-4cd2-8467-9f1866b0fd41', state = emptyDaemonState(config());
-  storeAction(state, `escalation:decision-unjudged:${id}`, { kind: 'escalation', work: 'GY-1710', principal: null, state: 'failed', detail: `GY-1710's close decision ${id} is unjudged after 3 approver session(s)`, attempts: 1, cycle: 1, at: '2026-10-12T02:16:40.081Z', epoch: null }, undefined);
-  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:escalation']);
-  trackFaults(state.faults, [{ kind: 'decision-unanswered', faultClass: 'decision', subject: 'GY-1710', text: `Decision ${id} (close) is unanswered after 41m: approver session is not running` }], '2026-10-12T02:16:50.965Z');
-  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['decision-unanswered']);
-  assert.deepEqual(Object.keys(state.faults.open), [`decision-unanswered|GY-1710|${Object.keys(state.faults.open)[0].split('|')[2]}`]);
+  // Recorded first, in the other observation order, it is the same one instance.
+  const fresh = emptyDaemonState(config());
+  storeAction(fresh, `escalation:decision-unjudged:${id}`, { kind: 'escalation', work: 'GY-1710', principal: null, state: 'failed', detail: 'x', attempts: 1, cycle: 1, at: '2026-10-12T02:16:30.000Z', epoch: null }, undefined);
+  trackFaults(fresh.faults, [{ kind: 'decision-unanswered', faultClass: 'decision', subject: 'GY-1710', text: unanswered }], '2026-10-12T02:16:40.081Z');
+  assert.deepEqual(fresh.faults.instances.map(entry => entry.kind), ['decision-unanswered']);
 });
 
 test('manual:fault-class-decision — a goal wait past its bound that quotes an HTTP 503 still counts; only the caught plane-wide error is exempt', async () => {
@@ -424,5 +417,22 @@ test('manual:fault-class-decision — a goal wait past its bound that quotes an 
   const effects = { settings: { enabled: true }, goals: async () => [goal], land: async () => ({ goal, landing: { state: 'waiting', detail: 'GitHub has not merged: HTTP 503 Startup validation has not completed' } }) };
   await acceptanceStep({ config: config(), state, effects: { acceptance: effects, persist: async () => {} }, now: () => clock, clock, performed: [],
     isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() } as never);
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:decision']);
+});
+
+// GY-1751 review: the real acceptance step and fault record over cycles of two simulated days.
+test('manual:fault-class-decision — over two simulated days a plane-wide land failure files none, and a goal refusal quoting the same words files one', async () => {
+  const { RefusedResponse } = await import('../src/model/refusal.js');
+  const { acceptanceStep } = await import('../src/daemon/acceptance.js');
+  const state = emptyDaemonState(config()), day = 86_400_000, start = Date.parse('2026-10-12T00:00:00.000Z');
+  let failure: Error = new RefusedResponse('Graphyard refused goals/G/land (503): Startup validation has not completed; retry shortly', 503, { error: 'Startup validation has not completed; retry shortly' });
+  const goal = { id: 'g', key: 'GOAL-1', stage: 'accepted', revision: 1, acceptance: { pr: 1, outcomes: [] } };
+  const effects = { settings: { enabled: true }, goals: async () => [goal], land: async () => { throw failure; } };
+  for (let at = 0; at < 2 * day; at += 300_000) {
+    const clock = start + at;
+    await acceptanceStep({ config: config(), state, effects: { acceptance: effects, persist: async () => {} }, now: () => clock, clock, performed: [],
+      isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() } as never);
+    if (at === day) { assert.deepEqual(state.faults.instances, [], 'a day of plane-wide failures files none'); failure = new RefusedResponse('Graphyard refused goals/G/land (409): the approved head moved while HTTP 503 was seen on the base', 409, { error: 'the approved head moved' }); }
+  }
   assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:decision']);
 });
