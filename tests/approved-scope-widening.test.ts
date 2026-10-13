@@ -194,6 +194,8 @@ test('unit:scope-ask-install-local-path-refused — the install-local .graphyard
 test('unit:scope-ask-new-file-still-decidable — a file a change will add beside tracked ones, and a directory entry, are not refused', () => {
   assert.deepEqual(nonRepositoryPaths(['src/model/scope-repository.ts', 'src/daemon/new/deeper/file.ts', 'tests/scope-repository.test.ts', 'docs/', 'src/*.ts', 'src/model/'], tree), []);
   assert.deepEqual(nonRepositoryPaths(['README.md', 'package.json'], tree), [], 'tracked root files');
+  assert.deepEqual(nonRepositoryPaths(['./src/model/scope.ts', './src/daemon/new-file.ts', './src/*.ts'], tree), [], 'a ./-prefixed tracked or new path stays decidable');
+  assert.deepEqual(nonRepositoryPaths(['./.graphyard/master.json', './nowhere/x.ts'], tree).map(entry => entry.why), ['install-local', 'untracked'], 'a ./ prefix hides neither refusal');
 });
 
 test('integration:decision-refused-gy-1696-replay — a worker\'s ask for truncated field names or the install-local credential is refused in-process and never routed to the approver', async () => {

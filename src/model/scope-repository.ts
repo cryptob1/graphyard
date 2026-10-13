@@ -7,7 +7,7 @@ export const masterStatusFields: readonly string[] = ['daemon.release', 'upgrade
 export interface NonRepositoryPath { path: string; nearMiss: string | null; why: 'install-local' | 'untracked' }
 
 /** The path an ask names, reduced to the file or directory it is anchored at: a glob or a directory entry loses its tail. */
-const anchored = (path: string) => path.replace(/\*.*$/, '').replace(/\/+$/, '');
+const anchored = (path: string) => path.replace(/^(\.\/)+/, '').replace(/\*.*$/, '').replace(/\/+$/, '');
 const editDistance = (a: string, b: string) => {
   let row = Array.from({ length: b.length + 1 }, (_, index) => index);
   for (let i = 1; i <= a.length; i++) {
