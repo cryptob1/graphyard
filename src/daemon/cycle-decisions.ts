@@ -440,7 +440,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     for (let attempt = 0; attempt < 2; attempt++) { try { await effects.recordMechanicalPlan(item, wanted); failure = null; break; } catch (error) { failure = error; } }
     if (failure) {
       const error = failure;
-      if (wanted) planUnreported.add(item.id);
+      if (wanted || held) planUnreported.add(item.id);
       const key = `mechanical-plan:${item.id}`;
       const detail = `Could not report ${item.key}'s mechanical plan (${wanted ? `review ${wanted.reviewId} on ${wanted.head.slice(0, 12)}` : 'none'}): ${message(error)}; the review gate drops the hold once its last confirmation passes ${Math.round(mechanicalPlanFreshMs / 60_000)} minutes old`;
       if (detailChanged(state.actions[key], detail)) await note(key, item, 'decision', 'failed', detail);

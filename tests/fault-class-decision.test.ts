@@ -657,6 +657,50 @@ test('integration:mechanical-plan-report-blocks-decision — an item whose plann
   for (let step = 0; step < 3; step++, now += 2 * minute) await daemon.runCycle(config(), state, effects, () => now);
   assert.ok(decisions().length > before, 'once the report lands the round forms its decision');
 });
+test('integration:mechanical-plan-report-clear-blocks-decision — a held plan the ledger no longer carries, whose clearing cannot be reported, forms no decision this cycle', async () => {
+  const { mechanicalReviewHold } = await import('../src/mechanical-findings.js');
+  const minute = 60_000, start = Date.parse('2026-10-13T08:00:00.000Z');
+  const iso = (at: number) => new Date(at).toISOString();
+  const head = '632185dd17dd'.padEnd(40, '0');
+  const review = { reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'APPROVED', id: 5499583025, submittedAt: iso(start - 35 * minute), mechanical: 2 };
+  const candidate = { sha: head, baseSha: '1'.repeat(40), pr: 1169, branch: 'graphyard/gy-1761-1', author: 'implementer' };
+  const state = emptyDaemonState(config());
+  // The plane as the loop reports to it: the item, its accepted plan report, and the ledger's standing plan.
+  // `reworkRequested` keeps the round's own rework decision out of the way: this step is the plan report.
+  let confirmedAt = iso(start - 11 * minute);
+  const attempts: ({ reviewId: number; head: string } | null)[] = [];
+  const work = (): Work => ({
+    id: 'work-1761', key: 'GY-1761', title: 'GY-1761', description: '', type: 'bug', priority: 2, dependencies: [], plannedFiles: ['src/'],
+    criteria: [{ id: 'AC-1', text: 'It works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 3, policyRevision: 1,
+    createdAt: iso(start - hour(2)), updatedAt: iso(start), stageEnteredAt: iso(start - hour(1)), ready: true, epoch: 1, lease: null, workspaces: [],
+    candidate, submission: { epoch: 1, pr: 1169 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [], scopeRequest: null, gates: [],
+    observation: { candidate, reviews: [review], checks: [], merged: false, prState: 'open', draft: false, at: iso(start - 30 * minute) },
+    mechanicalPlan: { reviewId: 5499583025, head, at: confirmedAt },
+  } as unknown as Work);
+  const effects = {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: [work()], now: iso(now) }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    persist: async () => {},
+    mechanicalFixes: async () => ({ requests: [] }),
+    recordMechanicalPlan: async (item: Work, plan: { reviewId: number; head: string } | null) => {
+      attempts.push(plan);
+      if (attempts.length <= 4) throw new Error('the control plane refused work/work-1761/mechanicalplan (503): plane-wide outage');
+      confirmedAt = iso(now);
+      return { ...item, mechanicalPlan: plan ? { ...plan, at: confirmedAt } : null };
+    },
+  } as unknown as Parameters<typeof daemon.runCycle>[2];
+  let now = start;
+  const faultsBefore = state.faults.instances.length;
+  for (let step = 0; step < 2; step++, now += 2 * minute) await daemon.runCycle(config(), state, effects, () => now);
+  const decisions = () => Object.keys(state.actions).filter(key => /^escalation:decision:/.test(key) || /rework/.test(key) && key.includes('work-1761'));
+  assert.ok(attempts.length >= 4, 'the report is retried within the cycle and again the next');
+  assert.equal(state.actions['mechanical-plan:work-1761']?.state, 'failed', 'the failed report is on the record');
+  assert.deepEqual(decisions(), [], 'no decision forms while the plan report fails');
+  assert.deepEqual(Object.values(state.approvals).map(watch => watch.work), [], 'no approval is requested for it');
+  assert.ok(attempts.every(plan => plan === null), 'only the plan\'s absence is reported');
+});
 function hour(count: number) { return count * 60 * 60_000; }
 
 // GY-1764 rework, AC-1/AC-3: the replay above injects the classifier's verdict; this one runs the real
