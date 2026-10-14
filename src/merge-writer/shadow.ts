@@ -65,7 +65,7 @@ export const deliveredMerge = (item: Pick<Work, 'stage' | 'candidate' | 'deliver
  * GitHub's side of the comparison for a verdict's head. The head's own merge decides, from the
  * snapshot or as the verdict remembers it (`delivered`): a main-guard revert of exactly that merge
  * commit makes it `reverted`, since a revert the guard opened, merged or abandoned is its judgement
- * that the merge broke main (a record whose cause is a cancelled CI run judged nothing); without
+ * that the merge broke main (a record whose cause is a cancelled CI run, or a base failure of main its revert shared, judged nothing); without
  * one the merge was kept, `merged`. A revert of an earlier delivery of the same item, fixed and
  * redelivered under a new head, says nothing about this head. With no merge of this head, the
  * current candidate's failed required check is `failed`; everything else is still `pending`.
@@ -73,7 +73,7 @@ export const deliveredMerge = (item: Pick<Work, 'stage' | 'candidate' | 'deliver
 export function githubOutcome(item: Pick<Work, 'stage' | 'candidate' | 'delivery' | 'mainGuardReverts' | 'observation' | 'policy'> | undefined, head: string, delivered?: { mergeSha: string } | null): GithubOutcome {
   if (!item) return 'pending';
   const mergeSha = delivered?.mergeSha.toLowerCase() ?? deliveredMerge(item, head);
-  if (mergeSha) return item.mainGuardReverts?.some(revert => revert.mergeSha.toLowerCase() === mergeSha && revert.cause !== 'cancelled') ? 'reverted' : 'merged';
+  if (mergeSha) return item.mainGuardReverts?.some(revert => revert.mergeSha.toLowerCase() === mergeSha && revert.cause !== 'cancelled' && revert.cause !== 'base-failure') ? 'reverted' : 'merged';
   if (item.candidate?.sha.toLowerCase() !== head.toLowerCase()) return 'pending';
   const observed = item.observation;
   if (observed?.candidate.sha.toLowerCase() !== head.toLowerCase()) return 'pending';

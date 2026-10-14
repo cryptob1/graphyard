@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { RerunPending, type GitHub } from '../src/github.js';
 import { mainCancelledRerunLimit } from '../src/main-guard.js';
+import { failedTestsMarker } from '../src/master/base-break-refresh.js';
 import { SimulatedGitHub, clock, hour, minute, protectionOnlyCheck } from './helpers/soak-world.js';
 import { file } from './helpers/soak-plane.js';
 import { soakControlPlanes } from './helpers/soak-plane.js';
@@ -357,4 +358,68 @@ test('unit:soak-main-guard-flaky — under GitHub delivery across a day with one
   assert.deepEqual(reverted.mainGuardReverts?.map(revert => revert.state), ['merged']);
   assert.match(reverted.mainGuardReverts![0].reason!, /test failed on that merge commit while its parent passed/);
   assert.equal(reverted.mainGuardFlakes, undefined, 'a failure that failed again is no flake');
+});
+
+// ---------------------------------------------------------------------------
+// GY-1789: a failure main shows without the merge. The shared world's failing `test` runs publish
+// CI's failed-tests annotation here, for this day only, so a revert whose own `test` fails the same
+// named tests as the merge's is a base failure of main, and the adapter counts every annotation read.
+// ---------------------------------------------------------------------------
+let annotatedDay: { reads: number[] } | null = null;
+const annotatedAdapter = world.adapter;
+world.adapter = function (this: SimulatedGitHub) {
+  const adapter = annotatedAdapter.call(this);
+  if (!annotatedDay) return adapter;
+  return Object.assign(adapter, {
+    async checkRunAnnotations(checkRun: number) {
+      annotatedDay!.reads.push(checkRun);
+      return [{ message: `1 test failed: unit:shared-failure. ${failedTestsMarker}${JSON.stringify({ failed: ['unit:shared-failure'] })}` }];
+    },
+  }) as GitHub;
+};
+
+test('unit:soak.main-guard-base-failure — under GitHub delivery across a day, a revert whose own test fails the same named tests as the merge is recorded as a base failure of main, not a culprit: no second revert is filed, one attention row stands while main is red, each run\'s annotations are read once, and the record clears once main passes', { timeout: 600_000 }, async () => {
+  // GY-1789: item two breaks main and its revert merges; item four breaks main and its revert fails
+  // the same named test, so the guard records it as main's own failure, closes the revert and files
+  // no further revert until main is fixed forward and passes.
+  const before = process.env.GRAPHYARD_DELIVERY;
+  process.env.GRAPHYARD_DELIVERY = 'github';
+  annotatedDay = { reads: [] };
+  let day: Awaited<ReturnType<typeof simulateDay>>;
+  try {
+    day = await simulateDay({
+      hours: 6, mainGuard: { breaks: 2, abandons: 4, fixAfterMs: 30 * minute },
+      plan: { items: 6, leftovers: 1, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, attested: 0, exhaustedReviewer: 0, unstable: 0, lowLane: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
+    });
+  } finally {
+    if (before === undefined) delete process.env.GRAPHYARD_DELIVERY; else process.env.GRAPHYARD_DELIVERY = before;
+  }
+  const scenario = annotatedDay; annotatedDay = null;
+  const { items, final, violations, failures, lost, github, escalations, guardDay } = day;
+  assert.deepEqual(violations, [], 'every system invariant holds across the base failure');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no lease was lost');
+
+  const [reverted, shared] = [items[1].key, items[3].key];
+  const brokenBy = (key: string) => github.broken.find(entry => entry.key === key)!;
+  const reverts = [...github.reverts.values()];
+  assert.deepEqual(reverts.map(revert => revert.mergeSha).sort(), [brokenBy(reverted).mergeSha, brokenBy(shared).mergeSha].sort(), 'each breaking merge has exactly one revert: none is filed again for the standing failure');
+
+  const kept = final.find(item => item.key === shared)!;
+  assert.deepEqual(kept.mainGuardReverts?.map(revert => `${revert.state} ${revert.cause}`), ['abandoned base-failure']);
+  assert.equal(kept.mainGuardReverts![0].baseFailure?.shared[0].tests[0], 'unit:shared-failure');
+  assert.ok(kept.mainGuardReverts![0].baseFailure?.cleared, 'the record cleared once main passed again');
+  assert.equal(kept.delivery?.mergeSha, brokenBy(shared).mergeSha, 'the merge keeps its delivery');
+  assert.ok(reverts.find(revert => revert.key === shared)!.closed, 'the revert pull request was closed');
+  assert.ok(guardDay!.fixedAt !== null, 'main was fixed forward');
+
+  const lines = escalations.filter(detail => detail.startsWith('Main guard:') && /base failure of main/.test(detail));
+  assert.ok(lines.length >= 1, 'one attention row names the shared failure');
+  assert.equal(new Set(lines).size, 1, `the row stays one row for the whole period: ${lines.join(' | ')}`);
+
+  // Annotations are read once per check run, not once per tick.
+  assert.equal(new Set(scenario.reads).size, scenario.reads.length, `no check run's annotations are read twice: ${scenario.reads.join(', ')}`);
+  assert.ok(scenario.reads.length <= 8, `annotation reads stay bounded by the runs compared: ${scenario.reads.length}`);
+  const ticks = guardDay!.ticks;
+  assert.deepEqual(ticks.at(-1)!.requests.map(request => request.kind), ['history'], 'once main is green a tick is one history read');
 });
