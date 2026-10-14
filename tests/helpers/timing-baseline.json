@@ -817,7 +817,6 @@
     "tests/work-snapshot-latency.test.ts": 109943,
     "tests/worker-launch-control-plane.test.ts": 528,
     "tests/worker-preference-risk.test.ts": 9000,
-    "tests/worker-prompt-gates.test.ts": 312,
     "tests/worker-push-credential.test.ts": 4639,
     "tests/worker-push-rights.test.ts": 16375,
     "tests/worker-sandbox.test.ts": 3744,
