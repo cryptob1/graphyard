@@ -761,6 +761,7 @@
     "tests/submit-head.test.ts": 1148,
     "tests/successor-scope.test.ts": 1901,
     "tests/sudo-code-entry.test.ts": 1000,
+    "tests/sudo-code-late-field.test.ts": 479,
     "tests/sudo-fallback.test.ts": 1500,
     "tests/sudo-form-capture.test.ts": 1000,
     "tests/sudo-totp-field.test.ts": 1000,
