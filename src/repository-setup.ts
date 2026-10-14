@@ -708,6 +708,8 @@ export async function writeExecutorDeclaration(root: string, declaration: Execut
   return { file, declaration: parsed };
 }
 
+/** The environment variable a unit hands the checkout to a snapshot's entry or launcher in (GY-1790). */
+export const checkoutRootVariable = 'GRAPHYARD_CHECKOUT_ROOT';
 /**
  * The shipped template, bound to one checkout: its working directory and the node binary and
  * script it starts. Nothing else in the unit is host-specific, so an operator who edited the
@@ -715,7 +717,10 @@ export async function writeExecutorDeclaration(root: string, declaration: Execut
  */
 export function renderExecutorUnit(template: string, binding: { root: string; node: string; script?: string; checkoutRoot?: string }) {
   const escape = (value: string) => value.replaceAll('%', '%%');
-  const lines = template.split('\n');
+  // GY-1790: the handed-checkout line is this renderer's own; one a previous render wrote is dropped
+  // before the unit is rendered again, so rendering a rendered unit is byte-identical (the alignment
+  // compares the two and reloads the manager only on a difference) and a lift leaves none behind.
+  const lines = template.split('\n').filter(line => !line.startsWith(`Environment="${checkoutRootVariable}=`));
   const working = lines.findIndex(line => line.startsWith('WorkingDirectory=')), start = lines.findIndex(line => line.startsWith('ExecStart='));
   if (working < 0 || start < 0) throw new Error('The executor unit template has no WorkingDirectory= or ExecStart= line');
   lines[working] = `WorkingDirectory=${escape(binding.root)}`;
@@ -725,7 +730,7 @@ export function renderExecutorUnit(template: string, binding: { root: string; no
   const script = binding.script ?? defaultScript;
   // GY-1790: an entry bound from the held snapshot is handed the checkout it serves, so the pin and
   // the commit re-read in front of every claim are the checkout's, read from there.
-  if (binding.checkoutRoot) lines.splice(start, 0, `Environment="GRAPHYARD_CHECKOUT_ROOT=${escape(binding.checkoutRoot)}"`);
+  if (binding.checkoutRoot) lines.splice(start, 0, `Environment="${checkoutRootVariable}=${escape(binding.checkoutRoot)}"`);
   lines[start + (binding.checkoutRoot ? 1 : 0)] = `ExecStart=${escape(binding.node)} ${escape(script)} --slot %i`;
   return lines.join('\n');
 }
