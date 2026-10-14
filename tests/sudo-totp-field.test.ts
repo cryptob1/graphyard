@@ -260,9 +260,9 @@ test('unit:sudo-copy-profile-routes — on a profile copy the handoff offers the
   } finally { await new Promise<void>(accept => setup.http.close(() => accept())); }
 });
 
-test('unit:sudo-code-direct — a code handed while a GitHub Mobile prompt waits is typed, and a profile copy\'s Mobile handoff offers the code methods and the local App page', async () => {
+test('unit:sudo-code-direct — a code handed while a GitHub Mobile prompt waits is typed, even when the field renders late, and a profile copy\'s Mobile handoff offers the code methods and the local App page', async () => {
   const { passSudo, sudoInstruction } = await browser();
-  const fake = fixturePage({ renderWaits: [1] });
+  const fake = fixturePage({ renderWaits: [7] });
   let mobile = false;
   const base = fake.page;
   const page: BrowserPage = { ...base, copy: true,
@@ -281,7 +281,7 @@ test('unit:sudo-code-direct — a code handed while a GitHub Mobile prompt waits
   assert.deepEqual(fake.state.submitted, [CODE], 'the code handed beside the Mobile prompt reached the TOTP field');
   const instruction = sudoInstruction(handed[0], 'your phone', { page: LOCAL, command: 'graphyard up --sudo-code', profile: { mode: 'copy', name: 'Default' } });
   assert.match(instruction, /^Approve the GitHub Mobile prompt on your phone and choose 42/);
-  assert.match(instruction, new RegExp(`Or enter your authenticator app's 6-digit code at ${LOCAL} or with graphyard up --sudo-code CODE`));
+  assert.match(instruction, new RegExp(`Or enter your authenticator app's 6-digit code at ${LOCAL} or with graphyard up --sudo-code CODE: the drive opens its code view beside this prompt and types the code as soon as GitHub shows the field \\(up to 10 s\\)`));
   assert.match(instruction, new RegExp(`Or open ${LOCAL} in your own browser and click its button there`));
   assert.doesNotMatch(instruction, /own Chrome/);
 });

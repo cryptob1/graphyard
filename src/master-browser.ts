@@ -343,7 +343,7 @@ export function sudoInstruction(state: Pick<SudoState, 'code' | 'method' | 'url'
   const codes = where ? (['authenticator', 'email'] as const).filter(method => state.offered?.includes(method)) : [];
   const copy = route.profile ? route.profile.mode === 'copy' : !!(route.copy ?? state.copy);
   const more = [
-    ...(codes.includes('authenticator') ? [`Or enter your authenticator app's 6-digit code ${where}: the drive types it within 2 s`] : []),
+    ...(codes.includes('authenticator') ? [`Or enter your authenticator app's 6-digit code ${where}: the drive opens its code view beside this prompt and types the code as soon as GitHub shows the field (up to 10 s), then within 2 s`] : []),
     ...(codes.includes('email') ? [`Or ask for an email code ${[route.page ? `at ${route.page}` : '', route.command ? `with ${route.command} email` : ''].filter(Boolean).join(' or ')}, then enter its 6 digits ${where}`] : []),
     ...(copy && route.page ? [`Or open ${route.page} in your own browser and click its button there: your own GitHub session holds sudo mode, and setup continues by itself once GitHub returns you to that page`] : []),
   ];
