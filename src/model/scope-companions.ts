@@ -1,13 +1,14 @@
 // Inevitable scope companions (GY-955), apart from model/scope.ts so that module keeps its budget.
 //
-// A change carries files no criterion names: the new test file its own unit proofs live in, the
-// existing tests that import a module it changes, the documentation-budget gate any documented
-// change must raise, the wall-clock gate a test change must keep passing (GY-1706), and the
-// test-duration baseline a new test file is recorded in (GY-1085). Each was refused wholesale and
-// approved minutes later by the approver as "the feature implementation, not optional add-ons"
-// (GY-945, GY-883). These rules ground them per path, so the loop grants them with no approver,
-// and `derivePlannedFiles` plans them at authoring time.
+// A change carries files no criterion names: the new test file its own unit proofs live in, the existing
+// tests that import a module it changes, the documentation-budget gate any documented change must raise,
+// the wall-clock gate a test change must keep passing (GY-1706), the test-duration baseline a new test
+// file is recorded in (GY-1085) and the verification map covering a planned file (GY-1783). Each was
+// refused wholesale and approved minutes later as "the feature implementation, not optional add-ons"
+// (GY-945, GY-883). These rules ground them per path, so the loop grants them with no approver, and
+// `derivePlannedFiles` plans them at authoring time.
 import { documentationGlobMatches } from './documentation-glob.js';
+import type { WorkOrigin } from './interventions.js';
 import { namedPaths, pathScope, pathScopeContains, testFile } from './scope.js';
 
 interface CompanionCriterion { id: string; text: string; proofs?: readonly string[] }
@@ -94,9 +95,6 @@ export function proofTestFiles(criteria: readonly CompanionCriterion[], layout =
 }
 /** A criterion that describes a change in the web UI: what makes a single file under `web/` the feature it describes. */
 const webUi = /\b(?:web (?:UI|app|page|dashboard)|dashboard)\b/i;
-
-import type { WorkOrigin } from './interventions.js';
-
 /** The fields of an item that make it a review follow-up and say what it names (GY-1116). */
 export type FollowUpSource = { origin?: WorkOrigin | null; description?: string | null };
 
@@ -124,24 +122,13 @@ export async function peerModuleGround(path: string, text: string | null, planne
   // 1. A planned file imports path (peer dependency / implementation delegate):
   for (const scope of planned) {
     const source = await read(scope);
-    if (!source) continue;
-    const imports = relativeImports(scope, source);
-    if (imports.includes(targetStem)) {
-      return `${path} is imported by ${scope}, a planned file whose behaviour the item changes`;
-    }
+    if (source && relativeImports(scope, source).includes(targetStem)) return `${path} is imported by ${scope}, a planned file whose behaviour the item changes`;
   }
-
   // 2. path imports a planned file (peer consumer):
   if (text) {
     const stems = new Map(planned.map(scope => [moduleStem(scope), scope]));
-    const imports = relativeImports(path, text);
-    for (const stem of imports) {
-      if (stems.has(stem)) {
-        return `${path} imports ${stems.get(stem)}, a planned file whose behaviour the item changes`;
-      }
-    }
+    for (const stem of relativeImports(path, text)) if (stems.has(stem)) return `${path} imports ${stems.get(stem)}, a planned file whose behaviour the item changes`;
   }
-
   return null;
 }
 
@@ -248,6 +235,51 @@ export async function importingTestGround(path: string, text: string | null, pla
     const barrel = relativeImports(scope, (source.match(/\bexport\s+(?:type\s+)?(?:\*(?:\s+as\s+[\w$]+)?|\{[^}]*\})\s*from\s*['"][^'"]+['"]/g) ?? []).join('\n')).find(stem => imports.includes(stem));
     if (barrel) return `${path} imports ${barrel}, which planned file ${scope} re-exports`;
   }
+  return null;
+}
+
+/** A per-area verification map (verification/AREA.md, GY-1495): a file, never the tree; the supported `./` spelling is the same file. */
+export const verificationMapFile = (path: string) => !pathScope(path).prefix && /^verification\/[^/]+\.md$/.test(pathScope(path).path);
+/**
+ * A test-side gate the engine grants as the companion of a test in the raw ask or the plan (the
+ * wall-clock gate, the timing baseline, the docs-budget gate): its ground is the ask's, so it is no
+ * independent ground for anything else.
+ */
+export const testCompanionGate = (path: string) => noWallClockGate(path) || timingBaseline(path) || documentationBudgetGate(path);
+/** The globs a map's opening `Paths:` line names, as parseVerificationMap reads them, or null when the text opens with no such line. */
+const verificationMapPaths = (text: string) => {
+  const opening = text.replace(/\r\n/g, '\n').split('\n').find(line => line.trim())?.match(/^Paths:\s*(.*)$/);
+  const paths = opening?.[1].split(/[\s,]+/).filter(Boolean) ?? [];
+  return paths.length ? paths : null;
+};
+/**
+ * GY-1783: the ground a verification map is granted on. A map opens with a `Paths:` line naming the
+ * globs it covers and holds the `## Tests` list an area's test files are named in, so an item that
+ * changes a file under those paths, or creates a test for one, must edit the map — granted the way
+ * the test importing a planned file is (importingTestGround). The ground names the line and the
+ * planned file it covers, or the test file under those paths a criterion names or this request has
+ * already granted on a ground of its own: `granted` holds the paths the rules grounded before the
+ * map, never the raw ask (a map covering only an unrelated test asked beside it is not granted on
+ * that test) and never a gate (`testCompanionGate`) granted as the companion of a test in the raw
+ * ask, so an ungrounded test cannot reach the map through the gate it drags in (review of d8e550a6).
+ * `text` is the map on the base: a map the base does not hold, one opening with no Paths line, or
+ * one covering none of those files stays refused and routed as before; the loop asks only for a map
+ * parseVerificationMap reads whole, so a malformed file under verification/ is routed, never granted.
+ */
+export function verificationMapGround(path: string, text: string | null, item: { plannedFiles?: readonly string[]; criteria: readonly CompanionCriterion[] }, granted: readonly string[] = []): string | null {
+  if (!text || !verificationMapFile(path)) return null;
+  const paths = verificationMapPaths(text);
+  if (!paths) return null;
+  const line = `Paths: ${paths.join(', ')}`;
+  // As verificationGlobCovers reads a glob (verification-maps.ts, not imported: it reaches scope.ts back through documentation.ts), a
+  // leading `./` is stripped, so `Paths: ./src/master/**` covers a planned `src/` as documentationGlobMatches covers a file under it (review of 8aac4bbf).
+  const covered = (entry: string) => entry !== path && paths.some(glob => documentationGlobMatches(glob, entry) || pathScope(entry).prefix && glob.replace(/^\.\//, '').startsWith(pathScope(entry).path));
+  const planned = (item.plannedFiles ?? []).find(covered);
+  if (planned) return `${path} is the verification map whose ${line} covers ${planned}, a planned file whose behaviour the item changes`;
+  const created = item.criteria.flatMap(criterion => namedPaths(criterion.text)).find(entry => testFile(entry) && covered(entry));
+  if (created) return `${path} is the verification map whose ${line} covers ${created}, a test file the item creates`;
+  const companion = granted.find(entry => testFile(entry) && !testCompanionGate(entry) && covered(entry));
+  if (companion) return `${path} is the verification map whose ${line} covers ${companion}, a test file this request grants`;
   return null;
 }
 

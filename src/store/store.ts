@@ -61,35 +61,16 @@ export class Store {
     this.background = new BackgroundLane(Math.max(1, Math.floor(max / 2))); this.reportPool = reportPool(url, options, storeConnectionTimeoutMs, storeStatementTimeoutMs);
   }
   /**
-   * Apply the additive migration and record the schema generation it reached. Running
-   * against a database a newer release already migrated refuses: rolling the application
-   * back under a schema it does not know is how columns and rows go missing silently.
-   *
-   * A release whose generation, prelude and every table's DDL are already recorded starts
-   * without any coordination or table lock: it reads graphyard_schema and its comment (the
-   * digest of the migration that last ran, with a digest per table, GY-773) and skips the
-   * DDL, so a new container never queues behind a busy live replica. A release that must
-   * migrate takes a lock — the migration lock, never the coordination lock (GY-203) — but
-   * touches only the tables whose DDL is not already recorded: a table whose recorded digest
-   * matches this release's is skipped without any lock at all, so `ALTER TABLE ... ADD COLUMN
-   * IF NOT EXISTS` and a trigger rebuild on receipts never hold up the writes that stream
-   * through an unchanged events table. A release whose whole-migration digest is recorded at
-   * this generation but whose per-table digests are not records them alone: a matching whole
-   * digest proves every table's DDL ran, so the upgrade itself takes no lock on a work table.
-   *
-   * Every lock wait of the migration shares one `lockTimeoutMs` deadline: each step's
-   * lock_timeout is the time left, and a watchdog cancels any lock wait still running at the
-   * deadline, so waits on the migration lock, across tables, and between the statements of one
-   * table's DDL never add up past it. The watchdog's connection is reserved before the migration
-   * begins, and a migration that cannot reserve it, or loses it past the deadline, fails at once.
-   * A deadlock or an expired lock wait under live traffic (40P01, 55P03, the watchdog's 57014) is
-   * transient: the attempt rolls back — releasing every lock at once, so live requests queue
-   * behind a failed attempt no longer — and retries with backoff while the deadline allows, all
-   * inside the health-check window. Each attempt waits for its locks at most
-   * `attemptLockTimeoutMs` (3 s by default) before it gives up its place, so a live writer queued
-   * behind the migration's exclusive lock request waits no longer than one attempt's budget. Startup then fails naming the lock, well inside the platform's
-   * health window. The migration's own work is not timed: a backfill or index build that takes
-   * longer than the lock budget (the offline `graphyard db migrate` Job) still completes.
+   * Apply the additive migration and record the schema generation it reached (migration-locks.ts
+   * holds the lock order, the per-table digests and the retrying lock deadline, GY-773). A database
+   * a newer release already migrated is refused: rolling back under a schema this release does not
+   * know is how columns and rows go missing silently. A release whose generation and every table's
+   * DDL are recorded starts without any lock; one that must migrate takes the migration lock, never
+   * the coordination lock (GY-203), only for the tables whose DDL is not yet recorded. Every lock
+   * wait shares one `lockTimeoutMs` deadline, each attempt waiting at most `attemptLockTimeoutMs`
+   * (3 s) before it rolls back and retries, so startup fails naming the lock inside the health
+   * window. The migration's own work is not timed: a long backfill (the offline `graphyard db
+   * migrate` Job) still completes.
    */
   async init(options: { lockTimeoutMs?: number; attemptLockTimeoutMs?: number } = {}) { return runStartupMigration(this.pool, options); }
   async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
@@ -157,6 +138,21 @@ export class Store {
       return (limit === null ? rows : rows.slice(0, limit)).map(row => row.document);
     } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
     finally { client.release(); }
+  }
+  /**
+   * The items whose candidate or submission names pull request `pr` (GY-1778), what the CI plan
+   * step asks for: a settled match as the work index's stored summary, matched on the index alone
+   * (its `pr` column, the candidate's, or the submission its summary keeps, so a delivery submitted
+   * without a candidate is found and no settled document is read); an open item whole.
+   */
+  async workForPullRequest(pr: number): Promise<Work[]> {
+    const rows = (await this.pool.query(`SELECT w.number, CASE WHEN COALESCE(i.settled, false) AND i.summary IS NOT NULL THEN i.summary ELSE w.document END AS document
+      FROM work_items w LEFT JOIN work_index i ON i.id = w.id
+      WHERE CASE WHEN i.pr = $1 THEN true
+        WHEN COALESCE(i.settled, false) AND i.summary IS NOT NULL THEN graphyard_number(i.summary->'submission'->'pr') = $1
+        ELSE graphyard_number(w.document->'candidate'->'pr') = $1 OR graphyard_number(w.document->'submission'->'pr') = $1 END
+      ORDER BY w.number`, [pr])).rows;
+    return rows.map(row => row.document);
   }
   async workSnapshot(): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[] }> {
     const row = (await this.pool.query("SELECT COALESCE(jsonb_agg(document ORDER BY number), '[]'::jsonb) AS work, statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs FROM work_items")).rows[0];
