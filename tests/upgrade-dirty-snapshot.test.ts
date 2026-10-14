@@ -505,3 +505,20 @@ test('unit:dirty-checkout-holding-the-tip-snapshots-it — a dirty checkout that
   assert.deepEqual(calls.executors, [tip]);
   assert.equal(status(root), ' M README.md', 'the dirty checkout is untouched');
 });
+
+test('unit:dirty-path-named-with-an-arrow — a modified tracked file whose name contains " -> " is named whole in the dirty paths, and a rename names the path the tree holds', async () => {
+  const w = await world('arrow-path');
+  const { root } = w;
+  await mkdir(join(root, 'src'), { recursive: true });
+  await writeFile(join(root, 'src', 'foo -> bar.ts'), 'one\n');
+  await writeFile(join(root, 'old name.txt'), 'two\n');
+  git(root, 'add', '.');
+  git(root, 'commit', '-q', '-m', 'files');
+  await writeFile(join(root, 'src', 'foo -> bar.ts'), 'edited\n');
+  const modified = await upgrade.checkoutState(root, run);
+  assert.deepEqual(modified.dirtyPaths, ['src/foo -> bar.ts']);
+  git(root, 'checkout', '-q', '--', '.');
+  git(root, 'mv', 'old name.txt', 'new name.txt');
+  const renamed = await upgrade.checkoutState(root, run);
+  assert.deepEqual(renamed.dirtyPaths, ['new name.txt']);
+});

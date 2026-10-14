@@ -144,7 +144,21 @@ const unquotePath = (path: string) => {
   }
   return Buffer.from(bytes).toString('utf8');
 };
-const porcelainPaths = (status: string) => status.split('\n').filter(line => line.length > 3).map(line => unquotePath(line.slice(3).split(' -> ').at(-1)!.trim())).filter(Boolean);
+/** The end of a leading quoted path in `text`, or -1 when it does not start with one. */
+const quotedEnd = (text: string) => {
+  if (!text.startsWith('"')) return -1;
+  for (let i = 1; i < text.length; i++) { if (text[i] === '\\') i++; else if (text[i] === '"') return i; }
+  return -1;
+};
+/** Only a rename or copy line holds a pair; a modified path that itself contains " -> " is one path. */
+const porcelainPath = (line: string) => {
+  const text = line.slice(3).trim();
+  if (!/[RC]/.test(line.slice(0, 2))) return unquotePath(text);
+  const end = quotedEnd(text);
+  if (end >= 0) return unquotePath(text.slice(end + 1).startsWith(' -> ') ? text.slice(end + 5).trim() : text);
+  return unquotePath(text.split(' -> ').at(-1)!.trim());
+};
+const porcelainPaths = (status: string) => status.split('\n').filter(line => line.length > 3).map(porcelainPath).filter(Boolean);
 export async function checkoutState(root: string, run: ChildRun): Promise<CheckoutState> {
   const git = (...args: string[]) => run('git', ['-C', root, ...args]);
   let commit: string | null;

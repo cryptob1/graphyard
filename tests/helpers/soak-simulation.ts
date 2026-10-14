@@ -289,6 +289,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   checkoutRestart?: { moveAt: number; restartAt: number; kind: 'forward' | 'foreign'; doctor?: { scenario: string; from: number; outage: { from: number; to: number } } };
   /** GY-1773: once the dirty window closes, the operator moves the checkout onto the commit the loop runs from its held snapshot, which lifts the pin. */
   dirtyLift?: boolean;
+  /** GY-1773: inside this window the dirty checkout's HEAD follows the base tip each cycle, so it already holds the deployed commit; it is put back when the window closes. */
+  dirtyTipHold?: { from: number; to: number };
   /** GY-1773: when a commit touching no loaded code (a docs page) lands on the base branch, so a deploy after it serves a docs-only head. */
   docsOnlyCommit?: number;
   /**
@@ -2574,7 +2576,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // it reads the tree and HEAD each cycle, raises the refusal naming the paths, the HEAD and the
   // panes pointing at the checkout, and lets the self-upgrade run only on a clean checkout at the
   // commit the loop runs. Its Herdr inventory reads are counted, to bound them.
-  const guardReads = { agents: 0, refused: 0, transitions: 0, details: new Set<string>(), headMoves: 0, foreignHead: sha('foreign-head', 1) };
+  let tipHeldFrom: string | null = null;
+  const guardReads = { agents: 0, refused: 0, transitions: 0, details: new Set<string>(), headMoves: 0, tipHolds: new Set<string>(), foreignHead: sha('foreign-head', 1) };
   // One guard per loop process, as runDaemon builds it: the restart day's new process builds its own.
   const newGuard = () => coordinatorCheckoutGuard({
     state: () => state, snapshot, persist: async () => {}, now: clock.now, log: line => { if (options.checkoutRestart) restartDay.journal.push({ elapsed: clock.now() - dayStart, line }); }, applies: () => true,
@@ -3179,6 +3182,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         dirtyLift = { at: clock.now(), from: checkout.head, to: releaseLagDay.pin };
         checkout.head = releaseLagDay.pin;
       }
+      const tipHold = options.dirtyTipHold && checkout.dirty && elapsed >= options.dirtyTipHold.from && elapsed < options.dirtyTipHold.to;
+      if (tipHold) { tipHeldFrom ??= checkout.head; checkout.head = github.tip; guardReads.tipHolds.add(github.tip); }
+      else if (tipHeldFrom !== null) { checkout.head = tipHeldFrom; tipHeldFrom = null; }
       const moved = elapsed >= plan.headMove.from && elapsed < plan.headMove.to;
       if (moved && movedFrom === null) { movedFrom = checkout.head; checkout.head = guardReads.foreignHead; guardReads.headMoves++; }
       if (!moved && movedFrom !== null) { checkout.head = movedFrom; movedFrom = null; }
