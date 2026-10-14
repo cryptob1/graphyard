@@ -27,6 +27,7 @@ import { detailChanged } from './decisions.js';
 import { MergeWriterUnreadError } from '../master/dispatch.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import type { Cycle } from './cycle.js';
+import { carriedIsolate, stepCallCarried } from './step-budget.js';
 
 export const acceptanceRole = 'acceptance';
 export const acceptanceTool = 'graphyard_acceptance';
@@ -223,9 +224,11 @@ export async function acceptanceStep(cycle: Cycle) {
       // GY-1751: a control-plane step (never a GitHub or merge-writer one, whose 502 text is GitHub's) that met the plane's own outage or startup-readiness 503 asks again at its interval (GY-1375): the plane's, no decision fault.
       outcome === 'failed' && caught !== undefined && !(caught instanceof ChildProcessError) && planeWideRefusal(caught) ? null : undefined));
   };
-  const goals = await cycle.isolate('decision', null, 'the open goals', () => acceptance.goals());
+  // GY-1774: a call carried past the step's bound is recorded waiting on its goal and retried next cycle, never noted as a failure.
+  const isolate = carriedIsolate(cycle, 'triage');
+  const goals = await isolate('decision', null, 'the open goals', () => acceptance.goals());
   for (const goal of goals ?? []) {
-    await cycle.isolate('decision', null, `the acceptance of ${goal.key}`, async () => {
+    await isolate('decision', null, `the acceptance of ${goal.key}`, async () => {
       const result = pending.get(goal.id);
       if (result && result.revision !== goal.revision) pending.delete(goal.id);
       if (goal.stage === 'acceptance-drafting') return drafting(cycle, acceptance, goal, note);
@@ -244,7 +247,7 @@ async function drafting(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal,
       await acceptance.close(refused.pr, `Closed by the Graphyard loop: ${goal.key}'s acceptance draft was not taken (${clip(refused.reason, 500)}, by ${refused.by}). The next draft opens on a new pull request.`);
       closedPulls.add(refused.pr);
       await note(goal, 'done', `Closed ${goal.key}'s refused acceptance pull request #${refused.pr} and deleted its branch`);
-    } catch (error) { later(cycle, goal, 'close', acceptanceStepRetryMs); return note(goal, 'failed', `Could not close ${goal.key}'s refused acceptance pull request #${refused.pr}: ${message(error)}; it is tried again in ten minutes, and the next draft waits for it`); }
+    } catch (error) { if (stepCallCarried(error)) throw error; later(cycle, goal, 'close', acceptanceStepRetryMs); return note(goal, 'failed', `Could not close ${goal.key}'s refused acceptance pull request #${refused.pr}: ${message(error)}; it is tried again in ten minutes, and the next draft waits for it`); }
   }
   // Closed before the next draft: until then nothing else moves.
   if (refused && !closedPulls.has(refused.pr)) return;
@@ -261,10 +264,10 @@ async function drafting(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal,
     // A draft the base or the control plane can never take is dropped, so the role drafts new ids within the hourly retry rather than reopening it forever.
     const drop = (error: unknown) => { pending.delete(goal.id); later(cycle, goal, 'draft', acceptanceRetryMs); return note(goal, 'failed', `The acceptance draft for ${goal.key} can never be opened: ${message(error)}; it is dropped and drafted again in an hour`); };
     try { result.opened ??= await openDraft(acceptance, goal, result.draft); }
-    catch (error) { if (unopenable(error)) return drop(error); later(cycle, goal, 'post', acceptanceStepRetryMs); return note(goal, 'failed', `The acceptance draft for ${goal.key} could not be opened: ${message(error)}; the same draft is opened again in ten minutes, reusing its branch`, error instanceof MergeWriterUnreadError ? error : undefined); }
+    catch (error) { if (stepCallCarried(error)) throw error; if (unopenable(error)) return drop(error); later(cycle, goal, 'post', acceptanceStepRetryMs); return note(goal, 'failed', `The acceptance draft for ${goal.key} could not be opened: ${message(error)}; the same draft is opened again in ten minutes, reusing its branch`, error instanceof MergeWriterUnreadError ? error : undefined); }
     const opened = result.opened, named = opened.pr === null ? `acceptance change ${opened.head.slice(0, 12)} on ${opened.branch}` : `acceptance pull request #${opened.pr}`;
     try { await acceptance.draft(goal, { ...result.draft, ...opened }); }
-    catch (error) {
+    catch (error) { if (stepCallCarried(error)) throw error;
       if (unopenable(error)) { if (opened.pr !== null) await acceptance.close(opened.pr, `Closed by the Graphyard loop: ${clip(message(error), 500)}`).catch(() => {}); return drop(error); }
       later(cycle, goal, 'post', acceptanceStepRetryMs); return note(goal, 'failed', `Opened ${named} for ${goal.key}, but its draft could not be recorded: ${message(error)}; it is posted again in ten minutes`, error);
     }
@@ -309,7 +312,7 @@ async function awaiting(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal,
     }
     if (!due(cycle, goal, 'verdict')) return;
     try { await acceptance.judge(goal, result.judgement); }
-    catch (error) { later(cycle, goal, 'verdict', acceptanceStepRetryMs); return note(goal, 'failed', `The approver's ${result.judgement.verdict} of ${goal.key} could not be recorded: ${message(error)}; it is posted again in ten minutes`, error); }
+    catch (error) { if (stepCallCarried(error)) throw error; later(cycle, goal, 'verdict', acceptanceStepRetryMs); return note(goal, 'failed', `The approver's ${result.judgement.verdict} of ${goal.key} could not be recorded: ${message(error)}; it is posted again in ten minutes`, error); }
     pending.delete(goal.id);
     return note(goal, 'done', `The approver ${result.judgement.verdict === 'approve' ? 'approved' : 'refused'} ${goal.key}'s ${acceptanceName(goal)}: ${clip(result.judgement.reason, 600)}`);
   }
@@ -332,7 +335,7 @@ async function accepted(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal,
   later(cycle, goal, 'land', acceptancePollMs);
   let answer: { goal: Goal; landing: Landing };
   try { answer = await acceptance.land(goal); }
-  catch (error) { return note(goal, 'failed', `Could not land ${goal.key}'s approved acceptance pull request #${pr}: ${message(error)}; it is asked again in five minutes`, error); }
+  catch (error) { if (stepCallCarried(error)) throw error; return note(goal, 'failed', `Could not land ${goal.key}'s approved acceptance pull request #${pr}: ${message(error)}; it is asked again in five minutes`, error); }
   const { landing } = answer;
   if (landing.state === 'merged') return note(goal, 'done', `${goal.key}'s acceptance pull request #${pr} merged; its cases ${outcomes.map(outcome => outcome.case.id).join(', ')} are protected`);
   if (landing.state === 'waiting') {
@@ -362,10 +365,10 @@ async function landChange(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goa
     return note(goal, 'failed', `${goal.key}'s ${named} is approved for the merge writer, but this loop runs without the merge writer's steps; it is tried again in five minutes`);
   let landing: Landing;
   try { landing = await mergeAcceptanceChange(acceptance.writer, goal); }
-  catch (error) { return note(goal, 'failed', `The merge writer could not land ${goal.key}'s ${named}: ${message(error)}; it is tried again in five minutes`); }
+  catch (error) { if (stepCallCarried(error)) throw error; return note(goal, 'failed', `The merge writer could not land ${goal.key}'s ${named}: ${message(error)}; it is tried again in five minutes`); }
   if (landing.state === 'merged') {
     try { await acceptance.landed(goal, landing.mergeSha!); }
-    catch (error) { return note(goal, 'failed', `The merge writer landed ${goal.key}'s ${named} as ${landing.mergeSha}, but it could not be recorded merged: ${message(error)}; it is recorded again in five minutes, without a second push`, error); }
+    catch (error) { if (stepCallCarried(error)) throw error; return note(goal, 'failed', `The merge writer landed ${goal.key}'s ${named} as ${landing.mergeSha}, but it could not be recorded merged: ${message(error)}; it is recorded again in five minutes, without a second push`, error); }
     return note(goal, 'done', `${landing.detail}; ${goal.key}'s cases ${outcomes.map(outcome => outcome.case.id).join(', ')} are protected and it moves to planning`);
   }
   if (landing.state === 'waiting') {
@@ -376,7 +379,7 @@ async function landChange(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goa
   }
   let reopened: Goal;
   try { reopened = await acceptance.closed(goal, null, landing.detail); }
-  catch (error) { return note(goal, 'failed', `${goal.key}'s ${landing.detail}, but it could not be recorded closed: ${message(error)}; it is tried again in five minutes`, error); }
+  catch (error) { if (stepCallCarried(error)) throw error; return note(goal, 'failed', `${goal.key}'s ${landing.detail}, but it could not be recorded closed: ${message(error)}; it is tried again in five minutes`, error); }
   if (landing.state === 'unapproved') return note(goal, 'failed', `${goal.key}'s ${landing.detail}. It went back to drafting with that reason recorded`);
   pending.set(goal.id, { revision: reopened.revision, draft: { outcomes }, runs: [] });
   return note(goal, 'done', `${goal.key}'s ${landing.detail}, so it went back to drafting; the same outcomes are committed again from the current base and judged again`);

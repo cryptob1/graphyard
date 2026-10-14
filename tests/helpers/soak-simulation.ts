@@ -187,7 +187,7 @@ const staleFiler: PostDeployFiler = async input => (await localPostDeployChecks(
   ? { ...check, followUp: { ...check.followUp, input: (({ observationWindow: _, ...rest }) => ({ ...rest, description: rest.description.replace(/\n\nObservation window: [^\n]*/, '') }))(check.followUp.input) } } : check);
 // What the served release's isolated checkout emits: every statement the verifier checks.
 const loopInstructions = (text => ({ guide: text, init: text }))('Keep cycling; deployment verification is a step of the cycle, against the exact deployed release. Stop only at a genuinely external blocker recorded in Graphyard. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. Close finished agent sessions.');
-export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; limitMenu?: { worker: number; prose: number; twinLogin?: boolean }; unbounded?: { stuck: number; progressing: number; pushedOnce: number; rework: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowAnswers?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; lateReading?: boolean; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
+export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; limitMenu?: { worker: number; prose: number; twinLogin?: boolean }; unbounded?: { stuck: number; progressing: number; pushedOnce: number; rework: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowCalls?: { from: number; to: number; ms: number }; slowAnswers?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; lateReading?: boolean; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-1294: the loop's own write moves a diagnosed item's revision before its approver reads the diagnosis decision, so the decision settles stale. */
   staleDiagnosis?: boolean;
@@ -340,7 +340,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const failover = options.failover;
   const config: MasterConfig = failover ? failover.master
     // GY-1286: the slow-server day staffs every item at once, so their decisions fall due together.
-    : options.slowDecisions ? masterConfigSchema.parse({ ...soakConfig, workers: [...workers, ...extraWorkers] })
+    : options.slowDecisions || options.slowCalls ? masterConfigSchema.parse({ ...soakConfig, workers: [...workers, ...extraWorkers] })
     : options.master ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, masterSessionMinutes: options.master.sessionMinutes, masterHeartbeatMinutes: options.master.heartbeatMinutes } })
     // GY-1354: the slow-deployment day's deliveries ask for a smoke proof the loop requests from this workflow.
     : options.slowDeployment ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, smokeWorkflow: 'smoke.yml' } })
@@ -2306,7 +2306,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // ---- GY-1286: the slow-server day. Inside the window every decision request and observation wake
   // ---- the loop sends takes `ms` of the clock before the plane answers, as the 30s-timeout writes of
   // ---- cycles 12285 and 12293 did, so the decisions step runs past its budget and puts items off.
-  const budgetDay = { cycles: [] as { cycle: number; elapsed: number; spentMs: number; slow: number; deferred: string[] }[], withdrawn: [] as { key: string; cycle: number }[], slowCalls: 0, cycleSlow: 0 };
+  const budgetDay = { cycles: [] as { cycle: number; elapsed: number; spentMs: number; slow: number; deferred: string[]; carried: number }[], withdrawn: [] as { key: string; cycle: number }[], slowCalls: 0, cycleSlow: 0, slowed: {} as Record<string, number> };
   if (options.slowDecisions) {
     const window = options.slowDecisions, { decide, wakeObservation, withdraw } = effects;
     const slow = async () => {
@@ -2317,6 +2317,34 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     effects.decide = async (work, action, reason, input) => { await slow(); return decide!(work, action, reason, input); };
     effects.wakeObservation = async work => { await slow(); return wakeObservation!(work); };
     effects.withdraw = async (work, decision, reason) => { budgetDay.withdrawn.push({ key: work.key, cycle: cycles }); return withdraw!(work, decision, reason); };
+  }
+  // ---- GY-1774: the slow-plane day for every bounded step. Inside the window each approver, decision
+  // ---- and session call the loop makes — a pane close, an approver launch, a re-prompt, a decision,
+  // ---- an observation wake — takes `ms` of the clock before it answers, past the 10 s per-call
+  // ---- bound, so every step carries calls to the next cycle, which joins them or consumes their answers.
+  if (options.slowCalls) {
+    const window = options.slowCalls;
+    const slow = async (name: string) => {
+      const at = clock.now() - dayStart;
+      if (at < window.from || at >= window.to) return;
+      budgetDay.slowCalls++; budgetDay.cycleSlow++; budgetDay.slowed[name] = (budgetDay.slowed[name] ?? 0) + 1; fenced.drift += window.ms; await moveClock(window.ms);
+    };
+    for (const name of ['closeSession', 'approver', 'decide', 'promptSession', 'wakeObservation', 'decideScope', 'widenScope', 'withdrawReview', 'endSession',
+      // GY-1774 round 3: the steps' other external calls — probes, records, holds, settlements, the reads that ground a widening — answer slowly too. Each slowed call costs the day `ms` of its
+      // clock whatever the bound (the clock moves before the call answers), so the calls slowed here are the ones a cycle makes a few of, never the inventories and readings every cycle takes.
+      'recordBlockerProbe', 'probeBlocker', 'deferWindow', 'settleContainment', 'stopSupervisor', 'reportCapacity', 'holdAccount', 'preserveWork', 'blockDispatch', 'reviewFindings', 'basePaths', 'replan'] as const) {
+      const original = effects[name] as ((...args: unknown[]) => unknown) | undefined;
+      if (!original) continue;
+      (effects as unknown as Record<string, unknown>)[name] = async (...args: unknown[]) => { await slow(name); return original(...args); };
+    }
+    // GY-1774 rework: the acceptance role's and the planner's own goals, runs and posts answer slowly too, so the triage step's nested phases are carried.
+    for (const role of ['acceptance', 'planner'] as const) {
+      const nested = effects[role] as unknown as Record<string, unknown> | undefined;
+      for (const name of Object.keys(nested ?? {})) {
+        const original = nested![name];
+        if (typeof original === 'function' && ['draft', 'judge', 'plan', 'release', 'deliver'].includes(name)) nested![name] = async (...args: unknown[]) => { await slow(`${role}.${name}`); await new Promise(resolve => setTimeout(resolve, 80)); return (original as (...rest: unknown[]) => unknown).apply(nested, args); };
+      }
+    }
   }
   // ---- GY-1562: the slow-answering plane. Inside the window the loop's snapshot read is answered,
   // ---- 200, only after `ms` of the clock, timed as the server request it is (cycle 13964's 95.8 s,
@@ -3142,7 +3170,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         if (planner) await plansSettled();
         if (options.staleRelease) { staleReleaseDay.steps.push({ elapsed, ms: result.metrics.steps?.decisions?.ms ?? 0, backlogReads: staleReleaseDay.backlogReads }); staleReleaseDay.backlogReads = 0; }
         if (options.slowAnswers) slowPlaneDay.cycles.push({ cycle: cycles - 1, elapsed, durationMs: result.metrics.durationMs, workMs: result.metrics.workMs ?? result.metrics.durationMs, planeWaitMs: result.metrics.planeWaitMs ?? 0, slowCalls: result.metrics.timings?.slowCalls ?? 0 });
-        if (options.slowDecisions) budgetDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, slow: budgetDay.cycleSlow, deferred: [...state.decisionsDeferred] });
+        if (options.slowDecisions || options.slowCalls) budgetDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, slow: budgetDay.cycleSlow, deferred: [...state.decisionsDeferred], carried: Object.values(state.actions).filter(row => row.state === 'waiting' && /stays owed and is retried next cycle/.test(row.detail)).length });
         if (options.slowDeployment) deploymentDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, cut: result.actions.some(action => action.kind === 'deployment' && /spent its \d+s budget/.test(action.detail)), pending: deploymentStep.deploymentReadsPending(state) });
         if (options.slowObservation) observationDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, cut: result.actions.some(action => action.kind === 'fault' && /spent its \d+s observation budget/.test(action.detail)), pending: faultsStep.observationReadsPending(state) });
         if (options.workspaceFailure) for (const [name, entry] of Object.entries(state.profiles)) if (/worktree/.test(entry.reason ?? '')) workspaceCooled.push(`+${Math.round(elapsed / minute)} min ${name}: ${entry.reason}`);

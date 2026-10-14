@@ -19,6 +19,7 @@ import { unsubmittedAttempt, unsubmittedAttemptText, workerReclaimBoundMs } from
 import { checkPaneStillBelongs, endWorkerAttempt } from './cycle-resume.js';
 import type { DaemonAction, DaemonState } from './state.js';
 import type { DaemonEffects } from './effects.js';
+import { carriedCall, recordCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
 
 /**
  * Session cleanup for a worker whose supervisor scope has ended (GY-189). `watch` exiting leaves
@@ -60,12 +61,14 @@ export async function closeEndedWorkerPanes(state: DaemonState, effects: DaemonE
       performed.push(await entry('done', `${gone ? 'Pane was already gone' : 'Closed pane'} ${pane} of ${item.key} epoch ${epoch}: ${why}, so its shell no longer lingers in the worktree`));
       closed.push(item);
     } catch (error) {
+      // GY-1774: a close past the step's bound is in flight; it is joined next cycle, and the quarantine stays until then.
+      if (stepCallCarried(error)) { try { await recordCarried({ state, now, performed, effects }, key, { kind: 'close', work: item.key, principal: quarantine.owner, epoch }, error, `Closing pane ${pane} of ${item.key} epoch ${epoch}`); } catch { /* recorded next cycle */ } continue; }
       try { performed.push(await entry('failed', `Could not close pane ${pane} of ${item.key} epoch ${epoch} (${why}): ${message(error)}; the containment quarantine stays until it is closed`)); } catch { /* recorded next cycle */ }
     }
   }
   if (!closed.length || !effects.containment) return;
   let fresh: Record<string, ContainmentAssessment> = {};
-  try { fresh = await effects.containment(closed, observed); } catch { /* re-probed next cycle */ }
+  try { fresh = await carriedCall({ state, now, performed, effects }, 'reclaim', 'reclaim', 'containment', () => effects.containment!(closed, observed), () => ({} as Record<string, ContainmentAssessment>)); } catch { /* re-probed next cycle */ }
   // A shell still exiting after its pane closed, or a probe that failed, is left to the next
   // cycle's probe, which settles or escalates it; the pre-close assessment is never used.
   for (const item of closed) if (fresh[item.id]?.settleable) assessments[item.id] = fresh[item.id];
@@ -116,6 +119,9 @@ export function settleDue(previous: DaemonAction | undefined, cycle: number) {
   if (previous.state === 'done') return false;
   return previous.state === 'failed' && previous.detail.includes(transientRetry) ? cycle > previous.cycle : readyToRetry(previous, cycle);
 }
+/** GY-1774: the control-plane clock read under the step's bound: carried, it is recorded on the step's row and the measurement falls back to the snapshot read, as a failed read always did. */
+const measuredClock = (cycle: Pick<Cycle, 'state' | 'now' | 'performed' | 'effects'>) => cycle.effects.controlPlaneClock
+  ? () => carriedCall(cycle, 'reclaim', 'settle', 'controlPlaneClock', () => cycle.effects.controlPlaneClock!(), error => { throw error; }) : undefined;
 /**
  * Lower a verified-dead containment fence: the autosettle POST, recorded as the item's settle
  * action. A fence already gone from the record — its supervisor settled it after the probe — is
@@ -131,6 +137,8 @@ export async function settleQuarantine(cycle: Cycle, item: Work, assessment: Con
     performed.push(await settled(`Settled the containment quarantine of ${item.key} epoch ${epoch}: its supervisor is verified gone on ${assessment.host ?? 'this host'}, so the item can be claimed again`));
     return true;
   } catch (error) {
+    // GY-1774: a settlement past the step's bound is in flight; the next cycle settles again, joining the write or consuming its answer.
+    if (stepCallCarried(error)) { await recordCarried(cycle, key, { kind: 'settle', work: item.key, epoch }, error, `Settling the containment quarantine of ${item.key} epoch ${epoch}`); return false; }
     if (/Containment quarantine is missing, superseded, or does not match/.test(message(error))) {
       performed.push(await settled(`The containment quarantine of ${item.key} epoch ${epoch} was already lowered when the loop settled it: its supervisor is verified gone on ${assessment.host ?? 'this host'}`));
       return true;
@@ -181,13 +189,13 @@ export async function settleEndedAttemptFence(cycle: Cycle, item: Work, ending: 
   if (!effects.containment || !effects.settleContainment || !containmentQuarantines([item], config.hostId).length) return false;
   if (!settleDue(state.actions[`settle:${item.id}:${ending.epoch}`], state.cycle)) return false;
   const ended = endedRecord(item, ending, new Date(now()).toISOString());
-  const measured = await containmentClock(clockOffset, effects.controlPlaneClock);
+  const measured = await containmentClock(clockOffset, measuredClock(cycle));
   const observed: ContainmentObservation = { now: snapshot.now, clockOffset: measured.clockOffset, clockRoundTripMs: measured.roundTripMs, clockSource: measured.source };
   const deadline = endedFenceDeadlines.get(cycle) ?? Date.now() + wait.boundMs;
   endedFenceDeadlines.set(cycle, deadline);
   for (;;) {
     let assessment: ContainmentAssessment | undefined;
-    try { assessment = (await effects.containment([ended], observed))[item.id]; } catch { return false; }
+    try { assessment = (await carriedCall(cycle, 'reclaim', 'settle', 'containment', () => effects.containment!([ended], observed), () => ({} as Record<string, ContainmentAssessment>)))[item.id]; } catch { return false; }
     if (assessment?.settleable) {
       if (!await settleQuarantine(cycle, item, assessment, ended)) return false;
       // The fence is gone from the record, so this cycle's later steps — dispatch, the faults pass — read it gone too.
@@ -210,7 +218,7 @@ export async function supervisorStillRunning(cycle: Cycle, item: Work, ending: {
   const fence = item.containmentQuarantine;
   if (fence?.epoch !== ending.epoch || fence.owner !== ending.owner || !fence.scope || !effects.containment || !containmentQuarantines([item], config.hostId).length) return null;
   const ended = endedRecord(item, ending, new Date(now()).toISOString());
-  const measured = await containmentClock(clockOffset, effects.controlPlaneClock);
+  const measured = await containmentClock(clockOffset, measuredClock(cycle));
   const observed: ContainmentObservation = { now: snapshot.now, clockOffset: measured.clockOffset, clockRoundTripMs: measured.roundTripMs, clockSource: measured.source };
   const deadline = endedFenceDeadlines.get(cycle) ?? Date.now() + wait.boundMs;
   endedFenceDeadlines.set(cycle, deadline);
@@ -267,7 +275,7 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
   const { config, state, effects, now, clock, snapshot, performed, isolate, agents, open, closedPanes } = cycle;
   // The pane inventory is read once, for the candidates and for the count: every pane the host's
   // runtime holds, with its cwd and whether an agent runs in it (GY-1533).
-  const inventory = await effects.panes?.().catch(() => null) ?? null;
+  const inventory = effects.panes ? await carriedCall(cycle, 'reclaim', 'reclaim', 'panes', () => effects.panes!(), () => null).catch(() => null) : null;
   const panes = inventory?.available ? inventory.panes : null;
   // The inventory and the close are local to this host, so only the handles this host's launchers
   // recorded are matched or counted: a finished handle another host recorded that happens to name
@@ -361,7 +369,7 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
   for (const [key, action] of Object.entries(state.actions)) if (key.startsWith('sweep:pane:') && action.state === 'waiting') sighted[key.slice('sweep:pane:'.length)] = action.at;
   // The reading is the host's after this pass: a pane closed here no longer stands, so the
   // inventory is read again once anything closed, and a drained backlog reads as drained now.
-  const after = closed ? await effects.panes?.().catch(() => null) ?? null : inventory;
+  const after = closed && effects.panes ? await carriedCall(cycle, 'reclaim', 'reclaim', 'panes', () => effects.panes!(), () => null).catch(() => null) : inventory;
   const status = paneReclaimStatus(after?.available ? after.panes : null, snapshot.work, agents, now(), config.hostId, sighted);
   const counts = `Herdr reports ${status.panes ?? 'an unknown number of'} pane(s) on this host, ${status.launched} opened by Graphyard launch(es), ${status.agentless} standing agentless${status.oldest ? `; the oldest is pane ${status.oldest.pane} of ${status.oldest.work} (${status.oldest.kind}), launched ${status.oldest.launchedAt}` : ''}`;
   const statusKey = 'sweep:panes:status';
@@ -377,7 +385,8 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
 }
 
 /** Step 3: reclaim disk, the loop's own bounded resources, and the items whose sessions died. */
-export async function reclaimStep(cycle: Cycle) {
+export const reclaimStep = (cycle: Cycle) => withinStepBudget(cycle, 'reclaim', ['panes', 'closeSession', 'reclaim', 'herdr', 'reclaimResources', 'containment', 'controlPlaneClock', 'settleContainment', 'preserveWork', 'reportCapacity'], reclaimStepWithin); // GY-1774: every call the step makes — the disk and resource reclaims, the inventories, the clock read, each fence assessment, preservation and settlement, every pane close — is bounded
+async function reclaimStepWithin(cycle: Cycle) {
   const { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, open } = cycle;
   // 3. Reclaim the disk the finished assignments are holding, before anything asks for more of
   //    it. Every attempt and every rework checks the repository out again, so without this step
@@ -395,7 +404,7 @@ export async function reclaimStep(cycle: Cycle) {
   const backlog = (state.reclaim?.treeBacklog ?? 0) > 0;
   if (effects.reclaim && (pressed || backlog || !(Number.isFinite(reclaimedAt) && clock - reclaimedAt < reclaimIntervalMs))) {
     try {
-      const report = await effects.reclaim(snapshot.work, clock);
+      const report = await carriedCall(cycle, 'reclaim', 'reclaim', 'reclaim', () => effects.reclaim!(snapshot.work, clock), error => { throw error; });
       state.reclaim = reclaimSummarySchema.parse({ at: report.at, scanned: report.scanned, removed: report.removed.length, kept: report.kept.length,
         freedBytes: report.freedBytes, freeBytes: report.freeAfter === null ? null : Math.max(0, Math.round(report.freeAfter)), errors: [...report.errors, ...(report.trees?.errors ?? []), ...(report.checkouts?.errors ?? [])].map(entry => entry.slice(0, 500)).slice(0, 20),
         checkouts: report.checkouts?.removed.length ?? 0, checkoutsOffVolume: (report.checkouts as { sharesVolume?: boolean } | undefined)?.sharesVolume === false ? report.checkouts?.removed.length ?? 0 : 0, rootFreeBytes: report.checkouts?.freeBytes == null ? null : Math.max(0, Math.round(report.checkouts.freeBytes)),
@@ -421,7 +430,8 @@ export async function reclaimStep(cycle: Cycle) {
           attempts: 1, cycle: state.cycle }, now(), effects.persist));
       } else await effects.persist(state);
     } catch (error) {
-      performed.push(await record(state, `reclaim:${new Date(clock).toISOString()}`, { kind: 'reclaim', work: null, principal: null, state: 'failed', detail: `Worktree reclamation failed: ${message(error)}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+      // GY-1774: a reclaim carried past the step's bound is recorded on the step's row by the call itself; the next cycle reclaims again, joining it.
+      if (!stepCallCarried(error)) performed.push(await record(state, `reclaim:${new Date(clock).toISOString()}`, { kind: 'reclaim', work: null, principal: null, state: 'failed', detail: `Worktree reclamation failed: ${message(error)}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
     }
   }
 
@@ -429,8 +439,8 @@ export async function reclaimStep(cycle: Cycle) {
   //     session slots, each within the bound docs/master-agent.md documents, recorded when it took any.
   if (effects.reclaimResources) {
     try {
-      const inventory = await effects.herdr?.();
-      const report = await effects.reclaimResources(snapshot.work, inventory ? (inventory.available ? inventory.agents : null) : agents);
+      const inventory = effects.herdr ? await carriedCall(cycle, 'reclaim', 'reclaim', 'herdr', () => effects.herdr!(), error => { throw error; }) : undefined;
+      const report = await carriedCall(cycle, 'reclaim', 'reclaim', 'reclaimResources', () => effects.reclaimResources!(snapshot.work, inventory ? (inventory.available ? inventory.agents : null) : agents), error => { throw error; });
       const detail = describeReclaim(report);
       if (detail) performed.push(await record(state, `reclaim:resources:${report.at}`, { kind: 'reclaim', work: null, principal: null, state: report.errors.length ? 'failed' : 'done', detail, attempts: 1, cycle: state.cycle }, now(), effects.persist));
       // A /tmp pass that removed 0 while the inode bound stands is recorded too (GY-1600), never dropped
@@ -451,7 +461,7 @@ export async function reclaimStep(cycle: Cycle) {
         delete state.actions[standingTmpKey];
       }
     } catch (error) {
-      performed.push(await record(state, `reclaim:resources:${new Date(clock).toISOString()}`, { kind: 'reclaim', work: null, principal: null, state: 'failed', detail: `Resource reclaim failed: ${message(error)}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+      if (!stepCallCarried(error)) performed.push(await record(state, `reclaim:resources:${new Date(clock).toISOString()}`, { kind: 'reclaim', work: null, principal: null, state: 'failed', detail: `Resource reclaim failed: ${message(error)}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
     }
   }
 
@@ -479,9 +489,9 @@ export async function reclaimStep(cycle: Cycle) {
   //     without waiting out the grace window, so its fence is assessable too.
   const settling = (item: Work) => containmentPhase(item, clock)?.state === 'lapsed' || loopEndedAttempt(item);
   const assessable = effects.containment && containmentQuarantines(snapshot.work, config.hostId).some(settling);
-  const measured = assessable ? await containmentClock(clockOffset, effects.controlPlaneClock) : null;
+  const measured = assessable ? await containmentClock(clockOffset, measuredClock(cycle)) : null;
   const observed: ContainmentObservation = measured ? { now: snapshot.now, clockOffset: measured.clockOffset, clockRoundTripMs: measured.roundTripMs, clockSource: measured.source } : { now: snapshot.now, clockOffset };
-  const assessments = await effects.containment?.(snapshot.work, observed) ?? {};
+  const assessments = effects.containment ? await carriedCall(cycle, 'reclaim', 'reclaim', 'containment', () => effects.containment!(snapshot.work, observed), () => ({} as Record<string, ContainmentAssessment>)) : {};
   // GY-1633: a delivered item's fence is settled here too. A worker still running when its item was
   //     closed (a duplicate, a triage closure) leaves its fence on the delivered record, and only the
   //     host can verify its supervisor gone; left out of this step it waited for a hand `recover`.
@@ -555,6 +565,7 @@ export async function stopUnboundedAttempts(cycle: Cycle) {
         const next = await endWorkerAttempt(cycle, item, profile, attempt.epoch, pane, held, `ended without submitting: it ${held}`, { stopFirst: true });
         performed.push(await entry('done', `${item.key} epoch ${attempt.epoch} (${attempt.owner}) ${held}; the loop stopped renewing it: ${next}, with its worktree kept`));
       } catch (error) {
+        if (stepCallCarried(error)) return recordCarried(cycle, key, { kind: 'session', work: item.key, principal: attempt.owner, epoch: attempt.epoch }, error, `Ending ${item.key} epoch ${attempt.epoch} past its reclaim bound`);
         performed.push(await entry('failed', `${unsubmittedAttemptText(attempt)}; but the loop could not end the attempt: ${message(error)}`));
       }
     });

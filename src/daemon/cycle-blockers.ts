@@ -10,6 +10,7 @@ import { profileHealth, readyToRetry } from './sessions.js';
 import { boundDetail, detailChanged, namePaths } from './decisions.js';
 import { record } from './effects.js';
 import { workerHandle } from './cycle-resume.js';
+import { carriedRow, recordCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
 import { credentialBlockedKey, credentialFailure } from '../worker-credential.js';
 import type { BlockerProbeResult } from './blocker-probes.js';
 import type { Cycle } from './cycle.js';
@@ -71,7 +72,8 @@ export function timeBoundHold(item: Work, now: number): number | null {
  * The per-episode cursor rows (the base tip, the approver launch) are retired once the blocker is
  * gone, and a delivered or closed item's rows with it, so `state.actions` stays bounded.
  */
-export async function blockerStep(cycle: Cycle) {
+export const blockerStep = (cycle: Cycle) => withinStepBudget(cycle, 'blockers', ['approver', 'closeSession', 'deferWindow', 'probeBlocker', 'decisions', 'approverLaunches', 'recordBlockerProbe', 'recordSession'], blockerStepWithin); // GY-1774: every call the step makes — the hold, each probe, the decision read, the launch listing, the probe record, the approver launch, the pane close and the handle it records — is bounded
+async function blockerStepWithin(cycle: Cycle) {
   const { config, state, effects, now, clock, performed, isolate, open, launcher } = cycle;
   for (const item of open) await isolate('blocker', item, item.key, () => endCredentialBlockedSession(cycle, item));
   const note = async (key: string, item: Work, outcome: DaemonAction['state'], detail: string, attempts = 1) =>
@@ -90,6 +92,8 @@ export async function blockerStep(cycle: Cycle) {
       for (const entry of episodeKeys(state, item)) delete state.actions[entry];
       performed.push(await note(blockerKey(item), item, 'done', `Held ${item.key} until ${notBefore}, when the reading it owes can first exist, and cleared its blocker: ${item.blocker}`));
     } catch (error) {
+      // GY-1774: a hold past the step's bound is in flight: nothing else touches the item this cycle, and the next cycle holds it again, joining the write.
+      if (stepCallCarried(error)) { held.add(item.id); await recordCarried(cycle, blockerKey(item), { kind: 'blocker', work: item.key, epoch: item.epoch }, error, `Holding ${item.key} until ${notBefore}`); return; }
       performed.push(await note(blockerKey(item), item, 'failed', `Could not hold ${item.key} until ${notBefore}: ${message(error)}`, (state.actions[blockerKey(item)]?.attempts ?? 0) + 1));
     }
   });
@@ -111,6 +115,7 @@ export async function blockerStep(cycle: Cycle) {
     const memo = classification.class === 'control-plane-error' || classification.class === 'outside-scope-test-failure' || classification.class === 'host-supervisor' ? classification.class
       : classification.class === 'worktree-mismatch' || classification.class === 'runtime-denial' ? `${classification.class}:${item.id}` : `${classification.class}:${launch}:${classification.path ?? ''}`;
     if (!probes.has(memo)) {
+      // GY-1774: each probe waits under the step's bound like its other calls; one carried past it leaves the item's handling carried, and the next cycle's probe of the cause joins the one still running.
       const running = effects.probeBlocker ? slots(() => effects.probeBlocker!(item, classification)) : Promise.resolve(null);
       // Started ahead of the item's turn: a failure is met when the item awaits it, inside its isolation.
       running.catch(() => {});
@@ -212,9 +217,9 @@ export async function blockerStep(cycle: Cycle) {
       } else {
         result = { probe: 'no decision on the item stands requested', passed: false, detail: `decision ${decision.id} (${decision.action}) waits on its approver` };
         const watched = Object.values(state.approvals).some(watch => watch.decision === decision.id && !watch.settledAt) || launcher.busy(`launch:approver:${decision.id}`)
-          || (await effects.approverLaunches?.().catch(() => []) ?? []).some(entry => entry.decision === decision.id);
+          || (await effects.approverLaunches?.().catch(error => { if (stepCallCarried(error)) throw error; return []; }) ?? []).some(entry => entry.decision === decision.id); // GY-1774: a carried listing is the item's carried handling, never an empty one
         const launchKey = approverKey(item, decision.id), previous = state.actions[launchKey];
-        if (!watched && effects.approver && (!previous || (previous.state === 'failed' && readyToRetry(previous, state.cycle)))) {
+        if (!watched && effects.approver && (!previous || carriedRow(previous) || (previous.state === 'failed' && readyToRetry(previous, state.cycle)))) {
           const attempts = (previous?.attempts ?? 0) + 1;
           try {
             const launched = await effects.approver(item, decision.id);
@@ -226,7 +231,8 @@ export async function blockerStep(cycle: Cycle) {
             performed.push(await note(launchKey, item, 'done', `${item.key} is blocked on decision ${decision.id} (${decision.action}) that no approver session judged; launched approver ${launched.agentName}${launched.pane ? ` in pane ${launched.pane}` : ''}`, attempts));
             result = { ...result, detail: `decision ${decision.id} (${decision.action}): approver ${launched.agentName} launched` };
           } catch (error) {
-            performed.push(await note(launchKey, item, 'failed', `${item.key} is blocked on decision ${decision.id}; its approver could not be launched: ${message(error)}`, attempts));
+            if (stepCallCarried(error)) await recordCarried(cycle, launchKey, { kind: 'blocker', work: item.key, epoch: item.epoch }, error, `Launching the approver of ${item.key}'s decision ${decision.id}`);
+            else performed.push(await note(launchKey, item, 'failed', `${item.key} is blocked on decision ${decision.id}; its approver could not be launched: ${message(error)}`, attempts));
           }
         }
       }
@@ -243,6 +249,8 @@ export async function blockerStep(cycle: Cycle) {
       if (result.passed) performed.push(await note(key, item, 'done', `Cleared ${item.key}'s ${classification.class} blocker: ${result.probe} passed (${result.detail}); it was: ${blocker}`));
       else await standing(`${item.key} is blocked (${classification.class}); the loop re-checks it every cycle: ${result.probe} fails (${result.detail})`);
     } catch (error) {
+      // GY-1774: a record past the step's bound is in flight; the next cycle's probe records again, joining the write or consuming its answer.
+      if (stepCallCarried(error)) return recordCarried(cycle, key, { kind: 'blocker', work: item.key, epoch: item.epoch }, error, `Recording ${item.key}'s ${classification.class} blocker probe (${result.probe}: ${outcome})`);
       performed.push(await note(key, item, 'failed', `Could not record ${item.key}'s ${classification.class} blocker probe (${result.probe}: ${outcome}): ${message(error)}`, (state.actions[key]?.attempts ?? 0) + 1));
     }
   });
@@ -260,7 +268,7 @@ async function endCredentialBlockedSession(cycle: Cycle, item: Work) {
   const epoch = item.lastAssignment?.epoch ?? item.epoch, owner = item.lastAssignment?.owner;
   if (!item.blocker || !credentialFailure(item.blocker) || (item.lease && item.lease.epoch >= epoch) || !owner) return;
   const key = credentialBlockedKey(item, epoch);
-  if (state.actions[key]) return;
+  if (state.actions[key] && !carriedRow(state.actions[key])) return;
   const profile = config.workers.find(worker => worker.principal === owner && worker.mode === 'launch');
   if (!profile) return;
   const handle = item.sessions?.find(session => session.kind === 'implementation' && session.id === `${owner}:${epoch}`);
@@ -269,7 +277,11 @@ async function endCredentialBlockedSession(cycle: Cycle, item: Work) {
   let closed = 'no pane was left to close';
   if (closable) {
     try { await effects.closeSession(pane!); closed = `pane ${pane} was closed`; }
-    catch (error) { closed = `pane ${pane} could not be closed (${message(error)})`; }
+    catch (error) {
+      // GY-1774: a close past the step's bound is in flight; the ending is tried again next cycle, joining it.
+      if (stepCallCarried(error)) return recordCarried(cycle, key, { kind: 'session', work: item.key, principal: owner, epoch }, error, `Closing pane ${pane} of ${profile.agentName}`);
+      closed = `pane ${pane} could not be closed (${message(error)})`;
+    }
   }
   await workerHandle(cycle, item, profile, epoch, pane ?? 'none', `closed as failed: credential-blocked attempt on epoch ${epoch}`, true);
   performed.push(await record(state, key, { kind: 'session', work: item.key, principal: owner, epoch, state: 'done', attempts: 1, cycle: state.cycle,

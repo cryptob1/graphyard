@@ -20,6 +20,7 @@ import { boundDetail, detailChanged, namePaths } from './decisions.js';
 import { findingRecheckMs, record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import type { MergerMode } from '../merger-mode.js';
+import { carriedCall, carriedRow, recordCarried, retireCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
 
 /** A requested path the loop grants without an approver, and the audited ground it stands on; `companion` marks a GY-955 companion. */
 export interface ScopeGround { path: string; ground: string; companion?: boolean }
@@ -106,18 +107,22 @@ const knownMerger = new WeakMap<object, MergerMode>();
  * fails closed, and the scope actions wait for a cycle whose read succeeds, so a transient status
  * error never raises a scope request under the control plane.
  */
-export async function controlPlaneMerger(cycle: Pick<Cycle, 'effects' | 'state'>): Promise<boolean> {
+export async function controlPlaneMerger(cycle: Cycle): Promise<boolean> {
   const reads = cycle.effects.mergeWriter;
   if (!reads) return false;
+  const unknown = () => knownMerger.get(cycle.state) !== 'github';
   try {
-    const mode = await reads.merger();
+    // GY-1774: a read carried past the step's bound is recorded as the step's waiting call, joined or consumed next cycle, and keeps the known mode meanwhile.
+    const mode = await carriedCall<MergerMode | null>(cycle, 'scope', 'scope', 'mergeWriter', () => reads.merger(), () => null);
+    if (mode === null) return unknown();
     knownMerger.set(cycle.state, mode);
     return mode === 'control-plane';
-  } catch { return knownMerger.get(cycle.state) !== 'github'; }
+  } catch { return unknown(); }
 }
 
 /** Step 2: decide the open scope requests, and measure the decision budget over what is still waiting. */
-export async function scopeStep(cycle: Cycle) {
+export const scopeStep = (cycle: Cycle) => withinStepBudget(cycle, 'scope', ['decideScope', 'widenScope', 'reviewFindings', 'basePaths', 'baseText', 'baseMentions', 'baseSuccessions', 'repositoryFiles', 'decisions', 'mergeWriter'], scopeStepWithin); // GY-1774: every call the step makes — the decision, the finding-grounded widening and the reads that ground it, the tree read, the held-ask history, the merge-mode read — is bounded
+async function scopeStepWithin(cycle: Cycle) {
   const { state, effects, now, clock, performed, isolate, open } = cycle;
   if (await controlPlaneMerger(cycle)) return { settled: new Map<string, Work>(), budget: scopeBudget([], state.scope, clock) };
   // 2. Decide the open scope requests. A worker that needs a file its own criteria — or this
@@ -164,7 +169,8 @@ export async function scopeStep(cycle: Cycle) {
     // approver's decision is bound to, and defer that decision another cycle.
     if (approverDeciding(state.approvals, item.key, request)) return null;
     const judged = previous?.state === 'done';
-    if (judged ? clock - Date.parse(previous.at) < findingRecheckMs : previous && (previous.state !== 'failed' || !readyToRetry(previous, state.cycle))) return null;
+    // GY-1774: a widening carried past the step's bound is retried next cycle, joining the one in flight or consuming its answer; a failed one backs off as before.
+    if (judged ? clock - Date.parse(previous.at) < findingRecheckMs : previous && !carriedRow(previous) && (previous.state !== 'failed' || !readyToRetry(previous, state.cycle))) return null;
     const attempts = judged ? previous.attempts : (previous?.attempts ?? 0) + 1;
     try {
       const prFindings = await effects.reviewFindings?.(item) ?? [];
@@ -218,6 +224,8 @@ export async function scopeStep(cycle: Cycle) {
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: boundDetail(`Widened ${item.key} with ${namePaths(paths)} on ${widenedOn(scoped.grounds!, paths.length)}: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
       return at;
     } catch (error) {
+      // GY-1774: a widening past the step's bound is in flight; it is joined next cycle, which judges the findings again.
+      if (stepCallCarried(error)) { await recordCarried(cycle, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch }, error, `Widening ${item.key} on its review findings`); return null; }
       // The race this widening is bound against, lost: the request was answered, withdrawn or re-asked
       // meanwhile, or its attempt ended, so the widening is moot — answered as the decide path answers
       // it, never a fault (GY-1347). A superseded ask is named, and its fresh ask is judged on its own
@@ -243,7 +251,7 @@ export async function scopeStep(cycle: Cycle) {
   let tree: Promise<ReadonlySet<string> | null> | null = null;
   const offending = async (item: Work, request: ScopeRequestState): Promise<NonRepositoryPath[] | null> => {
     if (!effects.repositoryFiles) return [];
-    tree ??= effects.repositoryFiles().catch(() => null);
+    tree ??= effects.repositoryFiles().catch(error => { if (stepCallCarried(error)) throw error; return null; }); // GY-1774: a carried read is each waiting ask's carried handling, never a missing tree
     const files = await tree;
     return files ? nonRepositoryPaths(unplannedPaths(item.plannedFiles, request.paths), files) : null;
   };
@@ -310,6 +318,7 @@ export async function scopeStep(cycle: Cycle) {
           attempts: 1, cycle: state.cycle }, now(), effects.persist));
       }
     } catch (error) {
+      if (stepCallCarried(error)) return recordCarried(cycle, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch }, error, `Deciding ${item.key}'s scope request`);
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'failed',
         detail: boundDetail(`Could not decide ${item.key}'s scope request: ${message(error)}`), attempts, cycle: state.cycle }, now(), effects.persist));
     }
@@ -359,11 +368,16 @@ const baseSuccessors = (effects: Cycle['effects'], item: Work) => effects.baseSu
  * audited additive requirements revision naming each successor's ground. Nothing is removed, and an
  * item whose successors are all planned already is left alone, so a standing re-plan never churns.
  */
-export async function successorStep(cycle: Cycle, settled: ReadonlyMap<string, Work> = new Map()) {
+export const successorStep = (cycle: Cycle, settled: ReadonlyMap<string, Work> = new Map()) => withinStepBudget(cycle, 'scope', ['baseSuccessions', 'replan', 'mergeWriter'], bounded => successorStepWithin(bounded, settled)); // GY-1774: the succession read and the re-plan are bounded
+async function successorStepWithin(cycle: Cycle, settled: ReadonlyMap<string, Work>) {
   const { state, effects, now, performed, isolate, open } = cycle;
   if (!effects.baseSuccessions || !effects.replan || await controlPlaneMerger(cycle)) return;
   // An item the scope step revised this cycle is re-planned from that revision, never from the
   // snapshot it outdated: the stale revision would be refused, not applied (GY-1235, GY-1293).
+  // A carried re-plan names the policy revision it was made on; once the item moved past that revision (the call landed, or the item left the open ones) nothing retries it, so its row is retired.
+  const current = new Set(open.map(read => { const item = settled.get(read.id) ?? read; return `successors:${item.id}:${item.policyRevision}`; }));
+  for (const [rowKey, row] of Object.entries(state.actions)) if (rowKey.startsWith('successors:') && carriedRow(row) && !current.has(rowKey))
+    await retireCarried(cycle, rowKey, row, `Re-planning ${row.work} onto the successors of its planned files, carried on cycle ${row.cycle}, is moot: the item moved past the policy revision it was made on, or left the open items`);
   for (const read of open) await isolate('scope', read, read.key, async () => {
     const item = settled.get(read.id) ?? read;
     if (item.observation?.merged || !(item.plannedFiles ?? []).length) return;
@@ -385,6 +399,8 @@ export async function successorStep(cycle: Cycle, settled: ReadonlyMap<string, W
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: null, epoch: item.epoch, state: 'done',
         detail: boundDetail(`Re-planned ${item.key} with ${namePaths([...missing])}, the successors of planned files the base branch split or renamed: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
+      // GY-1774: a read or re-plan past the step's bound is in flight; it is joined next cycle, or its answer consumed.
+      if (stepCallCarried(error)) return recordCarried(cycle, key, { kind: 'scope', work: item.key, epoch: item.epoch }, error, `Re-planning ${item.key} onto the successors of its planned files`);
       const moot = supersededScopeAsk(error);
       if (moot) {
         performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: null, epoch: item.epoch, state: 'done',
