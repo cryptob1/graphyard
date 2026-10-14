@@ -18,7 +18,7 @@ Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`
 
 ### Release filing credential
 
-UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds and follow-ups as operator agent `graphyard-release-follow-up` (only `intent:create`, work items `*`). The loop's hourly `master setup --apply` keeps it with the admin token (issues, rotates, stores the uat secret via `gh`); without one `master status` names the administrator's step (`graphyard operator-agent setup FILE --token-stdin`, FILE `{"id":"graphyard-release-follow-up","displayName":"Release follow-up","capabilities":["intent:create"],"scope":{"repositories":["OWNER/REPO"],"workItems":["*"]},"reason":"..."}`). `doctor`: `FAIL release-filing` when refused. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN` (`graphyard-e2e-recorder`, only `e2e:record`, never admin).
+UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds and follow-ups as operator agent `graphyard-release-follow-up` (only `intent:create`, work items `*`). The loop's hourly `master setup --apply` keeps it with the admin token (issues, rotates, stores the uat secret via `gh`); without one `master status` names the administrator's step (`graphyard operator-agent setup FILE --token-stdin`, FILE `{"id":"graphyard-release-follow-up","displayName":"Release follow-up","capabilities":["intent:create"],"scope":{"repositories":["OWNER/REPO"],"workItems":["*"]},"reason":"..."}`). `doctor`: `FAIL release-filing` when refused. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` with only `e2e:record`, never admin.
 
 ### Pre-merge gate and release-candidate validation
 
@@ -28,11 +28,11 @@ Required: `typecheck`, `test` (`ci.yml`, <10 min); per candidate `releaseCandida
 
 ### One delivery path
 
-Exact-head gates merge; [candidates](#release-candidates) deploy; [the redesign](delivery-redesign.md): only Graphyard writes main.
+Exact-head gates merge; [candidates](#release-candidates) deploy. [The redesign](delivery-redesign.md) has only Graphyard write main.
 
 ### Main guard
 
-Every 30 s the main guard reruns, then reverts, merges failing required checks their parents passed; the [revert approver App](deployment.md#variables) approves only a green exact inverse, a third refusal abandons (`approval-refused`). A revert failing the merge's named tests is abandoned `base-failure` (delivery kept): one attention row names the test; no further revert for that set; main reruns once per new merge; one failing only that set is recorded covered (`coveredBy`, read past); cleared when main passes.
+Every 30 s the main guard reruns, then reverts, merges failing required checks their parents passed; the [revert approver App](deployment.md#variables) approves only a green exact inverse, three refusals abandon (`approval-refused`). A revert failing the merge's named tests is abandoned `base-failure` (delivery kept): one attention row names the test; no further revert for that set; main reruns per merge; one failing only that set is covered (`coveredBy`, read past) until main passes.
 
 ## Managed repositories
 
