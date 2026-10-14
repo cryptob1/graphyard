@@ -11,7 +11,7 @@ import * as upgrade from '../src/daemon/upgrade.js';
 import type { SelfUpgradeDeps, SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { coordinatorCheckoutGuard } from '../src/daemon/run.js';
 import { loopUnitText, type LoopUnitInput } from '../src/supervisor.js';
-import { alignExecutorUnitScript, checkoutRootVariable, renderExecutorUnit } from '../src/repository-setup.js';
+import { renderExecutorUnit } from '../src/repository-setup.js';
 import { installUnitsFile, perInstallUnits } from '../src/install/units.js';
 import type { CoordinatorCheckout } from '../src/master/profiles.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -488,6 +488,9 @@ test('unit:moved-dirty-checkout-hold-keeps-served-pin — a checkout-loaded loop
 });
 
 test('unit:executor-unit-render-idempotent — rendering an executor unit the pin already rendered is byte-identical, the alignment then writes nothing and reloads nothing, and the lift removes the handed-checkout line it added', async () => {
+  // Imported here, not at the top: neither export exists on the base this file is exercised against,
+  // and the exercise must see these cases fail as test cases, never the file fail to load.
+  const { alignExecutorUnitScript, checkoutRootVariable } = await import('../src/repository-setup.js');
   const w = await world('unit-render');
   const template = await readFile(fileURLToPath(new URL('../examples/master/graphyard-executor@.service', import.meta.url)), 'utf8');
   const snapshotScript = join(upgrade.heldCliSnapshotAt(w.root, w.tip), 'scripts', 'graphyard-executor.mjs');
