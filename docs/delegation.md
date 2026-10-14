@@ -3,13 +3,13 @@
 
 ## Authority boundaries
 
-A `slice-lead` (`product`, `infrastructure`, `docs-experience`) rules on plans, sends back, escalates; never implements, reviews, proves or merges (`lead.action.refused`). `reject-plan`/`send-back` hold merging (**lead hold**) until that lead's `approve-plan` with `"supersedes": "RULING-ID"` or `rework`. Producers ever assigned item or slice: `evidence.producer.refused`. [Limits](deployment.md#variables).
+A `slice-lead` (`product`, `infrastructure`, `docs-experience`) rules on plans, sends back or escalates, never implements, reviews, proves or merges (`lead.action.refused`). `reject-plan`/`send-back` hold merging (**lead hold**) until that lead's `approve-plan` with `"supersedes": "RULING-ID"` or `rework`. Producers ever assigned the item or slice: `evidence.producer.refused`. [Limits](deployment.md#variables).
 
 ## Reviewer provider diversity
 
-The registry picks a `reviewer` account whose model provider (`provider`, else launch kind) differs from the item's newest `worker` session's; same-provider accounts are `skipped` (`shares the implementer's provider P on GY-N`), one at its session limit waited for; else the first eligible same-provider account.
+A `reviewer` account's `provider` (else launch kind) must differ from the item's newest `worker` session's; same-provider accounts are `skipped` (`shares the implementer's provider P on GY-N`) or, at a session limit, waited for; else the first eligible same-provider.
 
-`worker` tries Pi first for low/medium-risk items' first two attempts (ended epochs and failed starts count); high-risk and later attempts wait for a strong account. A failed Pi start falls to the next account.
+`worker` tries Pi for an item's first two attempts when every `plannedFiles` entry is normal by risk class, lane aside; a directory scope covering a sensitive surface (`src/`, `src/server/`) is sensitive. Sensitive or unplanned changes, later attempts and two failed starts wait for a strong account.
 
 ## Escalation
 
@@ -20,13 +20,13 @@ The registry picks a `reviewer` account whose model provider (`provider`, else l
 | `security-concern` | A lead's `escalate` ruling
 | `requirement-weakening` | A revision retires a criterion, narrows proofs
 
-Unresolved triggers refuse merging; replacements may claim. Explained lapses: `lease.expired` with a [cause](protocol/leases.md#how-a-lease-ends) (`submitted`, `blocked-awaiting-operator`, `stopped-by-attestation`, `exhausted-capacity`, `no-submission-bound`); a later-explained or superseded `lease-loss` auto-settles (`escalation.auto-settled`: `auto-settled: blocked report for epoch N explains the lapse`, `auto-settled: stopped-worker attestation for epoch N explains the lapse`).
+Unresolved triggers refuse merging; replacements may claim. An explained lapse (`lease.expired` [cause](protocol/leases.md#how-a-lease-ends): `blocked-awaiting-operator`, `stopped-by-attestation`…) or superseded `lease-loss` auto-settles (`escalation.auto-settled`: `auto-settled: blocked report for epoch N explains the lapse`, `auto-settled: stopped-worker attestation for epoch N explains the lapse`).
 
 ### Who may settle what
 
-`escalation.resolved` records each:
+`escalation.resolved` records:
 
 - Explained `lease-loss`: reconciliation, or `admin` `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`.
 - Superseded-epoch `lease-loss`: reconciliation; all attempts ended unfenced: after 5 min.
 - `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, lead-raised `lease-loss`: master-requested two-party decision or declared human session (`sessionKind: "human"`).
-- `requirement-weakening` from an approved `requirements` decision: settled by that approval, citing its approver; no `scope` fault, no escalation [intervention](dashboard.md).
+- `requirement-weakening` from an approved `requirements` decision: settled by that approval, citing its approver; no `scope` fault or [intervention](dashboard.md).
