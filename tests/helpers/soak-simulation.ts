@@ -369,9 +369,10 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days, ...(docs ? { docs: { budget: docs.budget, pages: docs.pages } } : {}), ...(options.mainGuard ? { mainGuard: true } : {}) },
     // GY-1764: the scope scenarios ask for files a change adds inside directories the base tracks
     // (tests/, src/soak/, newtop-18/), as a real repository's tree anchors them, so the evidence
-    // gate reads them as decidable and the scenarios exercise the folds they were built for.
+    // gate reads them as decidable and the scenarios exercise the folds they were built for. The
+    // preference day's overridden plans (GY-1772) are anchored the same way.
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md', ...(docs ? [] : [plan.docsConflict.page]),
-      'tests/soak-wide/.keep', 'newtop-18/.keep']);
+      'tests/soak-wide/.keep', 'newtop-18/.keep', ...Object.values(failover?.plannedFiles ?? {}).flat()]);
   const herdr = failover ? failover.world.herdr : new SimulatedHerdr(() => clock.now());
   // GY-453: approvers as headless Pi runs in the real run registry on disk, the loop restarting
   // (detaching every run) after every other cycle a run is live, and adopting them on the next.
@@ -547,7 +548,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         ? `The intervention report shows no escalation interventions at the build stage over ${options.observationWindow.windowHours} hours of live activity after item ${n} ships`
         : `The cause of the recurring escalation interventions at the build stage is found and removed: the intervention report shows the escalation rate at the build stage below 3 per ${options.observationWindow.windowDays} days after item ${n} ships`, proofs: [windowedPatternProof] }] : [])];
     const smokeIntake = options.slowDeployment ? { policy: { checks: ['test', 'typecheck'], review: true, deploySmoke: true } } : {};
-    let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: files(n), criteria, ...scopeIntake, ...docsIntake, ...broadIntake, ...smokeIntake }, id());
+    let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: failover?.plannedFiles?.[n] ? [...failover.plannedFiles[n]] : files(n), criteria, ...scopeIntake, ...docsIntake, ...broadIntake, ...smokeIntake }, id());
     if (n === plan.exhaustedReviewer) work = await engine.execute(principals.operator, 'reviewpolicy', work.id, { provider: 'agent', expectedPolicyRevision: work.policyRevision, reason: 'Reviewed by the reviewer bots',
       reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer' }, { name: 'cursor-reviewer', runtime: 'cursor', reviewerApp: 'cursor-reviewer' }] }, id());
     items.push(work);
@@ -911,7 +912,10 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     // GY-1523: the launcher reads the merger through the world (counted, refused on schedule) and
     // mints through it (recorded), so the day asserts one read per dispatch and no push credential
     // under the control-plane merger; a launch refused before any claim is kept with its words.
-    const result = await dispatchWork(failover.root, failover.lane ? { ...work, lane: failover.lane } : work, profile, free, world.run, snapshot.work,
+    // GY-1772: the day's lane holds for every item, or the item's own override takes its place, so
+    // a per-item lane is what the real dispatch is handed.
+    const lane = failover.lane ?? failover.lanes?.[numberOf(work)];
+    const result = await dispatchWork(failover.root, lane ? { ...work, lane } : work, profile, free, world.run, snapshot.work,
       async () => {
         const claimed = await engine.execute(principal, 'claim', work.id, {}, id());
         // A rework round re-registers the standing submission's branch, as the simulated dispatch does (GY-1569).
@@ -929,7 +933,10 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     // any session of the day; the world's tick renews its lease and pushes its head.
     const attempt = (attempts.get(work.key) ?? 0) + 1; attempts.set(work.key, attempt);
     sessions.push({ work: work.id, key: work.key, branch, profile, epoch, attempt, pane: result.pane!, pushAt: clock.now() + plan.workMs, diesAt: null, exitsAt: null, dispatchAt: clock.now(), state: 'working', syncs: 0,
-      scopeAt: null, misreadAt: null, misread: false, credentialAt: null, blockAt: null, retryingAt: null });
+      scopeAt: null, misreadAt: null, misread: false, credentialAt: null, blockAt: null, retryingAt: null,
+      // GY-1772: the session pushes exactly the change the item plans, so the pull request the
+      // control plane observes is the change the preference judged.
+      ...(failover.plannedFiles?.[numberOf(work)] ? { files: [...failover.plannedFiles[numberOf(work)]] } : {}) });
     return { key: work.key, epoch, pane: result.pane!, agentName: profile.agentName };
   } : (work, profile, free, snapshot) => simulatedDispatch(work, profile, free, snapshot);
   async function simulatedDispatch(...[work, profile, , snapshot]: Parameters<DaemonEffects['dispatch']>) {
