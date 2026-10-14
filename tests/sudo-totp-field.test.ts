@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFile, readdir } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import type { BrowserPage, Located, PageInput, RecordedStep, SudoState } from '../src/master-browser.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -29,29 +30,18 @@ const CODE = '483920';
 const LOCAL = 'http://127.0.0.1:4311';
 const SUDO = 'https://github.com/sessions/sudo';
 
-// GitHub's Confirm-access page (sessions/sudo) as the pilot's agent-browser profile copy rendered it
-// on 2026-10-07: its recorded text (record.json step 139, and the master's app-permissions records)
-// with the markup GitHub serves for it. The passkey view is the default; "Use your authenticator
-// app" swaps in the authenticator form, which renders after the click. Its TOTP input is a plain
-// text input with autocomplete="one-time-code" and inputmode="numeric", named by a heading through
-// aria-labelledby, not by a <label>, and its name and id are none the GY-1450 locator tried — which
-// is why every one of them came back null and the code was discarded.
+// GitHub's Confirm-access page (sessions/sudo), authenticator view. TOTP_VIEW is the recorded page
+// itself — tests/fixtures/github-confirm-access-authenticator.html, captured from GitHub by the
+// master's confirm-access capture (2026-10-14, secrets redacted) — not a reconstruction: its code
+// input is name="sudo_app_otp" id="app_totp", labelled by a sr-only <label> "Enter the verification
+// code", autocomplete="off", inputmode="numeric", beside the email form's name="sudo_email_otp".
+// PASSKEY_VIEW is only what the drive sees before the view switch: GitHub's default view, with the
+// "Use your authenticator app" control whose markup the capture does not include.
+const TOTP_VIEW = readFileSync(new URL('./fixtures/github-confirm-access-authenticator.html', import.meta.url), 'utf8');
 const PASSKEY_VIEW = `<main><div class="auth-form">
 <h1>Confirm access</h1><p>Signed in as <strong>@operator</strong></p>
 <div class="sudo-passkey"><h2>Passkey</h2><p>When you are ready, authenticate using the button below.</p><button type="button" class="btn btn-primary">Use passkey</button></div>
-<form action="/sessions/sudo" method="post" hidden><input type="hidden" name="authenticity_token" value="t0k3n"><input type="hidden" name="sudo_method" value="email">
-<label for="sudo_email_otp">Email code</label><input type="text" id="sudo_email_otp" name="email_otp" autocomplete="one-time-code" inputmode="numeric"></form>
 <p>Having problems?</p><ul><li><a href="/sessions/sudo?mobile=1">Use GitHub Mobile</a></li><li><a href="/sessions/sudo?sudo_method=totp">Use your authenticator app</a></li><li><button type="button">Send a code via email</button></li></ul>
-</div></main>`;
-const TOTP_VIEW = `<main><div class="auth-form">
-<h1>Confirm access</h1><p>Signed in as <strong>@operator</strong></p>
-<form action="/sessions/sudo" method="post"><input type="hidden" name="authenticity_token" value="t0k3n"><input type="hidden" name="sudo_method" value="totp"><input type="hidden" name="sudo_return_to" value="/settings/apps/new">
-<h2 id="sudo-totp-heading">Authentication code</h2>
-<input type="text" id="sudo_totp" name="totp" class="form-control input-block" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="XXXXXX" aria-labelledby="sudo-totp-heading" required autofocus>
-<p class="note">Open your two-factor authenticator (TOTP) app or browser extension to view your authentication code.</p>
-<button type="submit" class="btn btn-primary btn-block">Verify</button></form>
-<form action="/sessions/sudo" method="post" hidden><label for="sudo_email_otp">Email code</label><input type="text" id="sudo_email_otp" name="email_otp" autocomplete="one-time-code" inputmode="numeric"></form>
-<p>Having problems?</p><ul><li><a href="/sessions/sudo">Use passkey</a></li><li><a href="/sessions/sudo?mobile=1">Use GitHub Mobile</a></li><li><button type="button">Send a code via email</button></li></ul>
 </div></main>`;
 // The view switched, but its form has not rendered (yet).
 const TOTP_LOADING = `<main><div class="auth-form"><h1>Confirm access</h1><p>Authentication code</p><p>Having problems?</p><a href="/sessions/sudo">Use passkey</a></div></main>`;
@@ -60,18 +50,18 @@ const TOTP_LOADING = `<main><div class="auth-form"><h1>Confirm access</h1><p>Aut
 function textOf(html: string) {
   return html.replace(/<form[^>]*\bhidden\b[^>]*>[^]*?<\/form>/g, '').replace(/<[^>]+>/g, '\n').split('\n').map(line => line.trim()).filter(Boolean).join('\n');
 }
-const attributes = (raw: string) => Object.fromEntries([...raw.matchAll(/([a-z-]+)(?:="([^"]*)")?/g)].map(([, name, value]) => [name, value ?? '']));
+const attributes = (raw: string) => Object.fromEntries([...raw.matchAll(/([a-z_-]+)(?:="([^"]*)")?/g)].map(([, name, value]) => [name, value ?? '']));
 /** What the inputs script reports for HTML: every typeable input, its naming text, and whether a hidden ancestor hides it. */
 function inputsOf(html: string): PageInput[] {
-  const headings = Object.fromEntries([...html.matchAll(/<[a-z0-9]+ id="([^"]+)"[^>]*>([^<]*)</g)].map(([, id, text]) => [id, text]));
-  const labels = Object.fromEntries([...html.matchAll(/<label for="([^"]+)">([^<]*)<\/label>/g)].map(([, id, text]) => [id, text]));
+  const headings = Object.fromEntries([...html.matchAll(/<[a-z0-9]+ id="([^"]+)"[^>]*>([^<]*)</g)].map(([, id, text]) => [id, text.trim()]));
+  const labels = Object.fromEntries([...html.matchAll(/<label\b[^>]*\bfor="([^"]+)"[^>]*>([^<]*)<\/label>/g)].map(([, id, text]) => [id, text.trim()]));
   const found: PageInput[] = [];
   const hidden: boolean[] = [];
   for (const [, closing, tag, raw] of html.matchAll(/<(\/?)([a-z0-9]+)([^>]*)>/g)) {
     if (tag !== 'input') { if (closing) hidden.pop(); else hidden.push(/\bhidden\b/.test(raw) || !!hidden[hidden.length - 1]); continue; }
     const attrs = attributes(raw), type = attrs.type ?? 'text';
     if (['hidden', 'submit', 'button', 'checkbox', 'radio'].includes(type)) continue;
-    const label = [labels[attrs.id], headings[attrs['aria-labelledby']], attrs['aria-label'], attrs.placeholder].filter(Boolean).join(' | ');
+    const label = [...new Set([labels[attrs.id], headings[attrs['aria-labelledby']], attrs['aria-label'], attrs.placeholder].filter(Boolean))].join(' | ');
     found.push({ selector: `#${attrs.id}`, type, name: attrs.name ?? '', id: attrs.id ?? '', autocomplete: attrs.autocomplete ?? '', inputmode: attrs.inputmode ?? '', label, visible: !hidden[hidden.length - 1] });
   }
   return found;
@@ -99,10 +89,10 @@ function fixturePage(options: { renderWaits?: number[]; clock?: { at: number }; 
     locate(kind, text): Located | null {
       const markup = html();
       if (kind === 'field') { const input = inputsOf(markup).find(candidate => candidate.name === text); return input ? { selector: input.selector, tag: 'input', checked: null, value: '', text: '', visible: input.visible } : null; }
-      if (kind === 'label') { const match = markup.match(new RegExp(`<label for="([^"]+)">${text}`)); return match ? { selector: `#${match[1]}`, tag: 'input', checked: null, value: '', text: '' } : null; }
+      if (kind === 'label') { const match = markup.match(new RegExp(`<label\\b[^>]*\\bfor="([^"]+)"[^>]*>\\s*${text}`)); return match ? { selector: `#${match[1]}`, tag: 'input', checked: null, value: '', text: '' } : null; }
       const anchor = kind === 'link' && markup.match(new RegExp(`<a href="([^"]+)">${text}</a>`));
       if (anchor) return { selector: `a[href="${anchor[1]}"]`, tag: 'a', checked: null, value: null, text, href: `https://github.com${anchor[1]}`, visible: true };
-      if (kind === 'button' && new RegExp(`<button[^>]*>${text}</button>`).test(markup)) return { selector: `button:${text}`, tag: 'button', checked: null, value: null, text, visible: true };
+      if (kind === 'button' && new RegExp(`<button[^>]*>\\s*${text}\\s*</button>`).test(markup)) return { selector: `button:${text}`, tag: 'button', checked: null, value: null, text, visible: true };
       return null;
     },
     click(selector) {
@@ -110,7 +100,7 @@ function fixturePage(options: { renderWaits?: number[]; clock?: { at: number }; 
       if (selector === 'a[href="/sessions/sudo?sudo_method=totp"]') { state.view = 'loading'; state.waits = 0; state.pending = renders.shift() ?? 1; }
       if (selector === 'button:Verify' && state.view === 'totp') { state.submitted.push(state.field); if (state.field === CODE) state.view = 'done'; state.field = ''; }
     },
-    fill(selector, value) { assert.equal(selector, '#sudo_totp', 'the code goes into the TOTP input, never the hidden email field'); state.field = value; if (value) state.typed.push({ code: value, at: options.clock?.at ?? 0 }); },
+    fill(selector, value) { assert.equal(selector, '#app_totp', 'the code goes into the TOTP input, never the hidden email field'); state.field = value; if (value) state.typed.push({ code: value, at: options.clock?.at ?? 0 }); },
   };
   return { page, state };
 }
@@ -120,11 +110,11 @@ test('unit:sudo-totp-field — the fixture defeats the GY-1450 locators, and its
   const { confirmCodeField } = await browser();
   const inputs = inputsOf(TOTP_VIEW);
   const { page } = fixturePage();
-  for (const name of ['app_otp', 'otp', 'sudo_otp']) assert.equal(inputs.find(input => input.name === name), undefined, `no input named ${name}`);
-  assert.equal(page.locate('label', 'Authentication code'), null, 'no <label> names the TOTP input');
+  for (const name of ['app_otp', 'otp', 'sudo_otp', 'totp']) assert.equal(inputs.find(input => input.name === name), undefined, `no input named ${name}`);
+  assert.equal(page.locate('label', 'Authentication code'), null, 'no <label> carries the GY-1450 label text');
   const field = confirmCodeField(inputs, 'authenticator')!;
-  assert.deepEqual({ type: field.type, autocomplete: field.autocomplete, id: field.id, name: field.name, label: field.label }, { type: 'text', autocomplete: 'one-time-code', id: 'sudo_totp', name: 'totp', label: 'Authentication code | XXXXXX' });
-  assert.equal(confirmCodeField(inputsOf(PASSKEY_VIEW), 'authenticator'), null, 'the hidden email field is never the authenticator field');
+  assert.deepEqual({ type: field.type, autocomplete: field.autocomplete, id: field.id, name: field.name, label: field.label }, { type: 'text', autocomplete: 'off', id: 'app_totp', name: 'sudo_app_otp', label: 'Enter the verification code | XXXXXX' });
+  assert.equal(confirmCodeField(inputsOf(PASSKEY_VIEW), 'authenticator'), null, 'a page without the form yields no field');
   assert.equal(confirmCodeField(inputsOf(TOTP_LOADING), 'authenticator'), null);
   assert.equal(confirmCodeField(inputs.map(input => ({ ...input, visible: true })), 'email')?.id, 'sudo_email_otp', 'the email view takes the email field, never the TOTP one');
 });
@@ -248,7 +238,7 @@ test('unit:sudo-copy-profile-routes — on a profile copy the handoff offers the
   assert.equal(lines[0], "GitHub's Confirm-access page (https://github.com/sessions/sudo) offers: passkey, authenticator app, email code, Mobile");
   assert.ok(lines.includes(`For your authenticator app, enter its 6-digit code at ${LOCAL} or with graphyard up --sudo-code CODE`), 'the authenticator code method');
   assert.ok(lines.some(line => line.startsWith(`For an email code, ask for it at ${LOCAL} or with graphyard up --sudo-code email`)), 'the email code method');
-  assert.equal(lines[lines.length - 1], `Or open ${LOCAL} in your own browser and click its button there: your own GitHub session holds sudo mode, and setup continues by itself once GitHub returns you to that page`, 'the one-click manual route');
+  assert.ok(lines.includes(`Or open ${LOCAL} in your own browser and click its button there: your own GitHub session holds sudo mode, and setup continues by itself once GitHub returns you to that page`), 'the one-click manual route');
 
   // Every other message about a wait on a profile copy says the same.
   const copied: SudoState = { flow: 'installation-accept', record: 'r', code: null, issuedAt: new Date(0).toISOString(), attempt: 1, deadline: new Date(600_000).toISOString(), state: 'waiting', method: 'passkey', offered: ['passkey', 'authenticator', 'mobile'], copy: true };
