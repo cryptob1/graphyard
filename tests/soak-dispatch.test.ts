@@ -159,10 +159,12 @@ test('unit:soak-dispatch-preference-by-risk — every invariant holds as the reg
   // before any launch and Pi stays healthy and eligible throughout, so the account each dispatch
   // starts is the preference's own answer: items 1, 2 and 5 plan a sensitive path (persistence,
   // migrations, deployment) and ride the strong account although Pi could have taken them; items 3
-  // and 4 plan normal files and start on Pi — item 3 from a lane the dispatch fixes high, item 4 as
-  // the day's unknown-change observations stamp one anyway. An item that plans no files is judged
-  // the same worst case by the unit suite; a day cannot deliver one, since nothing outside an empty
-  // plan may change, so the sensitive plans stand for the class here.
+  // and 4 plan normal files and start on Pi — item 3 with its dispatch call overridden to the high
+  // lane (the override shapes what `dispatchWork` is handed, not the lane the day's stamping stores,
+  // which the assertions below read), item 4 as the day's unknown-change observations stamp one
+  // anyway. An item that plans no files is judged the same worst case by the unit suite; a day
+  // cannot deliver one, since nothing outside an empty plan may change, so the sensitive plans
+  // stand for the class here.
   const { root, master } = await failoverInstalled();
   const host = master.hostId ?? 'unknown-host', at = new Date().toISOString();
   let registry: AgentRegistry = applyRegistryMutation(emptyRegistry(), 'apply', { runtimes: proposedRuntimes.filter(runtime => ['pi', 'claude'].includes(runtime.name)),
@@ -215,8 +217,9 @@ test('unit:soak-dispatch-preference-by-risk — every invariant holds as the reg
     assert.ok(request, `the registry was asked for ${items[n - 1].key}`);
     assert.equal(request!.prefer, prefer, `${items[n - 1].key} was asked with preference ${prefer}`);
   }
-  // The lane never decided: both fast items rode a high lane (item 3 fixed by its dispatch, item 4
-  // as stamped) on a normal plan, and still took Pi.
+  // The lane never decided: both fast items rode a high lane on a normal plan and still took Pi. The
+  // stored lane read here is the day's stamping for both; item 3's `lanes` override only shaped the
+  // item handed to `dispatchWork`, which is where the preference would have read it had it read lanes.
   for (const n of [3, 4]) assert.equal(final.find(item => item.key === items[n - 1].key)!.lane, 'high', `${items[n - 1].key} rode a high lane and still started on Pi`);
   // The last dispatch record names the preference that ordered its accounts, beside the account it chose.
   const last = failover.dispatches.at(-1)!;

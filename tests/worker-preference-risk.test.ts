@@ -29,6 +29,10 @@ const sensitivePaths: Record<string, string> = {
   'CI configuration': '.github/workflows/ci.yml', dependencies: 'package.json', 'merge path': 'src/main-guard.ts', 'merge writer': 'src/merge-writer/index.ts', migrations: 'migrations/0042_items.sql',
 };
 const normalFiles = ['src/master/dispatch.ts', 'src/model/worker-preference.ts', 'tests/worker-preference-risk.test.ts', 'docs/delegation.md'];
+/** Directory scopes that cover a sensitive surface while matching no rule literally: the loop's widening fold (GY-549) writes such entries. */
+const sensitiveScopes = ['src/', 'src/*', 'src/**', 'src/server/', 'src/server/**', 'src/merge-writer/', '.github/', '.github/workflows/', 'migrations/', 'deploy/'];
+/** Directory scopes with no sensitive file beneath them. */
+const normalScopes = ['docs/', 'docs/**', 'tests/', 'tests/helpers/*', 'src/model/', 'src/master/**', 'src/server/jobs/', 'web/', 'browser-tests/'];
 /** An item whose `lane` is never read: the preference judges the change, not the lane. */
 const laneBlind = <T extends object>(work: T) => new Proxy(work, { get(target, property, receiver) { if (property === 'lane') throw new Error('workerPreference read the lane'); return Reflect.get(target, property, receiver); } });
 
@@ -47,6 +51,9 @@ test('unit:worker-preference-by-risk — a normal planned change is fast on its 
       assert.ok(path && pattern.test(path), `the fixture names a path for rule ${rule}`);
       assert.equal(workerPreference({ lane, plannedFiles: [...normalFiles, path], pipeline: { reworkRounds: 0, attempts: [] } }), 'strong', `lane ${lane}, ${path} (${rule}): strong`);
     }
+    // A directory scope that covers a sensitive surface is sensitive although no rule matches the entry itself; one covering none stays normal.
+    for (const scope of sensitiveScopes) assert.equal(workerPreference({ lane, plannedFiles: [...normalFiles, scope], pipeline: { reworkRounds: 0, attempts: [] } }), 'strong', `lane ${lane}, directory scope ${JSON.stringify(scope)}: strong`);
+    assert.equal(workerPreference({ lane, plannedFiles: [...normalFiles, ...normalScopes], pipeline: { reworkRounds: 0, attempts: [] } }), 'fast', `lane ${lane}, normal directory scopes: still Pi`);
     // No planned files: a change nobody can see is the worst case.
     assert.equal(workerPreference({ lane, plannedFiles: [], pipeline: { reworkRounds: 0, attempts: [] } }), 'strong', `lane ${lane}, empty plannedFiles: strong`);
     assert.equal(workerPreference({ lane, pipeline: { reworkRounds: 0, attempts: [] } }), 'strong', `lane ${lane}, no plannedFiles at all: strong`);
@@ -62,6 +69,32 @@ test('unit:worker-preference-by-risk — a normal planned change is fast on its 
   assert.equal(workerPreference(laneBlind({ plannedFiles: normalFiles, pipeline: { reworkRounds: 0, attempts: [] } })), 'fast');
   assert.equal(workerPreference(laneBlind({ plannedFiles: ['src/store/work-store.ts'], pipeline: { reworkRounds: 0, attempts: [] } })), 'strong');
   assert.equal(workerPreference(laneBlind({ plannedFiles: [] })), 'strong');
+});
+
+test('unit:worker-preference-by-risk — every sensitive rule has a surface that its own pattern matches, so a directory scope is judged against the whole rule set; an exact path is still judged by the rule itself', async () => {
+  // Imported dynamically so a tree without these exports fails this case, not the file's load.
+  const { plannedEntrySensitive, sensitiveSurfaces } = await import('../src/model/worker-preference.js') as Partial<typeof import('../src/model/worker-preference.js')>;
+  assert.ok(plannedEntrySensitive && sensitiveSurfaces, 'the preference exports the per-entry judgement and the rules\' surfaces');
+  for (const { rule, pattern } of sensitiveRules) {
+    const surfaces = sensitiveSurfaces[rule];
+    assert.ok(surfaces?.length, `rule ${rule} names its surface`);
+    for (const surface of surfaces!) {
+      assert.match(surface, pattern, `surface ${surface} is sensitive by its own rule ${rule}`);
+      assert.ok(plannedEntrySensitive(surface), `${surface} planned exactly is sensitive`);
+    }
+  }
+  assert.deepEqual(Object.keys(sensitiveSurfaces).sort(), sensitiveRules.map(({ rule }) => rule).sort(), 'no surface names a rule that does not exist');
+  for (const scope of sensitiveScopes) assert.ok(plannedEntrySensitive(scope), `${JSON.stringify(scope)} covers a sensitive surface`);
+  for (const scope of normalScopes) assert.ok(!plannedEntrySensitive(scope), `${scope} covers no sensitive surface`);
+  for (const path of normalFiles) assert.ok(!plannedEntrySensitive(path), `${path} is a normal file`);
+  // An exact path under a sensitive tree, and a directory scope inside one, are sensitive by the rule's own pattern.
+  assert.ok(plannedEntrySensitive('src/store/work-store.ts'));
+  assert.ok(plannedEntrySensitive('src/store/queries/'));
+  assert.ok(plannedEntrySensitive('src/server/auth/'));
+  // An exact path beside a surface is not made sensitive by the surface: only directory scopes are judged by overlap.
+  assert.ok(!plannedEntrySensitive('src/server/jobs.ts'));
+  assert.ok(!plannedEntrySensitive('src/operator-agent.test.ts'));
+  assert.ok(!plannedEntrySensitive('docs/Dockerfile'), 'the rules are anchored at the repository root');
 });
 
 /** A Herdr world on which every runtime comes up: the pane shows the runtime ready and the agent is found. */

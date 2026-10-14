@@ -136,7 +136,7 @@ test('unit:pi-launch-failure-falls-back — a Pi launch that never starts, or is
   await writeFile(credentialFile, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
   await mkdir(join(root, 'assigned'), { recursive: true });
   const profile: WorkerProfile = { name: 'registry-worker', principal: 'graphyard-worker-1', agentName: 'eng-pi', mode: 'launch', kind: 'pi', credentialFile, agentArgs: [], approvals: 'auto', environment: {} };
-  const item = { id: 'work-1746', key: 'GY-1746', title: 'Pi first', description: '', type: 'feature', priority: 1, dependencies: [], plannedFiles: ['src/'], lane: 'low', pipeline: { reworkRounds: 0, attempts: [] },
+  const item = { id: 'work-1746', key: 'GY-1746', title: 'Pi first', description: '', type: 'feature', priority: 1, dependencies: [], plannedFiles: ['src/master/'], lane: 'low', pipeline: { reworkRounds: 0, attempts: [] },
     criteria: [{ id: 'AC-3', text: 'Fallback', proofs: ['unit:pi-launch-failure-falls-back'] }], policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null,
     reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [] } as any;
 
