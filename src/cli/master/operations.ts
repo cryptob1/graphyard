@@ -188,6 +188,9 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     const request = followUpRequest(work), parent = request ? snapshot.work.find((item: any) => item.id === request.work) : null;
     const served = (await readDaemonState(root, master).catch(() => null))?.deployment;
     if (!served?.sha || served.source === 'unavailable') throw new Error('The loop has not verified a serving release; the reading is bound to one, so run the loop first');
+    // The observation is the loop's, taken this cycle or the last: after a rollout or a stopped loop it names a release the plane may no longer serve.
+    const age = Date.now() - Date.parse(served.at);
+    if (!(age <= Math.max(300, master.run.intervalSeconds * 3) * 1000)) throw new Error(`The loop's last verified serving release (${served.sha.slice(0, 12)}) was observed ${Number.isFinite(age) ? `${Math.round(age / 1000)}s ago` : 'at an unknown time'}, too long ago to bind a reading to: run the loop (master status) until it observes the release again`);
     if (request && !parent?.delivery) throw new Error(`${work.key}'s follow-up request names ${request.work}, which is not a delivered item`);
     // The same check the loop's reading makes: a release not observed carrying the parent's merge is no observation of it.
     if (request && !(served.deployed as string[]).includes(parent.key)) throw new Error(`${work.key}'s reading is due, and the release the control plane serves (${served.sha.slice(0, 12)}) is not observed carrying ${parent.key}'s merge ${String(parent.delivery.mergeSha).slice(0, 12)}; the loop reads it on a release that does`);

@@ -163,6 +163,13 @@ test('integration:loop-records-due-observation-reading — a due reading never s
   assert.equal(observed.length, 1, 'the due reading reads the release afresh');
 });
 
+test('integration:loop-records-due-observation-reading — a fail measured on a later release is recorded even when the proof\'s newest reading failed on an earlier one', async () => {
+  const item = followUp(1738), directory = await temporaryDirectory('loop-readings-later-fail');
+  item.evidence.push({ id: randomUUID(), producer: 'graphyard-master', trusted: true, executed: 1, skipped: 0, at: iso(now - 2 * hour), proof: own, sha: filed, baseSha: mergeSha, policyRevision: 1, result: 'fail', reading: { detail: 'earlier release failed' } } as never);
+  const made = await cycleOver([parent, item], directory, async () => ({ result: 'fail', detail: 'still failing on the serving release' }));
+  assert.deepEqual(made.recorded.map(entry => [entry.key, entry.reading.sha, entry.reading.result]), [['GY-1738', serving, 'fail']], 'the fail on the serving release is durable evidence bound to it');
+});
+
 test('integration:loop-records-due-observation-reading — the serving release not yet observed carrying the parent\'s merge, or unobserved this cycle, records why and takes no reading', async () => {
   const item = followUp(1731), directory = await temporaryDirectory('loop-readings-unserved');
   const other = { ...parent, id: '33333333-3333-4333-8333-333333333333', key: 'GY-1733' } as Work;

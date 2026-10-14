@@ -71,9 +71,6 @@ const parentProofOf = (parent: Pick<Work, 'criteria'>, proof: string) => parent.
 type Taken = { proof: string; reading: PostDeployReading };
 /** What one single-flight read of an item answers: the release it was read on, so an answer for a release the plane no longer serves is discarded, and the readings or the failure. */
 type Read = { release: string } & ({ readings: Taken[] } | { error: unknown });
-/** The loop's newest own reading of the proof on any release, at the item's current policy revision. */
-const newestLoopReading = (item: Work, proof: string) => item.evidence.filter(entry => entry.proof === proof && entry.trusted && !entry.revocation && !!entry.reading && entry.policyRevision === item.policyRevision)
-  .reduce<Work['evidence'][number] | null>((best, entry) => !best || Date.parse(entry.at) >= Date.parse(best.at) ? entry : best, null);
 const detailOf = (entry: Taken) => (entry.reading as { detail: string }).detail.slice(0, 2000);
 /** The pull request a delivered-observation closure still owes GitHub, as the close's answer or the snapshot's document carries it. */
 const owedPullRequest = (work: unknown) => { const closure = (work as Pick<Work, 'closure'> | null | undefined)?.closure; return closure?.kind === 'delivered-observation' && closure.pullRequest?.outcome === 'owed' ? closure.pullRequest.pr : null; };
@@ -202,12 +199,12 @@ export async function readingsStep(cycle: Cycle, served: DaemonState['deployment
     const unavailable = readings.filter(entry => 'unavailable' in entry.reading);
     if (unavailable.length) return note('waiting', `${item.key}'s reading is due on release ${short(release)} and cannot be taken from this host: ${unavailable.map(entry => `${entry.proof}: ${(entry.reading as { unavailable: string }).unavailable}`).join('; ')}`);
     // Every proof read: record each reading not yet on the item, bound as loopObservation reads it. A pass is recorded
-    // once per release; a fail re-read on the backoff, on this release or a later one, stands as recorded while the
+    // once per release; a fail re-read on the backoff on this release stands as recorded while the
     // proof's newest loop reading is already a fail — the escalation below names the values measured now.
     try {
       for (const entry of readings) {
         const reading = entry.reading as { result: 'pass' | 'fail'; detail: string };
-        if (reading.detail === 'already recorded' || (reading.result === 'fail' && newestLoopReading(item, entry.proof)?.result === 'fail')) continue;
+        if (reading.detail === 'already recorded' || (reading.result === 'fail' && loopReadingOn(item, entry.proof, release)?.result === 'fail')) continue;
         await effects.recordReading(item, { proof: entry.proof, sha: release, baseSha, policyRevision: item.policyRevision, result: reading.result, detail: reading.detail.slice(0, 2000) });
       }
     } catch (error) { return note('failed', `Could not record ${item.key}'s reading on release ${short(release)}: ${message(error)}`); }

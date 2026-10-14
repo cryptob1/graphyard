@@ -12,7 +12,13 @@ export function readingEffects(current: () => MasterConfig, mutate: (path: strin
   return {
     recordReading: (work, reading) => mutate(`work/${work.id}/reading`, reading),
     closeObservation: (work, release, reason, key) => mutate(`work/${work.id}/close`, { kind: 'delivered-observation', ref: release, reason }, key),
-    postDeployFiler: async input => (await verification()).localPostDeployChecks(input),
+    // The filer of the serving release, as verify-deployment resolves it: a parent proof is accepted by the code the release carries, never by the coordinator checkout's when they differ.
+    postDeployFiler: async input => {
+      const { releasePostDeployFiler } = await verification();
+      const resolved = await releasePostDeployFiler(current(), input.release);
+      if ('reason' in resolved) throw new Error(resolved.reason);
+      try { return await resolved.filer(input); } finally { await resolved.dispose(); }
+    },
     readPattern: async pattern => (await verification()).patternReader(asCoordinator)(pattern),
     readPostDeploy: async input => (await import('../master/post-deploy-readings.js')).postDeployReader((await verification()).patternReader(asCoordinator), current().cliPath)(input),
   };
