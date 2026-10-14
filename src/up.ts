@@ -984,7 +984,7 @@ export const upUsage = [
   '  --goal FILE                submit the goal in FILE once the checklist is green',
   "  --browser-profile PROFILE  the Chrome profile signed in to GitHub (default: the master's, else another install's for the same login); unused with --merger control-plane",
   '  --github-mobile            approve Confirm access with GitHub Mobile (the default whenever the page offers it)',
-  '  --sudo-code CODE|email     hand the waiting run a 6-digit Confirm-access code, or ask GitHub to email one',
+  '  --sudo-code CODE|email     hand the waiting run a Confirm-access code (6 digits from an authenticator app, 8 from an email), or ask GitHub to email one',
   '  --confirm-price X          consent to a created server\'s monthly price (passed to install)',
   '  --max-monthly N            consent to any monthly price up to N (passed to install)',
   '  --ssh-key NAME             the SSH key a created server is reached with (passed to install)',
@@ -1008,7 +1008,7 @@ export async function upSudoCode(root: string, args: string[]) {
   const at = args.findIndex(arg => arg === '--sudo-code' || arg.startsWith('--sudo-code='));
   if (at < 0) return null;
   const kind = await submitSudoCode(root, args[at].includes('=') ? args[at].slice('--sudo-code='.length) : args[at + 1] ?? '');
-  return { ok: true, handed: kind === 'email' ? 'a request for an emailed code' : 'a 6-digit code', next: 'The waiting graphyard up types it into GitHub\'s Confirm-access page within its next check.' };
+  return { ok: true, handed: kind === 'email' ? 'a request for an emailed code' : 'a code', next: 'The waiting graphyard up types it into GitHub\'s Confirm-access page within its next check.' };
 }
 
 /** A shell word: plain when it needs no quoting, otherwise single-quoted. */

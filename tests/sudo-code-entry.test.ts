@@ -159,7 +159,7 @@ test('unit:sudo-code-entry — an authenticator code handed with graphyard up --
   assert.equal(lines[0], FIRST_LINE);
   assert.equal(lines[1], "GitHub's Confirm-access page (https://github.com/sessions/sudo) offers: passkey, authenticator app, email code, Mobile", 'every method the page offers is listed');
   assert.equal(lines[2], `For your authenticator app, enter its 6-digit code at ${LOCAL} or with graphyard up --sudo-code CODE`);
-  assert.match(lines[3], /^For an email code, ask for it at http:\/\/127\.0\.0\.1:4311 or with graphyard up --sudo-code email, then enter its 6 digits/);
+  assert.match(lines[3], /^For an email code, ask for it at http:\/\/127\.0\.0\.1:4311 or with graphyard up --sudo-code email, then enter its 8 digits/);
   assert.deepEqual(methodSteps(steps), [['sudo-method', 'passkey'], ['sudo-code', 'authenticator', 'entered'], ['sudo-method', 'authenticator']]);
   assert.deepEqual(steps.find(step => step.action === 'fill')?.args, ['#app_otp', '[code withheld]']);
   for (const [what, value] of [['recorded steps', steps], ['handoffs', handed], ['printed answer', printed], ['console output', output]] as const) assert.ok(!JSON.stringify(value).includes(CODE), `the code never appears in the ${what}`);
@@ -202,7 +202,7 @@ test('unit:sudo-code-entry — an email code is requested, then typed into the e
   assert.deepEqual(result, { passed: true, attempts: 0, code: null });
   assert.deepEqual(fake.state.clicked, ['#totp-link', '#email-send', '#verify'], 'the authenticator view is prepared before the invitation; GitHub was asked to email a code, which was then entered');
   assert.deepEqual(fake.state.typed, ['654321']);
-  assert.match(handed[1], new RegExp(`GitHub emailed you a code: enter its 6 digits at ${LOCAL.replace(/\./g, '\\.')} or with graphyard up --sudo-code CODE`));
+  assert.match(handed[1], new RegExp(`GitHub emailed you a code: enter its 8 digits at ${LOCAL.replace(/\./g, '\\.')} or with graphyard up --sudo-code CODE`));
   assert.ok(!handed.join('\n').includes('654321'));
 });
 
@@ -505,4 +505,12 @@ test('unit:preflight-durable-checkout — host preflight names a checkout under 
   for (const temporary of ['/var/tmp', '/tmp']) assert.equal(durableCheckoutPreflight(`${temporary}/graphyard-game-pilot`, [temporary], '/home/operator').ok, false, `${temporary} is temporary`);
   const durable = durableCheckoutPreflight('/home/operator/code/pilot', ['/tmp', '/var/tmp'], '/home/operator');
   assert.deepEqual({ ok: durable.ok, name: durable.name }, { ok: true, name: 'Durable checkout' });
+});
+
+test('unit:sudo-code-entry — GitHub\'s 8-digit email code is handed over like a 6-digit authenticator code', async () => {
+  const { submitSudoCode } = await browser();
+  const root = await temporaryDirectory('sudo-code-eight');
+  assert.equal(await submitSudoCode(root, '12345678'), 'code');
+  assert.equal(await submitSudoCode(root, '123456'), 'code');
+  await assert.rejects(submitSudoCode(root, '1234567'), /6 digits/);
 });

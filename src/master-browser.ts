@@ -327,8 +327,8 @@ export function sudoInstruction(state: Pick<SudoState, 'code' | 'method' | 'url'
       ...(copy ? [] : [`Confirm access once in your own Chrome at ${sudoProtectedPage} with your passkey or password: GitHub then holds sudo mode for the session the agent's browser shares, and the flow continues by itself within 10 s`]),
       `GitHub's Confirm-access page${state.url ? ` (${state.url})` : ''} offers: ${offered.map(method => sudoMethodNames[method]).join(', ')}`];
     if (codes.includes('authenticator')) lines.push(`For your authenticator app, enter its 6-digit code ${where}`);
-    if (codes.includes('email')) lines.push(state.emailed ? `GitHub emailed you a code: enter its 6 digits ${where}`
-      : `For an email code, ask for it ${[route.page ? `at ${route.page}` : '', route.command ? `with ${route.command} email` : ''].filter(Boolean).join(' or ')}, then enter its 6 digits ${where}`);
+    if (codes.includes('email')) lines.push(state.emailed ? `GitHub emailed you a code: enter its 8 digits ${where}`
+      : `For an email code, ask for it ${[route.page ? `at ${route.page}` : '', route.command ? `with ${route.command} email` : ''].filter(Boolean).join(' or ')}, then enter its 8 digits ${where}`);
     // GY-1459: the code goes straight to the drive, and a fresh one leaves it the most of its 30 s.
     if (codes.includes('authenticator')) lines.push('Enter an authenticator code yourself, right after the app rolls over to a new one: the drive reads it the moment you enter it and types it within 2 s, with nobody passing it on');
     // GY-1459: on a copy, the one-click manual route is the local page in the operator's own browser, whose live session holds sudo mode.
@@ -343,8 +343,8 @@ export function sudoInstruction(state: Pick<SudoState, 'code' | 'method' | 'url'
   const codes = where ? (['authenticator', 'email'] as const).filter(method => state.offered?.includes(method)) : [];
   const copy = route.profile ? route.profile.mode === 'copy' : !!(route.copy ?? state.copy);
   const more = [
-    ...(codes.includes('authenticator') ? [`Or enter your authenticator app's 6-digit code ${where}: the drive opens its code view beside this prompt and types the code as soon as GitHub shows the field (up to 10 s), then within 2 s`] : []),
-    ...(codes.includes('email') ? [`Or ask for an email code ${[route.page ? `at ${route.page}` : '', route.command ? `with ${route.command} email` : ''].filter(Boolean).join(' or ')}, then enter its 6 digits ${where}`] : []),
+    ...(codes.includes('authenticator') ? [`Or enter your authenticator app's 6-digit code ${where}: the drive opens its code view beside this prompt and types the code as soon as GitHub shows the field (up to 10 s, ending the moment you approve the prompt), then within 2 s`] : []),
+    ...(codes.includes('email') ? [`Or ask for an email code ${[route.page ? `at ${route.page}` : '', route.command ? `with ${route.command} email` : ''].filter(Boolean).join(' or ')}, then enter its 8 digits ${where}`] : []),
     ...(copy && route.page ? [`Or open ${route.page} in your own browser and click its button there: your own GitHub session holds sudo mode, and setup continues by itself once GitHub returns you to that page`] : []),
   ];
   return [prompt, ...more].join('\n');
@@ -644,7 +644,7 @@ export function restoreSudoLanding(page: BrowserPage, landing: string, text: str
  * it. It is never logged, recorded, or echoed back.
  */
 export const sudoCodeSubmissionSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('code'), code: z.string().regex(/^\d{6}$/), at: z.string().min(1).max(40) }).strict(),
+  z.object({ kind: z.literal('code'), code: z.string().regex(/^\d{6}$|^\d{8}$/), at: z.string().min(1).max(40) }).strict(),
   z.object({ kind: z.literal('email'), at: z.string().min(1).max(40) }).strict(),
   // GY-1459: the local App page finished the step itself (the operator registered, reused or installed
   // the App in their own browser); a flow waiting since before AT ends its wait.
@@ -657,8 +657,8 @@ const sudoCodeFreshMs = 600_000;
 export async function submitSudoCode(root: string, value: string, now = new Date()): Promise<SudoCodeSubmission['kind']> {
   const trimmed = value.trim();
   const submission: SudoCodeSubmission = trimmed.toLowerCase() === 'email' ? { kind: 'email', at: now.toISOString() }
-    : /^\d{6}$/.test(trimmed) ? { kind: 'code', code: trimmed, at: now.toISOString() }
-    : (() => { throw new Error('A Confirm-access code is the 6 digits from your authenticator app or email, or "email" to have GitHub email one'); })();
+    : /^\d{6}$|^\d{8}$/.test(trimmed) ? { kind: 'code', code: trimmed, at: now.toISOString() }
+    : (() => { throw new Error('A Confirm-access code is the 6 digits from your authenticator app or the 8 digits GitHub emails, or "email" to have GitHub email one'); })();
   await mkdir(actionsDirectory(root), { recursive: true, mode: 0o700 });
   await atomicPrivateWrite(sudoCodeFile(root), submission);
   return submission.kind;
@@ -784,11 +784,12 @@ export async function passSudo(page: BrowserPage, options: SudoOptions): Promise
     for (const label of codeFieldLabels) { const field = page.locate('label', label); if (usable(field)) return field; }
     return null;
   };
-  // The chosen view renders its field asynchronously (GY-1459): wait up to 10 s for it.
+  // The chosen view renders its field asynchronously (GY-1459): wait up to 10 s for it, and stop at once when the
+  // page has left Confirm access (a GitHub Mobile prompt approved meanwhile), so a wait never hides an approval.
   const renderedField = (method: 'authenticator' | 'email') => {
     for (let check = 1; ; check += 1) {
       const field = codeField(method);
-      if (field || check >= codeFieldChecks) return field;
+      if (field || check >= codeFieldChecks || !detectSudo(page.url(), page.text()).sudo) return field;
       page.wait(codeFieldCheckMs);
     }
   };
@@ -816,6 +817,8 @@ export async function passSudo(page: BrowserPage, options: SudoOptions): Promise
     if (!field || !page.fill) {
       page.note?.('sudo-code', [method, field ? 'page cannot type' : 'no code field']);
       if (field) return 'done';
+      // The page left Confirm access while the field rendered: the next pass reads the approval, and the code is kept.
+      if (!detectSudo(page.url(), page.text()).sudo) return 'missing';
       if (state!.field !== 'missing') {
         if (state!.method === 'mobile') page.note?.('sudo-method', [method]);
         state = { ...state!, field: 'missing', ...(state!.method === 'mobile' ? { method } : {}) }; await options.onCode(state);

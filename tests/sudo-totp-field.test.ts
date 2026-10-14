@@ -281,7 +281,33 @@ test('unit:sudo-code-direct — a code handed while a GitHub Mobile prompt waits
   assert.deepEqual(fake.state.submitted, [CODE], 'the code handed beside the Mobile prompt reached the TOTP field');
   const instruction = sudoInstruction(handed[0], 'your phone', { page: LOCAL, command: 'graphyard up --sudo-code', profile: { mode: 'copy', name: 'Default' } });
   assert.match(instruction, /^Approve the GitHub Mobile prompt on your phone and choose 42/);
-  assert.match(instruction, new RegExp(`Or enter your authenticator app's 6-digit code at ${LOCAL} or with graphyard up --sudo-code CODE: the drive opens its code view beside this prompt and types the code as soon as GitHub shows the field \\(up to 10 s\\)`));
+  assert.match(instruction, new RegExp(`Or enter your authenticator app's 6-digit code at ${LOCAL} or with graphyard up --sudo-code CODE: the drive opens its code view beside this prompt and types the code as soon as GitHub shows the field \\(up to 10 s, ending the moment you approve the prompt\\)`));
   assert.match(instruction, new RegExp(`Or open ${LOCAL} in your own browser and click its button there`));
   assert.doesNotMatch(instruction, /own Chrome/);
+});
+
+test('unit:sudo-code-direct — an approval that lands while the field renders ends the wait at once and keeps the code, not a 10 s blind wait', async () => {
+  const { passSudo } = await browser();
+  const fake = fixturePage({ renderWaits: [Infinity] });
+  let approved = false, mobile = false, tracking = false, since = 0;
+  const base = fake.page;
+  const page: BrowserPage = { ...base, copy: true,
+    url: () => approved ? 'https://github.com/settings/apps/new' : base.url(),
+    text: () => approved ? '<h1>Register new GitHub App</h1>' : mobile && fake.state.view === 'passkey' ? 'Confirm access\nGitHub Mobile\n42\nUse your authenticator app\nUse passkey' : base.text(),
+    open(url) { mobile = false; base.open(url); },
+    click(selector) {
+      if (selector === 'a[href="/sessions/sudo?mobile=1"]') mobile = true; else base.click(selector);
+      if (selector === 'a[href="/sessions/sudo?sudo_method=totp"]') { tracking = true; since = fake.state.waited.length; }
+    },
+    // The prompt is approved 1.5 s into the field's render wait.
+    wait(ms) { base.wait(ms); if (tracking && fake.state.waited.length - since >= 3) approved = true; },
+  };
+  let reads = 0;
+  const clock = { at: 0 };
+  const result = await passSudo(page, { flow: 'installation-accept', record: 'graphyard up', prefer: 'mobile', timeoutMs: 60_000, pollMs: 500, maxAttempts: 2, now: () => new Date(clock.at),
+    readCode: () => ++reads < 2 ? null : { kind: 'code', code: CODE, at: new Date(clock.at).toISOString() },
+    onCode: () => {}, sleep: async ms => { clock.at += ms; } });
+  assert.equal(result.passed, true);
+  assert.ok(fake.state.waited.length < 8, `the render wait stopped once the prompt was approved (${fake.state.waited.length} waits)`);
+  assert.deepEqual(fake.state.submitted, [], 'no code was typed into a page that had moved on');
 });
