@@ -32,13 +32,16 @@ export const loopReadingOn = (work: Pick<Work, 'evidence' | 'policyRevision'>, p
 
 /**
  * GY-1779: the recorded passing readings that end a loop-owned observation item's wait, one per
- * proof, and the release the newest was taken on — the release its `delivered-observation` closure
- * names and the loop closes it on — or null while the wait stands or for any other item. Only a
- * passing, unexpired, current-policy reading, as postDeployChecks reads it, counts: of the follow-up's
- * filed serving release or marked as the loop's own on the later release the control plane served,
- * bound to the parent delivery's merge, with nothing skipped, taken once its window opened. The
- * newest reading of a proof decides: a later failed or expired reading of the same proof withdraws an
- * earlier pass. A follow-up whose parent is not among `all` has no merge to bind a reading to.
+ * proof, all taken on one release — the release its `delivered-observation` closure names and the
+ * loop closes it on — or null while the wait stands or for any other item. Only a passing, unexpired,
+ * current-policy reading, as postDeployChecks reads it, counts: of the follow-up's filed serving
+ * release or marked as the loop's own on the later release the control plane served, bound to the
+ * parent delivery's merge, with nothing skipped, taken once its window opened. The newest reading
+ * of a proof decides: a later failed or expired reading of the same proof withdraws an earlier pass.
+ * The passes must share one release: no single serving release passed every proof while one proof's
+ * newest pass is on R1 and another's on R2 (readings recorded by hand across a rollout), so the wait
+ * stands and the loop reads the proofs not yet passing on the release it serves. A follow-up whose
+ * parent is not among `all` has no merge to bind a reading to.
  */
 export function observationPass(work: Observed, now: Date, all: readonly Pick<Work, 'id' | 'delivery'>[] = []): { release: string; readings: Reading[] } | null {
   const proofs = loopObservationProofs(work);
@@ -53,7 +56,9 @@ export function observationPass(work: Observed, now: Date, all: readonly Pick<Wo
     if (!latest || !evidenceProves(proof, latest) || (latest.expiresAt && Date.parse(latest.expiresAt) <= now.getTime())) return null;
     readings.push(latest);
   }
-  return { release: newest(readings)!.sha, readings };
+  const release = readings[0].sha;
+  if (readings.some(entry => entry.sha !== release)) return null;
+  return { release, readings };
 }
 
 /**

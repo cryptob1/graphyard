@@ -20,6 +20,13 @@ export interface Closure {
   by: string; at: string;
   /** The stage the item held when it was closed. */
   from: Stage;
+  /**
+   * GY-1779: the open pull request a `delivered-observation` closure supersedes (a worker's unsubmitted
+   * candidate from before the loop held the item, GY-1725 #1172). Recorded `owed` in the closure's own
+   * transaction, before GitHub is touched; the close on GitHub follows the commit, and its outcome is
+   * recorded when it lands. One still `owed` is closed on the next close call for the item.
+   */
+  pullRequest?: { pr: number; outcome: 'owed' | 'closed' | 'already-closed' } | null;
 }
 
 export const closeSchema = z.object({

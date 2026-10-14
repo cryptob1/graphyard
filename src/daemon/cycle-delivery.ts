@@ -250,8 +250,10 @@ export async function deploymentStep(cycle: Cycle) {
     }
   });
   if (smokeDeferred) deferred.push(`${smokeDeferred} deliveries' deployment records and smoke requests`);
-  // 7c. GY-1779: the loop's own due readings of loop-owned observation items on the release verified above (cycle-readings.ts).
-  const readingsDeferred = await readingsStep(cycle, served, deadline);
+  // 7c. GY-1779: the loop's own due readings of loop-owned observation items on the release verified above
+  //     (cycle-readings.ts). An observation still in flight verifies nothing this cycle: the due readings
+  //     are deferred with it, never taken on the release the last cycle observed.
+  const readingsDeferred = await readingsStep(cycle, observed === stillVerifying ? stillVerifying : served, deadline);
   if (readingsDeferred) deferred.push(`${readingsDeferred} loop-owned observation readings`);
   await noteDeploymentBudget(cycle, budgetMs, deferred);
 }

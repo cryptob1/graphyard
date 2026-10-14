@@ -262,5 +262,7 @@ test('integration:loop-records-due-observation-reading — the coordinator recor
   assert.deepEqual(closedPulls.map(pull => pull.pr), [1172]);
   assert.match(closedPulls[0].reason, /superseded by that reading/);
   const audit = (await store.pool.query("SELECT payload FROM events WHERE work_id=$1 AND kind='work.closed'", [item.id])).rows[0].payload;
-  assert.deepEqual(audit.details.pullRequest, { pr: 1172, outcome: 'closed' });
+  assert.deepEqual(audit.details.pullRequest, { pr: 1172, outcome: 'owed' }, 'the closure records the pull request as owed before GitHub is touched');
+  assert.deepEqual(closed.closure?.pullRequest, { pr: 1172, outcome: 'closed' }, 'the settled closure names the outcome of the close on GitHub');
+  assert.equal((await store.pool.query("SELECT 1 FROM events WHERE work_id=$1 AND kind='work.pull-request-closed'", [item.id])).rowCount, 1);
 });
