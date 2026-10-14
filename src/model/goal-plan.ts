@@ -178,3 +178,11 @@ export function planItemInput(goal: Pick<Goal, 'key' | 'statement' | 'acceptance
     reason: `${goal.key}'s approved plan item ${item.ref}`,
   };
 }
+
+/** A goal's case change still `requested` (GY-1805), with the goal it protects cases for: what `master status` lists among the decisions the loop owes an independent approver. */
+export interface CaseChangeRequest { goal: string; goalId: string; id: string; work: string; cases: string[]; reason: string; requestedBy: string; requestedAt: string }
+/** The goals API path a case change is read from: every goal, delivered ones included (`open=1` drops them, and a protecting stage's `delivered` still accepts a case change). */
+export const caseChangeGoalsPath = 'goals';
+export const requestedCaseChanges = (goals: readonly Goal[]): CaseChangeRequest[] => goals
+  .flatMap(goal => goal.caseChanges.filter(change => change.state === 'requested').map(({ id, work, cases, reason, requestedBy, requestedAt }) => ({ goal: goal.key, goalId: goal.id, id, work, cases, reason, requestedBy, requestedAt })))
+  .sort((a, b) => Date.parse(a.requestedAt) - Date.parse(b.requestedAt));

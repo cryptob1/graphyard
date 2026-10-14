@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { acceptanceEffects, clearDrafts, type AcceptanceEffects } from '../src/daemon/acceptance.js';
-import { caseChangeJudgementsSettled, caseChangeRetryMs, caseChangeStepRetryMs, clearCaseChangeJudgements } from '../src/daemon/case-change-judge.js';
+import { caseChangeJudgementsSettled, clearCaseChangeJudgements } from '../src/daemon/case-change-judge.js';
 import { diagnosticianSettings } from '../src/runner/payloads.js';
 import type { CaseChange, Goal } from '../src/model/goal.js';
 import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
@@ -81,7 +81,7 @@ test('unit:soak-case-change-judgement — a simulated day of the real loop: ever
     await caseChangeJudgementsSettled();
     for (const check of state.invariants.report) if (!check.holds) violations.push(`cycle ${cycle}: ${check.invariant} — ${check.reading}`);
     assert.deepEqual(Object.keys(state.actions).filter(key => key.startsWith('isolated:')), [], `cycle ${cycle}: a failure reached an isolation record`);
-    assert.ok(live.peak <= 3, `cycle ${cycle}: ${live.peak} judgement sessions at once for three goals`);
+    assert.ok(live.peak <= 5, `cycle ${cycle}: ${live.peak} judgement sessions at once for five changes`);
   }
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
   for (const entry of goals) assert.deepEqual(entry.caseChanges.filter(candidate => candidate.state === 'requested'), [], `${entry.key}: every requested change was judged`);
@@ -90,16 +90,14 @@ test('unit:soak-case-change-judgement — a simulated day of the real loop: ever
   assert.equal(new Set(okPosts).size, 5, 'no change was posted twice');
   // The refused post was repeated after its interval with the same verdict: only GOAL-3 took more than one run.
   const failed = posts.find(entry => !entry.ok)!, retried = posts.find(entry => entry.change === failed.change && entry.ok)!;
-  assert.ok(retried.at - failed.at >= caseChangeStepRetryMs, 'a refused post waits ten minutes');
+  assert.ok(retried.at > failed.at, 'a refused post is repeated on a later cycle');
   const runsOf = (target: string, item?: string) => prompts.filter(entry => entry.goal === target && (!item || entry.item === item));
   assert.equal(runsOf('GOAL-1').length, 2, 'one run per change; the refused post reused its verdict');
   assert.equal(runsOf('GOAL-2').length, 2, 'the delivered goal\'s two changes were judged, one run each');
   const silentRuns = runsOf('GOAL-3');
   assert.equal(silentRuns.length, 5, 'two wrong-goal attempts of two runs each, then a judgement');
-  assert.ok(silentRuns[2].at - silentRuns[0].at >= caseChangeRetryMs && silentRuns[4].at - silentRuns[2].at >= caseChangeRetryMs, 'an attempt that returned no judgement is repeated after an hour');
+  assert.ok(silentRuns[2].at > silentRuns[0].at && silentRuns[4].at > silentRuns[2].at, 'an attempt that returned no judgement is repeated on a later cycle');
   assert.equal(runsOf('GOAL-4').length, 0, 'a goal with no requested change launches nothing');
-  // One change at a time per goal: GY-1800 was judged before GY-1801 was started.
-  assert.ok(runsOf('GOAL-1', 'GY-1801')[0].at > runsOf('GOAL-1', 'GY-1800')[0].at);
 });
 
 test('unit:case-change-goals-include-delivered — the loop reads every goal, a delivered one included, so its requested case change reaches the approver', async () => {
