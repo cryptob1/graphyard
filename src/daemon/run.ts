@@ -621,8 +621,9 @@ export function coordinatorCheckoutGuard(deps: {
       const recovered = selfUpgrade ? await recoverDrift(checkout, keepAlive) : null;
       if (recovered) { await escalate(checkout); return { refusal: null, upgraded: recovered }; }
       const refusal = await escalate(checkout);
-      // A snapshot-loaded loop runs no checkout code, so the checkout's HEAD moving is no drift to refuse it for.
-      if (!selfUpgrade || (refusal && !runsSnapshot() && headDrift(checkout))) return { refusal, upgraded: null };
+      // A snapshot-loaded loop runs no checkout code, so the checkout's HEAD moving is no drift to refuse it for;
+      // a dirty tree never holds the upgrade back, however its HEAD moved (GY-1773), so only a clean moved HEAD does.
+      if (!selfUpgrade || (refusal && !runsSnapshot() && !coordinatorCheckoutRefusal(checkout, 'the master loop') && headDrift(checkout))) return { refusal, upgraded: null };
       let upgraded: SelfUpgradeOutcome | null = null;
       try {
         upgraded = await selfUpgrade(deps.state());

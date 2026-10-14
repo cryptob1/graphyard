@@ -646,7 +646,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     // The checkout already holds the tip: finish what an earlier pass still owes, or align and
     // clear a refusal that no longer describes anything.
     // GY-1773: a restart owed onto loaded code is never run from a dirty tree, however the checkout came to hold the tip.
-    if (state.upgrade.pending) return state.upgrade.pending.code && checkout.dirty === true ? finish(state.upgrade.pending, false, { checkout: checkout.commit, dirty: checkout.dirtyPaths }) : finish(state.upgrade.pending);
+    if (state.upgrade.pending) return checkout.dirty === true ? finish(state.upgrade.pending, false, { checkout: checkout.commit, dirty: checkout.dirtyPaths }) : finish(state.upgrade.pending);
     // The tip itself is code the running loop never loaded: the restart onto it is owed, verified
     // or not (GY-1464), unless a completed pass already processed it without loaded code.
     if (loaded && loaded !== to && !processed(to)) {
@@ -655,7 +655,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       catch (error) { return unaligned(`the diff from ${shortCommit(loaded)} to ${shortCommit(to)} could not be read: ${message(error)}`, 'checkout-failed'); }
       state.upgrade.pending = { from: loaded, to, code };
       await persist();
-      return finish(state.upgrade.pending);
+      return checkout.dirty === true ? finish(state.upgrade.pending, false, { checkout: checkout.commit, dirty: checkout.dirtyPaths }) : finish(state.upgrade.pending);
     }
     const cleared = !!state.upgrade.refused;
     state.upgrade.alignedRelease = release ?? state.upgrade.alignedRelease;

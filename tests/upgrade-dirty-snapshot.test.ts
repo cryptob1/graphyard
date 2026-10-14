@@ -413,6 +413,11 @@ test('unit:snapshot-pin-reported-and-lifted — master status reports the loop\'
   }
   const stillCheckoutLoaded = guardFor(null, () => tree, logs);
   await stillCheckoutLoaded.guard.start(loaded);
+  // GY-1773: a checkout-loaded loop whose dirty tree's HEAD moved from A to C still runs the self-upgrade, which snapshots.
+  tree = { root, commit: 'd'.repeat(40), modified: ['README.md'], untracked: [] };
+  const movedDirty = await stillCheckoutLoaded.guard.betweenCycles(stillCheckoutLoaded.selfUpgrade);
+  assert.equal(stillCheckoutLoaded.upgrades.length, 1, 'a dirty tree whose HEAD moved never holds the upgrade back');
+  assert.ok(movedDirty.refusal, 'and is still escalated');
   assert.equal((await stillCheckoutLoaded.guard.betweenCycles(stillCheckoutLoaded.selfUpgrade)).upgraded?.outcome, 'skipped');
   tree = { root, commit: tip, modified: [], untracked: [] };
   assert.equal((await snapshotLoaded.guard.betweenCycles(snapshotLoaded.selfUpgrade)).refusal, null, 'a clean checkout at the commit the loop runs refuses nothing');
@@ -479,6 +484,24 @@ test('unit:owed-restart-onto-dirtied-head-snapshots — a restart owed onto load
   assert.equal(readHeldCli(root), tip, 'the launcher is pinned to the snapshot');
   assert.equal(state.upgrade.snapshot?.commit, tip);
   assert.equal(w.launch('watch', 'GY-1', '1').release, 'B');
+  assert.deepEqual(calls.executors, [tip]);
+  assert.equal(status(root), ' M README.md', 'the dirty checkout is untouched');
+});
+
+test('unit:dirty-checkout-holding-the-tip-snapshots-it — a dirty checkout that already holds the newly deployed commit restarts the loop onto a held snapshot of it, with no pending restart finished onto the dirty tree', async () => {
+  const w = await world('holds-tip');
+  const { root, loaded, tip, master } = w;
+  git(root, 'fetch', '-q', 'origin');
+  git(root, 'checkout', '-q', '--detach', tip);
+  await dirtied(root);
+  const state = emptyDaemonState(master);
+  state.release = { commit: loaded, dirty: false };
+  state.deployment = verified(tip);
+  const { calls, deps } = recording(root);
+  const done = await performSelfUpgrade(master, state, deps());
+  assert.equal(done.outcome, 'upgraded', JSON.stringify(done));
+  assert.equal(readHeldCli(root), tip, 'the launcher is pinned to the snapshot');
+  assert.equal(state.upgrade.snapshot?.commit, tip);
   assert.deepEqual(calls.executors, [tip]);
   assert.equal(status(root), ' M README.md', 'the dirty checkout is untouched');
 });
