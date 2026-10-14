@@ -123,7 +123,7 @@ const recording = (fake: FakeGit, root: string, behaviour: 'restart' | 'refuse' 
   };
 };
 
-test('unit:loop-self-upgrade — between cycles the loop checks out the verified deployed release: a src/ delivery restarts the executors and then itself, a docs-only delivery restarts nothing, and a dirty or non-detached checkout is never touched and is named instead', async () => {
+test('unit:loop-self-upgrade — between cycles the loop checks out the verified deployed release: a src/ delivery restarts the executors and then itself, a docs-only delivery restarts nothing, a dirty checkout is never touched and is upgraded by snapshot instead, and a non-detached one is never touched and is named', async () => {
   const { master, dispose } = await fixture();
   // A real checkout as deps.root: the loaded release is read from it with the shipped git.
   const checkout = await repository();
@@ -175,23 +175,25 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
     assert.equal(quiet.calls.self, 0, 'and so does the loop');
     assert.deepEqual(docs.upgrade, { alignedRelease: newer, pending: null, last: { at: iso(0), from: tip, to: newer, code: false, executors: null, self: false }, refused: null });
 
-    // A dirty checkout is never touched: no checkout, no restart, and a refusal master status
-    // names until the checkout clears.
+    // A dirty checkout is never touched — no checkout — and holds nothing back (GY-1773): the tip
+    // is snapshotted under .graphyard/held-cli, the launcher pinned to it before anything restarts,
+    // the executors and the loop restart onto it, and the cursor names the checkout left behind.
     const dirtyState = emptyDaemonState(master);
     const dirtyTip = hex('d');
     fake.nextTip = dirtyTip;
     fake.dirty = ' M src/daemon/run.ts\n';
+    fake.diffPaths = ['src/daemon/run.ts'];
     dirtyState.deployment = verified(dirtyTip);
     dirtyState.release = { commit: newer, dirty: false };
     const held = recording(fake, checkout);
-    const refusedDirty = await performSelfUpgrade(master, dirtyState, held.deps());
-    assert.deepEqual({ outcome: refusedDirty.outcome, commit: refusedDirty.outcome === 'refused' ? refusedDirty.commit : null }, { outcome: 'refused', commit: newer });
+    const snapshotted = await performSelfUpgrade(master, dirtyState, held.deps());
+    assert.deepEqual({ outcome: snapshotted.outcome, to: 'to' in snapshotted && snapshotted.to, left: 'left' in snapshotted && snapshotted.left }, { outcome: 'upgraded', to: dirtyTip, left: { checkout: newer, dirty: ['src/daemon/run.ts'] } });
     assert.equal(fake.checkoutTo, newer, 'the checkout was not moved');
-    assert.deepEqual(held.calls.executors, [], 'and nothing was restarted');
-    assert.match(dirtyState.upgrade.refused!.reason, /tracked files differ from the commit it holds/);
-    const named = dirtyState.actions['upgrade:refused'];
-    assert.equal(named?.state, 'failed');
-    assert.match(named!.detail, /left the coordinator checkout at [0-9a-f]{12} untouched/);
+    assert.deepEqual(held.calls.pins, [{ commit: dirtyTip, executors: 0 }], 'the launcher is pinned to a snapshot of the tip before anything restarts');
+    assert.deepEqual([held.calls.executors, held.calls.self], [[dirtyTip], 1], 'the executors and the loop restart onto it');
+    assert.deepEqual(dirtyState.upgrade.snapshot, { at: iso(0), commit: dirtyTip, checkout: newer, dirty: ['src/daemon/run.ts'] }, 'the cursor names the checkout left behind with its dirty paths');
+    assert.equal(dirtyState.upgrade.refused, null, 'nothing is refused');
+    assert.equal(dirtyState.actions['upgrade:refused'], undefined);
 
     // A checkout on a branch is not a detached one: refused the same way, before anything runs.
     fake.dirty = '';

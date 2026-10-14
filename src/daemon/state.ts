@@ -390,8 +390,12 @@ export type DoctorPendingFile = z.infer<typeof doctorPendingFileSchema>;
 export const loopReleaseSchema = z.object({ commit: z.string().regex(/^[0-9a-f]{40}$/).nullable(), dirty: z.boolean().nullable() }).strict();
 export type LoopRelease = z.infer<typeof loopReleaseSchema>;
 
-/** The causes an owed self-upgrade restart stalls on (GY-1445); `release-lagged` (GY-1585) is a held restart, not a fault. */
-export const upgradeStallCauses = ['executors-refused', 'executors-unavailable', 'supervisor-unreachable', 'checkout-dirty', 'checkout-not-detached', 'fetch-failed', 'checkout-failed', 'release-lagged'] as const;
+/**
+ * The causes an owed self-upgrade restart stalls on (GY-1445); `release-lagged` (GY-1585) is a held
+ * restart, not a fault. `snapshot-failed` (GY-1773): the held-cli snapshot a dirty checkout's upgrade
+ * restarts onto could not be made. `checkout-dirty` is kept for cursors written before GY-1773.
+ */
+export const upgradeStallCauses = ['executors-refused', 'executors-unavailable', 'supervisor-unreachable', 'checkout-dirty', 'checkout-not-detached', 'fetch-failed', 'checkout-failed', 'release-lagged', 'snapshot-failed'] as const;
 export type UpgradeStallCause = typeof upgradeStallCauses[number];
 export const upgradeStallSchema = z.object({ cause: z.enum(upgradeStallCauses), reason: z.string().max(500), since: z.string(), at: z.string() }).strict();
 export type UpgradeStall = z.infer<typeof upgradeStallSchema>;
@@ -415,6 +419,13 @@ export const upgradeStateSchema = z.object({
    * aligns or upgrades. Absent while nothing stalls it.
    */
   stalled: upgradeStallSchema.optional(),
+  /**
+   * GY-1773: the loop and the executors run a held-cli snapshot of `commit`, not the coordinator
+   * checkout, which stood dirty when the self-upgrade ran and was left at `checkout` with its
+   * `dirty` tracked paths. `master status` names it while the pin stands; moving the checkout onto
+   * `commit` lifts the pin and removes this. Absent while the loop runs the checkout itself.
+   */
+  snapshot: z.object({ at: z.string(), commit: z.string(), checkout: z.string().nullable(), dirty: z.array(z.string().max(300)).max(20) }).strict().optional(),
 }).strict().default(() => ({ alignedRelease: null, pending: null, last: null, refused: null }));
 export type UpgradeState = z.infer<typeof upgradeStateSchema>;
 
@@ -722,6 +733,7 @@ export function boundDaemonState(state: DaemonState): DaemonState {
     if (state.upgrade.pending) state.upgrade.pending = { ...state.upgrade.pending, from: cut(state.upgrade.pending.from, 40), to: cut(state.upgrade.pending.to, 40) };
     if (state.upgrade.stalled) state.upgrade.stalled = { ...state.upgrade.stalled, reason: cut(state.upgrade.stalled.reason, 500) };
     if (state.upgrade.last) state.upgrade.last = { ...state.upgrade.last, from: cut(state.upgrade.last.from, 40), to: cut(state.upgrade.last.to, 40), executors: cut(state.upgrade.last.executors, 300) };
+    if (state.upgrade.snapshot) state.upgrade.snapshot = { ...state.upgrade.snapshot, commit: cut(state.upgrade.snapshot.commit, 40), checkout: cut(state.upgrade.snapshot.checkout, 40), dirty: state.upgrade.snapshot.dirty.slice(0, 20).map(path => cut(path, 300)) };
   }
   if (state.config) state.config = { ...state.config, changed: state.config.changed.slice(0, 100).map(entry => cut(entry, 100)), refused: cut(state.config.refused, 1000) };
   if (state.reclaim) state.reclaim.errors = state.reclaim.errors.slice(0, 20).map(entry => cut(entry, 500));
