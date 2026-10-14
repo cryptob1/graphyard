@@ -194,6 +194,9 @@ test('integration:uat-e2e-recording — the uat job records E2E case runs as an 
   const filingRecord = await call(release.token, 'POST', `scenarios/${synced.id}/runs`, { ...run, runId: 'uat-run-2' });
   assert.equal(filingRecord.status, 403);
   assert.equal(filingRecord.body.error, 'Route is not available to operator agents');
+  // GY-1802: the cut reads the goal records and a work item's stage with that same credential, so the pending outcomes resolve in a workflow cut.
+  assert.equal((await call(release.token, 'GET', 'goals?open=1')).status, 200);
+  assert.equal((await call(release.token, 'GET', `work/${anyItem.key}`)).status, 200);
 });
 
 test('integration:uat-e2e-recording — a recorder revoked after it authenticated writes nothing: each recording transaction reads the credential again', async () => {
