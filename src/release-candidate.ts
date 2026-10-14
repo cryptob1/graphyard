@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, join, resolve, sep } from 'node:path';
+import type { ReleaseContract } from './e2e/case.js';
 
 /**
  * Release candidates: one moving main, a frozen candidate, UAT, then that exact SHA in production.
@@ -83,12 +84,24 @@ export interface ReleaseCandidate {
   prs?: number;
   queued?: number;
   items: CandidateItem[];
+  /**
+   * GY-1802: the contract outcomes that were still pending when this candidate was cut — bound by
+   * e2e/contract.json to a merged goal none of whose done plan items serves them yet
+   * (`pendingOutcomeIds`, from the plane's goal record the cut held). Release validate reads them
+   * here, off this record, with no credential of its own: their failing required cases record as
+   * pending instead of blocking and file no release hold, until a candidate cut after the plane
+   * records such an item done carries the outcome as delivered. Absent on records cut before
+   * GY-1802 and on any cut whose caller held no goal record; those block exactly as before.
+   */
+  pendingOutcomes?: string[];
 }
 export interface SuiteResult { name: string; passed: boolean; detail: string }
 /** One case of the candidate's e2e release run (GY-1378), as its UAT record keeps it. */
 export interface E2eCaseRecord {
   case: string; verdict: 'passed' | 'failed' | 'flaky' | 'unrun'; required: boolean; stoppedBy?: string; attempts: number;
   failingStep: { index: number; name: string; reason: string } | null;
+  /** GY-1802: the case failed or flaked while its outcome was still pending on the candidate, so it ran and is recorded, but did not block. */
+  pending?: true;
 }
 /** The e2e release run bound to the candidate: its run id, the SHA UAT served, every case's verdict and the blocking ones. */
 export interface E2eRecord { runId: string; sha: string; cases: E2eCaseRecord[]; blocking: string[] }
@@ -156,6 +169,35 @@ export function maxPrsFrom(value: string | number | undefined | null) {
 }
 
 /**
+ * The slice of the plane's goal record the cut reads (GY-1802): the outcomes a merged goal
+ * protects, and its approved plan's items — the outcomes each serves and the work item created for
+ * it, null until the plan is released. The caller distils this from the plane's goal and work
+ * records wherever the cut runs with the plane in hand; a cut handed none records no pending
+ * outcomes, and its candidate blocks like one cut before GY-1802.
+ */
+export interface GoalDelivery { outcomes: readonly string[]; items: readonly { outcomes: readonly string[]; key: string | null }[] }
+
+/**
+ * Pure (GY-1802): the contract outcomes still pending at a cut — bound to a goal that protects
+ * them while no item of its approved plan serving the outcome is done (`stageOf` answers 'done' on
+ * the plane). A contract outcome no goal protects never pends: its cases block exactly as before.
+ */
+export function pendingOutcomeIds(contract: Pick<ReleaseContract, 'outcomes'>, goals: readonly GoalDelivery[], stageOf: (key: string) => string | undefined = () => undefined): string[] {
+  return contract.outcomes.map(outcome => outcome.id).filter(id => {
+    const goal = goals.find(entry => entry.outcomes.includes(id));
+    return !!goal && !goal.items.some(item => item.key !== null && item.outcomes.includes(id) && stageOf(item.key) === 'done');
+  });
+}
+
+/**
+ * Pure (GY-1802): the required case ids the contract binds to an outcome still pending on the
+ * candidate — the cases whose failure records as pending instead of blocking. A candidate cut with
+ * no pending outcomes, or a checkout with no contract, names none.
+ */
+export const contractPendingCases = (contract: Pick<ReleaseContract, 'outcomes'> | null | undefined, pendingOutcomes: readonly string[] | undefined): string[] =>
+  !contract || !pendingOutcomes?.length ? [] : [...new Set(contract.outcomes.filter(outcome => pendingOutcomes.includes(outcome.id)).flatMap(outcome => outcome.cases))];
+
+/**
  * Pure: the candidate a cut records, or why there is nothing to cut. A candidate starts after the
  * newest one cut (`latest`), whatever its outcome — a failed candidate leaves main moving and its
  * successor starts after it (fix forward) — and carries at most `maxPrs` first-parent merges in
@@ -166,7 +208,7 @@ export function maxPrsFrom(value: string | number | undefined | null) {
  * promoting this one brings a failed predecessor's deliveries too. The first candidate ever has
  * nothing to start after, so it takes main's tip. A tip that is already a candidate is not cut twice.
  */
-export function cutCandidate(input: { tip: string; now: Date; trigger: CutTrigger; latest: ReleaseCandidate | null; promoted: ReleaseCandidate | null; commits: readonly CommitSummary[]; maxPrs?: number }):
+export function cutCandidate(input: { tip: string; now: Date; trigger: CutTrigger; latest: ReleaseCandidate | null; promoted: ReleaseCandidate | null; commits: readonly CommitSummary[]; maxPrs?: number; pendingOutcomes?: readonly string[] }):
   { cut: true; candidate: ReleaseCandidate } | { cut: false; reason: string } {
   assertSha(input.tip, 'main tip');
   const { latest } = input;
@@ -183,6 +225,7 @@ export function cutCandidate(input: { tip: string; now: Date; trigger: CutTrigge
     from: latest ? { id: latest.id, sha: latest.sha } : null,
     prs: capped ? maxPrs : merges.length, queued: capped ? merges.length - maxPrs : 0,
     items: itemsFromCommits(input.commits.slice(Math.max(0, input.commits.findIndex(commit => commit.sha === sha)))),
+    ...(input.pendingOutcomes?.length ? { pendingOutcomes: [...new Set(input.pendingOutcomes)].sort() } : {}),
   } };
 }
 
@@ -372,7 +415,7 @@ export const syncLedger = (git: Git, base: string) => git(['fetch', '--quiet', '
 export const syncLedgerAsync = (git: AsyncGit, base: string) => git(['fetch', '--quiet', '--force', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`, '+refs/tags/*:refs/tags/*']);
 
 /** Cut a candidate from the remote base branch's tip, as recorded in the remote's tags. */
-export function cut(git: Git, options: { base: string; trigger: CutTrigger; now: Date; push: boolean; maxPrs?: number }) {
+export function cut(git: Git, options: { base: string; trigger: CutTrigger; now: Date; push: boolean; maxPrs?: number; pendingOutcomes?: readonly string[] }) {
   syncLedger(git, options.base);
   const tip = git(['rev-parse', `refs/remotes/origin/${options.base}`]).trim();
   const ledger = readLedger(git);
@@ -381,12 +424,12 @@ export function cut(git: Git, options: { base: string; trigger: CutTrigger; now:
   let commits = firstParentCommits(git, tip, promoted?.sha ?? null);
   // Never promoted, the read is bounded to the newest 200: a latest candidate older than that is read up to, so the cap counts from it rather than from the window's edge.
   if (!promoted && latest && !commits.some(commit => commit.sha === latest.sha)) commits = [...firstParentCommits(git, tip, latest.sha), ...firstParentCommits(git, latest.sha, null)];
-  const result = cutCandidate({ tip, now: options.now, trigger: options.trigger, latest, promoted, maxPrs, commits });
+  const result = cutCandidate({ tip, now: options.now, trigger: options.trigger, latest, promoted, maxPrs, commits, pendingOutcomes: options.pendingOutcomes });
   if (result.cut) writeRecord(git, `${candidateTagPrefix}${result.candidate.id}`, result.candidate.sha, result.candidate, options.push);
   return result;
 }
 /** Async cut for the loop's local ports (GY-1526): same ledger rules as `cut`, through AsyncGit. */
-export async function cutAsync(git: AsyncGit, options: { base: string; trigger: CutTrigger; now: Date; push: boolean; maxPrs?: number }) {
+export async function cutAsync(git: AsyncGit, options: { base: string; trigger: CutTrigger; now: Date; push: boolean; maxPrs?: number; pendingOutcomes?: readonly string[] }) {
   await syncLedgerAsync(git, options.base);
   const tip = (await git(['rev-parse', `refs/remotes/origin/${options.base}`])).trim();
   const ledger = await readLedgerAsync(git);
@@ -394,7 +437,7 @@ export async function cutAsync(git: AsyncGit, options: { base: string; trigger: 
   const maxPrs = options.maxPrs ?? maxPrsFrom(process.env.GRAPHYARD_RC_MAX_PRS);
   let commits = await firstParentCommitsAsync(git, tip, promoted?.sha ?? null);
   if (!promoted && latest && !commits.some(commit => commit.sha === latest.sha)) commits = [...await firstParentCommitsAsync(git, tip, latest.sha), ...await firstParentCommitsAsync(git, latest.sha, null)];
-  const result = cutCandidate({ tip, now: options.now, trigger: options.trigger, latest, promoted, maxPrs, commits });
+  const result = cutCandidate({ tip, now: options.now, trigger: options.trigger, latest, promoted, maxPrs, commits, pendingOutcomes: options.pendingOutcomes });
   if (result.cut) await writeRecordAsync(git, `${candidateTagPrefix}${result.candidate.id}`, result.candidate.sha, result.candidate, options.push);
   return result;
 }
@@ -753,8 +796,9 @@ export function recordSoak(git: Git, id: string, input: { sha: string; result: S
 export const ledgerStatus = (ledger: Ledger) => ledger.candidates.map(candidate => {
   const uat = ledger.uat.find(record => record.id === candidate.id) ?? null, soak = ledger.soak.find(record => record.id === candidate.id) ?? null;
   return { id: candidate.id, sha: candidate.sha, cutAt: candidate.cutAt, trigger: candidate.trigger, prs: candidate.prs ?? null, queued: candidate.queued ?? null, items: candidate.items.map(item => item.key),
+    ...(candidate.pendingOutcomes?.length ? { pendingOutcomes: candidate.pendingOutcomes } : {}),
     uat: uat ? { result: uat.result, at: uat.at, failing: failingSuites(uat).map(suite => suite.name), followUp: uat.followUp,
-      ...(uat.e2e ? { blocking: uat.e2e.blocking, unrun: uat.e2e.cases.filter(entry => entry.verdict === 'unrun').map(entry => entry.case) } : {}), ...(uat.holds?.length ? { holds: uat.holds } : {}) } : null,
+      ...(uat.e2e ? { blocking: uat.e2e.blocking, unrun: uat.e2e.cases.filter(entry => entry.verdict === 'unrun').map(entry => entry.case), pending: uat.e2e.cases.filter(entry => entry.pending).map(entry => entry.case) } : {}), ...(uat.holds?.length ? { holds: uat.holds } : {}) } : null,
     soak: soak ? { result: soak.result, at: soak.at, run: soak.run, report: soak.report } : null,
     production: ledger.production.find(record => record.id === candidate.id)?.at ?? null };
 });

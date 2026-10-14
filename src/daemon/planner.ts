@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type { Goal } from '../model/goal.js';
 import { deploySmokeRequired } from '../model/delivery.js';
 import { goalPlanSchema, maxPlanRounds, planNoteMaxWords, planRefusals, servedInProduction, type GoalPlan } from '../model/goal-plan.js';
+import type { GoalDelivery } from '../release-candidate.js';
 import { agentToken } from '../master/autonomy.js';
 import { capacityRefusal, selectFleetSession } from '../fleet.js';
 import { heldAwareProbe } from '../master/environments.js';
@@ -26,6 +27,20 @@ import { carriedIsolate, stepCallCarried } from './step-budget.js';
 
 export const plannerRole = 'planner';
 export const planTool = 'graphyard_plan';
+/**
+ * The plane's goal record as the cut's pending-outcome check reads it (GY-1802): every merged goal
+ * with an approved plan, its protected outcomes, and each plan item's serving outcomes with the
+ * work item created for it. Handed to `release cut` beside the release contract
+ * (`pendingOutcomeIds`), with the work snapshot answering each item key's stage, so a merged
+ * goal's cases record as pending on candidates cut before its plan delivers — where the cut runs
+ * with the plane in hand, never from a checkout holding no goal record.
+ */
+export function goalDeliveries(goals: readonly Goal[]): GoalDelivery[] {
+  return goals.filter(goal => goal.merged && goal.plan).map(goal => ({
+    outcomes: goal.protected.outcomes,
+    items: (goal.plan?.items ?? []).map(item => ({ outcomes: item.outcomes, key: goal.items?.find(released => released.ref === item.ref)?.key ?? null })),
+  }));
+}
 /** The judgement run's Pi role and tool: the approver identity's verdict on one plan. */
 export const planJudgeRole = 'plan-judge';
 export const planJudgementTool = 'graphyard_plan_judgement';

@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { servedRevision } from '../release-candidate.js';
-import { describeStep, loadCases, registeredRevision, scenarioDefinition, type Api, type CaseFile, type E2eStep } from './case.js';
+import { candidateTagPrefix, contractPendingCases, gitIn, readRecords, servedRevision, type ReleaseCandidate } from '../release-candidate.js';
+import { contractFile, describeStep, loadCases, loadContract, registeredRevision, scenarioDefinition, type Api, type CaseFile, type E2eStep, type ReleaseContract } from './case.js';
 import { installSecretsDirectory, loadSecrets, redact, redactValues, runAgentStep, runCommandStep, runProcess, stepEnvironment, type ProcessRunner, type StepRecord } from './steps.js';
 
 /**
@@ -62,6 +63,8 @@ export interface CaseOutcome {
   executed: number;
   /** The last attempt's failing step, or for a flaky case the step its failed attempt stopped at. */
   failingStep: FailingStep | null;
+  /** GY-1802: the case failed or flaked while its outcome was still pending on the candidate, so it ran and is recorded here, but did not block. */
+  pending?: true;
   /** The registered revision the run was appended to, or why it was not recorded. */
   recorded?: { revision: number } | { error: string };
 }
@@ -72,8 +75,10 @@ export interface E2eReport {
 export interface RunOptions {
   url: string; token: string; environment?: string; runId?: string;
   stepTimeoutMs?: number; retries?: number;
-  /** Stop at the first required case that fails: every case after it is unrun, naming it. */
+  /** Stop at the first required case that fails: every case after it is unrun, naming it. A case bound to an outcome still pending on the candidate (GY-1802) never stops the run. */
   stopOnRequiredFailure?: boolean;
+  /** GY-1802: the required case ids bound to an outcome still pending on the candidate (`contractPendingCases`): their failure records as pending, never blocking. */
+  pendingCases?: readonly string[];
   fetcher?: typeof fetch; launcher?: E2eLauncher; now?: () => number;
   /** The candidate checkout command steps run in (the working directory by default). */
   root?: string;
@@ -262,6 +267,7 @@ export async function runCases(cases: readonly CaseFile[], options: RunOptions):
   const now = options.now ?? Date.now, signal = options.signal, fetcher = signal ? cancellable(options.fetcher ?? fetch, signal) : options.fetcher ?? fetch;
   const runId = options.runId ?? randomUUID();
   const retries = options.retries ?? 0, stepTimeoutMs = options.stepTimeoutMs ?? defaultStepTimeoutMs;
+  const pendingCases = options.pendingCases ?? [];
   const root = options.root ?? process.cwd();
   let secretsDirectory = options.secretsDirectory;
   const general = { root, artifactsDirectory: options.artifactsDirectory ?? join(tmpdir(), `graphyard-e2e-${runId}`), hostEnvironment: options.hostEnvironment ?? process.env, processRunner: options.processRunner ?? runProcess,
@@ -286,9 +292,10 @@ export async function runCases(cases: readonly CaseFile[], options: RunOptions):
     const last = attemptResults.at(-1)!;
     // A pass after a failure is flaky only when both attempts are bound to one served commit; at an unreported commit it is a failure.
     const verdict: CaseVerdict = last.outcome === 'fail' || (attemptResults.length > 1 && !sha) ? 'failed' : attemptResults.length > 1 ? 'flaky' : 'passed';
+    const pending = required && pendingCases.includes(id) && (verdict === 'failed' || verdict === 'flaky');
     outcomes.push({ id, title, file: entry.file, outcome: last.outcome, verdict, required, durationMs: Math.max(0, now() - started), attempts: attemptResults.length, attemptResults,
-      executed: last.executed, failingStep: last.failingStep ?? attemptResults.find(attempt => attempt.failingStep)?.failingStep ?? null });
-    if (verdict === 'failed' && required && options.stopOnRequiredFailure) stoppedBy = id;
+      executed: last.executed, failingStep: last.failingStep ?? attemptResults.find(attempt => attempt.failingStep)?.failingStep ?? null, ...(pending ? { pending: true } : {}) });
+    if (verdict === 'failed' && required && options.stopOnRequiredFailure && !pendingCases.includes(id)) stoppedBy = id;
   }
   const tally = (verdict: CaseVerdict) => outcomes.filter(outcome => outcome.verdict === verdict).length;
   return { runId, url: options.url, environment: options.environment ?? new URL(options.url).host, sha, startedAt, finishedAt: new Date(now()).toISOString(),
@@ -302,14 +309,19 @@ export interface FlakyAcceptance { case: string; runId: string; sha: string; dec
  * Pure: the release verdict of a run (GY-1378). Blocking are the required cases that failed and the
  * required cases that were flaky with no evidence decision accepting that case, run and exact SHA.
  * Unrun cases are reported apart, never as failures and never as passes, and optional cases never
- * block. A report naming no served SHA can bind no acceptance.
+ * block. A report naming no served SHA can bind no acceptance. `pendingCases` (GY-1802) names the
+ * required cases bound to an outcome still pending on the candidate: such a case keeps its verdict
+ * in the report, but is listed as pending instead of blocking — it ran, and its failure counts
+ * against nothing until a candidate cut after its outcome is delivered.
  */
-export function releaseVerdict(report: Pick<E2eReport, 'runId' | 'sha' | 'cases'>, acceptances: readonly FlakyAcceptance[] = []) {
+export function releaseVerdict(report: Pick<E2eReport, 'runId' | 'sha' | 'cases'>, acceptances: readonly FlakyAcceptance[] = [], pendingCases: readonly string[] = []) {
   const accepted = (id: string) => !!report.sha && acceptances.some(entry => entry.case === id && entry.runId === report.runId && entry.sha === report.sha);
   const of = (verdict: CaseVerdict) => report.cases.filter(outcome => outcome.verdict === verdict);
-  const blocking = report.cases.filter(outcome => outcome.required && (outcome.verdict === 'failed' || (outcome.verdict === 'flaky' && !accepted(outcome.id))));
+  const wouldBlock = (outcome: CaseOutcome) => outcome.required && (outcome.verdict === 'failed' || (outcome.verdict === 'flaky' && !accepted(outcome.id)));
+  const blocking = report.cases.filter(outcome => wouldBlock(outcome) && !pendingCases.includes(outcome.id));
   return {
-    passed: blocking.length === 0, blocking, flaky: of('flaky'), unrun: of('unrun'),
+    passed: blocking.length === 0, blocking, pending: report.cases.filter(outcome => wouldBlock(outcome) && pendingCases.includes(outcome.id)),
+    flaky: of('flaky'), unrun: of('unrun'),
     acceptedFlaky: of('flaky').filter(outcome => outcome.required && accepted(outcome.id)),
     optionalFailures: report.cases.filter(outcome => !outcome.required && (outcome.verdict === 'failed' || outcome.verdict === 'flaky')),
   };
@@ -317,6 +329,8 @@ export function releaseVerdict(report: Pick<E2eReport, 'runId' | 'sha' | 'cases'
 
 /** The run id one attempt is recorded under: the run's own for a single attempt, `RUN:attempt-N` when a case took several. */
 export const attemptRunId = (runId: string, outcome: Pick<CaseOutcome, 'attempts'>, attempt: number) => outcome.attempts > 1 ? `${runId}:attempt-${attempt}` : runId;
+/** Why a pending case's failure did not count (GY-1802), recorded beside its failing step on the Tests page. */
+export const pendingNote = '; recorded pending: its outcome has no delivered item yet, so it does not block the candidate';
 
 /**
  * Append each attempt of each case as a run of the scenario revision it is registered as, so a
@@ -338,8 +352,10 @@ export async function recordRuns(api: Api, cases: readonly CaseFile[], report: E
     try {
       for (const attempt of attempts) {
         const runId = attemptRunId(report.runId, { attempts: attempts.length }, attempt.attempt);
+        // GY-1802: the recorded run of a pending case names why its failure did not count, beside the failing step.
+        const failingStep = attempt.failingStep && outcome.pending ? { ...attempt.failingStep, reason: `${attempt.failingStep.reason}${pendingNote}`.slice(0, 1000) } : attempt.failingStep;
         await api(`scenarios/${encodeURIComponent(outcome.id)}/runs`, { revision, runId, baseUrl: report.url, sha: report.sha, environment: report.environment,
-          durationMs: attempt.durationMs, outcome: attempt.outcome, executed: attempt.executed, failingStep: attempt.failingStep }, `e2e-run:${runId}:${outcome.id}`);
+          durationMs: attempt.durationMs, outcome: attempt.outcome, executed: attempt.executed, failingStep }, `e2e-run:${runId}:${outcome.id}`);
       }
       outcome.recorded = { revision };
     } catch (error) { outcome.recorded = { error: message(error) }; }
@@ -357,11 +373,13 @@ export function summarize(report: E2eReport) {
     const head = `${verdictWord[verdict]} ${outcome.id}${outcome.required ? '' : ' (optional)'}`;
     if (verdict === 'unrun') return `${head}: not run, the run stopped at required case ${outcome.stoppedBy}`;
     return `${head} (${outcome.durationMs} ms)`
+      + (outcome.pending ? `\n     pending: its outcome has no delivered item yet, so it does not block` : '')
       + (verdict === 'flaky' && outcome.failingStep ? `\n     attempt 1 failed at ${stepLine(outcome.failingStep)}; attempt ${outcome.attempts} passed at ${report.sha}` : '')
       + (verdict === 'failed' && outcome.failingStep ? `\n     ${stepLine(outcome.failingStep)}` : '')
       + (outcome.recorded && 'error' in outcome.recorded ? `\n     not recorded: ${outcome.recorded.error}` : '');
   });
-  const extra = [report.flaky ? `${report.flaky} flaky` : '', report.unrun ? `${report.unrun} unrun` : ''].filter(Boolean);
+  const pending = report.cases.filter(outcome => outcome.pending).length;
+  const extra = [report.flaky ? `${report.flaky} flaky` : '', report.unrun ? `${report.unrun} unrun` : '', pending ? `${pending} pending` : ''].filter(Boolean);
   return [`E2E run ${report.runId} against ${report.url} (${report.environment}, serving ${report.sha ?? 'an unreported commit'})`, ...lines,
     [`${report.passed} passed, ${report.failed} failed`, ...extra].join(', ')].join('\n');
 }
@@ -369,11 +387,12 @@ export function summarize(report: E2eReport) {
 const caseFailure = (outcome: CaseOutcome) => outcome.verdict === 'flaky'
   ? `case ${outcome.id} was flaky: it failed at step ${outcome.failingStep!.index + 1} (${outcome.failingStep!.name}) and passed on attempt ${outcome.attempts}; it blocks until an evidence decision accepts it`
   : `case ${outcome.id} failed at step ${outcome.failingStep!.index + 1} (${outcome.failingStep!.name}): ${outcome.failingStep!.reason}`;
-/** A failing report in one line, for a release validation suite's detail and its follow-up item: the blocking cases, then the unrun ones apart. */
-export const failureDetail = (report: E2eReport) => {
-  const verdict = releaseVerdict(report);
+/** A failing report in one line, for a release validation suite's detail and its follow-up item: the blocking cases, then the unrun and pending ones apart. */
+export const failureDetail = (report: E2eReport, pendingCases: readonly string[] = []) => {
+  const verdict = releaseVerdict(report, [], pendingCases);
   return [verdict.blocking.filter(outcome => outcome.failingStep).map(caseFailure).join('; '),
     verdict.unrun.length ? `unrun after required case ${verdict.unrun[0].stoppedBy} stopped the run: ${verdict.unrun.map(outcome => outcome.id).join(', ')}` : '',
+    verdict.pending.length ? `pending, not blocking: ${verdict.pending.map(caseFailure).join('; ')}` : '',
     verdict.optionalFailures.length ? `optional, not blocking: ${verdict.optionalFailures.map(outcome => `${outcome.id} ${outcome.verdict}`).join(', ')}` : ''].filter(Boolean).join('; ');
 };
 
@@ -389,19 +408,29 @@ export const failureDetail = (report: E2eReport) => {
  * fails the suite, but never leaves a later required case unrun.
  */
 export const releaseRetries = 1;
+/** The candidate record the checkout's ledger holds for `id`, or why it reads none (GY-1802): its pending outcomes ride the `rc/ID` tag the cut pushed, which a validation checkout carries with no plane credential. A read that fails names none, so the suite blocks exactly as before. */
+export const candidatePendingOutcomes = (root: string, id: string | undefined): readonly string[] | undefined => {
+  if (!id) return undefined;
+  try { return readRecords<ReleaseCandidate>(gitIn(root), candidateTagPrefix).find(entry => entry.id === id)?.pendingOutcomes; } catch { return undefined; }
+};
+/** The checkout's release contract, or null when it has none or one that does not parse. */
+export const checkoutContract = async (root: string): Promise<ReleaseContract | null> => existsSync(join(root, contractFile)) ? await loadContract(root).catch(() => null) : null;
 export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { fetcher?: typeof fetch; launcher?: E2eLauncher; stepTimeoutMs?: number; root?: string; report?: (report: E2eReport) => void | Promise<void>;
   /** Which cases run: those targeting uat by default; a managed repository's candidate (GY-1535) runs every required case too. */
   select?: (entry: CaseFile) => boolean;
   /** Run every selected case even after a required one fails, so each records its own result (GY-1535). */
-  runAll?: boolean; signal?: AbortSignal; withholdSecrets?: boolean; hostEnvironment?: NodeJS.ProcessEnv } = {}) => ({
+  runAll?: boolean; signal?: AbortSignal; withholdSecrets?: boolean; hostEnvironment?: NodeJS.ProcessEnv;
+  /** The checkout's release contract: a candidate outcome still pending on the record it was cut with (GY-1802) runs its failing cases as pending, never blocking. */
+  contract?: ReleaseContract | null } = {}) => ({
   name: 'e2e',
-  run: async (url: string, candidate: { id: string } | null) => {
+  run: async (url: string, candidate: { id: string; pendingOutcomes?: readonly string[] } | null) => {
     const selected = cases.filter(options.select ?? (entry => entry.definition.target === 'uat'));
     if (!selected.length) return { name: 'e2e', passed: false, detail: options.select ? 'no required or uat E2E case is in the checkout, so the suite exercised nothing' : 'no E2E case targets uat, so the suite exercised nothing' };
+    const pendingCases = contractPendingCases(options.contract, candidate?.pendingOutcomes);
     const report = await runCases(selected, { url, token, environment: 'uat', runId: candidate ? `rc-${candidate.id}` : undefined, fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs,
-      root: options.root, retries: releaseRetries, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment });
+      root: options.root, retries: releaseRetries, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, pendingCases });
     await options.report?.(report);
-    const verdict = releaseVerdict(report), detail = failureDetail(report);
+    const verdict = releaseVerdict(report, [], pendingCases), detail = failureDetail(report, pendingCases);
     const executed = report.cases.length - verdict.unrun.length;
     return !verdict.passed
       ? { name: 'e2e', passed: false, detail: `${verdict.blocking.length} of ${executed} E2E cases ${verdict.blocking.every(outcome => outcome.verdict === 'flaky') ? 'were flaky' : 'failed'}: ${detail}` }
@@ -417,16 +446,20 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
  * the command suite reads back as its detail, so the failed candidate's follow-up names them. Like
  * every suite command it never holds the release credential, so it only writes its report to
  * `GRAPHYARD_E2E_REPORT`; the workflow's next step records that report with `graphyard e2e record`.
+ * The candidate's pending outcomes (GY-1802) it reads off the `rc/ID` record in its own checkout's
+ * ledger, beside the contract, so a case whose outcome no delivered item serves yet fails as
+ * pending, never blocking, without any credential beyond the checkout.
  */
 export async function runE2eSuite(env: NodeJS.ProcessEnv = process.env, root = env.GRAPHYARD_E2E_ROOT ?? process.cwd()) {
   const detail = async (text: string) => { if (env.GRAPHYARD_SUITE_DETAIL) await writeFile(env.GRAPHYARD_SUITE_DETAIL, `${text}\n`); };
   try {
     const url = env.GRAPHYARD_UAT_URL, token = env.GRAPHYARD_UAT_TOKEN;
     if (!url || !token) throw new Error('The e2e suite needs GRAPHYARD_UAT_URL and GRAPHYARD_UAT_TOKEN');
-    const result = await e2eSuite(await loadCases(root), token, { root, report: async report => {
+    const contract = await checkoutContract(root);
+    const result = await e2eSuite(await loadCases(root), token, { root, contract, report: async report => {
       console.log(summarize(report));
       if (env.GRAPHYARD_E2E_REPORT) await writeFile(env.GRAPHYARD_E2E_REPORT, `${JSON.stringify(report, null, 2)}\n`);
-    } }).run(url, env.GRAPHYARD_CANDIDATE_ID ? { id: env.GRAPHYARD_CANDIDATE_ID } : null);
+    } }).run(url, env.GRAPHYARD_CANDIDATE_ID ? { id: env.GRAPHYARD_CANDIDATE_ID, pendingOutcomes: candidatePendingOutcomes(root, env.GRAPHYARD_CANDIDATE_ID) } : null);
     console.log(result.detail);
     await detail(result.detail);
     if (!result.passed) process.exitCode = 1;

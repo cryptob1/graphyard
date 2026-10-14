@@ -2,7 +2,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { contractFile, loadCases, loadContract, type CaseFile } from './e2e/case.js';
+import { contractFile, loadCases, loadContract, type CaseFile, type ReleaseContract } from './e2e/case.js';
 import { e2eSuite, type E2eLauncher, type E2eReport } from './e2e/runner.js';
 import { holdTagPrefix, releaseHolds } from './release-holds.js';
 import { findCandidate, readLedgerAsync, recordsArguments, serveStaticSite, syncLedgerAsync, validateAndRecord, type AnyGit, type AsyncGit, type Git, type HoldOutcome, type ReleaseCandidate, type StaticUat, type Suite, type UatRecord } from './release-candidate.js';
@@ -18,12 +18,14 @@ import { findCandidate, readLedgerAsync, recordsArguments, serveStaticSite, sync
 export function projectCaseSuite(root: string, token: string, options: { fetcher?: typeof fetch; launcher?: E2eLauncher; stepTimeoutMs?: number;
   report?: (report: E2eReport) => void | Promise<void>; signal?: AbortSignal; select?: (entry: CaseFile) => boolean; withholdSecrets?: boolean; hostEnvironment?: NodeJS.ProcessEnv;
   /** The cases to run, loaded beforehand; when absent they are loaded from `root` at run time. */
-  cases?: readonly CaseFile[] } = {}): Suite {
+  cases?: readonly CaseFile[];
+  /** The checkout's release contract: a candidate outcome still pending on its record (GY-1802) runs its failing cases as pending, never blocking. */
+  contract?: ReleaseContract | null } = {}): Suite {
   return {
     name: 'e2e',
     run: async (url, candidate) => {
       const suite = e2eSuite(options.cases ? [...options.cases] : await loadCases(root), token, { fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs, root, report: options.report, signal: options.signal,
-        select: options.select ?? (entry => entry.definition.required || entry.definition.target === 'uat'), runAll: true, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment });
+        select: options.select ?? (entry => entry.definition.required || entry.definition.target === 'uat'), runAll: true, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, contract: options.contract });
       return suite.run(url, candidate);
     },
   };
@@ -117,9 +119,9 @@ export async function validateProjectCandidate(sourceGit: AnyGit, id: string, op
     served = await serveStaticSite(join(options.checkout, directory), candidate.sha);
     url = served.url;
   }
-  suites.push(projectCaseSuite(options.checkout, options.token, { fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs, report: value => { report = value; } }));
+  const contract = existsSync(join(options.checkout, contractFile)) ? await loadContract(options.checkout).catch(() => null) : null;
+  suites.push(projectCaseSuite(options.checkout, options.token, { fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs, report: value => { report = value; }, contract }));
   try {
-    const contract = existsSync(join(options.checkout, contractFile)) ? await loadContract(options.checkout).catch(() => null) : null;
     const holds = asyncHolds(git, { contract, push: options.push, file: options.file, now: options.now, report: async () => report });
     return await validateAndRecord(git, id, url, suites, { base: options.base, push: options.push, timeoutMs: options.timeoutMs, file: options.file, holds, now: options.now, fetcher: options.fetcher });
   } finally { await served?.close(); }

@@ -9,8 +9,8 @@ import railway, { releaseBranches } from '../.railway/railway.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { commands } from '../src/cli/index.js';
 import {
-  apiSuite, assessProductionServing, assessPromotion, commandSuite, cut, deployToUat, endpointSuite, gitIn, itemsFromCommits, ledgerStatus, productionBranch, promote, readLedger,
-  runZeroTouchSuite, servedRevision, uatBranch, validateAndRecord, zeroTouchScenario, type ReleaseCandidate, type Suite,
+  apiSuite, assessProductionServing, assessPromotion, commandSuite, contractPendingCases, cut, deployToUat, endpointSuite, gitIn, itemsFromCommits, ledgerStatus, pendingOutcomeIds, productionBranch, promote, readLedger,
+  runZeroTouchSuite, servedRevision, uatBranch, validateAndRecord, zeroTouchScenario, type GoalDelivery, type ReleaseCandidate, type Suite,
 } from '../src/release-candidate.js';
 import { loadCases, parseCase, type ReleaseContract } from '../src/e2e/case.js';
 import * as e2eCase from '../src/e2e/case.js';
@@ -21,7 +21,7 @@ import { defaultPromoteEveryMinutes, promotionCycle, promotionReads, promotionRe
 import type { MasterConfig } from '../src/master.js';
 import { promotionStateSchema, type PromotionState } from '../src/daemon/state.js';
 import { defaultDeliverySpeedTargets, deliverySpeed, deliverySpeedBreaches } from '../src/flow-analytics.js';
-// Time-bomb allowance (GY-1694): the 2026-10-01 instants are explicit `now` arguments to cut/promote/validate, already more than the 4 h UAT window in the past, so deployToUat's default new Date() never reads them as pending.
+// Time-bomb allowance (GY-1694): the 2026-10-01 instants are explicit `now` arguments to cut/promote/validate, already more than the 4 h UAT window in the past, so deployToUat's default new Date() never reads them as pending; the 2026-10-03 trio are the explicit cut/validate `now` arguments of the pending-outcome test, ordered between candidates and never read by a wall clock.
 
 const run = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
@@ -456,6 +456,77 @@ test('unit:e2e-release-contract-precut — e2e/contract.json binds each required
   assert.equal(result.record.result, 'passed', JSON.stringify(result.record.suites));
   assert.equal(report!.cases.find(entry => entry.id === 'optional')!.verdict, 'failed', 'the optional case ran and its failure is reported');
   assert.match(result.record.suites[0].detail, /optional, not blocking: optional failed/);
+});
+
+test('unit:candidate-records-pending-outcomes-at-cut — the candidate records, when it is cut, which contract outcomes the plane\'s goal record still has pending, and release validate reads them off that record with no credential beyond the checkout', async () => {
+  const contract = { outcomes: [
+    { id: 'goal-outcome', title: 'A goal outcome', criteria: ['Something a customer can do'], cases: ['goal-case'] },
+    { id: 'plain-outcome', title: 'A plain outcome', criteria: ['Something else a customer does'], cases: ['plain-case'] },
+  ] };
+  // The plane's goal record, stubbed in each state: the merged goal protects goal-outcome, and its approved plan's one item serves it through work GY-900.
+  const goal: GoalDelivery[] = [{ outcomes: ['goal-outcome'], items: [{ outcomes: ['goal-outcome'], key: 'GY-900' }] }];
+  assert.deepEqual(pendingOutcomeIds(contract, goal, () => 'delivering'), ['goal-outcome'], 'a goal outcome no done item serves yet is pending');
+  assert.deepEqual(pendingOutcomeIds(contract, goal, () => 'done'), [], 'once the plane records a serving item done the outcome is delivered');
+  assert.deepEqual(pendingOutcomeIds(contract, [], () => 'delivering'), [], 'a contract outcome no goal protects never pends');
+  const plainCaseOnly: GoalDelivery[] = [{ outcomes: ['plain-outcome'], items: [{ outcomes: ['plain-outcome'], key: null }] }];
+  assert.deepEqual(pendingOutcomeIds(contract, plainCaseOnly, () => 'delivering'), ['plain-outcome'], 'an unreleased plan item serves nothing done');
+  // The plane's own goal record distils to that shape: a merged goal with an approved plan and its released item, while an unmerged one delivers nothing.
+  const { goalDeliveries } = await import('../src/daemon/planner.js');
+  const released: any = { id: 'g-1', key: 'GOAL-9', merged: { at: '2026-10-03T10:00:00.000Z', by: 'approver', pr: 1153, mergeSha: 'a'.repeat(40) }, protected: { cases: ['goal-case'], outcomes: ['goal-outcome'] },
+    plan: { note: 'note', items: [{ ref: 'routes', title: 'Routes', description: '', outcomes: ['goal-outcome'], cases: ['goal-case'], criteria: [], plannedFiles: ['src/x.ts'], dependsOn: [] }], author: 'planner', draftedAt: '2026-10-03T10:00:00.000Z' },
+    items: [{ ref: 'routes', key: 'GY-900', id: 'w-1' }] };
+  const drafting: any = { id: 'g-2', key: 'GOAL-8', merged: null, protected: { cases: [], outcomes: [] }, plan: null, items: [] };
+  assert.deepEqual(goalDeliveries([released, drafting]), goal, 'the plane\'s goal record reads as the cut\'s pending-outcome input');
+
+  // Cut in each state. The pending cut records the outcome on the candidate; the delivered cut records none, and its case blocks like any required case.
+  const repo = await repository();
+  repo.merge('GY-901', 901);
+  const owed = cut(repo.git, { base: 'main', trigger: 'manual', now: new Date('2026-10-03T12:00:00Z'), push: true, pendingOutcomes: pendingOutcomeIds(contract, goal, () => 'delivering') }) as any;
+  assert.ok(owed.cut);
+  assert.deepEqual(owed.candidate.pendingOutcomes, ['goal-outcome']);
+  repo.merge('GY-902', 902);
+  const delivered = cut(repo.git, { base: 'main', trigger: 'manual', now: new Date('2026-10-03T13:00:00Z'), push: true, pendingOutcomes: pendingOutcomeIds(contract, goal, () => 'done') }) as any;
+  assert.ok(delivered.cut);
+  assert.equal(delivered.candidate.pendingOutcomes, undefined, 'a delivered outcome is recorded as no longer pending');
+  // A cut whose caller holds no goal record records none, and such a candidate blocks exactly as one cut before GY-1802.
+  repo.merge('GY-903', 903);
+  const uninformed = cut(repo.git, { base: 'main', trigger: 'manual', now: new Date('2026-10-03T13:30:00Z'), push: true }) as any;
+  assert.ok(uninformed.cut); assert.equal(uninformed.candidate.pendingOutcomes, undefined);
+
+  // What validate reads: the rc/ID record the cut pushed, and the pending cases the contract names on it — no credential beyond the checkout.
+  const record = readLedger(repo.git).candidates.find(entry => entry.id === owed.candidate.id)!;
+  assert.deepEqual(record.pendingOutcomes, ['goal-outcome']);
+  assert.deepEqual(contractPendingCases(contract, record.pendingOutcomes), ['goal-case']);
+  assert.deepEqual(contractPendingCases(contract, delivered.candidate.pendingOutcomes), [], 'a record with no pending outcomes names no pending cases');
+
+  // Validating the pending candidate the way release validate does: the goal case fails (its route does not exist yet), the plain one passes — the failure is pending, so the candidate passes UAT and promotes.
+  const { releaseHolds } = await import('../src/release-holds.js');
+  const cases = ['goal-case', 'plain-case'].map(id => ({ file: `e2e/cases/${id}.json`, definition: parseCase(`e2e/cases/${id}.json`, JSON.stringify(contractCase(id))) }));
+  const uatFor = (sha: string) => (async (url: URL | string) => {
+    const path = new URL(String(url)).pathname;
+    if (path === '/healthz') return new Response(JSON.stringify({ ok: true, commit: sha }));
+    if (path === '/api/goal-case') return new Response('{"error":"not routed yet"}', { status: 404 });
+    return new Response('{}');
+  }) as typeof fetch;
+  let report: any = null;
+  const owned = await validateAndRecord(repo.git, owed.candidate.id, 'https://uat.example.test',
+    [e2eSuite(cases, 'uat-token', { fetcher: uatFor(owed.candidate.sha), contract, report: async written => { report = written; } })],
+    { base: 'main', push: true, timeoutMs: 0, fetcher: uatFor(owed.candidate.sha), sleep: async () => {}, now: at('2026-10-03T12:30:00Z'),
+      holds: releaseHolds(repo.git, { contract, push: true, report: async () => report }) });
+  assert.equal(owned.record.result, 'passed', JSON.stringify(owned.record.suites));
+  assert.deepEqual(owned.record.e2e!.blocking, [], 'a pending-bound failure blocks nothing');
+  assert.deepEqual(assessPromotion(owed.candidate, owned.record, null), { promotable: true, refusals: [], sha: owed.candidate.sha, already: false });
+
+  // The next cut after the plane recorded the item done carries the outcome as delivered: the same failing case blocks again.
+  report = null;
+  const after = await validateAndRecord(repo.git, delivered.candidate.id, 'https://uat.example.test',
+    [e2eSuite(cases, 'uat-token', { fetcher: uatFor(delivered.candidate.sha), contract, report: async written => { report = written; } })],
+    { base: 'main', push: true, timeoutMs: 0, fetcher: uatFor(delivered.candidate.sha), sleep: async () => {}, now: at('2026-10-03T13:30:00Z'),
+      holds: releaseHolds(repo.git, { contract, push: true, report: async () => report }) });
+  assert.equal(after.record.result, 'failed');
+  assert.deepEqual(after.record.e2e!.blocking, ['goal-case']);
+  assert.equal(assessPromotion(delivered.candidate, after.record, null).promotable, false);
+  assert.match(after.record.e2e!.cases.find(entry => entry.case === 'goal-case')!.failingStep!.reason, /not routed yet/);
 });
 
 test('unit:e2e-release-holds-per-risk — a failing candidate files one hold per failed outcome with its cases, steps and criteria; a repeat failure attaches; a fold needs an independent approver; a hold clears only on a newer served candidate', async () => {
