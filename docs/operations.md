@@ -13,7 +13,7 @@
   - Expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission); retry: [rework](operations-reference.md#submitted-implementation-needs-rework); fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
   - Late-fault waits: 30min: owed `request-rework` (`owed-decision`), unwatched decision, owed escalation/blocker, stale non-release, `actorless` head behind base; 10min: containment past grace; 15min: watched decision after approver launch; once: unre-asked refusal (`decision-refused`).
   - Plane-wide failures (502–504, refused, timeout) retry faultless (`plane-unavailable`); slow fault/deployment reads defer (`faults:deferred`, `deployment:deferred`); `loop-cost` names the slowest.
-  - A failed producer-runnable manual proof returns to worker, never an operator escalation; one no producer may run needs operator witness, an unexecuted one an attestation.
+  - A failed producer-runnable manual proof returns to worker, never to an operator escalation; one no producer may run needs operator witness, an unexecuted one an attestation.
 - **Merge refused**: wait or repair, never bypass; `BLOCKED` retries head-bound 10min, `merge-blocked` 30min quotes GitHub. **Merged outside**: [bypass](operations-reference.md#merge-bypass). **Wrong evidence**: [revoke](operations-reference.md#accepted-evidence-turns-out-to-be-wrong). **GitHub paused/webhook silent**: [budget](operations-reference.md#github-request-budget). **Smoke failed**: [delivered](operations-reference.md#delivered-with-a-failed-smoke-proof).
 - **Main ahead of production**: [deployment incident](deployment.md#production-deployment-observation). An up-to-date release takes no coordination locks; a migrating one fails fast within health check, touches only tables whose DDL digest changed, retries deadlocks and expired lock waits with backoff in one 30-second lock budget, ≤3s per lock, so live writes never queue longer.
 - **Diagnosis `waiting`**: [provider quota](master-agent.md#research-and-diagnosis). **Loop down**: [loop](operations-reference.md#master-coordination-loop). **Self-proving change**: [bootstrap](operations-reference.md#bootstrap-mode-for-a-self-proving-change).
@@ -37,7 +37,7 @@ Confined masters, approvers, producers (not workers, reviewers) read GitHub logi
 
 ## Safety facts that never change
 
-- Workers never hold `admin`/`coordinator`/`producer` tokens. No AI principal holds `admin`.
+- Workers never hold `admin`/`coordinator`/`producer` tokens. No AI principal can hold `admin`.
 - Proof authority: live [grant](operations-reference.md#proof-authority-grants); `admin` attests only `manual:` proofs; operator agents only add requirements.
 - GitHub merges on passing gates: no bypass, no lifecycle-state endpoint.
 - History is append-only; routine rows past retention get [compacted](operations-reference.md#storage-retention).
