@@ -292,9 +292,9 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
   const leased = (key: string, epoch: number | null | undefined) => epoch != null && open.some(item => item.key === key && !!item.lease && item.lease.epoch === epoch && Date.parse(item.lease.expiresAt) > clock);
   // Whether a live lease's own session record names the pane (GY-1801): after a rekey the superseded
   // record keeps the pane the claimed record runs in, so the pane, not the epoch a record or a
-  // worktree parses to, is what a live lease holds. Such a pane is never the sweep's.
+  // worktree parses to, is what a live lease holds, on this host: a handle another host recorded names that host's pane. Such a pane is never the sweep's.
   const paneLeased = (pane: string | null | undefined) => !!pane && open.some(item => !!item.lease && Date.parse(item.lease.expiresAt) > clock
-    && (item.sessions ?? []).some(handle => handle.pane === pane));
+    && (item.sessions ?? []).some(handle => handle.pane === pane && handle.host === config.hostId));
   // Whether the worktree's exact item and epoch names an attempt that still stands (GY-1801): no end
   // of it is on the record, so the lease it held is either live or still to be classed, and its pane
   // is not the sweep's — whatever the lease in this cycle's snapshot reads.

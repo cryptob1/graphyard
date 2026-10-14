@@ -984,5 +984,23 @@ test('unit:rekey-never-closes-live-lease-pane — a rekey moves the record, neve
     sweepState.cycle += 1;
     await reclaimLaunchedPanes(sweepCycle(launchAppearanceMs + 60_000));
     assert.deepEqual(sweepClosed, ['w1:pENDED'], 'the ended attempt’s shell closed past its bound; nothing else was ever taken');
+
+    // Another host's live lease records a handle at the same pane coordinate: that is its pane,
+    // not this host's, so a local leftover shell there is still swept, cycle after cycle.
+    const remoteLease = guardItem('work-1804', 'GY-1804', { owner: 'graphyard-claude-9', epoch: 1, expiresAt: GY1791_AT(3_600_000) }, [attempt(1, false)],
+      [{ ...closeHandle('graphyard-claude-9:1', 'w1:pSHARED', 'running'), host: 'otherhost' } as SessionHandle]);
+    const leftover = guardItem('work-1805', 'GY-1805', null, [attempt(1, true)], [closeHandle(`${stallWorker.id}:5`, 'w1:pSHARED', 'running')]);
+    const multiWork = [remoteLease, leftover];
+    const multiState: DaemonState = emptyDaemonState(config);
+    const multiClosed: string[] = [];
+    const multiEffects = { persist: async () => {}, closeSession: async (pane: string) => { multiClosed.push(pane); }, recordSession: async () => {},
+      panes: async () => ({ panes: [{ pane_id: 'w1:pSHARED', agent_status: 'unknown', cwd: `${worktrees}/GY-1805-1` }], available: true }) } as unknown as DaemonEffects;
+    const multiCycle = (at: number) => ({ config, state: multiState, effects: multiEffects, now: () => GY1791_NOW + at, clock: GY1791_NOW + at, performed: [],
+      isolate: async (_k: string, _i: unknown, _n: string, fn: () => Promise<unknown>) => fn(), snapshot: { work: multiWork, now: new Date(GY1791_NOW + at).toISOString() },
+      open: multiWork, agents: [], closedPanes: new Set<string>() } as unknown as Cycle);
+    await reclaimLaunchedPanes(multiCycle(0));
+    multiState.cycle += 1;
+    await reclaimLaunchedPanes(multiCycle(launchAppearanceMs + 60_000));
+    assert.deepEqual(multiClosed, ['w1:pSHARED'], 'a live lease’s handle recorded by another host never holds this host’s leftover pane');
   } finally { void directory; }
 });
