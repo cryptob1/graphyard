@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import type { Principal } from '../src/model.js';
 import { applyGoalCommand, recordGoal, type Goal } from '../src/model/goal.js';
-import { requestedCaseChanges, type CaseChangeRequest } from '../src/model/goal-plan.js';
+import { caseChangeGoalsPath, requestedCaseChanges, type CaseChangeRequest } from '../src/model/goal-plan.js';
 import { RefusedResponse } from '../src/model/refusal.js';
 import type { AcceptanceEffects } from '../src/daemon/acceptance.js';
 import { caseChangeStep, caseChangesSettled, clearCaseChanges, type CaseChangeJudgement } from '../src/daemon/case-change-routing.js';
@@ -48,9 +48,10 @@ function stubRunner(respond: () => unknown, prompts: string[], tools: string[], 
 }
 
 /** The loop's case-change step over a mutable goal, with the approver's runs and posts recorded. */
-function harness(respond: (goal: string) => unknown, post?: (change: CaseChangeRequest, judgement: CaseChangeJudgement) => Promise<unknown>, gate?: Promise<void>) {
+function harness(respond: (goal: string) => unknown, post?: (change: CaseChangeRequest, judgement: CaseChangeJudgement) => Promise<unknown>, gate?: Promise<void>, stage?: Goal['stage']) {
   const prompts: string[] = [], tools: string[] = [], posted: { change: CaseChangeRequest; judgement: CaseChangeJudgement }[] = [];
   let goal = request(protectedGoal('GOAL-9'));
+  if (stage) goal = { ...goal, stage };
   const acceptance = { settings: diagnosticianSettings({}), cwd: process.cwd(), runner: async (_role: string, attempt: string) => ({ runner: stubRunner(() => respond(goal.key), prompts, tools, gate), runtime: 'stub', model: attempt }) } as unknown as AcceptanceEffects;
   const state = emptyDaemonState(config), performed: unknown[] = [];
   let clock = Date.parse('2026-10-14T00:00:00Z');
@@ -137,4 +138,14 @@ test('unit:case-change-retry-and-status — a slow approver is waited on, never 
   release(); await h.settle(); await h.step();
   assert.equal(h.goal.caseChanges[0].state, 'approved');
   assert.equal(h.posted.length, 1);
+});
+
+test('unit:case-change-routed-to-approver — a change requested on a delivered goal is routed too, and the goals path it is read from keeps delivered goals', async () => {
+  clearCaseChanges();
+  assert.equal(caseChangeGoalsPath, 'goals', 'not goals?open=1, which drops delivered goals');
+  const h = harness(key => ({ goal: key, verdict: 'approve', reason: 'Corrected' }), undefined, undefined, 'delivered');
+  assert.equal(h.goal.stage, 'delivered');
+  assert.equal(requestedCaseChanges([h.goal]).length, 1, 'a delivered goal\'s requested change is listed');
+  await h.step(); await h.settle(); await h.step();
+  assert.equal(h.goal.caseChanges[0].state, 'approved');
 });

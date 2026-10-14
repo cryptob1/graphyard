@@ -5,7 +5,7 @@ import { agentOwner, assessContainment, diskPressure, diskPressureAttention, dis
 import { reclaimableNow } from '../master/worktrees.js';
 import { standingDiskLine, worktreePassOf } from '../master/worktree-disk.js';
 import { type Work } from '../model/work.js';
-import { requestedCaseChanges } from '../model/goal-plan.js';
+import { caseChangeGoalsPath, requestedCaseChanges } from '../model/goal-plan.js';
 import { installationMerger } from '../executor.js';
 import { leftBehindCheckoutAttention, readHeldCli } from '../daemon/upgrade.js';
 import { baseFailureAttention, daemonSummary, loopAttention, readDaemonState } from '../master-daemon.js';
@@ -131,7 +131,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const merger = installationMerger({ loop: { configured: !!setup.supervisor.installed, running: !!cycling?.running, autoMerge: master.autoMerge },
     declaration: executors.supervision.declaration, served: executors.presence.served });
   // GY-1805: a goal's requested case change is a decision owed to an independent approver, which the loop routes; listed here until it is judged.
-  const caseChanges = await sections.optional('case changes', 'GET /api/goals', async () => requestedCaseChanges((await masterApi('goals?open=1')).goals), () => []);
+  const caseChanges = await sections.optional('case changes', 'GET /api/goals', async () => requestedCaseChanges((await masterApi(caseChangeGoalsPath)).goals), () => []);
   const caseChangeItems = caseChanges.map(change => ({ subject: change.work, text: `Case change ${change.id} on ${change.goal} (${change.cases.join(', ')}) requested by ${change.requestedBy} at ${change.requestedAt} awaits an independent approver: ${change.reason.slice(0, 200)}`,
     ...agentOwner('control plane', `the loop puts it to an approver who is neither ${change.requestedBy} nor an implementer of ${change.work}; by hand: graphyard goal case-change-approve ${change.goal} ${change.id} -- REASON (or case-change-refuse)`, 'approver') }));
   const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...conflicted, ...stuck.attentionItems, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...triage, ...owed.items, ...caseChangeItems, ...status.attentionItems, ...(sudo ? [{ subject: 'installation', text: sudo.instruction,

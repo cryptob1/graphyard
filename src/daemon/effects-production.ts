@@ -69,7 +69,7 @@ import { diagnosticianEffects, diagnosticianRole, type DiagnosticianEffects } fr
 import { acceptanceEffects, type AcceptanceEffects } from './acceptance.js';
 import { plannerEffects, type PlannerEffects } from './planner.js';
 import type { CaseChangeJudgement } from './case-change-routing.js';
-import { requestedCaseChanges, type CaseChangeRequest } from '../model/goal-plan.js';
+import { caseChangeGoalsPath, requestedCaseChanges, type CaseChangeRequest } from '../model/goal-plan.js';
 import { diagnosticianSettings } from '../runner/payloads.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
 import type { FlowResult, RemedyFlow, RemedyRecord } from '../stall-remedies.js';
@@ -416,7 +416,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get acceptance() { const config = current(); return config.operatorAgent && config.approver ? acceptanceEffects(config, root, { run, fetcher, asCoordinator, asOperatorAgent, merger: recordedMerger,
       writer: mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger }) }) : undefined; },
     // GY-1805: a goal's requested case changes are put to the approver role; its verdict is posted as the approver identity, whose separation the control plane checks.
-    get caseChanges() { const config = current(); return config.operatorAgent && config.approver ? async () => requestedCaseChanges((await asCoordinator('goals?open=1')).goals) : undefined; },
+    get caseChanges() { const config = current(); return config.operatorAgent && config.approver ? async () => requestedCaseChanges((await asCoordinator(caseChangeGoalsPath)).goals) : undefined; },
     get judgeCaseChange() {
       const config = current();
       return config.operatorAgent && config.approver ? async (change: CaseChangeRequest, judgement: CaseChangeJudgement) => {

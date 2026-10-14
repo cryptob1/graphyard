@@ -64,9 +64,9 @@ async function judge(cycle: Cycle, change: CaseChangeRequest): Promise<Pending> 
  * applied (so a failed post retries without another run), and a run that answers nothing, or past the decision bound, leaves the change requested
  * for the next cycle. The control plane keeps the independence rules: the approver identity is neither the requester nor an implementer of the item.
  */
-export const caseChangeStep = (cycle: Cycle) => cycle.effects.caseChanges && cycle.effects.judgeCaseChange
+export const caseChangeStep = (cycle: Cycle, outerLeft: () => number = () => Number.POSITIVE_INFINITY) => cycle.effects.caseChanges && cycle.effects.judgeCaseChange && outerLeft() > 0
   ? withinStepBudget(cycle, 'decisions', ['caseChanges', 'judgeCaseChange'], caseChangeStepWithin) : Promise.resolve();
-async function caseChangeStepWithin(cycle: Cycle) {
+async function caseChangeStepWithin(cycle: Cycle, budgetLeft: () => number | null) {
   const { state, effects, now, performed } = cycle;
   const isolate = carriedIsolate(cycle, 'decisions');
   const note = async (change: CaseChangeRequest, outcome: DaemonAction['state'], detail: string) => {
@@ -77,7 +77,7 @@ async function caseChangeStepWithin(cycle: Cycle) {
   const changes = await isolate('decision', null, 'the requested case changes', () => effects.caseChanges!());
   const standing = new Set((changes ?? []).map(change => change.id));
   for (const id of [...pending.keys()]) if (!standing.has(id)) pending.delete(id); // judged meanwhile (by hand, or already applied): nothing left to post
-  for (const change of changes ?? []) await isolate('decision', null, `${change.goal}'s case change ${change.id}`, async () => {
+  for (const change of changes ?? []) if (budgetLeft() !== 0) await isolate('decision', null, `${change.goal}'s case change ${change.id}`, async () => {
     const name = `${change.goal}'s case change ${change.id} (${change.cases.join(', ')} for ${change.work})`, result = pending.get(change.id);
     if (result?.judgement) {
       try { await effects.judgeCaseChange!(change, result.judgement); }

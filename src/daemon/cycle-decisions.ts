@@ -597,5 +597,5 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // 4c+++. A stale release of a backlog item is asked again, whoever asked first (GY-1315): last, so its backlog reads hold nothing above.
   await staleReleaseStep(cycle, effects);
   // 4c++++. A goal's requested case change goes to an independent approver, its verdict applied as case-change-approve or case-change-refuse (GY-1805).
-  await caseChangeStep(cycle);
+  await caseChangeStep(cycle, budgetLeft); // under the decisions step's own budget: spent, it defers the changes
 }
