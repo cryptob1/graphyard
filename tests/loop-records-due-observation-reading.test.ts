@@ -13,7 +13,7 @@ import { isClosed, type Principal, type Work } from '../src/model.js';
 import * as model from '../src/model.js';
 import type { Services } from '../src/server/routes.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): the 2026-10-13 instants are the fixture's own clock, judged against the explicit `now` below; Date.now() stamps nothing judged.
+// GY-1694/GY-1799: the 2026-10-13 instants are the fixture's own clock, judged against the explicit `now` below: the daemon cycle is handed that `now`, and the delivered-observation close reads its clock from the fixture-clocked store the test hands it (src/server/close.ts judges the worker lease against the transaction's `now`), so nothing judges the fixture against the wall clock.
 
 // GY-1779: GY-1724, GY-1725 and GY-1759 sat escalated past their windows for "the loop's reading" that
 // no loop step recorded. The deployment-verification step now takes every due loop-owned reading on the
@@ -310,6 +310,14 @@ async function plant(shape: Work): Promise<Work> {
   return reload(created.id);
 }
 
+/** GY-1799: the close path's services with the store's clock replaced — every transaction the close opens (src/server/close.ts judges the worker lease against the transaction's `now`) is handed the fixture's `now`, so the live-lease refusal is judged against the fixture's own clock, never the database's wall clock. */
+function clockedServices(github: unknown): Services {
+  const clocked = Object.assign(Object.create(engine), { store: Object.assign(Object.create(store), {
+    transaction: (fn: Parameters<Store['transaction']>[0], options?: Parameters<Store['transaction']>[1]) => store.transaction((db, at) => fn(db, new Date(now)), options),
+  }) as Store });
+  return { engine: clocked, github, repository, principals: [] } as unknown as Services;
+}
+
 test('integration:loop-records-due-observation-reading — the coordinator records the reading as trusted evidence bound to the serving release, refuses one off the parent\'s merge or on another item, and the delivered-observation close closes the superseded pull request', async () => {
   const { loopObservation } = model as unknown as { loopObservation: (work: Work, at: Date, all: Work[]) => { due: boolean } | null };
   const delivered = await plant(parent);
@@ -322,7 +330,7 @@ test('integration:loop-records-due-observation-reading — the coordinator recor
   const closedPulls: { pr: number; reason: string }[] = [];
   const github = { closeSupersededPullRequest: async (pr: number, reason: string) => { closedPulls.push({ pr, reason }); return 'closed' as const; } };
   const { closeWork } = await import('../src/server/close.js');
-  const services = { engine, github, repository, principals: [] } as unknown as Services;
+  const services = clockedServices(github);
   const close = (principal: Principal, id: string, ref: string | null = serving) => closeWork(services, principal, id, { kind: 'delivered-observation', reason: 'read', ref }, randomUUID());
   // No reading yet: the close is refused, and the pull request is not touched. A worker never closes; neither does the kind close a code item.
   await assert.rejects(close(coordinator, item.id), /carries no passing reading of manual:webhook-deliveries-clean-24h-on-serving-release as the loop reads one/);
@@ -351,4 +359,21 @@ test('integration:loop-records-due-observation-reading — the coordinator recor
   assert.deepEqual(audit.details.pullRequest, { pr: 1172, outcome: 'owed' }, 'the closure records the pull request as owed before GitHub is touched');
   assert.deepEqual(closed.closure?.pullRequest, { pr: 1172, outcome: 'closed' }, 'the settled closure names the outcome of the close on GitHub');
   assert.equal((await store.pool.query("SELECT 1 FROM events WHERE work_id=$1 AND kind='work.pull-request-closed'", [item.id])).rowCount, 1);
+});
+
+test('unit:observation-reading-close-judges-fixture-clock — the delivered-observation close judges a live worker lease against the fixture clock it is handed, never the wall clock', async () => {
+  const delivered = await plant(parent);
+  const owed = async (extra: Partial<Work>) => plant({ ...followUp(0, { stage: 'build', epoch: 2, ...extra } as Partial<Work>), description: `Post-deploy follow-up: post-deploy:${delivered.id}:AC-2:${proof}:${filed}\n\nowed` } as Work);
+  const reading = { id: randomUUID(), producer: coordinator.id, trusted: true, executed: 1, skipped: 0, at: iso(now - 30 * 60_000), proof: own, sha: serving, baseSha: mergeSha, policyRevision: 1, result: 'pass' as const, reading: { detail: 'the advanced delivery log shows 0 failed deliveries in 24 hours' } };
+  // The lease expires a fixture-day after the fixture's `now`: judged against the clock the close is
+  // handed, it is live and the close refuses. Judged against the wall clock it reads expired and the
+  // item would close — the time bomb this proof pins shut.
+  const leased = await owed({ lease: { owner: worker.id, epoch: 2, expiresAt: iso(now + 24 * hour) }, evidence: [{ ...reading, id: randomUUID() }] });
+  const { closeWork } = await import('../src/server/close.js');
+  await assert.rejects(closeWork(clockedServices({ closeSupersededPullRequest: async () => 'closed' as const }), coordinator, leased.id, { kind: 'delivered-observation', reason: 'read', ref: serving }, randomUUID()), /has a live worker lease/);
+  // The same close through the same clocked path on an unleased twin closes: the refusal is the lease
+  // itself, judged live at the fixture's now, not the handed clock refusing everything.
+  const free = await owed({ evidence: [{ ...reading, id: randomUUID() }] });
+  const closed = await closeWork(clockedServices({ closeSupersededPullRequest: async () => 'closed' as const }), coordinator, free.id, { kind: 'delivered-observation', reason: 'read', ref: serving }, randomUUID()) as Work;
+  assert.deepEqual([closed.stage, closed.closure?.kind, isClosed(closed)], ['done', 'delivered-observation', true]);
 });
