@@ -264,12 +264,14 @@ const verificationMapPaths = (text: string) => {
  * globs it covers and holds the `## Tests` list the repository names an area's test files in, so an
  * item that changes a file under those paths, or creates a test for one, must edit the map — the
  * same way the test importing a planned file is granted (importingTestGround). The ground names the
- * planned file the map's Paths line covers, or the test file a criterion or the ask names under those
- * paths, and the line itself. `text` is the map on the base: a map the base does not hold, one that
- * opens with no Paths line, or one whose paths cover none of the planned files is not grounded here
- * and stays refused and routed as before.
+ * planned file the map's Paths line covers, or the test file under those paths a criterion names or
+ * this same request has already granted (`granted`: the paths the rules grounded before the map,
+ * never the raw ask, so a map covering only an unrelated test asked beside it is not granted on that
+ * test), and the line itself. `text` is the map on the base: a map the base does not hold, one that
+ * opens with no Paths line, or one whose paths cover none of those files is not grounded here and
+ * stays refused and routed as before.
  */
-export function verificationMapGround(path: string, text: string | null, item: { plannedFiles?: readonly string[]; criteria: readonly CompanionCriterion[] }, ask: readonly string[] = []): string | null {
+export function verificationMapGround(path: string, text: string | null, item: { plannedFiles?: readonly string[]; criteria: readonly CompanionCriterion[] }, granted: readonly string[] = []): string | null {
   if (!text || !verificationMapFile(path)) return null;
   const paths = verificationMapPaths(text);
   if (!paths) return null;
@@ -278,8 +280,10 @@ export function verificationMapGround(path: string, text: string | null, item: {
   const covered = (entry: string) => entry !== path && paths.some(glob => documentationGlobMatches(glob, entry) || pathScope(entry).prefix && glob.startsWith(pathScope(entry).path));
   const planned = (item.plannedFiles ?? []).find(covered);
   if (planned) return `${path} is the verification map whose ${line} covers ${planned}, a planned file whose behaviour the item changes`;
-  const created = [...item.criteria.flatMap(criterion => namedPaths(criterion.text)), ...ask].find(entry => testFile(entry) && covered(entry));
+  const created = item.criteria.flatMap(criterion => namedPaths(criterion.text)).find(entry => testFile(entry) && covered(entry));
   if (created) return `${path} is the verification map whose ${line} covers ${created}, a test file the item creates`;
+  const companion = granted.find(entry => testFile(entry) && covered(entry));
+  if (companion) return `${path} is the verification map whose ${line} covers ${companion}, a test file this request grants`;
   return null;
 }
 

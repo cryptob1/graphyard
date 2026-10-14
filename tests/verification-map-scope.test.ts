@@ -47,7 +47,7 @@ const base: Record<string, string> = {
 const read = async (path: string) => base[path] ?? null;
 const exists = (path: string) => path in base;
 const ask = (paths: string[]): ScopeRequestState => ({ epoch: 1, paths, reason: 'the map names the new test file for the area', requestedBy: 'graphyard-worker', at: '2026-10-14T04:56:00.000Z' });
-const grounds = (work: Work, paths: string[]) => automaticScopeGrounds(work, ask(paths), paths, [], exists, read, async () => [], async () => Infinity, async () => Infinity);
+const grounds = (work: Work, paths: string[], tree: Record<string, string> = base) => automaticScopeGrounds(work, ask(paths), paths, [], path => path in tree, async path => tree[path] ?? null, async () => [], async () => Infinity, async () => Infinity);
 
 function item(plannedFiles: string[], extra: Partial<Work> = {}): Work {
   return {
@@ -88,12 +88,29 @@ test('unit:verification-map-companion — the map whose Paths line covers a plan
   assert.equal(verificationMapGround('verification/master.md', '## Tests\n\n- none', masterItem()), null, 'no Paths line');
   assert.equal(verificationMapGround('verification/', masterMap, masterItem()), null, 'never the tree');
   assert.equal(verificationMapGround('docs/master.md', masterMap, masterItem()), null, 'only a map under verification/');
-  // A test the criteria name, or the ask holds, under the map's paths grounds it too (a map whose Paths name tests).
+  // A test the criteria name, or one this request already granted, under the map's paths grounds it too (a map whose Paths name tests).
   const testMap = masterMap.replace(/^Paths:.*$/m, 'Paths: tests/loop-*.test.ts');
   const naming = [{ id: 'AC-2', text: 'The item creates tests/loop-self-upgrade.test.ts holding these tests', proofs: ['unit:loop-self-upgrade'] }];
   assert.equal(verificationMapGround('verification/master.md', testMap, { plannedFiles: ['src/daemon/run.ts'], criteria: naming }), 'verification/master.md is the verification map whose Paths: tests/loop-*.test.ts covers tests/loop-self-upgrade.test.ts, a test file the item creates');
-  assert.equal(verificationMapGround('verification/master.md', testMap, { plannedFiles: ['src/daemon/run.ts'], criteria: [] }, ['tests/loop-self-upgrade.test.ts', 'verification/master.md']), 'verification/master.md is the verification map whose Paths: tests/loop-*.test.ts covers tests/loop-self-upgrade.test.ts, a test file the item creates');
+  assert.equal(verificationMapGround('verification/master.md', testMap, { plannedFiles: ['src/daemon/run.ts'], criteria: [] }, ['tests/loop-self-upgrade.test.ts']), 'verification/master.md is the verification map whose Paths: tests/loop-*.test.ts covers tests/loop-self-upgrade.test.ts, a test file this request grants');
   assert.equal(verificationMapGround('verification/master.md', testMap, { plannedFiles: ['src/daemon/run.ts'], criteria: [] }, ['src/daemon/loop-x.ts']), null, 'only a test file');
+  assert.equal(verificationMapGround('verification/master.md', testMap, { plannedFiles: ['src/daemon/run.ts'], criteria: [] }), null, 'nothing granted, nothing named: the raw ask grounds no map');
+
+  // Review of 4a6bb1bb: the ask alone never grounds a map. On an item planning only src/daemon/run.ts, a map whose
+  // Paths cover tests/loop-*.test.ts asked beside tests/loop-self-upgrade.test.ts (no criterion names the test, it
+  // imports nothing planned) is refused with the test, so pairing an arbitrary test path with a map buys no scope.
+  const testTree = { ...base, 'verification/master.md': testMap };
+  const paired = await grounds(item(['src/daemon/run.ts']), ['tests/loop-self-upgrade.test.ts', 'verification/master.md'], testTree);
+  assert.ok('refusal' in paired && !paired.grounds?.length, 'refusal' in paired ? paired.refusal : 'granted');
+  assert.match(paired.refusal, /tests\/loop-self-upgrade\.test\.ts/);
+  assert.match(paired.refusal, /verification\/master\.md/);
+  // The same pair on the item planning src/master/release-lag.ts: the test is granted on its import, and the map on that granted test.
+  const chained = await grounds(item(['src/master/release-lag.ts']), ['verification/master.md', 'tests/loop-self-upgrade.test.ts'], testTree);
+  assert.ok(!('refusal' in chained), 'refusal' in chained ? chained.refusal : '');
+  assert.deepEqual(chained.grounds, [
+    { path: 'tests/loop-self-upgrade.test.ts', ground: 'tests/loop-self-upgrade.test.ts imports src/master/release-lag.ts, a planned file whose behaviour the item changes', companion: true },
+    { path: 'verification/master.md', ground: 'verification/master.md is the verification map whose Paths: tests/loop-*.test.ts covers tests/loop-self-upgrade.test.ts, a test file this request grants', companion: true },
+  ], 'the map is judged after the test, whatever order the ask named them in');
 
   // The checked-in map covers this repository's src/master/release-lag.ts as the fixture says.
   assert.equal(verificationMapGround('verification/master.md', readFileSync(new URL('../verification/master.md', import.meta.url), 'utf8'), masterItem()), mapGround);
