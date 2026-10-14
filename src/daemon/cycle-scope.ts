@@ -19,7 +19,7 @@ import { boundDetail, detailChanged, namePaths } from './decisions.js';
 import { findingRecheckMs, record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import type { MergerMode } from '../merger-mode.js';
-import { recordCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
+import { carriedRow, recordCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
 
 /** A requested path the loop grants without an approver, and the audited ground it stands on; `companion` marks a GY-955 companion. */
 export interface ScopeGround { path: string; ground: string; companion?: boolean }
@@ -156,7 +156,8 @@ async function scopeStepWithin(cycle: Cycle) {
     // approver's decision is bound to, and defer that decision another cycle.
     if (approverDeciding(state.approvals, item.key, request)) return null;
     const judged = previous?.state === 'done';
-    if (judged ? clock - Date.parse(previous.at) < findingRecheckMs : previous && (previous.state !== 'failed' || !readyToRetry(previous, state.cycle))) return null;
+    // GY-1774: a widening carried past the step's bound is retried next cycle, joining the one in flight or consuming its answer; a failed one backs off as before.
+    if (judged ? clock - Date.parse(previous.at) < findingRecheckMs : previous && !carriedRow(previous) && (previous.state !== 'failed' || !readyToRetry(previous, state.cycle))) return null;
     const attempts = judged ? previous.attempts : (previous?.attempts ?? 0) + 1;
     try {
       const prFindings = await effects.reviewFindings?.(item) ?? [];

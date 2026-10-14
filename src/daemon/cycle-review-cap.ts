@@ -9,7 +9,8 @@ import { closeStanding, closingItems, freshReads } from './stale-closes.js';
 import type { Cycle } from './cycle.js';
 import type { Work } from '../model.js';
 import type { MasterConfig } from '../master.js';
-import { recordCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
+import { carriedRow, recordCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
+import { message } from './state.js';
 
 /** How many times the step tries to withdraw one change request before it escalates instead. */
 export const maxCappedFilingAttempts = 5;
@@ -266,6 +267,22 @@ async function reviewCapStepWithin(cycle: Cycle) {
         performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
     };
     const key = cappedFilingKey(item, capped), previous = state.actions[key];
+    // GY-1774: the observation wake a withdrawal owes, carried past the step's bound, is retried until it answers — joining the
+    // wake in flight or consuming its answer — so the owed request-rework is cancelled; it holds nothing else on the item.
+    const wakeKey = `${key}:wake`, owedWake = state.actions[wakeKey];
+    const wake = async (): Promise<string> => {
+      if (!effects.wakeObservation) return 'the owed request-rework is cancelled at the next observation (this loop runs without the observation wake)';
+      try { await effects.wakeObservation(item); return 'its observation woken so the owed request-rework is cancelled'; }
+      catch (error) {
+        if (stepCallCarried(error)) { await recordCarried(cycle, wakeKey, { kind: 'review', work: item.key }, error, `Waking ${item.key}'s observation after withdrawing ${capped.reviewer}'s change request ${capped.reviewId}`); return 'its observation wake was carried to the next cycle, which retries it so the owed request-rework is cancelled'; }
+        return `the owed request-rework is cancelled at the next observation (waking it failed: ${message(error).slice(0, 200)})`;
+      }
+    };
+    if (carriedRow(owedWake)) {
+      const woken = await wake();
+      if (state.actions[wakeKey] === owedWake) // not carried again
+        performed.push(await record(state, wakeKey, { kind: 'review', work: item.key, principal: null, state: 'done', detail: `Retried the observation wake owed since ${capped.reviewer}'s change request ${capped.reviewId} on ${capped.sha.slice(0, 12)} was withdrawn: ${woken}`, attempts: owedWake!.attempts, cycle: state.cycle }, now(), effects.persist));
+    }
     if (previous?.state === 'done') return;
     const head = cappedHeadKey(item, capped.sha);
     const earlier = Object.keys(state.actions).find(other => other !== key && other.startsWith(head) && state.actions[other]?.state === 'done');
@@ -318,7 +335,8 @@ async function reviewCapStepWithin(cycle: Cycle) {
     if (earlier && !answer) return escalate(`${capped.reason}, after change request ${earlier.slice(head.length)} on the same head was already withdrawn; its re-review requested changes again, so it is not withdrawn a second time`, refusal ? [refusal] : []);
     if (!effects.withdrawReview)
       return escalate(`${capped.reason}, and this loop runs without the reviewer App it needs to withdraw the request`);
-    if (previous && previous.attempts >= maxCappedFilingAttempts) return escalate(`${capped.reason}; withdrawing it failed ${previous.attempts} times (${previous.detail.slice(0, 300)})`);
+    // GY-1774: only failures count toward the cap; a withdrawal carried past the bound is still in flight, and its row counts the sends made, never the cycles waited.
+    if (previous?.state === 'failed' && previous.attempts >= maxCappedFilingAttempts) return escalate(`${capped.reason}; withdrawing it failed ${previous.attempts} times (${previous.detail.slice(0, 300)})`);
     if (!readyToRetry(previous, state.cycle)) return;
     if (closing.has(item.key) || await closeStanding(reads, item, cycle.snapshot.work, closing)) return;
     if (!history) {
@@ -349,8 +367,7 @@ async function reviewCapStepWithin(cycle: Cycle) {
     }
     // GY-1575: the owed request-rework is the plane's row for a change request that no longer stands; a fresh
     // observation reads the withdrawal and retires it, so the head's review request is answered afresh.
-    const woken = effects.wakeObservation ? await effects.wakeObservation(item).then(() => null, (error: unknown) => error instanceof Error ? error.message : String(error)) : 'this loop runs without the observation wake';
-    const cancelled = woken === null ? 'its observation woken so the owed request-rework is cancelled' : `the owed request-rework is cancelled at the next observation (waking it failed: ${woken.slice(0, 200)})`;
+    const cancelled = await wake();
     performed.push(await record(state, key, { kind: 'review', work: item.key, principal: null, state: 'done', detail: `${reason}: the change request withdrawn and ${cancelled}`,
       attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
     performed.push(await record(state, answer ? answeredRereviewKey(item, capped.sha) : cappedRereviewKey(item, capped.sha), { kind: 'review', work: item.key, principal: null, state: 'done', detail: `Requested a fresh review of ${item.key} on ${capped.sha.slice(0, 12)}: ${request}`,

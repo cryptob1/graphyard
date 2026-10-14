@@ -1,18 +1,19 @@
 // Concern: cycle step 7c — the machine-filed backlog (GY-402): the triage runs; the goals the acceptance role drafts (GY-1417) and the planner plans (GY-1418).
 import { researchRunner, researchSettings } from '../research.js';
-import { triageStep } from '../triage.js';
+import { triageStep, type TriageStepInput } from '../triage.js';
 import { detailChanged } from './decisions.js';
 import { record } from './effects.js';
 import { acceptanceStep } from './acceptance.js';
 import { plannerStep } from './planner.js';
 import type { Cycle } from './cycle.js';
-import { withinStepBudget } from './step-budget.js';
+import type { Work } from '../model.js';
+import { boundedCalls, carriedRow, recordCarried, stepCallBoundMs, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
 
 /**
  * Step 7c. Start a triage run for each machine-filed item awaiting triage, on the research account (`run.research`): an unconfigured loop
  * triages nothing, and the item is raised as attention once it has waited a day.
  */
-export const triageBacklogStep = (cycle: Cycle) => withinStepBudget(cycle, 'triage', ['recordTriage'], triageBacklogStepWithin); // GY-1774: the triage record is bounded; a run settling after the step passes through
+export const triageBacklogStep = (cycle: Cycle) => withinStepBudget(cycle, 'triage', ['recordTriage'], triageBacklogStepWithin); // GY-1774: the triage record is bounded
 async function triageBacklogStepWithin(cycle: Cycle) {
   const { config, state, effects, now, snapshot, clock, performed, isolate } = cycle;
   const note = async (key: string, work: string | null, outcome: 'done' | 'failed', detail: string) => {
@@ -26,10 +27,31 @@ async function triageBacklogStepWithin(cycle: Cycle) {
   if (!effects.recordTriage || !effects.research || !config.run?.research) return;
   await isolate('decision', null, 'triage', async () => {
     const settings = researchSettings(config.run);
-    const actions = triageStep({ work: snapshot.work, clock, settings, config, cwd: effects.research!.cwd, runner: effects.research!.runner ?? researchRunner(settings), record: effects.recordTriage!, faults: state.faults, withdraw: effects.withdrawTriage });
-    for (const action of actions) {
-      const item = snapshot.work.find(entry => entry.key === action.work)!;
-      await note(`triage:${item.id}:${action.state}`, item.key, 'done', action.detail);
-    }
+    // GY-1774: a record the step makes is bounded by the step and awaited within it, so a carried one is recorded `waiting` on
+    // the item's row; one a run settling after the step makes holds no cycle but is bounded by the per-call bound alone, so a
+    // hanging plane never holds it either. Either, carried, stays owed to triage (`carried`), which records it again next cycle,
+    // joining the write still in flight or consuming its answer — applied once, and the item is never judged again meanwhile.
+    let running = true;
+    const writes: Promise<unknown>[] = [];
+    const later = boundedCalls(unboundedEffects(effects), state, now, () => stepCallBoundMs, { step: 'triage', calls: ['recordTriage'] }).recordTriage!;
+    const recordKey = (work: Work) => `triage:${work.id}:record`;
+    const within: TriageStepInput['record'] = async (work, body) => {
+      const key = recordKey(work), carried = state.actions[key];
+      try { await effects.recordTriage!(work, body); }
+      catch (error) {
+        if (stepCallCarried(error)) await recordCarried(cycle, key, { kind: 'decision', work: work.key }, error, `Recording the triage judgement of ${work.key}`);
+        throw error;
+      }
+      if (carriedRow(carried)) performed.push(await record(state, key, { kind: 'decision', work: work.key, principal: null, epoch: null, state: 'done', detail: `Recorded the triage judgement of ${work.key} (${body.judgement.outcome}) whose write was carried from an earlier cycle`, attempts: carried!.attempts, cycle: state.cycle }, now(), effects.persist));
+    };
+    const recordTriage: TriageStepInput['record'] = (work, body) => { if (!running) return later(work, body); const write = within(work, body); writes.push(write); return write; };
+    try {
+      const actions = triageStep({ work: snapshot.work, clock, settings, config, cwd: effects.research!.cwd, runner: effects.research!.runner ?? researchRunner(settings), record: recordTriage, carried: stepCallCarried, faults: state.faults, withdraw: effects.withdrawTriage });
+      for (const action of actions) {
+        const item = snapshot.work.find(entry => entry.key === action.work)!;
+        await note(`triage:${item.id}:${action.state}`, item.key, 'done', action.detail);
+      }
+      await Promise.allSettled(writes);
+    } finally { running = false; }
   });
 }

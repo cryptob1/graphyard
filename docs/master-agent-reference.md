@@ -15,7 +15,7 @@ Dispatch is optimistic (overlap holds nothing), smallest scope first ([rules](co
 
 ## GitHub administration through the browser
 
-`master protection --apply` reconciles protection; flows (`master browser app-permissions`, `master browser installation-accept`, `master browser protection`) drive the `master init --browser-profile` profile:
+`master protection --apply` reconciles protection; `master browser FLOW` flows drive the `master init --browser-profile` profile:
 
 | Flow | Effect
 | --- | ---
@@ -41,7 +41,7 @@ Unacted producer requests (unstarted, refused, launch-exited) relaunch on untrie
 
 ## Fault classes
 
-`faultClass` (`master status` `faults`): recurring classes file one item each; instances predating a delivered class item's landing (not opening) link there; triage proposes closing items holding only those, withdrawn on post-landing links; doctor matches standing/cover; a resource at bound files `resource:ID`; also `fleet-capacity`, `unanswered-request` (past `settledAnswerGraceMs`), `configuration`, `decision-unanswered`, and `unclassified` unless (`plane-unavailable`, `fix-item`, `decision-stale`, `overlong-session`). Review unlaunched 15min: `concurrency-starved`, `review-settlement`, `launch-review`. Unanswering planes: `plane-unavailable`. A `no master role` blocker groups as `configuration`, not `stalled-gate`. Pre-start launch failures: one.
+`faultClass` (`master status` `faults`): recurring classes file one item each; instances predating a delivered class item's landing (not opening) link there; triage proposes closing items holding only those, withdrawn on post-landing links; doctor matches standing/cover; a resource at bound files `resource:ID`; also `fleet-capacity`, `unanswered-request` (past `settledAnswerGraceMs`), `configuration`, `decision-unanswered`, and `unclassified` unless (`plane-unavailable`, `fix-item`, `decision-stale`, `overlong-session`). Review unlaunched 15min: `concurrency-starved`, `review-settlement`, `launch-review`. A `no master role` blocker is `configuration`, not `stalled-gate`. Pre-start launch failures: one.
 
 ## Shadow merge gate
 
@@ -51,4 +51,4 @@ Unacted producer requests (unstarted, refused, launch-exited) relaunch on untrie
 
 Target (10+ deliveries): submit→merge p50 ≤30min, p90 ≤60min. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; verdict `speed.submitToMerge`; `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
 
-Every loop step calling an approver, decision or session keeps a two-fifths interval budget (30s floor): each is bound to 10s or the budget left; a slower call is carried (`waiting`, no fault) and retried next cycle, joining its call in flight; one `decision.*` ledger read names moved items, an unmoved history is kept unread. Standing/held/approved-resume waits stay live, no fault; quarantine pauses matching held asks, covering fail clears; 5xx/stale retries unless moot.
+Every loop step calling an approver, decision or session keeps a two-fifths interval budget (30s floor): each is bound to 10s or the budget left; a slower call is carried (`waiting`, no fault) and retried next cycle, joining its call in flight or consuming its answer; a spent budget starts none; one `decision.*` ledger read names moved items, an unmoved history is kept unread. Standing/held/approved-resume waits stay live, no fault; quarantine pauses matching held asks, covering fail clears; 5xx/stale retries unless moot.

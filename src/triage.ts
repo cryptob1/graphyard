@@ -129,10 +129,12 @@ function refusalNote(work: Work) {
     + 'Follow the refusal instead: release it with a priority, rescoped to the work it still names, or close or merge it on a different ref the refusal did not weigh, stating that new evidence. ';
 }
 
-export interface TriageStepAction { work: string; state: 'started' | 'done' | 'failed' | 'held' | 'withdrawn'; detail: string }
+export interface TriageStepAction { work: string; state: 'started' | 'done' | 'failed' | 'held' | 'withdrawn' | 'recorded'; detail: string }
 interface LiveTriage { run: Run<TriageJudgement>; settled: Promise<void> }
 const live = new Map<string, LiveTriage>();
 const failedAt = new Map<string, number>();
+/** GY-1774: the judgements whose record the loop carried past its bound (`TriageStepInput.carried`): recorded again next cycle, joining the write still in flight, never judged again meanwhile. */
+const owed = new Map<string, Parameters<TriageStepInput['record']>[1]>();
 /** Items whose triage run proposed again the closure refused at the recorded time (GY-1448), by item id: not judged again while that refusal stands unchanged. */
 const repeatedAt = new Map<string, string>();
 /** Covered-by-delivery closures being recorded, by item id (GY-1632): no session runs for them. */
@@ -140,7 +142,9 @@ const recording = new Map<string, Promise<void>>();
 /** Overtaken closures being withdrawn, by item id (GY-1632). */
 const withdrawing = new Map<string, Promise<void>>();
 /** Test seam: stop and forget every triage run. */
-export function clearTriageRuns() { for (const entry of live.values()) entry.run.cancel('the triage runs were cleared'); live.clear(); failedAt.clear(); repeatedAt.clear(); recording.clear(); withdrawing.clear(); }
+export function clearTriageRuns() { for (const entry of live.values()) entry.run.cancel('the triage runs were cleared'); live.clear(); failedAt.clear(); repeatedAt.clear(); recording.clear(); withdrawing.clear(); owed.clear(); }
+/** The judgements owed a record (GY-1774), by item id: a test's reading. */
+export const owedTriageRecords = () => new Map(owed);
 /** Every run this process has in flight, settled. */
 export async function triageSettled() { await Promise.all([...[...live.values()].map(entry => entry.settled), ...recording.values(), ...withdrawing.values()]); }
 
@@ -158,6 +162,17 @@ export interface TriageStepInput {
   faults?: Partial<Pick<FaultRecord, 'instances' | 'linked'>>;
   /** Withdraws a proposed closure a later link overtook (POST work/ID/triage with `withdraw`, GY-1632). */
   withdraw?: (work: Work, body: { triageAt: string; reason: string }) => Promise<unknown>;
+  /** GY-1774: whether a record's rejection means the write is carried — still in flight past the loop's bound, not refused: the judgement stays owed and is recorded again next cycle, joining that write, and the item is not judged again. */
+  carried?: (error: unknown) => boolean;
+}
+
+/** Record a judgement; a carried write keeps it owed for the next step, a refused one notes the failure and the item is judged again after `triageRetryMs`. */
+function recordJudgement(input: TriageStepInput, work: Work, body: Parameters<TriageStepInput['record']>[1]): Promise<void> {
+  const settled: Promise<void> = input.record(work, body).then(() => { owed.delete(work.id); }, error => {
+    if (input.carried?.(error)) owed.set(work.id, body);
+    else { owed.delete(work.id); failedAt.set(work.id, Date.now()); }
+  }).finally(() => { if (recording.get(work.id) === settled) recording.delete(work.id); });
+  return settled;
 }
 
 /**
@@ -174,6 +189,14 @@ export function triageStep(input: TriageStepInput): TriageStepAction[] {
     withdrawing.set(work.id, input.withdraw!(work, overtaken).then(() => {}, () => {}).finally(() => withdrawing.delete(work.id)));
     actions.push({ work: work.key, state: 'withdrawn', detail: `Withdrawing the closure proposed for machine-filed ${work.key} at ${overtaken.triageAt}: ${overtaken.reason}` });
   }
+  // GY-1774: a judgement whose record was carried is recorded again, joining the write still in flight or consuming its answer; the item is not judged again while it is owed.
+  for (const work of input.work) {
+    const body = owed.get(work.id);
+    if (!body || recording.has(work.id)) continue;
+    if (!untriaged(work)) { owed.delete(work.id); continue; }
+    recording.set(work.id, recordJudgement(input, work, body));
+    actions.push({ work: work.key, state: 'recorded', detail: `Recording again the triage judgement of machine-filed ${work.key} (${body.judgement.outcome}) whose record the loop carried past its bound` });
+  }
   if (!input.settings.enabled) return actions;
   // A follow-up whose parent has not shipped is never judged (GY-845): its findings may still change,
   // and the migration folds it back onto the parent.
@@ -184,8 +207,7 @@ export function triageStep(input: TriageStepInput): TriageStepAction[] {
     // GY-1632: every instance predates a delivered same-class item's landing — closing it as covered needs no session, and never releases it to a worker.
     const covered = coveredByDelivery(work, input.work, input.faults);
     if (covered && !repeatsRefusedClosure(work, covered)) {
-      const settled = input.record(work, { judgement: covered }).then(() => {}, () => { failedAt.set(work.id, Date.now()); }).finally(() => recording.delete(work.id));
-      recording.set(work.id, settled);
+      recording.set(work.id, recordJudgement(input, work, { judgement: covered }));
       actions.push({ work: work.key, state: 'done', detail: `Proposing to close machine-filed ${work.key} as covered by delivered ${covered.ref}: every instance it lists predates that item's landing, so no worker is dispatched` });
       continue;
     }
@@ -217,7 +239,7 @@ async function settleTriage(input: TriageStepInput, work: Work, result: RunResul
   // fresh judgement time would bind a new close decision the refusal does not match, and launch
   // another approver session for a closure already refused (GY-1448).
   if (repeatsRefusedClosure(work, result.payload)) { repeatedAt.set(work.id, work.triage!.at); return; }
-  await input.record(work, { judgement: result.payload, runtime: input.runner.name });
+  await recordJudgement(input, work, { judgement: result.payload, runtime: input.runner.name });
 }
 
 /**
