@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { storeAction } from '../src/daemon/state.js';
+import type { FaultKind } from '../src/model/fault-classes.js';
 import { trackFaults } from '../src/model/fault-record.js';
 import { containmentInMotion, containmentSettleWaitBoundMs, cycleFaults, emptyDaemonState, reworkDecisionInMotion, reworkDecisionWaitBoundMs } from '../src/master-daemon.js';
 // GY-1337's own exports are read through namespaces, so the base exercise runs these replays and each fails on its assertion.
@@ -835,12 +836,232 @@ test('unit:mechanical-plan-cleared-on-failed-read', async () => {
   const sent: unknown[] = [], failures: string[] = [] as string[];
   let refuse = 1;
   const effects = { mechanicalFixes: () => {}, recordMechanicalPlan: async (_: Work, plan: unknown) => { sent.push(plan); if (refuse-- > 0) throw new Error('503'); } };
-  const unreported = await reportMechanicalPlans([item], [], effects, clock, async (_, detail) => { failures.push(detail); });
+  const unreported = await reportMechanicalPlans([item], [], effects, clock, { fail: async (_, detail) => { failures.push(detail); }, settle: async () => {} });
   assert.deepEqual(sent, [null, null], 'the clear is retried within the cycle until it lands');
   assert.equal(unreported.size, 0, 'a cleared plan owes no round');
   assert.deepEqual(failures, [], 'a landed clear is no failure');
   refuse = 9; sent.length = 0;
   const later: string[] = [];
-  await reportMechanicalPlans([item], [], effects, clock, async (_, detail) => { later.push(detail); });
+  await reportMechanicalPlans([item], [], effects, clock, { fail: async (_, detail) => { later.push(detail); }, settle: async () => {} });
   assert.equal(later.length, 1, 'a clear that cannot land is a visible failure');
+});
+
+// GY-1795: the three decision faults of 14 October 2026 share one cause — the loop filed a decision
+// fault (or asked the master to close a goal) for a state the product had already settled or could
+// settle itself. Each instance below is replayed as the item stood when the loop recorded it; against
+// the base each subtest fails, because the instance files there.
+//
+// - action:decision|GY-1459|2026-10-14T04:54:55.483Z: the loop's clear of a plan the ledger no longer
+//   carried met a write timeout. The gate lapses the hold by `mechanicalPlanFreshMs` whatever the write
+//   does, so the failure is a visible, retried action — and no decision fault.
+// - action:decision|GY-1775|2026-10-14T06:43:08.482Z: the same clear hit the server's refusal because
+//   the item had been delivered after the cycle's snapshot. The target is settled: no report, no hold,
+//   no instance.
+// - action:decision|GOAL-1|2026-10-14T08:54:23.295Z: the acceptance land route merged as the
+//   control-plane App that pushed the acceptance branch, so GitHub's approval-from-someone-other-than-
+//   the-last-pusher rule refused #1153, and past `acceptanceStuckMs` the loop asked the master to close
+//   the goal every five-minute poll. The route now approves the verified head with the independent
+//   approver App (GY-1291's), as the main guard's reverts are approved, and an unconfigured approver is
+//   named in the waiting detail.
+/**
+ * GY-1459 as the loop held it: a confirmed plan from before the ledger ceased to carry it, whose clear
+ * meets the loop's 30-second write timeout on every attempt. `state` is the loop's, `cycles` how many
+ * two-minute cycles to run from 04:50; the attempts the clear made and the item are returned.
+ */
+async function timedOutClearReplay(state: ReturnType<typeof emptyDaemonState>, cycles: number) {
+  const minute = 60_000, start = Date.parse('2026-10-14T04:50:00.000Z');
+  const iso = (at: number) => new Date(at).toISOString();
+  const head = '632185dd17dd'.padEnd(40, '0');
+  const review = { reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'APPROVED', id: 5499583025, submittedAt: iso(start - 35 * minute), mechanical: 2 };
+  const candidate = { sha: head, baseSha: '1'.repeat(40), pr: 1169, branch: 'graphyard/gy-1459-1', author: 'implementer' };
+  const confirmedAt = iso(start - 11 * minute);
+  const attempts: ({ reviewId: number; head: string } | null)[] = [];
+  let now = start;
+  const work = (): Work => ({
+    id: 'work-1459', key: 'GY-1459', title: 'GY-1459', description: '', type: 'bug', priority: 2, dependencies: [], plannedFiles: ['src/'],
+    criteria: [{ id: 'AC-1', text: 'It works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 3, policyRevision: 1,
+    createdAt: iso(start - hour(2)), updatedAt: iso(start), stageEnteredAt: iso(start - hour(1)), ready: true, epoch: 1, lease: null, workspaces: [],
+    candidate, submission: { epoch: 1, pr: 1169 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [], scopeRequest: null, gates: [],
+    observation: { candidate, reviews: [review], checks: [], merged: false, prState: 'open', draft: false, at: iso(start - 30 * minute) },
+    mechanicalPlan: { reviewId: 5499583025, head, at: confirmedAt },
+  } as unknown as Work);
+  const effects = {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: [work()], now: iso(now) }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    persist: async () => {},
+    mechanicalFixes: async () => ({ requests: [] }),
+    recordMechanicalPlan: async (_item: Work, plan: { reviewId: number; head: string } | null) => { attempts.push(plan); throw new Error('The operation was aborted due to timeout'); },
+  } as unknown as Parameters<typeof daemon.runCycle>[2];
+  for (let step = 0; step < cycles; step++, now += 2 * minute) await daemon.runCycle(config(), state, effects, () => now);
+  return { attempts, work: work(), start };
+}
+const timedOutClearDetail = `Could not report GY-1459's mechanical plan (none): The operation was aborted due to timeout; the review gate drops the hold once its last confirmation passes 5 minutes old`;
+
+test('manual:fault-class-decision — action:decision|GY-1459|2026-10-14T04:54:55.483Z: a plan-report write that times out is a retried action, not a decision fault', async () => {
+  const state = emptyDaemonState(config());
+  const faultsBefore = state.faults.instances.length;
+  const { attempts } = await timedOutClearReplay(state, 2);
+  assert.ok(attempts.length >= 2, 'the clear is attempted within the cycle and again the next');
+  const row = state.actions['mechanical-plan:work-1459'];
+  assert.equal(row?.state, 'failed', 'the failed write stays a visible, retried action');
+  assert.equal(row!.detail, timedOutClearDetail);
+  assert.equal(row!.faultClass, undefined, 'and carries no fault class');
+  assert.deepEqual(state.faults.instances.slice(faultsBefore).map(entry => entry.kind).filter(kind => /decision|escalation/.test(kind)), [], 'the timeout counts no decision fault: the gate drops the hold at mechanicalPlanFreshMs whatever the write does');
+});
+
+// The row a loop before this change stored for the same timed-out clear counts as a decision fault,
+// and its text never changes, so an unchanged-detail guard alone would keep it counting (Codex, PR
+// #1203): the first cycle after the upgrade rewrites it without the class, and files no instance.
+test('manual:fault-class-decision — a stored counting failure of the same clear is rewritten without its fault class once the write stops counting, under the same text', async () => {
+  const state = emptyDaemonState(config());
+  const at = '2026-10-14T04:48:00.000Z';
+  storeAction(state, 'mechanical-plan:work-1459', { kind: 'decision', work: 'GY-1459', principal: null, state: 'failed', detail: timedOutClearDetail, attempts: 3, epoch: 1, cycle: 7, at });
+  assert.equal(state.actions['mechanical-plan:work-1459']!.faultClass, 'decision', 'the stored row counts, as the loop before this change stored it');
+  const counted = state.faults.failing['mechanical-plan:work-1459'];
+  assert.ok(counted && state.faults.instances.some(entry => entry.id === counted && entry.kind === 'action:decision' && entry.subject === 'GY-1459'), 'the stored row opened a decision instance the recurrence counts');
+  const instancesBefore = state.faults.instances.length;
+  await timedOutClearReplay(state, 1);
+  const row = state.actions['mechanical-plan:work-1459']!;
+  assert.equal(row.state, 'failed');
+  assert.equal(row.detail, timedOutClearDetail, 'the same text');
+  assert.equal(row.faultClass, undefined, 'rewritten without the fault class on the first cycle after the upgrade');
+  assert.equal(row.attempts, 4, 'as one more attempt of the same failure');
+  assert.deepEqual(state.faults.instances.slice(instancesBefore).filter(entry => /decision|escalation/.test(entry.kind)).map(entry => `${entry.kind} ${entry.subject}`), [], 'and no further decision instance is filed');
+  // Codex, PR #1203 round 3: the rewrite alone left the instance the counting row had opened, and the run pointing at it, so the recurrence (which counts instances, not rows) could still reach its threshold on a write that was no fault.
+  assert.equal(state.faults.failing['mechanical-plan:work-1459'], undefined, 'the run the counting row opened is ended');
+  assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'action:decision' && entry.subject === 'GY-1459'), [], 'and the instance it opened is dropped: the write was no fault');
+  const [{ recurringClasses }, { faultClassPolicyDefaults }] = await Promise.all([import('../src/model/fault-class-recurrence.js'), import('../src/model/fault-classes.js')]);
+  assert.deepEqual(recurringClasses(state.faults.instances, [], faultClassPolicyDefaults, Date.parse(at) + hour(1)).filter(entry => entry.faultClass === 'decision'), [], 'so nothing of it stands in the decision class window');
+});
+
+test('manual:fault-class-decision — action:decision|GY-1775|2026-10-14T06:43:08.482Z: a write refused because the item was delivered meanwhile is settled — no report, no hold, no instance', async () => {
+  const { reportMechanicalPlans } = await import('../src/daemon/mechanical-plan-report.js');
+  const at = '2026-10-14T06:40:00.000Z', clock = Date.parse(at) + 30_000;
+  // The item as the pre-delivery snapshot held it, its confirmation already past the freshness window.
+  const item = { id: 'w', key: 'GY-1775', stage: 'review', epoch: 1, candidate: { sha: 'abc', pr: 1 }, mechanicalPlan: { reviewId: 7, head: 'abc', at } } as unknown as Work;
+  const sent: unknown[] = [], failures: string[] = [], settled: string[] = [];
+  const effects = { mechanicalFixes: () => {}, recordMechanicalPlan: async (_: Work, plan: unknown) => { sent.push(plan); throw new Error('{"error":"Delivered work is immutable; create a follow-up task"}'); } };
+  const unreported = await reportMechanicalPlans([item], [], effects, clock, { fail: async (_, detail) => { failures.push(detail); }, settle: async target => { settled.push(target.key); } });
+  assert.deepEqual(sent, [null, null], 'the clear was attempted and refused twice — the refusal only shows on the write');
+  assert.deepEqual(failures, [], 'the settled refusal names no failure');
+  assert.deepEqual(settled, ['GY-1775'], 'and settles what an earlier failure of the same report may have recorded');
+  assert.equal(unreported.size, 0, 'a delivered item holds no decision from the ledger');
+});
+
+// Codex, PR #1203 round 4: a newly wanted plan's write that failed on an earlier cycle opened a counting instance; when
+// the item is delivered before the retry, the delivered refusal used to skip that row untouched, and the next snapshot
+// skips the delivered item, so the run stood (and its instance counted) until the window aged it out. The refusal now
+// settles the report: the run ends, its instance is dropped, and the row reads done.
+test('manual:fault-class-decision — a counting failure of a newly wanted plan, refused as delivered on its retry, is settled: its run ends, its instance is dropped and its row reads done', async () => {
+  const [{ reportMechanicalPlans, planReportSink }, { recurringClasses }, { faultClassPolicyDefaults }] = await Promise.all([import('../src/daemon/mechanical-plan-report.js'), import('../src/model/fault-class-recurrence.js'), import('../src/model/fault-classes.js')]);
+  const state = emptyDaemonState(config());
+  const at = '2026-10-14T06:38:00.000Z', clock = Date.parse(at) + 2 * 60_000, key = 'mechanical-plan:w';
+  const failed = `Could not report GY-1775's mechanical plan (review 7 on abc): 503 Service Unavailable; the review gate drops the hold once its last confirmation passes 5 minutes old`;
+  storeAction(state, key, { kind: 'decision', work: 'GY-1775', principal: null, state: 'failed', detail: failed, attempts: 1, epoch: 1, cycle: 3, at });
+  const counted = state.faults.failing[key];
+  assert.ok(counted && state.faults.instances.some(entry => entry.id === counted && entry.kind === 'action:decision' && entry.subject === 'GY-1775'), 'the newly wanted plan\'s failed write counts, and opened a decision instance');
+  const item = { id: 'w', key: 'GY-1775', stage: 'review', epoch: 1, candidate: { sha: 'abc', pr: 1 }, mechanicalPlan: null } as unknown as Work;
+  const effects = { mechanicalFixes: () => {}, recordMechanicalPlan: async () => { throw new Error('{"error":"Delivered work is immutable; create a follow-up task"}'); } };
+  const note = async (row: string, target: Work, kind: 'decision', outcome: 'done' | 'failed', detail: string, when: number = clock, faultKind?: FaultKind | null) =>
+    storeAction(state, row, { kind, work: target.key, principal: null, state: outcome, detail, attempts: (state.actions[row]?.attempts ?? 0) + 1, epoch: target.epoch, cycle: 4, at: new Date(when).toISOString() }, faultKind);
+  const unreported = await reportMechanicalPlans([item], [{ key: 'GY-1775', head: 'abc', pr: 1, epoch: 1, reviewId: 7 }], effects, clock, planReportSink(state, note));
+  assert.equal(unreported.size, 0, 'a delivered item holds no decision from the ledger');
+  const row = state.actions[key]!;
+  assert.equal(row.state, 'done', 'the row reads done: the report is settled');
+  assert.match(row.detail, /GY-1775's mechanical plan report is settled: the item was delivered after the cycle's snapshot/);
+  assert.equal(row.faultClass, undefined, 'and carries no fault class');
+  assert.equal(row.attempts, 2, 'as one more attempt of the same report');
+  assert.equal(state.faults.failing[key], undefined, 'the run the counting row opened is ended');
+  assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'action:decision' && entry.subject === 'GY-1775'), [], 'and the instance it opened is dropped: delivery settled the target');
+  assert.deepEqual(recurringClasses(state.faults.instances, [], faultClassPolicyDefaults, clock + hour(1)).filter(entry => entry.faultClass === 'decision'), [], 'so nothing of it stands in the decision class window');
+  // The same refusal on a report nothing recorded writes no row: the settled target is not even named.
+  const quiet = emptyDaemonState(config());
+  await reportMechanicalPlans([item], [], effects, clock, planReportSink(quiet, note));
+  assert.equal(quiet.actions[key], undefined, 'no row for a settled report nothing had recorded');
+});
+
+test('manual:fault-class-decision — the land route approves the verified head with the independent approver App, so the last-pusher rule merges an approved acceptance (GOAL-1)', async () => {
+  const { landAcceptance } = await import('../src/server/routes/goals.js');
+  const head = 'a'.repeat(40), pr = 1153, lastPusher = 'GitHub GraphQL query failed: New changes require approval from someone other than the last pusher.';
+  const goal = { id: 'goal-1', key: 'GOAL-1', acceptance: { pr, author: 'graphyard-acceptance', outcomes: [{ case: { id: 'signup' } }] }, approval: { head, by: 'graphyard-approver', reason: 'The cases check what the customer asked for' } } as never;
+  // GitHub as GOAL-1's base branch held it: the merger is the control-plane App, which pushed the
+  // acceptance branch, so only an approval at exactly the merged head from an App other than it
+  // satisfies the rule.
+  function world(approver: boolean) {
+    const reviews: { state: string; commit_id: string; performed_via_github_app: { id: number } }[] = [];
+    const approvals: string[] = [], merges: { head: string; refused: boolean }[] = [];
+    let merged = false;
+    const github = {
+      config: { base: 'main', appId: 1, repository: 'owner/project', ...(approver ? { revertApprover: { appId: 5678, installationId: 9, privateKey: 'not-used' } } : {}) },
+      async approveAcceptance(_: number, sha: string) {
+        if (!approver) return 'unconfigured' as const;
+        approvals.push(sha); reviews.push({ state: 'APPROVED', commit_id: sha, performed_via_github_app: { id: 5678 } });
+        return 'approved' as const;
+      },
+      async request(path: string) {
+        if (path === `/pulls/${pr}`) return { state: merged ? 'closed' : 'open', merged, merge_commit_sha: merged ? 'c'.repeat(40) : null, node_id: `PR_${pr}`, head: { sha: head }, base: { ref: 'main' }, mergeable: true, mergeable_state: 'clean' };
+        if (path === '/check-runs') return {};
+        throw new Error(`unexpected GitHub call ${path}`);
+      },
+      async pages() { return []; },
+      async upsertLandable() {},
+      async graphql(_query: string, variables: { id: string; head: string }) {
+        const approved = reviews.some(review => review.state === 'APPROVED' && review.commit_id === variables.head && review.performed_via_github_app.id !== 1);
+        merges.push({ head: variables.head, refused: !approved });
+        if (!approved) throw new Error(lastPusher);
+        merged = true;
+        return {};
+      },
+    };
+    return { github, approvals, merges };
+  }
+  // Configured: one landing approves exactly the verified head as the independent approver App and merges.
+  const configured = world(true);
+  const landed = await landAcceptance(configured.github as never, goal);
+  assert.equal(landed.state, 'merged', 'the last-pusher rule no longer strands the approved goal');
+  assert.deepEqual(configured.approvals, [head], 'the approver approved exactly the verified head');
+  assert.deepEqual(configured.merges, [{ head, refused: false }]);
+  // Unconfigured: the merge is refused as before, and the waiting detail names the missing approver, so the
+  // stuck landing reads as the configuration gap it is rather than a decision nobody made.
+  const unconfigured = world(false);
+  const waiting = await landAcceptance(unconfigured.github as never, goal);
+  assert.equal(waiting.state, 'waiting');
+  assert.match(waiting.detail, /New changes require approval from someone other than the last pusher/);
+  assert.match(waiting.detail, /no independent approver App is configured \(GRAPHYARD_REVERT_APPROVER_APP_ID, GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID, GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY\)/);
+  assert.deepEqual(unconfigured.merges.map(merge => merge.refused), [true], 'the merge is still attempted, as the main guard attempts a refused approval');
+});
+
+// The approveAcceptance unit, over the real GitHub adapter: the acceptance approval is the revert
+// approver App's (GY-1291), posted head-bound, and one already standing is not posted again.
+test('manual:fault-class-decision — approveAcceptance is the independent approver App\'s head-bound approval, deduplicated on the standing one, unconfigured without it', async () => {
+  const { generateKeyPairSync } = await import('node:crypto');
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
+  const { GitHub } = await import('../src/github.js');
+  const head = 'b'.repeat(40), pr = 1153;
+  const world = (approver: boolean) => {
+    const github = new GitHub({ repository: 'fixture/repo', base: 'main', appId: 1, installationId: 2, privateKey: 'not-used', ...(approver ? { revertApprover: { appId: 5678, installationId: 9, privateKey } } : {}) });
+    const state = { reviews: [] as any[], approvals: [] as { auth: string; commit: string }[] };
+    github.fetch = (async (input: string, init: RequestInit = {}) => {
+      const url = new URL(String(input)), method = init.method ?? 'GET', body = init.body ? JSON.parse(String(init.body)) : undefined;
+      const auth = String((init.headers as Record<string, string>)?.Authorization);
+      if (url.pathname === '/app/installations/9/access_tokens') return Response.json({ token: 'approver-installation-token' }, { status: 201 });
+      if (url.pathname === `/repos/fixture/repo/pulls/${pr}/reviews` && method === 'GET') return Response.json(state.reviews);
+      if (url.pathname === `/repos/fixture/repo/pulls/${pr}/reviews` && method === 'POST') {
+        state.approvals.push({ auth, commit: body.commit_id });
+        const review = { id: state.reviews.length + 1, state: 'APPROVED', commit_id: body.commit_id, performed_via_github_app: { id: auth === 'Bearer approver-installation-token' ? 5678 : 1 } };
+        state.reviews.push(review);
+        return Response.json(review);
+      }
+      return new Response(`unexpected ${method} ${url.pathname}`, { status: 500 });
+    }) as typeof fetch;
+    return { github, state };
+  };
+  const configured = world(true);
+  assert.equal(await configured.github.approveAcceptance(pr, head, 'the landing approval'), 'approved');
+  assert.deepEqual(configured.state.approvals, [{ auth: 'Bearer approver-installation-token', commit: head }], 'the approval is the approver App\'s, head-bound');
+  assert.equal(await configured.github.approveAcceptance(pr, head, 'the landing approval'), 'approved');
+  assert.equal(configured.state.approvals.length, 1, 'an approval already standing on the head is not posted again');
+  assert.equal(await world(false).github.approveAcceptance(pr, head, 'the landing approval'), 'unconfigured', 'no approver App, no approval');
 });

@@ -13,7 +13,7 @@ import { isClosed, type Principal, type Work } from '../src/model.js';
 import * as model from '../src/model.js';
 import type { Services } from '../src/server/routes.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): the 2026-10-13 instants are the fixture's own clock, judged against the explicit `now` below; Date.now() stamps nothing judged.
+// Time-bomb allowance (GY-1694): the 2026-10-13 instants are the fixture's own clock, judged against the explicit `now` below; the one Date.now() builds the live lease the close route judges on the database's own clock, which no stub reaches (GY-1795).
 
 // GY-1779: GY-1724, GY-1725 and GY-1759 sat escalated past their windows for "the loop's reading" that
 // no loop step recorded. The deployment-verification step now takes every due loop-owned reading on the
@@ -339,7 +339,8 @@ test('integration:loop-records-due-observation-reading — the coordinator recor
   // The pass is on the serving release: a close naming another release, or none, is refused before GitHub is touched; so is one while a worker lease is live.
   await assert.rejects(close(coordinator, item.id, null), /names the release its reading was taken on/);
   await assert.rejects(close(coordinator, item.id, filed), /passing reading was taken on release bbbbbbbbbbbb, not aaaaaaaaaaaa/);
-  const leased = await plant({ ...followUp(0, { stage: 'build', epoch: 2, lease: { owner: worker.id, epoch: 2, expiresAt: iso(now + 24 * hour) }, candidate: { pr: 1174, sha: sha('d'), baseSha: sha('e'), author: 'bot', branch: 'graphyard/gy-y-2', createdAt: iso(now - hour) }, evidence: [{ ...entry, id: randomUUID() }] } as Partial<Work>), description: `Post-deploy follow-up: post-deploy:${delivered.id}:AC-2:${proof}:${filed}\n\nowed` } as Work);
+  // The close judges the lease on the transaction's clock_timestamp(), never the fixture's `now`: an expiry fixed at now + 24 h lapsed on 2026-10-14 and the refusal stopped coming (GY-1795).
+  const leased = await plant({ ...followUp(0, { stage: 'build', epoch: 2, lease: { owner: worker.id, epoch: 2, expiresAt: iso(Date.now() + 24 * hour) }, candidate: { pr: 1174, sha: sha('d'), baseSha: sha('e'), author: 'bot', branch: 'graphyard/gy-y-2', createdAt: iso(now - hour) }, evidence: [{ ...entry, id: randomUUID() }] } as Partial<Work>), description: `Post-deploy follow-up: post-deploy:${delivered.id}:AC-2:${proof}:${filed}\n\nowed` } as Work);
   await assert.rejects(close(coordinator, leased.id), /has a live worker lease/);
   assert.equal(closedPulls.length, 0, 'no refused close closed a pull request');
   // The close as delivered-observation closes the open pull request as superseded by the reading, then the item.
