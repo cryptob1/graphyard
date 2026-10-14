@@ -510,6 +510,7 @@
     "tests/live-scope-widening.test.ts": 1883,
     "tests/live-throughput.test.ts": 11540,
     "tests/liveness-invariant.test.ts": 4326,
+    "tests/locked-read-bound.test.ts": 18600,
     "tests/locked-read.test.ts": 17399,
     "tests/loop-faults-dispatch-wake.test.ts": 2375,
     "tests/loop-faults.test.ts": 2260,
