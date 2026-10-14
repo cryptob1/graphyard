@@ -14,7 +14,7 @@ import type { Cycle } from './cycle.js';
 import { sessionExhaustion } from './cycle-sessions.js';
 import { decisionFailureKind, resumedApplication } from './decision-reads.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
-import type { FaultKind } from '../model/fault-classes.js'; import { recordCarried, stepCallCarried, unboundedEffects } from './step-budget.js';
+import type { FaultKind } from '../model/fault-classes.js'; import { recordCarried, stepCallCarried } from './step-budget.js';
 
 /**
  * The approver sessions step 4c puts its decisions to (GY-1147 moved them here from
@@ -240,7 +240,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       });
     }
     let launched: Awaited<ReturnType<NonNullable<DaemonEffects['approver']>>>;
-    try { launched = await (cycle.detached ? unboundedEffects(effects) : effects).approver!(item, watch.decision); } // GY-1774: on the launcher beside the cycle the launch holds no cycle, so it waits as long as it takes; in place it is bound like every call of the step
+    try { launched = await (cycle.detached ? cycle.effects : effects).approver!(item, watch.decision); } // GY-1774: on the launcher beside the cycle the launch holds no cycle, so it waits as long as it takes through the cycle's own effects; in place it is bound like every call of the step
     catch (error) {
       // A launch no account could take (GY-182) ran no session either: the watch keeps why, persisted
       // now so the wait survives a restart, and `master status` names it as waiting for a slot.

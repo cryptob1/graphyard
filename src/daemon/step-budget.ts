@@ -131,7 +131,6 @@ export async function recordCarried(cycle: Pick<Cycle, 'state' | 'now' | 'perfor
   const { state, now, performed, effects } = cycle, previous = state.actions[key];
   // A `started` row already counted this attempt; a row of any other state counts it here.
   const attempts = previous?.state === 'started' ? previous.attempts : (previous?.attempts ?? 0) + 1;
-  if (process.env.GY_DEBUG_CARRIED) console.error("CARRIED", key, message(error));
   performed.push(await record(state, key, { kind: row.kind, work: row.work, principal: row.principal ?? null, epoch: row.epoch ?? null, state: 'waiting', detail: `${what} was carried to the next cycle: ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist, null));
 }
 
@@ -155,7 +154,7 @@ export const carriedIsolate = (cycle: Cycle, step: BoundedStep): Cycle['isolate'
  * to the launcher passes through unbounded.
  */
 export async function withinStepBudget<T>(cycle: Cycle, step: BoundedStep, calls: readonly (keyof DaemonEffects)[], body: (bounded: Cycle) => Promise<T>): Promise<T> {
-  const budget = stepBudget(cycle.now, (cycle.config.run.intervalSeconds ?? 20) * 1000);
+  const budget = stepBudget(cycle.now, (cycle.config?.run?.intervalSeconds ?? 20) * 1000); // a cycle built by hand (a step's own test) may carry no run settings
   // Nested steps (the resume step runs inside the sessions step) bound the effects beneath every earlier bound, never a bound's own race.
   const effects = boundedCalls(unboundedEffects(cycle.effects), cycle.state as DaemonState, cycle.now, budget.left, { step, calls });
   const bounded: Cycle = { ...cycle, effects, isolate: carriedIsolate({ ...cycle, effects }, step) };
