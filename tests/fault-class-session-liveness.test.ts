@@ -1002,5 +1002,24 @@ test('unit:rekey-never-closes-live-lease-pane — a rekey moves the record, neve
     multiState.cycle += 1;
     await reclaimLaunchedPanes(multiCycle(launchAppearanceMs + 60_000));
     assert.deepEqual(multiClosed, ['w1:pSHARED'], 'a live lease’s handle recorded by another host never holds this host’s leftover pane');
+
+    // Same host: an earlier round's finished handle of an item that now holds a live lease names a
+    // coordinate this host later reused for another item's ended-attempt shell; only the pane of
+    // the lease's own claimed record is held, so the leftover is swept, cycle after cycle.
+    const reused = guardItem('work-1806', 'GY-1806', { owner: stallWorker.id, epoch: 2, expiresAt: GY1791_AT(3_600_000) }, [attempt(1, true), attempt(2, false)],
+      [closeHandle(`${stallWorker.id}:1`, 'w1:pREUSED', 'finished'), closeHandle(`${stallWorker.id}:2`, 'w1:pLIVE2', 'running')]);
+    const reusedShell = guardItem('work-1807', 'GY-1807', null, [attempt(1, true)], [closeHandle(`${stallWorker.id}:7`, 'w1:pREUSED', 'running')]);
+    const reusedWork = [reused, reusedShell];
+    const reusedState: DaemonState = emptyDaemonState(config);
+    const reusedClosed: string[] = [];
+    const reusedEffects = { persist: async () => {}, closeSession: async (pane: string) => { reusedClosed.push(pane); }, recordSession: async () => {},
+      panes: async () => ({ panes: [{ pane_id: 'w1:pREUSED', agent_status: 'unknown', cwd: `${worktrees}/GY-1807-1` }, { pane_id: 'w1:pLIVE2', agent_status: 'unknown', cwd: `${worktrees}/GY-1806-2` }], available: true }) } as unknown as DaemonEffects;
+    const reusedCycle = (at: number) => ({ config, state: reusedState, effects: reusedEffects, now: () => GY1791_NOW + at, clock: GY1791_NOW + at, performed: [],
+      isolate: async (_k: string, _i: unknown, _n: string, fn: () => Promise<unknown>) => fn(), snapshot: { work: reusedWork, now: new Date(GY1791_NOW + at).toISOString() },
+      open: reusedWork, agents: [], closedPanes: new Set<string>() } as unknown as Cycle);
+    await reclaimLaunchedPanes(reusedCycle(0));
+    reusedState.cycle += 1;
+    await reclaimLaunchedPanes(reusedCycle(launchAppearanceMs + 60_000));
+    assert.deepEqual(reusedClosed, ['w1:pREUSED'], 'a finished earlier handle never holds a reused pane; the live claimed record’s pane stays shut');
   } finally { void directory; }
 });

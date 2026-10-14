@@ -290,11 +290,12 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
   for (const item of snapshot.work) for (const handle of item.sessions ?? []) if (handle.pane && handle.host === config.hostId) recorded.set(handle.pane, { item, handle });
   // Whether that exact item and attempt epoch holds a live lease.
   const leased = (key: string, epoch: number | null | undefined) => epoch != null && open.some(item => item.key === key && !!item.lease && item.lease.epoch === epoch && Date.parse(item.lease.expiresAt) > clock);
-  // Whether a live lease's own session record names the pane (GY-1801): after a rekey the superseded
-  // record keeps the pane the claimed record runs in, so the pane, not the epoch a record or a
-  // worktree parses to, is what a live lease holds, on this host: a handle another host recorded names that host's pane. Such a pane is never the sweep's.
+  // Whether the pane is the one a live lease's own claimed session runs in (GY-1801), on this host:
+  // the record keyed `owner:epoch` of the lease's epoch. A rekey leaves the superseded record the
+  // same pane, so the claimed record's pane is what is held; an earlier round's finished handle, or
+  // one another host recorded, names a pane coordinate that may since belong to another launch.
   const paneLeased = (pane: string | null | undefined) => !!pane && open.some(item => !!item.lease && Date.parse(item.lease.expiresAt) > clock
-    && (item.sessions ?? []).some(handle => handle.pane === pane && handle.host === config.hostId));
+    && (item.sessions ?? []).some(handle => handle.pane === pane && handle.host === config.hostId && handle.id === `${item.lease!.owner}:${item.lease!.epoch}`));
   // Whether the worktree's exact item and epoch names an attempt that still stands (GY-1801): no end
   // of it is on the record, so the lease it held is either live or still to be classed, and its pane
   // is not the sweep's — whatever the lease in this cycle's snapshot reads.
