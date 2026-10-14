@@ -201,7 +201,7 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * without it keeps cycling; it simply never reclaims. It touches no checkout, no branch, and
    * no Graphyard record, so it needs no credential and is safe to run on every cycle.
    */
-  reclaim?: (work: Work[]) => Promise<WorktreeReclaimReport>;
+  reclaim?: (work: Work[], now?: number) => Promise<WorktreeReclaimReport>;
   /** Worktrees disposable now by the plan over the current inventory (GY-1784); null when the plan cannot be read. */
   worktreeReclaimable?: (work: Work[], now: number) => Promise<number | null>;
   /** The resource reclaim pass (GY-132): reaps terminal records, closes finished sessions holding profile names, frees stuck sessions' slots; every cycle. */
@@ -726,12 +726,12 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // The same pass takes back every ephemeral checkout no live session owns, under the managed root.
     // Finished worktrees are removed outright first, a bounded number per pass (GY-360); the
     // inventory that remains is the one the dependency reclaim judges and `master status` reads.
-    reclaim: async work => {
+    reclaim: async (work, now) => {
       const config = current(), idleMs = reclaimIdleMs(config);
       const livePaths = [...(await readReviewLedger(root)).reviews, ...(await readProducerLedger(root)).producers]
         .filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!);
-      const trees = await removeReclaimableWorktrees(root, work, { idleMs, run, baseBranch: config.baseBranch, limit: config.run.worktreeRemovalLimit, livePaths });
-      const report = await reclaimWorktrees(root, work, { idleMs, entries: trees.entries });
+      const trees = await removeReclaimableWorktrees(root, work, { idleMs, run, baseBranch: config.baseBranch, limit: config.run.worktreeRemovalLimit, livePaths, now });
+      const report = await reclaimWorktrees(root, work, { idleMs, entries: trees.entries, now });
       const taken = new Set(report.applied ? report.removed : []);
       await writeWorktreeInventoryCache(root, { at: trees.at, entries: trees.entries.map(entry => ({ ...entry, dependencies: entry.dependencies.filter(dependency => !taken.has(dependency.path)) })),
         held: trees.held })
