@@ -70,16 +70,18 @@ async function slowPass() {
 function recordEvaluations() {
   const internals = engine as unknown as { reconcileItem: (db: unknown, work: Work, all: Work[], now: Date, options?: { dryRun?: boolean }) => Promise<boolean> };
   const original = internals.reconcileItem, evaluated: string[] = [];
-  let block = 0;
+  let block = 0, during: (() => Promise<void>) | null = null;
   internals.reconcileItem = async function (this: Engine, db, work, all, now, options) {
     if (options?.dryRun) {
       evaluated.push(work.id);
       // Hold the event loop for `block` ms once, on the first evaluation: the lag the tick samples.
       if (block) { const until = performance.now() + block; block = 0; while (performance.now() < until) { /* starve the loop */ } }
+      // Run `during` once, on the first evaluation: a writer outside the tick moving a face mid-pass.
+      if (during) { const run = during; during = null; await run(); }
     }
     return original.call(this, db, work, all, now, options);
   };
-  return { evaluated, blockOnce: (ms: number) => { block = ms; }, restore: () => { internals.reconcileItem = original; } };
+  return { evaluated, blockOnce: (ms: number) => { block = ms; }, duringOnce: (run: () => Promise<void>) => { during = run; }, restore: () => { internals.reconcileItem = original; } };
 }
 
 test('unit:slow-tick-names-cause — a tick past the bound names the keys and face fields that made it full, or the interval, and the event-loop lag it ran under', { timeout: 120_000 }, async () => {
@@ -138,11 +140,38 @@ test('unit:slow-tick-names-cause — a tick past the bound names the keys and fa
   assert.ok(!quiet.tick.full, 'a quiet pass is not full');
   assert.match(quiet.line, /0 candidate\(s\) whose inputs moved; (event-loop lag p50 \d+ ms, max \d+ ms over the tick|no event-loop lag sample over the tick)/, quiet.line);
   assert.ok(!quiet.tick.lagMs || quiet.tick.lagMs.max < 150, `a quiet pass reads no starvation: ${JSON.stringify(quiet.tick.lagMs)}`);
+  await settle();
+
+  // One item moved twice by writers outside the tick: once mid-pass, noted when a planned write's
+  // commit reread it, and once more before the next pass opened, read then as a stand-in. The next
+  // pass names it once, with the fields of both moves.
+  const twice = items[7], retitle = (field: string, value: string) => store.pool.query(`UPDATE work_items SET document = jsonb_set(document, $2::text[], to_jsonb($3::text)) WHERE id = $1`, [twice.id, `{${field}}`, value]);
+  const mover = recordEvaluations();
+  try {
+    // A writer outside the tick drops items[1]'s derived action: the pass is full and writes it back,
+    // and that planned write's commit finds items[7] moved mid-pass.
+    await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{nextAction}', 'null') WHERE id = $1`, [items[1].id]);
+    mover.duringOnce(async () => { await retitle('title', 'Moved mid-pass'); });
+    await engine.reconcile();
+    assert.ok(engine.reconcileTicks.at(-1)!.writes >= 1, 'the pass wrote the item whose action was dropped');
+  } finally { mover.restore(); }
+  await retitle('description', 'Moved again before the next pass opened');
+  const once = await slowPass();
+  assert.equal(once.tick.full?.cause, 'faces', JSON.stringify(once.tick.full));
+  const entries = once.tick.full!.moved.filter(move => move.id === twice.id);
+  assert.equal(entries.length, 1, `the item moved twice is named once: ${JSON.stringify(once.tick.full!.moved)}`);
+  assert.ok(entries[0].fields.includes('title') && entries[0].fields.includes('description'), `its fields are the union of both moves: ${entries[0].fields.join(', ')}`);
+  assert.equal(once.line.split(`${twice.key} (`).length - 1, 1, once.line);
+  assert.match(once.line, new RegExp(`${twice.key} \\([^)]*\\bdescription\\b[^)]*\\btitle\\b[^)]*\\)`), once.line);
 });
 
 test('unit:own-write-no-full-pass — a face the tick\'s own write moved makes the next pass evaluate only its readers; a face a request moved still makes it full', { timeout: 120_000 }, async () => {
-  const leased = await create();
+  const leased = await create({ exclusiveResources: ['printer'] });
   const dependent = await create({ dependencies: [leased.id] });
+  // Readers the engine defines without a reference: one waits on the exclusive resource the leased
+  // item holds (`resourceConflicts`), one plans a file in its scope (`fileConflicts`, `landingRegressions`).
+  const sharer = await create({ exclusiveResources: ['printer'] });
+  const neighbour = await create({ plannedFiles: [...leased.plannedFiles] });
   const others: Work[] = [];
   for (let n = 0; n < 3; n++) others.push(await create());
   await engine.execute(operator, 'ready', leased.id, {}, randomUUID());
@@ -165,6 +194,8 @@ test('unit:own-write-no-full-pass — a face the tick\'s own write moved makes t
     assert.ok(next.evaluated < next.live, `the pass evaluated ${next.evaluated} of ${next.live} live items`);
     const evaluated = new Set(recorder.evaluated);
     assert.ok(evaluated.has(dependent.id), 'the item that depends on the moved face is evaluated against it');
+    assert.ok(evaluated.has(sharer.id), 'the item sharing the exclusive resource the lapsed lease held is evaluated against the release');
+    assert.ok(evaluated.has(neighbour.id), 'the item whose planned files overlap the moved item\'s is evaluated against it');
     for (const other of others) assert.ok(!evaluated.has(other.id), `${other.key} reads nothing of the moved face and is not evaluated`);
     assert.match(next.line, /candidate\(s\) whose inputs moved/, 'the warning calls the pass incremental');
     recorder.evaluated.length = 0;

@@ -52,7 +52,7 @@ Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`).
 
 ### The merge-path reserve
 
-Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observations await reset (`githubBudget.deferrals`); token (`githubBudget.tokens`) projected below reserve at reset raises `github`.
+Below **500 requests** (`GRAPHYARD_GITHUB_RESERVE`), non-merge observations await reset (`githubBudget.deferrals`); token (`githubBudget.tokens`) projected below reserve at reset raises `github`.
 
 ### What an observation costs
 
@@ -115,4 +115,4 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ### Concurrent reconciliation
 
-Reconcile evaluates moved rows, all every `GRAPHYARD_RECONCILE_FULL_MS` (10000); ticks over 5s log `reconciliation tick took N ms` naming moved keys/face fields or that interval, and event-loop lag p50/max; own-write moves re-evaluate only readers. Batches evaluate lock-free, write per item under coordination+row locks; expired waits defer unwritten items; heartbeats lock only their item, renewals wait ≤1s.
+Reconcile evaluates moved rows, all every `GRAPHYARD_RECONCILE_FULL_MS` (10000); ticks over 5s log `reconciliation tick took N ms`: each moved key+fields once, or the interval, and event-loop lag p50/max; own-write moves re-evaluate only readers (reference/resource/path scope). Batches evaluate lock-free, write per item under coordination+row locks; expired waits defer unwritten items; heartbeats lock only their item (renewal wait ≤1s).

@@ -10,7 +10,7 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
+import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
 import { filedFollowUpWindow, followUpRequest, patternOfProof, type PatternProjections, type PatternReader } from './model/observation-window.js';
 import { readInterventionReport } from './interventions/report.js';
 import { interventionPolicyFromEnv } from './model/interventions.js';
@@ -700,7 +700,7 @@ interface ReconcileEntry { number: number; work: Work; version: string; settled:
 /** A write a reconciliation batch planned (GY-1290): its evaluation of the item, on a copy, at the row version and the clock it read. */
 interface ReconcilePlan { id: string; work: Work; version: string; now: Date }
 /** One planned write, committed: whether it wrote, whether later planned items must be evaluated again, and what to keep of it once committed. */
-interface ReconcileWritten { wrote: boolean; stale: boolean; faceMoved: FaceMove | null; saved: SavedVersion[]; apply: () => void }
+interface ReconcileWritten { wrote: boolean; stale: boolean; faceMoved: OwnFaceMove | null; saved: SavedVersion[]; apply: () => void }
 /** The running pass's kept view and its readers, as one planned write needs them. */
 interface ReconcilePass {
   fleet: Map<string, ReconcileEntry>; all: () => Work[]; view: () => void; lockWait: (ms: number) => void;
@@ -713,10 +713,10 @@ interface ReconcilePass {
  * (GY-1499). A heartbeat or an executor's claim renewal leaves the face unchanged, so the pass
  * after it evaluates only the renewed item; any other write changes it, and
  * the pass evaluates every live item against it, unless the write was a reconciliation pass's own
- * (GY-1777): that pass evaluated against it as planned, so the next evaluates only the items that
- * read it by reference (`readsFace`). A claim expiring is a move of the clock alone, which the
- * bounded full evaluation (`reconcileFullEvaluationMs`) catches up, as it does any other reader of
- * a face a pass's own write moved.
+ * (GY-1777): that pass evaluated against it as planned, so the next evaluates only the items whose
+ * evaluation reads it (`readsFace`: by reference, as a split sibling, through a shared exclusive
+ * resource or an overlapping path scope). A claim expiring is a move of the clock alone, which the
+ * bounded full evaluation (`reconcileFullEvaluationMs`) catches up.
  */
 function fleetFace(work: Work) {
   const { revision: _revision, updatedAt: _updatedAt, lease, actionQueue, lastAssignment, ...rest } = work;
@@ -741,9 +741,57 @@ function faceFields(before: string, after: string): string[] {
   const a = JSON.parse(before) as Record<string, unknown>, b = JSON.parse(after) as Record<string, unknown>;
   return [...new Set([...Object.keys(a), ...Object.keys(b)])].filter(field => JSON.stringify(a[field]) !== JSON.stringify(b[field])).sort();
 }
-/** Whether `work`'s evaluation reads `move`'s item by reference (GY-1777): as a dependency, or as a child it was split into. */
-function readsFace(work: Work, move: FaceMove) {
-  return work.dependencies.includes(move.id) || (work.children ?? []).includes(move.key);
+/** The moves merged by item (GY-1777): one entry per item in the order first seen, its fields the union of every move's. */
+function mergeFaceMoves(moves: Iterable<FaceMove>): FaceMove[] {
+  const merged = new Map<string, FaceMove>();
+  for (const move of moves) {
+    const known = merged.get(move.id);
+    merged.set(move.id, known ? { ...known, fields: [...new Set([...known.fields, ...move.fields])].sort() } : move);
+  }
+  return [...merged.values()];
+}
+/** A fleet face the pass's own planned write moved (GY-1777): the move, and the item's document before and after it. */
+interface OwnFaceMove { move: FaceMove; before: Work; after: Work }
+/**
+ * What a moved face reaches (GY-1777): every way one item's evaluation reads another's face. By
+ * reference, as a dependency, a split parent or child, a wait on it or a follow-up of its delivery:
+ * its id or key stands in the reader's own face (`mention`). As a split sibling: the readers'
+ * parent is its parent. Through an exclusive resource both name (`resourceConflicts`). Through path
+ * scope (`fileConflicts`, `landingRegressions`, `inheritedObligations`): the reader's planned,
+ * observed and landing-check files against the moved item's planned and observed files, the
+ * contract paths of a bootstrap deferral it declares, and those of any deferral whose proof its
+ * evidence may have delivered. Built from the document before and after the move, so a reader of
+ * either is reached.
+ */
+interface FaceReach { id: string; mention: RegExp; parents: Set<string>; resources: Set<string>; paths: string[] }
+function faceReach({ move, before, after }: OwnFaceMove, all: Work[]): FaceReach {
+  const proofs = new Set([...before.evidence ?? [], ...after.evidence ?? []].map(evidence => evidence.proof));
+  const paths = new Set<string>();
+  for (const work of [before, after]) {
+    for (const path of [...work.plannedFiles ?? [], ...work.observation?.files ?? []]) paths.add(path);
+    for (const criterion of work.criteria ?? []) for (const path of criterion.bootstrap?.contractPaths ?? []) paths.add(path);
+  }
+  for (const work of all) {
+    if (work.id === move.id) continue;
+    for (const criterion of work.criteria ?? []) if (criterion.bootstrap && criterion.proofs.some(proof => proofs.has(proof))) for (const path of criterion.bootstrap.contractPaths) paths.add(path);
+  }
+  const escaped = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return { id: move.id, mention: new RegExp(`${escaped(move.id)}|(^|[^A-Za-z0-9])${escaped(move.key)}(?![A-Za-z0-9])`),
+    parents: new Set([before.parent, after.parent].filter((parent): parent is string => !!parent)),
+    resources: new Set([...before.exclusiveResources ?? [], ...after.exclusiveResources ?? []]), paths: [...paths] };
+}
+/** The paths other items' evaluations read an item on (GY-1777): its planned scope, the files its candidate was observed to change, and the ones its landing check compared. */
+function readerPaths(work: Work): string[] {
+  return [...work.plannedFiles ?? [], ...work.observation?.files ?? [], ...(work.observation?.scopeFiles ?? []).map(file => file.path), ...(work.observation?.landing?.files ?? []).map(file => file.path)];
+}
+/** Whether `entry`'s evaluation reads the moved face `reach` describes (GY-1777). */
+function readsFace(entry: ReconcileEntry, reach: FaceReach) {
+  const work = entry.work;
+  if (work.id === reach.id) return false;
+  if (reach.mention.test(entry.face)) return true;
+  if (work.parent && reach.parents.has(work.parent)) return true;
+  if ((work.exclusiveResources ?? []).some(resource => reach.resources.has(resource))) return true;
+  return readerPaths(work).some(path => reach.paths.some(other => pathScopesOverlap(path, other)));
 }
 /** The slow-tick warning's account of a full pass (GY-1777): every moved face, by key and the fields that changed on it. */
 function describeFull(full: ReconcileFull) {
@@ -2730,10 +2778,10 @@ export class Engine {
   private readonly reconcileFaceMoves = new Map<string, FaceMove>();
   /**
    * Fleet faces the pass's own planned writes moved (GY-1777): the pass evaluated against them as
-   * planned, so they do not make the next pass full; it evaluates the items that read them by
-   * reference, and the bounded full evaluation catches up any other reader.
+   * planned, so they do not make the next pass full; it evaluates the items whose evaluation reads
+   * them (`readsFace`), and the bounded full evaluation catches up the rest.
    */
-  private readonly reconcileOwnMoves = new Map<string, FaceMove>();
+  private readonly reconcileOwnMoves = new Map<string, OwnFaceMove>();
   /** The event-loop lag sampler (GY-1777), open over each tick's window and read into the tick. */
   private readonly eventLoopLag = new EventLoopLag();
   /** What the last pass read and evaluated: the documents it fetched, the items it evaluated, and whether it was full. */
@@ -2743,7 +2791,12 @@ export class Engine {
   /** Note a face another writer moved, merging the fields of one noted already (GY-1777). */
   private noteFaceMove(move: FaceMove) {
     const known = this.reconcileFaceMoves.get(move.id);
-    this.reconcileFaceMoves.set(move.id, known ? { ...known, fields: [...new Set([...known.fields, ...move.fields])].sort() } : move);
+    this.reconcileFaceMoves.set(move.id, known ? mergeFaceMoves([known, move])[0] : move);
+  }
+  /** Note a face the pass's own planned write moved (GY-1777): the document before its first write of the pass and after its last, the fields merged. */
+  private noteOwnMove(own: OwnFaceMove) {
+    const known = this.reconcileOwnMoves.get(own.move.id);
+    this.reconcileOwnMoves.set(own.move.id, known ? { move: mergeFaceMoves([known.move, own.move])[0], before: known.before, after: own.after } : own);
   }
   private reconcileRunning: Promise<void> | null = null;
   private reconcileTrailing: Promise<void> | null = null;
@@ -2799,8 +2852,8 @@ export class Engine {
    * `reconcileFullEvaluationMs` the pass evaluates every live item, for the inputs only the
    * clock moves. A pass after a heartbeat therefore reads one document and evaluates one item. A
    * face the pass's own writes moved does not make the next pass full (GY-1777): the next pass
-   * evaluates the items that read it by reference, and a tick over `reconcileSlowWarnMs` names
-   * what made it full and the event-loop lag it ran under.
+   * evaluates the items whose evaluation reads it (`readsFace`), and a tick over
+   * `reconcileSlowWarnMs` names what made it full and the event-loop lag it ran under.
    *
    * Each batch evaluates on the background lane (a bounded share of the pool) holding no lock at
    * all (GY-1290): one short transaction compares every row's version with the view, re-reads only
@@ -2907,16 +2960,17 @@ export class Engine {
             // The rows the opening held as stand-ins, read whole outside the coordination lock; then the
             // pass decides what it evaluates: the items whose own row moved, plus every live item when
             // another's fleet face moved, and the lapsed, escalated and owed ones.
-            const moved = [...await reread(db, [...fleet].filter(([, entry]) => !entry.settled && isStandIn(entry.work)).map(([id]) => id), { owe: false }), ...this.reconcileFaceMoves.values()];
+            // An item moved twice (once noted mid-pass, once held as a stand-in here) is one move with the fields of both.
+            const moved = mergeFaceMoves([...await reread(db, [...fleet].filter(([, entry]) => !entry.settled && isStandIn(entry.work)).map(([id]) => id), { owe: false }), ...this.reconcileFaceMoves.values()]);
             this.reconcileFaceMoves.clear();
-            // The pass's own writes moved these faces as it evaluated against them (GY-1777): only their readers by reference are due.
-            const own = [...this.reconcileOwnMoves.values()];
+            // The pass's own writes moved these faces as it evaluated against them (GY-1777): only the items whose evaluation reads them are due.
+            const reaches = [...this.reconcileOwnMoves.values()].map(own => faceReach(own, all));
             this.reconcileOwnMoves.clear();
             const live = [...fleet].filter(([, entry]) => !entry.settled).sort(([, a], [, b]) => a.number - b.number).map(([id]) => id);
             if (full || moved.length) tick.full = { cause: fullCause ?? 'faces', moved: moved.sort((a, b) => (fleet.get(a.id)?.number ?? Infinity) - (fleet.get(b.id)?.number ?? Infinity) || a.key.localeCompare(b.key)) };
             const due = tick.full ? new Set(live) : new Set([
               ...changed, ...this.reconcileOwed,
-              ...live.filter(id => { const work = fleet.get(id)!.work; return !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime() || standingEscalations(work).length > 0 || own.some(move => readsFace(work, move)); }),
+              ...live.filter(id => { const work = fleet.get(id)!.work; return !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime() || standingEscalations(work).length > 0 || reaches.some(reach => readsFace(fleet.get(id)!, reach)); }),
             ]);
             if (full) this.reconcileConfig = config;
             candidates = live.filter(id => due.has(id)); tick.candidates = candidates.length;
@@ -2968,7 +3022,7 @@ export class Engine {
           // face it moved is owed to the rest of the fleet.
           written.apply(); rememberSaved(written.saved);
           this.reconcileOwed.delete(plans[index].id);
-          if (written.faceMoved) this.reconcileOwnMoves.set(written.faceMoved.id, written.faceMoved);
+          if (written.faceMoved) this.noteOwnMove(written.faceMoved);
           tick.maxAttempts = Math.max(tick.maxAttempts, attempts + 1); tick.evaluated++; if (written.wrote) tick.writes++;
           stale = written.stale; attempts = 0; index++;
         }
@@ -3028,7 +3082,7 @@ export class Engine {
       }
       const version = ((await db.query('SELECT xmin::text AS version FROM work_items WHERE id = $1', [plan.id])).rows[0] as { version: string }).version, face = fleetFace(work);
       const saved = await savedVersions(db, [work]);
-      const faceMoved = face !== entry.face ? { id: plan.id, key: work.key, fields: faceFields(entry.face, face) } : null;
+      const faceMoved = face !== entry.face ? { move: { id: plan.id, key: work.key, fields: faceFields(entry.face, face) }, before: entry.work, after: work } : null;
       return { wrote: true, stale, faceMoved, saved, apply: () => { Object.assign(entry, { work, version, face }); pass.view(); } };
     }, { lane: 'background', coordinationLock: false, retryStaleWrites: false });
   }
