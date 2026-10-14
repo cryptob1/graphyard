@@ -263,7 +263,20 @@ export const statusRoutes = defineRoutes('status', [
       return { timelines: operatorVisible(await readPipelineTimelines(services.engine.store)) };
     },
   },
-  { method: 'GET', path: '/api/work', handle: async ({ services, operatorVisible }) => operatorVisible(await services.engine.store.list()) },
+  {
+    // The work list is the bounded fleet read (GY-1778): every open item whole and each settled
+    // delivery as the work index's stored summary (store.fleet, GY-1376). `?pr=N` narrows it to
+    // the item whose candidate or submission names pull request N, which is all the CI plan step
+    // (scripts/enumerate-ci-proofs.mjs) needs. store.list() served every document whole here:
+    // 134 MB on a 1,777-item ledger, past the plan's abort on every acceptance run.
+    method: 'GET', path: '/api/work',
+    async handle({ url, services, operatorVisible }) {
+      const requested = url.searchParams.get('pr');
+      if (requested === null) return operatorVisible(await services.engine.store.fleet());
+      demand(/^[1-9]\d{0,14}$/.test(requested), 'pr must be a pull request number', 400);
+      return operatorVisible(await services.engine.store.workForPullRequest(Number(requested)));
+    },
+  },
   {
     // One item's whole document, history included, by id or display key (GY-422): what a reader
     // asks for when the snapshot's summary of a settled delivery is not enough.
