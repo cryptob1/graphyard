@@ -9,6 +9,8 @@ import { ciProofFamilies as registryFamilies, contract, contracts, planCiProofs 
 import { defineUnitContract, judgeUnitCases, parseTap } from '../scripts/unit-contract.mjs';
 // @ts-expect-error Dependency-free protected workflow script.
 import { candidateWork, ciPlan, matrixEntry, planFromControlPlane } from '../scripts/enumerate-ci-proofs.mjs';
+// @ts-expect-error Dependency-free protected workflow script; read as a namespace so a script without the bounds table fails the case, not the file's load.
+import * as enumeration from '../scripts/enumerate-ci-proofs.mjs';
 // @ts-expect-error Dependency-free protected workflow script.
 import { ciRunEvents as reporterEvents, grantAuthorizes, observeCiRun, publishCiReport, readCiReports, validateCiRun, validateReport } from '../scripts/publish-acceptance.mjs';
 import { ciFamilyAllows, ciPatternAllowed, ciProducerRuntime, ciProofFamilies, ciRunEvents, ciRunRefusal, compareCiAttempts, isCiProducer, observeCiCheckRun, staleCiAttemptRefusal, type CiRunBinding } from '../src/model/ci-proofs.js';
@@ -185,6 +187,47 @@ test('integration:ci-proofs-workflow the plan waits for the control plane to obs
   assert.deepEqual(stale.proofs, []); assert.match(stale.reason, /not ffff/);
   await assert.rejects(planFromControlPlane({ url: 'https://graphyard.example/', token: 'x', pr: 7, head, fetcher: async () => new Response(JSON.stringify({ actor: { role: 'worker' } })) }), /not a producer principal/);
   await assert.rejects(planFromControlPlane({ url: 'http://graphyard.example/', token: 'x', pr: 7, head, fetcher }), /credential-free HTTPS/);
+});
+
+test('unit:ci-plan-bounded-read the plan reads only /api/status and the work read filtered to its pull request, each under the one named bound covering that read\'s measured p95, and never the whole work list', async () => {
+  const work = { id: expected.workId, key: 'GY-1778', stage: 'build', submission: { epoch: 1, pr: 1183 }, policyRevision: 2, candidate: { sha: 'e'.repeat(40), baseSha: base, pr: 1183 }, criteria: [{ id: 'AC-1', proofs: ['integration:claim-safety'] }] };
+  // Every settled item of a 134 MB fleet is behind this control plane; a read of the whole list is what the fixture refuses.
+  const requests: { path: string; search: string; signal: unknown }[] = [];
+  const fetcher = async (url: string, init: { signal?: AbortSignal }) => {
+    const parsed = new URL(url);
+    requests.push({ path: parsed.pathname, search: parsed.search, signal: init?.signal });
+    if (parsed.pathname === '/api/status') return new Response(JSON.stringify({ actor: { id: 'ci-proofs', role: 'producer' } }));
+    if (parsed.pathname === '/api/work' && parsed.searchParams.get('pr') === '1183') return new Response(JSON.stringify(requests.filter(request => request.path === '/api/work').length >= 2 ? [{ ...work, candidate: { ...work.candidate, sha: head } }] : [work]));
+    if (parsed.pathname === '/api/work') return new Response(JSON.stringify({ error: 'the whole work list is not served to the plan' }), { status: 500 });
+    return new Response(JSON.stringify({ error: 'unexpected read' }), { status: 404 });
+  };
+  const plan = await planFromControlPlane({ url: 'https://graphyard.example/', token: 'ci-secret', pr: 1183, head, waitMs: 60_000, intervalMs: 1, fetcher, sleep: async () => {} });
+  assert.deepEqual(plan.work, { id: expected.workId, key: 'GY-1778', pr: 1183, policyRevision: 2, head, base });
+  assert.deepEqual(requests.map(request => `${request.path}${request.search}`), ['/api/status', '/api/work?pr=1183', '/api/work?pr=1183'], 'the plan reads the status and the filtered work read for its pull request, and nothing else');
+  assert.ok(requests.every(request => request.signal instanceof AbortSignal), 'every read carries an abort bound');
+  // An item whose pull request is not 1183 is not what the plan asked for, and an empty filtered read plans nothing with the reason.
+  const empty = await planFromControlPlane({ url: 'https://graphyard.example/', token: 'ci-secret', pr: 1183, head, waitMs: 0, intervalMs: 1, fetcher: async (url: string) => new Response(JSON.stringify(new URL(url).pathname === '/api/status' ? { actor: { role: 'producer' } } : [])), sleep: async () => {} });
+  assert.deepEqual(empty.proofs, []); assert.match(empty.reason, /no submitted candidate/);
+  // The bounds: one table names both reads; each bound covers the measured p95 of that read (status 5 s, the per-item read 13 s) with room for a runner further from the plane.
+  const planReads = enumeration.planReads as Record<string, { path: (...args: unknown[]) => string; measuredP95Ms: number; abortMs: number }>;
+  assert.ok(planReads, 'the plan names its read bounds in one table, planReads');
+  assert.deepEqual(Object.keys(planReads), ['status', 'work']);
+  assert.equal(planReads.status.path(), 'status'); assert.equal(planReads.work.path(1183), 'work?pr=1183');
+  assert.deepEqual([planReads.status.measuredP95Ms, planReads.work.measuredP95Ms], [5_000, 13_000], 'the measured p95 of each read, as the item records them');
+  for (const [name, bound] of Object.entries(planReads)) assert.ok(bound.abortMs >= 2 * bound.measuredP95Ms, `the ${name} read's abort bound (${bound.abortMs} ms) covers twice its measured p95 (${bound.measuredP95Ms} ms)`);
+  const source = await readFile(new URL('../scripts/enumerate-ci-proofs.mjs', import.meta.url), 'utf8');
+  assert.equal(source.match(/AbortSignal\.timeout\(/g)?.length, 1, 'one abort signal, built from the named bound');
+  assert.match(source, /AbortSignal\.timeout\(bound\.abortMs\)/, 'the abort bound is the table\'s, never a literal');
+  assert.doesNotMatch(source, /read\('work'\)|\/api\/work`|'work'\)/, 'no read of the whole work list remains in the plan');
+  // The reviewer's capped-refusal request reads the fleet the same bounded way: GET /api/work, now the fleet read, never a work-snapshot export.
+  const reviewer = await readFile(new URL('../src/reviewer.ts', import.meta.url), 'utf8');
+  const cappedRead = reviewer.slice(reviewer.indexOf('export function readCappedRefusal'), reviewer.indexOf('export const repeatingPaths'));
+  assert.match(cappedRead, /await read\('work'\)/, 'the capped-refusal request reads GET /api/work');
+  assert.doesNotMatch(cappedRead, /work-snapshot|view=full/, 'the capped-refusal request never reads a work-snapshot export');
+  // The route behind it is the bounded fleet read (store.fleet), not store.list().
+  const route = await readFile(new URL('../src/server/routes/status.ts', import.meta.url), 'utf8');
+  const workRoute = route.slice(route.indexOf("path: '/api/work',"), route.indexOf("path: /^\\/api\\/work\\/([^/]+)$/"));
+  assert.match(workRoute, /store\.fleet\(\)/); assert.match(workRoute, /store\.workForPullRequest\(/); assert.doesNotMatch(workRoute, /store\.list\(\)/);
 });
 
 test('integration:ci-proofs-workflow the publisher reads one report per downloaded artifact directory', async () => {
