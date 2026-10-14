@@ -32,7 +32,7 @@ Exact-head gates merge; [candidates](#release-candidates) deploy. [The redesign]
 
 ### Main guard
 
-Every 30 s the main guard reruns, then reverts, merges failing required checks their parents passed (`graphyard-revert/`). The [revert approver App](deployment.md#variables) approves only a green exact inverse (`doctor` names missing); a third refusal abandons (`approval-refused`).
+Every 30 s the main guard reruns, then reverts, merges failing required checks their parents passed (`graphyard-revert/`). The [revert approver App](deployment.md#variables) approves only a green exact inverse (`doctor` names missing); a third refusal abandons (`approval-refused`). A revert whose own `test` fails the same named tests as the merge's (CI's failed-tests annotation) proves the failure holds without the merge: the guard abandons it as `base-failure`, records the shared tests and both runs on the item, raises one attention row naming the shared test, leaves the delivery and rework alone, files no further revert for that failure set, and re-runs main once per new merge. The record clears when main passes.
 
 ## Managed repositories
 
