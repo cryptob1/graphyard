@@ -229,7 +229,7 @@ export async function acceptanceStep(cycle: Cycle) {
   };
   // GY-1774: a call carried past the step's bound is recorded waiting on its goal and retried next cycle, never noted as a failure.
   const isolate = carriedIsolate(cycle, 'triage');
-  const goals = await isolate('decision', null, 'the open goals', () => acceptance.goals());
+  const goals = await isolate('decision', null, 'the goals', () => acceptance.goals());
   for (const goal of goals ?? []) {
     await isolate('decision', null, `the acceptance of ${goal.key}`, async () => {
       const result = pending.get(goal.id);
@@ -238,8 +238,8 @@ export async function acceptanceStep(cycle: Cycle) {
       if (goal.stage === 'awaiting-approval') return awaiting(cycle, acceptance, goal, note);
       if (goal.stage === 'accepted') return accepted(cycle, acceptance, goal, note);
     });
-    // GY-1806: a requested case change is judged whatever the goal's stage, so no implementer blocks on it.
-    await isolate('decision', null, `the case changes of ${goal.key}`, () => caseChangeStep(cycle, acceptance, goal, note));
+    // GY-1806: a requested case change is judged whatever the goal's stage (a delivered goal included), so no implementer blocks on it.
+    if (goal.caseChanges?.some(change => change.state === 'requested')) await isolate('decision', null, `the case changes of ${goal.key}`, () => caseChangeStep(cycle, acceptance, goal, note));
   }
 }
 
@@ -513,7 +513,7 @@ export function acceptanceEffects(config: MasterConfig, root: string, calls: Cal
   };
   return {
     settings, cwd: root,
-    goals: async () => (await calls.asCoordinator('goals?open=1')).goals,
+    goals: async () => (await calls.asCoordinator('goals')).goals, // every goal: a delivered one still protects its cases and may carry a requested change (GY-1806)
     runner: async (role, attempt, goal) => {
       if (attempt === 'primary') {
         const [name, principal] = role === 'draft' ? [acceptanceRole, config.operatorAgent!.id] as const : ['approver', config.approver!.id] as const;
