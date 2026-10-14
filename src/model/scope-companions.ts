@@ -251,8 +251,14 @@ export async function importingTestGround(path: string, text: string | null, pla
   return null;
 }
 
-/** A per-area verification map (verification/AREA.md, GY-1495): a file, never the tree. */
-export const verificationMapFile = (path: string) => !pathScope(path).prefix && /^verification\/[^/]+\.md$/.test(path);
+/** A per-area verification map (verification/AREA.md, GY-1495): a file, never the tree; the supported `./` spelling is the same file. */
+export const verificationMapFile = (path: string) => !pathScope(path).prefix && /^verification\/[^/]+\.md$/.test(pathScope(path).path);
+/**
+ * A test-side gate the engine grants as the companion of a test in the raw ask or the plan (the
+ * wall-clock gate, the timing baseline, the docs-budget gate): its ground is the ask's, so it is no
+ * independent ground for anything else.
+ */
+export const testCompanionGate = (path: string) => noWallClockGate(path) || timingBaseline(path) || documentationBudgetGate(path);
 /** The globs a map's opening `Paths:` line names, as parseVerificationMap reads them, or null when the text opens with no such line. */
 const verificationMapPaths = (text: string) => {
   const opening = text.replace(/\r\n/g, '\n').split('\n').find(line => line.trim())?.match(/^Paths:\s*(.*)$/);
@@ -265,11 +271,14 @@ const verificationMapPaths = (text: string) => {
  * item that changes a file under those paths, or creates a test for one, must edit the map — the
  * same way the test importing a planned file is granted (importingTestGround). The ground names the
  * planned file the map's Paths line covers, or the test file under those paths a criterion names or
- * this same request has already granted (`granted`: the paths the rules grounded before the map,
- * never the raw ask, so a map covering only an unrelated test asked beside it is not granted on that
- * test), and the line itself. `text` is the map on the base: a map the base does not hold, one that
- * opens with no Paths line, or one whose paths cover none of those files is not grounded here and
- * stays refused and routed as before.
+ * this same request has already granted on a ground of its own (`granted`: the paths the rules
+ * grounded before the map, never the raw ask, so a map covering only an unrelated test asked beside
+ * it is not granted on that test; and never a gate (`testCompanionGate`) the engine granted as the
+ * companion of a test in the raw ask, so an ungrounded test cannot reach the map through the gate it
+ * drags in — review of d8e550a6), and the line itself. `text` is the map on the base: a map the base
+ * does not hold, one that opens with no Paths line, or one whose paths cover none of those files is
+ * not grounded here and stays refused and routed as before; the loop also asks only for a map
+ * parseVerificationMap reads whole, so a malformed file under verification/ is routed, never granted.
  */
 export function verificationMapGround(path: string, text: string | null, item: { plannedFiles?: readonly string[]; criteria: readonly CompanionCriterion[] }, granted: readonly string[] = []): string | null {
   if (!text || !verificationMapFile(path)) return null;
@@ -284,7 +293,7 @@ export function verificationMapGround(path: string, text: string | null, item: {
   if (planned) return `${path} is the verification map whose ${line} covers ${planned}, a planned file whose behaviour the item changes`;
   const created = item.criteria.flatMap(criterion => namedPaths(criterion.text)).find(entry => testFile(entry) && covered(entry));
   if (created) return `${path} is the verification map whose ${line} covers ${created}, a test file the item creates`;
-  const companion = granted.find(entry => testFile(entry) && covered(entry));
+  const companion = granted.find(entry => testFile(entry) && !testCompanionGate(entry) && covered(entry));
   if (companion) return `${path} is the verification map whose ${line} covers ${companion}, a test file this request grants`;
   return null;
 }

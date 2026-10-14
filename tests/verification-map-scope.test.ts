@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { automaticScopeGrounds, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { verificationMapGround } from '../src/model/scope-companions.js';
 import type { ScopeRequestState } from '../src/model/scope.js';
 import type { Work } from '../src/model.js';
 
@@ -65,6 +64,8 @@ const daemonItem = () => item(['src/daemon/run.ts', 'tests/loop-self-upgrade.tes
 const mapGround = "verification/master.md is the verification map whose Paths: src/master/**, src/master.ts, src/reviewer.ts covers src/master/release-lag.ts, a planned file whose behaviour the item changes";
 
 test('unit:verification-map-companion — the map whose Paths line covers a planned file is granted by the loop\'s scope step as a companion naming that file and the line; a map covering none of the planned files is refused and routed as before', async () => {
+  // Imported inside the case so a base without the rule fails this case, not the file (graphyard verify's exercise).
+  const { verificationMapGround } = await import('../src/model/scope-companions.js');
   const granted = await grounds(masterItem(), ['verification/master.md']);
   assert.ok(!('refusal' in granted), 'refusal' in granted ? granted.refusal : '');
   assert.deepEqual(granted.grounds, [{ path: 'verification/master.md', ground: mapGround, companion: true }]);
@@ -122,6 +123,33 @@ test('unit:verification-map-companion — the map whose Paths line covers a plan
     { path: 'tests/loop-self-upgrade.test.ts', ground: 'tests/loop-self-upgrade.test.ts imports src/master/release-lag.ts, a planned file whose behaviour the item changes', companion: true },
     { path: 'verification/master.md', ground: 'verification/master.md is the verification map whose Paths: tests/loop-*.test.ts covers tests/loop-self-upgrade.test.ts, a test file this request grants', companion: true },
   ], 'the map is judged after the test, whatever order the ask named them in');
+
+  // Review of d8e550a6: a gate the engine grants as the companion of a test in the raw ask (GY-1706's wall-clock gate,
+  // the timing baseline, the docs-budget gate) is no ground for a map. On an item planning only src/daemon/run.ts, an
+  // ask naming an unrelated test, the wall-clock gate and a map whose Paths cover tests/** grants the gate on the ask as
+  // GY-1706 does, but the map is refused with the test: a refused test reaches no map through the gate it drags in.
+  const gateMap = masterMap.replace(/^Paths:.*$/m, 'Paths: tests/**');
+  const gateTree = { ...base, 'verification/gates.md': gateMap, 'tests/no-wall-clock-time-bombs.test.ts': "test('gate', () => {});" };
+  const gated = await grounds(item(['src/daemon/run.ts']), ['tests/loop-self-upgrade.test.ts', 'tests/no-wall-clock-time-bombs.test.ts', 'verification/gates.md'], gateTree);
+  assert.ok('refusal' in gated, 'the test and the map stay refused');
+  assert.deepEqual(gated.grounds?.map(entry => entry.path), ['tests/no-wall-clock-time-bombs.test.ts'], 'only the gate, on the ask, as before this item');
+  assert.match(gated.refusal, /tests\/loop-self-upgrade\.test\.ts/);
+  assert.match(gated.refusal, /verification\/gates\.md/);
+  for (const gate of ['tests/no-wall-clock-time-bombs.test.ts', 'tests/helpers/timing-baseline.json', 'tests/docs-budget.test.ts'])
+    assert.equal(verificationMapGround('verification/gates.md', gateMap, { plannedFiles: ['src/daemon/run.ts'], criteria: [] }, [gate]), null, `${gate} grounds no map`);
+  // The same ask on the item planning src/master/release-lag.ts: the test is granted on its import, the gate on the
+  // test, and the map on the granted test, never on the gate.
+  const gatedChain = await grounds(item(['src/master/release-lag.ts']), ['verification/gates.md', 'tests/no-wall-clock-time-bombs.test.ts', 'tests/loop-self-upgrade.test.ts'], gateTree);
+  assert.ok(!('refusal' in gatedChain), 'refusal' in gatedChain ? gatedChain.refusal : '');
+  assert.deepEqual(gatedChain.grounds.map(entry => entry.path), ['tests/no-wall-clock-time-bombs.test.ts', 'tests/loop-self-upgrade.test.ts', 'verification/gates.md']);
+  assert.equal(gatedChain.grounds[2].ground, 'verification/gates.md is the verification map whose Paths: tests/** covers tests/loop-self-upgrade.test.ts, a test file this request grants');
+  // A map the base holds malformed — a Paths line over a planned file, but no Drive, Invariants or Gotchas — is one
+  // parseVerificationMap rejects and no session is ever shown, so the loop routes it instead of granting it.
+  const partial = await grounds(masterItem(), ['verification/master.md'], { ...base, 'verification/master.md': 'Paths: src/master/**\n\n## Tests\n\n- none\n' });
+  assert.ok('refusal' in partial && !partial.grounds?.length, 'refusal' in partial ? partial.refusal : 'granted');
+  assert.match(partial.refusal, /verification\/master\.md/);
+  // The supported ./ spelling of the map is the same file, classified and grounded as the bare one.
+  assert.equal(verificationMapGround('./verification/master.md', masterMap, masterItem()), mapGround.replace(/^verification/, './verification'));
 
   // The checked-in map covers this repository's src/master/release-lag.ts as the fixture says.
   assert.equal(verificationMapGround('verification/master.md', readFileSync(new URL('../verification/master.md', import.meta.url), 'utf8'), masterItem()), mapGround);

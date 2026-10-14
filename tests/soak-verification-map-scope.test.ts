@@ -24,8 +24,10 @@ import type { ScopeRequestState } from '../src/model/scope.js';
 const minute = 60_000, hour = 60 * minute, day = 24 * hour, start = Date.parse('2026-10-14T05:00:00.000Z');
 const iso = (at: number) => new Date(at).toISOString();
 const judgeAfter = 6 * minute;
-const masterMap = 'Paths: src/master/**, src/master.ts, src/reviewer.ts\n\n## Tests\n\n- `tests/master.test.ts`.\n';
-const storeMap = 'Paths: src/store/**, src/store.ts, src/engine.ts\n\n## Tests\n\n- `tests/store.test.ts`.\n';
+/** A map the base holds whole: the loop grants only what parseVerificationMap reads (review of d8e550a6). */
+const wholeMap = (paths: string, test: string) => `Paths: ${paths}\n\n## Tests\n\n- \`${test}\`.\n\n## Drive\n\nnode bin/graphyard.mjs master status.\n\n## Invariants\n\n- One.\n\n## Gotchas\n\n- One.\n`;
+const masterMap = wholeMap('src/master/**, src/master.ts, src/reviewer.ts', 'tests/master.test.ts');
+const storeMap = wholeMap('src/store/**, src/store.ts, src/engine.ts', 'tests/store.test.ts');
 /** The base branch the loop reads: the maps, the planned modules and the test importing the master one. */
 const base: Record<string, string> = {
   'verification/master.md': masterMap,
