@@ -161,13 +161,15 @@ export class Store {
   /**
    * The items whose candidate or submission names pull request `pr` (GY-1778): what the CI plan
    * step asks for. A settled match is served as the work index's stored summary and an open one
-   * whole; the match is decided on the index's `pr` column for every settled row, so no settled
-   * document is read, and an open item's document is read only to check its submission.
+   * whole. A settled row is matched on the index alone: its `pr` column (the candidate's) or the
+   * submission its stored summary keeps, so a delivery submitted without a candidate is found and
+   * no settled document is read; an open item's document is read only to check its submission.
    */
   async workForPullRequest(pr: number): Promise<Work[]> {
     const rows = (await this.pool.query(`SELECT w.number, CASE WHEN COALESCE(i.settled, false) AND i.summary IS NOT NULL THEN i.summary ELSE w.document END AS document
       FROM work_items w LEFT JOIN work_index i ON i.id = w.id
-      WHERE CASE WHEN i.pr = $1 THEN true WHEN COALESCE(i.settled, false) THEN false
+      WHERE CASE WHEN i.pr = $1 THEN true
+        WHEN COALESCE(i.settled, false) AND i.summary IS NOT NULL THEN graphyard_number(i.summary->'submission'->'pr') = $1
         ELSE graphyard_number(w.document->'candidate'->'pr') = $1 OR graphyard_number(w.document->'submission'->'pr') = $1 END
       ORDER BY w.number`, [pr])).rows;
     return rows.map(row => row.document);

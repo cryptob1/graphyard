@@ -352,7 +352,10 @@ test('integration:api-work-bounded-read — GET /api/work serves the fleet (open
     sessions: [{ id: `worker:${index}`, kind: 'implementation', state: 'finished', principal: 'worker', startedAt: stamp(2 * 86_400_000), endedAt: stamp(2 * 86_400_000), updatedAt: stamp(2 * 86_400_000), outcome: heavy }],
     ...overrides,
   });
-  const settled = Array.from({ length: settledCount }, (_, index) => document(index, { stage: 'done', candidate: { sha: hex('c'), baseSha: hex('b'), pr: 3000 + index }, submission: { epoch: 1, pr: 3000 + index }, delivery: { mergeSha: hex('a'), mergedAt: stamp(86_400_000) } }));
+  // Every tenth delivery was settled without a candidate, its submission alone naming its pull
+  // request: the shape tests/master-verification.test.ts delivers, which the index's `pr` column
+  // (the candidate's) never carries.
+  const settled = Array.from({ length: settledCount }, (_, index) => document(index, { stage: 'done', candidate: index % 10 === 5 ? null : { sha: hex('c'), baseSha: hex('b'), pr: 3000 + index }, submission: { epoch: 1, pr: 3000 + index }, delivery: { mergeSha: hex('a'), mergedAt: stamp(86_400_000) } }));
   const candidateOpen = document(settledCount, { stage: 'build', candidate: { sha: hex('d'), baseSha: hex('b'), pr: 7777 }, submission: { epoch: 1, pr: 7777 }, lease: { owner: 'worker', epoch: 1, expiresAt: stamp(-600_000) } });
   const submittedOpen = document(settledCount + 1, { stage: 'build', candidate: null, submission: { epoch: 1, pr: 7778 }, lease: { owner: 'worker', epoch: 1, expiresAt: stamp(-600_000) } });
   await store.pool.query('INSERT INTO work_items(id, document) SELECT (d->>\'id\')::uuid, d FROM jsonb_array_elements($1::jsonb) AS d', [JSON.stringify([...settled, candidateOpen, submittedOpen])]);
@@ -395,9 +398,13 @@ test('integration:api-work-bounded-read — GET /api/work serves the fleet (open
   const bySubmission = await settledReadWhole(() => get('work?pr=7778'));
   assert.deepEqual(items(bySubmission.result.body).map(item => item.key), [submittedOpen.key], 'an item whose submission alone names the pull request is found');
   assert.equal(bySubmission.whole, 0);
-  const settledMatch = await settledReadWhole(() => get('work?pr=3005'));
-  assert.deepEqual(items(settledMatch.result.body).map(item => [item.key, item.stage, item.sessions?.length ?? 0]), [[settled[5].key, 'done', 0]], 'a settled match is its stored summary');
+  const settledMatch = await settledReadWhole(() => get('work?pr=3006'));
+  assert.deepEqual(items(settledMatch.result.body).map(item => [item.key, item.stage, item.sessions?.length ?? 0]), [[settled[6].key, 'done', 0]], 'a settled match is its stored summary');
   assert.equal(settledMatch.whole, 0);
+  assert.equal((settled[5] as { candidate?: unknown }).candidate, null, 'the fixture settles item 5 without a candidate');
+  const settledBySubmission = await settledReadWhole(() => get('work?pr=3005'));
+  assert.deepEqual(items(settledBySubmission.result.body).map(item => [item.key, item.stage, item.candidate, item.submission?.pr, item.sessions?.length ?? 0]), [[settled[5].key, 'done', null, 3005, 0]], 'a delivery settled without a candidate, its submission alone naming the pull request, is found as its stored summary');
+  assert.equal(settledBySubmission.whole, 0, 'the submission match reads no settled document whole');
   const none = await settledReadWhole(() => get('work?pr=99999'));
   assert.deepEqual(none.result.body, [], 'a pull request no item names answers an empty list');
   assert.equal(none.whole, 0);
