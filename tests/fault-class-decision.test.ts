@@ -918,6 +918,8 @@ test('manual:fault-class-decision — a stored counting failure of the same clea
   const at = '2026-10-14T04:48:00.000Z';
   storeAction(state, 'mechanical-plan:work-1459', { kind: 'decision', work: 'GY-1459', principal: null, state: 'failed', detail: timedOutClearDetail, attempts: 3, epoch: 1, cycle: 7, at });
   assert.equal(state.actions['mechanical-plan:work-1459']!.faultClass, 'decision', 'the stored row counts, as the loop before this change stored it');
+  const counted = state.faults.failing['mechanical-plan:work-1459'];
+  assert.ok(counted && state.faults.instances.some(entry => entry.id === counted && entry.kind === 'action:decision' && entry.subject === 'GY-1459'), 'the stored row opened a decision instance the recurrence counts');
   const instancesBefore = state.faults.instances.length;
   await timedOutClearReplay(state, 1);
   const row = state.actions['mechanical-plan:work-1459']!;
@@ -926,6 +928,11 @@ test('manual:fault-class-decision — a stored counting failure of the same clea
   assert.equal(row.faultClass, undefined, 'rewritten without the fault class on the first cycle after the upgrade');
   assert.equal(row.attempts, 4, 'as one more attempt of the same failure');
   assert.deepEqual(state.faults.instances.slice(instancesBefore).filter(entry => /decision|escalation/.test(entry.kind)).map(entry => `${entry.kind} ${entry.subject}`), [], 'and no further decision instance is filed');
+  // Codex, PR #1203 round 3: the rewrite alone left the instance the counting row had opened, and the run pointing at it, so the recurrence (which counts instances, not rows) could still reach its threshold on a write that was no fault.
+  assert.equal(state.faults.failing['mechanical-plan:work-1459'], undefined, 'the run the counting row opened is ended');
+  assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'action:decision' && entry.subject === 'GY-1459'), [], 'and the instance it opened is dropped: the write was no fault');
+  const [{ recurringClasses }, { faultClassPolicyDefaults }] = await Promise.all([import('../src/model/fault-class-recurrence.js'), import('../src/model/fault-classes.js')]);
+  assert.deepEqual(recurringClasses(state.faults.instances, [], faultClassPolicyDefaults, Date.parse(at) + hour(1)).filter(entry => entry.faultClass === 'decision'), [], 'so nothing of it stands in the decision class window');
 });
 
 test('manual:fault-class-decision — action:decision|GY-1775|2026-10-14T06:43:08.482Z: a write refused because the item was delivered meanwhile is settled — no report, no hold, no instance', async () => {
