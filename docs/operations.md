@@ -13,9 +13,9 @@
   - Expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission); retry: [rework](operations-reference.md#submitted-implementation-needs-rework); fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
   - Late-fault waits: 30min: owed `request-rework` (`owed-decision`), unwatched decision, owed escalation/blocker, stale non-release, `actorless` head behind base; 10min: containment past grace; 15min: watched decision after approver launch; once: unre-asked refusal (`decision-refused`).
   - Plane-wide failures (502–504, refused, timeout) retry faultless (`plane-unavailable`); slow fault/deployment reads defer (`faults:deferred`, `deployment:deferred`); `loop-cost` names the slowest.
-  - A failed producer-runnable manual proof returns to worker, never an operator escalation; one no producer may run needs operator witness, an unexecuted one an attestation.
+  - A failed producer-runnable manual proof returns to worker, never to an operator escalation; one no producer may run needs operator witness, an unexecuted one an attestation.
 - **Merge refused**: wait or repair, never bypass; `BLOCKED` retries head-bound 10min, `merge-blocked` 30min quotes GitHub. **Merged outside**: [bypass](operations-reference.md#merge-bypass). **Wrong evidence**: [revoke](operations-reference.md#accepted-evidence-turns-out-to-be-wrong). **GitHub paused/webhook silent**: [budget](operations-reference.md#github-request-budget). **Smoke failed**: [delivered](operations-reference.md#delivered-with-a-failed-smoke-proof).
-- **Main ahead of production**: [deployment incident](deployment.md#production-deployment-observation). An up-to-date release takes no coordination locks; a migrating release fails fast within health check, touching only tables whose DDL changed since its per-table digest, retrying deadlocks and expired lock waits with backoff in one 30-second lock budget, each attempt ≤3 s per lock so live writes never queue longer.
+- **Main ahead of production**: [deployment incident](deployment.md#production-deployment-observation). An up-to-date release takes no coordination locks; a migrating release fails fast within health check, touching only tables whose DDL changed since its per-table digest, retrying deadlocks and expired lock waits with backoff in one 30-second lock budget, each attempt waiting ≤3 s per lock so live writes never queue longer.
 - **Diagnosis `waiting`**: [provider quota](master-agent.md#research-and-diagnosis). **Loop down**: [loop](operations-reference.md#master-coordination-loop). **Self-proving change**: [bootstrap](operations-reference.md#bootstrap-mode-for-a-self-proving-change).
 
 ## Recovery recipes
@@ -29,7 +29,7 @@ systemctl --user restart graphyard-master-OWNER-NAME                    # loop d
 graphyard master checkout-restore "reason"                              # dirty, drifted or diverged
 ```
 
-Never attest a stop you have not confirmed; merged work changes only via follow-ups. Outside its namespace `master status` judges the loop by stall bound; stalled/absent: stop hand-started loops and [supervise it](onboarding.md#the-loop-must-be-supervised).
+Never attest a stop you have not confirmed; merged work changes only via follow-ups. Outside its namespace `master status` judges the loop by stall bound; stalled/absent: stop hand-started loops, install `examples/master/graphyard-master.service`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-master`.
 
 ## Worker host keyring proxy
 
@@ -48,8 +48,8 @@ Confined masters, approvers, producers (not workers, reviewers) read GitHub logi
 
 ## Resources and disk
 
-`resourceRegistry` bounds resources ([remedies](operations-reference.md#control-plane-resources)); worktrees reclaimed after `run.reclaimIdleHours` (never dirty/unpushed), idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed); `disk` attention under `run.diskThresholdGb` is answered (reported, faultless) while the latest worktree-reclaim pass is ≤30 min old and drained (nothing removed; nothing disposable now; no fault standing); ≤ half the threshold, or ENOSPC/EDQUOT, always raises; a standing low reading holds to a tenth of the threshold above it, whatever the pass answers. Clean detached HEAD on a verified-release descendant self-recovers (`upgrade:recovered`); else `escalation:dirty-checkout` (no rollback): `master checkout-restore` serves the verified release's signed-grant snapshot; clean moved HEAD: `adopted` (reverted on failed restart); diverged HEAD: saved under `refs/graphyard/checkout-restore/diverged-*`, detached at the serving release; stale loop: `handoff`; a signalled entry reaps its Git children, then thaws.
+`resourceRegistry` bounds resources ([remedies](operations-reference.md#control-plane-resources)); worktrees reclaimed after `run.reclaimIdleHours` (never dirty/unpushed), idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed); `disk` attention under `run.diskThresholdGb` is answered (reported, faultless) while the latest worktree-reclaim pass is ≤30 min old and drained (nothing removed; nothing disposable now; no fault standing); ≤ half the threshold, or ENOSPC/EDQUOT, always raises; a standing low reading holds to a tenth of the threshold above it, whatever the pass answers. Clean detached HEAD on a verified-release descendant self-recovers (`upgrade:recovered`); otherwise `escalation:dirty-checkout` (no rollback): `master checkout-restore` serves from a signed-grant snapshot of the verified release; clean moved HEAD: `adopted`; diverged HEAD: saved under `refs/graphyard/checkout-restore/diverged-*`; stale loop: `handoff`.
 
 Main guard revert approver ([provisioning](deployment.md#manual-fallback)): redeploy; verify `mainGuard.revertApprover`, empty `mainGuard.attention`, `doctor`.
 
-`/tmp` pass (own, unheld, same-device): test temps 2h; agent checkouts, `opencode` scratch 24h; `tsx-UID`, `node-compile-cache` 6h; `.pnpm-store` 7d; a quarter inodes free: runtime roots keep 12 newest.
+`/tmp` pass (own, unheld, same-device): test temps 2h; agent checkouts, `opencode` scratch 24h; `tsx-UID`, `node-compile-cache` 6h; `.pnpm-store` 7d; under a quarter inodes free, runtime roots keep 12 newest.
