@@ -319,7 +319,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * 98070f3538 filed GY-1721..GY-1725); the served release's isolated checkout carries the current filer.
    * `windowHours` makes the criterion a live window of that many hours instead of a rate per `windowDays`.
    */
-  observationWindow?: { item: number; windowDays: number; filedAfterMs: number; unwindowed?: boolean; staleCoordinator?: boolean; windowHours?: number };
+  observationWindow?: { item: number; windowDays: number; filedAfterMs: number; unwindowed?: boolean; staleCoordinator?: boolean; windowHours?: number; closeRefusedHours?: number };
   /**
    * GY-1740: one post-deploy follow-up per entry of `hours`, filed as verify-deployment files them and
    * blocked by its first worker on a reading that cannot exist before the day's start plus that many
@@ -1890,7 +1890,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // the follow-up's instant — every due cycle records a failed reading, raises the item's escalation
   // naming the measured values and re-reads on the backoff — then as a streak that meets the window:
   // the pass is recorded and the item closes delivered-observation, all under the day's invariants.
-  const readingDay = windowDay ? { reads: 0, passFrom: null as number | null } : null;
+  const readingDay = windowDay ? { reads: 0, passFrom: null as number | null, closeAsks: [] as { at: number; key: string }[] } : null;
   const readPattern: PatternReader = async pattern => {
     readingDay!.reads += 1;
     const parent = (await store.list()).find(item => item.id === windowDay!.parent.id)!, mergedAt = parent.delivery ? Date.parse(parent.delivery.mergedAt) : clock.now();
@@ -1906,7 +1906,13 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     ...(readingDay ? {
       readPattern, postDeployFiler: localPostDeployChecks, readPostDeploy: postDeployReader(readPattern),
       recordReading: (work, reading) => api(principals.coordinator, 'POST', `work/${work.id}/reading`, reading),
-      closeObservation: (work, release, reason, key) => api(principals.coordinator, 'POST', `work/${work.id}/close`, { kind: 'delivered-observation', ref: release, reason }, key),
+      closeObservation: async (work, release, reason, key) => {
+        // GY-1794: `closeRefusedHours` makes the plane refuse the recorded pass's close for that long after the pass began.
+        readingDay.closeAsks.push({ at: clock.now(), key });
+        const refusedHours = options.observationWindow?.closeRefusedHours;
+        if (refusedHours && readingDay.passFrom !== null && clock.now() < readingDay.passFrom + refusedHours * hour) throw new Error('the control plane refused the close');
+        return api(principals.coordinator, 'POST', `work/${work.id}/close`, { kind: 'delivered-observation', ref: release, reason }, key);
+      },
     } : {}),
     ...(mainWatchEffect ? { mainWatch: mainWatchEffect } : {}),
     ...(hostDay ? { healHostSupervision: allow => healUserSupervision(hostDay.root, { systemctl: hostSystemctl, loginctl: hostLoginctl, masked: () => false, platform: 'linux',
