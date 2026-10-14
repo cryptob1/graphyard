@@ -29,7 +29,7 @@ systemctl --user restart graphyard-master-OWNER-NAME                    # loop d
 graphyard master checkout-restore "reason"                              # dirty, drifted or diverged
 ```
 
-Never attest a stop you have not confirmed; merged work changes only via follow-ups. Outside its namespace `master status` judges the loop by stall bound; stalled/absent: stop hand-started loops, install `examples/master/graphyard-master.service`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-master`.
+Never attest a stop you have not confirmed; merged work changes only via follow-ups. Outside its namespace `master status` judges the loop by stall bound; stalled/absent: stop hand-started loops and [supervise it](onboarding.md#the-loop-must-be-supervised).
 
 ## Worker host keyring proxy
 
@@ -48,7 +48,7 @@ Confined masters, approvers, producers (not workers, reviewers) read GitHub logi
 
 ## Resources and disk
 
-`resourceRegistry` bounds resources ([remedies](operations-reference.md#control-plane-resources)); worktrees reclaimed after `run.reclaimIdleHours` (never dirty/unpushed), idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed) seen twice; `disk` attention under `run.diskThresholdGb`; a loop under a supervisor unit records an absent `units.json`. Clean detached HEAD on a verified-release descendant self-recovers (`upgrade:recovered`); otherwise `escalation:dirty-checkout` (no rollback): `master checkout-restore` serves from a signed-grant snapshot of the verified release; clean moved HEAD: `adopted` (reverted on a failed restart); diverged HEAD: saved under `refs/graphyard/checkout-restore/diverged-*`, checkout detached at the serving release; stale loop: `handoff` (the command serves when HEAD predates the serve entry); cwd-unreadable processes: every live thread judged (inside: writer; unread: unverifiable); a signalled entry reaps its Git children, then thaws.
+`resourceRegistry` bounds resources ([remedies](operations-reference.md#control-plane-resources)); worktrees reclaimed after `run.reclaimIdleHours` (never dirty/unpushed), idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed); `disk` attention under `run.diskThresholdGb` is answered (reported, faultless) while the latest worktree-reclaim pass is ≤30 min old and drained (nothing removed or reclaimable); free space ≤ half the threshold, or ENOSPC/EDQUOT, always raises; a standing low reading recovers a tenth of the threshold above it. Clean detached HEAD on a verified-release descendant self-recovers (`upgrade:recovered`); otherwise `escalation:dirty-checkout` (no rollback): `master checkout-restore` serves a signed-grant snapshot of the verified release; clean moved HEAD: `adopted` (reverted on failed restart); diverged HEAD: saved under `refs/graphyard/checkout-restore/diverged-*`, checkout detached at the serving release; stale loop: `handoff`; a signalled entry reaps its Git children, then thaws.
 
 Main guard revert approver ([provisioning](deployment.md#manual-fallback)): redeploy; verify `mainGuard.revertApprover`, empty `mainGuard.attention`, `doctor`.
 

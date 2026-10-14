@@ -7,6 +7,7 @@ import { forgetDoneLinks, linkInstance } from '../model/fault-record.js';
 import { buildMasterStatus, diskThresholdBytes, type AttentionItem, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { hostMemoryAttention } from '../master-resources.js';
+import { judgeWorktreeDisk, standingDiskLine, worktreePassOf } from '../master/worktree-disk.js';
 import { qualifyTimingFailures, type CheckAnnotations } from '../cli/timing-failures.js';
 import { type DaemonAction, type DaemonState, faultActionKey, message } from './state.js';
 export { unboundedAttemptKey };
@@ -115,9 +116,14 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
     // one spent GitHub budget holding five subjects at once was six instances of its class. The resource's own line stands for it,
     // and where none was listed the first symptom does.
     for (const fault of attributed) if (!derived.some(other => other.kind === fault.kind && other.subject === fault.subject)) derived.push(fault);
+    // The worktree volume at the last reclaim, judged as the registry reading judges it (GY-1784): a low reading the pass answered — current
+    // and drained, the volume above its floor — raises nothing, and one whose fault stands is still low inside the recovery band.
     const reclaim = state.reclaim, below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
-    if (reclaim && (below(reclaim.freeBytes, diskThresholdBytes(config)) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config))))
-      derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Free space below its configured bound at the last reclaim (${reclaim.at})` });
+    if (reclaim) {
+      const judged = judgeWorktreeDisk({ freeBytes: reclaim.freeBytes, thresholdBytes: diskThresholdBytes(config), pass: worktreePassOf(reclaim), standing: standingDiskLine(state.faults.open, 'disk-pressure') }, now);
+      if ((judged.low && !judged.answered) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config)))
+        derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Free space below its configured bound at the last reclaim (${reclaim.at})${judged.detail ? `; ${judged.detail}` : ''}` });
+    }
     // A host below its memory floor defers every launch on it (GY-612): one instance for the whole dip. A fault is its
     // wording, and the attention item's text names consumers whose ranking moves from cycle to cycle, so this wording
     // carries none of it — the attention item keeps the moving detail, and the instance stands until memory recovers.

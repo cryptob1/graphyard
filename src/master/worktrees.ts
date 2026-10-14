@@ -418,25 +418,8 @@ export async function removeReclaimableWorktrees(root: string, work: Work[], opt
   return { at, limit, removed, kept, backlog, held, errors, entries: remaining };
 }
 
-export interface DiskPressure { path: string; freeBytes: number | null; thresholdBytes: number; low: boolean; reclaimable: number; worktrees: number; unavailable: string | null }
-/** Free space beside what a reclaim would give back, in the shape `master status` reports it. */
-export function diskPressure(path: string, free: number | null, thresholdBytes: number, plan: WorktreeReclaimCandidate[]): DiskPressure {
-  return { path, freeBytes: free, thresholdBytes, low: free !== null && free < thresholdBytes,
-    reclaimable: plan.filter(entry => entry.disposable).length, worktrees: plan.length,
-    unavailable: free === null ? `Free space on ${path} could not be read` : null };
-}
-const gigabytes = (bytes: number) => `${(bytes / 1e9).toFixed(1)} GB`;
-/**
- * The attention item that has to arrive before the volume fills: how much room is left, how much
- * of it finished worktrees are holding, and the one command that gives it back. It is raised on
- * the configured threshold rather than on the first failed write, so the master acts while
- * writes still succeed.
- */
-export function diskPressureAttention(pressure: DiskPressure): AttentionItem[] {
-  if (!pressure.low || pressure.freeBytes === null) return [];
-  return [{ subject: 'disk', text: `${gigabytes(pressure.freeBytes)} free on ${pressure.path}, below the configured ${gigabytes(pressure.thresholdBytes)} threshold; ${pressure.reclaimable} of ${pressure.worktrees} assignment worktree(s) hold dependency directories a fresh install recreates. Reclaim them before the volume fills`,
-    ...agentOwner('master', 'graphyard master run reclaims every cycle while free space is low (daemon.reclaim in master status says what it took back); lower run.reclaimIdleHours in .graphyard/master.json to make more of them disposable, and graphyard master run --once reclaims immediately when no loop is running') }];
-}
+/** The worktree volume's readings — disk pressure, its answered gate, hard line and recovery band — live in worktree-disk.ts (GY-1784); re-exported so every existing import keeps working. */
+export { diskPressure, diskPressureAttention, type DiskPressure } from './worktree-disk.js';
 
 /**
  * The managed worktree root's attention items: a root on a tmpfs, a volume below its configured
