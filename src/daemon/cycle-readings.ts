@@ -1,6 +1,7 @@
 // Concern: step 7c — the loop's own due readings of loop-owned observation items on the serving release (GY-1779): taken, recorded as trusted evidence, closed on a pass, escalated on a fail.
 import { followUpRequest, patternOfProof, type PatternProjection, type PatternReader } from '../model/observation-window.js';
-import { loopObservation, loopObservationProofs, loopReadingOn, observationPass, postDeployProofs, type Work } from '../model.js';
+import { loopObservation, loopObservationProofs, postDeployProofs, type Work } from '../model.js';
+import { loopReadingOn, observationPass } from '../model/loop-observation.js';
 // Types only: master-verification.ts imports the daemon, so the filer itself arrives through the effects.
 import type { PostDeployFiler } from '../master-verification.js';
 import type { PostDeployReader, PostDeployReading, ProjectionRead } from '../master/post-deploy-readings.js';
