@@ -62,8 +62,35 @@ export interface BrowserPage {
   markup?(): string | null;
   /** Every button and link under the element whose text is HEADING (GY-1781: "Having problems?"), by tag and label, so a refused capture names what the page offered. */
   controls?(heading: string): PageControl[];
+  /** Every typeable input the page renders now, each tagged so its selector addresses exactly it (GY-1459). */
+  inputs?(): PageInput[];
+  /**
+   * GY-1459: the page runs in its own browser on a copy of the operator's profile (browserProfileMode),
+   * so sudo mode they confirm in their own Chrome never reaches it.
+   */
+  copy?: boolean;
 }
 export interface PageControl { tag: string; label: string }
+/**
+ * A rendered input as the page itself describes it (GY-1459): its type, name, id, autocomplete and
+ * inputmode, the text naming it (its labels, aria-label, aria-labelledby or placeholder), and
+ * whether it is shown. GitHub's Confirm-access code field is found by these, not by one name.
+ */
+export interface PageInput { selector: string; type: string; name: string; id: string; autocomplete: string; inputmode: string; label: string; visible: boolean }
+
+// Runs inside the page: describes and tags every typeable input (GY-1459).
+const inputsScript = `(() => {
+  const norm = value => String(value ?? '').replace(/\\s+/g, ' ').trim();
+  const shown = candidate => candidate.getClientRects().length > 0 && getComputedStyle(candidate).visibility !== 'hidden';
+  const skip = new Set(['hidden', 'submit', 'button', 'checkbox', 'radio', 'file', 'image', 'reset']);
+  return JSON.stringify([...document.querySelectorAll('input')].filter(input => !skip.has((input.type || 'text').toLowerCase())).map(input => {
+    const marker = 'gy-' + String((window.__graphyardLocated = (window.__graphyardLocated ?? 0) + 1));
+    input.setAttribute('data-graphyard-target', marker);
+    const labelled = (input.getAttribute('aria-labelledby') || '').split(/\\s+/).map(id => id && document.getElementById(id)).filter(Boolean).map(node => node.textContent);
+    const label = [...new Set([...(input.labels ?? [])].map(node => node.textContent).concat(labelled, [input.getAttribute('aria-label'), input.getAttribute('placeholder')]).map(norm).filter(Boolean))].join(' | ');
+    return { selector: '[data-graphyard-target="' + marker + '"]', type: (input.type || 'text').toLowerCase(), name: input.name || '', id: input.id || '', autocomplete: input.getAttribute('autocomplete') || '', inputmode: input.getAttribute('inputmode') || '', label, visible: shown(input) };
+  }));
+})()`;
 
 // Runs inside the page. It tags the located element so the following command addresses exactly
 // that element, whatever GitHub's own ids are.
@@ -153,6 +180,9 @@ export function agentBrowserPage(browser: MasterBrowser, session: string, run: A
     close: () => { try { run([...prefix, 'close']); } catch { /* the session may already be gone */ } },
     markup: () => { const result = invoke('eval', sudoFormScript).result; const value = typeof result === 'string' ? JSON.parse(result) : result; return typeof value === 'string' ? value : null; },
     controls: heading => { const result = invoke('eval', controlsScript(heading)).result; const value = typeof result === 'string' ? JSON.parse(result) : result; return Array.isArray(value) ? value.filter((control): control is PageControl => !!control && typeof control.tag === 'string' && typeof control.label === 'string') : []; },
+    inputs: () => { const result = invoke('eval', inputsScript).result; const value = typeof result === 'string' ? JSON.parse(result) : result; return Array.isArray(value) ? value as PageInput[] : []; },
+    // GY-1459: agent-browser opens a profile named by its name as a copy of its own; the operator's running Chrome holds the original.
+    copy: browserProfileMode(browser.profile) === 'copy',
   };
 }
 
@@ -186,6 +216,7 @@ export function recordingPage(page: BrowserPage, record: { directory: string; st
     } catch (error) { entry.error = error instanceof Error ? error.message : String(error); throw error; }
   };
   return {
+    ...(page.copy ? { copy: true } : {}),
     open: url => step('open', [url], () => page.open(url)),
     url: () => step('url', [], () => page.url()),
     text: () => step('text', [], () => page.text()),
@@ -201,6 +232,7 @@ export function recordingPage(page: BrowserPage, record: { directory: string; st
     // The page's markup still carries session-bound values, so the step records only its length.
     ...(page.markup ? { markup: () => { let html: string | null = null; step('markup', [], () => { html = page.markup!(); return html === null ? null : `${html.length} chars`; }); return html; } } : {}),
     ...(page.controls ? { controls: (heading: string) => step('controls', [heading], () => page.controls!(heading)) } : {}),
+    ...(page.inputs ? { inputs: () => step('inputs', [], () => page.inputs!()) } : {}),
     ...(page.fill ? { fill: (selector: string, value: string) => step('fill', [selector, value ? '[code withheld]' : ''], () => {
       try { page.fill!(selector, value); } catch (error) { throw new Error(withheld(error, value)); }
       typed = value !== '';
@@ -231,6 +263,10 @@ export const sudoStateSchema = z.object({
   fallback: z.object({ method: z.enum(['passkey', 'password']), url: z.string().max(2_000) }).strict().nullable().optional(),
   // GY-1450: every method the page offered, and whether GitHub was asked to email a code.
   offered: z.array(z.enum(sudoMethods)).max(sudoMethods.length).optional(), emailed: z.boolean().optional(),
+  // GY-1459: a handed code found no code field within 10 s; the drive kept it and tries it again.
+  field: z.literal('missing').optional(),
+  // GY-1459: the flow's browser runs on a copy of the operator's profile (BrowserPage.copy).
+  copy: z.boolean().optional(),
 }).strict();
 export type SudoState = z.infer<typeof sudoStateSchema>;
 const sudoFile = (root: string) => resolve(actionsDirectory(root), 'sudo.json');
@@ -246,9 +282,12 @@ export function sudoAttention(state: SudoState | null, now = Date.now()) {
 }
 /**
  * Where a waiting flow takes an authenticator or email code (GY-1450): a local page, a command, or
- * both; and, when known, whether the drive shares the operator's live Chrome session (GY-1457).
+ * both; and, when known, whether the drive shares the operator's live Chrome session (GY-1457):
+ * PROFILE names it, or COPY (GY-1459) says the drive runs on a copy of their profile. On a copy a
+ * confirmation in their own Chrome never reaches the drive, so the handoff offers the local page,
+ * opened in their own browser, as the manual route instead.
  */
-export interface SudoCodeRoute { page?: string | null; command?: string | null; profile?: { mode: BrowserProfileMode; name: string } | null }
+export interface SudoCodeRoute { page?: string | null; command?: string | null; profile?: { mode: BrowserProfileMode; name: string } | null; copy?: boolean }
 /**
  * Whether the headless drive shares the operator's live Chrome session (GY-1457). A Chrome profile
  * named by its name (such as Default) is opened by agent-browser as a copy, whose session is its
@@ -272,10 +311,12 @@ const listMethods = (methods: readonly SudoMethod[]) => {
  * App-import route). Only the code methods the page offers are ever listed. A
  * GitHub Mobile prompt: its code and, once it has gone a minute unapproved, the other route too.
  */
-export function sudoInstruction(state: Pick<SudoState, 'code' | 'method' | 'url' | 'fallback' | 'offered' | 'emailed'>, device = 'your phone', route: SudoCodeRoute = {}) {
+export function sudoInstruction(state: Pick<SudoState, 'code' | 'method' | 'url' | 'fallback' | 'offered' | 'emailed' | 'field' | 'copy'>, device = 'your phone', route: SudoCodeRoute = {}) {
   if (state.method && state.method !== 'mobile') {
     const offered = state.offered?.length ? state.offered : [state.method];
     const profile = route.profile;
+    // GY-1459: a drive on a profile copy, known from the route's profile, the route itself, or the state the page recorded.
+    const copy = profile ? profile.mode === 'copy' : !!(route.copy ?? state.copy);
     const where = [route.page ? `at ${route.page}` : '', route.command ? `with ${route.command} CODE` : ''].filter(Boolean).join(' or ');
     // Only a code method the page offers can be typed in: passSudo acts on nothing else.
     const codes = where ? (['authenticator', 'email'] as const).filter(method => offered.includes(method)) : [];
@@ -283,25 +324,41 @@ export function sudoInstruction(state: Pick<SudoState, 'code' | 'method' | 'url'
     const lines = [
       ...(profile ? [profile.mode === 'shared' ? `The drive uses your live Chrome session (profile ${profile.name}), so a confirmation in your own Chrome reaches it`
         : `The drive runs on a copy of your Chrome profile ${profile.name}, not your live session, so a confirmation in your own Chrome does not reach it: ${codes.length ? 'use a code below' : unreached}`] : []),
-      ...(profile?.mode === 'copy' ? [] : [`Confirm access once in your own Chrome at ${sudoProtectedPage} with your passkey or password: GitHub then holds sudo mode for the session the agent's browser shares, and the flow continues by itself within 10 s`]),
+      ...(copy ? [] : [`Confirm access once in your own Chrome at ${sudoProtectedPage} with your passkey or password: GitHub then holds sudo mode for the session the agent's browser shares, and the flow continues by itself within 10 s`]),
       `GitHub's Confirm-access page${state.url ? ` (${state.url})` : ''} offers: ${offered.map(method => sudoMethodNames[method]).join(', ')}`];
     if (codes.includes('authenticator')) lines.push(`For your authenticator app, enter its 6-digit code ${where}`);
-    if (codes.includes('email')) lines.push(state.emailed ? `GitHub emailed you a code: enter its 6 digits ${where}`
-      : `For an email code, ask for it ${[route.page ? `at ${route.page}` : '', route.command ? `with ${route.command} email` : ''].filter(Boolean).join(' or ')}, then enter its 6 digits ${where}`);
+    if (codes.includes('email')) lines.push(state.emailed ? `GitHub emailed you a code: enter its 8 digits ${where}`
+      : `For an email code, ask for it ${[route.page ? `at ${route.page}` : '', route.command ? `with ${route.command} email` : ''].filter(Boolean).join(' or ')}, then enter its 8 digits ${where}`);
+    // GY-1459: the code goes straight to the drive, and a fresh one leaves it the most of its 30 s.
+    if (codes.includes('authenticator')) lines.push('Enter an authenticator code yourself, right after the app rolls over to a new one: the drive reads it the moment you enter it and types it within 2 s, with nobody passing it on');
+    // GY-1459: on a copy, the one-click manual route is the local page in the operator's own browser, whose live session holds sudo mode.
+    if (copy && route.page) lines.push(`Or open ${route.page} in your own browser and click its button there: your own GitHub session holds sudo mode, and setup continues by itself once GitHub returns you to that page`);
+    if (state.field === 'missing') lines.push("GitHub's code field did not appear within 10 s: the drive kept your code and tries it again on its next check; once the code has rolled over, enter the new one");
     return lines.join('\n');
   }
   const mobile = state.code ? `Approve the GitHub Mobile prompt on ${device} and choose ${state.code}` : 'Confirm access to GitHub on your device (GitHub Mobile or your passkey)';
-  return state.fallback ? `${mobile}, or, if no prompt arrived, confirm with your ${state.fallback.method === 'passkey' ? 'passkey' : 'password'} at ${state.fallback.url}` : mobile;
+  const prompt = state.fallback ? `${mobile}, or, if no prompt arrived, confirm with your ${state.fallback.method === 'passkey' ? 'passkey' : 'password'} at ${state.fallback.url}` : mobile;
+  // GY-1459: the same page offers its code methods and, on a profile copy, the local App page: both are named beside the prompt.
+  const where = [route.page ? `at ${route.page}` : '', route.command ? `with ${route.command} CODE` : ''].filter(Boolean).join(' or ');
+  const codes = where ? (['authenticator', 'email'] as const).filter(method => state.offered?.includes(method)) : [];
+  const copy = route.profile ? route.profile.mode === 'copy' : !!(route.copy ?? state.copy);
+  const more = [
+    ...(codes.includes('authenticator') ? [`Or enter your authenticator app's 6-digit code ${where}: the drive opens its code view beside this prompt and types the code as soon as GitHub shows the field (up to 10 s, ending the moment you approve the prompt), then within 2 s`] : []),
+    ...(codes.includes('email') ? [`Or ask for an email code ${[route.page ? `at ${route.page}` : '', route.command ? `with ${route.command} email` : ''].filter(Boolean).join(' or ')}, then enter its 8 digits ${where}`] : []),
+    ...(copy && route.page ? [`Or open ${route.page} in your own browser and click its button there: your own GitHub session holds sudo mode, and setup continues by itself once GitHub returns you to that page`] : []),
+  ];
+  return [prompt, ...more].join('\n');
 }
 /**
  * Why a Confirm-access wait gave up, naming the method actually in use: the GitHub Mobile prompt
  * only when one was issued, otherwise the methods the page offered (GY-1450).
  */
-export function sudoTimeout(state: Pick<SudoState, 'code' | 'method' | 'offered'> | null, offered: readonly SudoMethod[], timeoutMs: number, flow: string) {
+export function sudoTimeout(state: Pick<SudoState, 'code' | 'method' | 'offered'> | null, offered: readonly SudoMethod[], timeoutMs: number, flow: string, copy = false) {
   const within = `Confirm access was not approved within ${Math.round(timeoutMs / 1000)}s`;
   if (state?.method === 'mobile') return `${within}; approve the GitHub Mobile prompt${state.code ? ` (code ${state.code})` : ''} and rerun master browser ${flow}`;
   const methods = (state?.offered?.length ? state.offered : offered).filter(method => method !== 'mobile');
-  return `${within}; confirm access with your ${methods.length ? listMethods(methods) : 'passkey or password'}, or once in your own Chrome at ${sudoProtectedPage}, and rerun master browser ${flow}`;
+  // GY-1459: a profile copy never sees a confirmation in the operator's own Chrome, so it is not offered.
+  return `${within}; confirm access with your ${methods.length ? listMethods(methods) : 'passkey or password'}${copy ? '' : `, or once in your own Chrome at ${sudoProtectedPage},`} and rerun master browser ${flow}`;
 }
 
 /** Recognize GitHub's Confirm-access page and what it currently shows. */
@@ -323,9 +380,36 @@ export function offeredSudoMethods(text: string): Record<SudoMethod, boolean> {
 const routeLabels = { passkey: ['Use your passkey', 'Use passkey', 'Use a passkey'], password: ['Use your password', 'Use password'] } as const;
 const authenticatorLabels = ['Use your authenticator app', 'Use authenticator app', 'Use an authenticator app', 'Authenticator app'];
 const emailLabels = ['Send a code via email', 'Send code via email', 'Email me a code'];
-const codeFieldNames = ['app_otp', 'otp', 'email_otp', 'sudo_otp'];
-const codeFieldLabels = ['Authentication code', 'Verification code', 'Enter the code', 'Code'];
+// GY-1459: GitHub's recorded authenticator view names its field sudo_app_otp (id app_totp) and labels it
+// "Enter the verification code"; the email view's is sudo_email_otp. The older names stay for pages that keep them.
+const codeFieldNames = ['app_otp', 'sudo_app_otp', 'otp', 'email_otp', 'sudo_email_otp', 'sudo_otp'];
+const codeFieldLabels = ['Authentication code', 'Verification code', 'Enter the verification code', 'Enter the code', 'Code'];
 const verifyLabels = ['Verify', 'Confirm', 'Submit'];
+/** How long a code field may take to render once its view is chosen (GY-1459): 20 checks, 500 ms apart. */
+const codeFieldChecks = 20, codeFieldCheckMs = 500;
+/**
+ * GitHub's Confirm-access code field for METHOD among the page's rendered inputs (GY-1459), by the
+ * attributes its recorded authenticator view shows (master browser capture of 2026-10-14, record
+ * 2026-10-14T06-29-13-782Z-capture-1920704a, confirm-access-authenticator.html): a shown text input
+ * named sudo_app_otp with id app_totp, labelled "Enter the verification code", inputmode numeric,
+ * autocomplete off and a 6-digit pattern. A field is therefore scored on an otp or totp name or id,
+ * a label naming a verification or authentication code, a numeric inputmode, and autocomplete
+ * one-time-code where a page sets it, never on one name. Hidden inputs are never chosen, nor is the
+ * other method's field: the email view's sudo_email_otp for the authenticator, the app's for email.
+ */
+export function confirmCodeField(inputs: readonly PageInput[], method: 'authenticator' | 'email'): PageInput | null {
+  const other = method === 'authenticator' ? /email/i : /totp|app_otp/i;
+  let best: { input: PageInput; score: number } | null = null;
+  for (const input of inputs) {
+    if (!input.visible || !['text', 'tel', 'number', ''].includes(input.type)) continue;
+    const key = `${input.name} ${input.id}`;
+    if (other.test(key)) continue;
+    const score = (/^one-time-code$/i.test(input.autocomplete.trim()) ? 4 : 0) + (/otp/i.test(key) ? 3 : 0)
+      + (/authentication code|verification code|one-time|\bcode\b/i.test(input.label) ? 2 : 0) + (input.inputmode === 'numeric' ? 1 : 0);
+    if (score >= 3 && (!best || score > best.score)) best = { input, score };
+  }
+  return best?.input ?? null;
+}
 
 // ---- Confirm-access form capture ---------------------------------------------------------------
 
@@ -560,8 +644,11 @@ export function restoreSudoLanding(page: BrowserPage, landing: string, text: str
  * it. It is never logged, recorded, or echoed back.
  */
 export const sudoCodeSubmissionSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('code'), code: z.string().regex(/^\d{6}$/), at: z.string().min(1).max(40) }).strict(),
+  z.object({ kind: z.literal('code'), code: z.string().regex(/^\d{6}$|^\d{8}$/), at: z.string().min(1).max(40) }).strict(),
   z.object({ kind: z.literal('email'), at: z.string().min(1).max(40) }).strict(),
+  // GY-1459: the local App page finished the step itself (the operator registered, reused or installed
+  // the App in their own browser); a flow waiting since before AT ends its wait.
+  z.object({ kind: z.literal('settled'), at: z.string().min(1).max(40) }).strict(),
 ]);
 export type SudoCodeSubmission = z.infer<typeof sudoCodeSubmissionSchema>;
 const sudoCodeFile = (root: string) => resolve(actionsDirectory(root), 'sudo-code.json');
@@ -570,11 +657,20 @@ const sudoCodeFreshMs = 600_000;
 export async function submitSudoCode(root: string, value: string, now = new Date()): Promise<SudoCodeSubmission['kind']> {
   const trimmed = value.trim();
   const submission: SudoCodeSubmission = trimmed.toLowerCase() === 'email' ? { kind: 'email', at: now.toISOString() }
-    : /^\d{6}$/.test(trimmed) ? { kind: 'code', code: trimmed, at: now.toISOString() }
-    : (() => { throw new Error('A Confirm-access code is the 6 digits from your authenticator app or email, or "email" to have GitHub email one'); })();
+    : /^\d{6}$|^\d{8}$/.test(trimmed) ? { kind: 'code', code: trimmed, at: now.toISOString() }
+    : (() => { throw new Error('A Confirm-access code is the 6 digits from your authenticator app or the 8 digits GitHub emails, or "email" to have GitHub email one'); })();
   await mkdir(actionsDirectory(root), { recursive: true, mode: 0o700 });
   await atomicPrivateWrite(sudoCodeFile(root), submission);
   return submission.kind;
+}
+/**
+ * GY-1459: the local App page tells a waiting drive its step was finished in the operator's own
+ * browser, where their live session holds sudo mode, so the drive's Confirm-access wait ends. It
+ * replaces a code handed the same instant: the step that code was for is done.
+ */
+export async function signalSudoSettled(root: string, now = new Date()) {
+  await mkdir(actionsDirectory(root), { recursive: true, mode: 0o700 });
+  await atomicPrivateWrite(sudoCodeFile(root), { kind: 'settled', at: now.toISOString() } satisfies SudoCodeSubmission);
 }
 /** The handed code, taken once: the file is removed whether it was usable or not. */
 export async function takeSudoCode(root: string, now = new Date()): Promise<SudoCodeSubmission | null> {
@@ -587,8 +683,14 @@ export async function takeSudoCode(root: string, now = new Date()): Promise<Sudo
   try { submission = sudoCodeSubmissionSchema.parse(JSON.parse(raw)); } catch { return null; }
   return now.getTime() - Date.parse(submission.at) > sudoCodeFreshMs ? null : submission;
 }
+/** How often a waiting flow checks for a handed code (GY-1459), so it is typed within 2 s. */
+const codePollMs = 500;
+/** How long a kept code is tried again after its field failed to render: a TOTP code's window and its neighbours. */
+const heldCodeMs = 90_000;
 /** An error message with the code withheld, whatever echoed it. */
 const withheld = (error: unknown, code: string) => (error instanceof Error ? error.message : String(error)).split(code).join('[code withheld]');
+/** What passSudo returns: SETTLED when the local App page finished the step in the operator's own browser (GY-1459). */
+export interface SudoPass { passed: boolean; attempts: number; code: string | null; settled?: true }
 
 export interface SudoOptions {
   flow: BrowserFlow; record: string; onCode: (state: SudoState) => Promise<void> | void; onSettled?: (state: SudoState) => Promise<void> | void; sleep?: (ms: number) => Promise<void>; now?: () => Date; timeoutMs?: number; pollMs?: number; maxAttempts?: number;
@@ -606,8 +708,17 @@ export interface SudoOptions {
    * session — in the operator's own Chrome, or in the agent's profile — is seen and the flow continues.
    */
   reloadMs?: number;
-  /** GY-1450: a code handed to the waiting flow, if any (takeSudoCode); typed into the page, never logged. */
+  /**
+   * GY-1450: a code handed to the waiting flow, if any (takeSudoCode); typed into the page, never
+   * logged. Checked every 500 ms while the flow waits on the page's own confirmation (GY-1459), so
+   * a handed code is typed within 2 s.
+   */
   readCode?: () => Promise<SudoCodeSubmission | null> | SudoCodeSubmission | null;
+  /**
+   * GY-1459: when the drive this wait belongs to began. A one-shot settled signal older than this is stale;
+   * one that arrived after it is honoured even if it landed between two waits of the same drive.
+   */
+  settledSince?: Date;
   /** GY-1461: called once, when the page first asks to confirm access and before any wait, to keep its forms' markup. */
   capture?: (page: BrowserPage) => Promise<void> | void;
   /**
@@ -625,7 +736,7 @@ export interface SudoOptions {
  * attempt; the deadline bounds the whole wait. The method used is written to the flow's recorded
  * steps (`sudo-method`); a typed code is recorded as entered (`sudo-code`), never its digits.
  */
-export async function passSudo(page: BrowserPage, options: SudoOptions) {
+export async function passSudo(page: BrowserPage, options: SudoOptions): Promise<SudoPass> {
   const now = options.now ?? (() => new Date()), sleep = options.sleep ?? (ms => new Promise<void>(accept => setTimeout(accept, ms)));
   // GY-1461: a Confirm-access page keeps its forms' markup before any wait starts, so the capture
   // never eats into the deadline; a failed capture is recorded and the pass proceeds unchanged.
@@ -643,6 +754,8 @@ export async function passSudo(page: BrowserPage, options: SudoOptions) {
   const started = now().getTime(), deadline = new Date(started + timeoutMs).toISOString();
   const prefer = options.prefer ?? 'mobile', mobileFallbackMs = options.mobileFallbackMs ?? 60_000, reloadMs = options.reloadMs ?? 10_000;
   let attempt = 0; let state = null as SudoState | null;
+  // GY-1459: a handed code that found no code field, kept for another try while it may still be valid.
+  let held = null as Extract<SudoCodeSubmission, { kind: 'code' }> | null, heldTried = 0;
   // The methods the page offered, kept from its first render: the code view hides them.
   const offered = new Set<SudoMethod>();
   if (landingText) { const methods = offeredSudoMethods(landingText); for (const method of sudoMethods) if (methods[method]) offered.add(method); }
@@ -665,37 +778,115 @@ export async function passSudo(page: BrowserPage, options: SudoOptions) {
     try { page.click(located.selector); } catch (error) { if (!located.href) throw error; page.open(located.href); }
     page.wait(Math.min(pollMs, 1_000));
   };
-  const codeField = () => {
-    for (const name of codeFieldNames) { const field = page.locate('field', name); if (field) return field; }
-    for (const label of codeFieldLabels) { const field = page.locate('label', label); if (field) return field; }
+  const codeField = (method: 'authenticator' | 'email'): { selector: string } | null => {
+    // A page that lists its inputs is read by their attributes alone (GY-1459); the named locators are for one that cannot.
+    if (page.inputs) return confirmCodeField(page.inputs(), method);
+    const usable = (field: Located | null) => !!field && field.visible !== false;
+    for (const name of codeFieldNames) {
+      if (method === 'authenticator' ? name.includes('email') : name.includes('app_otp')) continue;
+      const field = page.locate('field', name); if (usable(field)) return field;
+    }
+    for (const label of codeFieldLabels) { const field = page.locate('label', label); if (usable(field)) return field; }
     return null;
+  };
+  // The chosen view renders its field asynchronously (GY-1459): wait up to 10 s for it, and stop at once when the
+  // page has left Confirm access (a GitHub Mobile prompt approved meanwhile), so a wait never hides an approval.
+  const renderedField = (method: 'authenticator' | 'email', checks = codeFieldChecks) => {
+    for (let check = 1; ; check += 1) {
+      const field = codeField(method);
+      if (field || check >= checks || !detectSudo(page.url(), page.text()).sudo) return field;
+      page.wait(codeFieldCheckMs);
+    }
   };
   // A handed code: `email` asks GitHub to email one; six digits go into the email view once one
   // was sent, else into the authenticator view, opened first when the page still shows another.
-  const enter = async (submission: SudoCodeSubmission) => {
+  // A code whose field never rendered is reported and kept, not discarded (GY-1459): 'missing'.
+  const enter = async (submission: Exclude<SudoCodeSubmission, { kind: 'settled' }>): Promise<'done' | 'missing'> => {
     if (submission.kind === 'email') {
       const send = offered.has('email') ? control(emailLabels) : null;
-      if (!send) { page.note?.('sudo-code', ['email', 'not offered']); return; }
+      if (!send) { page.note?.('sudo-code', ['email', 'not offered']); return 'done'; }
       activate(send);
       page.note?.('sudo-method', ['email']);
       await keep('email');
       state = { ...state!, method: 'email', emailed: true };
       await options.onCode(state);
-      return;
+      return 'done';
     }
     const method = state!.emailed ? 'email' : offered.has('authenticator') ? 'authenticator' : 'email';
-    let field = codeField();
-    if (!field && method === 'authenticator') { const view = control(authenticatorLabels); if (view) { activate(view); await keep('authenticator'); field = codeField(); } }
-    if (!field || !page.fill) { page.note?.('sudo-code', [method, field ? 'page cannot type' : 'no code field']); return; }
+    let field = codeField(method);
+    if (!field) {
+      const view = method === 'authenticator' ? control(authenticatorLabels) : null;
+      if (view) { activate(view); await keep('authenticator'); }
+      // A handed code is typed within 2 s of its arrival (GY-1459): the 1 s activation plus one more check; a field
+      // that renders later is typed when the kept code is retried (takeHanded), not waited for here.
+      field = renderedField(method, view ? 2 : codeFieldChecks);
+    }
+    if (!field || !page.fill) {
+      page.note?.('sudo-code', [method, field ? 'page cannot type' : 'no code field']);
+      if (field) return 'done';
+      // The page left Confirm access while the field rendered: the next pass reads the approval, and the code is kept.
+      if (!detectSudo(page.url(), page.text()).sudo) return 'missing';
+      if (state!.field !== 'missing') {
+        if (state!.method === 'mobile') page.note?.('sudo-method', [method]);
+        state = { ...state!, field: 'missing', ...(state!.method === 'mobile' ? { method } : {}) }; await options.onCode(state);
+      }
+      return 'missing';
+    }
     try { page.fill(field.selector, submission.code); } catch (error) { throw new Error(withheld(error, submission.code)); }
-    const verify = control(verifyLabels, ['button']);
-    if (verify) page.click(verify.selector);
+    // GitHub's recorded field submits itself once its 6 digits are typed (js-verification-code-input-auto-submit),
+    // so a Verify button the page has already left is no failure: the next read of the page shows the outcome.
+    try { const verify = control(verifyLabels, ['button']); if (verify) page.click(verify.selector); }
+    catch (error) { page.note?.('sudo-code', [method, `verify control: ${withheld(error, submission.code)}`]); }
     page.wait(Math.min(pollMs, 1_000));
     // A refused code stays in the field: clear it before any later step screenshots the page.
-    const left = codeField();
+    let left: { selector: string } | null = null;
+    try { left = codeField(method); } catch { /* the page has moved on */ }
     if (left) { try { page.fill(left.selector, ''); } catch { page.note?.('sudo-code', [method, 'field not cleared']); } }
     page.note?.('sudo-code', [method, 'entered']);
+    if (state!.field) { const { field: _missing, ...rest } = state!; state = rest; }
     if (state!.method !== method) { page.note?.('sudo-method', [method]); state = { ...state!, method }; }
+    return 'done';
+  };
+  // GY-1459: the code view is opened and its field rendered before the operator is invited to enter a code, so a code
+  // entered at any moment is typed at once; a code that arrives while the field renders is kept in `early` and typed first.
+  let early = null as SudoCodeSubmission | null, prepared = false;
+  const prepare = async () => {
+    if (!options.readCode || !offered.has('authenticator') || state?.emailed || codeField('authenticator')) return;
+    const view = control(authenticatorLabels);
+    if (!view) return;
+    activate(view);
+    if (!prepared) { prepared = true; await keep('authenticator'); }
+    for (let check = 1; check < codeFieldChecks && !codeField('authenticator'); check += 1) {
+      early ??= await options.readCode() ?? null;
+      if (early) return;
+      page.wait(codeFieldCheckMs);
+    }
+  };
+  // The code handed to the waiting run (GY-1459), whichever method the page is showing: a finished step settles the pass,
+  // a typed code is 'entered', and a kept code that found no field is tried again on a freshly loaded page.
+  const takeHanded = async (current: string): Promise<SudoPass | 'entered' | null> => {
+    // A TOTP window is 30 s and GitHub accepts its neighbours: a kept code is dropped once it may be stale.
+    if (held && now().getTime() - Date.parse(held.at) > heldCodeMs) { page.note?.('sudo-code', ['authenticator', 'kept code expired']); held = null; }
+    let submission = early ?? await options.readCode?.() ?? null; early = null;
+    // A kept code is tried on a freshly loaded page: the view that failed to render its field is reloaded first.
+    if (!submission && held) {
+      // The view stays open: a field that rendered since is typed at once; else the page is reloaded after a while.
+      const method = state!.emailed ? 'email' : offered.has('authenticator') ? 'authenticator' : 'email';
+      if (codeField(method)) submission = held;
+      else if (now().getTime() - heldTried >= reloadMs) { page.open(current); submission = held; }
+    }
+    if (submission?.kind === 'settled') {
+      // The step was finished on the local App page in the operator's own browser, after this wait began.
+      if (Date.parse(submission.at) < (options.settledSince?.getTime() ?? started)) return null;
+      page.note?.('sudo-settled', ['local App page']);
+      state = { ...state!, state: 'approved' }; await options.onSettled?.(state);
+      return { passed: true, attempts: attempt, code: state.code, settled: true };
+    }
+    if (!submission) return null;
+    const outcome = await enter(submission);
+    held = outcome === 'missing' && submission.kind === 'code' ? submission : null; heldTried = now().getTime();
+    lastReload = now().getTime();
+    return 'entered';
   };
   // The older page offers GitHub Mobile as a button; the passkey-first page keeps that button
   // hidden and offers a "Use GitHub Mobile" control under "Having problems?": activateSudoControl
@@ -718,7 +909,7 @@ export async function passSudo(page: BrowserPage, options: SudoOptions) {
     for (const method of sudoMethods) if (methods[method]) offered.add(method);
     if (now().getTime() - started >= timeoutMs) {
       if (state) { state = { ...state, state: 'expired' }; await options.onSettled?.(state); }
-      throw new Error(sudoTimeout(state, listed(), timeoutMs, options.flow));
+      throw new Error(sudoTimeout(state, listed(), timeoutMs, options.flow, !!page.copy));
     }
     const handed = !!state && state.method !== 'mobile';
     if (!detected.code && (handed || !state && prefer === 'passkey-or-password' && pageMethods.some(method => methods[method]))) {
@@ -729,27 +920,35 @@ export async function passSudo(page: BrowserPage, options: SudoOptions) {
         const method = pageMethods.find(method => methods[method])!;
         page.note?.('sudo-method', [method]);
         if (method !== 'password') await keep(method);
-        state = waiting({ code: null, method, url: current, offered: listed() });
+        await prepare();
+        state = waiting({ code: null, method, url: current, offered: listed(), ...(page.copy ? { copy: true } : {}) });
         await options.onCode(state);
       } else {
-        const submission = await options.readCode?.() ?? null;
-        if (submission) { await enter(submission); lastReload = now().getTime(); continue; }
+        const taken = await takeHanded(current);
+        if (taken === 'entered') continue;
+        if (taken) return taken;
         // Re-check whether the shared session holds sudo mode now: the page no longer asks on reload.
-        if (now().getTime() - lastReload >= reloadMs) { lastReload = now().getTime(); page.open(current); continue; }
+        if (now().getTime() - lastReload >= reloadMs) { lastReload = now().getTime(); page.open(current); await prepare(); continue; }
       }
-      await sleep(pollMs);
+      await sleep(options.readCode ? Math.min(pollMs, codePollMs) : pollMs);
       continue;
     }
     if (!state && !detected.code) { issue('Use GitHub Mobile'); continue; }
+    // GY-1459: a code handed to a run waiting on a GitHub Mobile prompt is typed as well; the page offers Mobile beside its code views.
+    if (state?.method === 'mobile' && options.readCode) {
+      const taken = await takeHanded(current);
+      if (taken === 'entered') continue;
+      if (taken) return taken;
+    }
     if (state && detected.expired && !detected.code) { issue(detected.mobileOffered ? 'Use GitHub Mobile' : 'Try again'); state = null; continue; }
     if (detected.code && detected.code !== state?.code) {
       if (state?.method !== 'mobile') page.note?.('sudo-method', ['mobile']);
-      state = waiting({ code: detected.code, method: 'mobile', url: current });
+      state = waiting({ code: detected.code, method: 'mobile', url: current, offered: listed() });
       await keep('mobile', [detected.code]);
       await options.onCode(state);
     } else if (!state) {
       page.note?.('sudo-method', ['mobile']);
-      state = waiting({ code: null, method: 'mobile', url: current });
+      state = waiting({ code: null, method: 'mobile', url: current, offered: listed() });
       await keep('mobile');
       await options.onCode(state);
     } else if (state.code && !state.fallback && (offered.has('passkey') || offered.has('password')) && now().getTime() - Date.parse(state.issuedAt) >= mobileFallbackMs) {
@@ -759,7 +958,7 @@ export async function passSudo(page: BrowserPage, options: SudoOptions) {
       page.note?.('sudo-fallback', [method, state.fallback!.url]);
       await options.onCode(state);
     }
-    await sleep(pollMs);
+    await sleep(state?.method === 'mobile' && options.readCode ? Math.min(pollMs, codePollMs) : pollMs);
   }
 }
 

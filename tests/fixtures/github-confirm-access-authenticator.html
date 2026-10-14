@@ -1,0 +1,141 @@
+<form class="js-webauthn-form" data-turbo="false" action="https://github.com/sessions/sudo" accept-charset="UTF-8" method="post"><input type="hidden" name="authenticity_token" value="[graphyard-redacted]">    <input type="hidden" name="id" id="id" value="[graphyard-redacted]" autocomplete="off" class="form-control">
+<input type="hidden" name="sudo_return_to" id="sudo_return_to" value="[graphyard-redacted]" autocomplete="off" class="form-control">
+    <input type="hidden" name="credential_type" value="[graphyard-redacted]">
+
+    <div data-view-component="true" class="Box tmp-mt-3 color-bg-subtle">
+  <div id="header-4fe6ea85-993b-4b1e-bba2-11518e40194d" data-view-component="true" class="Box-header d-flex flex-justify-center flex-items-center flex-column border-bottom-0 pb-0 tmp-pb-0">
+  
+          <svg height="32" aria-hidden="true" data-component="Octicon" viewBox="0 0 24 24" version="1.1" width="32" data-view-component="true" class="octicon octicon-shield-lock color-fg-muted">
+    <path d="M11.46 1.137a1.748 1.748 0 0 1 1.08 0l8.25 2.675A1.75 1.75 0 0 1 22 5.476V10.5c0 6.19-3.77 10.705-9.401 12.83a1.704 1.704 0 0 1-1.198 0C5.771 21.204 2 16.69 2 10.5V5.476c0-.76.49-1.43 1.21-1.664Zm.617 1.426a.253.253 0 0 0-.154 0L3.673 5.24a.25.25 0 0 0-.173.237V10.5c0 5.461 3.28 9.483 8.43 11.426a.199.199 0 0 0 .14 0c5.15-1.943 8.43-5.965 8.43-11.426V5.476a.25.25 0 0 0-.173-.237ZM13 12.232V15a1 1 0 0 1-2 0v-2.768a2 2 0 1 1 2 0Z"></path>
+</svg>
+        <h2 class="mt-2 f3 text-normal text-center">Passkey</h2>
+
+</div>
+  <div data-view-component="true" class="Box-body mt-0 tmp-mt-0">
+        <div class="tmp-mb-3">When you are ready, authenticate using the button below.</div>
+        
+<webauthn-get data-target="sudo-credential-options.webauthnGet" data-json="[graphyard-redacted]" data-catalyst="">
+  <noscript>
+    <p class="webauthn-message js-webauthn-message">
+      <x-banner data-dismiss-scheme="none" data-view-component="true">
+  <div data-view-component="true" class="tmp-mb-3 Banner flash text-left p-0 tmp-p-0">
+      <div class="Banner-visual">
+        <svg aria-hidden="true" data-component="Octicon" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" class="octicon octicon-alert">
+    <path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path>
+</svg>
+      </div>
+    <div data-view-component="true" class="Banner-message">
+      <p class="Banner-title" data-target="x-banner.titleText">
+        Enable JavaScript to use your passkey.
+</p>
+</div></div></x-banner>    </p>
+  </noscript>
+
+    <x-banner data-dismiss-scheme="none" data-view-component="true" data-catalyst="">
+  <div data-target="webauthn-get.passkeysUnsupportedMessage" data-view-component="true" class="tmp-mb-3 Banner flash Banner--warning flash-warn text-left p-0 tmp-p-0">
+      <div class="Banner-visual">
+        <svg aria-hidden="true" data-component="Octicon" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" class="octicon octicon-alert">
+    <path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path>
+</svg>
+      </div>
+    <div data-view-component="true" class="Banner-message">
+      <p class="Banner-title" data-target="x-banner.titleText">
+      This browser or device is reporting partial passkey support.
+</p>
+</div></div></x-banner>
+  <x-banner data-dismiss-scheme="none" data-view-component="true" data-catalyst="">
+  <div data-target="webauthn-get.unsupportedMessage" hidden="hidden" data-view-component="true" class="tmp-mb-3 Banner flash Banner--warning flash-warn text-left p-0 tmp-p-0">
+      <div class="Banner-visual">
+        <svg aria-hidden="true" data-component="Octicon" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" class="octicon octicon-alert">
+    <path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path>
+</svg>
+      </div>
+    <div data-view-component="true" class="Banner-message">
+      <p class="Banner-title" data-target="x-banner.titleText">
+    Webauthn isn't supported. Use a different browser or device to use your passkey.
+</p>
+</div></div></x-banner>
+  <x-banner data-dismiss-scheme="none" data-view-component="true" data-catalyst="">
+  <div data-targets="webauthn-get.messages" data-target="webauthn-get.errorMessage" hidden="" data-view-component="true" class="tmp-mb-3 Banner flash Banner--error flash-error text-left p-0 tmp-p-0">
+      <div class="Banner-visual">
+        <svg aria-hidden="true" data-component="Octicon" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" class="octicon octicon-alert">
+    <path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path>
+</svg>
+      </div>
+    <div data-view-component="true" class="Banner-message">
+      <p class="Banner-title" data-target="x-banner.titleText">
+    <span role="alert" data-target="webauthn-get.errorText"></span>
+</p>
+</div></div></x-banner>
+  <p data-targets="webauthn-get.messages" data-target="webauthn-get.waitingMessage" class="tmp-my-3 text-center color-fg-muted" hidden="">
+    <span data-view-component="true">
+  <svg style="box-sizing: content-box; color: var(--color-icon-primary);" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true" data-view-component="true" class="v-align-middle mr-2 tmp-mr-2 anim-rotate">
+    <circle cx="8" cy="8" r="7" stroke="currentColor" stroke-opacity="0.25" stroke-width="2" vector-effect="non-scaling-stroke" fill="none"></circle>
+    <path d="M15 8a7.002 7.002 0 00-7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" vector-effect="non-scaling-stroke"></path>
+</svg>    <span class="sr-only">Loading</span>
+</span>
+    Waiting for input from browser interaction...
+  </p>
+  <button data-target="webauthn-get.button" data-action="click:webauthn-get#prompt" data-retry-message="Retry passkey" type="button" data-view-component="true" class="js-webauthn-confirm-button btn btn-block Button--primary Button--medium Button mt-0 tmp-mt-0">  <span class="Button-content">
+    <span class="Button-label"><span data-target="webauthn-get.buttonText">Use passkey</span></span>
+  </span>
+</button>
+</webauthn-get>
+
+        <input type="hidden" name="webauthn_response" class="js-webauthn-response">
+</div>
+  
+</div></form>
+<form class="" data-turbo="false" action="https://github.com/sessions/sudo" accept-charset="UTF-8" method="post"><input type="hidden" name="authenticity_token" value="[graphyard-redacted]">    <input type="hidden" name="id" id="id" value="[graphyard-redacted]" autocomplete="off" class="form-control">
+<input type="hidden" name="sudo_return_to" id="sudo_return_to" value="[graphyard-redacted]" autocomplete="off" class="form-control">
+    <input type="hidden" name="credential_type" value="[graphyard-redacted]">
+</form>
+<form id="github-mobile-authenticate-form" data-turbo="false" action="/sessions/sudo/mobile_poll" accept-charset="UTF-8" method="post"><input type="hidden" name="authenticity_token" value="[graphyard-redacted]">
+      <input type="hidden" value="[graphyard-redacted]" data-csrf="[graphyard-redacted]" class="js-data-url-csrf">
+</form>
+<form class="" data-turbo="false" action="https://github.com/sessions/sudo" accept-charset="UTF-8" method="post"><input type="hidden" name="authenticity_token" value="[graphyard-redacted]">    <input type="hidden" name="id" id="id" value="[graphyard-redacted]" autocomplete="off" class="form-control">
+<input type="hidden" name="sudo_return_to" id="sudo_return_to" value="[graphyard-redacted]" autocomplete="off" class="form-control">
+    
+
+  <div class="width-full">
+      
+<div class="flash flash-error flash-full" hidden=""></div>
+<label id="session-otp-input-label" class="sr-only" for="app_totp">Enter the verification code</label>
+<input type="text" name="sudo_app_otp" id="app_totp" value="[graphyard-redacted]" aria-labelledby="session-otp-input-label" autocomplete="off" autofocus="autofocus" class="form-control width-full mb-2 js-verification-code-input-auto-submit input-code-verification-2fa app_totp" inputmode="numeric" pattern="([0-9]{6})|([0-9a-fA-F]{5}-?[0-9a-fA-F]{5})" placeholder="XXXXXX">
+
+  <button data-disable-with="Verifying…" type="submit" data-view-component="true" class="btn-primary btn btn-block">    Verify
+</button>
+
+  </div>
+
+</form>
+<form class="" data-turbo="false" action="https://github.com/sessions/sudo" accept-charset="UTF-8" method="post"><input type="hidden" name="authenticity_token" value="[graphyard-redacted]">
+      <input type="hidden" name="id" id="id" value="[graphyard-redacted]" autocomplete="off" class="form-control">
+<input type="hidden" name="sudo_return_to" id="sudo_return_to" value="[graphyard-redacted]" autocomplete="off" class="form-control">
+      <input type="hidden" name="credential_type" value="[graphyard-redacted]">
+      <div data-view-component="true" class="Box tmp-mt-3 color-bg-subtle">
+  
+  <div data-view-component="true" class="Box-body mt-0 tmp-mt-0">
+          <x-banner data-dismiss-scheme="none" data-view-component="true" data-catalyst="">
+  <div hidden="hidden" data-view-component="true" class="js-sudo-error Banner flash Banner--error flash-error d-block">
+      <div class="Banner-visual">
+        <svg aria-hidden="true" data-component="Octicon" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" class="octicon octicon-stop">
+    <path d="M4.47.22A.749.749 0 0 1 5 0h6c.199 0 .389.079.53.22l4.25 4.25c.141.14.22.331.22.53v6a.749.749 0 0 1-.22.53l-4.25 4.25A.749.749 0 0 1 11 16H5a.749.749 0 0 1-.53-.22L.22 11.53A.749.749 0 0 1 0 11V5c0-.199.079-.389.22-.53Zm.84 1.28L1.5 5.31v5.38l3.81 3.81h5.38l3.81-3.81V5.31L10.69 1.5ZM8 4a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 8 4Zm0 8a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path>
+</svg>
+      </div>
+    <div data-view-component="true" class="Banner-message">
+      <p class="Banner-title" data-target="x-banner.titleText"></p>
+</div></div></x-banner>
+          <p>
+            Enter the verification code sent to v******@gmail.com.
+            If it doesn’t appear within a few minutes, check your spam folder.
+          </p>
+          <input type="text" name="sudo_email_otp" id="sudo_email_otp" class="form-control input-block mb-2" arial_label="Enter the 8-digit verification code sent to your email" inputmode="numeric" pattern="([0-9]{8})" placeholder="XXXXXXXX">
+          <button type="submit" data-view-component="true" class="tmp-mt-3 Button--primary Button--medium Button Button--fullWidth">  <span class="Button-content">
+    <span class="Button-label">Verify</span>
+  </span>
+</button>
+
+</div>
+  
+</div></form>

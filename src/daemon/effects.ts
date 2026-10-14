@@ -34,14 +34,14 @@ export function refusedBodyDetail(result: unknown): string {
 }
 import { rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
-import { readProducerLedger, saveProducerLedger, launchProducer, reclaimCheckouts } from '../producer.js';
+import { readProducerLedger, saveProducerLedger, launchProducer } from '../producer.js';
 import { dismissApproval, followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
 import { type ReviewFinding, type SuccessionRead, readReviewFindings, basePaths, baseText, baseMentions, successionReader } from '../review-scope.js';
 import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
 import { readApproverLaunches } from '../master/autonomy.js';
 import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
-import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, holdRepeatedLimitAccount, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson, readCredentialFile, withRoleDefaults, heldAwareProbe, type ControlPlaneStatus, type SessionIdentity } from '../master.js';
+import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, holdRepeatedLimitAccount, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, writeFailure, assessContainment, herdrJson, readCredentialFile, withRoleDefaults, heldAwareProbe, type ControlPlaneStatus, type SessionIdentity } from '../master.js';
 import { readControlPlaneClock, type ContainmentObservation, type ControlPlaneClock } from '../master/containment.js';
 import { annotatePaneShell } from '../quarantine.js';
 import { herdrCall, listHerdrPanes, type HerdrPane } from '../master/herdr.js';
@@ -201,7 +201,9 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * without it keeps cycling; it simply never reclaims. It touches no checkout, no branch, and
    * no Graphyard record, so it needs no credential and is safe to run on every cycle.
    */
-  reclaim?: (work: Work[]) => Promise<WorktreeReclaimReport>;
+  reclaim?: (work: Work[], now?: number) => Promise<WorktreeReclaimReport>;
+  /** Worktrees disposable now by the plan over the current inventory (GY-1784); null when the plan cannot be read. */
+  worktreeReclaimable?: (work: Work[], now: number) => Promise<number | null>;
   /** The resource reclaim pass (GY-132): reaps terminal records, closes finished sessions holding profile names, frees stuck sessions' slots; every cycle. */
   reclaimResources?: (work: Work[], agents: HerdrAgent[] | null) => Promise<ResourceReclaimReport>;
   /** Why the plane cannot record a dispatch's result (its /healthz verdict), or null when it can. */
