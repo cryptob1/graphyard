@@ -1,0 +1,25 @@
+{
+  "id": "fixture-compose-app",
+  "title": "The fixture compose app's page shows the change",
+  "description": "The declared Compose-backed application of the fixture project, served in a change's local preview against its own database: its page shows the running app, and the change on it.",
+  "tags": [
+    "fixture",
+    "preview"
+  ],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "browser",
+      "name": "open the compose app's preview",
+      "action": "open",
+      "path": "/"
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "Fixture compose app",
+      "exact": false
+    }
+  ]
+}

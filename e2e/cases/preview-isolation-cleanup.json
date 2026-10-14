@@ -40,8 +40,8 @@
       "status": 200,
       "expect": [],
       "save": {
-        "id": "idA",
-        "key": "keyA"
+        "idA": "id",
+        "keyA": "key"
       }
     },
     {
@@ -73,8 +73,8 @@
       "status": 200,
       "expect": [],
       "save": {
-        "id": "idB",
-        "key": "keyB"
+        "idB": "id",
+        "keyB": "key"
       }
     },
     {

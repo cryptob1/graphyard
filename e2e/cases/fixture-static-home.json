@@ -1,0 +1,25 @@
+{
+  "id": "fixture-static-home",
+  "title": "The fixture static site's home shows the change",
+  "description": "The declared static site of the fixture project, served in a change's local preview: its home page shows the site, and the change on it.",
+  "tags": [
+    "fixture",
+    "preview"
+  ],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "browser",
+      "name": "open the static site's preview",
+      "action": "open",
+      "path": "/"
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "Fixture static site",
+      "exact": false
+    }
+  ]
+}

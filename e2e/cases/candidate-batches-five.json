@@ -39,7 +39,7 @@
       "status": 200,
       "expect": [],
       "save": {
-        "id": "id1"
+        "id1": "id"
       }
     },
     {
@@ -70,7 +70,7 @@
       "status": 200,
       "expect": [],
       "save": {
-        "id": "id2"
+        "id2": "id"
       }
     },
     {
@@ -101,7 +101,7 @@
       "status": 200,
       "expect": [],
       "save": {
-        "id": "id3"
+        "id3": "id"
       }
     },
     {
@@ -132,7 +132,7 @@
       "status": 200,
       "expect": [],
       "save": {
-        "id": "id4"
+        "id4": "id"
       }
     },
     {
@@ -163,7 +163,7 @@
       "status": 200,
       "expect": [],
       "save": {
-        "id": "id5"
+        "id5": "id"
       }
     },
     {
@@ -198,7 +198,7 @@
         }
       ],
       "save": {
-        "id": "candidateId"
+        "candidateId": "id"
       }
     },
     {
@@ -291,7 +291,7 @@
       "status": 200,
       "expect": [],
       "save": {
-        "id": "id6"
+        "id6": "id"
       }
     },
     {
@@ -310,7 +310,7 @@
         }
       ],
       "save": {
-        "id": "candidateId2"
+        "candidateId2": "id"
       }
     },
     {
