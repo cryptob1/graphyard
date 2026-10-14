@@ -1,4 +1,4 @@
-import { assertGhNotPaused, GhPausedError, notePossibleGhRateLimit } from './gh-pause.js';
+import { assertGhNotPaused, ghPausedUntil, GhPausedError, notePossibleGhRateLimit } from './gh-pause.js';
 import { randomUUID } from 'node:crypto';
 import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
@@ -29,7 +29,7 @@ import { answeredByPendingSession, independentProducerProfiles, launchProducer, 
 import { currentEvidence } from './model/evidence.js';
 import { judgeHostMemory, memoryDeferral, readHostMemory, reclaimResources, type HostMemoryReading } from './master-resources.js';
 import { unexercisedFindings } from './model/mechanical-proofs.js';
-import { classified, launchWaitKind, launchWaitWording } from './model/fault-classes.js';
+import { classified, ghPausedWording, launchWaitKind, launchWaitWording } from './model/fault-classes.js';
 import { planeWideFailure } from './model/blocker-class.js';
 import { planeUnavailableText } from './model/refusal.js';
 export { hostMemoryHold, loopMemoryAttention } from './master-resources.js';
@@ -1121,6 +1121,12 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     if (!read) return false;
     const until = waitUntil(review);
     if (now() >= until) return false;
+    // While the gh login's reads are paused the bot-reviewer check cannot be made at all — the same
+    // as a read that fails — so the launch is not held for it: it goes ahead on this tick, and the
+    // launch record names the pause as why the wait was skipped, exactly as an exhausted bot names
+    // itself. An answer a read gathered before the pause does not hold the launch either.
+    const paused = ghPausedUntil(now());
+    if (paused) { skippedWaits.set(review.id, `awaited-reviewer wait skipped: ${ghPausedWording.paused} until ${new Date(paused).toISOString()}: ${ghPausedWording.limit}`); return false; }
     const seen = await read;
     if (!seen) return false;
     const exhausted = new Map((await botStates).filter(bot => bot.state === 'exhausted').map(bot => [bot.login.toLowerCase(), bot]));
