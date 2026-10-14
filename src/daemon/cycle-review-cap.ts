@@ -2,7 +2,9 @@
 import { cappedReview, cappedReworkBinding, cappedRevisionMark, detailChanged, type CappedReview } from './decisions.js';
 import { decisionKey } from './reconcile.js';
 import { decisionBindingMax, decisionSituation, uncitedRefusals, type DecisionSituation } from '../model/approval.js';
-import { reviewRound, reviewRoundCapOf } from '../review-cap.js';
+import { defaultReviewRoundCap, pastReviewCap, reviewRound, reviewRoundCapOf } from '../review-cap.js';
+import { nextAction } from '../model/next-action.js';
+import { agentOwner, type AttentionItem } from '../master/attention.js';
 import { record } from './effects.js';
 import { readyToRetry } from './sessions.js';
 import { closeStanding, closingItems, freshReads } from './stale-closes.js';
@@ -97,13 +99,17 @@ export function refusedCapAnswers<D extends { id: string; action: string; state:
     .sort((a, b) => Date.parse(a.requestedAt!) - Date.parse(b.requestedAt!));
 }
 /**
- * GY-1580 review. How the master's refused answers bear on `capped`'s change request, submitted at `submittedAt` after
- * `refused`: a withdrawal the loop made on an answer is read from the answers alone, so the guard outlives pruned rows.
+ * How the refused reworks asked again on this head bear on `capped`'s change request, submitted at `submittedAt` after
+ * `refused`: a withdrawal the loop made on one is read from the history alone, so the guard outlives pruned rows.
  * The escalation of a first re-review's change request asks for an answer citing the capped refusal only, and that of
  * a later one for an answer citing the earlier answers too. So `answer`, the earliest answer requested after the
  * change request that cites no other answer, answers it as the first re-review's: the loop withdraws it once more.
- * `judged` holds every other refused answer the change request follows — one requested and refused before it was
- * submitted, or one citing an earlier answer — newest last, uncited ones only, as a new request must cite them; with
+ * GY-1810: the loop's own capped rework on this same binding, refused as non-blocking, answers it the same way,
+ * without a master answer — a low or medium lane applies a hand rework at once (src/server/lane-rework.ts), so on
+ * those no refused hand answer can ever exist and this request is the only answer the round can get; the loop's
+ * capped rework waits for its approver in every lane, so its refusal binds in all of them. As with a hand answer,
+ * the one requested after this change request answers it, and an earlier one is `judged`, cited by what follows. `judged` holds every other refused answer the change request follows — one requested and refused before it
+ * was submitted, or one citing an earlier answer — newest last, uncited ones only, as a new request must cite them; with
  * no `answer`, any of them makes this change request the one after a second withdrawal, escalated and never withdrawn.
  * An answer requested before the head's first re-review posted reads the same as one a withdrawal followed (GitHub's
  * observation keeps one review per reviewer); it never hides a later answer to the first re-review, which still withdraws.
@@ -112,10 +118,16 @@ export function refusedAnswerStanding<D extends Parameters<typeof refusedCapAnsw
   const answers = refusedCapAnswers(history, refused, sha, refused.refusal?.at ?? refused.requestedAt), submitted = Date.parse(submittedAt ?? '');
   const cites = (entry: D, other: D) => !!entry.precedent?.includes(other.id) || !!entry.reason?.includes(other.id.slice(0, 8));
   const chained = (entry: D) => answers.some(other => other.id !== entry.id && cites(entry, other));
-  const answer = answers.find(entry => Date.parse(entry.requestedAt!) > submitted && !chained(entry)) ?? null;
-  const judged = answers.filter(entry => entry !== answer && (chained(entry)
+  const asked = history.filter(entry => entry.id !== refused.id && entry.action === 'rework' && entry.state === 'refused'
+    && entry.input?.binding !== undefined && entry.input?.binding === refused.input?.binding
+    && Date.parse(entry.requestedAt ?? '') > Date.parse(refused.refusal?.at ?? refused.requestedAt ?? ''))
+    .sort((a, b) => Date.parse(a.requestedAt!) - Date.parse(b.requestedAt!));
+  const answer = answers.find(entry => Date.parse(entry.requestedAt!) > submitted && !chained(entry))
+    ?? asked.find(entry => Date.parse(entry.requestedAt!) > submitted) ?? null;
+  const judged = [...answers, ...asked].filter(entry => entry !== answer && (chained(entry)
     || Date.parse(entry.requestedAt!) <= submitted && Date.parse(entry.refusal?.at ?? entry.requestedAt!) < submitted));
-  return { answer, judged: judged.filter(entry => !answers.some(other => other.id !== entry.id && cites(other, entry))) };
+  const standing = [...answers, ...asked];
+  return { answer, judged: judged.filter(entry => !standing.some(other => other.id !== entry.id && cites(other, entry))) };
 }
 /** The cursor key of the re-review an approver's refusal of a capped rework asks for (GY-1575): one per head. */
 export const cappedRereviewKey = (work: Pick<Work, 'id'>, sha: string) => `review-cap:rereview:${work.id}:${sha}`;
@@ -143,9 +155,10 @@ export function refusalFollowUps(work: Pick<Work, 'key'>, refusal: { reason: str
  */
 export function refusedCapRereview(capped: Pick<CappedReview, 'round' | 'cap' | 'sha'>, refusal: { id: string; approver: string; reason: string }, followUps: readonly string[], answer?: { id: string; approver: string; reason: string }) {
   const listed = followUps.length ? `; the follow-up ${followUps.length === 1 ? 'item' : 'items'} filed for them: ${followUps.join(', ')}` : '';
-  // GY-1580: the master's answer to the re-review's change request was refused too; both judgements travel with the request.
+  // GY-1580, GY-1810: the rework asked again on the re-review's change request — the master's answer, or the loop's own
+  // capped rework — was refused too; both judgements travel with the request.
   if (answer) return `Graphyard withdrew this change request: review round ${capped.round} is past the cap of ${capped.cap}. Independent approver ${refusal.approver} refused the rework it first asked for as non-blocking (decision ${refusal.id}): ${refusal.reason}\n\n`
-    + `The re-review requested changes again; the master asked for that rework, and independent approver ${answer.approver} refused it as non-blocking too (decision ${answer.id}): ${answer.reason}\n\n`
+    + `The re-review requested changes again; the rework was asked for again, and independent approver ${answer.approver} refused it as non-blocking too (decision ${answer.id}): ${answer.reason}\n\n`
     + `Re-review head ${capped.sha} and approve it, listing these findings as FOLLOW-UP threads, not as a change request${listed}. `
     + 'Only a finding that breaks a criterion neither refusal judged is BLOCKING. A change request on this head again is escalated, not withdrawn a third time.';
   return `Graphyard withdrew this change request: review round ${capped.round} is past the cap of ${capped.cap}, and independent approver ${refusal.approver} refused the rework it asked for as non-blocking (decision ${refusal.id}): ${refusal.reason}\n\n`
@@ -153,10 +166,11 @@ export function refusedCapRereview(capped: Pick<CappedReview, 'round' | 'cap' | 
     + 'A change request on this head again is escalated, not withdrawn a second time.';
 }
 
-/** The refusal an approver gave a capped rework decision, as the re-review request names it. */
-export type CapRefusal = { id: string; approver: string; reason: string; at?: string };
-export function capRefusalOf(refused: { id: string; outcome?: string | null; refusal?: { approver?: string; reason?: string; at?: string } | null }): CapRefusal {
-  return { id: refused.id, approver: refused.refusal?.approver ?? 'its approver', reason: refused.refusal?.reason ?? refused.outcome ?? 'no reason recorded', ...(refused.refusal?.at ? { at: refused.refusal.at } : {}) };
+/** The refusal an approver gave a capped rework decision, as the re-review request names it. `binding` names the grounds the refused rework carried, when it carried any: the loop's own capped rework answers its round on it (GY-1810), a hand answer has none. */
+export type CapRefusal = { id: string; approver: string; reason: string; at?: string; binding?: unknown };
+export function capRefusalOf(refused: { id: string; outcome?: string | null; input?: { binding?: unknown } | null; refusal?: { approver?: string; reason?: string; at?: string } | null }): CapRefusal {
+  return { id: refused.id, approver: refused.refusal?.approver ?? 'its approver', reason: refused.refusal?.reason ?? refused.outcome ?? 'no reason recorded', ...(refused.refusal?.at ? { at: refused.refusal.at } : {}),
+    ...(refused.input?.binding !== undefined ? { binding: refused.input.binding } : {}) };
 }
 
 /**
@@ -290,7 +304,7 @@ async function reviewCapStepWithin(cycle: Cycle) {
     const earlier = Object.keys(state.actions).find(other => other !== key && other.startsWith(head) && state.actions[other]?.state === 'done');
     let refusal: CapRefusal | null = null, answer: CapRefusal | null = null;
     const again = `${capped.reason}, after the independent approver refused its capped rework as non-blocking and Graphyard withdrew the change request on the same head; its re-review requested changes again, so it is not withdrawn a second time`;
-    const thrice = `${capped.reason}, after the independent approvers refused both its capped rework and the master's answer to its re-review as non-blocking, and Graphyard withdrew the change request on the same head twice; its re-review requested changes again, so it is not withdrawn a third time`;
+    const thrice = `${capped.reason}, after the independent approvers refused its capped rework and the rework asked for on its re-review as non-blocking, and Graphyard withdrew the change request on the same head twice; its re-review requested changes again, so it is not withdrawn a third time`;
     const decisionHistory = () => effects.decisions ? effects.decisions(item).then(result => result.decisions, error => { if (stepCallCarried(error)) throw error; return null; }) : Promise.resolve(null); // GY-1774: a carried read is the item's carried handling, never an empty history
     // A nits-only change request needs no approver; past a refused capped rework on the head it is judged as the escalated one is (GY-1580 review).
     const judged = capped.kind === 'escalate';
@@ -348,7 +362,7 @@ async function reviewCapStepWithin(cycle: Cycle) {
     }
     const followUps = refusal ? capFollowUps(item, [refusal, ...answer ? [answer] : []], cycle.snapshot.work) : [];
     const reason = answer && refusal
-      ? `Review round ${capped.round} of ${item.key} is past its cap of ${capped.cap}: independent approver ${answer.approver} refused the master's answer (decision ${answer.id}) to the re-review of refused capped rework ${refusal.id} as non-blocking, so ${capped.reviewer}'s change request ${capped.reviewId} on ${capped.sha.slice(0, 12)} is withdrawn once more and the head re-reviewed with both refusals' findings as FOLLOW-UP`
+      ? `Review round ${capped.round} of ${item.key} is past its cap of ${capped.cap}: independent approver ${answer.approver} ${answer.binding !== undefined ? `refused the capped rework asked again on this binding (decision ${answer.id})` : `refused the master's answer (decision ${answer.id}) to the re-review of refused capped rework ${refusal.id}`} as non-blocking, so ${capped.reviewer}'s change request ${capped.reviewId} on ${capped.sha.slice(0, 12)} is withdrawn once more and the head re-reviewed with both refusals' findings as FOLLOW-UP`
       : refusal
       ? `Review round ${capped.round} of ${item.key} is past its cap of ${capped.cap}: independent approver ${refusal.approver} refused the capped rework (decision ${refusal.id}) as non-blocking, so ${capped.reviewer}'s change request ${capped.reviewId} on ${capped.sha.slice(0, 12)} is withdrawn and the head re-reviewed with its findings as FOLLOW-UP`
       : `Review round ${capped.round} of ${item.key} is past its cap of ${capped.cap}: ${capped.reviewer}'s change request ${capped.reviewId} on ${capped.sha.slice(0, 12)} names no BLOCKING: finding, so its findings are nits, not filed, and the item proceeds toward merge without another rework`;
@@ -375,4 +389,51 @@ async function reviewCapStepWithin(cycle: Cycle) {
     performed.push(await record(state, answer ? answeredRereviewKey(item, capped.sha) : cappedRereviewKey(item, capped.sha), { kind: 'review', work: item.key, principal: null, state: 'done', detail: `Requested a fresh review of ${item.key} on ${capped.sha.slice(0, 12)}: ${request}`,
       attempts: 1, cycle: state.cycle }, now(), effects.persist));
   });
+}
+
+/** The loop's cursor as `master status` reads it for the review-cap hold: its action rows and its standing decision watches. */
+export interface ReviewCapCursor {
+  actions?: Record<string, { state: string; detail: string }>;
+  approvals?: Record<string, { work: string; action: string; decision: string; settledAt: string | null; agentName: string | null }>;
+}
+
+/** Whether the review-cap step holds `item`'s head with nothing that would itself relaunch a review in motion (GY-1810 AC-2): the item is system-driven, past its cap with a change request standing on its head, and it has no review request open for the head, no request-review action queued, and no withdrawal still owed or retried. */
+const reviewCapHoldsHead = (item: Work, all: readonly Work[], cursor: ReviewCapCursor | null | undefined, cap: number, now: number): boolean =>
+  item.systemDriven === true && !!item.candidate && !!item.observation && pastReviewCap(item, cap)
+  && item.observation.reviews.some(review => review.sha === item.candidate!.sha && review.state === 'CHANGES_REQUESTED')
+  && !(item.reviewRequest && item.reviewRequest.sha === item.candidate.sha) && item.autoDispatch?.review?.state !== 'requested'
+  && nextAction(item, [...all], new Date(now))?.kind !== 'request-review'
+  && !Object.entries(cursor?.actions ?? {}).some(([key, action]) => key.startsWith(`review-cap:${item.id}:`) && action.state !== 'done');
+
+/** Why the step holds the head when it has escalated nothing: the round's rework decision before its approver, or the bare hold. */
+const reviewCapHold = (item: Work, cursor: ReviewCapCursor | null | undefined): string => {
+  const watch = Object.values(cursor?.approvals ?? {}).find(entry => entry.work === item.key && entry.action === 'rework' && !entry.settledAt);
+  return watch ? `the round's rework decision ${watch.decision} stands before its independent approver${watch.agentName ? ` (${watch.agentName})` : ''}, so the change request on this head is neither withdrawn nor answered and no review is relaunched until it judges`
+    : `its change request on this head stands past the review-round cap with no review request open, none queued and no withdrawal owed, so no review is relaunched`;
+};
+
+/**
+ * GY-1810 AC-2. `master status` with every review-gate attention row that says the loop relaunches the review on its
+ * own replaced, wherever that would be false: the item is past its review-round cap with a change request standing on
+ * its head, and it has no review request open, no request-review action queued and no withdrawal owed, so the loop
+ * relaunches nothing — its review-cap step holds the head. Such a row is the stalled step naming the head: the head's
+ * standing escalation when the step raised one (it names the refusals and the command that answers it), else the
+ * round's wait. A state any of those reads answers keeps the loop's row, and a row for another gate is never touched.
+ */
+export function stalledReviewCapAttention<T extends { work: Array<{ key: string; attention: string | null; attentionOwner?: { next: string } | null; refusal?: { gate?: string } | null }>; attentionItems: AttentionItem[]; counts?: { attention: number } }>(
+  status: T, all: readonly Work[], cursor: ReviewCapCursor | null | undefined, cap = defaultReviewRoundCap, now = Date.now()): T {
+  const held = new Map<string, { text: string; next: string }>();
+  for (const row of status.work) {
+    if (row.refusal?.gate !== 'review' || !row.attentionOwner?.next.includes('the loop relaunches the review on its own')) continue;
+    const item = all.find(candidate => candidate.key === row.key);
+    if (!item || !reviewCapHoldsHead(item, all, cursor, reviewRoundCapOf({ reviewRoundCap: cap }), now)) continue;
+    const sha = item.candidate!.sha, escalation = cursor?.actions?.[`escalation:review-cap:${item.id}:${sha}`];
+    held.set(row.key, escalation?.detail ? { text: `${row.key}'s review-cap step is stalled on ${sha.slice(0, 12)}: ${escalation.detail}`, next: escalation.detail }
+      : { text: `${row.key}'s review-cap step is stalled on ${sha.slice(0, 12)}: ${reviewCapHold(item, cursor)}`, next: `graphyard master decisions ${row.key}` });
+  }
+  if (!held.size) return status;
+  const rows = status.work.map(row => held.has(row.key) ? { ...row, attention: held.get(row.key)!.text, attentionOwner: agentOwner('master', held.get(row.key)!.next) } : row);
+  const attentionItems = status.attentionItems.map(entry => held.has(entry.subject)
+    ? { ...entry, text: held.get(entry.subject)!.text, ...agentOwner('master', held.get(entry.subject)!.next) } : entry);
+  return { ...status, work: rows, attentionItems };
 }
