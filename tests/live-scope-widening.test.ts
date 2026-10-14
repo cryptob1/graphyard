@@ -411,6 +411,9 @@ test('unit:transient-scope-refusal — only a 5xx response or a stale revision i
   assert.equal(transientScopeRefusal(refused('x', 409, 'Operator agents cannot remove planned-file containment')), null);
   assert.equal(scopeRefusalFault('the control plane answered 5xx', undefined), null);
   assert.equal(scopeRefusalFault('the control plane answered 5xx', { state: 'failed', detail: 'Could not widen GY-1 (the control plane answered 5xx, so it is retried next cycle on a fresh read): …' }), undefined);
+  // GY-1788: a transport refusal is never a scope fault, first or nth; a persistently failing read surfaces under github-budget.
+  assert.equal(scopeRefusalFault('the call failed in transport: a timeout, a network error or a gh rate limit', undefined), null);
+  assert.equal(scopeRefusalFault('the call failed in transport: a timeout, a network error or a gh rate limit', { state: 'failed', detail: 'Could not widen GY-1 (the call failed in transport: a timeout, a network error or a gh rate limit, so it is retried next cycle on a fresh read): …' }), null);
   assert.equal(scopeRefusalFault(null, undefined), undefined);
 });
 
@@ -568,14 +571,14 @@ test('unit:widen-transient-gh-stored — GY-1757: a gh CLI failure reading the f
   assert.deepEqual(scopeFaults(state), []);
 });
 
-test('integration:widen-transient-second-run-counts — GY-1757: the second consecutive failure of the same run is exactly one instance', async () => {
+test('integration:widen-transport-second-run-quiet — GY-1788: a transport failure is stored for retry however many times in a row the run fails, never an instance', async () => {
   const control = plane(item({ key: 'GY-1757', scopeRequest: refusedRequest(['docs/delivery.md']) } as Partial<Work>));
   const state = emptyDaemonState(config());
   const failing = effects(control, { baseSuccessions: undefined, replan: undefined, reviewFindings: async () => { throw gh(); }, baseText: async () => null });
   await cycle(state, failing);
   assert.deepEqual(scopeFaults(state), []);
   await cycle(state, failing, clock + 60_000);
-  assert.deepEqual(scopeFaults(state).map(instance => [instance.kind, instance.subject]), [['action:scope', 'GY-1757']]);
+  assert.deepEqual(scopeFaults(state).map(instance => [instance.kind, instance.subject]), [], 'the run\'s second transport failure judged the scope no more than the first; github-budget surfaces the outage');
 });
 
 test('unit:replan-transient-stored — GY-1757: a successor re-plan failing in transport is stored for retry, no instance', async () => {
@@ -601,7 +604,7 @@ test('unit:widen-transient-gh-timeout — GY-1757: the bounded gh runner\'s time
   assert.equal(transientScopeRefusal(killed('git')), null);
 });
 
-test('integration:widen-gh-timeout-first-quiet-second-counts — GY-1757: a bounded gh timeout opens an instance only on the second consecutive failure', async () => {
+test('integration:widen-gh-timeout-transport-quiet — GY-1788: a bounded gh timeout is never an instance, first or nth; another command\'s is not transient', async () => {
   const killed = () => new ChildProcessError('gh', ['api', 'x'], { stdout: '', stderr: '', status: null, signal: 'SIGKILL', timedOut: true, timeoutMs: 90000 });
   const control = plane(item({ key: 'GY-1757', scopeRequest: refusedRequest(['docs/delivery.md']) } as Partial<Work>));
   const state = emptyDaemonState(config());
@@ -609,7 +612,7 @@ test('integration:widen-gh-timeout-first-quiet-second-counts — GY-1757: a boun
   await cycle(state, failing);
   assert.deepEqual(scopeFaults(state), []);
   await cycle(state, failing, clock + 60_000);
-  assert.equal(scopeFaults(state).length, 1);
+  assert.equal(scopeFaults(state).length, 0, 'the transport outage files nothing; the read is retried on a fresh read');
   const replanState = emptyDaemonState(config());
   await cycle(replanState, effects(plane(item({ key: 'GY-1757' } as Partial<Work>)), { baseSuccessions: async () => { throw killed(); }, replan: async () => { throw killed(); } }));
   assert.deepEqual(scopeFaults(replanState), []);
