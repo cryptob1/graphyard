@@ -39,7 +39,7 @@ test('unit:module-budgets-advisory-listing — every budgeted module within 50 l
   for (const { original, directory } of split) {
     for (const file of [original, ...await modules(directory)]) {
       const count = lines(await read(file));
-      if (count > lineBudget - 50) near.push(`${file} at ${count}/${lineBudget}`);
+      if (count >= lineBudget - 50) near.push(`${file} at ${count}/${lineBudget}`);
     }
   }
   const report = near.length
