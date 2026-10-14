@@ -104,8 +104,9 @@ export function readingDueNow(cycle: Cycle): boolean {
  * delivered-observation in the same pass, a fail records the reading and raises the item's escalation
  * naming the measured values, and a reading this host cannot take records why. An item still open on
  * a recorded pass — its close refused or failed in the cycle that recorded it, or the pass recorded by
- * hand — is closed on the release the pass was taken on, under the same idempotency key, every cycle
- * until it closes. `served` is the release observation this cycle verified: while that observation
+ * hand — is closed on the release the pass was taken on, under the same idempotency key, the pass
+ * after it was recorded and, once a close itself has failed, on that close's own failure backoff —
+ * never the read backoff — until it closes. `served` is the release observation this cycle verified: while that observation
  * is still in flight (`stillVerifying`) every due reading is deferred, never taken on the release the
  * last cycle observed, which the plane may no longer serve. The reads run under the deployment step's
  * budget, keyed per item: one still running at the bound is left in flight and resumed next cycle,
@@ -126,12 +127,27 @@ export async function readingsStep(cycle: Cycle, served: DaemonState['deployment
   /** The close a recorded pass ends in: refused or failed, it is retried next cycle on the same key without a second record. */
   const close = async (item: Work, release: string, passes: { proof: string; detail: string }[], note: (outcome: DaemonAction['state'], detail: string) => Promise<void>) => {
     const summary = passes.map(entry => `${entry.proof}: ${entry.detail}`).join('; ');
-    if (!effects.closeObservation) return note('failed', `Recorded ${item.key}'s passing reading on release ${short(release)}, and this loop cannot close it: it runs without the coordinator's close effect`);
+    // GY-1794: a close that failed paces its own retries through a cursor under the close's idempotency
+    // key — outside the fault record, for the recorded-pass close to wait on before asking again — so a
+    // plane that keeps refusing is asked once per backoff step, never once per cycle. The readable
+    // failure itself is noted under the reading action, where GY-1779 records what a pass ended in.
+    const pace = async (detail: string) => {
+      const key = readingCloseKey(item, release);
+      await record(state, key, { kind: 'deployment', work: item.key, principal: null, state: 'failed', detail: detail.slice(0, 2000), attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, null);
+    };
+    if (!effects.closeObservation) {
+      const detail = `Recorded ${item.key}'s passing reading on release ${short(release)}, and this loop cannot close it: it runs without the coordinator's close effect`;
+      await pace(detail);
+      return note('failed', detail);
+    }
     try {
       const closed = await effects.closeObservation(item, release, closeReason(item, release, passes), readingCloseKey(item, release));
       const owed = owedPullRequest(closed);
       return note('done', `Recorded ${item.key}'s passing reading on release ${short(release)} and closed it as delivered-observation${owed ? `; its superseded pull request #${owed} is still owed on GitHub, and the loop closes it next cycle` : ''}: ${summary}`);
-    } catch (error) { return note('failed', `Recorded ${item.key}'s passing reading on release ${short(release)}, and could not close it as delivered-observation: ${message(error)}`); }
+    } catch (error) {
+      await pace(message(error));
+      return note('failed', `Recorded ${item.key}'s passing reading on release ${short(release)}, and could not close it as delivered-observation: ${message(error)}`);
+    }
   };
   // A closed item's superseded pull request the control plane still owes GitHub: the same close under the same key
   // closes it there and replays the closure, on the failure backoff, until GitHub has it closed.
@@ -153,14 +169,17 @@ export async function readingsStep(cycle: Cycle, served: DaemonState['deployment
     const observing = loopObservation(item, new Date(now()), snapshot.work);
     // A recorded pass still open: closed on the release it was read on, whatever the plane serves now.
     // The read backoff paces live reads only (GY-1794): it never holds this close, so a pass recorded
-    // by hand after unavailable or failed readings closes on the next pass and a close that failed is
-    // retried every pass until it lands, under the same idempotency key. A done action stands: that
-    // close has landed, and only the owed pull request is retried, above, on its own key.
+    // by hand after unavailable or failed readings closes on the next pass. What paces the close is
+    // its own failure cursor (GY-1794): a close the plane keeps refusing is asked once per backoff
+    // step, never once per cycle and never on the reading's backoff. A done action stands: that close
+    // has landed, and only the owed pull request is retried, above, on its own key.
     if (!observing) {
       const pass = observationPass(item, new Date(now()), snapshot.work);
       if (!pass) return;
       const key = readingKey(item), previous = state.actions[key];
       if (previous?.state === 'done') return;
+      const failed = state.actions[readingCloseKey(item, pass.release)];
+      if (failed && !readyToRetry(failed, state.cycle)) return;
       return close(item, pass.release, pass.readings.map(entry => ({ proof: entry.proof, detail: entry.reading?.detail ?? `a trusted passing record by ${entry.producer} at ${entry.at}` })), noteFor(item, key, previous, (previous?.attempts ?? 0) + 1));
     }
     if (!observing.due) return;

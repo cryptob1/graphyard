@@ -12,8 +12,10 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-1794: the read backoff the deployment-verification step applies after an unavailable or failed
 // reading paces live reads, never the close of an item whose passing reading is already recorded — a
 // pass recorded by hand while that backoff stands closes the item on the next pass, while an item
-// with no passing reading is still read only once the backoff has run out. GY-1779 added the step;
-// these tests drive it the way production wires it, over an in-memory work list.
+// with no passing reading is still read only once the backoff has run out. A close that itself fails
+// is paced by its own failure cursor under the close's idempotency key — asked the pass after it
+// failed, then at the widened step — never once per pass and never on the read backoff. GY-1779
+// added the step; these tests drive it the way production wires it, over an in-memory work list.
 
 const hour = 3_600_000, now = Date.parse('2026-10-13T12:00:00.000Z');
 const iso = (at: number) => new Date(at).toISOString();
@@ -113,7 +115,7 @@ test('unit:recorded-pass-bypasses-read-backoff — with no passing reading the b
   assert.deepEqual(asked, [item.key, item.key, item.key], 'once the backoff has run out the reading is asked again');
 });
 
-test('unit:recorded-pass-bypasses-read-backoff — a close that failed on a recorded pass is retried on the next pass, not on the read backoff, and records the passing reading once', async () => {
+test('unit:recorded-pass-bypasses-read-backoff — a close that failed on a recorded pass is retried on the next pass and paced by its own failure cursor, never the read backoff and never every pass, and records the passing reading once', async () => {
   const item = followUp(1796);
   const asked: string[] = [];
   let refuse = 2;
@@ -121,11 +123,17 @@ test('unit:recorded-pass-bypasses-read-backoff — a close that failed on a reco
   const run = await makeCycle([parent, item], await temporaryDirectory('recorded-pass-retry'), reader, () => { if (refuse-- > 0) throw new Error('the control plane refused the close'); });
   await run.pass();
   assert.deepEqual([run.closed, run.recorded.map(entry => [entry.key, entry.reading.result])], [[], [[item.key, 'pass']]], 'the reading is recorded, its close is refused');
-  assert.equal(run.state.actions[`reading:${item.id}`]?.state, 'failed');
+  assert.equal(run.state.actions[`reading:${item.id}`]?.state, 'failed', 'the pass that reads and closes records the refusal under the reading action');
+  assert.equal(run.state.actions[`reading:close:${item.id}:${serving}`]?.attempts, 1, 'the failure also cursors the close under its idempotency key');
   await run.next(); await run.pass();
-  assert.equal(run.state.actions[`reading:${item.id}`]?.attempts, 2, 'the close is retried on the next pass');
+  assert.equal(run.state.actions[`reading:close:${item.id}:${serving}`]?.attempts, 2, 'the close is retried on the next pass, its first backoff step');
   assert.deepEqual([asked, run.recorded.length], [[item.key], 1], 'the recorded pass is never read or recorded twice');
+  // The second refusal widens the close's own backoff to two passes: the next pass is inside it and asks nothing.
   await run.next(); await run.pass();
-  assert.deepEqual(run.closed.map(entry => [entry.key, entry.release]), [[item.key, serving]], 'the close lands on the next pass, whatever backoff its failures left');
-  assert.equal(run.state.actions[`reading:${item.id}`]?.state, 'done');
+  assert.equal(run.state.actions[`reading:close:${item.id}:${serving}`]?.attempts, 2, 'the widened failure backoff withholds the close for a pass');
+  assert.equal(run.closed.length, 0, 'nothing has landed');
+  assert.deepEqual([asked, run.recorded.length], [[item.key], 1], 'the withheld pass neither reads nor records');
+  await run.next(); await run.pass();
+  assert.deepEqual(run.closed.map(entry => [entry.key, entry.release, entry.idempotency]), [[item.key, serving, `reading:close:${item.id}:${serving}`]], 'the close lands once its own failure backoff has run out, under the same key');
+  assert.deepEqual([run.state.actions[`reading:${item.id}`]?.state, run.state.actions[`reading:${item.id}`]?.attempts], ['done', 3]);
 });
