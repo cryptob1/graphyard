@@ -94,6 +94,8 @@ export async function worktreeActivity(path: string, now = Date.now()) {
   // A timestamp ahead of the clock must not make a worktree look idle for ever.
   return Math.min(Math.max(0, ...times), now);
 }
+/** Whether the worktree directory exists but cannot be read: an inventory nobody knows, which `inventoryWorktrees` reads as empty. */
+export const worktreesUnreadable = (root: string) => readdir(worktreesDirectory(root)).then(() => false, error => (error as NodeJS.ErrnoException)?.code !== 'ENOENT');
 /** Every assignment worktree on this host and the dependency trees it is holding. */
 export async function inventoryWorktrees(root: string, now = Date.now()): Promise<WorktreeEntry[]> {
   const base = worktreesDirectory(root);
@@ -230,14 +232,28 @@ export async function writeWorktreeInventoryCache(root: string, cache: WorktreeI
  * one file read, whatever the number of trees. Only a host whose loop has never reclaimed walks
  * the directory, once, and leaves the cache behind for the next call. No Git command runs here.
  */
-export async function statusWorktreeInventory(root: string, now = Date.now()): Promise<{ entries: WorktreeEntry[]; at: string; cached: boolean }> {
+export async function statusWorktreeInventory(root: string, now = Date.now()): Promise<{ entries: WorktreeEntry[]; at: string; cached: boolean; unreadable?: boolean; held?: HeldWorktree[] }> {
   const cache = await readWorktreeInventoryCache(root);
-  if (cache) return { entries: cache.entries, at: cache.at, cached: true };
+  if (cache) return { entries: cache.entries, at: cache.at, cached: true, held: cache.held };
+  // A directory that exists but cannot be read is an inventory nobody knows, not an empty one: it is not cached, and callers that judge a plan on it say so (GY-1784 review).
+  const unreadable = await worktreesUnreadable(root);
   const entries = await inventoryWorktrees(root, now), at = new Date(now).toISOString();
-  await writeWorktreeInventoryCache(root, { at, entries, held: [] }).catch(() => {});
-  return { entries, at, cached: false };
+  if (!unreadable) await writeWorktreeInventoryCache(root, { at, entries, held: [] }).catch(() => {});
+  return { entries, at, cached: false, ...(unreadable ? { unreadable } : {}) };
 }
 
+/**
+ * How many worktrees the loop's next pass would take back: those holding disposable dependency
+ * directories, and those `removeReclaimableWorktrees` removes outright whether or not they hold any
+ * (a delivered tree with no `node_modules`), less the trees held as dirty or unpushed for as long
+ * as their working tree stands unchanged. The disk reading answers a low volume only when this is nothing (GY-1784 review).
+ */
+export function reclaimableNow(plan: WorktreeReclaimCandidate[], entries: WorktreeEntry[], work: Work[], options: { idleMs: number; now: number; held?: HeldWorktree[] }): number {
+  const activity = new Map(entries.map(entry => [entry.path, entry.activityAt]));
+  return plan.filter(candidate => candidate.disposable
+    || (worktreeRemovalReason(candidate, work, new Set(), options.idleMs, options.now) !== null
+      && !(options.held ?? []).some(held => held.path === candidate.path && held.activityAt === activity.get(candidate.path) && !(held.retryAt && Date.parse(held.retryAt) <= options.now)))).length;
+}
 /** The attempt epoch a session handle works under: its own, or the one its `principal:epoch` id names. */
 function sessionEpoch(handle: { id: string; epoch: number | null }) {
   if (handle.epoch !== null) return handle.epoch;
@@ -418,25 +434,8 @@ export async function removeReclaimableWorktrees(root: string, work: Work[], opt
   return { at, limit, removed, kept, backlog, held, errors, entries: remaining };
 }
 
-export interface DiskPressure { path: string; freeBytes: number | null; thresholdBytes: number; low: boolean; reclaimable: number; worktrees: number; unavailable: string | null }
-/** Free space beside what a reclaim would give back, in the shape `master status` reports it. */
-export function diskPressure(path: string, free: number | null, thresholdBytes: number, plan: WorktreeReclaimCandidate[]): DiskPressure {
-  return { path, freeBytes: free, thresholdBytes, low: free !== null && free < thresholdBytes,
-    reclaimable: plan.filter(entry => entry.disposable).length, worktrees: plan.length,
-    unavailable: free === null ? `Free space on ${path} could not be read` : null };
-}
-const gigabytes = (bytes: number) => `${(bytes / 1e9).toFixed(1)} GB`;
-/**
- * The attention item that has to arrive before the volume fills: how much room is left, how much
- * of it finished worktrees are holding, and the one command that gives it back. It is raised on
- * the configured threshold rather than on the first failed write, so the master acts while
- * writes still succeed.
- */
-export function diskPressureAttention(pressure: DiskPressure): AttentionItem[] {
-  if (!pressure.low || pressure.freeBytes === null) return [];
-  return [{ subject: 'disk', text: `${gigabytes(pressure.freeBytes)} free on ${pressure.path}, below the configured ${gigabytes(pressure.thresholdBytes)} threshold; ${pressure.reclaimable} of ${pressure.worktrees} assignment worktree(s) hold dependency directories a fresh install recreates. Reclaim them before the volume fills`,
-    ...agentOwner('master', 'graphyard master run reclaims every cycle while free space is low (daemon.reclaim in master status says what it took back); lower run.reclaimIdleHours in .graphyard/master.json to make more of them disposable, and graphyard master run --once reclaims immediately when no loop is running') }];
-}
+/** The worktree volume's readings — disk pressure, its answered gate, hard line and recovery band — live in worktree-disk.ts (GY-1784); re-exported so every existing import keeps working. */
+export { diskPressure, diskPressureAttention, type DiskPressure } from './worktree-disk.js';
 
 /**
  * The managed worktree root's attention items: a root on a tmpfs, a volume below its configured

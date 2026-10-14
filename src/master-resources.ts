@@ -3,8 +3,10 @@ import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
-import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isProfileSession, neverStartedReason, privateFile, profileConcurrency, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
+import { agentOwner, atomicPrivateWrite, closeHerdrPane, defaultDiskThresholdGb, diskThresholdBytes, isProfileSession, neverStartedReason, planWorktreeReclaim, privateFile, profileConcurrency, reclaimIdleMs, statusWorktreeInventory, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
+import { reclaimableNow } from './master/worktrees.js';
 import type { HerdrPane } from './master/herdr.js';
+import { judgeWorktreeDisk, standingDiskLine, worktreePassCurrentMs, worktreePassOf, type WorktreePass } from './master/worktree-disk.js';
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
 import { agentRuntimeScratchRoots, agentScratchMinAgeMs, agentScratchPatterns, compileCacheName, describeTmpReclaim, packageStoreMinAgeMs, packageStoreNames, runtimeScratchCapEntries, tmpReclaimBaseClasses, tmpReclaimClassNames, type TmpReclaimClass, hostTmpRoots, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpInodeHeadroom, tmpReclaimEscalation, tmpReclaimLimitPerCycle, tmpReclaimMinAgeMs, tmpConsumersScanBound, tmpReclaimWorkMsPerCycle, tsxCacheName, type TmpConsumer, type TmpRootPressure, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
@@ -92,7 +94,14 @@ export interface ResourceInputs {
   upgrade?: { from: string | null; to: string | null; code: boolean; attemptedAt: number | null; promotion?: PromotionWait | null; stalled?: UpgradeStall | null } | null;
   /** The reclaim pass's seen-unowned map (pane → first seen), from .graphyard/resource-reclaims.json; absent or null when unread. */
   reclaimSeen?: Record<string, string> | null;
-  disk: { path: string; totalBytes: number; freeBytes: number; thresholdBytes: number } | null;
+  /**
+   * The worktree volume: its size, free bytes and warn line; the loop's latest worktree-reclaim pass
+   * and whether this reading's fault stands in the loop's record, both from the daemon cursor
+   * (GY-1784, absent or null when unread), which decide whether a low reading is answered and where it
+   * recovers; and what is disposable now over the current plan (`reclaimable`, GY-1784 review: the
+   * answered gate needs the plan beside the pass, and null when the plan cannot be read never answers).
+   */
+  disk: { path: string; totalBytes: number; freeBytes: number; thresholdBytes: number; pass?: WorktreePass | null; standing?: boolean; reclaimable?: number | null } | null;
   /**
    * The host temporary directories' inodes, and what the loop's last /tmp pass removed (GY-1074):
    * one per filesystem the pass scans (GY-1602), each read as its own row; absent or null when unread.
@@ -448,12 +457,18 @@ export const resourceRegistry: ResourceDefinition[] = [
   },
   {
     id: 'worktree-disk', title: 'Coordinator worktree disk', unit: 'bytes',
-    bound: 'the size of the volume holding .graphyard/worktrees; it warns at run.diskThresholdGb free',
+    bound: `the size of the volume holding .graphyard/worktrees; it warns at run.diskThresholdGb free (${defaultDiskThresholdGb} GB by default), and while a low reading's fault stands it recovers only a recovery band of a tenth of that line above it (GY-1784), so one wobble across the line is one fault`,
     usage: 'statfs of .graphyard/worktrees', owner: 'the worker launcher and the loop\'s worktree reclamation (src/master.ts)',
-    reclaim: 'the loop reclaims dependency directories of finished worktrees every cycle while free space is below the threshold',
-    remedy: 'graphyard master run --once reclaims now; lower run.reclaimIdleHours to make more worktrees disposable',
+    reclaim: `the loop reclaims dependency directories of finished worktrees every cycle while free space is below the threshold; while its latest pass is current (within ${worktreePassCurrentMs / 60_000} minutes) and drained — it removed nothing, left no reclaimable worktrees, took no unowned managed checkout, met no error, and nothing is disposable now over the current plan — and the reading's fault does not stand, a low reading is answered: what holds the volume is outside the loop's reach, so it is reported and raises nothing until the hard line, free space at or below the exhaustion floor of half the warn line, which raises attention whatever the pass answered, as a write failing ENOSPC or EDQUOT always does; a standing fault is never answered, and holds until the reading recovers past the band`,
+    remedy: 'graphyard master run --once reclaims now; lower run.reclaimIdleHours to make more worktrees disposable; with nothing reclaimable, free host data on the volume, raise run.diskThresholdGb, or move the worktree root to a dedicated volume',
     warnBelow: bound => bound, symptoms: [/ENOSPC|No space left on device|Disk quota exceeded/],
-    read: input => [input.disk ? { id: '', used: input.disk.totalBytes - input.disk.freeBytes, bound: input.disk.totalBytes, detail: `${input.disk.path}`, reclaimable: 0 } : { id: '', used: null, bound: null, detail: 'free space could not be read', reclaimable: 0 }],
+    // The pass and the standing fault come from the daemon cursor, and what is disposable now from the plan over the cached inventory (readDisk): without them the reading judges as before GY-1784.
+    read: input => {
+      if (!input.disk) return [{ id: '', used: null, bound: null, detail: 'free space could not be read', reclaimable: 0 }];
+      const judged = judgeWorktreeDisk({ freeBytes: input.disk.freeBytes, thresholdBytes: input.disk.thresholdBytes, pass: input.disk.pass, standing: input.disk.standing, reclaimable: input.disk.reclaimable }, input.now);
+      return [{ id: '', used: input.disk.totalBytes - input.disk.freeBytes, bound: input.disk.totalBytes, reclaimable: input.disk.reclaimable ?? 0, warnBelow: judged.warnBelow, ...(judged.answered ? { answered: true } : {}),
+        detail: `${input.disk.path}${judged.detail ? `; ${judged.detail}` : ''}` }];
+    },
   },
   {
     id: 'tmp-inodes', title: 'Host /tmp inodes', unit: 'inodes',
@@ -720,13 +735,55 @@ export function loadedRevision(root: string, pid: number, run: Run = runCommand,
   } catch { return null; }
 }
 
-export async function readDisk(root: string, config: MasterConfig) {
+/** What the worktree-disk reading takes from the daemon cursor (GY-1784): the latest worktree-reclaim pass and the standing fault lines. */
+export interface DiskCursor { reclaim: WorktreePass | null; open: Record<string, string> }
+/**
+ * The cursor's reclaim summary and open fault lines, read as plain JSON from the daemon state file:
+ * a reading never fails on a cursor another version wrote, and never waits for the full parse the
+ * loop makes of it. Null when there is no cursor, or it cannot be read.
+ */
+export async function readDiskCursor(config: MasterConfig): Promise<DiskCursor | null> {
+  // Imported when first read: the daemon state reaches this module through the dispatcher, so a static import would be a cycle.
+  const { daemonStatePath, reclaimSummarySchema } = await import('./daemon/state.js');
+  try {
+    const parsed = JSON.parse(await readFile(daemonStatePath(config), 'utf8')) as { reclaim?: unknown; faults?: { open?: unknown } } | null;
+    const reclaim = reclaimSummarySchema.safeParse(parsed?.reclaim);
+    const open = parsed?.faults?.open;
+    return { reclaim: reclaim.success ? worktreePassOf(reclaim.data) : null, open: open && typeof open === 'object' && !Array.isArray(open) ? open as Record<string, string> : {} };
+  } catch { return null; }
+}
+/**
+ * The worktree volume's reading: free bytes on the volume holding .graphyard/worktrees (the
+ * checkout's volume stands in before the directory exists) beside the loop's latest reclaim pass,
+ * whether the reading's fault stands, and what is disposable now — the pass and the standing line
+ * from `cursor` (read here when the caller passes none), the plan over the cached inventory and
+ * `work` when the caller passes it (GY-1784, and its review: the answered gate judges the plan beside
+ * the pass, so the registry and `master status`'s disk line cannot disagree on it).
+ */
+export async function readDisk(root: string, config: MasterConfig, cursor?: DiskCursor | null, plan?: { work: Work[]; now: number } | null): Promise<ResourceInputs['disk']> {
   const path = worktreesDirectory(root);
   for (const candidate of [path, root]) {
-    try { const info = await statfs(candidate); return { path, totalBytes: Number(info.blocks) * Number(info.bsize), freeBytes: Number(info.bavail) * Number(info.bsize), thresholdBytes: diskThresholdBytes(config) }; }
-    catch { /* the worktree directory may not exist yet: the checkout's volume stands in */ }
+    try {
+      const info = await statfs(candidate), read = cursor === undefined ? await readDiskCursor(config) : cursor;
+      return { path, totalBytes: Number(info.blocks) * Number(info.bsize), freeBytes: Number(info.bavail) * Number(info.bsize), thresholdBytes: diskThresholdBytes(config),
+        pass: read?.reclaim ?? null, standing: standingDiskLine(read?.open, 'resource-bound'),
+        ...(plan ? { reclaimable: await disposableWorktrees(root, config, plan) } : {}) };
+    } catch { /* the worktree directory may not exist yet: the checkout's volume stands in */ }
   }
   return null;
+}
+
+/**
+ * The assignment worktrees disposable now: the plan `master reclaim` acts on, over the cached
+ * inventory and the snapshot's work. Null when the inventory cannot be read, so a reading is
+ * never answered on a plan it does not know (GY-1784 review, AC-2).
+ */
+export async function disposableWorktrees(root: string, config: MasterConfig, { work, now }: { work: Work[]; now: number }): Promise<number | null> {
+  try {
+    const { entries, unreadable, held } = await statusWorktreeInventory(root, now), idleMs = reclaimIdleMs(config);
+    if (unreadable) return null;
+    return reclaimableNow(planWorktreeReclaim(entries, work, { now, idleMs }), entries, work, { idleMs, now, held });
+  } catch { return null; }
 }
 
 /** The most top-level /tmp entries a reading stats for its owner: a status read stays bounded on a host with a backlog. */
