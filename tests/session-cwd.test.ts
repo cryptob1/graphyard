@@ -499,6 +499,20 @@ test('unit:session-cwd-own-checkout — a restarted loop finds the research run 
   } finally { await fixture.cleanup(); }
 });
 
+test('unit:snapshot-executor-ignores-dirty-checkout — an executor loaded from a held snapshot runs its claims beside the dirty checkout it was left behind by (GY-1773)', async () => {
+  const fixture = await installed();
+  try {
+    const { root, config } = fixture;
+    await writeFile(join(root, 'src', 'loop.ts'), `${await readFile(join(root, 'src', 'loop.ts'), 'utf8')}\nexport const halfFinished = true;\n`);
+    const row = { id: 'a1', key: 'GY-852', work: 'w1', kind: 'dispatch', inputs: { kind: 'dispatch', target: 'implementation', epoch: 3 } } as unknown as ActionRow;
+    const run = (handler: unknown) => (handler as (action: unknown, identity: unknown) => Promise<unknown>)(row, { id: 'exec', host: 'machine-a' });
+    const snapshotted = controlPlaneHandlers(() => ({ ...config, url: '' }), loopEffects([{ key: 'GY-852', id: 'w1', lease: { epoch: 3, owner: 'graphyard-claude-1', expiresAt: iso(hour) }, plannedFiles: ['src/loop.ts'] }], { loadedSnapshot: () => 'a'.repeat(40) }));
+    await assert.rejects(run(snapshotted.dispatch!), (error: Error) => !/holds uncommitted work/.test(error.message), 'the dirty checkout refuses nothing');
+    const beside = controlPlaneHandlers(() => config, loopEffects([], { loadedSnapshot: () => null }));
+    await assert.rejects(run(beside.dispatch!), /holds uncommitted work/, 'an executor loaded from the checkout is still refused');
+  } finally { await fixture.cleanup(); }
+});
+
 test('unit:coordinator-checkout-drift-detected — the loop cycles nothing from a dirty coordinator checkout and raises attention naming the paths', async () => {
   const fixture = await installed();
   try {
@@ -527,7 +541,7 @@ test('unit:coordinator-checkout-drift-detected — the loop cycles nothing from 
   } finally { await fixture.cleanup(); }
 });
 
-test('unit:coordinator-checkout-drift-detected — the loop checks the checkout every cycle: a tree that turns dirty under a running loop is attention, and the self-upgrade waits', async () => {
+test('unit:coordinator-checkout-drift-detected — the loop checks the checkout every cycle: a tree that turns dirty under a running loop is attention, and the self-upgrade still runs (GY-1773: a dirty tree is upgraded by snapshot, never a reason to wait)', async () => {
   const fixture = await installed();
   try {
     const { config, cleanup } = fixture;
@@ -543,10 +557,14 @@ test('unit:coordinator-checkout-drift-detected — the loop checks the checkout 
     const state = emptyDaemonState(config);
     await runDaemon(config, state, loopEffects([], { selfUpgrade: async () => { upgrades++; return { outcome: 'skipped' as const, reason: 'nothing deployed yet' }; } }),
       loopOptions(fixture, { checkout }));
-    assert.equal(upgrades, 0, 'the self-upgrade is skipped from the cycle the tree turned dirty');
+    // GY-1773: the dirty tree used to skip the self-upgrade here, and left the loop on stale code
+    // for as long as it stood; it is escalated as before, and the upgrade runs — from a dirty tree
+    // it snapshots the merged commit under .graphyard/held-cli and restarts onto that.
+    assert.equal(upgrades, 1, 'the self-upgrade runs from the cycle the tree turned dirty: a dirty tree holds it back no longer');
     const escalation = state.actions['escalation:dirty-checkout'];
     assert.ok(escalation, 'the turned-dirty tree is raised as attention');
     assert.match(escalation.detail, /src\/loop\.ts/);
+    assert.match(escalation.detail, /The self-upgrade is not held by it: a merged release restarts the loop and the executors onto a held snapshot of it, the checkout left where it stands/, 'and says the upgrade is not held by it');
     await cleanup();
   } finally { await fixture.cleanup(); }
 });

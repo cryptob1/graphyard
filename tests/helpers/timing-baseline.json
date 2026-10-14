@@ -800,6 +800,7 @@
     "tests/unproduced-manual-attestation.test.ts": 537,
     "tests/unresolved-threads.test.ts": 816,
     "tests/up-control-plane.test.ts": 2500,
+    "tests/upgrade-dirty-snapshot.test.ts": 4000,
     "tests/upgrade-slot-restart.test.ts": 1800,
     "tests/user-manager-faults.test.ts": 9309,
     "tests/validation.test.ts": 34631,
