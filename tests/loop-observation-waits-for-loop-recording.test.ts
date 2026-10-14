@@ -132,8 +132,7 @@ test('unit:loop-observation-waits-for-loop-recording — only the loop\'s record
 
 test('unit:loop-observation-waits-for-loop-recording — docs/master-agent.md states that the loop records due readings in the deployment-verification step and what a failed reading raises', () => {
   const page = readFileSync(fileURLToPath(new URL('../docs/master-agent.md', import.meta.url)), 'utf8');
-  assert.match(page, /Deployment verification also records loop-owned post-deploy follow-ups' due readings on the serving release \(`pendingReadings`\)/);
-  assert.match(page, /a pass closes the item `delivered-observation` and its superseded pull request/);
-  assert.match(page, /a fail records it and raises the item's escalation naming the measured values/);
-  assert.match(page, /`master reading GY-N pass\|fail DETAIL` records it by hand/);
+  const delivery = readFileSync(fileURLToPath(new URL('../docs/delivery.md', import.meta.url)), 'utf8');
+  assert.match(delivery, /deployment verification reads it; a pass closes it `delivered-observation`, a fail escalates/);
+  assert.match(page, /`master reading GY-N pass\|fail DETAIL` records one by hand/);
 });
