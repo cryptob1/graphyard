@@ -23,7 +23,7 @@ import { baseRefreshConflict } from '../merge-queue.js'; import { docsSyncRoute 
 import { throughputDecisionAdopts, throughputRoutineDecision, wakeObservationJob } from './cycle-delivery.js';
 import { createApproverSupervisor } from './cycle-approvers.js';
 import { boundedDecisions, decisionBudget, decisionCallCarried, deferredFirst, settleDeferred } from './decision-budget.js'; import { boundedCalls, recordCarried, stepCallCarried } from './step-budget.js';
-import { staleReleaseStep } from './stale-releases.js'; import { caseChangeStep } from './case-change-routing.js';
+import { staleReleaseStep } from './stale-releases.js';
 import { closeStanding, closingItems, recordingWrites, staleCloseStep } from './stale-closes.js';
 /** The approval-watch key prefix of a hand-launched approver, re-exported for the blocker step (GY-403); `approverCalls`: the approvers step's calls (cycle-approvers.ts), bounded like the decisions step's own `decide` (GY-1774), a launch on the launcher beside the cycle using the effects beneath the bound; `agents` is the runtime inventory the step reads in place of an absent `herdr`, bounded the same. */
 export { handWatchPrefix }; const approverCalls: readonly (keyof DaemonEffects)[] = ['approver', 'endRegistrySession', 'resume', 'withdraw', 'closeSession', 'herdr', 'agents', 'approverLaunches', 'approverLaunch', 'sessionOutput', 'recordSession', 'holdAccount', 'reportCapacity', 'reconcileSessions'];
@@ -596,6 +596,4 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   await staleCloseStep(cycle, effects, written);
   // 4c+++. A stale release of a backlog item is asked again, whoever asked first (GY-1315): last, so its backlog reads hold nothing above.
   await staleReleaseStep(cycle, effects);
-  // 4c++++. A goal's requested case change goes to an independent approver, its verdict applied as case-change-approve or case-change-refuse (GY-1805).
-  await caseChangeStep(cycle, budgetLeft); // under the decisions step's own budget: spent, it defers the changes
 }

@@ -27,11 +27,11 @@ export type BoundedStep = 'decisions' | 'approvers' | 'blockers' | 'dispatch' | 
  * launch the launcher runs beside the cycle, a triage run settling minutes later — holds no cycle,
  * so it passes through unbounded, exactly as it did before.
  */
-export function stepBudget(now: () => number, intervalMs: number, outerLeft: () => number = () => Number.POSITIVE_INFINITY) {
+export function stepBudget(now: () => number, intervalMs: number) {
   const startedAt = now(), wallStartedAt = Date.now(), budgetMs = stepBudgetMs(intervalMs);
   let ended = false;
-  // A step nested in another's budget never outlives what that one has left. The spent share is the larger of the loop's clock and the wall, so a fixed or simulated clock never lets a step go on past its budget on the wall.
-  return { budgetMs, left: (): number | null => ended ? null : Math.max(0, Math.min(outerLeft(), budgetMs - Math.max(now() - startedAt, Date.now() - wallStartedAt))), end: () => { ended = true; } };
+  // The spent share is the larger of the loop's clock and the wall, so a fixed or simulated clock never lets a step go on past its budget on the wall.
+  return { budgetMs, left: (): number | null => ended ? null : Math.max(0, budgetMs - Math.max(now() - startedAt, Date.now() - wallStartedAt)), end: () => { ended = true; } };
 }
 
 /** A call that passed its bound (GY-1766/GY-1774): the per-call bound, or the step budget left it is capped by, or a budget already spent before the call could be made. Its work stays owed, with the attempt recorded, and is retried next cycle. */
@@ -359,8 +359,8 @@ export async function retryOwedWrites(cycle: CarriedCycle, calls: readonly (keyo
  * `waiting` and retried next cycle, the best-effort writes owed to the step's calls are retried first,
  * and once the step returns the budget ends, so a launch it handed to the launcher passes through unbounded.
  */
-export async function withinStepBudget<T>(cycle: Cycle, step: BoundedStep, calls: readonly (keyof DaemonEffects)[], body: (bounded: Cycle, budgetLeft: () => number | null) => Promise<T>, identity: Pick<BoundOptions, 'key'> = {}, outerLeft?: () => number): Promise<T> {
-  const budget = stepBudget(cycle.now, (cycle.config?.run?.intervalSeconds ?? 20) * 1000, outerLeft); // a cycle built by hand (a step's own test) may carry no run settings
+export async function withinStepBudget<T>(cycle: Cycle, step: BoundedStep, calls: readonly (keyof DaemonEffects)[], body: (bounded: Cycle, budgetLeft: () => number | null) => Promise<T>, identity: Pick<BoundOptions, 'key'> = {}): Promise<T> {
+  const budget = stepBudget(cycle.now, (cycle.config?.run?.intervalSeconds ?? 20) * 1000); // a cycle built by hand (a step's own test) may carry no run settings
   // Nested steps (the resume step runs inside the sessions step) bound the effects beneath every earlier bound, never a bound's own race.
   const effects = boundedCalls(unboundedEffects(cycle.effects), cycle.state as DaemonState, cycle.now, budget.left, { step, calls, ...identity });
   const bounded: Cycle = { ...cycle, effects, isolate: carriedIsolate({ ...cycle, effects }, step) };
