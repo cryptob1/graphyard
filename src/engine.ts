@@ -681,19 +681,30 @@ class ReconcileContended extends Error {}
  * One reconciliation tick's outcome (GY-1115, GY-1290): every candidate is evaluated or deferred.
  * `writes` counts the items its batches wrote, and `lockWaitMs` is the longest a batch waited in
  * line for the coordination lock before writing them: the one place a tick waits on other writers.
+ * `full` says why the tick evaluated every live item, or is null when it evaluated only the items
+ * whose inputs moved, and `lagMs` is the event-loop lag sampled over the tick's window (GY-1777),
+ * null when the window held no sample.
  */
-export interface ReconcileTick { at: string; candidates: number; evaluated: number; deferred: number; maxAttempts: number; ms: number; writes: number; lockWaitMs: number }
+export interface ReconcileTick { at: string; candidates: number; evaluated: number; deferred: number; maxAttempts: number; ms: number; writes: number; lockWaitMs: number; full: ReconcileFull | null; lagMs: { p50: number; max: number } | null }
+/** One item whose fleet face moved (GY-1777): which face fields, or `new` for an item the view first read and `gone` for one deleted. */
+export interface FaceMove { id: string; key: string; fields: string[] }
+/**
+ * Why a tick evaluated every live item (GY-1777): the kept view was empty (`view`: the first pass
+ * of a process, or one after a reset), the merge configuration changed, the full-evaluation
+ * interval elapsed, or another writer moved a fleet face; `moved` lists the faces that moved.
+ */
+export interface ReconcileFull { cause: 'view' | 'configuration' | 'interval' | 'faces'; moved: FaceMove[] }
 
 /** One item in the reconciliation view kept between passes (GY-1124). */
 interface ReconcileEntry { number: number; work: Work; version: string; settled: boolean; face: string }
 /** A write a reconciliation batch planned (GY-1290): its evaluation of the item, on a copy, at the row version and the clock it read. */
 interface ReconcilePlan { id: string; work: Work; version: string; now: Date }
 /** One planned write, committed: whether it wrote, whether later planned items must be evaluated again, and what to keep of it once committed. */
-interface ReconcileWritten { wrote: boolean; stale: boolean; faceMoved: boolean; saved: SavedVersion[]; apply: () => void }
+interface ReconcileWritten { wrote: boolean; stale: boolean; faceMoved: FaceMove | null; saved: SavedVersion[]; apply: () => void }
 /** The running pass's kept view and its readers, as one planned write needs them. */
 interface ReconcilePass {
   fleet: Map<string, ReconcileEntry>; all: () => Work[]; view: () => void; lockWait: (ms: number) => void;
-  versionsOf: (db: PoolClient) => Promise<Map<string, string>>; moved: (versions: Map<string, string>) => string[]; reread: (db: PoolClient, ids: string[]) => Promise<boolean>;
+  versionsOf: (db: PoolClient) => Promise<Map<string, string>>; moved: (versions: Map<string, string>) => string[]; reread: (db: PoolClient, ids: string[]) => Promise<FaceMove[]>;
 }
 /**
  * What other items' evaluations can read of an item (GY-1124): its document without the fields a
@@ -701,8 +712,11 @@ interface ReconcilePass {
  * and renewal count (GY-1276), and the assignment's session start the first renewal stamps
  * (GY-1499). A heartbeat or an executor's claim renewal leaves the face unchanged, so the pass
  * after it evaluates only the renewed item; any other write changes it, and
- * the pass evaluates every live item against it. A claim expiring is a move of the clock alone,
- * which the bounded full evaluation (`reconcileFullEvaluationMs`) catches up.
+ * the pass evaluates every live item against it, unless the write was a reconciliation pass's own
+ * (GY-1777): that pass evaluated against it as planned, so the next evaluates only the items that
+ * read it by reference (`readsFace`). A claim expiring is a move of the clock alone, which the
+ * bounded full evaluation (`reconcileFullEvaluationMs`) catches up, as it does any other reader of
+ * a face a pass's own write moved.
  */
 function fleetFace(work: Work) {
   const { revision: _revision, updatedAt: _updatedAt, lease, actionQueue, lastAssignment, ...rest } = work;
@@ -716,6 +730,61 @@ function fleetFace(work: Work) {
     }),
   };
   return stableJson({ ...rest, lastAssignment: assignment, actionQueue: actions, lease: lease ? { owner: lease.owner, epoch: lease.epoch } : null });
+}
+/**
+ * The face fields that differ between two fleet faces (GY-1777), as the slow-tick warning names
+ * them: `new` when the view held no face before, `gone` when it holds none after.
+ */
+function faceFields(before: string, after: string): string[] {
+  if (!before) return ['new'];
+  if (!after) return ['gone'];
+  const a = JSON.parse(before) as Record<string, unknown>, b = JSON.parse(after) as Record<string, unknown>;
+  return [...new Set([...Object.keys(a), ...Object.keys(b)])].filter(field => JSON.stringify(a[field]) !== JSON.stringify(b[field])).sort();
+}
+/** Whether `work`'s evaluation reads `move`'s item by reference (GY-1777): as a dependency, or as a child it was split into. */
+function readsFace(work: Work, move: FaceMove) {
+  return work.dependencies.includes(move.id) || (work.children ?? []).includes(move.key);
+}
+/** The slow-tick warning's account of a full pass (GY-1777): at most five moved faces by key and fields, then a count. */
+function describeFull(full: ReconcileFull) {
+  const moved = full.moved.length ? `the fleet face of ${full.moved.slice(0, 5).map(move => `${move.key} (${move.fields.join(', ')})`).join(', ')}${full.moved.length > 5 ? ` and ${full.moved.length - 5} more` : ''} moved` : '';
+  const cause = { view: 'the kept view was empty (the first pass of this process, or one after a reset)', configuration: 'the merge configuration changed', interval: 'the full-evaluation interval elapsed', faces: moved }[full.cause];
+  return full.cause !== 'faces' && moved ? `${cause}, and ${moved}` : cause;
+}
+/** The event-loop lag sampler's timer interval (GY-1777); a sample is that timer's overrun past it. */
+const eventLoopLagResolutionMs = 10;
+/** The most samples one window keeps (GY-1777): ten minutes at the resolution; a longer window keeps its first ten minutes. */
+const eventLoopLagSamples = 60_000;
+/**
+ * The event-loop lag over one reconciliation tick's window (GY-1777): a timer due every
+ * `eventLoopLagResolutionMs` records how far past due it ran, the reading
+ * `perf_hooks.monitorEventLoopDelay` gives, kept here because that histogram cannot be windowed
+ * per tick (on Node 24 `reset()` stops it recording, and a histogram enabled after one was disabled
+ * never fires). The timer holds the process open for nothing.
+ */
+class EventLoopLag {
+  private samples: number[] = [];
+  private timer: NodeJS.Timeout | null = null;
+  private due = 0;
+  /** Open a window: samples from now on belong to it. */
+  start() {
+    this.stop();
+    this.due = performance.now() + eventLoopLagResolutionMs;
+    this.timer = setInterval(() => {
+      const now = performance.now();
+      if (this.samples.length < eventLoopLagSamples) this.samples.push(Math.max(0, now - this.due));
+      this.due = now + eventLoopLagResolutionMs;
+    }, eventLoopLagResolutionMs);
+    this.timer.unref();
+  }
+  /** The window's lag so far: p50 and max in ms, or null when the window holds no sample yet. */
+  read(): { p50: number; max: number } | null {
+    if (!this.samples.length) return null;
+    const sorted = [...this.samples].sort((a, b) => a - b);
+    return { p50: Math.round(sorted[Math.ceil(sorted.length / 2) - 1]), max: Math.round(sorted[sorted.length - 1]) };
+  }
+  /** Close the window and forget its samples. */
+  stop() { if (this.timer) clearInterval(this.timer); this.timer = null; this.samples = []; }
 }
 /** The longest reconciliation goes between full evaluations: `GRAPHYARD_RECONCILE_FULL_MS`, 2000..300000 ms, default 10000 (GY-1124). */
 export function configuredReconcileFullMs(value = process.env.GRAPHYARD_RECONCILE_FULL_MS, fallback = 10_000): number {
@@ -2653,12 +2722,29 @@ export class Engine {
   /** When the last full evaluation began (the database clock, ms), and the configuration it evaluated under. */
   private reconcileFullAt = -Infinity;
   private reconcileConfig = '';
-  /** A committed reconciliation write changed what other items read of it: the next pass evaluates every live item. */
-  private reconcileFaceMoved = false;
+  /**
+   * Fleet faces a writer outside the running pass moved since the last pass decided what to
+   * evaluate, by item (GY-1124, GY-1777): the next pass evaluates every live item against them,
+   * and a slow tick names them.
+   */
+  private readonly reconcileFaceMoves = new Map<string, FaceMove>();
+  /**
+   * Fleet faces the pass's own planned writes moved (GY-1777): the pass evaluated against them as
+   * planned, so they do not make the next pass full; it evaluates the items that read them by
+   * reference, and the bounded full evaluation catches up any other reader.
+   */
+  private readonly reconcileOwnMoves = new Map<string, FaceMove>();
+  /** The event-loop lag sampler (GY-1777), open over each tick's window and read into the tick. */
+  private readonly eventLoopLag = new EventLoopLag();
   /** What the last pass read and evaluated: the documents it fetched, the items it evaluated, and whether it was full. */
   lastReconcile = { documentsRead: 0, evaluated: 0, live: 0, full: false };
   /** Forget the kept view, so the next pass reads the whole fleet again (GY-1124). */
-  resetReconcileView() { this.reconcileView.clear(); this.reconcileOwed.clear(); this.reconcileFullAt = -Infinity; this.reconcileFaceMoved = false; }
+  resetReconcileView() { this.reconcileView.clear(); this.reconcileOwed.clear(); this.reconcileFullAt = -Infinity; this.reconcileFaceMoves.clear(); this.reconcileOwnMoves.clear(); }
+  /** Note a face another writer moved, merging the fields of one noted already (GY-1777). */
+  private noteFaceMove(move: FaceMove) {
+    const known = this.reconcileFaceMoves.get(move.id);
+    this.reconcileFaceMoves.set(move.id, known ? { ...known, fields: [...new Set([...known.fields, ...move.fields])].sort() } : move);
+  }
   private reconcileRunning: Promise<void> | null = null;
   private reconcileTrailing: Promise<void> | null = null;
   /**
@@ -2711,7 +2797,10 @@ export class Engine {
    * configuration did; an item whose lease has lapsed or whose standing escalations read the
    * ledger; and the items an earlier pass deferred. Every
    * `reconcileFullEvaluationMs` the pass evaluates every live item, for the inputs only the
-   * clock moves. A pass after a heartbeat therefore reads one document and evaluates one item.
+   * clock moves. A pass after a heartbeat therefore reads one document and evaluates one item. A
+   * face the pass's own writes moved does not make the next pass full (GY-1777): the next pass
+   * evaluates the items that read it by reference, and a tick over `reconcileSlowWarnMs` names
+   * what made it full and the event-loop lag it ran under.
    *
    * Each batch evaluates on the background lane (a bounded share of the pool) holding no lock at
    * all (GY-1290): one short transaction compares every row's version with the view, re-reads only
@@ -2733,33 +2822,40 @@ export class Engine {
    */
   private async reconcileTick() {
     const tickStarted = performance.now();
+    // The event-loop lag over the tick's window (GY-1777): a timer's overrun past its 10 ms
+    // resolution, so a tick slowed by a starved loop is told apart from one waiting on I/O.
+    this.eventLoopLag.start();
+    try { await this.reconcilePass(tickStarted); }
+    finally { this.eventLoopLag.stop(); }
+  }
+  private async reconcilePass(tickStarted: number) {
     // A process's first pass would otherwise open on a cold stand-in cache and project every open
     // document while it holds the coordination lock: warm it first, outside the lock (GY-1042).
     if (!this.lockedReadsWarm) { await warmLockedReads(this.store.pool); this.lockedReadsWarm = true; }
     const fleet = this.reconcileView;
     let all: Work[] = [], candidates: string[] = [], next = 0, documentsRead = 0, full = false;
-    const tick: ReconcileTick = { at: new Date().toISOString(), candidates: 0, evaluated: 0, deferred: 0, maxAttempts: 0, ms: 0, writes: 0, lockWaitMs: 0 };
+    const tick: ReconcileTick = { at: new Date().toISOString(), candidates: 0, evaluated: 0, deferred: 0, maxAttempts: 0, ms: 0, writes: 0, lockWaitMs: 0, full: null, lagMs: null };
     const view = () => { all = [...fleet.values()].sort((a, b) => a.number - b.number).map(entry => entry.work); };
     // Only the pass's candidates and the rows not settled now are versioned: a settled delivery that stays settled is never visited.
     const versionsOf = async (db: PoolClient) => new Map<string, string>((await db.query(reconcileVersionsSql, [candidates])).rows.map(row => [row.id, row.version]));
     const moved = (versions: Map<string, string>) => [...versions].filter(([id, version]) => fleet.get(id)?.version !== version).map(([id]) => id);
     // Read moved rows again into the view. Read mid-pass, a row another writer moved in a way other items
-    // read is owed to them on the next pass; read for the pass's own decision (`owe` false), whether any
-    // face moved is returned instead.
-    const reread = async (db: PoolClient, ids: string[], { owe = true }: { owe?: boolean } = {}) => {
-      if (!ids.length) return false;
+    // read is owed to them on the next pass; read for the pass's own decision (`owe` false), the faces
+    // that moved are only returned.
+    const reread = async (db: PoolClient, ids: string[], { owe = true }: { owe?: boolean } = {}): Promise<FaceMove[]> => {
+      if (!ids.length) return [];
       const rows = (await db.query(reconcileRereadSql, [ids])).rows as { id: string; number: string; version: string; document: Work }[];
       documentsRead += rows.length;
-      let faceMoved = false;
+      const moves: FaceMove[] = [];
       for (const row of rows) {
-        const face = fleetFace(row.document), before = fleet.get(row.id)?.face;
-        if (before !== face) { faceMoved = true; if (owe) this.reconcileFaceMoved = true; }
+        const face = fleetFace(row.document), before = fleet.get(row.id)?.face ?? '';
+        if (before !== face) { const move = { id: row.id, key: row.document.key, fields: faceFields(before, face) }; moves.push(move); if (owe) this.noteFaceMove(move); }
         fleet.set(row.id, { number: Number(row.number), work: row.document, version: row.version, settled: false, face });
       }
       view();
-      return faceMoved;
+      return moves;
     };
-    let opened = false, decided = false, changed: string[] = [], config = '';
+    let opened = false, decided = false, changed: string[] = [], config = '', fullCause: ReconcileFull['cause'] | null = null;
     const pass: ReconcilePass = { fleet, all: () => all, view, versionsOf, moved, reread, lockWait: ms => { tick.lockWaitMs = Math.max(tick.lockWaitMs, Math.round(ms)); } };
     try {
       for (;;) {
@@ -2771,10 +2867,11 @@ export class Engine {
             const listed = (await db.query(reconcileRowsSql)).rows as { id: string; number: string; version: string; settled: boolean }[];
             config = stableJson({ ciAppIds: this.ciAppIds });
             // Measured on the clock evaluation reads, so time the gates see pass is what brings the catch-up.
-            full = !fleet.size || config !== this.reconcileConfig || !(now.getTime() - this.reconcileFullAt < this.reconcileFullEvaluationMs);
+            fullCause = !fleet.size ? 'view' : config !== this.reconcileConfig ? 'configuration' : !(now.getTime() - this.reconcileFullAt < this.reconcileFullEvaluationMs) ? 'interval' : null;
+            full = fullCause !== null;
             if (full) this.reconcileFullAt = now.getTime();
             const versions = new Map(listed.map(row => [row.id, row]));
-            for (const id of [...fleet.keys()]) if (!versions.has(id)) { fleet.delete(id); this.reconcileFaceMoved = true; }
+            for (const id of [...fleet.keys()]) if (!versions.has(id)) { this.noteFaceMove({ id, key: fleet.get(id)!.work.key, fields: ['gone'] }); fleet.delete(id); }
             changed = listed.filter(row => { const entry = fleet.get(row.id); return !entry || entry.version !== row.version || entry.settled !== row.settled; }).map(row => row.id);
             // Under the lock the pass reads no document whole (GY-1027): a row that moved is held as its
             // stand-in — a settled delivery's summary, an open item's projection, served from the
@@ -2786,7 +2883,7 @@ export class Engine {
               const settled = isSettledSummary(document);
               if (!settled) { fleet.set(document.id, { number, work: document, version: row.version, settled, face: entry?.face ?? '' }); continue; }
               const face = fleetFace(document);
-              if (entry?.face !== face) this.reconcileFaceMoved = true;
+              if (entry?.face !== face) this.noteFaceMove({ id: document.id, key: document.key, fields: faceFields(entry?.face ?? '', face) });
               fleet.set(document.id, { number, work: document, version: row.version, settled, face });
             }
             view();
@@ -2794,8 +2891,13 @@ export class Engine {
             const swept = await sweepDirectMerges(db, all, await directMergeWindows(db, this.directMergeEnvironment), now);
             if (swept.length) {
               const after = await versionsOf(db);
-              for (const work of swept) { const entry = fleet.get(work.id); if (entry) { entry.work = work; entry.version = after.get(work.id) ?? ''; } }
-              this.reconcileFaceMoved = true;
+              for (const work of swept) {
+                const entry = fleet.get(work.id);
+                if (!entry) continue;
+                const face = fleetFace(work), fields = faceFields(entry.face, face);
+                this.noteFaceMove({ id: work.id, key: work.key, fields: fields.length ? fields : ['swept'] });
+                Object.assign(entry, { work, version: after.get(work.id) ?? '', face });
+              }
               view();
             }
             opened = true;
@@ -2805,12 +2907,16 @@ export class Engine {
             // The rows the opening held as stand-ins, read whole outside the coordination lock; then the
             // pass decides what it evaluates: the items whose own row moved, plus every live item when
             // another's fleet face moved, and the lapsed, escalated and owed ones.
-            const faceMoved = (await reread(db, [...fleet].filter(([, entry]) => !entry.settled && isStandIn(entry.work)).map(([id]) => id), { owe: false })) || this.reconcileFaceMoved;
-            this.reconcileFaceMoved = false;
+            const moved = [...await reread(db, [...fleet].filter(([, entry]) => !entry.settled && isStandIn(entry.work)).map(([id]) => id), { owe: false }), ...this.reconcileFaceMoves.values()];
+            this.reconcileFaceMoves.clear();
+            // The pass's own writes moved these faces as it evaluated against them (GY-1777): only their readers by reference are due.
+            const own = [...this.reconcileOwnMoves.values()];
+            this.reconcileOwnMoves.clear();
             const live = [...fleet].filter(([, entry]) => !entry.settled).sort(([, a], [, b]) => a.number - b.number).map(([id]) => id);
-            const due = full || faceMoved ? new Set(live) : new Set([
+            if (full || moved.length) tick.full = { cause: fullCause ?? 'faces', moved: moved.sort((a, b) => (fleet.get(a.id)?.number ?? Infinity) - (fleet.get(b.id)?.number ?? Infinity) || a.key.localeCompare(b.key)) };
+            const due = tick.full ? new Set(live) : new Set([
               ...changed, ...this.reconcileOwed,
-              ...live.filter(id => { const work = fleet.get(id)!.work; return !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime() || standingEscalations(work).length > 0; }),
+              ...live.filter(id => { const work = fleet.get(id)!.work; return !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime() || standingEscalations(work).length > 0 || own.some(move => readsFace(work, move)); }),
             ]);
             if (full) this.reconcileConfig = config;
             candidates = live.filter(id => due.has(id)); tick.candidates = candidates.length;
@@ -2862,7 +2968,7 @@ export class Engine {
           // face it moved is owed to the rest of the fleet.
           written.apply(); rememberSaved(written.saved);
           this.reconcileOwed.delete(plans[index].id);
-          if (written.faceMoved) this.reconcileFaceMoved = true;
+          if (written.faceMoved) this.reconcileOwnMoves.set(written.faceMoved.id, written.faceMoved);
           tick.maxAttempts = Math.max(tick.maxAttempts, attempts + 1); tick.evaluated++; if (written.wrote) tick.writes++;
           stale = written.stale; attempts = 0; index++;
         }
@@ -2877,9 +2983,15 @@ export class Engine {
     this.lastReconcile = { documentsRead, evaluated: tick.evaluated, live: [...fleet.values()].filter(entry => !entry.settled).length, full };
     const elapsedMs = performance.now() - tickStarted;
     tick.ms = Math.round(elapsedMs);
+    tick.lagMs = this.eventLoopLag.read();
     this.reconcileTicks.push(tick);
     if (this.reconcileTicks.length > 20) this.reconcileTicks.shift();
-    if (elapsedMs >= this.reconcileSlowWarnMs) console.warn(`reconciliation tick took ${Math.round(elapsedMs)} ms for ${this.lastReconcile.live} item(s) (${tick.evaluated} evaluated, ${tick.writes} written, longest wait for the coordination lock ${tick.lockWaitMs} ms), over the ${this.reconcileSlowWarnMs} ms bound; find what held the coordination lock in the server logs`);
+    if (elapsedMs >= this.reconcileSlowWarnMs) {
+      // GY-1777: the warning says what made the pass full and the loop's lag, so a starved process is told from a held lock.
+      const why = tick.full ? `every live item evaluated because ${describeFull(tick.full)}` : `${tick.candidates} candidate(s) whose inputs moved`;
+      const lag = tick.lagMs ? `event-loop lag p50 ${tick.lagMs.p50} ms, max ${tick.lagMs.max} ms over the tick` : 'no event-loop lag sample over the tick';
+      console.warn(`reconciliation tick took ${Math.round(elapsedMs)} ms for ${this.lastReconcile.live} item(s) (${tick.evaluated} evaluated, ${tick.writes} written, longest wait for the coordination lock ${tick.lockWaitMs} ms; ${why}; ${lag}), over the ${this.reconcileSlowWarnMs} ms bound; a high lag is this process starved of CPU, otherwise find what held the coordination lock in the server logs`);
+    }
   }
   /**
    * Write one item a reconciliation batch planned, in a transaction of its own (GY-1290). It waits
@@ -2899,9 +3011,9 @@ export class Engine {
       const waitStarted = performance.now(), locked = await this.coordinationLockWithin(db, this.reconcileCommitLockWaitMs);
       pass.lockWait(performance.now() - waitStarted);
       if (!locked) throw new ReconcileContended();
-      if (await pass.reread(db, pass.moved(await pass.versionsOf(db)))) stale = true;
+      if ((await pass.reread(db, pass.moved(await pass.versionsOf(db)))).length) stale = true;
       const row = (await db.query(reconcileRowLockSql, [plan.id])).rows[0] as { version: string } | undefined;
-      if (!row || !pass.fleet.has(plan.id)) return { wrote: false, stale, faceMoved: false, saved: [], apply: () => {} };
+      if (!row || !pass.fleet.has(plan.id)) return { wrote: false, stale, faceMoved: null, saved: [], apply: () => {} };
       if (row.version !== pass.fleet.get(plan.id)!.version) await pass.reread(db, [plan.id]);
       const entry = pass.fleet.get(plan.id)!;
       let work = plan.work;
@@ -2912,11 +3024,12 @@ export class Engine {
         const wrote = await this.reconcileItem(db, work, pass.all(), now);
         // Items the batch evaluated after this one read it as evaluated: if it came out otherwise, they are evaluated again too.
         if (fleetFace(work) !== fleetFace(plan.work)) stale = true;
-        if (!wrote) return { wrote: false, stale, faceMoved: false, saved: [], apply: () => {} };
+        if (!wrote) return { wrote: false, stale, faceMoved: null, saved: [], apply: () => {} };
       }
       const version = ((await db.query('SELECT xmin::text AS version FROM work_items WHERE id = $1', [plan.id])).rows[0] as { version: string }).version, face = fleetFace(work);
       const saved = await savedVersions(db, [work]);
-      return { wrote: true, stale, faceMoved: face !== entry.face, saved, apply: () => { Object.assign(entry, { work, version, face }); pass.view(); } };
+      const faceMoved = face !== entry.face ? { id: plan.id, key: work.key, fields: faceFields(entry.face, face) } : null;
+      return { wrote: true, stale, faceMoved, saved, apply: () => { Object.assign(entry, { work, version, face }); pass.view(); } };
     }, { lane: 'background', coordinationLock: false, retryStaleWrites: false });
   }
   /**
