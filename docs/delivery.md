@@ -7,14 +7,14 @@ Records intended releases, verifying observers ([rollback](recovery.md#rollback)
 
 Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`, `release/production` (moved only by `graphyard release`) to candidates' SHAs.
 
-- `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N first-parent merges since the last candidate (`GRAPHYARD_RC_MAX_PRS`, 10; rest queue); `.github/workflows/release-candidate.yml` cuts on loop dispatch (cron fallback). A cut holding the plane's goal record records `rc/ID`'s `pendingOutcomes`.
-- `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*` credentials); refused while an unjudged candidate under 4h serves.
-- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser`, suites ([below](#pre-merge-gate-and-release-candidate-validation); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`, reading [`pendingOutcomes`](validation.md#release-verdicts) off it: a pending outcome's case pends, never blocking.
+- `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N first-parent merges since the last candidate (`GRAPHYARD_RC_MAX_PRS`, 10; rest queue); `.github/workflows/release-candidate.yml` cuts on loop dispatch (cron fallback).
+- `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*` credentials); refused while an unjudged candidate <4h old serves.
+- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser`, suites ([below](#pre-merge-gate-and-release-candidate-validation); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`; a [pending](validation.md#release-verdicts) case never blocks.
 - `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`; `release verify --url URL` confirms.
 - Failed candidates file a [hold](validation.md#release-holds) per failed outcome, else a follow-up (`release follow-up ID`) as the [filing credential](#release-filing-credential).
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records advisory `rc-soak/ID`.
 
-**The master loop promotes** (`promote=true`) once main differs from the last `rc-production/` and cut SHAs, nothing is queued and `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`; 10, `0` off) passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`, `GRAPHYARD_PRODUCTION_URL`; no workflow; managed repositories run [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. A `GRAPHYARD_UAT_STATIC` site's [merge-writer](delivery-redesign.md#merge-writer) trials run pre-build required/uat cases uncredentialed: failing or secret-declaring required ones, or none runnable, fail it; timeouts re-queue. `release status` lists candidates; `release GY-N EPOCH` leases. Needs `vars.UAT_URL`/`PRODUCTION_URL`, tokens.
+**The master loop promotes** (`promote=true`) once main differs from the last `rc-production/` and cut SHAs, nothing is queued and `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`; 10, `0` off) passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`, `GRAPHYARD_PRODUCTION_URL`; no workflow; managed repositories run [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. A `GRAPHYARD_UAT_STATIC` site's [merge-writer](delivery-redesign.md#merge-writer) trials run pre-build required/uat cases uncredentialed: failing or secret-declaring required ones, or none runnable, fail it; timeouts re-queue (`mergeLedger.trial.preview`). `release status` lists candidates; `release GY-N EPOCH` leases. Needs `vars.UAT_URL`/`PRODUCTION_URL`, tokens.
 
 ### Release filing credential
 
@@ -28,7 +28,7 @@ Required: `typecheck`, `test` (`ci.yml`); per candidate `releaseCandidateTests`,
 
 ### One delivery path
 
-Exact-head gates merge; [candidates](#release-candidates) deploy. See [the redesign](delivery-redesign.md).
+Exact-head gates merge; [candidates](#release-candidates) deploy. [The redesign](delivery-redesign.md) has only Graphyard write main.
 
 ### Main guard
 
@@ -36,7 +36,7 @@ Every 30 s the main guard reruns, then reverts, merges failing required checks t
 
 ## Managed repositories
 
-`init --scan` splits checks (`delivery.mergeGate`, per-candidate); `--apply` renders `graphyard-release-candidate.yml` (cut on `candidateSchedule`, `--candidate-cron CRON|off`) and `graphyard-promotion.yml`. `deploy.adapter`: `railway` (`deploy.project`) or `command` (`deploy.uat`/`deploy.production` with `GRAPHYARD_CANDIDATE_SHA`; unset renders none). `--delivery per-pr` keeps per-PR checks; `install --plan` lists them.
+`init --scan` splits checks (`delivery.mergeGate`, per-candidate); `--apply` renders `graphyard-release-candidate.yml` (cut on `candidateSchedule`, `--candidate-cron CRON|off`) and `graphyard-promotion.yml`. `deploy.adapter`: `railway` (`deploy.project`) or `command` (`deploy.uat`/`deploy.production` with `GRAPHYARD_CANDIDATE_SHA`; unset renders none). `--delivery per-pr` keeps per-PR checks; `install --plan` lists resources.
 
 ```json
 {"kind":"environment","id":"production","expectedRevision":0,"repository":"owner/repository","url":"https://app.example.test","instance":"production-cluster","immutable":true,"services":["api","web"],"resources":["production-smoke-account"],"delivery":{"freshnessSeconds":300,"approvalRequired":true}}
