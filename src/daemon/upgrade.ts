@@ -135,7 +135,20 @@ export function detectLoopSupervisorUnit(options: { cgroup?: string | null } = {
 /** How the coordinator checkout stands: its commit, whether HEAD is detached, and whether tracked files differ from the commit (`dirtyPaths` names them). */
 export interface CheckoutState { commit: string | null; detached: boolean | null; dirty: boolean | null; dirtyPaths: string[]; branch: string | null }
 /** The paths of a porcelain status: the second of a rename's pair is the path the tree holds. */
-const porcelainPaths = (status: string) => status.split('\n').filter(line => line.length > 3).map(line => line.slice(3).split(' -> ').at(-1)!.trim()).filter(Boolean);
+const unquotePath = (path: string) => {
+  if (!path.startsWith('"') || !path.endsWith('"') || path.length < 2) return path;
+  const escapes: Record<string, number> = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11, '"': 34, '\\': 92 };
+  const bytes: number[] = [];
+  const body = path.slice(1, -1);
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] !== '\\') { bytes.push(...Buffer.from(body[i]!)); continue; }
+    const octal = body.slice(i + 1, i + 4);
+    if (/^[0-3][0-7]{2}$/.test(octal)) { bytes.push(parseInt(octal, 8)); i += 3; }
+    else { const code = escapes[body[++i] ?? '']; bytes.push(code ?? 92); }
+  }
+  return Buffer.from(bytes).toString('utf8');
+};
+const porcelainPaths = (status: string) => status.split('\n').filter(line => line.length > 3).map(line => unquotePath(line.slice(3).split(' -> ').at(-1)!.trim())).filter(Boolean);
 export async function checkoutState(root: string, run: ChildRun): Promise<CheckoutState> {
   const git = (...args: string[]) => run('git', ['-C', root, ...args]);
   let commit: string | null;

@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { daemonSummary, deploymentObservationSchema, emptyDaemonState, readDaemonState, runDaemon, writeDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { describeSelfUpgrade, heldCliPointer, holdCliAt, performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
+import { describeSelfUpgrade, heldCliPointer, holdCliAt, checkoutState, performSelfUpgrade, upgradeTouchesCode, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { releaseLag, promotionWait, readBaseTip, releaseLagGraceMs, upgradeRefusalAttention, type PromotionWait } from '../src/master/release-lag.js';
 import { owedUpgrade, readResources, resourceAttention } from '../src/master-resources.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
@@ -973,4 +973,11 @@ test('unit:docs-only-alignment-unaffected — a move touching no loaded code com
     assert.equal(state.upgrade.alignedRelease, loaded);
     assert.equal(fake.ancestryReads, 0, 'a docs-only move never asks whether production serves it');
   } finally { await dispose(); }
+});
+
+test('unit:gy-1773-quoted-porcelain-paths — a dirty loaded file whose name Git quotes is still named by its real path, so it counts as loaded code', async () => {
+  const status = ' M "src/a b.ts"\n M "src/caf\\303\\251.ts"\nR  "old.txt" -> "src/n\\"q.ts"\n';
+  const state = await checkoutState('/repo', async (_command, args) => args.includes('status') ? status : 'abc123\n');
+  assert.deepEqual(state.dirtyPaths, ['src/a b.ts', 'src/café.ts', 'src/n"q.ts']);
+  assert.equal(upgradeTouchesCode(state.dirtyPaths), true);
 });
