@@ -587,6 +587,22 @@ export const destructivePromptGuidance = 'Avoid any command that triggers your r
  * "fix forward" (GY-1477, GY-1567): rewriting a pushed branch is never granted, so the request says so.
  */
 export const branchRewriteGuidance = 'Never force-push or rewrite a branch you have pushed: your runtime refuses it, so fix a pushed commit forward with a new commit and push normally. ';
+/**
+ * The fast mechanical gates (GY-1797): the module and docs budget tests, the docs growth and
+ * glossary gates, the wall-clock bomb scan and the CI shard map, plus the docs page checker. Each
+ * runs locally in seconds, and each is a check CI fails a whole rework round on when a worker
+ * ships past it, so the request names them where the sync rule left the before-push discipline:
+ * after it, before the complete instruction. One exported constant beside the prompt, so the
+ * request (workerPrompt), its test (tests/worker-prompt-gates.test.ts) and the documentation
+ * (docs/coordination.md) read the same list; every entry is a test file or script the repository
+ * carries, and the test files run as one `npx tsx --test` command while each script runs on its own.
+ */
+export const workerFastGates = {
+  tests: ['tests/module-budgets.test.ts', 'tests/docs-budget.test.ts', 'tests/docs-growth-gate.test.ts', 'tests/docs-glossary.test.ts', 'tests/no-wall-clock-time-bombs.test.ts', 'tests/ci-shards.test.ts'],
+  scripts: ['scripts/check-docs.mjs'],
+} as const;
+/** The one sentence the request adds: the gates, their one command line, and what to do when one fails. */
+export const workerFastGatesSentence = `Before complete, run the fast gates — \`npx tsx --test ${workerFastGates.tests.join(' ')}\` and \`${workerFastGates.scripts.map(script => `node ${script}`).join(' and ')}\` — and fix what they name before pushing, since CI fails on each of them. `;
 export function workerPrompt(
   config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository'>>,
   work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'documentation' | 'description' | 'criteria' | 'researchBrief' | 'candidate' | 'plannedFiles' | 'submission' | 'pipeline'>>,
@@ -622,7 +638,7 @@ export function workerPrompt(
   // so the launcher says which trees are already there rather than leaving it to be guessed.
   const installed = dependencies?.shared.length ? `The assigned worktree needs no dependency install: ${dependencies.shared.map(entry => `${entry.name} ${entry.how === 'reachable' ? 'already resolves to' : 'is shared with'} the install at ${entry.source}`).join(', ')}, for this exact lockfile. Do not install dependencies again unless you change the lockfile. ` : '';
   const memoryDigest = projectMemoryDigest(memory, 'worker', { baseSha });
-  return `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them. `
+  return `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. ${workerFastGatesSentence}Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them. `
     + installed
     + (memoryDigest || '')
     + verificationMapDigest(verificationMaps, work.plannedFiles, 'worker')
