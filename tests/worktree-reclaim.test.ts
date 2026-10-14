@@ -279,6 +279,12 @@ test('unit:disk-pressure-attention — master status asks for a reclaim before t
   assert.match(item.next, /lower run\.reclaimIdleHours in \.graphyard\/master\.json/);
   assert.match(item.next, /graphyard master run --once reclaims immediately when no loop is running/);
 
+  // Inside the recovery band of a standing fault the attention line does not claim the reading is below the threshold.
+  const inBand = diskPressure(worktrees, 10_500_000_000, 10_000_000_000, plan, { standing: true });
+  assert.equal(inBand.low, true);
+  assert.match(diskPressureAttention(inBand)[0].text, /10\.5 GB free on .*, within the recovery band above the configured 10\.0 GB threshold/);
+  assert.doesNotMatch(diskPressureAttention(inBand)[0].text, /below the configured/);
+
   // The threshold is what decides, and it is configuration, not a constant.
   assert.deepEqual(diskPressureAttention(diskPressure(worktrees, 40_000_000_000, 10_000_000_000, plan)), []);
   assert.equal(diskPressureAttention(diskPressure(worktrees, 40_000_000_000, 60_000_000_000, plan)).length, 1);
@@ -708,6 +714,8 @@ test('unit:disk-pressure-drained-flap — the derived disk-pressure line gets th
     assert.deepEqual(walk.map(step => step.opened), [['disk-pressure'], [], [], [], []]);
     assert.deepEqual(walk.map(step => step.lines.length), [1, 1, 1, 1, 1], 'inside the band the line keeps standing');
     assert.match(walk[1].lines[0].text, /within the 1\.0 GB recovery band above the 10\.0 GB line/);
+    assert.match(walk[1].lines[0].text, /^Free space within the recovery band above its configured bound at the last reclaim/, 'inside the band the derived line does not claim the reading is below the bound');
+    assert.match(walk[0].lines[0].text, /^Free space below its configured bound/);
     // Recovered past the band: the instance ends; the next dip under the line is a new one. Without a standing line the band is not in force.
     assert.deepEqual(observe(threshold + disk.diskRecoveryBandBytes(threshold), 2 * hour).lines, []); assert.equal(standing(), false);
     assert.deepEqual(observe(10_500_000_000, 2 * hour).lines, [], 'above the line with no standing fault, the band does not apply');

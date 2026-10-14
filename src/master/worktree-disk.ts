@@ -119,7 +119,7 @@ const gigabytes = (bytes: number) => `${(bytes / 1e9).toFixed(1)} GB`;
  */
 export function diskPressureAttention(pressure: DiskPressure): AttentionItem[] {
   if (!pressure.low || pressure.freeBytes === null || pressure.answered) return [];
-  const reading = `${gigabytes(pressure.freeBytes)} free on ${pressure.path}, below the configured ${gigabytes(pressure.thresholdBytes)} threshold`;
+  const reading = `${gigabytes(pressure.freeBytes)} free on ${pressure.path}, ${pressure.freeBytes >= pressure.thresholdBytes ? 'within the recovery band above' : 'below'} the configured ${gigabytes(pressure.thresholdBytes)} threshold`;
   // Nothing reclaimable (GY-1784): the volume's holders are outside the loop's reach, and only the operator's choices move the number.
   if (pressure.drained) return [{ subject: 'disk', text: `${reading}; ${pressure.reclaimable} of ${pressure.worktrees} assignment worktree(s) hold dependency directories a fresh install recreates${pressure.detail ? ` (${pressure.detail})` : ''}. The volume's remaining holders are outside the loop's reach: ${outsideReachRemedy}`,
     ...agentOwner('master', `${outsideReachRemedy}; graphyard master run --once reclaims immediately when no loop is running, and daemon.reclaim in master status says what the last pass took back`) }];

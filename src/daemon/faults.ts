@@ -122,7 +122,7 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
     if (reclaim) {
       const judged = judgeWorktreeDisk({ freeBytes: reclaim.freeBytes, thresholdBytes: diskThresholdBytes(config), pass: worktreePassOf(reclaim), standing: standingDiskLine(state.faults.open, 'disk-pressure') }, now);
       if ((judged.low && !judged.answered) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config)))
-        derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Free space below its configured bound at the last reclaim (${reclaim.at})${judged.detail ? `; ${judged.detail}` : ''}` });
+        derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Free space ${reclaim.freeBytes !== null && reclaim.freeBytes !== undefined && reclaim.freeBytes >= diskThresholdBytes(config) ? 'within the recovery band above' : 'below'} its configured bound at the last reclaim (${reclaim.at})${judged.detail ? `; ${judged.detail}` : ''}` });
     }
     // A host below its memory floor defers every launch on it (GY-612): one instance for the whole dip. A fault is its
     // wording, and the attention item's text names consumers whose ranking moves from cycle to cycle, so this wording
