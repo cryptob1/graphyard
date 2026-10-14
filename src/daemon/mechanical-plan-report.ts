@@ -1,12 +1,16 @@
 // Concern: GY-1764 — the loop's report of each item's planned mechanical round to the review gate.
 import type { Work } from '../model.js';
-import { mechanicalPlanFreshMs } from '../mechanical-findings.js';
+import { bindingApproval } from '../model/carry.js';
+import { mechanicalPlanFreshMs, mechanicalRoundStartMs } from '../mechanical-findings.js';
 import type { FaultKind } from '../model/fault-classes.js';
 import { deliveredMeanwhile } from './decision-reads.js';
 import { detailChanged } from './decision-text.js';
 import { type DaemonState, message } from './state.js';
 
 type Plan = { key: string; head: string; pr?: number; epoch?: number; reviewId: number };
+/** The approvals a ledger read has answered for: planned, or settled otherwise (follow-ups filed, a fresh read present, a fallback), so a plan still owed is never reported past the ledger's answer. */
+export type AnsweredApproval = { key: string; reviewId: number };
+type LedgerRead = { answered?: readonly AnsweredApproval[] };
 type Effects = { recordMechanicalPlan?: (item: Work, plan: { reviewId: number; head: string } | null) => Promise<unknown>; mechanicalFixes?: unknown };
 /** Where a report's outcome goes: `fail` names a write that failed (`counts`: as a decision fault); `settle` ends what an earlier failure of the same report recorded, once delivery settled its target. */
 export type PlanReportSink = { fail: (item: Work, detail: string, counts: boolean) => Promise<void>; settle: (item: Work) => Promise<void> };
@@ -30,6 +34,27 @@ export function planReportSink(state: Pick<DaemonState, 'actions' | 'faults'>, n
 }
 
 /**
+ * The approvals a ledger read has answered for — planned, or settled otherwise (follow-ups filed, a fresh read
+ * present, a fallback or an applied round). The loop reports a plan for exactly the approvals no record answers,
+ * so a head is held from the moment its approval is observed until the ledger answers, and never past it.
+ */
+export function answeredMechanicalReviews(records: readonly { key: string; verdict?: { state?: string; reviewId?: number }; followUps?: unknown; freshRead?: unknown; mechanicalFix?: unknown }[]): AnsweredApproval[] {
+  return records.flatMap(record => record.verdict?.state === 'APPROVED' && typeof record.verdict.reviewId === 'number' && !!record.verdict.reviewId && (record.mechanicalFix || record.followUps || record.freshRead) ? [{ key: record.key, reviewId: record.verdict.reviewId }] : []);
+}
+
+/**
+ * The observed approval the loop reports a plan for while it has reported none: the approval binding the candidate
+ * that names mechanical findings (the same one the review gate reads), inside its round's window. The ledger's plan
+ * is what asks for the round; this only holds the head from the approval's observation to the loop's first report.
+ */
+function owedMechanicalPlan(item: Work, clock: number): { reviewId: number; head: string } | null {
+  const approval = bindingApproval(item);
+  const review = approval && item.observation?.reviews.find(entry => entry.state === 'APPROVED' && entry.sha === approval.sha && typeof entry.id === 'number' && entry.id > 0 && (entry.mechanical ?? 0) > 0 && !!entry.submittedAt);
+  if (!review || !item.candidate) return null;
+  return clock < Date.parse(review.submittedAt!) + mechanicalRoundStartMs ? { reviewId: review.id as number, head: item.candidate.sha } : null;
+}
+
+/**
  * A projection the loop last confirmed within `mechanicalPlanFreshMs` is current; an older one is re-reported, so the gate
  * never holds on evidence a failed write or ledger read left stale. A report that cannot be written is a visible, retried
  * failure (`sink.fail` names it) and the item forms no decision from the ledger this cycle: the returned set holds those items.
@@ -40,14 +65,35 @@ export function planReportSink(state: Pick<DaemonState, 'actions' | 'faults'>, n
  * settled instead (`sink.settle`). A write the gate's own freshness already governs — the same plan re-confirmed, or the
  * clear of a plan the ledger ceased to carry — changes nothing the gate reads that `mechanicalPlanFreshMs` does not, so
  * it is retried without an instance; only a plan the gate would newly hold counts.
+ *
+ * GY-1814: the gate holds an approval naming mechanical findings from its observation (mechanical-findings.ts), so
+ * between the cycle the approval was observed and the ledger pass that plans it — the head can merge inside one
+ * observation job — the loop reports the observed approval itself as the plan. The provisional report stands only
+ * while the ledger has not answered the approval (`answered`, which mechanical-fixes reads carry): an approval the
+ * ledger answered without a plan is cleared exactly as before, and a read that fails or an effects wiring without
+ * the answered list answers everything, so the gate never holds what nothing backs (GY-1764).
  */
 export async function reportMechanicalPlans(work: readonly Work[], plans: readonly Plan[], effects: Effects, clock: number, sink: PlanReportSink) {
   const unreported = new Set<string>();
   if (!effects.recordMechanicalPlan || !effects.mechanicalFixes) return unreported;
+  let answered: readonly AnsweredApproval[] | null = null, answeredKnown = false;
   for (const item of work) {
     if (item.stage === 'done' || !item.candidate) continue;
     const plan = plans.find(entry => entry.key === item.key && entry.head === item.candidate!.sha && entry.pr === item.candidate!.pr && entry.epoch === item.epoch);
-    const wanted = plan ? { reviewId: plan.reviewId, head: plan.head } : null, held = item.mechanicalPlan ?? null;
+    let wanted = plan ? { reviewId: plan.reviewId, head: plan.head } : null;
+    // The provisional report of an approval the ledger has not answered — or, once it answered none, the
+    // clear that releases the gate's hold over it: either is written over an item that reports nothing.
+    const owed = !plan ? owedMechanicalPlan(item, clock) : null;
+    if (owed) {
+      if (answered === null) ({ known: answeredKnown, answered } = await (effects.mechanicalFixes as () => Promise<LedgerRead>)().then(
+        read => ({ known: read.answered !== undefined, answered: read.answered ?? [] }), () => ({ known: false, answered: [] })));
+      wanted = answeredKnown && !answered.some(entry => entry.key === item.key && entry.reviewId === owed.reviewId) ? owed : null;
+    }
+    const held = item.mechanicalPlan ?? null;
+    // A clear is written only over a plan that stood or an approval the gate may still hold: rewriting the
+    // absence would churn every never-planned item each cycle, and `mechanicalPlan` null is the loop's
+    // standing answer the gate reads.
+    if (!wanted && !held && !owed) continue;
     if (wanted?.reviewId === held?.reviewId && wanted?.head === held?.head && held && clock - Date.parse(held.at) < mechanicalPlanFreshMs) continue;
     let failure: unknown = null;
     for (let attempt = 0; attempt < 2; attempt++) { try { await effects.recordMechanicalPlan(item, wanted); failure = null; break; } catch (error) { failure = error; } }

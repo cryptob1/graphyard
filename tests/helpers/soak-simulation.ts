@@ -88,6 +88,7 @@ import { SimulatedGitHub, SimulatedHerdr, SimulatedPi, clock, hour, minute, sha 
 import { mergeStallAttention } from '../../src/cli/master-status.js';
 import { itemLane, laneSpeedTargets, lanes } from '../../src/model/policy.js';
 import { type MechanicalFixRequest, appliedMechanicalRework, freshReadFor, mechanicalFixRequests, mechanicalFixState } from '../../src/mechanical-findings.js';
+import { answeredMechanicalReviews } from '../../src/daemon/mechanical-plan-report.js';
 import { mechanicalHoldPattern } from '../../src/model/refusal-catalogue.js';
 import { type InterventionRecordInput } from '../../src/model/interventions.js';
 import { type DiagnosisRun, type Failover, type RegistryFailover, MANUAL, type MainGuardDay, PROOF, api, basePlan, blockerPlan, bulk18, coordinatorRoot, diagnosisRunner, engine, everyone, extraFile, extraWorkers, file, files, fixture, id, loopAgent, padded, principals, remedyItem, repository, reviewerApps, scopePlan, sideDayLeftovers, soakConfig, soakSessionDirectory, soakWorktreeRoot, store, token, url, workers } from './soak-plane.js';
@@ -588,7 +589,12 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     samples: [] as { key: string; at: string; notBefore: number; stage: string; blocker: string | null; window: string | null; group: string | null; overdue: boolean | null; lease: string | null; sessions: number; dispatches: { requestedBy: string; at: string }[]; faults: string[]; escalations: string[] }[] } : null;
   for (const [index, after] of (options.blockedHolds?.hours ?? []).entries()) {
     const notBefore = dayStart + after * hour, instant = new Date(notBefore).toISOString(), worker = { id: workers[index % workers.length].principal, role: 'worker' as const };
+    // The follow-up's own request identity, as the filer files it (master-verification.ts): the structured `Post-deploy
+    // follow-up:` line is what makes the item loop-owned (loop-observation.ts), so past its instant the reading is the
+    // loop's own to record and no worker is dispatched for it (GY-1762) — as every filed follow-up stands.
+    const requestId = `post-deploy:00000000-0000-4000-8000-00000000000${index}:AC-1:manual:intervention-pattern-escalation-build:${'0123456789abcdef0123456789abcdef01234567'}`;
     let work = await engine.execute(principals.operator, 'create', null, { title: `Post-deploy verification of soak release ${days}-${index}`, type: 'chore', priority: 1,
+      description: `Post-deploy follow-up: ${requestId}\n\nFiled for the serving release 0123456789abcdef0123456789abcdef01234567: observe the outcome and record the proof.`,
       criteria: [{ id: 'AC-1', text: `From this head against the serving release 0123456789ab that carries the change: the escalation rate at the build stage stays below 3 over ${after} hours of live activity`, proofs: ['manual:intervention-pattern-escalation-build-on-serving-release'] }] }, id());
     work = await engine.execute(worker, 'claim', (await engine.execute(principals.operator, 'ready', work.id, {}, id())).id, {}, id());
     work = await engine.execute(worker, 'blocked', work.id, { epoch: work.epoch, reason: `AC-1's reading cannot exist yet: its ${after}-hour window on the serving release has not elapsed; not before ${instant} can it be observed` }, id());
@@ -1908,21 +1914,27 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       ...entry, reason: entry.reason?.replace(/\[Capped review under policy revision \d+\.\]\s*/, ''),
       ...(undated ? { requestedAt: undefined, refusal: entry.refusal ? { ...entry.refusal, at: undefined } : entry.refusal } : {}) }) };
   };
-  // GY-1779: the loop's own readings of the windowed follow-up over the real control plane. The
-  // report's row for the pattern reads as the filing projection did (no streak yet) until an hour past
-  // the follow-up's instant — every due cycle records a failed reading, raises the item's escalation
-  // naming the measured values and re-reads on the backoff — then as a streak that meets the window:
-  // the pass is recorded and the item closes delivered-observation, all under the day's invariants.
+  // GY-1779: the loop's own readings of the windowed follow-up over the real control plane. A live window
+  // (`windowHours`: GY-1732's and GY-1762's own day) reads as the filing projection did (no streak yet) until an
+  // hour past the follow-up's instant — every due cycle records a failed reading, raises the item's escalation
+  // naming the measured values and re-reads on the backoff — then as a streak that meets the window: the pass is
+  // recorded and the item closes delivered-observation, all under the day's invariants. A multi-day criterion
+  // window (GY-1698's three-day window, and the unwindowed filing GY-1735 derives one for) serves the projection
+  // the filer's window computation reads, but within the day holds no measured row the loop's reading could read
+  // (GY-1814: the streak such a row measures begins, at the earliest, with the merge itself) — `readPattern`
+  // answers no row, the loop records that it cannot take the reading and stays on the wait: never an escalation,
+  // never a recorded reading, never a close.
   const readingDay = windowDay ? { reads: 0, passFrom: null as number | null, closeAsks: [] as { at: number; key: string }[] } : null;
   const readPattern: PatternReader = async pattern => {
     readingDay!.reads += 1;
     const parent = (await store.list()).find(item => item.id === windowDay!.parent.id)!, mergedAt = parent.delivery ? Date.parse(parent.delivery.mergedAt) : clock.now();
     const projected = new Date(mergedAt + windowDay!.windowDays * 24 * hour - 12 * hour).toISOString();
     if (pattern.kind !== 'escalation' || pattern.stage !== 'build') return null;
+    if (!options.observationWindow!.windowHours) return null;
     const notBefore = windowDay!.followUp?.observationWindow ? Date.parse(windowDay!.followUp.observationWindow.notBefore) : null;
     if (notBefore === null || clock.now() < notBefore + hour) return { since: null, projected };
     readingDay!.passFrom ??= clock.now();
-    return { since: new Date(notBefore + hour - (options.observationWindow!.windowHours ?? windowDay!.windowDays * 24) * hour).toISOString(), projected: null };
+    return { since: new Date(notBefore + hour - options.observationWindow!.windowHours * hour).toISOString(), projected: null };
   };
   const effects: DaemonEffects = {
     ...(promotionEffect ? { promotion: promotionEffect } : {}),
@@ -2111,7 +2123,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       },
     } : {}),
     exhaustedProofs: async () => [...abandoned.values()],
-    ...(mechanicalDay ? { mechanicalFixes: async () => mechanicalFixState(ledger),
+    ...(mechanicalDay ? { mechanicalFixes: async () => ({ ...mechanicalFixState(ledger), answered: answeredMechanicalReviews(ledger) }),
       recordMechanicalPlan: (work: Work, plan: { reviewId: number; head: string } | null) => api(principals.operatorAgent, 'POST', `work/${work.id}/mechanicalplan`, plan ? { ...plan, planned: true } : { reviewId: work.mechanicalPlan?.reviewId ?? 1, head: work.mechanicalPlan?.head ?? work.candidate!.sha, planned: false }) } : {}),
     // A rework decision waiting on a stale observation wakes the item's own job (GY-793): the real
     // resync, with the observation job run while the step waits, as the control plane runs it. Its

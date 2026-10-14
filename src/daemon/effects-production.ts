@@ -73,7 +73,8 @@ import { diagnosticianSettings } from '../runner/payloads.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
 import type { FlowResult, RemedyFlow, RemedyRecord } from '../stall-remedies.js';
 import { browserFlowChild } from './cycle-remedies.js';
-import { readMechanicalFixState, type MechanicalFixState } from '../mechanical-findings.js';
+import { answeredMechanicalReviews } from './mechanical-plan-report.js';
+import { mechanicalFixState, readMechanicalFixState } from '../mechanical-findings.js';
 import { retriedSnapshot } from './snapshot-retry.js';
 import { promptTarget, refusedBodyDetail, type DaemonEffects, type LoopFiledItem } from './effects.js';
 
@@ -375,7 +376,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
       .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),
-    mechanicalFixes: () => readMechanicalFixState(root), recordMechanicalPlan: (work, plan) => mutate(`work/${work.id}/mechanicalplan`, plan ? { ...plan, planned: true } : { reviewId: work.mechanicalPlan?.reviewId ?? 1, head: work.mechanicalPlan?.head ?? work.candidate!.sha, planned: false }),
+    // GY-1814: the read also names the approvals the ledger answered (planned, follow-ups filed, a fresh read, a fallback), so a plan still owed is reported only until the answer lands. A ledger that cannot be read answers everything: the requests-only read carries no `answered`, and the gate never holds what nothing backs.
+    mechanicalFixes: async () => { try { const reviews = (await readReviewLedger(root)).reviews; return { ...mechanicalFixState(reviews), answered: answeredMechanicalReviews(reviews) }; } catch { return readMechanicalFixState(root); } }, recordMechanicalPlan: (work, plan) => mutate(`work/${work.id}/mechanicalplan`, plan ? { ...plan, planned: true } : { reviewId: work.mechanicalPlan?.reviewId ?? 1, head: work.mechanicalPlan?.head ?? work.candidate!.sha, planned: false }),
     requestSmoke: async work => {
       const config = current();
       await run('gh', ['workflow', 'run', config.run.smokeWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,

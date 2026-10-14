@@ -296,9 +296,6 @@ export const readMechanicalFixRequests = (root: string): Promise<MechanicalFixRe
 
 /** Whether the ledger's reported plan is for this approval of the item's current candidate (GY-1764), confirmed against the ledger within `mechanicalPlanFreshMs` of `now`: a projection the loop can no longer synchronize — its write refused, its ledger read failing — holds nothing, so the gate never retains a hold the ledger stopped backing. */
 export const mechanicalPlanFreshMs = 5 * 60_000;
-const plannedFor = (work: Work, review: { id?: number }, now: number) => !!work.mechanicalPlan && work.mechanicalPlan.head === work.candidate?.sha
-  && (review.id === undefined || review.id === work.mechanicalPlan.reviewId)
-  && Number.isFinite(Date.parse(work.mechanicalPlan.at ?? '')) && now - Date.parse(work.mechanicalPlan.at) < mechanicalPlanFreshMs;
 /**
  * The review gate's hold (GY-971): GitHub merges a head once build, review and required checks pass
  * (docs/delivery.md), so an approval naming nits classified mechanical does not pass the gate until
@@ -308,13 +305,22 @@ const plannedFor = (work: Work, review: { id?: number }, now: number) => !!work.
  */
 export function mechanicalReviewHold(work: Work, now: number): string | null {
   const approval = bindingApproval(work);
-  // Several approvals on the head may name mechanical findings; the hold is for the one the ledger planned.
-  const review = approval && work.observation?.reviews.find(entry => entry.state === 'APPROVED' && entry.sha === approval.sha && (entry.mechanical ?? 0) > 0 && !!entry.submittedAt && plannedFor(work, entry, now));
-  // GY-1764: the hold reads the one source the decision step reads — a planned fix for this approval in the review ledger,
-  // reported as `mechanicalPlan`. An approval with no plan (follow-ups already filed, a fresh read present, the plan read failed) holds nothing.
+  const matching = !!work.mechanicalPlan && work.mechanicalPlan.head === work.candidate?.sha;
+  // GY-1814: the hold covers an approval naming mechanical findings from the moment it is observed until
+  // its round window lapses, so the head cannot merge inside the observation job that saw the approval —
+  // the pass re-evaluates the gates before any report could exist — nor between the loop's confirms of a
+  // plan the ledger still carries. The loop's report answers it when it is `null`, which mechanical-plan-
+  // report.ts writes only as a real clear (the ledger answered none: follow-ups filed, a fresh read
+  // present, a fallback or an applied round), or when it names another approval of this head (GY-1764).
+  // A matching plan past its confirm holds until the loop's next one lands or the clear is written: the
+  // decision step still owes the round the ledger plans, and the round window bounds every hold. A `null`
+  // answered the candidate it was cleared on: a head approved again after its answer stays released until
+  // the loop's next report, the one window the hold does not cover.
+  const review = approval && work.observation?.reviews.find(entry => entry.state === 'APPROVED' && entry.sha === approval.sha && (entry.mechanical ?? 0) > 0 && !!entry.submittedAt
+    && now < Date.parse(entry.submittedAt) + mechanicalRoundStartMs
+    && (work.mechanicalPlan === undefined || (matching && (entry.id === undefined || entry.id === work.mechanicalPlan!.reviewId))));
   if (!review) return null;
   const until = Date.parse(review.submittedAt!) + mechanicalRoundStartMs;
-  if (!(now < until)) return null;
   const count = review.mechanical!;
   return `Approval${review.id !== undefined ? ` ${review.id}` : ''} of ${review.sha.slice(0, 12)} names ${count} finding${count === 1 ? '' : 's'} classified mechanical, which the worker bot fixes before the reviewer's fresh read (GY-971); the head is not merged before that round, or before ${new Date(until).toISOString()} if it never starts`;
 }

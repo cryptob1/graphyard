@@ -551,17 +551,20 @@ test('integration:owed-decision-gy-1761-replay — approval 5499583025 of 632185
     observation: { candidate, reviews: [review], checks: [], merged: false, prState: 'open', draft: false, at: submittedAt } } as unknown as Work;
   const sevenOhOne = Date.parse('2026-10-13T07:00:34.946Z');
   // Base: the gate held from the observation's review entry alone, until 07:25:00Z, while the ledger planned nothing (mechanicalFix null, follow-ups filed 06:24:59.869Z).
-  // Candidate: the ledger reports no plan, so there is no hold and no owed request-rework to outlast the bound.
-  assert.equal(mechanicalReviewHold(gy1761, sevenOhOne), null, 'no plan, no hold');
+  // Candidate: the loop's report answers the approval — follow-ups are filed, so no plan is owed — and the gate releases on it; there is no owed request-rework to outlast the bound.
+  // GY-1814: the answer rides the item as `mechanicalPlan` null, the clear the loop wrote over its provisional report of this approval.
+  assert.equal(mechanicalReviewHold({ ...gy1761, mechanicalPlan: null }, sevenOhOne), null, 'no plan, no hold');
   assert.equal(decisions.neededDecision(gy1761, { autoMerge: true } as never, undefined, [], []), null, 'and no mechanical rework is owed');
   assert.ok(sevenOhOne - Date.parse('2026-10-13T06:25:05.685Z') > reworkDecisionWaitBoundMs, 'the instance stood past the bound at 07:00:34Z');
   // The same approval with a planned fix the loop confirmed this cycle is held, as GY-971 intends, and owes its round;
-  // one whose confirmation the loop can no longer renew — the sync write refused, the ledger read failing — holds nothing,
-  // so the gate cannot retain a hold the ledger stopped backing (GY-1764 rework, AC-2).
+  // GY-1814: a matching report holds past its confirm too — the round is still owed between the loop's confirms, so
+  // the head is never released to merge it, and the round window (here 07:25:00Z) is the bound that releases it.
   const held = mechanicalReviewHold({ ...gy1761, mechanicalPlan: { reviewId: 5499583025, head, at: '2026-10-13T07:00:00.000Z' } }, sevenOhOne);
   assert.match(held ?? '', /Approval 5499583025 of 632185dd17dd names 2 findings classified mechanical/);
   const { mechanicalPlanFreshMs } = await import('../src/mechanical-findings.js');
-  assert.equal(mechanicalReviewHold({ ...gy1761, mechanicalPlan: { reviewId: 5499583025, head, at: new Date(sevenOhOne - mechanicalPlanFreshMs - 1).toISOString() } }, sevenOhOne), null, 'a stale confirmation holds nothing');
+  const staleHold = mechanicalReviewHold({ ...gy1761, mechanicalPlan: { reviewId: 5499583025, head, at: new Date(sevenOhOne - mechanicalPlanFreshMs - 1).toISOString() } }, sevenOhOne);
+  assert.match(staleHold ?? '', /names 2 findings classified mechanical/, 'a matching report past its confirm holds until the round window');
+  assert.ok(staleHold!.includes('07:25:00'), 'the hold names the round window that releases it');
   // Two approvals on the head both name mechanical findings and the ledger planned the later one: the hold is for that one.
   const earlier = { ...review, id: 5499583024, submittedAt: '2026-10-13T06:20:00.000Z' };
   const twoApprovals = { ...gy1761, observation: { ...gy1761.observation!, reviews: [earlier, review] }, mechanicalPlan: { reviewId: 5499583025, head, at: '2026-10-13T07:00:00.000Z' } } as unknown as Work;
@@ -616,9 +619,12 @@ test('integration:mechanical-plan-report-surfaced — a refused plan report is a
   assert.match(row![1].detail, /503\): plane-wide outage/);
   assert.deepEqual(state.faults.instances.slice(faultsBefore).map(entry => entry.kind).filter(kind => /decision|escalation/.test(kind)), [], 'a refused plan report is not a decision fault');
   assert.deepEqual(attempts.slice(3), [], 'a confirmed report is not re-reported while it stays fresh');
-  // The gate reads the same projection: held while the confirmation stands, dropped once it cannot be renewed.
+  // The gate reads the same projection: held while the confirmation stands. GY-1814: a matching report holds
+  // past its confirm too — the round is still owed between the loop's confirms, and the round window is the
+  // bound that releases it — never dropped to let the head merge a round the ledger still plans.
   assert.match(mechanicalReviewHold(work(), start) ?? '', /names 2 findings classified mechanical/);
-  assert.equal(mechanicalReviewHold({ ...work(), mechanicalPlan: { reviewId: 5499583025, head, at: iso(start - 6 * minute) } } as Work, start), null, 'a stale confirmation holds nothing');
+  const staleHold = mechanicalReviewHold({ ...work(), mechanicalPlan: { reviewId: 5499583025, head, at: iso(start - 6 * minute) } } as Work, start);
+  assert.match(staleHold ?? '', /names 2 findings classified mechanical/, 'a matching report past its confirm holds until the round window');
 });
 test('integration:mechanical-plan-report-blocks-decision — an item whose planned round cannot be reported forms no decision from the ledger until the report lands', async () => {
   const { mechanicalReviewHold } = await import('../src/mechanical-findings.js');

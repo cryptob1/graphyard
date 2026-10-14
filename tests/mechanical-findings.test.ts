@@ -369,18 +369,21 @@ test('unit:mechanical-mislabel-caught — a substantive finding misclassified as
 
 // GY-1764. The review gate's hold and the decision step's rework read one source: a planned fix for the approval in the review ledger.
 const planned901 = { key: 'GY-7', pr: 7, head: H, reviewId: 901, epoch: 1, at: '2026-09-30T12:00:00.000Z', mechanical: [], substantive: [], paths: ['docs/widget.md'] };
-test('unit:mechanical-hold-requires-planned-fix — an approval naming mechanical nits holds its head only while the ledger holds a planned fix for that approval, confirmed this cycle', () => {
+test('unit:mechanical-hold-requires-planned-fix — an approval naming mechanical nits holds its head from its observation until its round window, released by the loop\'s answer: a reported plan for that approval while fresh, or the clear of a plan that stood', () => {
   const now = Date.now();
   const nitted = item(H, 1, [approvalOf(H, 901, 4)]);
-  assert.equal(reviewRefusals(nitted).length, 0, 'the observation alone holds nothing');
+  // GY-1814: the approval is observed and its head re-evaluated inside the observation job, before the loop's
+  // report of the ledger's plan could exist — an approval the loop has not answered yet holds its head until
+  // its round window, so the head cannot merge without its bot round in that window.
+  assert.equal(reviewRefusals(nitted).length, 1, 'an approval the loop has not answered yet holds its head from its observation');
   assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 900, head: H, at: new Date(now).toISOString() } }).length, 0, 'a plan for another approval holds nothing');
   assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 901, head: B, at: new Date(now).toISOString() } }).length, 0, 'a plan for another head holds nothing');
   assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 901, head: H, at: new Date(now).toISOString() } }).length, 1, 'a planned fix for this approval holds the head');
-  // GY-1764 rework: the projection is the loop's report of the ledger, and the gate holds only while the loop
-  // could confirm it. A plan whose confirmation instant is past `mechanicalPlanFreshMs` — the loop's write
-  // refused, its ledger read failing — holds nothing, so the head is not held a review the ledger no longer plans.
-  assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 901, head: H, at: new Date(now - mechanicalPlanFreshMs - 60_000).toISOString() } }).length, 0, 'a stale confirmation holds nothing');
-  assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 901, head: H, at: 'not-a-date' } }).length, 0, 'an unstamped projection holds nothing');
+  // GY-1814: a matching plan the loop has not re-confirmed in `mechanicalPlanFreshMs` — its write refused, its
+  // ledger read failing — still holds: the decision step still owes the round the ledger plans, so the head is
+  // not released to merge between confirms; the round window is what bounds every hold.
+  assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 901, head: H, at: new Date(now - mechanicalPlanFreshMs - 60_000).toISOString() } }).length, 1, 'a matching plan past its confirm holds until the round window');
+  assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 901, head: H, at: 'not-a-date' } }).length, 1, 'a matching plan holds whatever stamp its last confirm carried');
 });
 
 test('unit:mechanical-hold-released-without-plan — an approval whose follow-ups were filed, whose fresh read exists or whose plan read failed holds nothing and owes no request-rework', () => {
