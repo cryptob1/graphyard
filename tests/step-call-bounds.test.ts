@@ -623,7 +623,35 @@ test('unit:step-calls-applied-once — an answer owed to a carried row that stan
   state.cycle = 30;
   assert.deepEqual(await fx.promptSession!(agent, 'resume GY-1'), { profile: 'again' }, 'owed again, the answer is kept for the retry however many cycles begin');
   assert.equal(slow.calls.length, 4);
-  assert.equal(sb.settledKeepMs, 24 * 3_600_000, 'the wall keep bounds every kept answer, owed or not');
+  // The wall keep never drops an owed answer: a row deferred for days behind earlier calls or spent budgets still has its retry consume the answer, so the effect is never sent a second time. Retired, the answer falls to the wall keep like any unowed one.
+  assert.equal(sb.settledKeepMs, 24 * 3_600_000, 'the wall keep bounds an answer no row owes');
+  const real = Date.now;
+  try {
+    const fifth = await rejection(fx.promptSession!(agent, 'resume GY-1') as Promise<unknown>);
+    await sb.recordCarried(carried(), row, { kind: 'session', work: 'GY-1' }, fifth, 'Re-prompting GY-1');
+    slow.calls[4].answer({ profile: 'days' });
+    await settle();
+    // The wall runs on under the offset, so a bound still passes; only its date is days ahead.
+    let ahead = sb.settledKeepMs + 60_000;
+    Date.now = () => real() + ahead;
+    state.cycle = 31;
+    const held = await rejection(spent.promptSession!(other, 'close GY-1 first') as Promise<unknown>);
+    await sb.recordCarried(carried(), row, { kind: 'session', work: 'GY-1' }, held, 'Closing GY-1 first');
+    assert.equal(slow.calls.length, 5, 'a day on, the spent budget sends nothing and the owed answer stands');
+    ahead += 2 * sb.settledKeepMs;
+    state.cycle = 40;
+    assert.deepEqual(await fx.promptSession!(agent, 'resume GY-1'), { profile: 'days' }, 'three days on, the retry consumes the answer the row still owes');
+    assert.equal(slow.calls.length, 5, 'and sends nothing: the effect is applied once');
+    const sixth = await rejection(fx.promptSession!(agent, 'resume GY-1') as Promise<unknown>);
+    await sb.recordCarried(carried(), row, { kind: 'session', work: 'GY-1' }, sixth, 'Re-prompting GY-1');
+    slow.calls[5].answer({ profile: 'unowed' });
+    await settle();
+    await sb.retireCarried(carried(), row, state.actions[row]!, 'Handling GY-1 ran through another way');
+    ahead += sb.settledKeepMs;
+    state.cycle = 41;
+    await assert.rejects(fx.promptSession!(agent, 'resume GY-1') as Promise<void>, sb.stepCallCarried);
+    assert.equal(slow.calls.length, 7, 'released, the answer a day old is dropped by the wall keep and the call is a fresh send');
+  } finally { Date.now = real; }
 });
 
 test('unit:step-calls-bounded — a step budget is spent on the wall as well as the loop clock, so a fixed clock never lets a step outlast it', async () => {

@@ -54,8 +54,10 @@ export const carriedCallSent = (error: unknown) => !(error instanceof StepCallCa
  * a call whose carry its caller let go) is kept by cycles, never by the clock, whatever the run
  * interval (up to its 900 s): until `settledKeepCycles` cycles have begun since it settled, which is
  * the retry's cycle and one more, after which the next call under its key is a fresh send.
- * `settledKeepMs` on the wall bounds every kept answer, owed or not, and is the whole keep of a state
- * that counts no cycles (a bound run on its own).
+ * `settledKeepMs` on the wall bounds an answer no row owes, and is the whole keep of a state that
+ * counts no cycles (a bound run on its own); it never drops an owed one, whose row may stand for
+ * days behind earlier calls or spent budgets before its retry comes, since the retry would then send
+ * the effect a second time.
  */
 export const settledKeepCycles = 3, settledKeepMs = 24 * 3_600_000;
 
@@ -195,8 +197,8 @@ export function boundedCalls(effects: DaemonEffects, kept: object, clockMs: () =
       if (left === null) return fn.call(target, ...args);
       const startedAt = clockMs(), wall = Date.now(), boundMs = options.boundMs?.(effects) ?? (effects as { stepCallBoundMs?: number }).stepCallBoundMs ?? stepCallBoundMs, capped = Math.max(0, Math.min(boundMs, left)), budgeted = capped < boundMs;
       const key = options.key?.(call, args) ?? callKey(call, args);
-      // An answer still owed to a carried row that stands is kept for its retry, however many cycles have begun: a retry deferred by earlier calls or a spent budget consumes it and never starts the effect again. One no row owes, unconsumed within the keep, is dropped, this call's own key included: the work it served has moved on, so a later call under the key is a fresh send and never takes the stale answer for its effect.
-      const stale = (flight: Flight) => !!flight.settledAt && (wall - flight.settledAt.wall >= settledKeepMs || (!stillOwed(kept, flight) && cycleOf(kept) - flight.settledAt.cycle >= settledKeepCycles));
+      // An answer still owed to a carried row that stands is kept for its retry, however many cycles have begun and however long the wall has run: a retry deferred by earlier calls or a spent budget consumes it and never starts the effect again. One no row owes, unconsumed within the cycle keep or the wall keep, is dropped, this call's own key included: the work it served has moved on, so a later call under the key is a fresh send and never takes the stale answer for its effect.
+      const stale = (flight: Flight) => !!flight.settledAt && !stillOwed(kept, flight) && (wall - flight.settledAt.wall >= settledKeepMs || cycleOf(kept) - flight.settledAt.cycle >= settledKeepCycles);
       for (const [other, flight] of pending) if (stale(flight)) pending.delete(other);
       const joined = pending.get(key);
       // The retry of a carried call that settled within the keep consumes its answer: applied once, never sent again.
