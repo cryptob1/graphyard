@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { storeAction } from '../src/daemon/state.js';
+import type { FaultKind } from '../src/model/fault-classes.js';
 import { trackFaults } from '../src/model/fault-record.js';
 import { containmentInMotion, containmentSettleWaitBoundMs, cycleFaults, emptyDaemonState, reworkDecisionInMotion, reworkDecisionWaitBoundMs } from '../src/master-daemon.js';
 // GY-1337's own exports are read through namespaces, so the base exercise runs these replays and each fails on its assertion.
@@ -835,13 +836,13 @@ test('unit:mechanical-plan-cleared-on-failed-read', async () => {
   const sent: unknown[] = [], failures: string[] = [] as string[];
   let refuse = 1;
   const effects = { mechanicalFixes: () => {}, recordMechanicalPlan: async (_: Work, plan: unknown) => { sent.push(plan); if (refuse-- > 0) throw new Error('503'); } };
-  const unreported = await reportMechanicalPlans([item], [], effects, clock, async (_, detail) => { failures.push(detail); });
+  const unreported = await reportMechanicalPlans([item], [], effects, clock, { fail: async (_, detail) => { failures.push(detail); }, settle: async () => {} });
   assert.deepEqual(sent, [null, null], 'the clear is retried within the cycle until it lands');
   assert.equal(unreported.size, 0, 'a cleared plan owes no round');
   assert.deepEqual(failures, [], 'a landed clear is no failure');
   refuse = 9; sent.length = 0;
   const later: string[] = [];
-  await reportMechanicalPlans([item], [], effects, clock, async (_, detail) => { later.push(detail); });
+  await reportMechanicalPlans([item], [], effects, clock, { fail: async (_, detail) => { later.push(detail); }, settle: async () => {} });
   assert.equal(later.length, 1, 'a clear that cannot land is a visible failure');
 });
 
@@ -940,12 +941,45 @@ test('manual:fault-class-decision — action:decision|GY-1775|2026-10-14T06:43:0
   const at = '2026-10-14T06:40:00.000Z', clock = Date.parse(at) + 30_000;
   // The item as the pre-delivery snapshot held it, its confirmation already past the freshness window.
   const item = { id: 'w', key: 'GY-1775', stage: 'review', epoch: 1, candidate: { sha: 'abc', pr: 1 }, mechanicalPlan: { reviewId: 7, head: 'abc', at } } as unknown as Work;
-  const sent: unknown[] = [], failures: string[] = [];
+  const sent: unknown[] = [], failures: string[] = [], settled: string[] = [];
   const effects = { mechanicalFixes: () => {}, recordMechanicalPlan: async (_: Work, plan: unknown) => { sent.push(plan); throw new Error('{"error":"Delivered work is immutable; create a follow-up task"}'); } };
-  const unreported = await reportMechanicalPlans([item], [], effects, clock, async (_, detail) => { failures.push(detail); });
+  const unreported = await reportMechanicalPlans([item], [], effects, clock, { fail: async (_, detail) => { failures.push(detail); }, settle: async target => { settled.push(target.key); } });
   assert.deepEqual(sent, [null, null], 'the clear was attempted and refused twice — the refusal only shows on the write');
   assert.deepEqual(failures, [], 'the settled refusal names no failure');
+  assert.deepEqual(settled, ['GY-1775'], 'and settles what an earlier failure of the same report may have recorded');
   assert.equal(unreported.size, 0, 'a delivered item holds no decision from the ledger');
+});
+
+// Codex, PR #1203 round 4: a newly wanted plan's write that failed on an earlier cycle opened a counting instance; when
+// the item is delivered before the retry, the delivered refusal used to skip that row untouched, and the next snapshot
+// skips the delivered item, so the run stood (and its instance counted) until the window aged it out. The refusal now
+// settles the report: the run ends, its instance is dropped, and the row reads done.
+test('manual:fault-class-decision — a counting failure of a newly wanted plan, refused as delivered on its retry, is settled: its run ends, its instance is dropped and its row reads done', async () => {
+  const [{ reportMechanicalPlans, planReportSink }, { recurringClasses }, { faultClassPolicyDefaults }] = await Promise.all([import('../src/daemon/mechanical-plan-report.js'), import('../src/model/fault-class-recurrence.js'), import('../src/model/fault-classes.js')]);
+  const state = emptyDaemonState(config());
+  const at = '2026-10-14T06:38:00.000Z', clock = Date.parse(at) + 2 * 60_000, key = 'mechanical-plan:w';
+  const failed = `Could not report GY-1775's mechanical plan (review 7 on abc): 503 Service Unavailable; the review gate drops the hold once its last confirmation passes 5 minutes old`;
+  storeAction(state, key, { kind: 'decision', work: 'GY-1775', principal: null, state: 'failed', detail: failed, attempts: 1, epoch: 1, cycle: 3, at });
+  const counted = state.faults.failing[key];
+  assert.ok(counted && state.faults.instances.some(entry => entry.id === counted && entry.kind === 'action:decision' && entry.subject === 'GY-1775'), 'the newly wanted plan\'s failed write counts, and opened a decision instance');
+  const item = { id: 'w', key: 'GY-1775', stage: 'review', epoch: 1, candidate: { sha: 'abc', pr: 1 }, mechanicalPlan: null } as unknown as Work;
+  const effects = { mechanicalFixes: () => {}, recordMechanicalPlan: async () => { throw new Error('{"error":"Delivered work is immutable; create a follow-up task"}'); } };
+  const note = async (row: string, target: Work, kind: 'decision', outcome: 'done' | 'failed', detail: string, when: number = clock, faultKind?: FaultKind | null) =>
+    storeAction(state, row, { kind, work: target.key, principal: null, state: outcome, detail, attempts: (state.actions[row]?.attempts ?? 0) + 1, epoch: target.epoch, cycle: 4, at: new Date(when).toISOString() }, faultKind);
+  const unreported = await reportMechanicalPlans([item], [{ key: 'GY-1775', head: 'abc', pr: 1, epoch: 1, reviewId: 7 }], effects, clock, planReportSink(state, note));
+  assert.equal(unreported.size, 0, 'a delivered item holds no decision from the ledger');
+  const row = state.actions[key]!;
+  assert.equal(row.state, 'done', 'the row reads done: the report is settled');
+  assert.match(row.detail, /GY-1775's mechanical plan report is settled: the item was delivered after the cycle's snapshot/);
+  assert.equal(row.faultClass, undefined, 'and carries no fault class');
+  assert.equal(row.attempts, 2, 'as one more attempt of the same report');
+  assert.equal(state.faults.failing[key], undefined, 'the run the counting row opened is ended');
+  assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'action:decision' && entry.subject === 'GY-1775'), [], 'and the instance it opened is dropped: delivery settled the target');
+  assert.deepEqual(recurringClasses(state.faults.instances, [], faultClassPolicyDefaults, clock + hour(1)).filter(entry => entry.faultClass === 'decision'), [], 'so nothing of it stands in the decision class window');
+  // The same refusal on a report nothing recorded writes no row: the settled target is not even named.
+  const quiet = emptyDaemonState(config());
+  await reportMechanicalPlans([item], [], effects, clock, planReportSink(quiet, note));
+  assert.equal(quiet.actions[key], undefined, 'no row for a settled report nothing had recorded');
 });
 
 test('manual:fault-class-decision — the land route approves the verified head with the independent approver App, so the last-pusher rule merges an approved acceptance (GOAL-1)', async () => {
