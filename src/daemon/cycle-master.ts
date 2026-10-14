@@ -10,8 +10,7 @@ import { sessionCapMs } from '../model/registry-sessions.js';
 import { masterHandover, masterSessionBudgetMs, masterHeartbeatIntervalMs, masterWakeText, masterProfile } from '../master/master-session.js';
 import { outputReadDue } from './cycle-sessions.js';
 import type { Cycle } from './cycle.js';
-import { callKey, carriedCall, owedWrite, stepCallCarried, withinStepBudget } from './step-budget.js';
-import { canonicalJson } from '../onboarding.js';
+import { carriedCall, owedWrite, stepCallCarried, withinStepBudget } from './step-budget.js';
 
 /** The launcher key the master launch records its started entry under: one in flight at a time. */
 export const masterLaunchKey = 'master:launch';
@@ -33,9 +32,7 @@ export const masterMergeDeferralMs = 30 * 60_000;
  * material subjects — the heartbeat only as the fallback. A loop wired without `effects.masterSession`
  * keeps cycling exactly as before.
  */
-export const masterSessionStep = (cycle: Cycle) => withinStepBudget(cycle, 'master', ['promptSession', 'herdr', 'sessionOutput', 'endRegistrySession', 'holdAccount', 'closeSession'], masterSessionStepWithin, { key: wakeKey }); // GY-1774: every runtime, output and registry call the step makes is bounded; a slow one is carried and made again next cycle
-/** A wake is the call for the subjects it names: a wake for other subjects never joins one still in flight, while a heartbeat's changing quiet minutes do not make it another call. */
-export const wakeKey = (call: string, args: unknown[]) => call === 'promptSession' ? canonicalJson([callKey(call, [args[0]]), String(args[1]).replace(/for \d+ minutes/, 'for N minutes')]) : null;
+export const masterSessionStep = (cycle: Cycle) => withinStepBudget(cycle, 'master', ['promptSession', 'herdr', 'sessionOutput', 'endRegistrySession', 'holdAccount', 'closeSession'], masterSessionStepWithin); // GY-1774: every runtime, output and registry call the step makes is bounded; a slow one is carried and made again next cycle. A wake is keyed by its intent (step-budget.ts): one for other subjects never joins a wake still in flight, while a heartbeat's changing quiet minutes do not make it another call.
 async function masterSessionStepWithin(cycle: Cycle) {
   const { config, state, effects, now, clock, snapshot, performed, isolate } = cycle;
   const launcher = effects.masterSession;

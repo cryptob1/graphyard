@@ -90,9 +90,17 @@ const identityArguments: Partial<Record<keyof DaemonEffects, number[]>> = {
   blockDispatch: [0], holdAccount: [0], endEscalation: [0], markEscalation: [0], relaunchEscalation: [0], stopSupervisor: [0, 1], recordSession: [], reportCapacity: [0], settleContainment: [0], containment: [0],
   reclaim: [], reclaimResources: [], panes: [], herdr: [], roleHealth: [], escalationSessions: [], launchedSessions: [], approverLaunches: [], planeHealth: [], hostMemory: [], repositoryFiles: [], reconcileSessions: [],
 };
-/** What a call's key carries beside its arguments: a scope decision is keyed by the ask it decides (the item's `scopeRequest`), a session record by the handle and state it writes, a capacity report by the event it reports, a settlement by the fence's epoch. */
+/**
+ * The intent of a prompt's text: the instruction it gives, with what the clock moves between one cycle's wording
+ * and the next's (a timestamp, a count of minutes) blanked. A retry of the same instruction joins its call, or
+ * consumes its answer; a different instruction to the same pane — the continuation after a declined prompt, then
+ * the resume or idle re-prompt, or a wake naming other subjects — is its own call and is never left unsent.
+ */
+export const promptIntent = (text: unknown) => String(text).replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g, 'T').replace(/\b\d+ (?:more )?minutes?\b/g, 'N minutes');
+/** What a call's key carries beside its arguments: a prompt is keyed by its intent, a scope decision by the ask it decides (the item's `scopeRequest`), a session record by the handle and state it writes, a capacity report by the event it reports, a settlement by the fence's epoch. */
 const keyedBeside = (call: string, args: unknown[]): unknown[] => {
   const second = args[1] as Record<string, unknown> | undefined;
+  if (call === 'promptSession') return [promptIntent(args[1])];
   if (call === 'decideScope') return [callIdentity((args[0] as Work | undefined)?.scopeRequest ?? null)];
   // A handle record is keyed by the item's id, never its revision or head: the item advancing between the running and the finished record must not part them.
   if (call === 'recordSession') return [(args[0] as Work | undefined)?.id ?? null, second?.id ?? null, second?.state ?? null];
@@ -122,6 +130,21 @@ const beneath = new WeakMap<object, DaemonEffects>();
 export const unboundedEffects = (effects: DaemonEffects): DaemonEffects => { let base = effects; while (beneath.has(base)) base = beneath.get(base)!; return base; };
 /** The cycle a kept state counts, which dates a kept answer; a state counting none dates it 0, and the wall keep alone drops it. */
 const cycleOf = (kept: object) => typeof (kept as { cycle?: unknown }).cycle === 'number' ? (kept as { cycle: number }).cycle : 0;
+/** A plain object of calls (an effect object, or a port object nested in one): never an array, a promise, a map or another instance, whose members are its own. */
+const plainObject = (value: unknown): value is object => !!value && typeof value === 'object' && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+/**
+ * An effect object's calls seen through `through`, named by their path (`acceptance.goals`), method by method
+ * and nested object by nested object: the acceptance role's merge-writer ports (`acceptance.writer.merged`,
+ * `.fetch`, `.merge`, `.push`) are reached the same way as its own calls, so no call beneath the object escapes
+ * the bound or the gate it is seen through. A member that is neither a call nor a plain object passes through.
+ */
+function throughMethods<T extends object>(object: T, path: string, through: (name: string, owner: object, member: (...args: unknown[]) => unknown) => (...args: unknown[]) => unknown): T {
+  return new Proxy(object, { get: (inner, method) => {
+    const member: unknown = Reflect.get(inner, method), name = `${path}.${String(method)}`;
+    if (typeof member === 'function') return through(name, inner, member as (...args: unknown[]) => unknown);
+    return plainObject(member) ? throughMethods(member, name, through) : member;
+  } });
+}
 
 /**
  * GY-1774: the step sees its effects through this. Each call named in `calls` races its answer
@@ -141,10 +164,11 @@ export function boundedCalls(effects: DaemonEffects, kept: object, clockMs: () =
       if (left === null) return fn.call(target, ...args);
       const startedAt = clockMs(), wall = Date.now(), boundMs = options.boundMs?.(effects) ?? (effects as { stepCallBoundMs?: number }).stepCallBoundMs ?? stepCallBoundMs, capped = Math.max(0, Math.min(boundMs, left)), budgeted = capped < boundMs;
       const key = options.key?.(call, args) ?? callKey(call, args);
-      // An answer no retry consumed within the keep is dropped: the work it served moved on. The call's own key is checked first (it is consumed below, however late), never swept.
-      for (const [other, flight] of pending) if (other !== key && flight.settledAt && (cycleOf(kept) - flight.settledAt.cycle >= settledKeepCycles || wall - flight.settledAt.wall >= settledKeepMs)) pending.delete(other);
+      // An answer no retry consumed within the keep is dropped, this call's own key included: the work it served has moved on, so a later call under the key is a fresh send and never takes the stale answer for its effect.
+      const stale = (flight: Flight) => !!flight.settledAt && (cycleOf(kept) - flight.settledAt.cycle >= settledKeepCycles || wall - flight.settledAt.wall >= settledKeepMs);
+      for (const [other, flight] of pending) if (stale(flight)) pending.delete(other);
       const joined = pending.get(key);
-      // The retry of a carried call that settled meanwhile consumes its answer: applied once, never sent again.
+      // The retry of a carried call that settled within the keep consumes its answer: applied once, never sent again.
       if (joined?.settledAt) { pending.delete(key); return joined.promise; }
       const { what, owed, per } = options.wording?.(call, args) ?? callWording(call, args);
       // A budget already spent makes no new call: the work stays owed to the next cycle, which makes it on a fresh budget.
@@ -175,13 +199,13 @@ export function boundedCalls(effects: DaemonEffects, kept: object, clockMs: () =
       return Promise.race([flight.promise, expired]).finally(() => { stopped = true; clearTimeout(timer); if (!carried && pending.get(key) === flight) pending.delete(key); });
     };
   };
-  // An effect object named in `calls` (the merge writer's reads, the acceptance role, the planner) is bounded method by method as `object.method`, so its external calls wait under the same bound.
+  // An effect object named in `calls` (the merge writer's reads, the acceptance role, the planner) is bounded method by method as `object.method`, its nested ports (`acceptance.writer.merged`) included, so every external call beneath it waits under the same bound.
   const proxy: DaemonEffects = new Proxy(effects, { get: (target, property, receiver) => {
     const fn = Reflect.get(target, property, receiver);
     if (!bounded.has(property)) return fn;
     if (typeof fn === 'function') return wrap(String(property), target, fn);
     if (!fn || typeof fn !== 'object') return fn;
-    return new Proxy(fn, { get: (inner, method) => { const member = Reflect.get(inner, method); return typeof member === 'function' ? wrap(`${String(property)}.${String(method)}`, inner, member) : member; } });
+    return throughMethods(fn, String(property), wrap);
   } });
   beneath.set(proxy, effects);
   return proxy;
@@ -312,8 +336,8 @@ const gated = (cycle: Cycle, gate: PhaseGate): Cycle => ({ ...cycle, effects: ne
   const fn = Reflect.get(target, property, receiver);
   const hold = (owner: object, member: (...args: unknown[]) => unknown) => async (...args: unknown[]) => { while (!gate.open) await new Promise<void>(resolve => gate.waiters.push(resolve)); return member.apply(owner, args); };
   if (typeof fn === 'function') return property !== 'persist' ? hold(target, fn) : fn;
-  // The acceptance role's and the planner's effects are objects of calls: each waits at the gate too.
-  if (fn && typeof fn === 'object' && (property === 'acceptance' || property === 'planner')) return new Proxy(fn, { get: (inner, method) => { const member = Reflect.get(inner, method); return typeof member === 'function' ? hold(inner, member) : member; } });
+  // The acceptance role's and the planner's effects are objects of calls, the merge-writer ports under `acceptance.writer` among them: each waits at the gate too, so a landing whose `merged` read answered after the step returned starts no fetch, merge or push behind it.
+  if (fn && typeof fn === 'object' && (property === 'acceptance' || property === 'planner')) return throughMethods(fn, String(property), (_name, owner, member) => hold(owner, member));
   return fn;
 } }) });
 /**

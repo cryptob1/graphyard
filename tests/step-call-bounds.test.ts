@@ -108,17 +108,21 @@ test('unit:step-calls-applied-once — a retried call joins the one in flight un
   const kept = {}, slow = hanging<{ profile: string }>();
   const fx = sb.boundedCalls(effects([], { promptSession: slow.call as DaemonEffects['promptSession'] }), kept, () => clock, () => 10_000, { step: 'resume', calls: ['promptSession'] });
   const agent = { name: 'graphyard-claude-a', pane_id: 'pane-1' } as HerdrAgent;
-  await assert.rejects(fx.promptSession!(agent, 'resume GY-1 (first wording)') as Promise<void>, sb.stepCallCarried);
-  await assert.rejects(fx.promptSession!(agent, 'resume GY-1 (re-worded a cycle later)') as Promise<void>, sb.stepCallCarried);
-  assert.equal(slow.calls.length, 1, 'the retry joined the prompt still in flight: free text is no part of the key');
-  await assert.rejects(fx.promptSession!({ ...agent, pane_id: 'pane-2' } as HerdrAgent, 'resume GY-1') as Promise<void>, sb.stepCallCarried);
+  // The same instruction a cycle later: only what the clock moved (the reminder's timestamp and minutes) is worded anew.
+  const resume = (minutes: number) => `resume GY-1 (no activity since ${iso(-minutes * 60_000)}, ${minutes} minutes)`;
+  await assert.rejects(fx.promptSession!(agent, resume(12)) as Promise<void>, sb.stepCallCarried);
+  await assert.rejects(fx.promptSession!(agent, resume(13)) as Promise<void>, sb.stepCallCarried);
+  assert.equal(slow.calls.length, 1, 'the retry joined the prompt still in flight: the wording the clock moves is no part of the key');
+  await assert.rejects(fx.promptSession!({ ...agent, pane_id: 'pane-2' } as HerdrAgent, resume(12)) as Promise<void>, sb.stepCallCarried);
   assert.equal(slow.calls.length, 2, 'another pane is another call');
   slow.answer({ profile: 'x' });
   await new Promise(resolve => setTimeout(resolve, 5));
-  assert.deepEqual(await fx.promptSession!(agent, 'resume GY-1'), { profile: 'x' }, 'the retry of a carried call that settled meanwhile consumes its kept answer');
+  assert.deepEqual(await fx.promptSession!(agent, resume(14)), { profile: 'x' }, 'the retry of a carried call that settled meanwhile consumes its kept answer');
   assert.equal(slow.calls.length, 2, 'and sends nothing: the effect is applied once');
-  await fx.promptSession!(agent, 'resume GY-1');
+  await fx.promptSession!(agent, resume(15));
   assert.equal(slow.calls.length, 3, 'once the answer is consumed, the next call is fresh');
+  await fx.promptSession!(agent, 'resume GY-1: its blocker was cleared');
+  assert.equal(slow.calls.length, 4, 'another instruction to the same pane is another call');
   // A fresh send is never made on a spent budget: the work stays owed to the next cycle, which makes it on a fresh budget.
   const spent = hanging();
   const none = sb.boundedCalls(effects([], { closeSession: spent.call as DaemonEffects['closeSession'] }), {}, () => clock, () => 0, { step: 'sessions', calls: ['closeSession'] });
@@ -150,7 +154,7 @@ test('unit:step-calls-applied-once — a retried call joins the one in flight un
   assert.equal(sb.unboundedEffects(quick), base, 'the effects beneath a bound are reachable for a launch that holds no cycle');
   const ended = sb.boundedCalls(effects([], { closeSession: slow.call as DaemonEffects['closeSession'] }), {}, () => clock, () => null, { step: 'triage', calls: ['closeSession'] });
   const pass = ended.closeSession('pane-3') as Promise<void>;
-  assert.equal(slow.calls.length, 4);
+  assert.equal(slow.calls.length, 5);
   assert.ok(pass instanceof Promise, 'after the step ended, the call passes through unbounded');
 });
 
@@ -539,22 +543,32 @@ test('unit:step-calls-applied-once — a carried call\'s answer is kept until it
   kept.cycle = 13;
   assert.deepEqual(await fx.promptSession!(agent, 'resume GY-1'), { profile: 'y' }, 'two cycles on, the answer is still kept and consumed');
   assert.equal(slow.calls.length, 2);
-  // An owed item delayed past the keep still consumes its own answer: the sweep never drops the retry's key before it is checked.
+  // The call's own key is swept with the rest: a retry within the keep consumes its answer; one past it (the action it served moot, never retried in time) is a fresh send and never takes the stale answer for its effect.
   await assert.rejects(fx.promptSession!(agent, 'resume GY-1') as Promise<void>, sb.stepCallCarried);
   slow.calls[2].answer({ profile: 'z' });
   await settle();
-  kept.cycle = 16;
-  assert.deepEqual(await fx.promptSession!(agent, 'resume GY-1'), { profile: 'z' }, 'the late retry consumes its own answer, never sending again');
+  kept.cycle = 15;
+  assert.deepEqual(await fx.promptSession!(agent, 'resume GY-1'), { profile: 'z' }, 'two cycles on, the retry consumes its own answer, never sending again');
   assert.equal(slow.calls.length, 3);
+  await assert.rejects(fx.promptSession!(agent, 'resume GY-1') as Promise<void>, sb.stepCallCarried);
+  slow.calls[3].answer({ profile: 'stale' });
+  await settle();
+  kept.cycle = 18;
+  await assert.rejects(fx.promptSession!(agent, 'resume GY-1') as Promise<void>, sb.stepCallCarried);
+  assert.equal(slow.calls.length, 5, 'three cycles on, the kept answer is dropped and the call under its key is a fresh send');
+  slow.calls[4].answer({ profile: 'fresh' });
+  await settle();
+  kept.cycle = 19;
+  assert.deepEqual(await fx.promptSession!(agent, 'resume GY-1'), { profile: 'fresh' }, 'and its retry consumes the fresh answer, never the stale one');
   // An answer of another key nobody retries is dropped once it is three cycles old.
   const other = { name: 'graphyard-claude-b', pane_id: 'pane-2' } as HerdrAgent;
   await assert.rejects(fx.promptSession!(other, 'resume GY-2') as Promise<void>, sb.stepCallCarried);
-  slow.calls[3].answer({ profile: 'w' });
+  slow.calls[5].answer({ profile: 'w' });
   await settle();
-  kept.cycle = 20;
+  kept.cycle = 23;
   await assert.rejects(fx.promptSession!(agent, 'resume GY-1') as Promise<void>, sb.stepCallCarried);
   await assert.rejects(fx.promptSession!(other, 'resume GY-2') as Promise<void>, sb.stepCallCarried);
-  assert.equal(slow.calls.length, 6, 'with no retry inside the keep the answer is dropped and the call is a fresh send');
+  assert.equal(slow.calls.length, 8, 'with no retry inside the keep the answer is dropped and the call is a fresh send');
 });
 
 test('unit:step-calls-bounded — a step budget is spent on the wall as well as the loop clock, so a fixed clock never lets a step outlast it', async () => {
@@ -759,14 +773,29 @@ test('unit:step-calls-bounded — master: a Herdr reading that does not answer r
   assert.doesNotMatch(source, /await Promise\.resolve\(effects\.herdr/, 'no unbounded Herdr read remains in the step');
 });
 
-test('unit:step-calls-applied-once — master: a wake for other subjects is another call, never the carried earlier wake\'s answer; a heartbeat\'s quiet minutes do not make it another', async () => {
-  const { wakeKey } = await import('../src/daemon/cycle-master.js');
+test('unit:step-calls-applied-once — a prompt is keyed by its intent: a wake for other subjects, or the resume instruction to a pane whose decline continuation is still carried, is another call and is sent, never the carried one\'s answer; a heartbeat\'s quiet minutes or a reminder\'s countdown do not make it another', async () => {
+  const sb = await helper();
   const { masterWakeText } = await import('../src/master/master-session.js');
-  const agent = { name: 'graphyard-master', pane_id: 'p1' };
-  const key = (text: string) => wakeKey('promptSession', [agent, text]);
+  const { resumePromptText, idlePromptText } = await import('../src/daemon/cycle-resume.js');
+  const { continueAfterDecline } = await import('../src/master/runtime-prompt.js');
+  const agent = { name: 'graphyard-master', pane_id: 'p1' } as HerdrAgent;
+  const key = (text: string) => sb.callKey('promptSession', [agent, text]);
   assert.notEqual(key(masterWakeText('cli', ['GY-1'], false, 0)), key(masterWakeText('cli', ['GY-2'], false, 0)));
   assert.equal(key(masterWakeText('cli', [], true, 12)), key(masterWakeText('cli', [], true, 13)));
-  assert.equal(wakeKey('herdr', []), null);
+  const work = { key: 'GY-1', candidate: null };
+  const continuation = continueAfterDecline('GY-1', { text: 'rm -rf build/*', answer: 'No' }, '/wt'), resume = resumePromptText('cli', work, 1, 'its blocker was cleared');
+  assert.notEqual(key(continuation), key(resume), 'the continuation after a declined prompt and the resume instruction to the same pane are two calls');
+  assert.notEqual(key(resume), key(idlePromptText('cli', work, 1, iso(-600_000), clock)));
+  assert.equal(key(idlePromptText('cli', work, 1, iso(-600_000), clock)), key(idlePromptText('cli', work, 1, iso(-600_000), clock + 120_000)), 'the minutes a reminder counts down do not make it another');
+  assert.equal(sb.promptIntent('since 2026-10-14T03:53:00.000Z for 12 minutes, 1 more minute'), 'since T for N minutes, N minutes');
+  // Under the bound: the continuation carried past it and the resume instruction that follows to the same pane are two sends, and each retry joins its own.
+  const slow = hangingEach<void>();
+  const fx = sb.boundedCalls(effects([], { promptSession: slow.call as DaemonEffects['promptSession'] }), { cycle: 1 }, () => clock, () => 10_000, { step: 'sessions', calls: ['promptSession'] });
+  await assert.rejects(fx.promptSession!(agent, continuation) as Promise<void>, sb.stepCallCarried);
+  await assert.rejects(fx.promptSession!(agent, resume) as Promise<void>, sb.stepCallCarried);
+  await assert.rejects(fx.promptSession!(agent, continuation) as Promise<void>, sb.stepCallCarried);
+  assert.equal(slow.calls.length, 2, 'the resume instruction is sent; the retried continuation joins its own call');
+  assert.deepEqual(slow.calls.map(call => call.args[1]), [continuation, resume]);
 });
 
 test('unit:step-calls-bounded — an effect object named in the bound (the merge writer, the acceptance role) is bounded method by method; a finished handle record waits for the running one of an item whose revision moved; a phase\'s nested effects wait at its gate', async () => {
@@ -828,4 +857,30 @@ test('unit:step-calls-bounded — a merge-mode read carried past its bound is re
   assert.equal(rows.filter(entry => entry.state === 'failed').length, 0, 'no failure is noted for a carried close');
   assert.ok(rows.some(entry => carriedRow(entry)), 'the carried close is recorded waiting');
   assert.ok(stepCallCarried('x') === false);
+});
+
+test('unit:step-calls-bounded — triage: the merge-writer ports under the acceptance role wait at the phase gate and under the bound: a merged read answered after the step returned starts no fetch, merge or push behind it, and the next cycle joins the phase, under whose budget the landing runs through', async () => {
+  const { boundedCalls, boundedPhase, stepCallCarried, carriedRow } = await helper();
+  const now = () => clock, order: string[] = [];
+  let answerMerged!: (value: string | null) => void;
+  const merged = new Promise<string | null>(resolve => { answerMerged = resolve; });
+  const writer = { baseBranch: 'main', retrials: 2, merged: () => { order.push('merged'); return merged; }, fetch: async () => { order.push('fetch'); return 'tip'; }, merge: async () => { order.push('merge'); return 'sha'; }, push: async () => { order.push('push'); } };
+  const state = { actions: {}, cycle: 1 } as unknown as DaemonState;
+  const phaseCycle = { state, now, performed: [], effects: { persist: async () => undefined, acceptance: { settings: { enabled: true }, writer } } } as unknown as Cycle;
+  const land = async (phase: Cycle) => { const ports = (phase.effects.acceptance as unknown as { writer: typeof writer }).writer; if (await ports.merged()) return; await ports.fetch(); await ports.merge(); await ports.push(); };
+  let left: number | null = 30;
+  await boundedPhase(phaseCycle, 'triage', 'acceptance', () => left, land);
+  assert.ok(carriedRow((state.actions as Record<string, DaemonAction>)['carried:triage:acceptance']), 'the phase is carried past the bound');
+  // The step has returned; the read answers now: the landing's ports wait at the gate, so nothing runs behind the step.
+  left = null; answerMerged(null); await settle();
+  assert.deepEqual(order, ['merged'], 'no fetch, merge or push starts behind the returned step');
+  // The next cycle joins the phase: its gate opens and the landing runs through under that cycle's budget.
+  (state as unknown as { cycle: number }).cycle = 2; left = 1000;
+  await boundedPhase(phaseCycle, 'triage', 'acceptance', () => left, land);
+  assert.deepEqual(order, ['merged', 'fetch', 'merge', 'push']);
+  assert.equal((state.actions as Record<string, DaemonAction>)['carried:triage:acceptance']?.state, 'done', 'the carried phase ran through on its retry');
+  // Named in a step's bound, the nested ports are bounded by their path like the role's own calls.
+  const hanging = { stepCallBoundMs: 30, acceptance: { writer: { merged: () => new Promise<string | null>(() => {}) } } } as unknown as DaemonEffects;
+  const bounded = boundedCalls(hanging, {}, now, () => 1000, { step: 'triage', calls: ['acceptance'] });
+  await assert.rejects(() => bounded.acceptance!.writer!.merged('h'), (error: unknown) => stepCallCarried(error) && /acceptance\.writer\.merged call/.test(String(error)));
 });
