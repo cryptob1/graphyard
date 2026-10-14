@@ -22,6 +22,7 @@ import { type DaemonAction, message } from './state.js';
 import { record } from './effects.js';
 import { detailChanged } from './decisions.js';
 import type { Cycle } from './cycle.js';
+import { carriedIsolate, stepCallCarried } from './step-budget.js';
 
 export const plannerRole = 'planner';
 export const planTool = 'graphyard_plan';
@@ -143,10 +144,11 @@ export async function plannerStep(cycle: Cycle) {
     if (!detailChanged(state.actions[key], clip(detail, 1000))) return;
     performed.push(await record(state, key, { kind: 'decision', work: goal.key, principal: null, state: outcome, detail: clip(detail, 1000), attempts: (state.actions[key]?.attempts ?? 0) + (outcome === 'failed' ? 1 : 0), cycle: state.cycle }, now(), effects.persist));
   };
-  const goals = await cycle.isolate('decision', null, 'the goals being planned', () => planner.goals());
+  const isolate = carriedIsolate(cycle, 'triage'); // GY-1774: a call carried past the step's bound is recorded waiting on its goal, never noted as a failure
+  const goals = await isolate('decision', null, 'the goals being planned', () => planner.goals());
   for (const goal of goals ?? []) {
     if (!goal.merged) continue;
-    await cycle.isolate('decision', null, `the plan of ${goal.key}`, async () => {
+    await isolate('decision', null, `the plan of ${goal.key}`, async () => {
       const result = pending.get(goal.id);
       if (result && result.revision !== goal.revision) pending.delete(goal.id);
       if (goal.stage === 'planning') return planning(cycle, planner, goal, note);
@@ -176,7 +178,7 @@ async function planning(cycle: Cycle, planner: PlannerEffects, goal: Goal, note:
     // the plan rounds whatever restarts the loop, and the next run is told why.
     const refuse = async (reason: string) => {
       try { await planner.invalid(goal, reason); }
-      catch (error) { later(cycle, goal, 'post', planStepRetryMs); return note(goal, 'failed', `The planner's plan for ${goal.key} was refused before approval (${clip(reason, 300)}), but the refusal could not be recorded: ${message(error)}; it is recorded again in ten minutes`); }
+      catch (error) { if (stepCallCarried(error)) throw error; later(cycle, goal, 'post', planStepRetryMs); return note(goal, 'failed', `The planner's plan for ${goal.key} was refused before approval (${clip(reason, 300)}), but the refusal could not be recorded: ${message(error)}; it is recorded again in ten minutes`); }
       pending.delete(goal.id); later(cycle, goal, 'plan', planRetryMs);
       const last = (goal.planDrafts ?? 0) + 1 >= maxPlanRounds;
       return note(goal, 'failed', `The planner's plan for ${goal.key} was refused before approval: ${reason}; ${last ? `that was plan ${maxPlanRounds} of ${maxPlanRounds}, so the loop plans no more and leaves it to the master` : 'it is planned again in an hour, answering that'}`);
@@ -185,7 +187,7 @@ async function planning(cycle: Cycle, planner: PlannerEffects, goal: Goal, note:
     const refusals = planRefusals(goal, result.plan);
     if (refusals.length) return refuse(refusals.join('; '));
     try { await planner.plan(goal, result.plan); }
-    catch (error) {
+    catch (error) { if (stepCallCarried(error)) throw error;
       if (invalidPlan(error)) return refuse(message(error));
       // Refused for authority or state (401, 403, 409), the plan is kept and posted again in an hour: recording it as invalid with the same credential would be refused too.
       if (refusedOutright(error)) { later(cycle, goal, 'post', planRetryMs); return note(goal, 'failed', `The plan for ${goal.key} could not be recorded: ${message(error)}; the control plane refused it outright, so it is posted again in an hour`); }
@@ -209,7 +211,7 @@ async function reviewing(cycle: Cycle, planner: PlannerEffects, goal: Goal, note
     }
     if (!due(cycle, goal, 'verdict')) return;
     try { await planner.judge(goal, result.judgement); }
-    catch (error) { later(cycle, goal, 'verdict', planStepRetryMs); return note(goal, 'failed', `The approver's ${result.judgement.verdict} of ${goal.key}'s plan could not be recorded: ${message(error)}; it is posted again in ten minutes`); }
+    catch (error) { if (stepCallCarried(error)) throw error; later(cycle, goal, 'verdict', planStepRetryMs); return note(goal, 'failed', `The approver's ${result.judgement.verdict} of ${goal.key}'s plan could not be recorded: ${message(error)}; it is posted again in ten minutes`); }
     pending.delete(goal.id);
     return note(goal, 'done', `The approver ${result.judgement.verdict === 'approve' ? 'approved' : 'refused'} ${goal.key}'s plan: ${clip(result.judgement.reason, 600)}`);
   }
@@ -223,7 +225,7 @@ async function releasing(cycle: Cycle, planner: PlannerEffects, goal: Goal, note
   if (!due(cycle, goal, 'release')) return;
   let released: Goal;
   try { released = await planner.release(goal); }
-  catch (error) {
+  catch (error) { if (stepCallCarried(error)) throw error;
     // Refused outright (401, 403, 409 or 422), asking again in ten minutes is answered the same: it waits the hour a paid run does.
     if (refusedOutright(error)) { later(cycle, goal, 'release', planRetryMs); return note(goal, 'failed', `Could not release ${goal.key}'s approved plan: ${message(error)}; the control plane refused it outright, so it is asked again in an hour, reusing the items already created`); }
     later(cycle, goal, 'release', planStepRetryMs); return note(goal, 'failed', `Could not release ${goal.key}'s approved plan: ${message(error)}; it is asked again in ten minutes, reusing the items already created`);
@@ -251,7 +253,7 @@ async function delivering(cycle: Cycle, planner: PlannerEffects, goal: Goal, not
   if (unrecorded.length) return note(goal, 'failed', `${goal.key} is delivering, but production's deployment could not be recorded for ${unrecorded.join('; ')}; it is recorded again in five minutes`);
   if (waiting.length) return note(goal, 'waiting', `${goal.key} is delivering: ${waiting.map(item => item.key).join(', ')} ${waiting.length === 1 ? 'is' : 'are'} not yet done and served by production`);
   try { await planner.deliver(goal, items.map(item => item.key), `Every item of ${goal.key}'s plan is done and served by production`); }
-  catch (error) { return note(goal, 'failed', `Could not record ${goal.key} delivered: ${message(error)}; it is asked again in five minutes`); }
+  catch (error) { if (stepCallCarried(error)) throw error; return note(goal, 'failed', `Could not record ${goal.key} delivered: ${message(error)}; it is asked again in five minutes`); }
   return note(goal, 'done', `${goal.key} is delivered: ${items.map(item => item.key).join(', ')} are done and served by production`);
 }
 

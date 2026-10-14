@@ -381,7 +381,10 @@ test('supervisor stops a worker when renewal hangs beyond the granted lease', as
   let count = 0; const started = performance.now();
   const code = await supervise(process.execPath, ['-e', "process.on('SIGTERM',()=>{}); setInterval(()=>{},20)"], 1,
     async () => ++count === 1 ? renewal(200) : new Promise(() => {}), { intervalMs: 25, graceMs: 50 });
-  assert.equal(code, 1); assert.equal(count, 2); assert.ok(performance.now() - started < 2000);
+  // The hung renewal is given up on at its attempt bound (the 50 ms safety margin of a 200 ms lease)
+  // and one fresh request is sent before the lease expires (GY-1791); neither answers, so the deadline
+  // never moves and the worker stops at the server's expiry.
+  assert.equal(code, 1); assert.equal(count, 3); assert.ok(performance.now() - started < 2000);
 });
 
 test('Muse remains inside the common supervisor and is terminated on lease loss without server credentials', async () => {
