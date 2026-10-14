@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { Work } from '../src/model.js';
 import { generateKeyPairSync } from 'node:crypto';
 import * as mainGuard from '../src/main-guard.js';
-import { applyMainGuardRevert, commitVerdict, mainGuardAttention, readMain, revertInverseRefusal, runMainGuard, type CheckRun, type MainGuardRevert, type FileChange, type MainCommit, type MainGuardPorts } from '../src/main-guard.js';
+import { applyMainGuardRevert, commitVerdict, mainGuardAttention, readMain, revertInverseRefusal, runMainGuard, type CheckRun, type CommitVerdict, type MainGuardRevert, type FileChange, type MainCommit, type MainGuardPorts } from '../src/main-guard.js';
 import { GitHub } from '../src/github.js';
 import { mergeStep } from '../src/daemon/cycle-delivery.js';
 import { emptyDaemonState, pruneDaemonState, retainedActions } from '../src/daemon/state.js';
@@ -47,6 +47,8 @@ function world(history: MainCommit[], items: Work[]) {
   const checks = new Map<string, CheckRun[]>();
   const pulls = new Map<number, { merged: boolean; mergeSha: string | null; open: boolean; mergeable: boolean | null; head: string }>();
   const pushers = new Map<number, string>(), approvals = new Map<number, { by: string; head: string }[]>(), revertDiffs = new Map<number, FileChange[]>();
+  // CI's failed-tests annotations by check-run id (GY-1789): the failing test names a run published.
+  const annotations = new Map<number, string[]>();
   const calls = { opened: [] as string[], merged: [] as number[], closed: [] as { pr: number; reason: string }[], approved: [] as number[] };
   let next = 900, refuse: string | null = null;
   const ports: MainGuardPorts = {
@@ -79,9 +81,12 @@ function world(history: MainCommit[], items: Work[]) {
       return merge;
     },
     closeRevert: async (pr, reason) => { calls.closed.push({ pr, reason }); pulls.set(pr, { ...pulls.get(pr)!, open: false }); },
+    // GY-1789: the failing test names a run published, and every uncleared base failure of main.
+    failedTests: async checkRun => annotations.get(checkRun) ?? null,
+    standingBaseFailures: async () => items.flatMap(work => (work.mainGuardReverts ?? []).filter(revert => revert.cause === 'base-failure' && revert.baseFailure && !revert.baseFailure.cleared).map(revert => ({ work, revert }))),
     record: async (snapshot, revert) => { applyMainGuardRevert(items.find(work => work.id === snapshot.id)!, revert, new Date(at)); },
   };
-  return { ports, checks, pulls, calls, items, revertDiffs, approvals, refuse: (reason: string | null) => { refuse = reason; } };
+  return { ports, checks, pulls, calls, items, revertDiffs, approvals, annotations, refuse: (reason: string | null) => { refuse = reason; } };
 }
 
 test('unit:main-guard-reverts-breaking-merge a merge that fails a check its parent passed is reverted by an App-merged revert PR and its item reopened', async () => {
@@ -738,6 +743,95 @@ test('unit:main-guard-flake-recorded a rerun that passes leaves main green with 
     assert.equal(reads.P, settled, `${ending ?? 'running'}: the stale merge is not polled again`);
     assert.deepEqual(stale.calls.opened, []); assert.equal(itemP.mainGuardFlakes, undefined); assert.deepEqual(rerun.reruns, [0]);
   }
+});
+
+// GY-1789: a red main whose revert fails the same failing test names main shows is a base failure of
+// main, not the merge's — the revert is the merge's inverse onto the tree main passed on.
+test('unit:main-guard-revert-shares-failure — a revert whose own checks fail with the failing test names main shows is recorded as a base failure of main instead of a culprit: one attention row naming the shared test, no further revert for that failure set, one rerun per new merge until main passes', async () => {
+  const failing = ['tests/locked-read.test.ts › unit:reconcile-lock-hold-bounded'];
+  const named = (id: number, annotation?: string[]): CheckRun[] => [{ name: 'test', result: annotation ? 'failure' : 'success', appId: ci, id }, { name: 'typecheck', result: 'success', appId: ci, id: id + 1 }];
+  const [base, A, B, C] = ['b0', 'a1', 'b2', 'c3'].map(sha);
+  const history: MainCommit[] = [{ sha: B, parent: A }, { sha: A, parent: base }, { sha: base, parent: null }];
+  const itemA = delivered('GY-1', A, 701), itemB = delivered('GY-2', B, 702), itemC = delivered('GY-3', C, 703);
+  const fake = world(history, [itemA, itemB, itemC]);
+  fake.checks.set(base, green); fake.checks.set(A, green);
+  fake.checks.set(B, named(300, failing)); fake.annotations.set(300, failing);
+  // A restart reads afresh; the maps are what a live guard keeps across ticks.
+  const options = () => ({ required, ciAppIds: [ci], now: new Date(at), verdicts: new Map<string, CommitVerdict>(), reruns: new Map(), runIds: new Map<string, Record<string, number | null>>(), testNames: new Map<number, string[] | null>() });
+
+  // B broke main: the revert is opened as before.
+  let tick = await runMainGuard(fake.ports, options());
+  assert.deepEqual(tick.main, { state: 'broken', culprit: B, parent: A, failing: ['test'] });
+  assert.deepEqual(fake.calls.opened, [B]);
+  const revert = itemB.mainGuardReverts![0].revert!;
+
+  // The revert's own test fails, publishing the same failing test names: the failure holds without B's merge.
+  fake.checks.set(revert.head, named(400, failing)); fake.annotations.set(400, failing);
+  await runMainGuard(fake.ports, options());
+  const record = itemB.mainGuardReverts![0];
+  assert.equal(record.state, 'abandoned');
+  assert.equal(record.cause, 'base-failure');
+  assert.equal(record.red, undefined, 'the line is raised once, not every cycle while main is red');
+  assert.deepEqual(record.baseFailure, { shared: [{ check: 'test', tests: failing, run: 300, revertRun: 400 }], cleared: null });
+  assert.ok(record.reason!.includes(`revert PR #${revert.pr}'s own required checks failed what main fails: test with 1 failing test (${failing[0]}) on run 300 and on the revert's run 400`), String(record.reason));
+  assert.equal(itemB.stage, 'done', 'the merge keeps its delivery: no rework is asked');
+  assert.deepEqual(fake.calls.closed.map(close => close.pr), [revert.pr]);
+  // One attention row naming the shared test; it blames no merge.
+  const lines = mainGuardAttention(fake.items);
+  assert.equal(lines.length, 1);
+  assert.deepEqual(lines[0].red, []);
+  assert.match(lines[0].text, /unit:reconcile-lock-hold-bounded/);
+  assert.match(lines[0].text, /base failure of main/);
+  assert.doesNotMatch(lines[0].text, /broke main/);
+
+  // A different failing test on the revert is no proof: the abandonment stays a culprit attribution.
+  const only = world([{ sha: B, parent: A }, { sha: A, parent: base }], [delivered('GY-9', B, 709)]);
+  only.checks.set(A, green); only.checks.set(B, named(310, failing)); only.annotations.set(310, failing);
+  await runMainGuard(only.ports, options());
+  const ownRevert = only.items[0].mainGuardReverts![0].revert!;
+  only.checks.set(ownRevert.head, named(410, ['tests/other.test.ts › a different test fails'])); only.annotations.set(410, ['tests/other.test.ts › a different test fails']);
+  await runMainGuard(only.ports, options());
+  assert.equal(only.items[0].mainGuardReverts![0].cause, 'checks-failed', 'a different failing test is the revert\'s own, not a shared base failure');
+  assert.equal(only.items[0].mainGuardReverts![0].red, true);
+
+  // C lands while B is still red and fails the same test on its own run: B is still the read, and it is never tried again.
+  history.unshift({ sha: C, parent: B });
+  fake.checks.set(C, named(60, failing)); fake.annotations.set(60, failing);
+  await runMainGuard(fake.ports, options());
+  assert.deepEqual(fake.calls.opened, [B], 'nothing is reverted while the failure stands');
+  assert.equal(itemC.mainGuardReverts, undefined);
+
+  // B's rerun passes (the master reran it): C, red with the same failing tests, is the read — and no revert is filed for it.
+  fake.checks.set(B, named(500));
+  const actions = withFailedReruns(fake, C);
+  let opts = options();
+  tick = await runMainGuard(fake.ports, opts);
+  assert.deepEqual(tick.main, { state: 'pending', probe: C, rerun: { failing: ['test'] } }, 'C is read once B passes, and its failed jobs are rerun once');
+  assert.deepEqual(actions.reruns, [60]);
+  actions.conclude('failure');
+  fake.annotations.set(200, failing); // the rerun's run publishes the same names
+  tick = await runMainGuard(fake.ports, opts);
+  assert.deepEqual(tick.main, { state: 'broken', culprit: C, parent: B, failing: ['test'] });
+  assert.deepEqual(fake.calls.opened, [B], 'no revert for the merge the failure set does not belong to');
+  assert.equal(itemC.mainGuardReverts, undefined);
+  assert.equal(itemC.stage, 'done');
+  await runMainGuard(fake.ports, opts);
+  assert.deepEqual(fake.calls.opened, [B], 'and no revert on later ticks either');
+  assert.deepEqual(actions.reruns, [60], 'the one rerun per merge is all main gets while the failure stands');
+
+  // Main passes again on a fresh run of C: the standing base failure clears.
+  fake.checks.set(C, named(700));
+  tick = await runMainGuard(fake.ports, options());
+  assert.deepEqual(tick.main, { state: 'green' });
+  assert.deepEqual(itemB.mainGuardReverts![0].baseFailure!.cleared, { at, sha: C });
+
+  // A later red main with the same tests is judged afresh: reverted as before.
+  const D = sha('d4'), itemD = delivered('GY-4', D, 704);
+  history.unshift({ sha: D, parent: C }); fake.items.push(itemD);
+  fake.checks.set(D, named(800, failing)); fake.annotations.set(800, failing);
+  tick = await runMainGuard(fake.ports, options());
+  assert.equal(tick.main.state, 'broken');
+  assert.deepEqual(fake.calls.opened, [B, D], 'the next red main with the same tests is reverted again once the base failure cleared');
 });
 
 test('unit:main-guard-cancel-bound-escalates a run still cancelled past the rerun bound is reported once to the master as an infrastructure fault naming the run, never reverted', async () => {
