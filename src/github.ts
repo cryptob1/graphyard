@@ -2423,6 +2423,18 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     demand(review?.state === 'APPROVED' && review.commit_id === head, `GitHub did not record the revert approver's approval of PR #${pr} at ${head.slice(0, 12)}`, 502);
     return 'approved';
   }
+  /**
+   * GY-1779: closes a loop-owned observation item's open pull request as superseded by the loop's
+   * reading, saying why; one already closed or merged is left as it is. The branch stays: it is the
+   * worker's record, and the item closes as delivered-observation, not as merged.
+   */
+  async closeSupersededPullRequest(pr: number, reason: string): Promise<'closed' | 'already-closed'> {
+    const pull = await this.request(`/pulls/${pr}`);
+    if (pull?.state !== 'open') return 'already-closed';
+    await this.request(`/issues/${pr}/comments`, 'POST', { body: reason });
+    await this.request(`/pulls/${pr}`, 'PATCH', { state: 'closed' });
+    return 'closed';
+  }
   /** Closes a revert pull request the main guard gave up on, saying why, and deletes its branch. */
   async closeRevert(pr: number, reason: string): Promise<void> {
     await this.request(`/issues/${pr}/comments`, 'POST', { body: reason });
