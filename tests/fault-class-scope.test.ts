@@ -13,11 +13,13 @@ import { workFaults } from '../src/model/fault-classes.js';
 import { scopeRequestAttention } from '../src/cli/owed-report.js';
 import { decideScopeRequest, followUpPaths, impliedScopes, namedPaths, plannedCompanions, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
 import { peerModuleGround, importingTestGround, noWallClockGatePath } from '../src/model/scope-companions.js';
-import { automaticScopeGrounds } from '../src/daemon/cycle-scope.js';
+import { automaticScopeGrounds, scopeRefusalFault, transientScopeRefusal } from '../src/daemon/cycle-scope.js';
+import { faultClassPolicyDefaults } from '../src/model/fault-classes.js';
+import { trackFaults, type FaultRecord } from '../src/model/fault-record.js';
 import { derivePlannedFiles } from '../src/model/work.js';
 import { RefusedResponse } from '../src/model/refusal.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): the 2026-10-01..06 scope-request stamps are ledger fixtures judged on Date.parse(observedAt) handed to cycleFaults, runCycle and workFaults; the one new Date() stamps a request judged by paths alone. GY-1706's 11 October instances are derived as offsets from those stamps, never written as calendar literals.
+// Time-bomb allowance (GY-1694): the 2026-10-01..06 scope-request stamps are ledger fixtures judged on Date.parse(observedAt) handed to cycleFaults, runCycle and workFaults; the one new Date() stamps a request judged by paths alone. GY-1706's 11 October instances are derived as offsets from those stamps, never written as calendar literals. GY-1788's 14 October instances (action:scope|GY-1773 twice, scope-request|GY-1785) are replayed from the item's own record at the stamps the loop recorded them, judged on Date.parse of those fixture strings beside clocks the tests hand the cycle, never against the wall clock.
 
 // GY-1085 names this file for its proof: manual:fault-class-scope. The master loop filed 9 scope
 // faults in 24 hours on 1 October 2026. Every one was a live attempt's scope request that the
@@ -458,4 +460,114 @@ test('unit:standing-dead-ends-stand — GY-1757: no approver route, a non-additi
   ruleRefused.scopeRequest!.remove = ['docs/'];
   assert.deepEqual(scopeFaults(ruleRefused, entry.observedAt).map(fault => fault.kind), ['scope-request']);
   assert.equal(workFaults(standing(entry), Date.parse(entry.observedAt), false).filter(fault => fault.subject === entry.subject).length, 1, 'with no approver route');
+});
+
+// GY-1788 — three scope-class instances inside 24 hours on 14 October 2026, two of them not scope
+// faults. action:scope|GY-1773 (05:03:05.438Z, again 06:13:50.068Z) were the loop's own
+// widen-on-findings read failing in transport — a gh rate limit reading the pull request's reviews —
+// filed because GY-1757's rule exempted only the FIRST transport refusal in a run: an outage that
+// outlasted a cycle (or a re-ask's new action key) filed one counted instance per run and carried the
+// class trip on its own. The third, scope-request|GY-1785 (06:33:44.634Z), is genuine: a one-path ask
+// the widening rule refused on a live lease with nothing to route it, withdrawn by the worker six
+// minutes later. Shared cause, removed at the candidate: a transport-failure refusal is stored for
+// retry and never an instance, however many times in a row it fails — a persistently failing gh read
+// surfaces once under its own bound (github-budget) — so the scope class counts only genuine faults
+// and this window counts one, below the threshold of three.
+const gy1788BaseSha = 'f807a88b05def86d0aacc495e9bb7978a19262b8'; // main's tip when GY-1788 was claimed: still files a run's second transport refusal
+const gy1788Gh = () => new Error('Command failed: gh api --paginate --slurp repos/cryptob1/graphyard/pulls/1181/reviews?per_page=100\ngh: API rate limit exceeded for user ID 4241869. If you reach out to GitHub Support for help, please include the request ID 8C38:8DC0:53AEFC:596F90:6ACF0D09 and timestamp 2026-10-14 05:03:05 UTC.');
+const gy1788WidenAt = '2026-10-14T05:03:05.438Z', gy1785AskedAt = '2026-10-14T06:32:05.988Z', gy1785RefusedAt = '2026-10-14T06:32:12.012Z', gy1785ObservedAt = '2026-10-14T06:33:44.634Z';
+type Gy1788Base = { scopeRefusalFault: typeof scopeRefusalFault; transientScopeRefusal: typeof transientScopeRefusal };
+let gy1788Base: Gy1788Base;
+before(async () => {
+  try { execFileSync('git', ['cat-file', '-e', `${gy1788BaseSha}^{commit}`], { cwd: process.cwd(), stdio: 'ignore' }); }
+  catch { execFileSync('git', ['fetch', '--no-tags', '--depth=1', '--quiet', 'origin', gy1788BaseSha], { cwd: process.cwd() }); }
+  const directory = await temporaryDirectory('gy1788-base');
+  execFileSync('tar', ['-x', '-C', directory], { input: execFileSync('git', ['archive', '--format=tar', gy1788BaseSha, 'src'], { cwd: process.cwd(), maxBuffer: 256 * 1024 * 1024 }), maxBuffer: 256 * 1024 * 1024 });
+  await fs.symlink(gy1706NodeModules, join(directory, 'node_modules'), 'dir');
+  gy1788Base = await import(join(directory, 'src/daemon/cycle-scope.ts'));
+});
+
+test('manual:fault-class-scope — action:scope|GY-1773|2026-10-14T05:03:05.438Z and |2026-10-14T06:13:50.068Z: a transport refusal is stored for retry, never a scope instance, however many in a row', () => {
+  const gh = gy1788Gh();
+  assert.equal(gy1788Base.transientScopeRefusal(gh), 'the call failed in transport: a timeout, a network error or a gh rate limit', 'the base already read the outage as transport (GY-1757)');
+  const transient = transientScopeRefusal(gh);
+  assert.equal(transient, 'the call failed in transport: a timeout, a network error or a gh rate limit');
+  // The run's first failure, as the action row stood when each instance was filed: failed, retrying on a fresh read.
+  const previous = { state: 'failed', detail: `Could not widen GY-1773 on a review finding or a planned file's successor (${transient}, so it is retried next cycle on a fresh read): ${gh.message}` };
+  // Against the base each instance reproduces: the run's second transport failure filed the counted action:scope.
+  assert.equal(gy1788Base.scopeRefusalFault(transient, previous), undefined, 'the base files the second transport failure in a run as action:scope');
+  // The candidate stores it for retry: the read judged nothing about GY-1773's scope, and a persistently
+  // failing gh read surfaces under its own bound (github-budget), so the scope class counts only genuine faults.
+  assert.equal(scopeRefusalFault(transient, undefined), null);
+  assert.equal(scopeRefusalFault(transient, previous), null);
+  // What the loop still counts as before: a judged refusal, whatever it refused…
+  assert.equal(scopeRefusalFault(null, undefined), undefined);
+  // …and any other transient: the first in a run is quiet, the second in a row is the fault (GY-1293).
+  assert.equal(scopeRefusalFault('the control plane answered 5xx', undefined), null);
+  assert.equal(scopeRefusalFault('the control plane answered 5xx', previous), undefined);
+});
+
+test(`manual:fault-class-scope — action:scope|GY-1773|${gy1788WidenAt} replayed through the loop: the outage's cycles store the widen for retry and open no scope instance`, async () => {
+  const work = standing({ id: 'GY-1773', subject: 'GY-1773', observedAt: gy1788WidenAt, epoch: 2, requestedAt: '2026-10-14T04:59:06.260Z', refusedAt: '2026-10-14T04:59:28.010Z',
+    paths: ['tests/soak-day.test.ts', 'tests/helpers/soak-simulation.ts'], plannedFiles: ['src/daemon/upgrade.ts', 'src/daemon/state.ts', baseline],
+    settled: 'the ask was widened once the read answered' });
+  const effects = {
+    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [work], now: gy1788WidenAt }), closeSession: () => {}, dispatch: async () => {},
+    requestProof: () => {}, observeDeployment: async () => ({ source: 'unavailable', sha: null, at: gy1788WidenAt, reason: 'replay', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    // The production loop that filed the instances had its approver route: the refused ask is the
+    // route's to settle, so only the widening's own outcome is under test here.
+    decide: async () => ({ id: 'decision-replay' }), approver: async () => ({ agentName: 'graphyard-approver-replay', pane: 'pane-replay' }),
+    reviewFindings: async () => { throw gy1788Gh(); },
+    basePaths: async (paths: string[]) => new Set(paths),
+    widenScope: async () => { throw new Error('the findings read fails before any widening is posted'); },
+  } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config());
+  await runCycle(config(), state, effects, () => Date.parse(gy1788WidenAt));
+  await runCycle(config(), state, effects, () => Date.parse(gy1788WidenAt) + minute);
+  const widen = Object.values(state.actions).filter(action => action.kind === 'scope' && action.work === 'GY-1773');
+  assert.equal(widen.length, 1, 'one action row, retried in place');
+  assert.equal(widen[0]?.state, 'failed');
+  assert.equal(widen[0]?.attempts, 2, 'the second cycle retried the read');
+  assert.match(widen[0]?.detail ?? '', /so it is retried next cycle on a fresh read/);
+  assert.deepEqual(state.faults.instances.filter(instance => instance.faultClass === 'scope'), [], 'the outage files no scope instance on the candidate');
+});
+
+test('manual:fault-class-scope — a widening the control plane refuses as judged still counts, so the class keeps its teeth for genuine faults', async () => {
+  // Synthetic (not a listed instance): the same widen, refused as judged rather than failing in transport.
+  const at = '2026-10-14T07:30:12.012Z';
+  const work = standing({ id: 'GY-1773', subject: 'GY-1773', observedAt: at, epoch: 2, requestedAt: '2026-10-14T07:30:05.988Z', refusedAt: at,
+    paths: ['src/daemon/cycle-dispatch.ts'], plannedFiles: ['src/daemon/cycle-scope.ts'], settled: 'refused as judged' });
+  const effects = {
+    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [work], now: at }), closeSession: () => {}, dispatch: async () => {},
+    requestProof: () => {}, observeDeployment: async () => ({ source: 'unavailable', sha: null, at, reason: 'replay', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    decide: async () => ({ id: 'decision-replay' }), approver: async () => ({ agentName: 'graphyard-approver-replay', pane: 'pane-replay' }),
+    reviewFindings: async () => [{ ground: 'review thread PRRT_replay', text: 'src/daemon/cycle-dispatch.ts:40 still dispatches the stale item' }],
+    basePaths: async (paths: string[]) => new Set(paths),
+    widenScope: async () => { throw new RefusedResponse('Graphyard refused work/GY-1773/requirements (403): the file is unrelated to every criterion', 403, { error: 'the file is unrelated to every criterion' }); },
+  } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config());
+  await runCycle(config(), state, effects, () => Date.parse(at));
+  const instances = state.faults.instances.filter(instance => instance.kind === 'action:scope');
+  assert.equal(instances.length, 1, 'a judged refusal is the action\'s own kind, action:scope, as before');
+  assert.equal(instances[0]?.faultClass, 'scope');
+});
+
+test(`manual:fault-class-scope — scope-request|GY-1785|${gy1785ObservedAt}: the genuine refusal still stands where nothing routes it, and the window it tripped counts one against the candidate`, () => {
+  const work = standing({ id: 'GY-1785', subject: 'GY-1785', observedAt: gy1785ObservedAt, epoch: 2, requestedAt: gy1785AskedAt, refusedAt: gy1785RefusedAt,
+    paths: ['tests/locked-read.test.ts'], plannedFiles: ['README.md', 'tests/readme-preview-step.test.ts', baseline],
+    settled: 'withdrawn by the worker at 06:39:19 once its own tests carried the point' });
+  // The instance is genuine: the one-path refusal stood at once where no approver route judged it (GY-1757's dead end).
+  assert.deepEqual(workFaults(work, Date.parse(gy1785ObservedAt), false).map(fault => fault.kind), ['scope-request']);
+  // Where the route is there the product settles it: the routable ask is no fault (GY-1085's rule, unchanged).
+  assert.deepEqual(workFaults(work, Date.parse(gy1785ObservedAt)).map(fault => fault.kind), []);
+  // The candidate does not weaken the class: this genuine instance counts. What the window loses are the
+  // two transport filings the replays above show quiet, so the count is one, below the threshold of three:
+  // the loop files no class item off this window, and later genuine instances still link to one.
+  const record: FaultRecord = { instances: [], open: {}, failing: {} };
+  trackFaults(record, workFaults(work, Date.parse(gy1785ObservedAt), false), gy1785ObservedAt);
+  const scopeCount = record.instances.filter(instance => instance.faultClass === 'scope').length;
+  assert.equal(scopeCount, 1);
+  assert.ok(scopeCount < faultClassPolicyDefaults.threshold, `the window's genuine count (${scopeCount}) no longer reaches the threshold (${faultClassPolicyDefaults.threshold})`);
 });

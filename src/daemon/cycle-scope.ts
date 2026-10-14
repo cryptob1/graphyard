@@ -400,6 +400,8 @@ export async function successorStep(cycle: Cycle, settled: ReadonlyMap<string, W
 
 /** What a scope action refused only transiently says, so its next failure can tell a run of them from one (GY-1293). */
 const transientScopeRetry = 'so it is retried next cycle on a fresh read';
+/** What a scope action that failed in transport says (GY-1757): a timeout, a network error or a gh rate limit, so it is retried next cycle on a fresh read. */
+export const transportScopeRefusal = 'the call failed in transport: a timeout, a network error or a gh rate limit';
 /**
  * GY-1293. Why the control plane refused one of the loop's own additive scope revisions without
  * judging its scope, or null: the plane answered 5xx (GY-1290 on 5 October 2026: an internal error
@@ -410,7 +412,7 @@ const transientScopeRetry = 'so it is retried next cycle on a fresh read';
 export function transientScopeRefusal(error: unknown): string | null {
   if (error instanceof RefusedResponse && error.status >= 500) return 'the control plane answered 5xx';
   if (/Policy revision changed; reload before revising/.test(message(error))) return 'the item moved past the revision the loop read';
-  if (!(error instanceof RefusedResponse) && transportFailure(error)) return 'the call failed in transport: a timeout, a network error or a gh rate limit';
+  if (!(error instanceof RefusedResponse) && transportFailure(error)) return transportScopeRefusal;
   return null;
 }
 /**
@@ -457,15 +459,20 @@ export function mootScopeWidening(error: unknown): string | null {
   return null;
 }
 /**
- * The fault kind a refused scope action is noted under: a transient refusal judged nothing about the
- * item's scope, so one alone is no scope fault (null: stored for retry, never an instance); the
+ * The fault kind a refused scope action is noted under. A transport refusal is never one (null:
+ * stored for retry, never an instance) — GY-1788: the read judged nothing about the item's scope,
+ * and GY-1757's exemption of only the first transport refusal in a run still let an outage that
+ * outlasted a cycle (or a re-ask's new action key) file one counted action:scope per run and carry
+ * the class trip on its own; a persistently failing gh read surfaces once under its own bound
+ * (github-budget). Any other transient refusal — a control-plane 5xx, a stale revision — and every
+ * judged refusal count as before (GY-1293): the first transient in a run is no scope fault, the
  * second in a row is, and so is every other refusal (undefined: the action's own kind, action:scope).
  * "In a row" is per action key, and the key names the policy revision: a stale-revision refusal's
  * retry runs under the new revision's key, so it starts a run of its own. That is intended — the
  * item moved on, and the retry is a new revision's first attempt, not the stale one again.
  */
 export function scopeRefusalFault(transient: string | null, previous: { state: string; detail: string } | undefined): null | undefined {
-  return transient && !(previous?.state === 'failed' && previous.detail.includes(transientScopeRetry)) ? null : undefined;
+  return transient === transportScopeRefusal || (transient && !(previous?.state === 'failed' && previous.detail.includes(transientScopeRetry))) ? null : undefined;
 }
 /** True while an approver judges the requirements decision that answers this scope request (GY-176). */
 export function approverDeciding(approvals: Cycle['state']['approvals'], work: string, request: Pick<ScopeRequestState, 'epoch' | 'at'>) {
