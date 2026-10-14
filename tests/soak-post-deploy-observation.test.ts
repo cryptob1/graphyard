@@ -10,8 +10,8 @@ import { simulateDay } from './helpers/soak-simulation.js';
  * manual post-deploy proofs, so across the whole day every master cycle must hold the three
  * decisions this item changed: no worker is ever dispatched or launched for it, master status counts
  * it waiting and never ready (before its window closes, and after, until a reading is recorded),
- * and once the window has closed the queue names the reading as owed (an escalation) rather than a
- * dispatch. One concern of the day, in its own file (GY-1363): the world is tests/helpers/soak-world.ts,
+ * and once the window has closed the queue names the reading as the loop's own wait (GY-1779: never
+ * an escalation, never a dispatch). One concern of the day, in its own file (GY-1363): the world is tests/helpers/soak-world.ts,
  * the control planes tests/helpers/soak-plane.ts, the day tests/helpers/soak-simulation.ts
  * (`observationWindow`), and the system invariants are asserted after every cycle.
  */
@@ -21,7 +21,7 @@ const items = 5, windowHours = 2;
 const plan = { items, releaseEveryMs: 5 * minute, leftovers: 0, slowRecompute: 0, workMs: 15 * minute, rework: new Set<number>(), deaths: new Set<number>(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set<number>(), misread: new Set<number>(), exits: new Set<number>(), spentProducer: 0, lostRuns: 0,
   outOfQueue: { item: items, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: items }, loopRestarts: [] as number[], dirtyCheckout: { from: 99 * hour, to: 100 * hour }, headMove: { from: 99 * hour, to: 100 * hour }, deploys: basePlan.deploys };
 
-test('unit:soak-invariants-hold — over a simulated day of the real loop, an all-manual post-deploy follow-up is never dispatched or given a session, is counted waiting on every cycle before and after its window closes, and past the window the queue names its reading as owed (an escalation), with every system invariant holding', { timeout: 600_000 }, async () => {
+test('unit:soak-invariants-hold — over a simulated day of the real loop, an all-manual post-deploy follow-up is never dispatched or given a session, is counted waiting on every cycle before and after its window closes, and past the window the queue names the reading as the loop\'s own wait (never an escalation, never a dispatch), with every system invariant holding', { timeout: 600_000 }, async () => {
   const day = await simulateDay({ hours: 16, plan, observationWindow: { item: 1, windowDays: 1, filedAfterMs: 25 * minute, windowHours } });
   const window = day.observationWindowDay!;
   assert.deepEqual(day.violations, [], 'every system invariant holds after every cycle');
@@ -34,6 +34,7 @@ test('unit:soak-invariants-hold — over a simulated day of the real loop, an al
     assert.deepEqual([sample.dispatches, sample.lease, sample.sessions, sample.stage, sample.counted], [[], null, 0, 'ready', 'waiting'], `${sample.at}: undispatched, unleased, without a session, ready-stage and counted waiting`);
   }
   assert.ok(before.every(sample => sample.next === null), 'before the instant the queue names nothing for it');
-  assert.ok(after.every(sample => sample.next === 'escalate'), 'past the instant the queue names the owed reading, never a dispatch');
+  // GY-1779: past the instant the reading is the loop's own to record: a wait on the loop, never an operator-proof escalation and never a dispatch.
+  assert.ok(after.every(sample => sample.next === null), 'past the instant the queue names the loop\'s wait, never an escalation and never a dispatch');
   assert.equal(followUp.stage, 'ready', 'it stays open until the loop records the reading');
 });
