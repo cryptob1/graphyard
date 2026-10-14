@@ -617,6 +617,7 @@
     "tests/registry-slot-followups.test.ts": 1167,
     "tests/regression-guard.test.ts": 391,
     "tests/release-candidate.test.ts": 6100,
+    "tests/release-lag-ancestry.test.ts": 400,
     "tests/release-project.test.ts": 1500,
     "tests/release-revert.test.ts": 4000,
     "tests/repair-lane.test.ts": 446,
