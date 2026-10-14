@@ -208,6 +208,16 @@ export async function readingsStep(cycle: Cycle, served: DaemonState['deployment
     if (!taken.ok) return note('failed', `Could not take ${item.key}'s reading on release ${short(release)}: ${message(taken.error)}`);
     if ('error' in taken.value) return note('failed', `Could not take ${item.key}'s reading on release ${short(release)}: ${message(taken.value.error)}`);
     const readings = taken.value.readings;
+    // The plane may have moved while the filer and the readers ran: the serving release is observed again, and a reading
+    // taken on any other release is discarded unrecorded — never bound to, or closed on, a release it did not read.
+    // The next cycle observes the release afresh and reads it.
+    const delivered = snapshot.work.filter(entry => entry.stage === 'done' && entry.delivery).sort((x, y) => Date.parse(x.delivery!.mergedAt) - Date.parse(y.delivery!.mergedAt));
+    const after = await withinDeploymentBudget(state, `reobserve:${item.id}`, () => effects.observeDeployment(delivered, state.deployment?.containment ?? null), deadline, now);
+    if (after === stillVerifying) { deferred++; return; }
+    if (!after.ok || after.value.source === 'unavailable' || after.value.sha !== release) {
+      const moved = !after.ok ? `could not be observed again (${message(after.error)})` : after.value.source === 'unavailable' ? 'could not be observed again' : `moved to ${short(after.value.sha ?? 'none')}`;
+      return note('waiting', `${item.key}'s reading was taken on release ${short(release)}, and the release the control plane serves ${moved} since; the reading is discarded unrecorded and taken again on the release served next cycle`);
+    }
     const unavailable = readings.filter(entry => 'unavailable' in entry.reading);
     // Every proof read: record each reading not yet on the item, bound as loopObservation reads it. A pass is recorded
     // once per release; a fail re-read on the backoff on this release stands as recorded while the

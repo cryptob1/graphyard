@@ -194,7 +194,19 @@ test('integration:loop-records-due-observation-reading — a due reading never s
   made.state.deployment = { ...made.served(), at: iso(now - 60_000), pending: [] } as never;
   const { deploymentStep } = await import('../src/daemon/cycle-delivery.js');
   await deploymentStep(made.cycle);
-  assert.equal(observed.length, 1, 'the due reading reads the release afresh');
+  assert.equal(observed.length, 2, 'the due reading reads the release afresh, then observes it again after its reads');
+});
+
+test('integration:loop-records-due-observation-reading — a reading taken while the plane moved to another release is discarded unrecorded and never closes the item', async () => {
+  const item = followUp(1738), directory = await temporaryDirectory('loop-readings-moved'), asks: number[] = [];
+  const moved = 'f'.repeat(40);
+  const made = await makeCycle([parent, item], directory, async () => ({ result: 'pass', detail: 'read' }), now, { observeDeployment: async () => { asks.push(1); return (asks.length > 1 ? { ...made.served(), sha: moved } : made.served()) as never; } });
+  const { deploymentStep } = await import('../src/daemon/cycle-delivery.js');
+  await deploymentStep(made.cycle);
+  assert.equal(asks.length, 2);
+  assert.deepEqual(made.recorded, [], 'a reading of a release the plane has left is recorded nowhere');
+  assert.deepEqual(made.closed, [], 'and closes nothing');
+  assert.match(made.state.actions[`reading:${item.id}`].detail, /moved to ffffffffffff/);
 });
 
 test('integration:loop-records-due-observation-reading — a fail measured on a later release is recorded even when the proof\'s newest reading failed on an earlier one', async () => {
