@@ -1136,6 +1136,7 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
   const upFlags = options.upFlags ?? ' --agent';
   const rerun = `graphyard up --repo ${options.repository}${options.reuseFlags ?? ''}${upFlags}`, importRoute = appImportRoute(options.repository, upFlags);
   let setupPage: string | null = null, resumeChecked = false, settledLocally = false;
+  const driveStarted = (options.now ?? (() => new Date()))();
   const awaitSudo = async (handoff: Handoff) => {
     const onCode = async (state: SudoState) => {
       // The first confirmation a rerun meets resumes the one handed off before (within a day), when it is the same page method.
@@ -1156,7 +1157,7 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
       // the operator chose otherwise; the page's own confirmation or a code only when it offers none.
       const mobile = () => offeredSudoMethods(page.text()).mobile && !!(page.locate('button', 'Use GitHub Mobile') ?? page.locate('link', 'Use GitHub Mobile'));
       const prefer = options.sudo ?? (mobile() ? 'mobile' : 'passkey-or-password');
-      const passed = await passSudo(page, { flow: 'installation-accept', record: options.record ?? 'graphyard up', sleep: options.sleep, now: options.now, timeoutMs: options.timeoutMs ?? upAgentWaitMs, prefer, readCode: options.readCode,
+      const passed = await passSudo(page, { flow: 'installation-accept', record: options.record ?? 'graphyard up', sleep: options.sleep, now: options.now, timeoutMs: options.timeoutMs ?? upAgentWaitMs, prefer, readCode: options.readCode, settledSince: driveStarted,
         maxAttempts: 1 + upMobileReprompts,
         onCode, onSettled: state => options.remember?.(state.state === 'approved' ? null : state) });
       settledLocally = !!passed.settled;

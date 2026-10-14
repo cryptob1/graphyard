@@ -311,3 +311,25 @@ test('unit:sudo-code-direct — an approval that lands while the field renders e
   assert.ok(fake.state.waited.length < 8, `the render wait stopped once the prompt was approved (${fake.state.waited.length} waits)`);
   assert.deepEqual(fake.state.submitted, [], 'no code was typed into a page that had moved on');
 });
+
+test('unit:sudo-code-direct — a settled signal written after the drive began but before this wait began still ends the wait, and one older than the drive is stale', async () => {
+  const { passSudo } = await browser();
+  const run = async (settledAt: number) => {
+    const fake = fixturePage({ renderWaits: [Infinity] });
+    const clock = { at: 100_000 };
+    let mobile = false;
+    const base = fake.page;
+    const page: BrowserPage = { ...base, copy: true,
+      text: () => mobile && fake.state.view === 'passkey' ? 'Confirm access\nGitHub Mobile\n42\nUse your authenticator app\nUse passkey' : base.text(),
+      open(url) { mobile = false; base.open(url); },
+      click(selector) { if (selector === 'a[href="/sessions/sudo?mobile=1"]') mobile = true; else base.click(selector); } };
+    return passSudo(page, { flow: 'installation-accept', record: 'graphyard up', prefer: 'mobile', timeoutMs: 5_000, pollMs: 500, maxAttempts: 2, now: () => new Date(clock.at),
+      settledSince: new Date(50_000),
+      readCode: () => ({ kind: 'settled', at: new Date(settledAt).toISOString() }),
+      onCode: () => {}, sleep: async ms => { clock.at += ms; } }).catch(error => ({ passed: false, error }));
+  };
+  const between = await run(80_000) as any;
+  assert.equal(between.settled, true, 'a signal between two waits of one drive is honoured');
+  const stale = await run(20_000) as any;
+  assert.notEqual(stale.settled, true, 'a signal from before the drive began is stale');
+});

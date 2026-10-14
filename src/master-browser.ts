@@ -714,6 +714,11 @@ export interface SudoOptions {
    * a handed code is typed within 2 s.
    */
   readCode?: () => Promise<SudoCodeSubmission | null> | SudoCodeSubmission | null;
+  /**
+   * GY-1459: when the drive this wait belongs to began. A one-shot settled signal older than this is stale;
+   * one that arrived after it is honoured even if it landed between two waits of the same drive.
+   */
+  settledSince?: Date;
   /** GY-1461: called once, when the page first asks to confirm access and before any wait, to keep its forms' markup. */
   capture?: (page: BrowserPage) => Promise<void> | void;
   /**
@@ -786,10 +791,10 @@ export async function passSudo(page: BrowserPage, options: SudoOptions): Promise
   };
   // The chosen view renders its field asynchronously (GY-1459): wait up to 10 s for it, and stop at once when the
   // page has left Confirm access (a GitHub Mobile prompt approved meanwhile), so a wait never hides an approval.
-  const renderedField = (method: 'authenticator' | 'email') => {
+  const renderedField = (method: 'authenticator' | 'email', checks = codeFieldChecks) => {
     for (let check = 1; ; check += 1) {
       const field = codeField(method);
-      if (field || check >= codeFieldChecks || !detectSudo(page.url(), page.text()).sudo) return field;
+      if (field || check >= checks || !detectSudo(page.url(), page.text()).sudo) return field;
       page.wait(codeFieldCheckMs);
     }
   };
@@ -812,7 +817,9 @@ export async function passSudo(page: BrowserPage, options: SudoOptions): Promise
     if (!field) {
       const view = method === 'authenticator' ? control(authenticatorLabels) : null;
       if (view) { activate(view); await keep('authenticator'); }
-      field = renderedField(method);
+      // A handed code is typed within 2 s of its arrival (GY-1459): the 1 s activation plus one more check; a field
+      // that renders later is typed when the kept code is retried (takeHanded), not waited for here.
+      field = renderedField(method, view ? 2 : codeFieldChecks);
     }
     if (!field || !page.fill) {
       page.note?.('sudo-code', [method, field ? 'page cannot type' : 'no code field']);
@@ -862,10 +869,15 @@ export async function passSudo(page: BrowserPage, options: SudoOptions): Promise
     if (held && now().getTime() - Date.parse(held.at) > heldCodeMs) { page.note?.('sudo-code', ['authenticator', 'kept code expired']); held = null; }
     let submission = early ?? await options.readCode?.() ?? null; early = null;
     // A kept code is tried on a freshly loaded page: the view that failed to render its field is reloaded first.
-    if (!submission && held && now().getTime() - heldTried >= reloadMs) { page.open(current); submission = held; }
+    if (!submission && held) {
+      // The view stays open: a field that rendered since is typed at once; else the page is reloaded after a while.
+      const method = state!.emailed ? 'email' : offered.has('authenticator') ? 'authenticator' : 'email';
+      if (codeField(method)) submission = held;
+      else if (now().getTime() - heldTried >= reloadMs) { page.open(current); submission = held; }
+    }
     if (submission?.kind === 'settled') {
       // The step was finished on the local App page in the operator's own browser, after this wait began.
-      if (Date.parse(submission.at) < started) return null;
+      if (Date.parse(submission.at) < (options.settledSince?.getTime() ?? started)) return null;
       page.note?.('sudo-settled', ['local App page']);
       state = { ...state!, state: 'approved' }; await options.onSettled?.(state);
       return { passed: true, attempts: attempt, code: state.code, settled: true };
