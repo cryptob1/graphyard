@@ -2400,29 +2400,46 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * exactly the inverse of the merge it names. An approval already standing on `head` is not posted again.
    */
   async approveRevert(pr: number, head: string, body: string): Promise<'approved' | 'unconfigured'> {
+    return this.approveAsIndependentApprover(pr, head, body, 'revert');
+  }
+  /**
+   * GY-1795: approves an approved acceptance pull request at exactly its verified head as the
+   * independent approver App, for the rule that stranded GOAL-1 approved and unmerged: branch
+   * protection requires an approval from someone other than the last pusher, and the control-plane
+   * App both pushed the acceptance branch and published its own App-bound verdicts. The land route
+   * calls this only after reading the pull request at the approved head on the managed base, and a
+   * refused approval still tries the merge, as the main guard's reverts do. An approval already
+   * standing on `head` is not posted again. The approver, its installation and its key are the revert
+   * approver App's (GY-1291): one independent App serves both landings.
+   */
+  async approveAcceptance(pr: number, head: string, body: string): Promise<'approved' | 'unconfigured'> {
+    return this.approveAsIndependentApprover(pr, head, body, 'acceptance');
+  }
+  /** The approval both landings post as the independent approver App (GY-1291, GY-1795): mint its installation token, skip an approval already standing on `head`, post it head-bound. */
+  private async approveAsIndependentApprover(pr: number, head: string, body: string, what: string): Promise<'approved' | 'unconfigured'> {
     const approver = this.config.revertApprover;
     if (!approver) return 'unconfigured';
-    demand(approver.appId !== this.config.appId, 'The revert approver must be an App other than the control-plane App that pushed the revert');
+    demand(approver.appId !== this.config.appId, `The ${what} approver must be an App other than the control-plane App that pushed the branch`);
     const minted = await this.fetch(`https://api.github.com/app/installations/${approver.installationId}/access_tokens`, {
       method: 'POST', signal: AbortSignal.timeout(15_000),
       headers: { Authorization: `Bearer ${appJwt(approver.appId, approver.privateKey)}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
       body: JSON.stringify({ repositories: [this.config.repository.split('/')[1]], permissions: { pull_requests: 'write' } }),
     });
-    demand(minted.ok, `the revert approver App ${approver.appId} could not mint an installation token (${minted.status})`, 502);
+    demand(minted.ok, `the ${what} approver App ${approver.appId} could not mint an installation token (${minted.status})`, 502);
     const token = ((await minted.json()) as any)?.token;
-    demand(typeof token === 'string' && token.length >= 20, `GitHub returned no token for the revert approver App ${approver.appId}`, 502);
+    demand(typeof token === 'string' && token.length >= 20, `GitHub returned no token for the ${what} approver App ${approver.appId}`, 502);
     const call = async (path: string, method = 'GET', payload?: unknown) => {
       const response = await this.fetch(`https://api.github.com/repos/${this.config.repository}${path}`, {
         method, signal: AbortSignal.timeout(15_000), body: payload === undefined ? undefined : JSON.stringify(payload),
         headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
       });
-      demand(response.ok, `GitHub refused the revert approver's ${method} ${path} (${response.status})`, 502);
+      demand(response.ok, `GitHub refused the ${what} approver's ${method} ${path} (${response.status})`, 502);
       return response.json() as Promise<any>;
     };
     const reviews = await call(`/pulls/${pr}/reviews?per_page=100`);
     if (Array.isArray(reviews) && reviews.some((review: any) => review?.state === 'APPROVED' && review.commit_id === head && review.performed_via_github_app?.id === approver.appId)) return 'approved';
     const review = await call(`/pulls/${pr}/reviews`, 'POST', { commit_id: head, event: 'APPROVE', body });
-    demand(review?.state === 'APPROVED' && review.commit_id === head, `GitHub did not record the revert approver's approval of PR #${pr} at ${head.slice(0, 12)}`, 502);
+    demand(review?.state === 'APPROVED' && review.commit_id === head, `GitHub did not record the ${what} approver's approval of PR #${pr} at ${head.slice(0, 12)}`, 502);
     return 'approved';
   }
   /**
