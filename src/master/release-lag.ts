@@ -87,28 +87,51 @@ export interface ReleaseLagReport { baseTip: string | null; components: ReleaseL
   promotion: { nextDueAt: string | null; inFlight: boolean; onSchedule: boolean; pending: string[] } | null }
 
 /**
+ * The deliveries a loaded release does not contain, from one git child run (GY-1776). The report
+ * used to ask `git merge-base --is-ancestor` once per delivery per component, and a plane with
+ * hundreds of deliveries spent seconds of `master status` in git. The right side of the symmetric
+ * differences `release...merge` is every commit reachable from a merge but not from the release,
+ * so a merge commit is listed exactly when the release does not contain it. `--ignore-missing`
+ * keeps the old reading of what git cannot place: a merge this checkout does not hold drops its
+ * range and is never listed, and a release git cannot place drops every range, so nothing is
+ * counted against it; a run that fails (no repository, no git) reads the same way. The call is
+ * skipped for a component with no release and for a report with no deliveries.
+ */
+async function missingDeliveries(root: string, run: ChildRun, commit: string, deliveries: readonly LagDelivery[]): Promise<Set<string>> {
+  const merges = [...new Set(deliveries.map(delivery => delivery.mergeSha.toLowerCase()))];
+  if (!merges.length) return new Set();
+  let listed: string[];
+  try { listed = (await run('git', ['-C', root, 'rev-list', '--right-only', '--ignore-missing', ...merges.map(merge => `${commit}...${merge}`)])).split('\n').filter(Boolean); }
+  catch { return new Set(); }
+  const commits = new Set(listed);
+  // A merge recorded by its full name is looked up; an abbreviated one matches what git expanded it to.
+  return new Set(merges.filter(merge => commits.has(merge) || (merge.length < 40 && listed.some(line => line.startsWith(merge)))));
+}
+
+/**
  * Per component, the release it loaded against the base tip. A delivery counts as behind when
  * git answers and answers no — a commit this checkout does not hold, or a component with no
  * readable release, reads as unknown and is never counted, so attention is raised only on what
- * is known.
+ * is known. Git is asked once per distinct loaded release, whatever the number of deliveries.
  */
 export async function releaseLag(baseTip: string | null, deliveries: readonly LagDelivery[], components: readonly LagComponent[],
   deps: { root: string; run?: ChildRun; now: number; graceMs?: number; promotion?: PromotionWait | null }): Promise<ReleaseLagReport> {
   const run = deps.run ?? defaultChildRun;
   const graceMs = deps.graceMs ?? releaseLagGraceMs;
-  const contains = async (commit: string, mergeSha: string): Promise<boolean> => {
-    if (commit === mergeSha) return true;
-    try { await run('git', ['-C', deps.root, 'merge-base', '--is-ancestor', mergeSha, commit]); return true; }
-    catch (error: any) { return error?.status !== 1; }
+  // Components on the same release share one answer: at most one git run per component, fewer when releases repeat.
+  const answers = new Map<string, Promise<Set<string>>>();
+  const missingFor = (commit: string) => {
+    let answer = answers.get(commit);
+    if (!answer) { answer = missingDeliveries(deps.root, run, commit, deliveries); answers.set(commit, answer); }
+    return answer;
   };
   const wait = deps.promotion ?? null;
   const onSchedule = promotionOnSchedule(wait, deps.now);
   const pending = new Set(wait?.pending ?? []);
   const rows = components.map(async (component): Promise<ReleaseLagRow> => {
     const commit = component.release.commit;
-    const missing = async (delivery: LagDelivery) => commit ? !(await contains(commit, delivery.mergeSha.toLowerCase())) : false;
-    const behind: LagDelivery[] = [];
-    for (const delivery of deliveries) if (await missing(delivery)) behind.push(delivery);
+    const missing = commit ? await missingFor(commit) : new Set<string>();
+    const behind = deliveries.filter(delivery => missing.has(delivery.mergeSha.toLowerCase()));
     // A delivery the verified release does not serve yet, while its promotion is on schedule, is
     // the promotion window (GY-1400): the loop could not have loaded it, so only the rest count.
     const awaiting = new Set(onSchedule ? behind.filter(delivery => pending.has(delivery.key)).map(delivery => delivery.key) : []);
