@@ -1,7 +1,8 @@
 // Concern: cycle step 2 — decide open scope requests and measure the decision budget.
 import type { Work } from '../model.js';
 import { type ScopeRequestState, companionGround, decideScopeRequest, itemDocumentationPaths, pathScope, pathScopeContains, pinningTestGround, plannedFilesMax, redecidableScopeRefusal, routableScopeRequest, scopeDecisionBinding, testFile, unplannedPaths } from '../model/scope.js';
-import { importingTestGround, newProofTestGround, peerModuleGround } from '../model/scope-companions.js';
+import { importingTestGround, newProofTestGround, peerModuleGround, testCompanionGate, verificationMapFile, verificationMapGround } from '../model/scope-companions.js';
+import { parseVerificationMap } from '../model/verification-maps.js';
 import { type NonRepositoryPath, nonRepositoryPaths } from '../model/scope-repository.js';
 import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import { groundedWideningReason } from '../model/scope-provenance.js';
@@ -39,8 +40,13 @@ export interface ScopeGround { path: string; ground: string; companion?: boolean
  * engine's rule implies on its own (a criterion names it, documentation, a companion such as the
  * docs-budget gate beside a documentation path) is granted here too, and so are the companions only
  * the base can ground: a test importing a module a planned file is or re-exports
- * (importingTestGround), and a new test file the criteria's unit proofs need when no base file holds
- * them (newProofTestGround, searched by `held`).
+ * (importingTestGround), a new test file the criteria's unit proofs need when no base file holds
+ * them (newProofTestGround, searched by `held`), and the verification map whose Paths line covers a
+ * planned file or a test this same request grants (GY-1783, verificationMapGround: the maps are judged
+ * after every other path of the request, on what the rules granted on a ground of its own, never on
+ * the raw ask and never on a gate the engine grants as the companion of a test in the raw ask — a
+ * refused test cannot reach a map through the wall-clock gate it drags in — and only for a map the
+ * base holds whole, as parseVerificationMap reads it).
  */
 export async function automaticScopeGrounds(item: Work, request: ScopeRequestState, paths: readonly string[], findings: readonly ReviewFinding[], exists: (path: string) => boolean, read?: (path: string) => Promise<string | null>, successors?: () => Promise<readonly Successor[]>, mentions?: (identifier: string) => Promise<number>, held?: (proof: string) => Promise<number>): Promise<{ grounds: ScopeGround[] } | { grounds?: ScopeGround[]; refusal: string }> {
   const grounds: ScopeGround[] = [], refusals: string[] = [];
@@ -49,7 +55,9 @@ export async function automaticScopeGrounds(item: Work, request: ScopeRequestSta
   const symbols = criterionSymbols(item.criteria);
   const searched = new Map<string, number>();
   const documentation = itemDocumentationPaths(item);
-  for (const path of paths) {
+  // The verification maps last: their ground may be a test the rules grant earlier in this request.
+  const ordered = [...paths.filter(path => !verificationMapFile(path)), ...paths.filter(verificationMapFile)];
+  for (const path of ordered) {
     const named = findingScope([path], findings, exists);
     if ('grounds' in named) { grounds.push(...named.grounds); continue; }
     const implied = decideScopeRequest(item, { paths: [path] });
@@ -68,6 +76,8 @@ export async function automaticScopeGrounds(item: Work, request: ScopeRequestSta
     if (read && !pathScope(path).prefix && !path.includes('*') && exists(path)) {
       planned ??= await Promise.all((item.plannedFiles ?? []).filter(scope => !pathScope(scope).prefix && !scope.includes('*')).slice(0, 50).map(async scope => ({ path: scope, text: await read(scope) })));
       const text = await read(path);
+      const map = text !== null && parseVerificationMap(path, text) ? verificationMapGround(path, text, item, grounds.filter(entry => !testCompanionGate(entry.path)).map(entry => entry.path)) : null;
+      if (map) { grounds.push({ path, ground: map, companion: true }); continue; }
       const barrel = barrelSuccessorGround(path, planned);
       if (barrel) { grounds.push({ path, ground: barrel }); continue; }
       const pinning = testFile(path) ? pinningTestGround(path, request.reason, text, planned) ?? criterionTestGround(path, text, symbols) : null;
@@ -133,7 +143,7 @@ export async function scopeStep(cycle: Cycle) {
   // What an automatic widening stood on, in the audit detail: the grounds it actually used.
   const widenedOn = (grounds: ScopeGround[], count: number): string => {
     const kinds = new Set(grounds.map(entry => entry.companion ? 'companion' : entry.ground.startsWith('successor of ') ? 'successor' : /^review /.test(entry.ground) ? 'finding' : 'criteria'));
-    if (kinds.size === 1 && kinds.has('companion')) return `the companions the change inevitably carries: what the item implies, a test importing a planned module, a peer module a planned file imports or that imports it, the test its proofs live in or the docs-budget gate`;
+    if (kinds.size === 1 && kinds.has('companion')) return `the companions the change inevitably carries: what the item implies, a test importing a planned module, a peer module a planned file imports or that imports it, the test its proofs live in, the verification map whose Paths cover a planned file or the docs-budget gate`;
     if (kinds.size === 1 && kinds.has('successor')) return `the base branch's split or rename of a planned file`;
     if (kinds.size === 1 && kinds.has('finding')) return `the review finding that names ${count === 1 ? 'it' : 'them'}`;
     if (kinds.size === 1) return `what the item's criteria name: a symbol a file defines or calls, or text a test pins`;
@@ -390,6 +400,8 @@ export async function successorStep(cycle: Cycle, settled: ReadonlyMap<string, W
 
 /** What a scope action refused only transiently says, so its next failure can tell a run of them from one (GY-1293). */
 const transientScopeRetry = 'so it is retried next cycle on a fresh read';
+/** What a scope action that failed in transport says (GY-1757): a timeout, a network error or a gh rate limit, so it is retried next cycle on a fresh read. */
+export const transportScopeRefusal = 'the call failed in transport: a timeout, a network error or a gh rate limit';
 /**
  * GY-1293. Why the control plane refused one of the loop's own additive scope revisions without
  * judging its scope, or null: the plane answered 5xx (GY-1290 on 5 October 2026: an internal error
@@ -400,7 +412,7 @@ const transientScopeRetry = 'so it is retried next cycle on a fresh read';
 export function transientScopeRefusal(error: unknown): string | null {
   if (error instanceof RefusedResponse && error.status >= 500) return 'the control plane answered 5xx';
   if (/Policy revision changed; reload before revising/.test(message(error))) return 'the item moved past the revision the loop read';
-  if (!(error instanceof RefusedResponse) && transportFailure(error)) return 'the call failed in transport: a timeout, a network error or a gh rate limit';
+  if (!(error instanceof RefusedResponse) && transportFailure(error)) return transportScopeRefusal;
   return null;
 }
 /**
@@ -447,15 +459,20 @@ export function mootScopeWidening(error: unknown): string | null {
   return null;
 }
 /**
- * The fault kind a refused scope action is noted under: a transient refusal judged nothing about the
- * item's scope, so one alone is no scope fault (null: stored for retry, never an instance); the
+ * The fault kind a refused scope action is noted under. A transport refusal is never one (null:
+ * stored for retry, never an instance) — GY-1788: the read judged nothing about the item's scope,
+ * and GY-1757's exemption of only the first transport refusal in a run still let an outage that
+ * outlasted a cycle (or a re-ask's new action key) file one counted action:scope per run and carry
+ * the class trip on its own; a persistently failing gh read surfaces once under its own bound
+ * (github-budget). Any other transient refusal — a control-plane 5xx, a stale revision — and every
+ * judged refusal count as before (GY-1293): the first transient in a run is no scope fault, the
  * second in a row is, and so is every other refusal (undefined: the action's own kind, action:scope).
  * "In a row" is per action key, and the key names the policy revision: a stale-revision refusal's
  * retry runs under the new revision's key, so it starts a run of its own. That is intended — the
  * item moved on, and the retry is a new revision's first attempt, not the stale one again.
  */
 export function scopeRefusalFault(transient: string | null, previous: { state: string; detail: string } | undefined): null | undefined {
-  return transient && !(previous?.state === 'failed' && previous.detail.includes(transientScopeRetry)) ? null : undefined;
+  return transient === transportScopeRefusal || (transient && !(previous?.state === 'failed' && previous.detail.includes(transientScopeRetry))) ? null : undefined;
 }
 /** True while an approver judges the requirements decision that answers this scope request (GY-176). */
 export function approverDeciding(approvals: Cycle['state']['approvals'], work: string, request: Pick<ScopeRequestState, 'epoch' | 'at'>) {
