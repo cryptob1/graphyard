@@ -21,7 +21,7 @@ import type { Cycle } from '../src/daemon/cycle.js';
 import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import * as pi from '../integrations/pi/index.js';
-// Time-bomb allowance (GY-1694): the 2026-10-07 clock is handed to plannerStep as its now; the goals it plans are stamped with new Date() by recordGoal and applyGoalCommand, stamps the planner records but never ages.
+// Time-bomb allowance (GY-1694): the 2026-10-07 clock is handed to plannerStep as its now and every stamp is derived from it; the goals it plans are stamped with new Date() by recordGoal and applyGoalCommand, stamps the planner records but never ages.
 
 /** The planner's modules, loaded inside each test so a tree without them fails as a test case, not as a file that cannot load. */
 const planner = async () => ({ ...await import('../src/model/goal-plan.js'), ...await import('../src/daemon/planner.js'), ...await import('../src/model/goal.js') });
@@ -196,6 +196,89 @@ test('unit:planner-plan-validation — a plan covers every approved outcome, nam
   assert.equal(stubborn.planDrafts, maxPlanRounds); assert.equal(stubborn.stage, 'planning');
   assert.match(state.actions[`planner:${stubborn.id}`].detail, /the loop plans no more and leaves it to the master/);
   assert.match(goalSummary(stubborn).next!.who, /^master: /);
+});
+
+test('unit:planner-prompt-states-post-deploy-rule — the planner prompt states the post-deploy criterion rule plan validation enforces: a serving-release criterion is declared manual:post-deploy/NAME on the item that ships the change, beside one a head can show before merge, and no item is post-deploy criteria alone', async () => {
+  const { plannerPrompt } = await planner();
+  const prompt = plannerPrompt({ repository }, mergedGoal('GOAL-3'));
+  // Half one: an observation of the serving release is declared, on the item that ships the change.
+  assert.match(prompt, /manual:post-deploy\/NAME proof on the item that ships the change/);
+  // Half two: the declared item still carries a criterion a head can show before merge; no item is post-deploy criteria alone.
+  assert.match(prompt, /beside at least one criterion with a unit:, integration: or manual: proof a head can show before merge/);
+  assert.match(prompt, /no item may consist of post-deploy criteria alone/);
+});
+
+test('unit:planner-validation-failure-feeds-back — every run whose graphyard_plan payload fails validation records the validation reason on the goal as its plan refusal, the next prompt carries it as lastRefusal, the retry waits ten minutes, and the failure counts toward maxPlanRounds', async () => {
+  const { clearPlans, goalSummary, maxPlanRounds, plansSettled, plannerStep } = await planner();
+  clearPlans();
+  const goal = mergedGoal('GOAL-4');
+  let current: Goal = goal;
+  const prompts: string[] = [], tools: string[] = [], invalids: string[] = [];
+  // The payload GOAL-1's models kept writing: a live-observation criterion named undeclared, so the plan payload fails validation before anything is posted.
+  const undeclared = () => ({ goal: current.key, note, items: [{ ...item('verify', ['signup'], ['src/verify.ts']), criteria: [
+    { id: 'AC-1', text: 'The release gate tallies every required check a candidate needs', proofs: ['unit:gate-tally'] },
+    { id: 'AC-2', text: 'Production promotes only a release candidate whose required checks all passed', proofs: ['unit:promotion-record'] },
+  ] }] });
+  let clock = Date.parse('2026-10-07T00:00:00Z');
+  const fx: PlannerEffects = {
+    settings: diagnosticianSettings({}), cwd: process.cwd(),
+    goals: async () => [current],
+    runner: async (_role, attempt) => ({ runner: stubRunner(undeclared, prompts, tools), runtime: 'stub', model: attempt }),
+    plan: async () => { throw new Error('a payload that failed validation must never be posted'); },
+    invalid: async (target, reason) => { invalids.push(reason); return current = applyGoalCommand(target, 'plan-invalid', { reason }, { actor: planAuthor, at: new Date(clock).toISOString() }); },
+    judge: async target => target, release: async target => target, deliver: async target => target,
+  };
+  const state = emptyDaemonState(config);
+  const step = async (advance = 60_000) => {
+    clock += advance;
+    await plannerStep({ config, state, effects: { planner: fx, persist: async () => {} }, now: () => clock, clock, snapshot: { work: [] }, performed: [], isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() } as unknown as Cycle);
+    await plansSettled();
+  };
+  await step();
+  assert.equal(prompts.length, 2, 'primary and fallback both ran on the payload');
+  await step();
+  // The refusal is recorded on the goal through the same effect a refused posted plan uses, attributed to the validation.
+  assert.match(invalids[0], /the graphyard_plan payload failed validation/);
+  assert.match(invalids[0], /AC-2 \(..Production..\) is a live-install or post-deploy observation/, 'the reason names the criterion and its observed phrase');
+  assert.equal(current.planDrafts, 1, 'the validation failure counts as one of the goal\'s plan rounds');
+  assert.match(current.planRefusal!.reason, /failed validation/);
+  assert.match(state.actions[`planner:${goal.id}`].detail, /planned again in ten minutes/);
+  await step();
+  assert.equal(prompts.length, 2, 'the retry waits ten minutes, not the next cycle, and not an hour');
+  await step(9 * 60_000);
+  assert.equal(prompts.length, 4, 'the round is retried ten minutes after the refusal');
+  assert.match(prompts[2], /plan-author: the graphyard_plan payload failed validation/, 'the next prompt carries the recorded refusal as lastRefusal');
+  await step();
+  assert.equal(current.planDrafts, 2);
+  await step(10 * 60_000); await step();
+  assert.equal(current.planDrafts, maxPlanRounds);
+  assert.match(state.actions[`planner:${goal.id}`].detail, new RegExp(`that was plan ${maxPlanRounds} of ${maxPlanRounds}`));
+  await step(10 * 60_000);
+  assert.equal(prompts.length, 6, 'no run past the cap');
+  assert.equal(invalids.length, maxPlanRounds);
+  assert.match(state.actions[`planner:${goal.id}`].detail, /the loop plans no more and leaves it to the master/);
+  assert.match(goalSummary(current).next!.who, /^master: /);
+});
+
+test('unit:plan-validation-accepts-declared-post-deploy-criterion — the plan payload accepts an item whose serving-release criterion names a manual:post-deploy/ proof beside a buildable criterion, and refuses the same item with the declaration removed, naming the criterion', async () => {
+  const { planPayloadSchema } = await planner();
+  // Shaped like GOAL-1's outcomes: candidate-gates-promotion and the exact-release verification, each a live observation beside a criterion a head proves.
+  const payload = (gatesProofs: string[]) => ({ goal: 'GOAL-1', note, items: [
+    { ...item('gates', ['candidate-gates-promotion'], ['src/promotion/gates.ts']), criteria: [
+      { id: 'AC-1', text: 'The release gate tallies every required check a candidate needs before promotion', proofs: ['unit:promotion-gate-tally'] },
+      { id: 'AC-3', text: 'Production promotes only a release candidate whose required checks all passed', proofs: gatesProofs },
+    ] },
+    { ...item('exact', ['production-exact-verification'], ['src/release/exact.ts']), criteria: [
+      { id: 'AC-1', text: 'The exact-release record ties a served release to the commit its item proved', proofs: ['unit:exact-release-record'] },
+      { id: 'AC-2', text: 'Production serves the exact merge commit every delivered item of the goal proved', proofs: ['manual:post-deploy/exact-release'] },
+    ] },
+  ] });
+  const parsed = planPayloadSchema.parse(payload(['manual:post-deploy/promotion-gates']));
+  assert.deepEqual(parsed.items.map(entry => entry.ref), ['gates', 'exact']);
+  assert.deepEqual(parsed.items[0].criteria[1].proofs, ['manual:post-deploy/promotion-gates'], 'the declared proof rides through the parse');
+  assert.throws(() => planPayloadSchema.parse(payload(['unit:promotion-record'])),
+    (error: Error) => /AC-3 \(..Production..\) is a live-install or post-deploy observation/.test(error.message),
+    'the same item with the declaration removed is refused, naming the criterion and its observed phrase');
 });
 
 test('unit:planner-approval-and-dispatch-order — only an approver who did not write the plan approves it, only then are its items created and released with their dependencies, the dispatcher holds each until those are delivered, and the goal moves planned, delivering, delivered', async () => {
