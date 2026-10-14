@@ -115,7 +115,7 @@ test('unit:blocked-prompt-answered-once — GY-1774: a continuation prompt carri
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('unit:blocked-prompt-answered-once — GY-1774: a carried continuation is retried inside the settle window, without the decline keys', async () => {
+test('unit:blocked-prompt-answered-once — GY-1774: a carried continuation answered meanwhile is consumed inside the settle window, without the decline keys or a second paste', async () => {
   const { directory, master } = await setup();
   try {
     const item = { current: held() };
@@ -131,7 +131,8 @@ test('unit:blocked-prompt-answered-once — GY-1774: a carried continuation is r
     release();
     await new Promise(resolve => setTimeout(resolve, 5));
     await runCycle(master, state, effects, () => clock + 25_000);
-    assert.equal(prompts.length, 2, 'the continuation was retried within the settle window');
+    assert.equal(prompts.length, 1, 'the continuation answered meanwhile is consumed within the settle window, never pasted twice');
+    assert.equal(Object.values(state.actions).filter(row => row.detail.includes('destructive-command prompt') && row.state === 'done' && row.detail.includes('told it to continue')).length, 1, 'the answer retired the carried row');
     assert.deepEqual(log.keys, [['2']], 'the retry resumed at the continuation: the decline keys were not sent again');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

@@ -62,6 +62,8 @@ export interface BoundOptions {
   /** The in-flight key of a call: the identity a retry must share to join it. */
   key?: (call: string, args: unknown[]) => string | null;
   wording?: (call: string, args: unknown[]) => CallWording | null;
+  /** The decisions step's pass reaches its first item whatever the clock says (GY-1286), so its call is made on a spent budget and carried at once, as it always was; every other step makes none. */
+  sendWhenSpent?: boolean;
 }
 
 /** The identity a retry's argument must share with the call in flight: an item's binding (head, base, policy revision, epoch), a session's pane, a ledger record's id, a fence's supervisor, an escalation handler's launch. */
@@ -144,7 +146,7 @@ export function boundedCalls(effects: DaemonEffects, kept: object, clockMs: () =
       if (joined?.settledAt) { pending.delete(key); return joined.promise; }
       const { what, owed, per } = options.wording?.(call, args) ?? callWording(call, args);
       // A budget already spent makes no new call: the work stays owed to the next cycle, which makes it on a fresh budget.
-      if (!joined && capped <= 0) return Promise.reject(new StepCallCarriedError(`the ${options.step} step's budget passed before ${what} was made (${boundMs} ms per ${per}, 0 ms left); the ${owed} stays owed and is retried next cycle`, false));
+      if (!joined && capped <= 0 && !options.sendWhenSpent) return Promise.reject(new StepCallCarriedError(`the ${options.step} step's budget passed before ${what} was made (${boundMs} ms per ${per}, 0 ms left); the ${owed} stays owed and is retried next cycle`, false));
       const sent = !joined;
       let flight = joined;
       if (!flight) {

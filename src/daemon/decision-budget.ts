@@ -64,7 +64,7 @@ const decidingKey = (item: Work, rest: unknown[]) => canonicalJson([item.id, ite
  */
 export function boundedDecisions(effects: DaemonEffects, kept: object, clockMs: () => number, budgetLeft: () => number | null): DaemonEffects {
   if (!effects.decide) return effects;
-  return boundedCalls(effects, kept, clockMs, budgetLeft, { step: 'decisions', calls: ['decide'], boundMs: fx => (fx as { decisionCallBoundMs?: number }).decisionCallBoundMs ?? decisionCallBoundMs,
+  return boundedCalls(effects, kept, clockMs, budgetLeft, { step: 'decisions', calls: ['decide'], sendWhenSpent: true, boundMs: fx => (fx as { decisionCallBoundMs?: number }).decisionCallBoundMs ?? decisionCallBoundMs,
     key: (_call, args) => decidingKey(args[0] as Work, args.slice(1)), wording: (_call, args) => ({ what: `${(args[0] as Work).key}'s decision call`, owed: 'decision', per: 'decision' }) });
 }
 
