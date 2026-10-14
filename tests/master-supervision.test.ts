@@ -358,7 +358,7 @@ test('integration:runtime-calls-bounded — a hung agent runtime fails its step,
     assert.match(master_ts, /agentRuntimeRun = \(timeoutMs: number = agentRuntimeTimeoutMs\)[\s\S]{0,300}?childRunner\(\{ timeoutMs \}\)/);
     assert.equal(defaultChildTimeoutMs, agentRuntimeTimeoutMs, 'the default runner carries the runtime bound');
     // The loop's other subprocess commands are bounded where it builds them.
-    for (const file of ['daemon/effects.ts', 'auto-dispatch.ts']) {
+    for (const file of ['daemon/effects-production.ts', 'auto-dispatch.ts']) {
       const defaults = [...source(file).matchAll(/childRunner\(\{[^}]*\}\)/g)];
       assert.ok(defaults.length, `${file} builds the loop's command runner`);
       for (const [call] of defaults) assert.match(call, /timeoutMs:/, `${file} bounds every command the loop runs: ${call}`);

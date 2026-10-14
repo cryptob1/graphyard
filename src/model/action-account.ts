@@ -26,7 +26,9 @@ import type { Work } from './work.js';
  * - `human` — one of the three decisions the project reserves for a person (AGENTS.md).
  * - `settled` — no gate refuses: the item is delivered, or merged and awaiting its record.
  * - `window` — the observation the item owes cannot exist before its recorded instant
- *   (`observationWindow.notBefore`, GY-1698); the loop dispatches it once the instant passes.
+ *   (`observationWindow.notBefore`, GY-1698); the loop dispatches it once the instant passes. On
+ *   the loop (`on: 'loop'`, GY-1779) it is the loop's own reading, recorded in its
+ *   deployment-verification step, never a dispatch.
  */
 export const waitKinds = ['dependency', 'session', 'human', 'settled', 'window'] as const;
 export type WaitKind = typeof waitKinds[number];

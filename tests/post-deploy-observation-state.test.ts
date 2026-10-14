@@ -62,10 +62,10 @@ test('unit:observation-class-needs-the-follow-up-reading — a head-anchored cod
   const due = follow();
   assert.match(upNextHold(due, [due], now)?.text ?? '', /reading of manual:rate-on-serving-release/);
   const lapsed = follow({ observationWindow: { notBefore: iso(now - hour), basis: 'criterion-window', detail: 'd' } });
-  assert.match(upNextHold(lapsed, [lapsed], now)?.text ?? '', /owed now/);
+  assert.match(upNextHold(lapsed, [lapsed], now)?.text ?? '', /which is due and which the loop records in its deployment-verification step/);
 });
 
-test('unit:observation-item-counted-waiting — it counts as waiting with what it waits for, and as ready again once the wait has ended', () => {
+test('unit:observation-item-counted-waiting — it counts as waiting with what it waits for, and still waiting, on the loop\'s close, once a recorded pass has ended the reading\'s wait', () => {
   const snapshot = (...work: Work[]) => buildMasterStatus({ now: iso(now), work } as never, [], []);
   const windowed = item(4, { observationWindow: { notBefore: iso(now + 6 * hour), basis: 'criterion-window', detail: 'merged 7 days before' } });
   const status = snapshot(item(1), windowed, item(2, { criteria: code }));
@@ -86,19 +86,27 @@ test('unit:observation-item-counted-waiting — it counts as waiting with what i
   assert.deepEqual((loopObservation(windowed, new Date(now)) as { due: boolean }).due, false);
   const later = new Date(now + 7 * hour);
   assert.equal(dispatchable(windowed, later.getTime()), false);
-  assert.equal(nextAction(windowed, [windowed], later)?.kind, 'escalate');
-  assert.equal(nextAction(item(1), [item(1)], new Date(now))?.kind, 'escalate', 'an unwindowed one owes its reading at once');
+  // GY-1779: a due reading is the loop's own to record, a wait on the loop, never an operator-proof escalation.
+  assert.equal(nextAction(windowed, [windowed], later), null);
+  assert.deepEqual([actionAccount(windowed, [windowed], later).wait?.kind, actionAccount(windowed, [windowed], later).wait?.on], ['window', 'loop']);
+  assert.equal(nextAction(item(1), [item(1)], new Date(now)), null, 'an unwindowed one is due at once, on the loop');
+  // GY-1779: a recorded pass leaves the item open only until the loop closes it in the same step: it waits on the loop's close, never counted ready and never escalated.
   const after = buildMasterStatus({ now: iso(now + 7 * hour), work: [windowed, read] } as never, [], []);
-  assert.deepEqual([after.counts.ready, after.counts.waiting], [1, 1]);
+  assert.deepEqual([after.counts.ready, after.counts.waiting], [0, 2]);
+  const closing = after.work.find(entry => entry.key === 'GY-5')!;
+  assert.match(closing.observing!, /the loop's close of GY-5 as delivered-observation on release aaaaaaaaaaaa/);
+  assert.deepEqual([closing.observationDue, closing.observationPassedOn, closing.attention], [true, 'a'.repeat(40), null]);
+  assert.deepEqual([actionAccount(read, [read], later).action, actionAccount(read, [read], later).wait?.on], [null, 'loop']);
 });
 
-test('unit:observation-wait-names-reading — a windowed wait names the observation due then, never a dispatch; a due one is attention for the reading, not a missing submission', () => {
+test('unit:observation-wait-names-reading — a windowed wait names the observation due then, never a dispatch; a due one is a pending reading of the loop, not a missing submission and not attention', () => {
   const windowed = item(4, { observationWindow: { notBefore: iso(now + 6 * hour), basis: 'criterion-window', detail: 'merged 7 days before' } });
   const wait = actionAccount(windowed, [windowed], new Date(now)).wait!;
   assert.match(wait.detail, /first exist at/);
   assert.doesNotMatch(wait.detail, /dispatches it then/);
   const later = iso(now + 7 * hour);
-  const row = buildMasterStatus({ now: later, work: [windowed] } as never, [], []).work[0]!;
-  assert.match(row.attention!, /owes the loop's reading/);
-  assert.doesNotMatch(row.attention!, /has not submitted/);
+  const status = buildMasterStatus({ now: later, work: [windowed] } as never, [], []), row = status.work[0]!;
+  assert.equal(row.attention, null);
+  assert.match(row.observing!, /the loop records in its deployment-verification step/);
+  assert.deepEqual((status as { pendingReadings: { key: string; due: boolean }[] }).pendingReadings.map(entry => [entry.key, entry.due]), [['GY-4', true]]);
 });

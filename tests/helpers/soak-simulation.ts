@@ -10,6 +10,8 @@ import { GitHubCacheStore } from '../../src/github-cache.js';
 import { GitHubChargeLedger } from '../../src/github-charges.js';
 import { type Principal, Refusal, type Work, observationWindowHold } from '../../src/model.js';
 import { type PostDeployFiler, filePostDeployFollowUps, localPostDeployChecks, verifyDeployment } from '../../src/master-verification.js';
+import { postDeployReader } from '../../src/master/post-deploy-readings.js';
+import type { PatternReader } from '../../src/model/observation-window.js';
 import { plainStatus } from '../../src/model/plain-status.js';
 import { buildBoard, groupOf } from '../../src/model/board.js';
 import { conflictReworkBoundMs } from '../../src/model/approval.js';
@@ -56,7 +58,7 @@ import { terminalDecisions } from '../../src/cli/decision-report.js';
 import { Launcher } from '../../src/daemon/cycle.js';
 import { wakeOwnObservation } from '../../src/master/base-break-refresh.js';
 import { buildMasterStatus } from '../../src/master/status.js';
-import { nextAction } from '../../src/model/next-action.js';
+import { actionAccount, nextAction } from '../../src/model/next-action.js';
 import * as faultsStep from '../../src/daemon/faults.js';
 import { type ReportedAttention, docsHeadroomStatus, docsWordCountAt } from '../../src/daemon/faults.js';
 import { docsTrimTitle } from '../../src/model/documentation.js';
@@ -317,7 +319,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * 98070f3538 filed GY-1721..GY-1725); the served release's isolated checkout carries the current filer.
    * `windowHours` makes the criterion a live window of that many hours instead of a rate per `windowDays`.
    */
-  observationWindow?: { item: number; windowDays: number; filedAfterMs: number; unwindowed?: boolean; staleCoordinator?: boolean; windowHours?: number };
+  observationWindow?: { item: number; windowDays: number; filedAfterMs: number; unwindowed?: boolean; staleCoordinator?: boolean; windowHours?: number; closeRefusedHours?: number };
   /**
    * GY-1740: one post-deploy follow-up per entry of `hours`, filed as verify-deployment files them and
    * blocked by its first worker on a reading that cannot exist before the day's start plus that many
@@ -556,7 +558,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     parent: items[options.observationWindow.item - 1], windowDays: options.observationWindow.windowDays, proof: windowedPatternProof,
     followUp: null as Work | null, filedAt: null as number | null, releasedAt: null as number | null, filings: 0, staleFilings: 0, created: [] as string[],
     deferred: [] as { at: number; epoch: number; notBefore: string }[],
-    samples: [] as { elapsed: number; at: string; stage: string; waiting: boolean | null; attention: string | null; attentionRows: number; sentence: string; dispatches: { requestedBy: string; at: string }[]; lease: string | null; sessions: number; masterLive: boolean; faults: string[]; escalations: string[]; counted: 'ready' | 'waiting' | null; next: string | null }[],
+    samples: [] as { elapsed: number; at: string; stage: string; waiting: boolean | null; attention: string | null; attentionRows: number; sentence: string; dispatches: { requestedBy: string; at: string }[]; lease: string | null; sessions: number; masterLive: boolean; faults: string[]; escalations: string[]; counted: 'ready' | 'waiting' | null; next: string | null; readings: { result: string; sha: string }[]; closure: { kind: string; ref: string | null } | null; wait: string | null }[],
   } : null;
   // ---- GY-1740: blocked, unleased post-deploy follow-ups whose recorded blockers name future instants. ----
   const holdDay = options.blockedHolds ? { seeded: [] as { id: string; key: string; notBefore: number }[], windows: [] as { key: string; at: number; notBefore: string }[], final: [] as Work[],
@@ -1883,8 +1885,35 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       ...entry, reason: entry.reason?.replace(/\[Capped review under policy revision \d+\.\]\s*/, ''),
       ...(undated ? { requestedAt: undefined, refusal: entry.refusal ? { ...entry.refusal, at: undefined } : entry.refusal } : {}) }) };
   };
+  // GY-1779: the loop's own readings of the windowed follow-up over the real control plane. The
+  // report's row for the pattern reads as the filing projection did (no streak yet) until an hour past
+  // the follow-up's instant — every due cycle records a failed reading, raises the item's escalation
+  // naming the measured values and re-reads on the backoff — then as a streak that meets the window:
+  // the pass is recorded and the item closes delivered-observation, all under the day's invariants.
+  const readingDay = windowDay ? { reads: 0, passFrom: null as number | null, closeAsks: [] as { at: number; key: string }[] } : null;
+  const readPattern: PatternReader = async pattern => {
+    readingDay!.reads += 1;
+    const parent = (await store.list()).find(item => item.id === windowDay!.parent.id)!, mergedAt = parent.delivery ? Date.parse(parent.delivery.mergedAt) : clock.now();
+    const projected = new Date(mergedAt + windowDay!.windowDays * 24 * hour - 12 * hour).toISOString();
+    if (pattern.kind !== 'escalation' || pattern.stage !== 'build') return null;
+    const notBefore = windowDay!.followUp?.observationWindow ? Date.parse(windowDay!.followUp.observationWindow.notBefore) : null;
+    if (notBefore === null || clock.now() < notBefore + hour) return { since: null, projected };
+    readingDay!.passFrom ??= clock.now();
+    return { since: new Date(notBefore + hour - (options.observationWindow!.windowHours ?? windowDay!.windowDays * 24) * hour).toISOString(), projected: null };
+  };
   const effects: DaemonEffects = {
     ...(promotionEffect ? { promotion: promotionEffect } : {}),
+    ...(readingDay ? {
+      readPattern, postDeployFiler: localPostDeployChecks, readPostDeploy: postDeployReader(readPattern),
+      recordReading: (work, reading) => api(principals.coordinator, 'POST', `work/${work.id}/reading`, reading),
+      closeObservation: async (work, release, reason, key) => {
+        // GY-1794: `closeRefusedHours` makes the plane refuse the recorded pass's close for that long after the pass began.
+        readingDay.closeAsks.push({ at: clock.now(), key });
+        const refusedHours = options.observationWindow?.closeRefusedHours;
+        if (refusedHours && readingDay.passFrom !== null && clock.now() < readingDay.passFrom + refusedHours * hour) throw new Error('the control plane refused the close');
+        return api(principals.coordinator, 'POST', `work/${work.id}/close`, { kind: 'delivered-observation', ref: release, reason }, key);
+      },
+    } : {}),
     ...(mainWatchEffect ? { mainWatch: mainWatchEffect } : {}),
     ...(hostDay ? { healHostSupervision: allow => healUserSupervision(hostDay.root, { systemctl: hostSystemctl, loginctl: hostLoginctl, masked: () => false, platform: 'linux',
       wait: async ms => { fenced.drift += ms; await moveClock(ms); } }, allow) } : {}),
@@ -3313,7 +3342,10 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
             dispatches: [...(current.actionQueue?.actions ?? []), ...(current.actionQueue?.history ?? [])].filter(action => action.kind === 'dispatch').map(action => ({ requestedBy: action.requestedBy, at: action.requestedAt })),
             lease: current.lease?.owner ?? null, sessions: sessions.filter(session => session.key === current.key).length, masterLive: !!herdr.byName(config.masterAgentName!) || !!state.master.session,
             faults: state.faults.instances.filter(instance => instance.subject === current.key).map(instance => instance.kind),
-            escalations: Object.values(state.actions).filter(action => action.kind === 'escalation' && action.work === current.key).map(action => action.detail) });
+            escalations: Object.values(state.actions).filter(action => action.kind === 'escalation' && action.work === current.key).map(action => action.detail),
+            // GY-1779: the loop's recorded readings on the item, its closure once a pass closed it, and the wait the queue names.
+            readings: current.evidence.filter(entry => entry.reading).map(entry => ({ result: entry.result, sha: entry.sha })), closure: current.closure ? { kind: current.closure.kind, ref: current.closure.ref } : null,
+            wait: actionAccount(current, all, new Date(at)).wait?.detail ?? null });
           windowDay.followUp = current;
         }
       }
@@ -3406,7 +3438,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: existsSync(tmpRoot) ? readdirSync(tmpRoot) : [] };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { observationWindowDay: windowDay, blockedHoldDay: holdDay, unmatchedRefusals, capAnswers, readinessDay, waitsDay, outageDay, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
+  return { observationWindowDay: windowDay, readingDay, blockedHoldDay: holdDay, unmatchedRefusals, capAnswers, readinessDay, waitsDay, outageDay, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, limitMenuDay, menuReset, menuNotice, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, githubStatusReads, credentialReads, blockerRecords, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },

@@ -381,6 +381,9 @@ test('a row a reconciliation batch saved stands in as exactly the projection the
       baseRefresh: { carry: { evidence: [{ evidenceId: evidence[2].id, carried: true }] } } as unknown as Work['baseRefresh'],
       evidence: evidence.map(entry => ({ ...entry, sha: sha(5, 'q') })), autoDispatch: null as unknown as Work['autoDispatch'], observation: null as unknown as Work['observation'], queueHistory: null } as unknown as Work,
     { ...base, id: randomUUID(), key: 'SHAPE-3', evidence: undefined, actionQueue: undefined, autoDispatch: undefined, sessions: undefined, queueHistory: undefined, observation: undefined, pipeline: undefined } as unknown as Work,
+    // GY-1779: a loop-owned observation item carries no candidate; the loop's own readings (`reading`) on the serving release are kept, a producer's record on another head is not.
+    { ...base, id: randomUUID(), key: 'SHAPE-4', candidate: null, autoDispatch: null as unknown as Work['autoDispatch'],
+      evidence: [{ ...evidence[0], id: randomUUID(), sha: sha(6, 's'), baseSha: sha(7, 'm'), reading: { detail: 'the loop read it' } }, { ...evidence[0], id: randomUUID(), sha: sha(6, 's'), baseSha: sha(7, 'm') }] as unknown as Work['evidence'] } as unknown as Work,
   ];
   await insert(shapes);
   const fromSql = async (ids: string[]) => new Map((await store.pool.query(`SELECT d.id, x.document::text AS text
@@ -388,6 +391,7 @@ test('a row a reconciliation batch saved stands in as exactly the projection the
     CROSS JOIN ${coordinationRelevance(coordinationTail)} CROSS JOIN LATERAL (SELECT ${coordinationDocumentSql} AS document) x`, [ids])).rows.map(row => [row.id as string, JSON.parse(row.text)]));
   const projected = await fromSql(shapes.map(shape => shape.id));
   for (const shape of shapes) assert.deepEqual(coordinationProjection(JSON.parse(JSON.stringify(shape))), projected.get(shape.id), `${shape.key}'s in-process projection is the SQL one`);
+  assert.deepEqual(projected.get(shapes[3].id).evidence.map((entry: { reading?: unknown }) => entry.reading), [{ detail: 'the loop read it' }], 'SHAPE-4 keeps exactly the loop\'s reading');
   // The attempts made reach worker dispatch through both projections (GY-1746): two ended epochs, no completed rework round.
   for (const shape of shapes.filter(entry => entry.stage !== 'done' && Array.isArray((entry.pipeline as any)?.attempts))) assert.equal(projected.get(shape.id).attemptCount, (shape.pipeline as any).attempts.length, `${shape.key}'s SQL projection keeps its attempt count`);
 

@@ -383,7 +383,7 @@ test('unit:acceptance-role-drafts-and-approval — the loop launches the accepta
   // The acceptance role has its own enablement: the diagnostician switched off holds no goal.
   const off = masterConfigSchema.parse({ ...config, run: { diagnostician: { enabled: false } } });
   assert.equal(acceptanceEffects(off, root, {} as never).settings.enabled, true);
-  assert.match(await readFile(join(root, 'src/daemon/effects.ts'), 'utf8'), /get acceptance\(\) \{ const config = current\(\); return config\.operatorAgent && config\.approver \? acceptanceEffects\(/);
+  assert.match(await readFile(join(root, 'src/daemon/effects-production.ts'), 'utf8'), /get acceptance\(\) \{ const config = current\(\); return config\.operatorAgent && config\.approver \? acceptanceEffects\(/);
 });
 
 /** A claimed item with its workspace, and the observation of a candidate changing `files` on its branch. */
