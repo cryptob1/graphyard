@@ -5,11 +5,11 @@ Sidebar: **Work**, **Workers**, **Shipped**, **Tests**, **Insights**, **Settings
 
 ## From your phone
 
-A local dashboard listens on `127.0.0.1:4310`, or its install's free port ([install](install.md)). With Tailscale, `graphyard up` prints `tailscale serve --bg --http=4310 http://127.0.0.1:4310` and its tailnet URL; `--share-tailnet` runs it, keeps `up.json` `reachableUrl`, sign-in links use it: tailnet-only, never `tailscale funnel`. A green `up` ends with one single-use sign-in link (`signIn`, 10min).
+A local dashboard listens on `127.0.0.1:4310`, or its install's free port ([install](install.md)). With Tailscale, `graphyard up` prints `tailscale serve --bg --http=4310 http://127.0.0.1:4310` and its tailnet URL; `--share-tailnet` runs it, keeps `up.json` `reachableUrl`, sign-in links use it: tailnet-only, never `tailscale funnel`. A green `up` ends with one single-use sign-in link (`signIn`, 10 minutes).
 
 ## Work
 
-Open items by group: **Needs you** (yours alone), **Blocked**, **Moving**, **Up next**, **Backlog**. `GET /api/board` items carry `group`, `stage`, `owner`, `actor`, `command`, `since`, `overdue` (Moving/Blocked past `overdueAfterMs`, 30min); master-owed: `master status` `board.owed`. Blocked rows: one sentence naming its clearer (`blocker.summary`; a wait's UTC `until`).
+Open items by group: **Needs you** (yours alone), **Blocked**, **Moving**, **Up next**, **Backlog**. `GET /api/board` items carry `group`, `stage`, `owner`, `actor`, `command`, `since`, `overdue` (Moving/Blocked past `overdueAfterMs`, 30 min); master-owed: `master status` `board.owed`. Blocked rows: one sentence naming its clearer (`blocker.summary`; a wait's UTC `until`).
 
 ## Needs you
 
