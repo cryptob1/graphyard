@@ -32,6 +32,7 @@ export async function currentBaseTree(root: string, baseBranch: string, run: Chi
 }
 import { agentOwner, loadMasterConfig, type AttentionItem } from './master.js';
 import { processConnectAccounts } from './master/environments.js';
+import { loadedHeldSnapshot } from './daemon/upgrade.js';
 import { parseCoordinatorCheckout, checkoutGuardApplies, coordinatorCheckoutRefusal, coordinatorCheckoutRoot } from './master/profiles.js';
 import { loopUnitOf } from './supervisor.js';
 import { executorUnitDirectory } from './repository-setup.js';
@@ -55,6 +56,8 @@ import { executorUnitDirectory } from './repository-setup.js';
 export interface ControlPlaneEffects {
   /** The work snapshot as the control plane reports it, with its own clock. */
   snapshot: () => Promise<{ work: Work[]; now: string }>;
+  /** GY-1773: the held snapshot commit this executor's modules were loaded from, null for the checkout's; defaults to where this module was loaded from. */
+  loadedSnapshot?: (root: string) => string | null;
   /** A coordinator-authenticated mutation against the control plane. */
   mutate: (path: string, body: unknown, requestId?: string) => Promise<any>;
   /** Herdr's agent inventory, or null when it could not be read; read asynchronously. */
@@ -233,7 +236,8 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
   // restart after the checkout is cleaned is what puts the fleet back on committed code.
   const cliPath = config().cliPath;
   const checkout = typeof cliPath === 'string' && cliPath ? executorCheckout(coordinatorCheckoutRoot(cliPath)) : null;
-  const checkoutRefusal = checkout && checkoutGuardApplies(checkout.root) ? coordinatorCheckoutRefusal(checkout, 'this executor') : null;
+  // GY-1773: an executor whose modules were loaded from a held snapshot runs that snapshot, never the dirty checkout beside it.
+  const checkoutRefusal = checkout && checkoutGuardApplies(checkout.root) && !(effects.loadedSnapshot ?? loadedHeldSnapshot)(checkout.root) ? coordinatorCheckoutRefusal(checkout, 'this executor') : null;
   // A host with a declared identity serves connects: a fresh installation's operator connects its
   // first accounts from the UI before any session can launch, and this is the process that is
   // already resident on the agent host with a coordinator credential (GY-409).

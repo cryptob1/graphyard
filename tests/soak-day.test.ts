@@ -496,20 +496,30 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(freed >= 1024 * (tmpReclaimLimitPerCycle + 20) && reported <= freed && reported >= freed - last, `the reclaim records carry the bytes the passes freed (${reported} of ${freed})`);
   assert.ok(tmp.reports.length <= 50, `the reclaim record stays bounded (${tmp.reports.length})`);
   assert.ok(Object.keys(state.actions).filter(key => key.startsWith('reclaim:resources:')).length <= tmp.passes.filter(pass => pass.removed.length).length, 'the loop records a reclaim only for a pass that freed something');
-  // GY-437: the between-cycles self-upgrade ran after every cycle of the day. Each deploy aligned
-  // the checkout once, and restarted the fleet and the loop once (every merge touches src/); the
-  // dirty checkout across the second deploy was refused, untouched, without growing the cursor,
-  // and aligned once it was clean again.
+  // GY-437: the between-cycles self-upgrade ran after every cycle of the day. The first deploy moved
+  // the clean checkout once and restarted the fleet and the loop once (every merge touches src/);
+  // the second deploy was verified while the checkout stood dirty, so its alignment went onto a held
+  // snapshot instead — the launcher pinned, the fleet restarted onto the snapshot tip, the loop
+  // re-executed onto it — with the checkout left where it stood; once the operator was done with it,
+  // the checkout moved onto the commit the loop already ran, which lifted the pin, re-grounded the
+  // fleet and owed no re-execution (the loop already ran that commit from the snapshot).
   const summary = `${upgrades.checkouts.map(entry => `+${Math.round((entry.at - dayStart) / minute)} min ${entry.from.slice(0, 7)}..${entry.to.slice(0, 7)}`).join(', ')}`;
-  assert.equal(upgrades.outcomes.length + guardReads.refused, cycles, 'the checkout guard ran after every cycle, and the self-upgrade after every one it did not refuse');
-  assert.equal(upgrades.checkouts.length, production.deploys.length, `one alignment per deploy: ${summary}`);
-  assert.equal(upgrades.executors.length, production.deploys.length, 'one fleet restart per deploy');
-  assert.equal(upgrades.self, production.deploys.length, 'one re-execution of the loop per deploy');
-  assert.deepEqual(upgrades.executors, upgrades.checkouts.map(entry => entry.to), 'the fleet restarts against the tip the checkout moved to');
-  assert.ok(upgrades.checkouts[1].at >= dayStart + basePlan.dirtyCheckout.to, `the second deploy aligned only once the checkout was clean: ${summary}`);
   const dirtySamples = refusalSamples.filter(sample => !sample.head), headSamples = refusalSamples.filter(sample => sample.head);
-  assert.ok(dirtySamples.length >= 3, `the dirty checkout stood refused across the second deploy (${dirtySamples.length} cycles)`);
-  assert.deepEqual(new Set(dirtySamples.map(sample => JSON.stringify(sample))).size, 1, `a standing refusal does not grow the cursor's actions: ${JSON.stringify(dirtySamples.slice(0, 3))}`);
+  assert.equal(upgrades.outcomes.length + headSamples.length, cycles, 'the checkout guard ran after every cycle, and the self-upgrade after every one it did not refuse for a moved HEAD — a dirty checkout holds it back no longer');
+  assert.equal(upgrades.checkouts.length, production.deploys.length, `one checkout move per deploy: ${summary}`);
+  const snapshotTip = upgrades.executors[1];
+  assert.equal(upgrades.checkouts[1].to, snapshotTip, `the checkout finished on the commit the loop had been running from the snapshot: ${summary}`);
+  assert.deepEqual(upgrades.executors, [upgrades.checkouts[0].to, snapshotTip, snapshotTip], 'one fleet restart per deploy plus one for the move back onto the checkout');
+  assert.equal(upgrades.self, production.deploys.length, 'one re-execution of the loop per deploy; the move back owes none, the loop already ran that commit');
+  assert.ok(upgrades.checkouts[1].at >= dayStart + basePlan.dirtyCheckout.to, `the checkout moved only once the operator was done with it: ${summary}`);
+  assert.deepEqual(upgrades.pins.map(entry => entry.commit), [...Array(basePlan.heldClaimRestarts + 1).fill(null), snapshotTip, null], 'the launcher stood unpinned through the clean deploy (its refused passes included), was pinned to the snapshot across the dirty window, and the move back onto the checkout unpinned it');
+  const snapshotSamples = upgrades.samples.filter(sample => sample.snapshot);
+  assert.ok(snapshotSamples.length >= 3, `the cursor named the checkout left behind across the dirty window (${snapshotSamples.length} cycles)`);
+  assert.ok(snapshotSamples.every(sample => sample.snapshot!.commit === snapshotTip && sample.snapshot!.checkout === upgrades.checkouts[0].to && sample.snapshot!.dirty.includes('src/master.ts')),
+    'naming the snapshot tip, the checkout it left, and the operator\'s dirty path');
+  assert.ok(dirtySamples.length >= 3, `the dirty checkout stood escalated across the second deploy (${dirtySamples.length} cycles)`);
+  assert.equal(new Set(dirtySamples.map(sample => sample.keys)).size, 2, `the dirty window's only cursor growth is the snapshot alignment's one action row (${JSON.stringify([...new Set(dirtySamples.map(sample => sample.keys))])})`);
+  assert.equal(new Set(dirtySamples.map(sample => sample.attempts)).size, 2, `the escalation's attempts grew once, when the loop began running the snapshot (${JSON.stringify([...new Set(dirtySamples.map(sample => sample.attempts))])})`);
   // GY-866: the per-cycle guard over the day. The HEAD moved by a session outside the loop stood
   // refused for the whole window — named with the commit the loop runs and the one it found —
   // without an alignment or a restart from it, and the loop's own alignments at each deploy never
@@ -757,4 +767,85 @@ test('unit:soak-invariants-hold — broad items are split before dispatch with b
   const report = splitReport(await store.list());
   assert.equal(report.length, broadItems.length, 'master status split report lists all split parents');
   assert.ok(report.every(entry => entry.delivered && entry.children.length === 2 && entry.children.every(c => c.delivered)), 'split report shows parent and children delivered');
+});
+
+test('unit:soak-invariants-hold — a coordinator checkout dirty across several deploys never refuses the loop: every verified release advances it onto a held snapshot of its head — one snapshot, one pin and one re-execution per head, a fleet restart only for a head touching loaded code, the checkout never touched, the upgrade rows bounded by the heads — and the operator\'s move onto the pinned commit lifts the pin and settles the day', { timeout: 600_000 }, async () => {
+  // GY-1773 over a real loop for simulated hours: the checkout stands dirty from the first hour to
+  // the seventh while four deploys are verified, so the day advances through several merged heads
+  // with the checkout left where it stands the whole time, and the operator ends the story with the
+  // move that lifts the pin (dirtyLift). A verified release the served release does not contain yet
+  // is held as anywhere else, so a restart never runs ahead of production. The last deploy serves a
+  // docs-only head: a docs page lands on the base branch after the day's merges are done and after
+  // the loop restarted onto the third head, so its diff from the snapshot the loop runs touches no
+  // loaded code, and the snapshot restart is the loop's alone, the executors kept running.
+  const deploys = [2 * hour, 4 * hour, 6 * hour, 6 * hour + 45 * minute];
+  const day = await simulateDay({ hours: 8, dirtyLift: true, dirtyTipHold: { from: 3 * hour, to: 5 * hour }, docsOnlyCommit: 6 * hour + 30 * minute, plan: { deploys, dirtyCheckout: { from: hour, to: 7 * hour }, headMove: { from: 5 * hour, to: 5 * hour + 30 * minute }, heldClaimRestarts: 0, deaths: new Set() } });
+  assertLaunchesConfined(day, coordinatorRoot!);
+  const { upgrades, state, production, checkout, dirtyLift, cycles, violations, failures, lost, guardReads, github, dayStart } = day;
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  assert.deepEqual(failures, [], 'no cycle or self-upgrade failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  assert.equal(production.deploys.length, deploys.length, 'the day deployed on schedule');
+  const heads = [...new Set(production.deploys.map(entry => entry.sha))];
+  assert.ok(heads.length >= 3, `the deploys served distinct heads while the checkout stood dirty: ${production.deploys.map(entry => entry.sha.slice(0, 7)).join(', ')}`);
+  assert.equal(production.deploys.at(-1)!.sha, upgrades.docsOnly, 'the last deploy served the docs-only head, the day\'s merges all landed before it');
+  // Repeated dirty cycles: the checkout stood dirty and unmoved from the first hour to the seventh,
+  // and the self-upgrade ran after every cycle of the day — the dirty escalations held it back no
+  // longer, and the loop never touched the tree.
+  const dirtySamples = upgrades.samples.filter(sample => sample.dirty);
+  assert.ok(dirtySamples.length >= 20, `the checkout stood dirty across ${dirtySamples.length} cycles`);
+  const startTip = upgrades.samples[0].head;
+  const moveWindow = (sample: { elapsed: number }) => sample.elapsed >= 5 * hour && sample.elapsed < 5 * hour + 30 * minute;
+  assert.ok(dirtySamples.filter(sample => !moveWindow(sample) && !(sample.elapsed >= 3 * hour && sample.elapsed < 5 * hour)).every(sample => sample.head === startTip), 'the checkout never moved while it stood dirty, but for the operator\'s HEAD moves');
+  // GY-1773: the operator's HEAD moved to another commit while the pin stood and a release was aligned: no restart was owed onto the dirty tree, and the pin held through the window.
+  const movedSamples = upgrades.samples.filter(sample => sample.dirty && moveWindow(sample));
+  assert.equal(guardReads.headMoves, 1, 'the day moved the dirty checkout\'s HEAD once');
+  assert.ok(movedSamples.length >= 3 && movedSamples.every(sample => sample.head !== startTip && sample.pin !== null && sample.snapshot !== null && sample.outcome === 'skipped'), 'the pin and the snapshot record stood, and the upgrade skipped, every cycle the dirty HEAD stood moved');
+  // GY-1773: a dirty checkout already holding the deployed tip, cycle after cycle and head after head: every restart still went onto a held snapshot, never onto the dirty tree.
+  const tipSamples = upgrades.samples.filter(sample => sample.dirty && sample.elapsed >= 3 * hour && sample.elapsed < 5 * hour);
+  assert.ok(guardReads.tipHolds.size >= 2 && tipSamples.length >= 10, `the dirty checkout held ${guardReads.tipHolds.size} distinct deployed tips across ${tipSamples.length} cycles`);
+  const firstTipRestart = tipSamples.findIndex(sample => sample.outcome === 'upgraded');
+  assert.ok(firstTipRestart >= 0, 'a snapshot restart ran while the dirty checkout held the deployed tip');
+  assert.ok(tipSamples.slice(firstTipRestart).every(sample => sample.pin !== null && sample.snapshot !== null), 'from the first restart on, the pin and the snapshot record stood every cycle the dirty checkout held the tip');
+  assert.deepEqual(upgrades.checkouts, [], 'the loop never moved the checkout: a dirty tree is never touched');
+  assert.equal(upgrades.outcomes.length, cycles, 'the self-upgrade ran after every cycle of the day, refused nowhere');
+  assert.ok(guardReads.refused >= 10, `the dirty tree stood escalated (${guardReads.refused} refused cycles) while the upgrade kept running`);
+  // One snapshot restart per eligible head: the fleet restarted once against each verified head the
+  // served release contained, the launcher was pinned once per restart, and the loop re-executed
+  // onto each snapshot. A head merged into a gap the served release does not cover yet is held as
+  // anywhere else, so every restart ran against a commit production serves.
+  const restarts = upgrades.executors.length, codeHeads = heads.length - 1;
+  assert.ok(restarts >= 2 && restarts <= codeHeads, `one fleet restart per eligible head touching loaded code (${restarts} of ${codeHeads} heads${restarts < codeHeads ? '; a head past the last deploy waits for a release that serves it' : ''})`);
+  assert.equal(new Set(upgrades.executors).size, restarts, 'no head was snapshotted or restarted twice');
+  assert.ok(upgrades.executors.every(to => production.deploys.some(entry => github.contains(entry.sha, to))), 'every restart ran against a commit the served release contains');
+  assert.ok(!upgrades.executors.includes(upgrades.docsOnly!), 'the docs-only head restarted no executor: nothing they run changed');
+  // The docs-only head: the same snapshot restart minus the executors — the snapshot made and
+  // pinned, the loop re-executed onto it and recording it as the release it runs, one more upgrade
+  // row — exercised here over the heads before it, which touched loaded code.
+  const docsOnly = upgrades.samples.find(sample => sample.outcome === 'upgraded' && sample.last?.to === upgrades.docsOnly);
+  assert.ok(docsOnly && docsOnly.last!.code === false && docsOnly.last!.self === true && docsOnly.pin === upgrades.docsOnly, `the docs-only head was snapshotted and pinned, and the loop alone re-executed onto it: ${JSON.stringify(docsOnly)}`);
+  assert.ok(docsOnly!.elapsed >= deploys[3], 'only once a release served it');
+  assert.equal(upgrades.self, restarts + 1, 'one re-execution of the loop per snapshot restart, the docs-only one included');
+  assert.equal(upgrades.pins.map(entry => entry.commit).filter(commit => commit !== null).length, restarts + 1, 'one pin per snapshot restart, the docs-only one included');
+  assert.equal(upgrades.pins.at(-1)!.commit, null, 'the pin was lifted at the end of the story');
+  // The cursor: the checkout left behind named with its dirty path, one done action row per head,
+  // nothing refused, and the escalation grown only when what it named changed.
+  const snapshotSamples = upgrades.samples.filter(sample => sample.snapshot);
+  assert.ok(snapshotSamples.length >= 10, `the cursor named the checkout left behind across the dirty window (${snapshotSamples.length} cycles)`);
+  assert.ok(snapshotSamples.every(sample => (sample.snapshot!.checkout === startTip || guardReads.tipHolds.has(sample.snapshot!.checkout!)) && sample.snapshot!.dirty.includes('src/master.ts')), 'naming the checkout it left and the operator\'s dirty path, every cycle it stood');
+  const upgradeRows = Object.keys(state.actions).filter(key => /^upgrade:[0-9a-f]{40}$/.test(key));
+  assert.equal(upgradeRows.length, restarts + 1, `one upgrade action row per head: ${upgradeRows.join(', ')}`);
+  assert.ok(upgradeRows.every(key => state.actions[key]!.state === 'done' && state.actions[key]!.attempts <= 3), 'every upgrade row done, its attempts bounded by its head and the pass that lifted the last one');
+  assert.equal(state.upgrade.refused, null, 'nothing is refused');
+  const escalation = state.actions['escalation:dirty-checkout'];
+  assert.ok(escalation && escalation.attempts >= 2 && escalation.attempts <= upgrades.self + 1 + 2 * guardReads.headMoves + 2 * guardReads.tipHolds.size, `the escalation grew only when what it named changed — the snapshot each restart runs (${escalation?.attempts} attempts)`);
+  // The operator's move onto the pinned commit: the pin lifts, the cursor stops naming the checkout,
+  // and the day ends with the loop running the commit the checkout holds.
+  const pinnedCommit = upgrades.pins.map(entry => entry.commit).filter(commit => commit !== null).at(-1)!;
+  assert.ok(dirtyLift && dirtyLift.from === startTip && dirtyLift.to === pinnedCommit && dirtyLift.at >= dayStart + 7 * hour, `the operator moved the checkout onto the pinned commit once done: ${JSON.stringify(dirtyLift)}`);
+  const lifted = upgrades.samples.filter(sample => sample.outcome === 'up-to-date').at(-1);
+  assert.ok(lifted && lifted.elapsed >= 7 * hour, `a pass after the move lifted the pin: ${JSON.stringify(lifted)}`);
+  assert.equal(state.upgrade.snapshot, undefined, 'the checkout is no longer recorded as left behind');
+  assert.equal(state.release?.commit, checkout.head, 'the loop runs the commit the checkout holds');
+  assert.equal(escalation.state, 'done', 'the escalation settled once the checkout stood moved and clean');
 });
