@@ -652,9 +652,16 @@ test('unit:self-upgrade-under-load — with executors holding claimed actions at
  */
 const order = [hex('a'), hex('b'), hex('c'), hex('d')];
 const ancestry = async (_command: string, args: string[]) => {
-  const [mergeSha, commit] = args.slice(-2);
-  if (order.indexOf(mergeSha) <= order.indexOf(commit)) return '';
-  throw Object.assign(new Error('not an ancestor'), { status: 1 });
+  // One `rev-list --right-only --ignore-missing COMMIT...MERGE …` per component (GY-1776): a merge
+  // is listed exactly when the commit does not contain it, with the history between them.
+  assert.deepEqual(args.slice(2, 5), ['rev-list', '--right-only', '--ignore-missing']);
+  const listed = new Set<string>();
+  for (const range of args.slice(5)) {
+    const [commit, mergeSha] = range.split('...');
+    if (!order.includes(commit) || !order.includes(mergeSha)) continue; // --ignore-missing drops the range
+    for (let index = order.indexOf(commit) + 1; index <= order.indexOf(mergeSha); index++) listed.add(order[index]);
+  }
+  return [...listed].join('\n');
 };
 const windowNow = Date.parse('2026-10-07T03:10:36.678Z');
 const windowDeliveries = [
