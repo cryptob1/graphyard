@@ -15,7 +15,7 @@ A `reviewer` account's `provider` (else launch kind) must differ from the item's
 
 | Trigger | Raised when
 | --- | ---
-| `lease-loss` | A lapse with no submission, no carried `blocked` report, no stopped-worker attestation, no exhaustion, no recorded plane stall
+| `lease-loss` | A lapse with no submission, no carried `blocked` report, no stopped-worker attestation, no provider exhaustion
 | `evidence-policy-conflict` | Trusted evidence for another policy revision
 | `security-concern` | A lead's `escalate` ruling
 | `requirement-weakening` | A revision retires a criterion, narrows proofs
