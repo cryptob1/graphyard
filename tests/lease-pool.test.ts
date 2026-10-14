@@ -260,7 +260,11 @@ test('unit:heartbeat-latency-reported — status reports heartbeat p50/p95 and f
     assert.equal(served.attention, null);
   } finally { await http.close(); await store.close(); }
 
-  // The operations reference states the lease pool and the rule.
+  // The operations reference states the lease pool and the rule: a recorded renewal fault (the
+  // plane stall) keeps an expired lease only for the engine's 30s stallRenewalWindowMs, never a
+  // further lease period — this pin fails if the page again claims one.
   const docs = await readFile(new URL('../docs/operations-reference.md', import.meta.url), 'utf8');
-  assert.match(docs, /lease pool/i); assert.match(docs, /p95/); assert.match(docs, /one more lease period|one further lease period/);
+  assert.match(docs, /lease pool/i); assert.match(docs, /p95/);
+  assert.match(docs, /recorded renewal fault, plane stall: 30s `stallRenewalWindowMs`, not another lease period/, 'the page states the stall window the engine grants, not a further lease period');
+  assert.doesNotMatch(docs, /one more lease period|one further lease period|another lease period after/, 'the page never again claims a further lease period');
 });
