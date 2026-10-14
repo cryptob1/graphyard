@@ -1,0 +1,87 @@
+{
+  "id": "onboarding-delivery-defaults",
+  "title": "Normal onboarding already carries the rapid delivery defaults",
+  "description": "After normal install and init of the fixture repository, the project's delivery settings already show the rapid path — local previews, candidates of at most five changes, required production verification — the merger runs in control-plane mode with GitHub only a mirror, and the delivery view in the dashboard says so.",
+  "tags": [
+    "api",
+    "dashboard",
+    "onboarding",
+    "delivery"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "read the delivery defaults the project was onboarded with",
+      "method": "GET",
+      "path": "/api/status",
+      "status": 200,
+      "expect": [
+        {
+          "path": "project.delivery.previews",
+          "equals": "local"
+        },
+        {
+          "path": "project.delivery.candidateMaxChanges",
+          "equals": 5
+        },
+        {
+          "path": "project.delivery.productionVerification",
+          "equals": true
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "read the merger mode",
+      "method": "GET",
+      "path": "/api/merger",
+      "status": 200,
+      "expect": [
+        {
+          "path": "mode",
+          "equals": "control-plane"
+        }
+      ]
+    },
+    {
+      "kind": "browser",
+      "action": "open",
+      "path": "/"
+    },
+    {
+      "kind": "browser",
+      "action": "fill",
+      "label": "Access token",
+      "value": "{{token}}"
+    },
+    {
+      "kind": "browser",
+      "action": "click",
+      "role": "button",
+      "text": "Open control plane",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "open the delivery view",
+      "action": "click",
+      "role": "button",
+      "text": "Delivery"
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "Local preview",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "Production verification",
+      "exact": false
+    }
+  ]
+}

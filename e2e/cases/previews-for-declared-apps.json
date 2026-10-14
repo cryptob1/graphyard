@@ -1,0 +1,181 @@
+{
+  "id": "previews-for-declared-apps",
+  "title": "A declared static site and a declared Compose app both get served local previews",
+  "description": "The fixture project declares a static site and a Compose-backed application. A change needing the static site and one needing the Compose app each get a preview; both are served locally, the item names the local runner, the static preview shows the site with the change, and the Compose preview shows the running app with its own database.",
+  "tags": [
+    "api",
+    "dashboard",
+    "preview"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "create a change needing the static site",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "criteria": [
+          {
+            "id": "AC-1",
+            "proofs": [
+              "e2e:fixture-static-home"
+            ],
+            "text": "The fixture static site's home shows this change"
+          }
+        ],
+        "description": "A change whose declared application case needs the static site.",
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        },
+        "priority": 3,
+        "title": "E2E case {{case}} run {{run}} static",
+        "type": "feature"
+      },
+      "status": 200,
+      "expect": [],
+      "save": {
+        "id": "idS",
+        "key": "keyS"
+      }
+    },
+    {
+      "kind": "http",
+      "name": "create a change needing the compose app",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "criteria": [
+          {
+            "id": "AC-1",
+            "proofs": [
+              "e2e:fixture-compose-app"
+            ],
+            "text": "The compose app's page shows this change"
+          }
+        ],
+        "description": "A change whose declared application case needs the Compose-backed application.",
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        },
+        "priority": 3,
+        "title": "E2E case {{case}} run {{run}} compose",
+        "type": "feature"
+      },
+      "status": 200,
+      "expect": [],
+      "save": {
+        "id": "idC",
+        "key": "keyC"
+      }
+    },
+    {
+      "kind": "http",
+      "name": "the static change's preview is local",
+      "method": "GET",
+      "path": "/api/work/{{idS}}",
+      "status": 200,
+      "expect": [
+        {
+          "path": "preview.path",
+          "equals": "/preview/{{keyS}}"
+        },
+        {
+          "path": "preview.state",
+          "equals": "running"
+        },
+        {
+          "path": "preview.runner",
+          "equals": "local"
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "the compose change's preview is local",
+      "method": "GET",
+      "path": "/api/work/{{idC}}",
+      "status": 200,
+      "expect": [
+        {
+          "path": "preview.path",
+          "equals": "/preview/{{keyC}}"
+        },
+        {
+          "path": "preview.state",
+          "equals": "running"
+        },
+        {
+          "path": "preview.runner",
+          "equals": "local"
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "the static preview serves",
+      "method": "GET",
+      "path": "/preview/{{keyS}}",
+      "status": 200,
+      "expect": []
+    },
+    {
+      "kind": "http",
+      "name": "the compose preview serves",
+      "method": "GET",
+      "path": "/preview/{{keyC}}",
+      "status": 200,
+      "expect": []
+    },
+    {
+      "kind": "browser",
+      "name": "open the static site's preview",
+      "action": "open",
+      "path": "/preview/{{keyS}}"
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "Fixture static site",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "E2E case {{case}} run {{run}} static",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "open the compose app's preview",
+      "action": "open",
+      "path": "/preview/{{keyC}}"
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "Fixture compose app",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "E2E case {{case}} run {{run}} compose",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "database preview-{{keyC}}-db",
+      "exact": false
+    }
+  ]
+}

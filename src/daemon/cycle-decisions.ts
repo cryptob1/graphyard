@@ -15,7 +15,7 @@ import {
 } from './metrics.js';
 import { candidateMovedMeanwhile, decisionFailureKind, decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication, selfHealingDecisionFailure } from './decision-reads.js';
 import { refusedAttestationWatch, type RefusedAttestation } from '../model/rework-ground.js';
-import { type DaemonEffects, record } from './effects.js'; import { reportMechanicalPlans } from './mechanical-plan-report.js';
+import { type DaemonEffects, record } from './effects.js'; import { planReportSink, reportMechanicalPlans } from './mechanical-plan-report.js';
 import { adoptedWatch, refusedOnOtherGrounds } from './rework-grounds.js';
 import type { FaultKind } from '../model/fault-classes.js';
 import type { Cycle } from './cycle.js';
@@ -423,7 +423,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // GY-1436: one stable wait per held item, naming the docs-sync session, head, base and the end of its bound; that bound, reached or still ahead, ends the loop's idle wait (GY-1622), kept at the latest local time the control plane can reach it (the read's upper clock offset): the cycle it wakes finds the hold ended, at most one round trip late.
   const noteHold = async (item: Work, { wait: detail, deadline }: { wait: string; deadline: string }) => { const bound = Date.parse(deadline); const waitKey = `wait:docs-sync:${item.id}`; if (bound >= clock) bounds.set(item.id, bound + clockOffset.max); if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
   const mechanical = effects.mechanicalFixes ? await effects.mechanicalFixes().then(read => read.requests, () => []) : []; // GY-971 planned bot rounds; GY-1764: reported to the review gate, an unreported plan holds its item's decision
-  const planUnreported = await reportMechanicalPlans(snapshot.work, mechanical, effects, clock, async (item, detail) => { const key = `mechanical-plan:${item.id}`; if (detailChanged(state.actions[key], detail)) await note(key, item, 'decision', 'failed', detail); });
+  const planUnreported = await reportMechanicalPlans(snapshot.work, mechanical, effects, clock, planReportSink(state, note)); // GY-1795: a write the gate's freshness already supersedes fails visibly but counts no decision fault, and an item delivered meanwhile settles its report (mechanical-plan-report.ts)
   const routinePass = budget.pass(), attestPass = budget.pass();
   // GY-1439: while a close stands requested and unapplied on an item, nothing advances it (closingItems): no
   // bot round, rework, attestation or observation wake moves the revision under the close or spends a round on it.

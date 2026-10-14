@@ -142,8 +142,10 @@ function fakeGitHub() {
   const runs: { id: number; name: string; head_sha: string; conclusion: string; external_id: string; output: { title: string; summary: string }; app: { id: number } }[] = [];
   const comments: { pr: number; body: string }[] = [], deleted: string[] = [], merges: { pr: number; head: string }[] = [];
   const view = (pr: number) => { const pull = pulls.get(pr)!; return { number: pr, node_id: `PR_${pr}`, state: pull.state, merged: pull.merged, merge_commit_sha: pull.mergeSha, head: { sha: pull.head, ref: pull.branch }, base: { ref: 'main' }, mergeable: pull.mergeable, mergeable_state: pull.mergeable === false ? 'dirty' : 'clean' }; };
+  const reviews: { pr: number; sha: string; state: string; by: string }[] = [];
   const github = {
     config: { base: 'main', appId: 15368 },
+    async approveAcceptance(pr: number, head: string, _body: string) { reviews.push({ pr, sha: head, state: 'APPROVED', by: 'app:graphyard-approver' }); return 'approved' as const; },
     async request(path: string, method = 'GET', body?: any) {
       const pr = Number(path.match(/^\/(?:pulls|issues)\/(\d+)/)?.[1]);
       if (method === 'GET' && path.startsWith('/pulls/')) return view(pr);
@@ -165,7 +167,7 @@ function fakeGitHub() {
       return {};
     },
   };
-  return { github, pulls, runs, comments, deleted, merges };
+  return { github, pulls, runs, comments, deleted, merges, reviews };
 }
 
 test('unit:acceptance-role-drafts-and-approval — the loop launches the acceptance role on an open goal, opens its draft as one pull request, and only an approver who did not author it approves', async () => {

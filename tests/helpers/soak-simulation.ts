@@ -54,6 +54,7 @@ import { plannerWorld } from './soak-planner.js';
 import type { Goal, Landing } from '../../src/model/goal.js';
 import { recordLanding } from '../../src/server/routes/goals.js';
 import { controlPlaneAcceptance } from './soak-acceptance-writer.js';
+import { type ProtectedLandingOptions, protectedAcceptance } from './soak-acceptance-landing.js';
 import { terminalDecisions } from '../../src/cli/decision-report.js';
 import { Launcher } from '../../src/daemon/cycle.js';
 import { wakeOwnObservation } from '../../src/master/base-break-refresh.js';
@@ -245,8 +246,21 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * day's clock. From `crashLoop.from` to `.to` slot 1 crashes half a minute after each start.
    */
   hostSupervision?: { managerDown: { from: number; to: number }; crashLoop: { from: number; to: number } };
-  /** GY-1417: record three goals and wire the acceptance role (acceptanceWorld below); `control-plane` lands them through the merge writer (GY-1535, soak-acceptance-writer.ts). */
-  acceptance?: boolean | 'control-plane';
+  /** GY-1417: record three goals and wire the acceptance role (acceptanceWorld below); `control-plane` lands them through the merge writer (GY-1535, soak-acceptance-writer.ts); `protected` lands each approved pull request through the real land route function under GitHub's last-pusher rule (GY-1795, soak-acceptance-landing.ts). */
+  acceptance?: boolean | 'control-plane' | 'protected';
+  /** GY-1795: with `acceptance: 'protected'`, how the independent approver App and GitHub Actions answer each landing (tests/helpers/soak-acceptance-landing.ts). */
+  landing?: ProtectedLandingOptions;
+  /**
+   * GY-1795: with `mechanical`, the loop's report of a mechanical plan to the control plane fails as the
+   * two decision faults of 14 October 2026 did. `settleAfterMs` after each scenario item's plan was
+   * made, the review ledger settles it refused (the approver refused its bot round), so the loop owes
+   * the clear of a plan it had confirmed and the ledger ceased to carry. Every such clear meets the
+   * loop's write timeout for `timeoutMs` from its first attempt (GY-1459); with `delivered`, the
+   * applied item's clear keeps timing out until its candidate has merged, its delivery is then
+   * reconciled by the dispatcher beside the next cycle whose ledger carries no plan — after that
+   * cycle's snapshot — and the clear meets the plane's "Delivered work is immutable" refusal (GY-1775).
+   */
+  planReports?: { timeoutMs: number; settleAfterMs: number; delivered: boolean };
   /** GY-1418: with `acceptance`, also wire the planner role over the same goals (tests/helpers/soak-planner.ts). */
   planner?: boolean;
   /**
@@ -1608,7 +1622,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const settings = diagnosticianSettings({ diagnostician: { invariantBoundMinutes: 30 } });
   const diagnosed: DiagnosisRun[] = [];
   clearDrafts(); clearPlans();
-  const acceptance = options.acceptance ? await acceptanceWorld(dayStart, options.acceptance === 'control-plane' ? 'control-plane' : 'github') : null;
+  const acceptance = options.acceptance ? await acceptanceWorld(dayStart, options.acceptance === true ? 'github' : options.acceptance, options.landing) : null;
   const planner = acceptance && options.planner ? await plannerWorld(dayStart, acceptance.day.goals) : null;
   // GY-1092: for `diagnosisLimit` the provider refuses every run for its spent quota, naming no reset.
   const limited = () => !!options.diagnosisLimit && clock.now() - dayStart >= options.diagnosisLimit.from && clock.now() - dayStart < options.diagnosisLimit.to;
@@ -2214,6 +2228,54 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       if (!stuck.sessions.has(session)) return ending?.(session, reason);
       stuck.ends.set(session, (stuck.ends.get(session) ?? 0) + 1);
       throw new FleetUnreachableError('The agent registry at https://graphyard.example answered 404: Unknown session');
+    };
+  }
+  // GY-1795: the mechanical-plan report's failures, through the real loop: each timed-out clear, each
+  // refusal of a clear for an item delivered after the cycle's snapshot, and the deliveries held for it.
+  const planReportDay = { timeouts: [] as { key: string; at: number }[], refusals: [] as { key: string; detail: string; at: number }[], writes: [] as { key: string; plan: boolean; at: number }[], delivered: [] as { key: string; at: number }[], settled: [] as { key: string; at: number }[], held: null as string | null, hold: null as (() => Promise<void>) | null };
+  if (options.planReports && mechanicalDay && effects.recordMechanicalPlan) {
+    const { timeoutMs, settleAfterMs, delivered } = options.planReports, write = effects.recordMechanicalPlan, agents = effects.agents;
+    const applied = items[mechanicalDay.applied - 1], firstClear = new Map<string, number>();
+    // GitHub recomputes each scenario item's merge state slowly, so the approval's first observation cannot merge the head before the ledger plans its round and the loop confirms the plan.
+    for (const n of [mechanicalDay.applied, mechanicalDay.rejected]) github.slowRecompute.add(items[n - 1].key);
+    effects.recordMechanicalPlan = async (work, plan) => {
+      planReportDay.writes.push({ key: work.key, plan: !!plan, at: clock.now() - dayStart });
+      // Only the clear of a plan the loop had confirmed (the projection stands, the ledger ceased to carry it) fails: the no-op clears every candidate gets are the base's.
+      if (!plan && work.mechanicalPlan && mechanicalItem(work.key)) {
+        firstClear.set(work.key, firstClear.get(work.key) ?? clock.now());
+        const merged = [...github.prs.values()].some(pr => pr.key === work.key && pr.merged);
+        // The applied item's clear times out until its candidate has merged, so the delivery lands under a later cycle's snapshot.
+        const timingOut = delivered && work.key === applied.key ? !merged : clock.now() - firstClear.get(work.key)! < timeoutMs;
+        if (timingOut) { planReportDay.timeouts.push({ key: work.key, at: clock.now() - dayStart }); throw new Error('The operation was aborted due to timeout'); }
+      }
+      try { return await write(work, plan); }
+      catch (error) { planReportDay.refusals.push({ key: work.key, detail: error instanceof Error ? error.message : String(error), at: clock.now() - dayStart }); throw error; }
+    };
+    // The dispatcher beside the cycle reconciles the applied item's merge once, right after the
+    // snapshot of the first cycle whose ledger ceased to carry its plan: its observation job is held
+    // off the between-cycles dispatcher from the merge until then (an observation backlog, GY-1099),
+    // so the cycle that reads the item open owes its clear and meets the refusal.
+    const planCarried = () => mechanicalFixRequests(ledger).some(request => request.key === applied.key);
+    effects.agents = async () => {
+      const read = await agents();
+      if (delivered && planReportDay.held === applied.key && !planCarried()) {
+        await store.pool.query('UPDATE jobs SET available_at=now(), held_until=NULL WHERE work_id=$1', [applied.id]);
+        for (let round = 0; round < 5 && (await store.list()).find(item => item.id === applied.id)?.stage !== 'done'; round++) await processJob(engine, adapter);
+        planReportDay.held = null;
+        planReportDay.delivered.push({ key: applied.key, at: clock.now() - dayStart });
+      }
+      return read;
+    };
+    planReportDay.hold = async () => {
+      // The ledger settles each scenario item's plan refused once the loop has confirmed it: the approver refused the bot round.
+      for (const record of ledger) if (record.mechanicalFix?.state === 'planned' && mechanicalItem(record.key) && clock.now() - Date.parse(record.mechanicalFix.at) >= settleAfterMs) {
+        record.mechanicalFix = { ...record.mechanicalFix, state: 'refused', settledAt: new Date(clock.now()).toISOString(), reason: `Refused: ${record.key}'s mechanical-fix round rests on grounds this approver does not accept` };
+        planReportDay.settled.push({ key: record.key, at: clock.now() - dayStart });
+      }
+      if (!delivered || planReportDay.held !== null || planReportDay.delivered.length) return;
+      if (![...github.prs.values()].some(pr => pr.key === applied.key && pr.merged) || (await store.list()).find(item => item.id === applied.id)?.stage === 'done') return;
+      await store.pool.query(`UPDATE jobs SET available_at=now() + interval '1 day', held_until=now() + interval '1 day' WHERE work_id=$1`, [applied.id]);
+      planReportDay.held = applied.key;
     };
   }
   const outageDay = { refused: 0, answered: 0 };
@@ -3069,6 +3131,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         for (const id of starved) if (prioritized.has(id)) starvation.claimed.push({ key: items.find(item => item.id === id)!.key, at: elapsed });
         await store.pool.query(`UPDATE jobs SET available_at=now() + interval '1 day' WHERE work_id = ANY($1::uuid[]) AND NOT (work_id = ANY($2::uuid[]))`, [starved, [...prioritized]]);
       }
+      // GY-1795: a merge GitHub landed this minute is held off the between-cycles dispatcher until the next cycle's observe step.
+      if (options.planReports) await planReportDay.hold?.();
       const dueNow = await due(), woken = (await store.webhookDue()).filter(id => dueNow.has(id));
       let claims = 0, processed = 0;
       const job = async () => {
@@ -3192,6 +3256,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         if (options.slowDeployment) { deploymentDay.land(); await new Promise(resolve => setImmediate(resolve)); }
         const cycleStart = clock.now(); budgetDay.cycleSlow = 0;
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
+        // GY-1795: the applied item's merge, landed by this cycle, is reconciled beside the next one rather than by the dispatcher between them.
+        if (options.planReports) await planReportDay.hold?.();
         loopWakeDay?.ran(result);
         if (acceptance) await draftsSettled();
         if (planner) await plansSettled();
@@ -3507,7 +3573,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, limitMenuDay, menuReset, menuNotice, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, githubStatusReads, credentialReads, blockerRecords, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, lateReading, staleMerges, restartLog, hostDay, guardDay, mainWatchDay, budgetDay, slowPlaneDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, loopWakeDay: loopWakeDay || null,
+    wakes, lateReading, staleMerges, restartLog, hostDay, guardDay, mainWatchDay, budgetDay, slowPlaneDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, planReportDay, loopWakeDay: loopWakeDay || null,
     holdThrowDay, restartDay: options.checkoutRestart ? restartDay : null, releaseLagDay: options.releaseLag ? releaseLagDay : null, fleetDay: options.releaseLag?.fleet ? fleetDay : null, dirtyLift: options.dirtyLift ? dirtyLift : null, failedLaunches };
 }
 
@@ -3549,7 +3615,7 @@ export const memoryDay = { memoryDip: { from: 0, until: 15 * minute } };
  * returns nothing and its first approved pull request conflicts with the base. The control plane's
  * land answers waiting until half an hour after it was first asked, then merged.
  */
-export async function acceptanceWorld(dayStart: number, merger: 'github' | 'control-plane' = 'github') {
+export async function acceptanceWorld(dayStart: number, merger: 'github' | 'control-plane' | 'protected' = 'github', protectedLanding?: ProtectedLandingOptions) {
   const day = {
     goals: {} as Record<string, string>, runs: [] as { goal: string; role: 'draft' | 'judge'; at: number }[], opens: [] as { goal: string; pr: number; revision: number; at: number }[],
     posts: [] as { goal: string; ok: boolean; at: number }[], reads: [] as { pr: number; at: number }[], closes: [] as number[], lands: [] as { pr: number; at: number }[],
@@ -3623,9 +3689,14 @@ export async function acceptanceWorld(dayStart: number, merger: 'github' | 'cont
     close: async pr => { const pull = day.pulls.get(pr)!; if (pull.state === 'open') pull.state = 'closed'; day.closes.push(pr); },
     closed: (goal, pr, reason) => api(principals.operatorAgent, 'POST', `goals/${goal.key}/closed`, { pr, reason }, `acceptance:${goal.id}:${goal.revision}:closed`),
   };
-  if (merger === 'github') return { day: { ...day, writer: null, main: null }, effects };
+  if (merger === 'github') return { day: { ...day, writer: null, main: null, landing: null }, effects };
+  // GY-1795: each approved pull request landed through the real land route function under GitHub's last-pusher rule.
+  if (merger === 'protected') {
+    const landed = protectedAcceptance(effects, named, dayStart, protectedLanding ?? { approverRefusals: 0, checkPendingMs: 0, mergeOutages: 0 });
+    return { day: { ...day, writer: null, main: null, landing: landed.landing }, effects: landed.effects };
+  }
   const controlPlane = controlPlaneAcceptance(effects, named, dayStart);
-  return { day: { ...day, writer: controlPlane.writer, main: controlPlane.history }, effects: controlPlane.effects };
+  return { day: { ...day, writer: controlPlane.writer, main: controlPlane.history, landing: null }, effects: controlPlane.effects };
 }
 
 /**
