@@ -546,11 +546,11 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       if (left.checkout !== commit || left.dirty.join('\n') !== dirty.join('\n')) { state.upgrade.snapshot = { ...left, checkout: commit, dirty }; await persist(); }
       return { outcome: 'skipped', reason: `the checkout holds ${shortCommit(commit)}, the commit the loop runs from its held snapshot, but loaded code is dirty in it (${dirty.filter(path => upgradeTouchesCode([path])).slice(0, 8).join(', ')}); the pin stays until it is clean` };
     }
-    await holdCli(null).catch(() => {});
+    // A pointer that failed to go still pins the launcher: the record stays and the next cycle retries.
+    const unlifted = await holdCli(null).then(() => null, error => message(error));
+    if (unlifted) return { outcome: 'skipped', reason: `the checkout holds ${shortCommit(commit)}, the commit the loop runs from its held snapshot, but the pin could not be lifted: ${unlifted}; retried next cycle` };
     delete state.upgrade.snapshot;
-    state.upgrade.refused = null;
-    unstall();
-    await persist();
+    state.upgrade.refused = null; unstall(); await persist();
     await note(`The checkout is current at ${shortCommit(commit)}; it was moved onto the commit the loop runs from its held snapshot, so the pin on the snapshot is lifted`, false);
     return { outcome: 'up-to-date', commit };
   };

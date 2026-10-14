@@ -347,6 +347,12 @@ test('unit:snapshot-pin-reported-and-lifted — master status reports the loop\'
   assert.match(keptNamed[0].next, /^Return the checkout's loaded paths \(src\/, scripts\/, bin\/, package\.json\) to the commit, which lifts the pin/);
   git(root, 'checkout', '-q', '--', 'src/cli.ts');
   assert.equal(status(root), ' M README.md', 'the loaded code is clean again; the operator\'s edit stands');
+  // A pointer whose removal fails still pins the launcher: the lift is not reported and retries.
+  const stuck = await performSelfUpgrade(master, state, { ...deps({ loadedFrom: join(snapshot, 'src', 'daemon', 'upgrade.ts'), now: () => clock + 50_000 }), holdCli: async () => { throw new Error('EACCES'); } });
+  assert.equal(stuck.outcome, 'skipped');
+  assert.match((stuck as { reason: string }).reason, /pin could not be lifted: EACCES; retried next cycle$/);
+  assert.equal(readHeldCli(root), tip, 'the pin stands');
+  assert.ok(state.upgrade.snapshot, 'the snapshot record stays');
   const lifted = await performSelfUpgrade(master, state, deps({ loadedFrom: join(snapshot, 'src', 'daemon', 'upgrade.ts'), now: () => clock + 60_000 }));
   assert.deepEqual(lifted, { outcome: 'up-to-date', commit: tip });
   assert.equal(existsSync(heldCliPointer(root)), false, 'the pin is lifted');
