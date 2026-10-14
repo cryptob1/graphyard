@@ -643,6 +643,21 @@ async function closeStepWithin(cycle: Cycle) {
 }
 
 /**
+ * Whether the handle's own attempt still stands (GY-1801): no end of it — lapse, reclaim or
+ * submission — is on the record yet. While it stands, the lease it held is either live (a stall
+ * grace can keep an expired one so, once) or still to be classed by the plane's next pass, and the
+ * pane it ran in is the resume step's and the engine's to end with the attempt — never a closer's
+ * to take first. An item whose record carries no attempts at all stands nobody's pane back.
+ */
+export function attemptStanding(item: Pick<Work, 'pipeline'>, handleId: string): boolean {
+  const attempts = item.pipeline?.attempts;
+  if (!attempts?.length) return false;
+  const epoch = Number(handleId.slice(handleId.lastIndexOf(':') + 1));
+  const attempt = Number.isInteger(epoch) ? attempts.find(entry => entry.epoch === epoch) : undefined;
+  return !!attempt && attempt.endedAt == null;
+}
+
+/**
  * 1g. An implementation session over while its handle still says running (GY-524): its item has
  * left build, the stage it was launched for, or Herdr detects no agent in its pane — the runtime is
  * no longer the pane's foreground process. The pane is matched on its own coordinate, never on the
@@ -654,9 +669,13 @@ async function closeStepWithin(cycle: Cycle) {
  * Herdr's foreground detection misreads a live agent at times, and a pane can drop out of one
  * listing (GY-544), so an exited runtime is acted on as step 1 acts on one: only when Herdr read
  * the handle's workspace at all, and only once the same sight stands on a later cycle and
- * launchAppearanceMs after it was first seen.
+ * launchAppearanceMs after it was first seen. Never while the handle's attempt still stands
+ * (GY-1801): a lease the plane's stall grace kept live, or one the plane's next pass has yet to
+ * class, is the attempt's own hold on its pane, and the sighting bound cannot tell a pane whose
+ * runtime left from one a misread hides — so the close waits for the attempt's end, which the
+ * engine's lapse or the resume step's reclaim records first.
  */
-async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrAgent[]; available: boolean } | null) {
+export async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrAgent[]; available: boolean } | null) {
   const { config, state, effects, snapshot, clock, now, performed, isolate } = cycle;
   if (!effects.recordSession) return;
   const sighted = new Set<string>();
@@ -676,7 +695,7 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
       && item.submission?.epoch === fence.epoch && containmentPhase(item, clock)?.state === 'lapsed' && inspectable(item, config.hostId);
     if (item.stage !== 'build' && !leased) reason = `${item.key} has left build, the stage this implementation session was launched for, and is now in ${item.stage}`;
     else if (lingering) reason = `${item.key} epoch ${fence!.epoch} submitted pull request #${item.submission!.pr} and holds no lease, yet its containment fence still stands past the grace window`;
-    else if (runtime?.available && handle.pane && !(clock - Date.parse(handle.startedAt) < launchAppearanceMs)) {
+    else if (runtime?.available && handle.pane && !attemptStanding(item, handle.id) && !(clock - Date.parse(handle.startedAt) < launchAppearanceMs)) {
       const listed = runtime.agents.find(agent => agent.pane_id === handle.pane);
       if (!leased && listed && ['idle', 'done', 'blocked'].includes(listed.agent_status ?? '')) {
         reason = `${handle.runtime} session in pane ${handle.pane} is ${listed.agent_status} and ${item.key} has no live lease`;

@@ -18,8 +18,13 @@ import { awaitRuntimeStart, buildMasterStatus, masterConfigSchema, SessionStartE
 import { launchWaitAttention } from '../src/auto-dispatch.js';
 import { GhPausedError } from '../src/gh-pause.js';
 import { emptyDaemonState } from '../src/master-daemon.js';
-import { record } from '../src/daemon/effects.js';
-import { resumeStep } from '../src/daemon/cycle-resume.js';
+import { record, launchAppearanceMs } from '../src/daemon/effects.js';
+import { resumeStep, checkPaneStillBelongs } from '../src/daemon/cycle-resume.js';
+import { reclaimLaunchedPanes } from '../src/daemon/cycle-reclaim.js';
+// A namespace import, so the base run of this file, which exports neither 1g's closer nor the stall
+// grace's window, fails only the GY-1801 case that reads them.
+import * as daemonSessions from '../src/daemon/cycle-sessions.js';
+import * as engineModule from '../src/engine.js';
 import { Store } from '../src/store.js';
 import { Engine, readPlaneStalls } from '../src/engine.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -815,4 +820,169 @@ test('integration:fault-class-session-liveness GY-1764 escalation:lease-loss —
   assert.ok(Date.parse(after.lease!.expiresAt) > Date.now(), 'and was extended past now');
   const renewed = await stallEngine.execute(stallWorker, 'heartbeat', work.id, { epoch: work.epoch }, stallId());
   assert.ok(renewed.lease, 'the supervisor\'s heartbeat lands on a live lease');
+});
+
+// GY-1801: the moves GY-1791 added must never close a pane whose attempt still holds a live
+// lease — the soak's pane-close invariant (GY-980). A rekey moves the launcher's record and
+// closes the guessed record in the same transaction as a record, never as a pane, and the pane it
+// leaves behind is no longer the new session's address. The stall's grace keeps a lease only
+// `stallRenewalWindowMs` past the stall — the window a still-retrying supervisor needs, never a
+// full lease period — and the loop's own closers (1g and the sweep) take no pane whose attempt
+// still stands or whose record a live lease names: their close waits for the attempt's end, which
+// the engine's lapse or the resume step's reclaim records first.
+test('unit:rekey-never-closes-live-lease-pane — a rekey moves the record, never the pane; a stall-kept lease keeps its pane only for the renewal window; and no closer takes a standing attempt’s pane', async () => {
+  // A rekey beside a live lease: epoch 1 is claimed and its session is the one the lease serves.
+  let live = await stallEngine.execute(human, 'create', null, stallInput('rekey-live-lease'), stallId());
+  live = await stallEngine.execute(human, 'ready', live.id, {}, stallId());
+  live = await stallEngine.execute(stallWorker, 'claim', live.id, {}, stallId());
+  const liveExpiry = live.lease!.expiresAt;
+  const handle = { kind: 'implementation' as const, principal: stallWorker.id, runtime: 'claude', host: 'vishrog' };
+  live = await stallEngine.execute(stallCoordinator, 'session', live.id, { ...handle, subject: `${live.key}: rekey-live-lease`, id: `${stallWorker.id}:1`, state: 'running', pane: 'w1V:pLIVE', agentName: 'graphyard-opencode-4' }, stallId());
+  // The launch claimed epoch 2 and the record moves onto it in one write (GY-1791). The write is
+  // a record move: no lease ends, no attempt ends, and no pane is closed by it.
+  live = await stallEngine.execute(stallCoordinator, 'session', live.id, { ...handle, subject: `${live.key}: rekey-live-lease`, id: `${stallWorker.id}:2`, state: 'running', pane: 'w1V:pNEXT', agentName: 'graphyard-opencode-4' }, stallId());
+  const byId = Object.fromEntries((live.sessions ?? []).map(entry => [entry.id, entry]));
+  assert.equal(byId[`${stallWorker.id}:1`]?.state, 'finished', 'the guessed record is closed in the same transaction');
+  assert.match(byId[`${stallWorker.id}:1`]?.outcome ?? '', /superseded: .* runs one implementation session/);
+  assert.equal(byId[`${stallWorker.id}:1`]?.pane, 'w1V:pLIVE', 'the pane the guessed record carried stays bound on it: the move closed no pane');
+  assert.equal(byId[`${stallWorker.id}:2`]?.state, 'running');
+  assert.equal(byId[`${stallWorker.id}:2`]?.pane, 'w1V:pNEXT');
+  assert.ok(live.lease && live.lease.epoch === 1 && live.lease.expiresAt === liveExpiry, 'the attempt’s live lease is untouched by the move');
+  assert.equal(live.pipeline?.attempts.at(-1)?.endedAt ?? null, null, 'the attempt stands: the move ended nothing');
+  // The pane the move left behind is no longer the new session's address: the paste check the loop
+  // refuses on (GY-852) names the record the pane now belongs to.
+  assert.match(checkPaneStillBelongs(live, `${stallWorker.id}:2`, 'w1V:pLIVE') ?? '', /not where .* is recorded/);
+
+  // A stall-kept lease: the pass that first meets the expired lease inside a stall it just
+  // recorded keeps the lease — bounded to the renewal window, never a full lease period — with
+  // the attempt's pane standing, and a supervisor's heartbeat still renews under it.
+  let kept = await stallEngine.execute(human, 'create', null, stallInput('stall-kept-pane'), stallId());
+  kept = await stallEngine.execute(human, 'ready', kept.id, {}, stallId());
+  kept = await stallEngine.execute(stallWorker, 'claim', kept.id, {}, stallId());
+  kept = await stallEngine.execute(stallCoordinator, 'session', kept.id, { ...handle, subject: `${kept.key}: stall-kept-pane`, id: `${stallWorker.id}:1`, state: 'running', pane: 'w1V:pKEPT' }, stallId());
+  await stallEngine.reconcile();
+  await stallStore.pool.query('UPDATE plane_liveness SET tick_at = tick_at - interval \'90 seconds\'');
+  await stallEngine.reconcile();
+  const [stall] = (await stallStore.pool.query(`SELECT payload->'details' AS details FROM events WHERE kind = 'plane.stall' ORDER BY seq DESC LIMIT 1`)).rows.map(row => row.details) as PlaneStall[];
+  // The lease ran out inside the stall, so the next pass keeps it for the stall — whichever of the
+  // ledger's recorded stalls covers the expiry this pass reads (earlier tests left their own).
+  const expirySet = Date.parse(stall.to) - 45_000;
+  await stallOverwrite(kept.id, document => { document.lease!.expiresAt = new Date(expirySet).toISOString(); });
+  await stallEngine.reconcile();
+  const stalls = (await stallStore.pool.query(`SELECT payload->'details' AS details FROM events WHERE kind = 'plane.stall' ORDER BY seq`)).rows.map(row => row.details) as PlaneStall[];
+  const covering = stalls.find(entry => Date.parse(entry.from) <= expirySet && expirySet <= Date.parse(entry.to))!;
+  const graced = await stallDocument(kept.id) as Work;
+  const gracedLease = graced.lease as (typeof graced.lease & { renewalFault?: { at: string; error: string } }) | null;
+  assert.equal(gracedLease?.renewalFault === undefined ? null : gracedLease.renewalFault?.error, `the control plane was not answering between ${covering.from} and ${covering.to}`, 'the stall’s grace is on the lease');
+  const gracedExpiry = Date.parse(graced.lease!.expiresAt);
+  const windowMs = (engineModule as { stallRenewalWindowMs?: number }).stallRenewalWindowMs!;
+  assert.ok(Math.abs(gracedExpiry - (Date.parse(covering.to) + windowMs)) < 2_000, `the grace ends one renewal window past the stall, not a lease period later: ${graced.lease!.expiresAt}`);
+  assert.ok(gracedExpiry > Date.parse(graced.updatedAt ?? covering.to), 'and past now: the lease is live');
+  assert.equal(graced.pipeline?.attempts.at(-1)?.endedAt ?? null, null, 'the attempt stands under the grace');
+  assert.equal(graced.sessions?.find(entry => entry.id === `${stallWorker.id}:1`)?.pane, 'w1V:pKEPT', 'the pane the live lease binds is kept while the grace holds it');
+  const renewed = await stallEngine.execute(stallWorker, 'heartbeat', kept.id, { epoch: kept.epoch }, stallId());
+  assert.ok(renewed.lease && Date.parse(renewed.lease.expiresAt) > Date.parse(covering.to), 'a supervisor still retrying renews through the grace');
+  // Past the window the lease lapses, explained by the stall that covered its expiry: from here a
+  // close of the pane binds no live lease, which is what makes the loop's close legal. The grace
+  // this stall spent does not apply twice: the heartbeat cleared it, and the pass that meets the
+  // expired lease again finds the marker the grace left on the lease, exactly as the soak's days
+  // leave it — one grace per stall, and a lapse on the pass that finds the window closed.
+  await stallOverwrite(kept.id, document => {
+    document.lease!.expiresAt = new Date(Date.parse(stall.to) - 500).toISOString();
+    (document.lease as { renewalFault?: unknown }).renewalFault = gracedLease!.renewalFault;
+  });
+  await stallEngine.reconcile();
+  const lapsed = await stallDocument(kept.id) as Work;
+  assert.equal(lapsed.lease ?? null, null, 'the stall-kept lease lapsed once its window closed');
+  assert.deepEqual(await stallEscalations(kept.id), [], 'the lapse is history with its cause, not a lease loss');
+  assert.equal(lapsed.pipeline?.attempts.at(-1)?.end, 'expired', 'the attempt ended at the lapse');
+  assert.equal((await stallEvents(kept.id, 'lease.expired')).at(-1)?.cause, 'control-plane-stall');
+
+  // The loop's own closers. 1g sights a pane whose runtime left and closes it two sightings apart,
+  // and the sweep takes the shells a launch left behind; neither may take a pane whose attempt
+  // still stands — an end the engine's lapse or the resume step's reclaim has yet to record —
+  // whatever the lease in the cycle's snapshot reads, and never the pane a live lease's own record
+  // names, which after a rekey (or a rework round that reuses the submitted attempt's workspace)
+  // is a pane the claimed session runs in.
+  const closerProfile = { name: 'claude-1801', principal: stallWorker.id, agentName: 'graphyard-opencode-4', mode: 'launch', kind: 'claude', credentialFile: '/outside/1801.token', agentArgs: [], environment: {} } as unknown as WorkerProfile;
+  const directory = await temporaryDirectory('session-liveness-closer');
+  const config: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(directory, 'closer.token'), cliPath: '/usr/bin/graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'vishrog', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [closerProfile] });
+  const attempt = (epoch: number, ended: boolean) => ({ epoch, owner: stallWorker.id, claimedAt: GY1791_AT(-7_200_000 - epoch * 60_000), endedAt: ended ? GY1791_AT(-300_000) : null, end: ended ? 'expired' as const : null });
+  const closeHandle = (id: string, pane: string, state: 'running' | 'finished') => ({ id, kind: 'implementation', principal: stallWorker.id, runtime: 'claude', host: 'vishrog', workspace: 'w1',
+    pane, attach: `herdr pane attach ${pane}`, subject: 'soak: no pane closes under a live lease', startedAt: GY1791_AT(-30 * 60_000), updatedAt: GY1791_AT(-60_000), endedAt: null, state, outcome: null } as unknown as SessionHandle);
+  const guardItem = (id: string, key: string, lease: Work['lease'], attempts: ReturnType<typeof attempt>[], sessions: SessionHandle[]) => ({
+    id, key, title: 'Soak: no pane closes under a live lease', description: '', type: 'bug', priority: 1, dependencies: [],
+    criteria: [], plannedFiles: [], stage: 'build', ready: true, createdAt: GY1791_AT(-7_200_000), updatedAt: GY1791_AT(-60_000), stageEnteredAt: GY1791_AT(-7_200_000),
+    epoch: attempts.at(-1)!.epoch, lease, workspaces: [], candidate: null, submission: null, blocker: null, scopeRequest: null,
+    pipeline: { attempts, submittedAt: null, resubmittedAt: null, reworkRounds: 0, interventions: { blocked: 0, requirements: 0 } },
+    sessions, gates: [], violations: [], evidence: [], observation: null,
+  } as unknown as Work);
+  try {
+    const state: DaemonState = emptyDaemonState(config);
+    const closed: string[] = [], recorded: SessionHandleInput[] = [];
+    const effects = { persist: async () => {}, closeSession: async (pane: string) => { closed.push(pane); }, recordSession: async (_work: Work, wrote: SessionHandleInput) => { recorded.push(wrote); } } as unknown as DaemonEffects;
+    // Herdr lists another agent of the same workspace, so the handle's pane reading agentless is
+    // a read workspace, not a listing that holds nothing of it: the exit the step acts on.
+    const runtime = { agents: [{ name: 'graphyard-other', pane_id: 'w1:pOTHER', agent: 'claude', agent_status: 'working' }], available: true };
+    const cycle = (item: Work, at: number) => ({ config, state, effects, now: () => GY1791_NOW + at, clock: GY1791_NOW + at, performed: [],
+      isolate: async (_k: string, _i: unknown, _n: string, fn: () => Promise<unknown>) => fn(), snapshot: { work: [item], now: new Date(GY1791_NOW + at).toISOString() } } as unknown as Cycle);
+    const pass = async (item: Work, at: number) => { await daemonSessions.closeExitedWorkerSessions!(cycle(item, at), runtime); };
+    // A grace-kept lease: expiry future, attempt standing. Nothing sights, nothing closes.
+    const gracedItem = guardItem('work-1801a', 'GY-1801', { owner: stallWorker.id, epoch: 1, expiresAt: GY1791_AT(3_600_000) }, [attempt(1, false)], [closeHandle(`${stallWorker.id}:1`, 'w1:pKEPT', 'running')]);
+    await pass(gracedItem, 0); state.cycle += 1; await pass(gracedItem, launchAppearanceMs + 60_000);
+    assert.deepEqual(closed, [], 'the pane of a live lease is never closed, however dead its runtime reads');
+    assert.ok(!Object.keys(state.actions).some(key => key.startsWith('exited:implementation:')), 'the exit is not even sighted while the attempt stands');
+    // The revival window: the lease reads expired, the attempt has no end yet — a pass can still
+    // class the lapse or keep the lease for a stall, so the close waits all the same.
+    const revivalItem = guardItem('work-1801b', 'GY-1801', { owner: stallWorker.id, epoch: 1, expiresAt: GY1791_AT(-60_000) }, [attempt(1, false)], [closeHandle(`${stallWorker.id}:1`, 'w1:pREVIVAL', 'running')]);
+    await pass(revivalItem, 0); state.cycle += 1; await pass(revivalItem, launchAppearanceMs + 60_000);
+    assert.deepEqual(closed, [], 'an expired lease whose attempt has no end on the record yet holds its pane');
+    // The engine's lapse records the end: the same handle's pane is sighted and then closed.
+    const lapsedItem = guardItem('work-1801c', 'GY-1801', null, [attempt(1, true)], [closeHandle(`${stallWorker.id}:1`, 'w1:pLAPSED', 'running')]);
+    await pass(lapsedItem, 0);
+    assert.ok(Object.values(state.actions).some(action => action.state === 'waiting' && /agent has exited/.test(action.detail)), 'the ended attempt’s exited pane is sighted');
+    state.cycle += 1;
+    await pass(lapsedItem, 2 * launchAppearanceMs);
+    assert.deepEqual(closed, ['w1:pLAPSED'], 'the pane of an ended attempt closes on the second sighting');
+    assert.ok(recorded.some(entry => entry.id === `${stallWorker.id}:1` && entry.state === 'finished' && /agent has exited/.test(entry.outcome ?? '')), 'the handle is closed with the reason');
+    // The epoch the handle names is the one that decides: an ended attempt's pane closes even
+    // while the item's next attempt stands, and a standing attempt's pane stays shut beside an
+    // ended one.
+    closed.length = 0;
+    const mixedItem = guardItem('work-1801d', 'GY-1801', { owner: stallWorker.id, epoch: 2, expiresAt: GY1791_AT(3_600_000) }, [attempt(1, true), attempt(2, false)],
+      [closeHandle(`${stallWorker.id}:1`, 'w1:pOLD', 'running'), closeHandle(`${stallWorker.id}:2`, 'w1:pCURRENT', 'running')]);
+    await pass(mixedItem, 0); state.cycle += 1; await pass(mixedItem, 2 * launchAppearanceMs + 60_000);
+    assert.deepEqual(closed, ['w1:pOLD'], 'the ended first attempt’s pane closes; the standing second attempt’s pane does not');
+
+    // The sweep: the rekeyed record pair — the superseded guessed record keeps the pane the
+    // claimed record runs in, whose worktree is the workspace the first claim built — never hands
+    // that pane to the sweep while the claimed lease lives; a shell in a standing attempt's
+    // worktree waits for the end, whatever the lease reads; an ended attempt's shell closes.
+    const worktrees = '/tmp/soak/.graphyard/worktrees';
+    const rekeyed = guardItem('work-1801e', 'GY-1801', { owner: stallWorker.id, epoch: 2, expiresAt: GY1791_AT(3_600_000) }, [attempt(1, true), attempt(2, false)],
+      [closeHandle(`${stallWorker.id}:1`, 'w1:pREKEY', 'finished'), closeHandle(`${stallWorker.id}:2`, 'w1:pREKEY', 'running')]);
+    const standingShell = guardItem('work-1802', 'GY-1802', null, [attempt(3, false)], [closeHandle(`${stallWorker.id}:3`, 'w1:pSTANDING', 'running')]);
+    const endedShell = guardItem('work-1803', 'GY-1803', null, [attempt(1, true)], [closeHandle(`${stallWorker.id}:4`, 'w1:pENDED', 'running')]);
+    const snapshotWork = [rekeyed, standingShell, endedShell];
+    const sweepState: DaemonState = emptyDaemonState(config);
+    const sweepClosed: string[] = [];
+    const agents = [{ name: 'graphyard-opencode-4', pane_id: 'w1:pREKEY', agent: 'claude', agent_status: 'idle', cwd: `${worktrees}/GY-1801-1` }];
+    const panes = [
+      { pane_id: 'w1:pREKEY', agent: 'claude', agent_status: 'idle', cwd: `${worktrees}/GY-1801-1` },
+      { pane_id: 'w1:pSTANDING', agent_status: 'unknown', cwd: `${worktrees}/GY-1802-3` },
+      { pane_id: 'w1:pENDED', agent_status: 'unknown', cwd: `${worktrees}/GY-1803-1` },
+    ];
+    const sweepEffects = { persist: async () => {}, closeSession: async (pane: string) => { sweepClosed.push(pane); }, recordSession: async () => {}, panes: async () => ({ panes, available: true }) } as unknown as DaemonEffects;
+    const sweepCycle = (at: number) => ({ config, state: sweepState, effects: sweepEffects, now: () => GY1791_NOW + at, clock: GY1791_NOW + at, performed: [],
+      isolate: async (_k: string, _i: unknown, _n: string, fn: () => Promise<unknown>) => fn(), snapshot: { work: snapshotWork, now: new Date(GY1791_NOW + at).toISOString() },
+      open: snapshotWork, agents, closedPanes: new Set<string>() } as unknown as Cycle);
+    await reclaimLaunchedPanes(sweepCycle(0));
+    assert.ok(!sweepState.actions['sweep:pane:w1:pREKEY'], 'the pane a live lease’s record names is never the sweep’s, though the superseded record that first carries it is finished');
+    assert.ok(!sweepState.actions['sweep:pane:w1:pSTANDING'], 'a shell in a standing attempt’s worktree is not the sweep’s, whatever the lease reads');
+    assert.equal(sweepState.actions['sweep:pane:w1:pENDED']?.state, 'waiting', 'the ended attempt’s shell is sighted for its bound');
+    sweepState.cycle += 1;
+    await reclaimLaunchedPanes(sweepCycle(launchAppearanceMs + 60_000));
+    assert.deepEqual(sweepClosed, ['w1:pENDED'], 'the ended attempt’s shell closed past its bound; nothing else was ever taken');
+  } finally { void directory; }
 });

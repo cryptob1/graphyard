@@ -57,7 +57,7 @@ Reviewers/producers are `awaiting acknowledgement` until 30s active (`counts.dis
 
 ### Panes are closed and reclaimed
 
-Ended sessions' panes close; each cycle closes ≤12 more, never a live lease's: agentless shells in `.graphyard/worktrees` after **120s**, agents named for ended sessions after **60s**. `master status` counts shells (`herdr pane list`). Over 20 agentless: `daemon.escalations` attention.
+Ended sessions' panes close; each cycle closes ≤12 more, never a live lease's: agentless shells in `.graphyard/worktrees` after **120s**, agents named for ended sessions after **60s**; never an implementation handle whose attempt has no recorded end, nor a pane a live lease's record names. `master status` counts shells (`herdr pane list`). Over 20 agentless: `daemon.escalations` attention.
 
 ### The dispatcher's own state
 

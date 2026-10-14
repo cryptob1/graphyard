@@ -11,7 +11,7 @@
 
 ## Lost worker before submission
 
-Leases expire 120s after last heartbeat (one more lease period after recorded renewal fault); next, higher-epoch claim keeps worktree. Unexplained lapses raise [`lease-loss`](protocol/leases.md#how-a-lease-ends), blocking merge until [settled](delegation.md#who-may-settle-what).
+Leases expire 120s after last heartbeat (a renewal fault holds one period; a plane stall, 30s); next, higher-epoch claim keeps worktree. Unexplained lapses raise [`lease-loss`](protocol/leases.md#how-a-lease-ends), blocking merge until [settled](delegation.md#who-may-settle-what).
 
 ## Supervisor died leaving a containment quarantine
 
