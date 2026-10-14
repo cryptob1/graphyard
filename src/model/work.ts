@@ -96,7 +96,7 @@ export function observationWindowHold(work: { observationWindow?: ObservationWin
   const window = work.observationWindow;
   return window && Date.parse(window.notBefore) > now.getTime() ? window : null;
 }
-export { loopObservationProofs, loopObservation } from './loop-observation.js';
+export { loopObservationProofs, loopObservation, loopReadingOn, observationPass, deliveredObservationRefusal } from './loop-observation.js';
 // The `decision:*` capabilities request a two-party decision (see model/approval.ts); an agent
 // holding one still needs a second, independent agent holding `decision:approve` to apply it.
 // `e2e:record` (GY-1614) admits only the scenario registry and its run route: a candidate's UAT case runs.

@@ -42,7 +42,9 @@ const followUp = (n: number, extra: Partial<Work> = {}) => base(n, { description
   criteria: [{ id: 'AC-1', text: `From this head against the serving release ${filed.slice(0, 12)} that carries GY-1700's merge: zero failed webhook deliveries over 24 hours`, proofs: [own] }],
   observationWindow: { notBefore: iso(now - hour), basis: 'criterion-window', detail: 'the 24-hour live window ran' }, ...extra });
 
-async function cycleOver(work: Work[], directory: string, reader: DaemonEffects['readPostDeploy'], at = now) {
+type Closing = (item: Work, release: string) => void;
+/** The loop's cycle over `work` with the reading effects wired as production wires them, the reader and any extra effect injected; `closing` may refuse a close. */
+async function makeCycle(work: Work[], directory: string, reader: DaemonEffects['readPostDeploy'], at = now, extra: Partial<DaemonEffects> = {}, closing: Closing = () => {}) {
   const token = join(directory, 'coordinator.token');
   await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: token, cliPath: join(directory, 'graphyard.mjs'), repository: 'owner/project', baseBranch: 'main',
@@ -50,19 +52,25 @@ async function cycleOver(work: Work[], directory: string, reader: DaemonEffects[
   const state = emptyDaemonState(config);
   const recorded: { key: string; reading: Record<string, unknown> }[] = [], closed: { key: string; release: string; reason: string; idempotency: string }[] = [];
   const { localPostDeployChecks } = await import('../src/master-verification.js');
+  const served = () => ({ source: 'endpoint', sha: serving, at: iso(at - 60_000), reason: null, deployed: work.filter(item => item.stage === 'done' && item.delivery && item.key !== 'GY-1733').map(item => item.key), pending: [], requests: 1 });
   const effects: DaemonEffects = {
     agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work, now: iso(at) }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, persist: async () => {},
-    observeDeployment: async () => ({ source: 'endpoint', sha: serving, at: iso(at - 60_000), reason: null, deployed: work.filter(item => item.stage === 'done' && item.delivery && item.key !== 'GY-1733').map(item => item.key), pending: [], requests: 1 }) as never,
+    observeDeployment: async () => served() as never,
     recordDeployment: async () => {}, requestSmoke: () => {},
     recordReading: async (item: Work, reading: Parameters<NonNullable<DaemonEffects['recordReading']>>[1]) => { recorded.push({ key: item.key, reading }); item.evidence.push({ id: randomUUID(), producer: 'graphyard-master', trusted: true, executed: 1, skipped: 0, at: iso(at), proof: reading.proof, sha: reading.sha, baseSha: reading.baseSha, policyRevision: reading.policyRevision, result: reading.result, reading: { detail: reading.detail } }); },
-    closeObservation: async (item: Work, release: string, reason: string, idempotency: string) => { closed.push({ key: item.key, release, reason, idempotency }); },
-    postDeployFiler: localPostDeployChecks, readPostDeploy: reader,
+    closeObservation: async (item: Work, release: string, reason: string, idempotency: string) => { closing(item, release); closed.push({ key: item.key, release, reason, idempotency }); item.stage = 'done'; item.closure = { kind: 'delivered-observation', reason, ref: release, by: 'graphyard-master', at: iso(at), from: 'ready' }; },
+    postDeployFiler: localPostDeployChecks, readPostDeploy: reader, ...extra,
   } as unknown as DaemonEffects;
   const cycle = { config, state, effects, now: () => at, clock: at, clockOffset: { min: 0, max: 0 }, performed: [], snapshot: { work, now: iso(at) }, open: work.filter(item => item.stage !== 'done'),
     isolate: async (_kind: string, _item: unknown, _name: string, body: () => Promise<unknown>) => body(), detached: false, launcher: { busy: () => false }, timings: { step: async (_name: string, body: () => Promise<unknown>) => body() } } as unknown as Cycle;
+  const next = () => { cycle.state.cycle++; cycle.performed.length = 0; cycle.open = work.filter(item => item.stage !== 'done'); };
+  return { state, recorded, closed, cycle, served, next };
+}
+async function cycleOver(work: Work[], directory: string, reader: DaemonEffects['readPostDeploy'], at = now, extra: Partial<DaemonEffects> = {}, closing: Closing = () => {}) {
+  const made = await makeCycle(work, directory, reader, at, extra, closing);
   const { deploymentStep } = await import('../src/daemon/cycle-delivery.js');
-  await deploymentStep(cycle);
-  return { state, recorded, closed, cycle, again: async () => { cycle.state.cycle++; cycle.performed.length = 0; await deploymentStep(cycle); } };
+  await deploymentStep(made.cycle);
+  return { ...made, again: async () => { made.next(); await deploymentStep(made.cycle); } };
 }
 
 test('integration:loop-records-due-observation-reading — the deployment-verification step reads every due loop-owned item on the serving release through the filer and the reader, records the reading bound as loopObservation reads it, closes a pass as delivered-observation and raises a fail naming the measured values', async () => {
@@ -102,23 +110,23 @@ test('integration:loop-records-due-observation-reading — the deployment-verifi
   assert.match(run.closed.find(entry => entry.key === 'GY-1724')!.reason, /passed on the serving release bbbbbbbbbbbb: manual:webhook-deliveries-clean-24h-on-serving-release: the advanced delivery log shows 0 failed deliveries/);
   assert.equal(run.closed.find(entry => entry.key === 'GY-1724')!.idempotency, `reading:close:${passing.id}:${serving}`);
   // A fail records the reading, raises the item's escalation naming the measured values and is asked again on the backoff, never closed.
-  const escalation = run.state.actions[`escalation:reading:${failing.id}:${serving}`];
+  const escalation = run.state.actions[`escalation:reading:${failing.id}`];
   assert.equal(escalation?.kind, 'escalation');
   assert.match(escalation!.detail, /GY-1726's reading of manual:webhook-deliveries-clean-24h-on-serving-release failed on the serving release bbbbbbbbbbbb: .*3 failed deliveries \(2 × 502, 1 connection failure\)/);
-  assert.equal(run.state.actions[`reading:${failing.id}:${serving}`]?.state, 'waiting');
+  assert.equal(run.state.actions[`reading:${failing.id}`]?.state, 'waiting');
   // A reading this host cannot take records why, so the item is never left owed to nobody.
-  const untaken = run.state.actions[`reading:${untakeable.id}:${serving}`];
+  const untaken = run.state.actions[`reading:${untakeable.id}`];
   assert.equal(untaken?.state, 'waiting');
   assert.match(untaken!.detail, /GY-1727's reading is due on release bbbbbbbbbbbb and cannot be taken from this host: manual:webhook-deliveries-clean-24h-on-serving-release: the App's advanced delivery log needs a browser sign-in/);
-  assert.equal(run.state.actions[`reading:${windowed.id}:${serving}`], undefined);
-  assert.equal(run.state.actions[`reading:${passing.id}:${serving}`]?.state, 'done');
-  assert.match(run.state.actions[`reading:${passing.id}:${serving}`]!.detail, /closed it as delivered-observation/);
+  assert.equal(run.state.actions[`reading:${windowed.id}`], undefined);
+  assert.equal(run.state.actions[`reading:${passing.id}`]?.state, 'done');
+  assert.match(run.state.actions[`reading:${passing.id}`]!.detail, /closed it as delivered-observation/);
   // The next cycle records nothing twice: a done reading stands, and the failed one is read again on its backoff but, failing again, is not recorded a second time.
   const before = run.recorded.length, askedBefore = asked.length;
   await run.again();
   assert.equal(run.recorded.length, before);
   assert.deepEqual(asked.slice(askedBefore), ['GY-1726', 'GY-1727'], 'the failed and the untakeable readings are asked again; the done ones never');
-  assert.equal(run.state.actions[`reading:${failing.id}:${serving}`]?.attempts, 2);
+  assert.equal(run.state.actions[`reading:${failing.id}`]?.attempts, 2);
   assert.equal(run.closed.length, 3);
 });
 
@@ -128,9 +136,66 @@ test('integration:loop-records-due-observation-reading — the serving release n
   const orphan = followUp(1732, { description: `Post-deploy follow-up: post-deploy:${other.id}:AC-2:${proof}:${filed}\n\nowed` });
   const run = await cycleOver([parent, other, item, orphan], directory, async () => ({ result: 'pass', detail: 'clean' }));
   assert.deepEqual(run.recorded.map(entry => entry.key), ['GY-1731']);
-  const unserved = run.state.actions[`reading:${orphan.id}:${serving}`];
+  const unserved = run.state.actions[`reading:${orphan.id}`];
   assert.equal(unserved?.state, 'waiting');
   assert.match(unserved!.detail, /release the control plane serves \(bbbbbbbbbbbb\) is not observed carrying GY-1733's merge cccccccccccc/);
+});
+
+test('integration:loop-records-due-observation-reading — a recorded pass whose close was refused is closed next cycle under the same idempotency key without a second record, and a pass recorded by hand is closed on the release it was read on', async () => {
+  const refused = followUp(1741);
+  // GY-1725 by hand: `master reading GY-1742 pass …` recorded the pass on the filed release an hour before its close was ever attempted.
+  const byHand = followUp(1742, { evidence: [{ id: randomUUID(), proof: own, sha: filed, baseSha: mergeSha, policyRevision: 1, producer: 'readings-master', trusted: true, result: 'pass', executed: 1, skipped: 0, at: iso(now - 30 * 60_000), reading: { detail: 'the advanced delivery log shows 0 failed deliveries, read by hand' } }] } as Partial<Work>);
+  const asked: string[] = [];
+  let refusing = true;
+  const run = await cycleOver([parent, refused, byHand], await temporaryDirectory('loop-readings-close'), async input => { asked.push(input.item.key); return { result: 'pass', detail: 'clean' }; }, now, {},
+    (item: Work) => { if (refusing && item.key === 'GY-1741') throw Object.assign(new Error('GitHub refused closing #1172 (503): upstream unavailable'), { status: 503 }); });
+  // The hand-recorded pass needed no reader and closed on the filed release, where it was read, under its key.
+  assert.deepEqual(asked, ['GY-1741'], 'the item whose pass is recorded is not read again');
+  assert.deepEqual(run.closed.map(entry => [entry.key, entry.release, entry.idempotency]), [['GY-1742', filed, `reading:close:${byHand.id}:${filed}`]]);
+  assert.equal(run.state.actions[`reading:${byHand.id}`]?.state, 'done');
+  assert.match(run.state.actions[`reading:${byHand.id}`]!.detail, /closed it as delivered-observation: manual:webhook-deliveries-clean-24h-on-serving-release: the advanced delivery log shows 0 failed deliveries, read by hand/);
+  // The refused close is a failed action on the item: the pass stands recorded, and the item is still open.
+  assert.deepEqual(run.recorded.map(entry => entry.key), ['GY-1741']);
+  const failed = run.state.actions[`reading:${refused.id}`];
+  assert.equal(failed?.state, 'failed');
+  assert.match(failed!.detail, /Recorded GY-1741's passing reading on release bbbbbbbbbbbb, and could not close it as delivered-observation: GitHub refused closing #1172 \(503\)/);
+  assert.equal(refused.stage, 'ready');
+  // Next cycle the loop closes it on the recorded pass: no second reading, no reader, the same idempotency key.
+  refusing = false;
+  await run.again();
+  assert.deepEqual(asked, ['GY-1741']);
+  assert.deepEqual(run.recorded.map(entry => entry.key), ['GY-1741']);
+  assert.deepEqual(run.closed.map(entry => [entry.key, entry.release, entry.idempotency]).sort(), [['GY-1741', serving, `reading:close:${refused.id}:${serving}`], ['GY-1742', filed, `reading:close:${byHand.id}:${filed}`]]);
+  assert.deepEqual([run.state.actions[`reading:${refused.id}`]?.state, run.state.actions[`reading:${refused.id}`]?.attempts], ['done', 2]);
+  assert.match(run.state.actions[`reading:${refused.id}`]!.detail, /closed it as delivered-observation: manual:webhook-deliveries-clean-24h-on-serving-release: clean/);
+  // Closed items are left alone.
+  await run.again();
+  assert.equal(run.closed.length, 2);
+});
+
+test('integration:loop-records-due-observation-reading — the reads run under the deployment step\'s budget: a reading still running at the bound is deferred, left in flight and recorded by the cycle that finds it settled; the report is read once per item for the filer and the reader together', async () => {
+  const { readingsStep } = await import('../src/daemon/cycle-readings.js');
+  const { postDeployReader } = await import('../src/master/post-deploy-readings.js');
+  // A pattern proof: the reader takes it from the intervention report's row the filer's projection already read.
+  const patternProof = 'manual:post-deploy/intervention-pattern-escalation-build', ownPattern = 'manual:intervention-pattern-escalation-build-on-serving-release';
+  const patternParent = { ...parent, id: '44444444-4444-4444-8444-444444444444', key: 'GY-1744', criteria: [{ id: 'AC-2', text: 'The intervention report shows the escalation rate at the build stage below 3 per 1 days after it ships', proofs: [patternProof] }] } as Work;
+  const item = followUp(1745, { description: `Post-deploy follow-up: post-deploy:${patternParent.id}:AC-2:${patternProof}:${filed}\n\nowed`, criteria: [{ id: 'AC-1', text: 'From this head against the serving release: the escalation rate at the build stage stays below 3 per 1 days', proofs: [ownPattern] }] });
+  let release: (() => void) | null = null;
+  const reads: string[] = [];
+  const readPattern = async (pattern: { kind: string; stage: string }) => { reads.push(`${pattern.kind}-${pattern.stage}`); await new Promise<void>(resolve => { release = resolve; }); return { since: iso(now - 3 * 24 * hour), projected: null }; };
+  const made = await makeCycle([patternParent, item], await temporaryDirectory('loop-readings-budget'), postDeployReader(readPattern as never), now, { readPattern: readPattern as never });
+  // The report read does not settle within the 5 ms left: the reading is deferred, nothing is noted, and the read is left in flight.
+  assert.equal(await readingsStep(made.cycle, made.served() as never, now + 5), 1);
+  assert.deepEqual([made.recorded.length, made.state.actions[`reading:${item.id}`]], [0, undefined]);
+  assert.deepEqual(reads, ['escalation-build'], 'the report was read once, for the filer');
+  // The read settles; the next cycle records the reading from it — the reader took the projection the filer read, never the report again — and closes the item.
+  release!();
+  made.next();
+  assert.equal(await readingsStep(made.cycle, made.served() as never, now + 5), 0);
+  assert.deepEqual(reads, ['escalation-build'], 'the reader took the projection already read');
+  assert.deepEqual(made.recorded.map(entry => [entry.key, entry.reading.result]), [['GY-1745', 'pass']]);
+  assert.match(String(made.recorded[0].reading.detail), /under its threshold since 2026-10-10T12:00:00.000Z, 3.0 days at 2026-10-13T12:00:00.000Z, which meets the 1-day window on release bbbbbbbbbbbb/);
+  assert.deepEqual(made.closed.map(entry => [entry.key, entry.release]), [['GY-1745', serving]]);
 });
 
 // The control plane's side of the same pass, against a real Postgres: the coordinator's `reading`
@@ -168,16 +233,30 @@ test('integration:loop-records-due-observation-reading — the coordinator recor
   await assert.rejects(engine.execute(worker, 'reading', item.id, reading, randomUUID()), /Coordinator permission required/);
   await assert.rejects(engine.execute(coordinator, 'reading', code.id, { ...reading, proof: 'unit:code' }, randomUUID()), /not a loop-owned observation item/);
   await assert.rejects(engine.execute(coordinator, 'reading', item.id, { ...reading, baseSha: sha('f') }, randomUUID()), /bound to the parent delivery's merge/);
-  const read = await engine.execute(coordinator, 'reading', item.id, reading, randomUUID()) as Work;
-  const [entry] = read.evidence;
-  assert.deepEqual([entry.trusted, entry.producer, entry.sha, entry.baseSha, entry.result, entry.reading], [true, coordinator.id, serving, mergeSha, 'pass', { detail: reading.detail }]);
-  assert.equal(loopObservation(read, new Date(now), [delivered]), null, 'the loop\'s reading on the later serving release ends the wait');
-  // The close as delivered-observation closes the open pull request as superseded by the reading, then the item.
   const closedPulls: { pr: number; reason: string }[] = [];
   const github = { closeSupersededPullRequest: async (pr: number, reason: string) => { closedPulls.push({ pr, reason }); return 'closed' as const; } };
   const { closeWork } = await import('../src/server/close.js');
   const services = { engine, github, repository, principals: [] } as unknown as Services;
-  await assert.rejects(closeWork(services, coordinator, item.id, { kind: 'delivered-observation', reason: 'read', ref: null }, randomUUID()), /names the release its reading was taken on/);
+  const close = (principal: Principal, id: string, ref: string | null = serving) => closeWork(services, principal, id, { kind: 'delivered-observation', reason: 'read', ref }, randomUUID());
+  // No reading yet: the close is refused, and the pull request is not touched. A worker never closes; neither does the kind close a code item.
+  await assert.rejects(close(coordinator, item.id), /carries no passing reading of manual:webhook-deliveries-clean-24h-on-serving-release as the loop reads one/);
+  await assert.rejects(close(worker, item.id), /Only the master \(coordinator or operator agent\) or an admin may close work/);
+  await assert.rejects(close(coordinator, code.id), /is not a loop-owned observation item/);
+  // Only a failed reading: still refused.
+  await engine.execute(coordinator, 'reading', item.id, { ...reading, result: 'fail', detail: '2 failed deliveries' }, randomUUID());
+  await assert.rejects(close(coordinator, item.id), /carries no passing reading/);
+  assert.equal(closedPulls.length, 0, 'a refused close leaves the pull request open');
+  const read = await engine.execute(coordinator, 'reading', item.id, reading, randomUUID()) as Work;
+  const entry = read.evidence.at(-1)!;
+  assert.deepEqual([entry.trusted, entry.producer, entry.sha, entry.baseSha, entry.result, entry.reading], [true, coordinator.id, serving, mergeSha, 'pass', { detail: reading.detail }]);
+  assert.equal(loopObservation(read, new Date(now), [delivered]), null, 'the loop\'s reading on the later serving release ends the wait');
+  // The pass is on the serving release: a close naming another release, or none, is refused before GitHub is touched; so is one while a worker lease is live.
+  await assert.rejects(close(coordinator, item.id, null), /names the release its reading was taken on/);
+  await assert.rejects(close(coordinator, item.id, filed), /passing reading was taken on release bbbbbbbbbbbb, not aaaaaaaaaaaa/);
+  const leased = await plant({ ...followUp(0, { stage: 'build', epoch: 2, lease: { owner: worker.id, epoch: 2, expiresAt: iso(now + 24 * hour) }, candidate: { pr: 1174, sha: sha('d'), baseSha: sha('e'), author: 'bot', branch: 'graphyard/gy-y-2', createdAt: iso(now - hour) }, evidence: [{ ...entry, id: randomUUID() }] } as Partial<Work>), description: `Post-deploy follow-up: post-deploy:${delivered.id}:AC-2:${proof}:${filed}\n\nowed` } as Work);
+  await assert.rejects(close(coordinator, leased.id), /has a live worker lease/);
+  assert.equal(closedPulls.length, 0, 'no refused close closed a pull request');
+  // The close as delivered-observation closes the open pull request as superseded by the reading, then the item.
   const closed = await closeWork(services, coordinator, item.id, { kind: 'delivered-observation', reason: `${read.key}'s reading passed on the serving release`, ref: serving }, randomUUID()) as Work;
   assert.deepEqual([closed.stage, closed.closure?.kind, closed.closure?.ref, closed.closure?.by, isClosed(closed)], ['done', 'delivered-observation', serving, coordinator.id, true]);
   assert.deepEqual(closedPulls.map(pull => pull.pr), [1172]);

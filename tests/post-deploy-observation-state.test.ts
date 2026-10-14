@@ -65,7 +65,7 @@ test('unit:observation-class-needs-the-follow-up-reading — a head-anchored cod
   assert.match(upNextHold(lapsed, [lapsed], now)?.text ?? '', /which is due and which the loop records in its deployment-verification step/);
 });
 
-test('unit:observation-item-counted-waiting — it counts as waiting with what it waits for, and as ready again once the wait has ended', () => {
+test('unit:observation-item-counted-waiting — it counts as waiting with what it waits for, and still waiting, on the loop\'s close, once a recorded pass has ended the reading\'s wait', () => {
   const snapshot = (...work: Work[]) => buildMasterStatus({ now: iso(now), work } as never, [], []);
   const windowed = item(4, { observationWindow: { notBefore: iso(now + 6 * hour), basis: 'criterion-window', detail: 'merged 7 days before' } });
   const status = snapshot(item(1), windowed, item(2, { criteria: code }));
@@ -90,8 +90,13 @@ test('unit:observation-item-counted-waiting — it counts as waiting with what i
   assert.equal(nextAction(windowed, [windowed], later), null);
   assert.deepEqual([actionAccount(windowed, [windowed], later).wait?.kind, actionAccount(windowed, [windowed], later).wait?.on], ['window', 'loop']);
   assert.equal(nextAction(item(1), [item(1)], new Date(now)), null, 'an unwindowed one is due at once, on the loop');
+  // GY-1779: a recorded pass leaves the item open only until the loop closes it in the same step: it waits on the loop's close, never counted ready and never escalated.
   const after = buildMasterStatus({ now: iso(now + 7 * hour), work: [windowed, read] } as never, [], []);
-  assert.deepEqual([after.counts.ready, after.counts.waiting], [1, 1]);
+  assert.deepEqual([after.counts.ready, after.counts.waiting], [0, 2]);
+  const closing = after.work.find(entry => entry.key === 'GY-5')!;
+  assert.match(closing.observing!, /the loop's close of GY-5 as delivered-observation on release aaaaaaaaaaaa/);
+  assert.deepEqual([closing.observationDue, closing.observationPassedOn, closing.attention], [true, 'a'.repeat(40), null]);
+  assert.deepEqual([actionAccount(read, [read], later).action, actionAccount(read, [read], later).wait?.on], [null, 'loop']);
 });
 
 test('unit:observation-wait-names-reading — a windowed wait names the observation due then, never a dispatch; a due one is a pending reading of the loop, not a missing submission and not attention', () => {

@@ -5,7 +5,7 @@ import { hotFileSet } from '../daemon/hotspots.js';
 import type { ConflictReport } from '../conflicts.js';
 import { standingCapacity, describeCapacity, quotaRoles } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, openHumanRequests } from '../model/human-request.js';
-import { type Work, carriedBindings, describeGround, observationWindowHold, loopObservation, loopObservationProofs, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance } from '../model.js';
+import { type Work, carriedBindings, describeGround, observationWindowHold, loopObservation, loopObservationProofs, observationPass, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance } from '../model.js';
 import { containmentAttestation, containmentGraceMs } from '../quarantine.js';
 import { pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, restoredApproval, refusedReconciliation, blockedPastProbe } from '../merge-queue.js';
 import { MERGE_PROTOCOL } from '../protocol-version.js';
@@ -158,12 +158,12 @@ export type LoopStatusInput = { projectMemory?: ProjectMemory | null; actions?: 
  * with what it waits for and the loop's last record of taking it: recorded and closed, failed with
  * the measured values, or why this host could not take it. Listed here, never as a stalled gate.
  */
-export function pendingReadings(rows: readonly { key: string; stage: string; observing: string | null; observationDue: boolean }[], work: readonly Work[], loop: LoopStatusInput, now: number) {
+export function pendingReadings(rows: readonly { key: string; stage: string; observing: string | null; observationDue: boolean; observationPassedOn?: string | null }[], work: readonly Work[], loop: LoopStatusInput, now: number) {
   const actions = loop && !('error' in loop) ? loop.actions ?? {} : {};
   return rows.filter(row => row.observing).map(row => {
     const item = work.find(entry => entry.key === row.key)!;
-    const last = Object.entries(actions).filter(([key]) => key.startsWith(`reading:${item.id}:`)).map(([, action]) => action).sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0] ?? null;
-    return { key: row.key, stage: row.stage, proofs: loopObservationProofs(item) ?? [], due: row.observationDue, notBefore: item.observationWindow?.notBefore ?? null, waitingFor: row.observing!,
+    const last = actions[`reading:${item.id}`] ?? null;
+    return { key: row.key, stage: row.stage, proofs: loopObservationProofs(item) ?? [], due: row.observationDue, notBefore: item.observationWindow?.notBefore ?? null, waitingFor: row.observing!, passedOn: row.observationPassedOn ?? null,
       candidate: item.candidate ? { pr: item.candidate.pr, sha: item.candidate.sha } : null,
       loop: last ? { state: last.state, detail: last.detail, at: last.at, ageMs: Math.max(0, now - Date.parse(last.at)) } : null };
   });
@@ -201,6 +201,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     // GY-1762: waiting on the loop's own live reading, not ready for a worker. GY-1779: at any open stage —
     // an unsubmitted worker candidate left on the item before the loop held it waits the same way.
     const observing = !work.blocker && !active ? loopObservation(work, new Date(now), snapshot.work) : null;
+    // A recorded pass still open waits the same way: the loop closes it on that reading's release in the same step.
+    const passed = !work.blocker && !active && !observing && loopObservationProofs(work) ? observationPass(work, new Date(now), snapshot.work) : null;
+    const observingDetail = observing ? observing.waitingFor : passed ? `the loop's close of ${work.key} as delivered-observation on release ${passed.release.slice(0, 12)}, where its reading of ${passed.readings.map(entry => entry.proof).join(', ')} passed, which the loop records in its deployment-verification step` : null;
     const observationWindow = work.observationWindow ? { ...work.observationWindow, waiting: !!observationWindowHold(work, new Date(now)) } : null;
     const review = reviewState(work);
     const assessed = containment[work.id];
@@ -291,7 +294,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : baseRefresh && !work.blocker ? [null, null]
       // A follow-up held on its observation window (GY-1698) is waiting for the instant, not stalled at its gate.
       // GY-1779: a due reading is the loop's own, listed under `pendingReadings` with the loop's last record of it, never a stalled gate.
-      : (observationWindow?.waiting || observing) && !work.blocker && !active ? [null, null]
+      : (observationWindow?.waiting || observingDetail) && !work.blocker && !active ? [null, null]
       : work.blocker || dwellMs > 3_600_000 ? [first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour`, 'gate'] : [null, null];
     const attentionOwner = cause ? workAttentionOwner(work, cause, now) : null;
     if (cause) causes.set(work.key, cause);
@@ -302,7 +305,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // The observation window a windowed post-deploy follow-up carries (GY-1698): `waiting` while it holds the dispatch.
       observationWindow,
       // The loop's observation an all-manual post-deploy item waits for (GY-1762): counted as waiting, never ready.
-      observing: observing ? observing.waitingFor : null, observationDue: !!observing?.due,
+      observing: observingDetail, observationDue: !!observing?.due || !!passed, observationPassedOn: passed?.release ?? null,
       // Set only for an item GitHub merged though its gates had not passed: the merge, the violation and
       // the last refused reconciliation, so the row reads as stuck rather than as a candidate.
       merged,

@@ -1,6 +1,8 @@
 import type pg from 'pg';
 import { demand, operatorCapability, type Principal, type Work } from '../model.js';
-import { closeRefusal, closeSchema, closureRefRefusal, commitRef, itemRef, type Closure } from '../model/closure.js';
+import { closeRefusal, closeSchema, closureRefRefusal, commitRef, itemRef, type CloseInput, type Closure } from '../model/closure.js';
+import { followUpRequest } from '../model/observation-window.js';
+import { deliveredObservationRefusal } from '../model/loop-observation.js';
 import { dispatchHistoryLimit, type DispatchRequest } from '../model/dispatch.js';
 import { humanRequestBlocker, retainedHumanRequests, type HumanRequest } from '../model/human-request.js';
 import { decisionGroundsMovedSince } from '../engine.js';
@@ -39,8 +41,11 @@ export async function closeWork(services: Services, caller: Principal, id: strin
   // GY-1779: a loop-owned observation item closed on the loop's reading leaves no pull request open: a
   // worker's unsubmitted candidate from before the loop held it (GY-1725, #1172) is closed on GitHub as
   // superseded by the reading, outside the transaction like the ancestry read. One already closed is
-  // left as it is, and a refused close below leaves the reading recorded for the next attempt.
-  const superseded = data.kind === 'delivered-observation' ? await supersededPullRequest(services, id, data.reason) : null;
+  // left as it is. The close is authorised first, on the document as it stands — the caller's role,
+  // the item's closability and the reading the ref names — so a refused close never mutates GitHub;
+  // the transaction judges the same again under the lock, and a refusal there leaves the reading
+  // recorded for the next attempt.
+  const superseded = data.kind === 'delivered-observation' ? await supersededPullRequest(services, caller, id, data, options) : null;
   return services.engine.store.transaction(async (db: Db, now: Date) => {
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay as unknown as Work;
@@ -53,7 +58,7 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     const moved = judged === undefined ? null : await decisionGroundsMovedSince(db, work!, judged);
     if (moved) demand(false, `${moved[0].toUpperCase()}${moved.slice(1)} since approved revision ${judged} moved the decision's grounds; the close was not applied`, 409);
     const refused = closeRefusal(judged !== undefined && work!.lease ? { ...work!, lease: null } : work!, now.getTime()); demand(!refused, refused!, 409);
-    const badRef = closureRefRefusal(work!, all, data.kind, ref); demand(!badRef, badRef!, 422);
+    const badRef = closureRefRefusal(work!, all, data.kind, ref) ?? (data.kind === 'delivered-observation' ? deliveredObservationRefusal(work!, all, ref!, now) : null); demand(!badRef, badRef!, 422);
     if (ancestry) demand(ancestry.contained, `Commit ${ref} is not an ancestor of the base branch (${ancestry.base.slice(0, 12)}); an item is superseded only by work that landed`, 422);
     const closure: Closure = { kind: data.kind, reason: data.reason, ref, by: actor.id, at: now.toISOString(), from: work!.stage };
     const settled = settleOpenRequests(work!, closure, now);
@@ -78,16 +83,28 @@ export async function closeWork(services: Services, caller: Principal, id: strin
   });
 }
 
+const readDocument = async (services: Services, ref: string): Promise<Work | undefined> => (await services.engine.store.pool.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [ref])).rows[0]?.document;
+
 /**
  * GY-1779: the open pull request of the item being closed as delivered-observation, closed on GitHub as
- * superseded by the loop's reading; null when the item carries none. GitHub is required to close one.
+ * superseded by the loop's reading; null when the item carries none. Closed only once the close is
+ * authorised on the document as it stands: a worker-role caller, an item a live lease or a merge
+ * holds, or a ref naming no recorded passing reading is refused here, before GitHub is touched, with
+ * the refusal the transaction would give. GitHub is required to close one.
  */
-async function supersededPullRequest(services: Services, id: string, reason: string): Promise<{ pr: number; outcome: 'closed' | 'already-closed' } | null> {
-  const work: Work | undefined = (await services.engine.store.pool.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [id])).rows[0]?.document;
-  const pr = work?.candidate?.pr ?? work?.submission?.pr ?? null;
-  if (!work || !pr || work.stage === 'done' || work.observation?.merged) return null;
-  demand(services.github, `GitHub integration is required to close ${work.key}'s pull request #${pr} as superseded by the loop's reading`, 503);
-  const outcome = await services.github!.closeSupersededPullRequest(pr, `Closed by Graphyard: ${work.key}'s only work is the loop's post-deploy reading of the serving release, which the loop recorded itself; this pull request is superseded by that reading. ${reason}`.slice(0, 2000));
+async function supersededPullRequest(services: Services, caller: Principal, id: string, data: CloseInput, options: { decided?: { expectedRevision?: number } }): Promise<{ pr: number; outcome: 'closed' | 'already-closed' } | null> {
+  demand(['admin', 'coordinator', 'operator-agent'].includes(caller.role), 'Only the master (coordinator or operator agent) or an admin may close work', 403);
+  const work = await readDocument(services, id); demand(work, 'Work item not found', 404);
+  if (caller.role === 'operator-agent') operatorCapability(caller, 'intent:create', work!, services.repository);
+  const now = Date.now();
+  const refused = closeRefusal(options.decided?.expectedRevision !== undefined && work!.lease ? { ...work!, lease: null } : work!, now); demand(!refused, refused!, 409);
+  // The reading binds to the parent delivery's merge: the parent the follow-up request names is read for the check.
+  const request = followUpRequest(work!), parent = request ? await readDocument(services, request.work) : undefined;
+  const badRef = closureRefRefusal(work!, [work!], data.kind, data.ref ?? null) ?? deliveredObservationRefusal(work!, parent ? [work!, parent] : [work!], data.ref!, new Date(now)); demand(!badRef, badRef!, 422);
+  const pr = work!.candidate?.pr ?? work!.submission?.pr ?? null;
+  if (!pr || work!.observation?.merged) return null;
+  demand(services.github, `GitHub integration is required to close ${work!.key}'s pull request #${pr} as superseded by the loop's reading`, 503);
+  const outcome = await services.github!.closeSupersededPullRequest(pr, `Closed by Graphyard: ${work!.key}'s only work is the loop's post-deploy reading of the serving release, which the loop recorded itself; this pull request is superseded by that reading. ${data.reason}`.slice(0, 2000));
   return { pr, outcome };
 }
 

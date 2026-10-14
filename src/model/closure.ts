@@ -50,7 +50,13 @@ export function closeRefusal(work: Work, now: number): string | null {
   return null;
 }
 
-/** Why `ref` cannot stand for this closure against the graph, or null. Commit ancestry is judged by the caller. */
+/**
+ * Why `ref` cannot stand for this closure against the graph, or null. Commit ancestry is judged by
+ * the caller, and so is a `delivered-observation` closure's reading (`deliveredObservationRefusal`
+ * in loop-observation.ts, which this module cannot import without a cycle): the kind is no
+ * client-controlled lifecycle transition, so the close route refuses it on any item that is not a
+ * loop-owned observation item with a recorded passing reading taken on `ref`.
+ */
 export function closureRefRefusal(work: Work, all: readonly Work[], kind: ClosureKind, ref: string | null): string | null {
   if (kind === 'obsolete') return null;
   if (kind === 'delivered-observation') return commitRef.test(ref ?? '') ? null : `A delivered-observation closure names the release commit its reading was taken on, not ${ref}`;
