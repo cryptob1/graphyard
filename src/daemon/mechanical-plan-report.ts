@@ -73,7 +73,7 @@ function owedMechanicalPlan(item: Work, clock: number): { reviewId: number; head
  * ledger answered without a plan is cleared exactly as before, and a read that fails or an effects wiring without
  * the answered list answers everything, so the gate never holds what nothing backs (GY-1764).
  */
-export async function reportMechanicalPlans(work: readonly Work[], plans: readonly Plan[], effects: Effects, clock: number, sink: PlanReportSink) {
+export async function reportMechanicalPlans(work: readonly Work[], plans: readonly Plan[], effects: Effects, clock: number, sink: PlanReportSink, snapshot?: LedgerRead | null) {
   const unreported = new Set<string>();
   if (!effects.recordMechanicalPlan || !effects.mechanicalFixes) return unreported;
   let answered: readonly AnsweredApproval[] | null = null, answeredKnown = false;
@@ -85,7 +85,8 @@ export async function reportMechanicalPlans(work: readonly Work[], plans: readon
     // clear that releases the gate's hold over it: either is written over an item that reports nothing.
     const owed = !plan ? owedMechanicalPlan(item, clock) : null;
     if (owed) {
-      if (answered === null) ({ known: answeredKnown, answered } = await (effects.mechanicalFixes as () => Promise<LedgerRead>)().then(
+      // One ledger snapshot decides plan and answer together (the cycle's own read when it passes it), so a transition between two reads never pairs an old plan with a new answer.
+      if (answered === null) ({ known: answeredKnown, answered } = snapshot !== undefined ? { known: !!snapshot && snapshot.answered !== undefined, answered: snapshot?.answered ?? [] } : await (effects.mechanicalFixes as () => Promise<LedgerRead>)().then(
         read => ({ known: read.answered !== undefined, answered: read.answered ?? [] }), () => ({ known: false, answered: [] })));
       wanted = answeredKnown && !answered.some(entry => entry.key === item.key && entry.reviewId === owed.reviewId) ? owed : null;
     }

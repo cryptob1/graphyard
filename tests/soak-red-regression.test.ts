@@ -77,6 +77,11 @@ test('unit:soak-red-regression — the loop reports an approval the ledger has n
   // cleared, never re-held past the answer (GY-1764).
   assert.deepEqual(await run(async () => ({ requests: [], answered: [{ key, reviewId }] })), [null], 'the ledger\'s answer clears the approval');
   assert.equal(mechanicalReviewHold(item({ mechanicalPlan: null, mechanicalAnswered: { reviewId, head } }), now), null, 'and the gate releases on the clear');
+  // One ledger snapshot decides plan and answer: a snapshot handed to the report is the only read made.
+  let reads = 0;
+  plans.length = 0;
+  await reportMechanicalPlans([item()], [], { mechanicalFixes: (async () => { reads++; return { requests: [], answered: [] }; }) as never, recordMechanicalPlan: async (_work, plan) => { plans.push(plan); } }, now, sink, { answered: [{ key, reviewId }] });
+  assert.deepEqual([reads, plans], [0, [null]], 'the cycle\'s own snapshot answers the approval without a second ledger read');
   // An effects wiring that supplies no answered list answers everything: the gate never holds what nothing backs.
   assert.deepEqual(await run(async () => ({ requests: [] })), [null], 'a read without an answered list reports none');
   // A matching report stands while the ledger still plans nothing: it is re-confirmed, whatever its stamp.
@@ -98,6 +103,7 @@ test('unit:soak-red-regression — the review gate holds an approval naming mech
   assert.match(mechanicalReviewHold(item({ mechanicalPlan: { reviewId, head: base, at: iso(now) } }), now) ?? '', /names 2 findings/, 'a plan for another head answers nothing here');
   assert.match(mechanicalReviewHold(item({ mechanicalPlan: null, mechanicalAnswered: { reviewId: reviewId - 1, head: base } }), now) ?? '', /names 2 findings/, 'the clear of an earlier head or approval holds the new one (GY-1814)');
   assert.equal(mechanicalReviewHold(item({ mechanicalPlan: null, mechanicalAnswered: { reviewId, head } }), now), null, 'the clear of this approval releases the head');
+  assert.equal(mechanicalReviewHold(item({ mechanicalPlan: null, mechanicalAnswered: { reviewId, head: base } }), now), null, 'the clear of a carried approval names the refreshed candidate head, and still releases the approval it answered by review id');
   const late = iso(now - mechanicalRoundStartMs - minute);
   assert.equal(mechanicalReviewHold(item(observed([{ ...approval, submittedAt: late }])), now), null, 'an approval past its round window holds nothing');
 });

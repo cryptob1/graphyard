@@ -313,11 +313,11 @@ export function mechanicalReviewHold(work: Work, now: number): string | null {
   // present, a fallback or an applied round), or when it names another approval of this head (GY-1764).
   // A matching plan past its confirm holds until the loop's next one lands or the clear is written: the
   // decision step still owes the round the ledger plans, and the round window bounds every hold. A clear
-  // releases only the approval it answered (`mechanicalAnswered`): a plan or clear recorded for an earlier head
-  // or review leaves a later approval held until the loop reports on it.
+  // releases only the approval it answered (`mechanicalAnswered`, matched by review id — a carried approval's clear names the refreshed candidate head, not the approved one): a clear recorded for an earlier review
+  // leaves a later approval held until the loop reports on it.
   const held = approval ? work.observation?.reviews.filter(entry => entry.state === 'APPROVED' && entry.sha === approval.sha && (entry.mechanical ?? 0) > 0 && !!entry.submittedAt
     && now < Date.parse(entry.submittedAt) + mechanicalRoundStartMs
-    && !(work.mechanicalPlan === null && work.mechanicalAnswered?.head === entry.sha && (entry.id === undefined || work.mechanicalAnswered.reviewId === entry.id))) ?? [] : [];
+    && !(work.mechanicalPlan === null && !!work.mechanicalAnswered && (entry.id !== undefined ? work.mechanicalAnswered.reviewId === entry.id : work.mechanicalAnswered.head === entry.sha))) ?? [] : [];
   const review = held.find(entry => entry.id !== undefined && entry.id === work.mechanicalPlan?.reviewId) ?? held[0];
   if (!review) return null;
   const until = Date.parse(review.submittedAt!) + mechanicalRoundStartMs;
