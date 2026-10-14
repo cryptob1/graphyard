@@ -237,8 +237,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * unmarked), and of each of `undated` unmarked and with no time it was requested or refused, so nothing dates it before the item's revision (GY-1579: it binds).
    * GY-1580: the master answers each review-cap escalation of `answered` with the rework it names, once per escalation and at most twice
    * per item, and the approver refuses every answer; the re-review after that second withdrawal of each of `third` requests changes again.
+   * GY-1810: once a head of `asked` stands escalated, the loop requests the capped rework again on the same binding, as it does on a low or medium lane (no master answer exists there), and the approver refuses it.
    */
-  reviewCap?: { cap: number; items: number[]; refused: number[]; again?: number[]; unmatched?: number[]; legacy?: number[]; undated?: number[]; answered?: number[]; third?: number[] };
+  reviewCap?: { cap: number; items: number[]; refused: number[]; again?: number[]; unmatched?: number[]; legacy?: number[]; undated?: number[]; answered?: number[]; third?: number[]; asked?: number[] };
   /**
    * GY-1428: the loop's host-supervision step runs the real repair over a simulated host declaring
    * two executor slots. Its user manager stops answering at `managerDown.from`, taking both slots
@@ -2759,6 +2760,23 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       capAnswers.push({ key: work.key, decision, precedent, at: clock.now() });
     }
   };
+  // GY-1810: the loop's second capped rework on a head whose change request was withdrawn once, which the approver refuses too.
+  const askedAgain: { key: string; decision: string; at: number }[] = [];
+  const askCappedAgain = async () => {
+    for (const n of cappedDay!.asked!) {
+      const work = (await store.list()).find(item => numberOf(item) === n);
+      if (!work?.candidate || work.stage === 'done' || askedAgain.some(entry => entry.key === work.key)) continue;
+      if (!state.actions[`escalation:review-cap:${work.id}:${work.candidate.sha}`]) continue;
+      const first = ((await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions as { id: string; action: string; state: string; input?: { binding?: string } }[])
+        .find(entry => entry.action === 'rework' && entry.state === 'refused' && /:capped:/.test(entry.input?.binding ?? ''));
+      if (!first) continue;
+      const requested = await api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action: 'rework', input: { binding: first.input!.binding, previousWorkerStopped: true }, precedent: [first.id],
+        reason: `Answering refusal ${first.id.slice(0, 8)}: the re-review of ${work.key} requested changes again past the review-round cap: approve one more round fixing exactly that finding, or refuse it as non-blocking.` });
+      const decision = (requested.decision?.id ?? requested.id) as string;
+      await api(principals.approver, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision, reason: `Refused: the re-review's finding on ${work.key} is real but not blocking; it is a follow-up.` });
+      askedAgain.push({ key: work.key, decision, at: clock.now() });
+    }
+  };
   const violations: string[] = [], observed = new Set<string>(), faulted = new Set<string>(), failures: string[] = [], escalations: string[] = [], spent = new Set<string>(), actionKeys = new Set<string>(), lanesSeen = new Set<string>();
   // Peers `processJob` reconciled from another item's landing check (GY-744), as `KEY merged|unmerged`.
   const reconciled: string[] = [];
@@ -3270,6 +3288,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
         escalations.push(...result.actions.filter(action => action.kind === 'escalation').map(action => action.detail));
         if (cappedDay?.answered) await answerCapEscalations();
+        if (cappedDay?.asked) await askCappedAgain();
         if (supervisedDay) {
           for (const agent of herdr.list()) if (agent.name) supervisedDay.agentNames.add(agent.name);
           const withheldIds = options.supervised!.withheld.map(n => items[n - 1].id);
@@ -3569,7 +3588,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: existsSync(tmpRoot) ? readdirSync(tmpRoot) : [] };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { observationWindowDay: windowDay, readingDay, blockedHoldDay: holdDay, unmatchedRefusals, capAnswers, readinessDay, waitsDay, outageDay, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
+  return { observationWindowDay: windowDay, readingDay, blockedHoldDay: holdDay, unmatchedRefusals, capAnswers, askedAgain, readinessDay, waitsDay, outageDay, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, limitMenuDay, menuReset, menuNotice, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, githubStatusReads, credentialReads, blockerRecords, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
