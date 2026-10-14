@@ -6,6 +6,7 @@ import { basename, join, resolve } from 'node:path';
 import { localDirectory } from '../onboarding.js';
 import { loopStopTimeoutSeconds, loopUnitDirectory, loopUnitOf, type LoopSupervisorHost } from '../supervisor.js';
 import type { MasterConfig } from './profiles.js';
+import { coordinatorCheckoutRoot } from './profiles.js';
 import { agentOwner } from './attention.js';
 import { atomicPrivateText } from './config.js';
 import { defaultChildRun } from '../child-runner.js';
@@ -26,13 +27,26 @@ export type LoopInstall = Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterCon
 
 const canonical = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } };
 /**
- * The CLIs this install's unit may run: config.cliPath, and the known-good pin master init writes
- * instead while one is promoted (loopUnitText, GY-1529). A pin that was never promoted is not this install's CLI.
+ * The CLIs this install's unit may run: config.cliPath, the known-good pin master init writes
+ * instead while one is promoted (loopUnitText, GY-1529), and — while a snapshot restart's CLI pin
+ * stands (GY-1790) — the launcher held in the snapshot, which the alignment writes into the unit
+ * so the checkout's own launcher files never boot the loop. A pin that was never promoted is not
+ * this install's CLI.
  */
 function installClis(install: LoopInstall) {
   let directory = install.installDir ?? null;
   if (!directory && install.repository) { try { directory = installDirectory(installIdFor(install.repository)); } catch { /* no install directory: the launcher alone */ } }
-  return directory && knownGoodState(directory) ? [install.cliPath, knownGoodCli(directory)] : [install.cliPath];
+  const clis = directory && knownGoodState(directory) ? [install.cliPath, knownGoodCli(directory)] : [install.cliPath];
+  // GY-1790: while a snapshot restart's pin stands the unit's ExecStart names the launcher held in
+  // the snapshot; it is this install's own doing, like the known-good pin. The pin pointer names
+  // the snapshot's root; read here, so this module stays out of the daemon's module graph.
+  let held: string | null = null;
+  try {
+    const checkout = coordinatorCheckoutRoot(install.cliPath);
+    const pointer = JSON.parse(readFileSync(resolve(checkout, '.graphyard/held-cli.json'), 'utf8'));
+    held = typeof pointer?.root === 'string' && pointer.root ? join(pointer.root, 'bin', 'graphyard.mjs') : null;
+  } catch { held = null; }
+  return held ? [...clis, held] : clis;
 }
 /**
  * Why the unit's effective ExecStart (drop-ins applied: `{ path=… ; argv[]=NODE CLI master run ; … }`)

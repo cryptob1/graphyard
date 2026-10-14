@@ -23,7 +23,8 @@ export async function resolve(specifier, context, next) {
 /**
  * The pin standing on the checkout at `checkout` (a directory URL), or null: the served release's
  * commit, the snapshot's directory URL, and whether that snapshot's loop reads the hold's cursor
- * (`loop`). The launcher and the executor entry read it before loading any module.
+ * (`loop`). The executor entry reads it before loading any module; the launcher carries its own
+ * copy of this reading (GY-1790), so it imports nothing from a checkout that may hold this file dirty.
  */
 export function heldRelease(checkout) {
   try {

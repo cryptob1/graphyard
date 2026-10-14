@@ -832,7 +832,9 @@ test('unit:soak-invariants-hold — a coordinator checkout dirty across several 
   // nothing refused, and the escalation grown only when what it named changed.
   const snapshotSamples = upgrades.samples.filter(sample => sample.snapshot);
   assert.ok(snapshotSamples.length >= 10, `the cursor named the checkout left behind across the dirty window (${snapshotSamples.length} cycles)`);
-  assert.ok(snapshotSamples.every(sample => (sample.snapshot!.checkout === startTip || guardReads.tipHolds.has(sample.snapshot!.checkout!)) && sample.snapshot!.dirty.includes('src/master.ts')), 'naming the checkout it left and the operator\'s dirty path, every cycle it stood');
+  // GY-1790: a HEAD moved by hand while the pin stands is named where it now stands, so inside the
+  // head-move window the record names the foreign commit, with the dirty path as it stands there.
+  assert.ok(snapshotSamples.every(sample => (sample.snapshot!.checkout === startTip || guardReads.tipHolds.has(sample.snapshot!.checkout!) || (moveWindow(sample) && sample.snapshot!.checkout === guardReads.foreignHead)) && sample.snapshot!.dirty.includes('src/master.ts')), 'naming the checkout it left — or, while the operator\'s HEAD move stands, where it now stands — and the operator\'s dirty path, every cycle it stood');
   const upgradeRows = Object.keys(state.actions).filter(key => /^upgrade:[0-9a-f]{40}$/.test(key));
   assert.equal(upgradeRows.length, restarts + 1, `one upgrade action row per head: ${upgradeRows.join(', ')}`);
   assert.ok(upgradeRows.every(key => state.actions[key]!.state === 'done' && state.actions[key]!.attempts <= 3), 'every upgrade row done, its attempts bounded by its head and the pass that lifted the last one');

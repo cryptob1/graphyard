@@ -56,6 +56,7 @@ import { worktreeRoot } from '../install/worktree-root.js';
 import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
 import { readingEffects } from './reading-effect.js';
 import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, recoverMovedHead, type SelfUpgradeDeps, type SelfUpgradeOutcome } from './upgrade.js';
+import { alignExecutorUnitScript } from '../repository-setup.js';
 import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
@@ -186,6 +187,10 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await awaitSupervisorRestart(() => run('systemctl', ['--user', '--no-block', 'restart', unit]));
     },
     alignUnit: () => alignRunningLoopUnit(root, current()),
+    // GY-1790: the executor units' entry follows the pin — the held snapshot's scripts/graphyard-executor.mjs
+    // while a snapshot restart's pin stands, the checkout's when it lifts — so a slot its unit starts
+    // never boots from an entry the checkout holds dirty.
+    alignExecutorUnits: script => alignExecutorUnitScript(root, script),
     persist: persistLoop,
   });
   return Object.defineProperties({

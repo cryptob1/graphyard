@@ -70,7 +70,7 @@ import { type DocsSyncPlan, docsSyncHarness, docsSyncSessionName, releaseDocsSyn
 import { type TmpReclaimReport, heldOpenPaths, reclaimTmpDirectories, tmpReclaimLimitPerCycle, tmpReclaimMinAgeMs, writeTempOwner } from '../../src/tmp-reclaim.js';
 import { temporaryDirectory } from './temp-dirs.js';
 import { lostRunReason, sessionRetry } from '../../src/producer.js';
-import { type SelfUpgradeOutcome, performSelfUpgrade } from '../../src/daemon/upgrade.js';
+import { type SelfUpgradeOutcome, heldExecutorEntryOf, performSelfUpgrade } from '../../src/daemon/upgrade.js';
 import { type ExecutorRegistration, executorFleetReport } from '../../src/executor-fleet.js';
 import { cycleDelay, watchdogPlan } from '../../src/daemon/liveness.js';
 import { LoopWake, loopWakeSubjects } from '../../src/daemon/loop-wake.js';
@@ -305,6 +305,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   checkoutRestart?: { moveAt: number; restartAt: number; kind: 'forward' | 'foreign'; doctor?: { scenario: string; from: number; outage: { from: number; to: number } } };
   /** GY-1773: once the dirty window closes, the operator moves the checkout onto the commit the loop runs from its held snapshot, which lifts the pin. */
   dirtyLift?: boolean;
+  /** GY-1790: inside these windows the loop's supervisor unit cannot be rewritten (its file is read-only), so a restart that must move its ExecStart between the checkout's launcher and a snapshot's is withheld until the rewrite goes. */
+  unitRefusal?: { from: number; to: number }[];
   /** GY-1773: inside this window the dirty checkout's HEAD follows the base tip each cycle, so it already holds the deployed commit; it is put back when the window closes. */
   dirtyTipHold?: { from: number; to: number };
   /** GY-1773: when a commit touching no loaded code (a docs page) lands on the base branch, so a deploy after it serves a docs-only head. */
@@ -2604,10 +2606,12 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     passes: [] as { elapsed: number; outcome: SelfUpgradeOutcome['outcome'] | null; pending: string | null; stall: string | null; held: { state: string; attempts: number } | null; waiting: number; upgradeRows: number; head: string; served: string; fetches: number; pin: string | null }[] };
   const upgrades = { fetches: 0, checkouts: [] as { at: number; from: string; to: string }[], executors: [] as string[], self: 0, outcomes: [] as SelfUpgradeOutcome['outcome'][],
     /** GY-916: the restarts refused on a held claim, the owed restart sampled each cycle it stood, and the unit the supervisor runs. */
-    held: [] as string[], owed: [] as { to: string; state: string; attempts: number }[], unit: { watchdogSec: plan.driftedWatchdogSec, rewrites: 0 },
+    held: [] as string[], owed: [] as { to: string; state: string; attempts: number }[],
+    /** GY-1790: the loop unit as installed — its watchdog window and the launcher its ExecStart starts (`checkout`, or `snapshot:<commit>` while a pin stands) — `rewrites` counting the window's, `launcherRewrites` the launcher's, `refusals` the rewrites refused; and the entry the executor units start. */
+    unit: { watchdogSec: plan.driftedWatchdogSec, rewrites: 0, launcher: 'checkout', launcherRewrites: 0, refusals: 0 }, executorEntry: 'checkout', executorRewrites: 0,
     starts: 0, watchdog: [] as { failed: number; attempts: number; windowSec: number }[],
     /** GY-1773: every pin the launcher received or lost, and each cycle's view of the checkout, the pin and the checkout the cursor names left behind. */
-    pins: [] as { at: number; commit: string | null }[], samples: [] as { elapsed: number; head: string; dirty: boolean; pin: string | null; snapshot: { at: string; commit: string; checkout: string | null; dirty: string[] } | null; outcome: SelfUpgradeOutcome['outcome'] | null; last: { to: string; code: boolean; self: boolean } | null }[],
+    pins: [] as { at: number; commit: string | null }[], samples: [] as { elapsed: number; head: string; dirty: boolean; pin: string | null; snapshot: { at: string; commit: string; checkout: string | null; dirty: string[] } | null; outcome: SelfUpgradeOutcome['outcome'] | null; last: { to: string; code: boolean; self: boolean } | null; unit: string; executorEntry: string; pending: string | null; stall: string | null; unitRow: { state: string; attempts: number } | null; self: number }[],
     /** GY-1773: the docs-only commit `docsOnlyCommit` landed, once it has. */
     docsOnly: null as string | null };
   /** The paths the base branch changed between two commits: every merged pull request's files, and what any other commit added or removed. */
@@ -2643,6 +2647,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     if (op === 'checkout') { assert.ok(!checkout.dirty, 'a dirty checkout is never touched'); upgrades.checkouts.push({ at: clock.now(), from: checkout.head, to: operands[2] }); checkout.head = operands[2]; return ''; }
     throw new Error(`the simulated coordinator checkout cannot answer git ${args.slice(2).join(' ')}`);
   };
+  /** GY-1790: the launcher the loop unit must start, and the entry the executor units must, given the pin as it stands: the snapshot's while one stands, the checkout's otherwise. */
+  const wantedLauncher = () => releaseLagDay.pin ? `snapshot:${releaseLagDay.pin}` : 'checkout';
+  const wantedExecutorEntry = () => releaseLagDay.pin ? heldExecutorEntryOf('/soak/coordinator', releaseLagDay.pin)! : 'checkout';
   const selfUpgrade = (state: DaemonState) => performSelfUpgrade(config, state, {
     root: '/soak/coordinator', run: coordinatorGit, now: clock.now, persist: async () => {},
     holdCli: async commit => {
@@ -2651,6 +2658,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       releaseLagDay.pin = commit;
     },
     restartExecutors: async to => {
+      // GY-1790: a slot the fleet restart starts runs the entry its unit names, which must be the one the pin requires now.
+      if (upgrades.executorEntry !== wantedExecutorEntry()) violations.push(`${new Date(clock.now()).toISOString()} (+${Math.round((clock.now() - dayStart) / minute)} min) the executors restarted onto ${to.slice(0, 12)} through units starting ${upgrades.executorEntry}, not ${wantedExecutorEntry()}`);
       // A busy fleet: a claim outlives restartExecutors' bounded wait for the first passes, and the restart is refused.
       if (upgrades.held.length < plan.heldClaimRestarts) { upgrades.held.push(to); return { result: 'refused', reason: `Restart refused while an executor on ${config.hostId} holds a claimed action`, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; }
       const fleet = options.releaseLag?.fleet, elapsed = clock.now() - dayStart;
@@ -2659,10 +2668,26 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       if (options.releaseLag) releaseLagDay.restarts.push({ elapsed: clock.now() - dayStart, kind: 'executors', to, served: production.sha, contained: github.contains(production.sha, to), pin: releaseLagDay.pin });
       upgrades.executors.push(to); return { result: 'restarted', reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] };
     },
-    // The alignment re-applies the unit the loop runs under: a drifted watchdog window is rewritten to the configuration's.
+    // The alignment re-applies the unit the loop runs under: a drifted watchdog window is rewritten to the configuration's,
+    // and (GY-1790) its ExecStart follows the pin — the snapshot's launcher while one stands, the checkout's otherwise.
+    // Inside a `unitRefusal` window the file cannot be written: the refusal says whether the launcher it names is stale.
     alignUnit: async () => {
-      if (upgrades.unit.watchdogSec === loopWatchdogSeconds(config.run.intervalSeconds)) return { wrote: 'unchanged', reason: null };
-      upgrades.unit.watchdogSec = loopWatchdogSeconds(config.run.intervalSeconds); upgrades.unit.rewrites++;
+      const wanted = wantedLauncher(), elapsed = clock.now() - dayStart;
+      if (options.unitRefusal?.some(window => elapsed >= window.from && elapsed < window.to)) {
+        upgrades.unit.refusals++;
+        return { wrote: 'refused', reason: 'EACCES: ~/.config/systemd/user/graphyard-master.service is read-only', launcherStale: upgrades.unit.launcher !== wanted };
+      }
+      const drifted = upgrades.unit.watchdogSec !== loopWatchdogSeconds(config.run.intervalSeconds), moved = upgrades.unit.launcher !== wanted;
+      if (!drifted && !moved) return { wrote: 'unchanged', reason: null };
+      if (drifted) { upgrades.unit.watchdogSec = loopWatchdogSeconds(config.run.intervalSeconds); upgrades.unit.rewrites++; }
+      if (moved) { upgrades.unit.launcher = wanted; upgrades.unit.launcherRewrites++; }
+      return { wrote: 'updated', reason: null };
+    },
+    // GY-1790: the executor units' entry follows the pin the same way — the snapshot's script while it stands, the checkout's when it lifts.
+    alignExecutorUnits: async script => {
+      const wanted = script ?? 'checkout';
+      if (upgrades.executorEntry === wanted) return { wrote: 'unchanged', reason: null };
+      upgrades.executorEntry = wanted; upgrades.executorRewrites++;
       return { wrote: 'updated', reason: null };
     },
     // The supervisor re-executes the loop: the next process loads the release the checkout holds, as runDaemon records it,
@@ -2670,6 +2695,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     // launcher is pinned to, so the next process loads the snapshot's commit — never the dirty checkout's HEAD — and the
     // checkout guard reads it as the snapshot the loop runs from.
     restartSelf: async () => {
+      // GY-1790: the loop re-executes through its unit, so the launcher the unit names must be the one the pin requires now.
+      if (upgrades.unit.launcher !== wantedLauncher()) violations.push(`${new Date(clock.now()).toISOString()} (+${Math.round((clock.now() - dayStart) / minute)} min) the loop re-executed through a unit starting ${upgrades.unit.launcher}, not ${wantedLauncher()}`);
       const snapshotLoad = checkout.dirty && releaseLagDay.pin ? releaseLagDay.pin : null;
       loadedSnapshot = snapshotLoad;
       if (options.releaseLag) releaseLagDay.restarts.push({ elapsed: clock.now() - dayStart, kind: 'self', to: snapshotLoad ?? checkout.head, served: production.sha, contained: github.contains(production.sha, snapshotLoad ?? checkout.head), pin: releaseLagDay.pin });
@@ -3344,7 +3371,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       if (upgraded) upgrades.outcomes.push(upgraded.outcome);
       // GY-1773: each cycle's view of the checkout, the pin and the checkout the cursor names left behind.
       upgrades.samples.push({ elapsed, head: checkout.head, dirty: checkout.dirty, pin: releaseLagDay.pin, snapshot: state.upgrade.snapshot ? { ...state.upgrade.snapshot } : null, outcome: upgraded?.outcome ?? null,
-        last: state.upgrade.last ? { to: state.upgrade.last.to, code: state.upgrade.last.code, self: state.upgrade.last.self } : null });
+        last: state.upgrade.last ? { to: state.upgrade.last.to, code: state.upgrade.last.code, self: state.upgrade.last.self } : null,
+        unit: upgrades.unit.launcher, executorEntry: upgrades.executorEntry, pending: state.upgrade.pending?.to ?? null, stall: state.upgrade.stalled?.cause ?? null,
+        unitRow: state.actions['upgrade:unit'] ? { state: state.actions['upgrade:unit'].state, attempts: state.actions['upgrade:unit'].attempts } : null, self: upgrades.self });
       if (options.releaseLag) {
         const rows = Object.entries(state.actions).filter(([key]) => key.startsWith('upgrade:')), held = state.actions['upgrade:held'];
         releaseLagDay.passes.push({ elapsed, outcome: upgraded?.outcome ?? null, pending: state.upgrade.pending?.to ?? null, stall: state.upgrade.stalled?.cause ?? null, held: held ? { state: held.state, attempts: held.attempts } : null,
