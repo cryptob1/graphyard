@@ -364,6 +364,82 @@ test('unit:locked-read-relative-bound — a full reconciliation pass over 1000 i
   assert.ok(slowRead < opened_ * 2, `with every batch yielding on its budget the pass read ${slowRead} open documents whole for ${opened_} open items`);
 });
 
+test('unit:reconcile-lock-hold-bounded — a full reconciliation pass over 1000 items (600 delivered) holds the coordination lock within a per-batch budget, the opening read bounded on its own, each batch within its budget', async () => {
+  // unit:locked-read-relative-bound runs first in this file and leaves the ledger reconciled and the
+  // engine's reconcile view populated, so this test seeds its own unreconciled rows and starts from
+  // a reset view: its pass is a full, writing pass — every seeded row reprojected, as a restarted
+  // server's first pass over an unprojected ledger is (GY-1124) — whatever ran before it. The seed
+  // is small enough that the opening read stays inside the kept per-batch margin on a loaded runner.
+  // The template is ensured here too, so the case stands on its own when an earlier case did not run.
+  await ensureTemplate();
+  await seed(100, 0);
+  assert.ok(template, 'the test seeded its own ledger rows');
+  engine.resetReconcileView();
+  label = 'reconcile'; const from = holds.length;
+  await engine.reconcile();
+  const batches = holds.slice(from).filter(entry => entry.label === 'reconcile');
+  label = 'other';
+  const total = batches.reduce((sum, entry) => sum + entry.ms, 0), longest = Math.max(...batches.map(entry => entry.ms));
+  const reread = batches.reduce((sum, entry) => sum + seededDelivered(entry), 0);
+  const openRead = batches.map(seededOpen), opened_ = Number((await store.pool.query("SELECT count(*) FROM work_items WHERE document->>'key' LIKE 'OPEN-%'")).rows[0].count);
+  console.log(`reconcile pass: ${batches.length} batches, ${total.toFixed(0)} ms of lock hold, longest ${longest.toFixed(0)} ms, ${reread} delivered and ${openRead.reduce((a, b) => a + b, 0)} open documents read whole (${opened_} open)`);
+  // The pass opens under the lock on every item's compact stand-in and reads no document whole
+  // there; each batch reads its own open rows whole: not one of the 600 delivered documents is read
+  // in any batch, and the pass reads each open document whole about once — not once per batch, as
+  // re-reading every open row in each batch would.
+  assert.ok(batches[0].locked, 'the opening read holds the coordination lock');
+  assert.deepEqual(batches[0].keys, [], 'the opening read reads no document whole');
+  assert.equal(reread, 0, `${reread} delivered documents were read whole over ${batches.length} batches (${batches.map(seededDelivered).join(', ')})`);
+  assert.ok(batches.length > 3, `${batches.length} batches`);
+  assert.ok(openRead.reduce((a, b) => a + b, 0) < opened_ * 2, `the pass read ${openRead.reduce((a, b) => a + b, 0)} open documents whole for ${opened_} open items`);
+  // The total is deliberately not asserted against a wall-clock bound: a slow host spends each
+  // batch's budget before its rows are done, so a pass splits into more batches and each pays the
+  // per-batch lock overhead, which grows the total with the host's batch count and not with the
+  // pass. Main's CI on 2026-10-14 read a full pass as 459 batches holding the lock 5182 ms in
+  // total against this file's fixed 5 s bound — an 11.3 ms average per batch where a quiet host
+  // sees about 4 ms — and failed although every batch was inside its budget and although the
+  // revert of that pass's own merge failed the very same test (the failure was the runner's
+  // load, not the pass). The bound that does not grow with the batch count is the hold per
+  // batch: a batch holds the lock only to commit what it wrote, and the average commit hold
+  // stays within the engine's own batch budget however many batches the host splits the pass
+  // into. The opening read is bounded on its own beside that: it is one read of every item's
+  // compact stand-in, so its hold grows with the ledger's size, never with the batch count, and
+  // a pass that read delivered documents whole under the lock would blow it (and is failed
+  // outright by the delivered-read assert above, whatever its speed).
+  const perBatch = total / batches.length;
+  assert.ok(perBatch < engine.reconcileBatchMs, `a full pass held the lock ${perBatch.toFixed(1)} ms per batch over ${batches.length} batches (total ${total.toFixed(0)} ms)`);
+  assert.ok(batches[0].ms < engine.reconcileBatchMs + 250, `the opening read held the lock ${batches[0].ms.toFixed(0)} ms against a ${engine.reconcileBatchMs} ms batch budget`);
+  // The opening read is the longest hold; a batch holds the lock only to commit what it wrote.
+  assert.ok(longest < engine.reconcileBatchMs + 250, `the longest batch held the lock ${longest.toFixed(0)} ms against a ${engine.reconcileBatchMs} ms budget`);
+  // A second pass changes nothing it does not need to and still reads no delivered document; the
+  // same per-batch bound covers it, not a wall-clock total.
+  const again = holds.length; label = 'reconcile';
+  await engine.reconcile(); label = 'other';
+  const secondBatches = holds.slice(again).filter(entry => entry.label === 'reconcile');
+  const second = secondBatches.reduce((sum, entry) => sum + entry.ms, 0);
+  console.log(`second reconcile pass: ${secondBatches.length} batches, ${second.toFixed(0)} ms of lock hold`);
+  assert.ok(secondBatches.length === 0 || second / secondBatches.length < engine.reconcileBatchMs, `a second pass held the lock ${(second / Math.max(1, secondBatches.length)).toFixed(1)} ms per batch over ${secondBatches.length} batches (total ${second.toFixed(0)} ms)`);
+  const secondLongest = Math.max(0, ...secondBatches.map(entry => entry.ms));
+  assert.ok(secondLongest < engine.reconcileBatchMs + 250, `a second pass's longest batch held the lock ${secondLongest.toFixed(0)} ms against a ${engine.reconcileBatchMs} ms budget`);
+  assert.equal(holds.slice(again).reduce((sum, entry) => sum + seededDelivered(entry), 0), 0, 'a second pass reads no delivered document whole');
+  // A slow host spends each batch's budget before its rows are done (CI on 2026-10-01: 35 batches
+  // read 1082 open documents whole for 407 open items). The next batch reads only as many rows as
+  // that one finished, so the pass still reads each open document whole about once.
+  // A pass evaluates only what moved since the last (GY-1124), so the slow pass starts from a reset
+  // view: a full pass that reads every open document again, as a restarted server's first pass does.
+  engine.resetReconcileView();
+  const budget = engine.reconcileBatchMs, slow = holds.length;
+  engine.reconcileBatchMs = 1; label = 'reconcile';
+  try { await engine.reconcile(); } finally { engine.reconcileBatchMs = budget; label = 'other'; }
+  const slowBatches = holds.slice(slow), slowRead = slowBatches.reduce((sum, entry) => sum + seededOpen(entry), 0);
+  console.log(`slow reconcile pass: ${slowBatches.length} batches, ${slowRead} open documents read whole (${opened_} open)`);
+  // Each planned write commits in a transaction of its own under the lock (GY-1290), and the reset pass
+  // writes almost nothing: the budget is counted on the evaluating batches, which hold no lock.
+  const evaluating = (entries: typeof holds) => entries.filter(entry => !entry.locked).length;
+  assert.ok(evaluating(slowBatches) > evaluating(batches), `a 1 ms budget yields more often: ${evaluating(slowBatches)} evaluating batches against ${evaluating(batches)}`);
+  assert.ok(slowRead < opened_ * 2, `with every batch yielding on its budget the pass read ${slowRead} open documents whole for ${opened_} open items`);
+});
+
 test('a row a reconciliation batch saved stands in as exactly the projection the database would build from it', async () => {
   assert.ok(template, 'the benchmark seeded the ledger');
   // In-process projection and SQL projection agree, over the edge shapes the SQL handles too.
