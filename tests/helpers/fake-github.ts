@@ -222,9 +222,11 @@ export class FakeGitHub {
   /**
    * The control plane's GitHub adapter as its acceptance land route uses it (LandingGitHub), acting as
    * the control-plane App: reading the pull request, publishing its App-bound check runs and merging
-   * head-bound through GraphQL, which GitHub refuses until protection is satisfied.
+   * head-bound through GraphQL, which GitHub refuses until protection is satisfied. `approver` is the
+   * independent approver App the route's GY-1795 approval is posted as; without one the approval
+   * answers unconfigured, as an installation without the App does.
    */
-  landing(app: FakeApp) {
+  landing(app: FakeApp, approver?: FakeApp) {
     const as: Actor = `app:${app.slug}`;
     return {
       config: { base: this.defaultBranch, appId: app.id, repository: this.repository },
@@ -242,6 +244,12 @@ export class FakeGitHub {
         return this.checkRuns.filter(run => run.head_sha === head && run.name === decodeURIComponent(name ?? ''));
       },
       upsertLandable: async (body: any) => { this.check(body.head_sha, body.name, body.conclusion, app.id, { external_id: body.external_id, output: body.output }); },
+      approveAcceptance: async (pr: number, head: string, body: string) => {
+        if (!approver) return 'unconfigured' as const;
+        if (!this.reviews.some(review => review.pr === pr && review.sha === head && review.state === 'APPROVED' && review.by === `app:${approver.slug}`))
+          this.review(pr, { sha: head, state: 'APPROVED', body }, `app:${approver.slug}`);
+        return 'approved' as const;
+      },
       graphql: async (_query: string, variables: { id: string; head: string }) => { this.merge(Number(variables.id.slice(3)), variables.head, as); return {}; },
     };
   }

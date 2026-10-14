@@ -844,3 +844,155 @@ test('unit:mechanical-plan-cleared-on-failed-read', async () => {
   await reportMechanicalPlans([item], [], effects, clock, async (_, detail) => { later.push(detail); });
   assert.equal(later.length, 1, 'a clear that cannot land is a visible failure');
 });
+
+// GY-1795: the three decision faults of 14 October 2026 share one cause — the loop filed a decision
+// fault (or asked the master to close a goal) for a state the product had already settled or could
+// settle itself. Each instance below is replayed as the item stood when the loop recorded it; against
+// the base each subtest fails, because the instance files there.
+//
+// - action:decision|GY-1459|2026-10-14T04:54:55.483Z: the loop's clear of a plan the ledger no longer
+//   carried met a write timeout. The gate lapses the hold by `mechanicalPlanFreshMs` whatever the write
+//   does, so the failure is a visible, retried action — and no decision fault.
+// - action:decision|GY-1775|2026-10-14T06:43:08.482Z: the same clear hit the server's refusal because
+//   the item had been delivered after the cycle's snapshot. The target is settled: no report, no hold,
+//   no instance.
+// - action:decision|GOAL-1|2026-10-14T08:54:23.295Z: the acceptance land route merged as the
+//   control-plane App that pushed the acceptance branch, so GitHub's approval-from-someone-other-than-
+//   the-last-pusher rule refused #1153, and past `acceptanceStuckMs` the loop asked the master to close
+//   the goal every five-minute poll. The route now approves the verified head with the independent
+//   approver App (GY-1291's), as the main guard's reverts are approved, and an unconfigured approver is
+//   named in the waiting detail.
+test('manual:fault-class-decision — action:decision|GY-1459|2026-10-14T04:54:55.483Z: a plan-report write that times out is a retried action, not a decision fault', async () => {
+  const minute = 60_000, start = Date.parse('2026-10-14T04:50:00.000Z');
+  const iso = (at: number) => new Date(at).toISOString();
+  const head = '632185dd17dd'.padEnd(40, '0');
+  const review = { reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'APPROVED', id: 5499583025, submittedAt: iso(start - 35 * minute), mechanical: 2 };
+  const candidate = { sha: head, baseSha: '1'.repeat(40), pr: 1169, branch: 'graphyard/gy-1459-1', author: 'implementer' };
+  const state = emptyDaemonState(config());
+  // GY-1459 as the loop held it: a confirmed plan from before the ledger ceased to carry it, whose clear
+  // met the loop's 30-second write timeout on every attempt.
+  let confirmedAt = iso(start - 11 * minute);
+  const attempts: ({ reviewId: number; head: string } | null)[] = [];
+  const work = (): Work => ({
+    id: 'work-1459', key: 'GY-1459', title: 'GY-1459', description: '', type: 'bug', priority: 2, dependencies: [], plannedFiles: ['src/'],
+    criteria: [{ id: 'AC-1', text: 'It works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 3, policyRevision: 1,
+    createdAt: iso(start - hour(2)), updatedAt: iso(start), stageEnteredAt: iso(start - hour(1)), ready: true, epoch: 1, lease: null, workspaces: [],
+    candidate, submission: { epoch: 1, pr: 1169 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [], scopeRequest: null, gates: [],
+    observation: { candidate, reviews: [review], checks: [], merged: false, prState: 'open', draft: false, at: iso(start - 30 * minute) },
+    mechanicalPlan: { reviewId: 5499583025, head, at: confirmedAt },
+  } as unknown as Work);
+  const effects = {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: [work()], now: iso(now) }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    persist: async () => {},
+    mechanicalFixes: async () => ({ requests: [] }),
+    recordMechanicalPlan: async (_item: Work, plan: { reviewId: number; head: string } | null) => { attempts.push(plan); throw new Error('The operation was aborted due to timeout'); },
+  } as unknown as Parameters<typeof daemon.runCycle>[2];
+  let now = start;
+  const faultsBefore = state.faults.instances.length;
+  for (let step = 0; step < 2; step++, now += 2 * minute) await daemon.runCycle(config(), state, effects, () => now);
+  assert.ok(attempts.length >= 2, 'the clear is attempted within the cycle and again the next');
+  const row = state.actions['mechanical-plan:work-1459'];
+  assert.equal(row?.state, 'failed', 'the failed write stays a visible, retried action');
+  assert.match(row!.detail, /mechanical plan \(none\): The operation was aborted due to timeout/);
+  assert.deepEqual(state.faults.instances.slice(faultsBefore).map(entry => entry.kind).filter(kind => /decision|escalation/.test(kind)), [], 'the timeout counts no decision fault: the gate drops the hold at mechanicalPlanFreshMs whatever the write does');
+});
+
+test('manual:fault-class-decision — action:decision|GY-1775|2026-10-14T06:43:08.482Z: a write refused because the item was delivered meanwhile is settled — no report, no hold, no instance', async () => {
+  const { reportMechanicalPlans } = await import('../src/daemon/mechanical-plan-report.js');
+  const at = '2026-10-14T06:40:00.000Z', clock = Date.parse(at) + 30_000;
+  // The item as the pre-delivery snapshot held it, its confirmation already past the freshness window.
+  const item = { id: 'w', key: 'GY-1775', stage: 'review', epoch: 1, candidate: { sha: 'abc', pr: 1 }, mechanicalPlan: { reviewId: 7, head: 'abc', at } } as unknown as Work;
+  const sent: unknown[] = [], failures: string[] = [];
+  const effects = { mechanicalFixes: () => {}, recordMechanicalPlan: async (_: Work, plan: unknown) => { sent.push(plan); throw new Error('{"error":"Delivered work is immutable; create a follow-up task"}'); } };
+  const unreported = await reportMechanicalPlans([item], [], effects, clock, async (_, detail) => { failures.push(detail); });
+  assert.deepEqual(sent, [null, null], 'the clear was attempted and refused twice — the refusal only shows on the write');
+  assert.deepEqual(failures, [], 'the settled refusal names no failure');
+  assert.equal(unreported.size, 0, 'a delivered item holds no decision from the ledger');
+});
+
+test('manual:fault-class-decision — the land route approves the verified head with the independent approver App, so the last-pusher rule merges an approved acceptance (GOAL-1)', async () => {
+  const { landAcceptance } = await import('../src/server/routes/goals.js');
+  const head = 'a'.repeat(40), pr = 1153, lastPusher = 'GitHub GraphQL query failed: New changes require approval from someone other than the last pusher.';
+  const goal = { id: 'goal-1', key: 'GOAL-1', acceptance: { pr, author: 'graphyard-acceptance', outcomes: [{ case: { id: 'signup' } }] }, approval: { head, by: 'graphyard-approver', reason: 'The cases check what the customer asked for' } } as never;
+  // GitHub as GOAL-1's base branch held it: the merger is the control-plane App, which pushed the
+  // acceptance branch, so only an approval at exactly the merged head from an App other than it
+  // satisfies the rule.
+  function world(approver: boolean) {
+    const reviews: { state: string; commit_id: string; performed_via_github_app: { id: number } }[] = [];
+    const approvals: string[] = [], merges: { head: string; refused: boolean }[] = [];
+    let merged = false;
+    const github = {
+      config: { base: 'main', appId: 1, repository: 'owner/project', ...(approver ? { revertApprover: { appId: 5678, installationId: 9, privateKey: 'not-used' } } : {}) },
+      async approveAcceptance(_: number, sha: string) {
+        if (!approver) return 'unconfigured' as const;
+        approvals.push(sha); reviews.push({ state: 'APPROVED', commit_id: sha, performed_via_github_app: { id: 5678 } });
+        return 'approved' as const;
+      },
+      async request(path: string) {
+        if (path === `/pulls/${pr}`) return { state: merged ? 'closed' : 'open', merged, merge_commit_sha: merged ? 'c'.repeat(40) : null, node_id: `PR_${pr}`, head: { sha: head }, base: { ref: 'main' }, mergeable: true, mergeable_state: 'clean' };
+        if (path === '/check-runs') return {};
+        throw new Error(`unexpected GitHub call ${path}`);
+      },
+      async pages() { return []; },
+      async upsertLandable() {},
+      async graphql(_query: string, variables: { id: string; head: string }) {
+        const approved = reviews.some(review => review.state === 'APPROVED' && review.commit_id === variables.head && review.performed_via_github_app.id !== 1);
+        merges.push({ head: variables.head, refused: !approved });
+        if (!approved) throw new Error(lastPusher);
+        merged = true;
+        return {};
+      },
+    };
+    return { github, approvals, merges };
+  }
+  // Configured: one landing approves exactly the verified head as the independent approver App and merges.
+  const configured = world(true);
+  const landed = await landAcceptance(configured.github as never, goal);
+  assert.equal(landed.state, 'merged', 'the last-pusher rule no longer strands the approved goal');
+  assert.deepEqual(configured.approvals, [head], 'the approver approved exactly the verified head');
+  assert.deepEqual(configured.merges, [{ head, refused: false }]);
+  // Unconfigured: the merge is refused as before, and the waiting detail names the missing approver, so the
+  // stuck landing reads as the configuration gap it is rather than a decision nobody made.
+  const unconfigured = world(false);
+  const waiting = await landAcceptance(unconfigured.github as never, goal);
+  assert.equal(waiting.state, 'waiting');
+  assert.match(waiting.detail, /New changes require approval from someone other than the last pusher/);
+  assert.match(waiting.detail, /no independent approver App is configured \(GRAPHYARD_REVERT_APPROVER_APP_ID, GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID, GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY\)/);
+  assert.deepEqual(unconfigured.merges.map(merge => merge.refused), [true], 'the merge is still attempted, as the main guard attempts a refused approval');
+});
+
+// The approveAcceptance unit, over the real GitHub adapter: the acceptance approval is the revert
+// approver App's (GY-1291), posted head-bound, and one already standing is not posted again.
+test('manual:fault-class-decision — approveAcceptance is the independent approver App\'s head-bound approval, deduplicated on the standing one, unconfigured without it', async () => {
+  const { generateKeyPairSync } = await import('node:crypto');
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
+  const { GitHub } = await import('../src/github.js');
+  const head = 'b'.repeat(40), pr = 1153;
+  const world = (approver: boolean) => {
+    const github = new GitHub({ repository: 'fixture/repo', base: 'main', appId: 1, installationId: 2, privateKey: 'not-used', ...(approver ? { revertApprover: { appId: 5678, installationId: 9, privateKey } } : {}) });
+    const state = { reviews: [] as any[], approvals: [] as { auth: string; commit: string }[] };
+    github.fetch = (async (input: string, init: RequestInit = {}) => {
+      const url = new URL(String(input)), method = init.method ?? 'GET', body = init.body ? JSON.parse(String(init.body)) : undefined;
+      const auth = String((init.headers as Record<string, string>)?.Authorization);
+      if (url.pathname === '/app/installations/9/access_tokens') return Response.json({ token: 'approver-installation-token' }, { status: 201 });
+      if (url.pathname === `/repos/fixture/repo/pulls/${pr}/reviews` && method === 'GET') return Response.json(state.reviews);
+      if (url.pathname === `/repos/fixture/repo/pulls/${pr}/reviews` && method === 'POST') {
+        state.approvals.push({ auth, commit: body.commit_id });
+        const review = { id: state.reviews.length + 1, state: 'APPROVED', commit_id: body.commit_id, performed_via_github_app: { id: auth === 'Bearer approver-installation-token' ? 5678 : 1 } };
+        state.reviews.push(review);
+        return Response.json(review);
+      }
+      return new Response(`unexpected ${method} ${url.pathname}`, { status: 500 });
+    }) as typeof fetch;
+    return { github, state };
+  };
+  const configured = world(true);
+  assert.equal(await configured.github.approveAcceptance(pr, head, 'the landing approval'), 'approved');
+  assert.deepEqual(configured.state.approvals, [{ auth: 'Bearer approver-installation-token', commit: head }], 'the approval is the approver App\'s, head-bound');
+  assert.equal(await configured.github.approveAcceptance(pr, head, 'the landing approval'), 'approved');
+  assert.equal(configured.state.approvals.length, 1, 'an approval already standing on the head is not posted again');
+  assert.equal(await world(false).github.approveAcceptance(pr, head, 'the landing approval'), 'unconfigured', 'no approver App, no approval');
+});
