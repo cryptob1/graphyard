@@ -14,8 +14,10 @@ import type { Work } from '../src/model.js';
 // changes every 54 cycles, one release runs three slow cycles across a process restart (the state
 // is reloaded from the cursor between cycles), another loses the filing's reply twice before the
 // control plane answers, another's loop process exits with the filing's POST in flight (the plane
-// commits the item; the loop is reloaded from the cursor as it stood at that ask), and the healthy
-// releases never cross the bound. After every cycle:
+// commits the item; the loop is reloaded from the cursor as it stood at that ask), the last loses
+// one step's filing to a plane that stays down while a fast cycle ends that run and three cycles held
+// by another step file that step's own item (the first ask is settled afterwards, on a fast cycle,
+// on its own backoff), and the healthy release never crosses the bound. After every cycle:
 //
 // - every system invariant holds, and no cycle failed;
 // - the recorded run matches the day — each count and reset survived the restart, so three slow
@@ -25,9 +27,9 @@ import type { Work } from '../src/model.js';
 //   receipt fingerprint accepts the replay;
 // - the slow-cycle attention row names the run's filed item once one is filed.
 //
-// Bounded: exactly one item per release and slowest step that crossed the bound — five items over
-// the day, eight asks, one durable done record each, nothing pending, nothing for the healthy
-// releases — and every body as asked parses as the item it files.
+// Bounded: exactly one item per release and slowest step that crossed the bound — seven items over
+// the day, thirteen asks, one durable done record each, nothing pending, nothing for the healthy
+// release — and every body as asked parses as the item it files.
 const minute = 60_000, hour = 60 * minute, interval = 5 * minute, holdMs = 90_000;
 const start = Date.parse('2026-10-14T00:00:00.000Z'), cycles = 280;
 const sha = (label: string) => createHash('sha1').update(label).digest('hex');
@@ -39,23 +41,29 @@ const config: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https:
   invariants: { cycleP90Seconds: 120 } });
 
 /** The serving release changes every 54 cycles (about four hours and a half of the day). */
-const releaseEvery = 54, releases = Array.from({ length: 6 }, (_, index) => sha(`slow-loop-release-${index}`));
+const releaseEvery = 54, releases = Array.from({ length: 6 }, (_, index) => sha(`slow-loop-release-${index}`)), last = 5 * releaseEvery;
 const releaseAt = (cycle: number) => releases[Math.min(Math.floor(cycle / releaseEvery), releases.length - 1)];
 /**
  * The day's script: whether the cycle is slow past the bound, and which step holds the time — the
  * `snapshot` step (the release's first filing names it) or the `credentials` step (a second, later
- * filing on the same release names it). The healthy releases never cross the bound.
+ * filing on the same release names it). The healthy release never crosses the bound.
  */
 const stretch = (cycle: number): { slow: boolean; hold: 'snapshot' | 'credentials' } => {
   const index = cycle % releaseEvery, release = Math.floor(cycle / releaseEvery);
   if (release === 1) return { slow: index < 3 || (index >= 23 && index < 26), hold: index < 3 ? 'snapshot' : 'credentials' };
   if (release === 2 || release === 3 || release === 4) return { slow: index < (release === 3 ? 6 : release === 4 ? 4 : 3), hold: 'snapshot' };
+  if (release === 5) return { slow: index < 3 || (index >= 4 && index < 7), hold: index < 3 ? 'snapshot' : 'credentials' };
   return { slow: false, hold: 'snapshot' };
 };
 /** The cycles a restart runs between (the release 2 count crosses the bound across the one at 109). */
 const restarts = new Set([2 * releaseEvery + 1]);
-/** The cycles whose filing ask the control plane never answered (release 3 loses its reply twice). */
-const lostReplies = new Set([3 * releaseEvery + 2, 3 * releaseEvery + 3]);
+/**
+ * The cycles whose filing ask the control plane never answered: release 3 loses its reply twice; the
+ * last release's snapshot ask is lost at its third slow cycle and at its retries one and two cycles
+ * later (the record's backoff), so it is still pending when the credentials run files at cycle 276
+ * and is settled at 279, a fast cycle, four cycles after its last failed ask.
+ */
+const lostReplies = new Set([3 * releaseEvery + 2, 3 * releaseEvery + 3, last + 2, last + 3, last + 5]);
 /** The cycle whose filing ask the loop process exits in the middle of (release 4): the plane commits it, the loop never hears. */
 const exits = new Set([4 * releaseEvery + 2]);
 
@@ -126,14 +134,19 @@ test('integration:soak-slow-loop — over a simulated day of slow cycles across 
     for (const key of new Set(asks.slice(before).map(ask => ask.key))) {
       const bodies = asks.filter(ask => ask.key === key).map(ask => ask.body);
       if (new Set(bodies).size !== 1) violations.push(`cycle ${cycle}: ${key} was asked with ${new Set(bodies).size} different bodies`);
-      if (bodies.length > 3) violations.push(`cycle ${cycle}: ${key} was asked ${bodies.length} times`);
+      if (bodies.length > 4) violations.push(`cycle ${cycle}: ${key} was asked ${bodies.length} times`);
     }
     // The slow-cycle attention row names the run's filed item once one is filed for this release.
     const row = slowCycleAttention({ liveness: { state: 'running' }, cost: cycleCost(state.metrics.at(-1) ?? null, interval), cycleTime: cycleTimes(state.metrics, now), release: state.release, slowLoop: state.slowLoop });
     if (phase.slow && row.length !== 1) rowWrong.push(`cycle ${cycle}: ${row.length} slow-cycle row(s)`);
-    if (phase.slow && cycle === releaseEvery + 24 && !row[0]?.text.includes('the loop filed GY-40')) rowWrong.push(`cycle ${cycle}: the row names no filed item: ${row[0]?.text}`);
+    // A run a fast cycle ended does not own a later run's step: at cycle 78 the credentials run is two cycles old and names no item; its own item is named from the third.
+    if (phase.slow && cycle === releaseEvery + 24 && row[0]?.text.includes('the loop filed')) rowWrong.push(`cycle ${cycle}: the row claims an earlier run's item for the credentials step: ${row[0]?.text}`);
+    if (phase.slow && cycle === releaseEvery + 25 && !row[0]?.text.includes('the loop filed GY-41')) rowWrong.push(`cycle ${cycle}: the row names no filed item: ${row[0]?.text}`);
     if (phase.slow && cycle === 3 * releaseEvery + 5 && !row[0]?.text.includes('the loop filed GY-43')) rowWrong.push(`cycle ${cycle}: the row names no filed item: ${row[0]?.text}`);
     if (phase.slow && cycle === 4 * releaseEvery + 3 && !row[0]?.text.includes('the loop filed GY-44')) rowWrong.push(`cycle ${cycle}: the row names no filed item: ${row[0]?.text}`);
+    if (phase.slow && cycle === last + 4 && row[0]?.text.includes('the loop filed')) rowWrong.push(`cycle ${cycle}: the row claims an item while the snapshot ask is unanswered and the run is held by credentials: ${row[0]?.text}`);
+    if (phase.slow && cycle === last + 6 && !row[0]?.text.includes('the loop filed GY-46')) rowWrong.push(`cycle ${cycle}: the row names no filed item: ${row[0]?.text}`);
+    if (cycle === last + 8 && state.slowLoop.pending[`${releases[5]}:snapshot`] === undefined) rowWrong.push(`cycle ${cycle}: the snapshot ask is no longer pending before its backoff elapsed`);
   }
 
   assert.deepEqual(failedCycles, [], 'no cycle failed');
@@ -145,9 +158,9 @@ test('integration:soak-slow-loop — over a simulated day of slow cycles across 
   // Bounded: exactly one item per release and slowest step that crossed the bound, nothing for the healthy releases.
   const keys = (release: number, step: string) => slowLoopIdempotencyKey(releases[release], step);
   assert.deepEqual(filed.map(item => item.key),
-    [keys(1, 'snapshot'), keys(1, 'credentials'), keys(2, 'snapshot'), keys(3, 'snapshot'), keys(4, 'snapshot')],
-    'one item per release and slowest step, and nothing for the healthy releases');
-  assert.equal(asks.length, 8, 'eight asks: one per item, plus the two lost-reply retries and the one after the exit');
+    [keys(1, 'snapshot'), keys(1, 'credentials'), keys(2, 'snapshot'), keys(3, 'snapshot'), keys(4, 'snapshot'), keys(5, 'snapshot'), keys(5, 'credentials')],
+    'one item per release and slowest step, and nothing for the healthy release');
+  assert.equal(asks.length, 13, 'thirteen asks: one per item, plus the two lost-reply retries, the one after the exit, and the three retries of the last release\'s snapshot ask');
   for (const key of new Set(asks.map(ask => ask.key))) {
     const bodies = asks.filter(ask => ask.key === key).map(ask => ask.body);
     assert.equal(new Set(bodies).size, 1, `${key} was always asked with the same body`);
@@ -155,14 +168,22 @@ test('integration:soak-slow-loop — over a simulated day of slow cycles across 
   assert.equal(asks.filter(ask => ask.key === keys(3, 'snapshot')).length, 3, 'the lost reply was retried twice more under its key');
   assert.equal(asks.filter(ask => ask.key === keys(4, 'snapshot')).length, 2, 'the ask the exit cut off was asked once more under its key, with the body from the cursor');
   assert.equal(filed.find(item => item.key === keys(4, 'snapshot'))?.work, 'GY-44', 'the plane filed it during the ask the exit cut off; the restarted loop was answered with it');
+  // The last release: the snapshot ask was lost at 272 and retried at 273 and 275 to a plane still down, the credentials
+  // run filed its own item at 276 while that ask stood, and the snapshot ask was settled at 279 — a fast cycle, on its own backoff.
+  const cycleOf = (key: string) => asks.map((ask, index) => ({ ...ask, index })).filter(ask => ask.key === key).map(ask => ask.index);
+  assert.equal(asks.filter(ask => ask.key === keys(5, 'snapshot')).length, 4, 'the snapshot ask: first, two retries to a plane still down, and the one answered');
+  assert.equal(asks.filter(ask => ask.key === keys(5, 'credentials')).length, 1, 'the credentials run asked once, under its own key');
+  assert.ok(cycleOf(keys(5, 'credentials'))[0] > cycleOf(keys(5, 'snapshot'))[2] && cycleOf(keys(5, 'credentials'))[0] < cycleOf(keys(5, 'snapshot'))[3], 'the credentials item was filed while the snapshot ask was still unanswered');
+  assert.equal(filed.find(item => item.key === keys(5, 'credentials'))?.work, 'GY-46');
+  assert.equal(state.slowLoop.filed[`${releases[5]}:snapshot`]?.key, 'GY-45', 'the settled snapshot ask was answered with the item the plane filed when its reply was lost');
   // The durable record: one done action per item on the cursor, and nothing pending or carried over.
   const actionKey = (release: number, step: string) => `slow-loop:${releases[release].slice(0, 12)}:${step}`;
   const slowLoopActions = Object.entries(state.actions).filter(([key]) => key.startsWith('slow-loop:'));
   assert.deepEqual(slowLoopActions.map(([key]) => key).sort(),
-    [actionKey(1, 'snapshot'), actionKey(1, 'credentials'), actionKey(2, 'snapshot'), actionKey(3, 'snapshot'), actionKey(4, 'snapshot')].sort(),
+    [actionKey(1, 'snapshot'), actionKey(1, 'credentials'), actionKey(2, 'snapshot'), actionKey(3, 'snapshot'), actionKey(4, 'snapshot'), actionKey(5, 'snapshot'), actionKey(5, 'credentials')].sort(),
     'one durable record per filed item');
   assert.ok(slowLoopActions.every(([, action]) => action.state === 'done'), 'every filing is done on the record');
-  assert.equal(state.slowLoop.pending, null, 'nothing is left pending');
-  assert.deepEqual(state.slowLoop.filed, {}, 'the run ended on a healthy release: no items carried');
-  assert.ok(!filed.some(item => item.key.includes(releases[0]) || item.key.includes(releases[5])), 'the healthy releases filed nothing');
+  assert.deepEqual(state.slowLoop.pending, {}, 'nothing is left pending');
+  assert.deepEqual(Object.keys(state.slowLoop.filed).sort(), filed.map(item => `${item.key.slice('slow-loop:'.length)}`).sort(), 'every filing is kept on the cursor across the day\'s releases, so a release rolled back to files nothing new');
+  assert.ok(!filed.some(item => item.key.includes(releases[0])), 'the healthy release filed nothing');
 });

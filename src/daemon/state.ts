@@ -391,16 +391,21 @@ export type DoctorPendingFile = z.infer<typeof doctorPendingFileSchema>;
 export const loopReleaseSchema = z.object({ commit: z.string().regex(/^[0-9a-f]{40}$/).nullable(), dirty: z.boolean().nullable() }).strict();
 export type LoopRelease = z.infer<typeof loopReleaseSchema>;
 /**
- * The slow-loop run (GY-1775): consecutive completed cycles past the cycle bound on the release the
- * loop loaded, and the fix item filed per release and slowest step (keyed `RELEASE:STEP`), so a later
- * slow cycle files nothing new and the slow-cycle attention names the item. A new release starts it again.
+ * The slow-loop run (GY-1775): the trailing completed cycles past the cycle bound on the release the
+ * loop loaded, read from the retained metrics from the cycle that release was first counted at, so
+ * a cycle persisted by a loop that exited before counting it is counted by the next; the fix item
+ * filed per release and slowest step (keyed `RELEASE:STEP`), kept across releases so a release rolled
+ * back to files nothing new and the slow-cycle attention names the item; and the filings the control
+ * plane never answered, by the same key, each replayed with its first body on its own backoff.
  */
 export const slowLoopStateSchema = z.object({
   release: z.string().max(40).nullable().default(null),
+  /** The cycle the loaded release was first counted at: the run is the trailing slow cycles from it. */
+  sinceCycle: z.number().int().min(0).default(0),
   consecutive: z.number().int().min(0).default(0),
   filed: z.record(z.string().max(160), z.object({ key: z.string().max(40), step: z.string().max(80), file: z.string().max(200).nullable(), cycle: z.number().int().min(0), at: z.string().max(40) }).strict()).default({}),
-  /** A filing the control plane never answered (GY-1775): its original body and key, kept so the retry asks what was asked first. */
-  pending: z.lazy(() => slowLoopPendingSchema).nullable().default(null),
+  /** Filings the control plane never answered (GY-1775), by `RELEASE:STEP`: each original body and key, kept so the retry asks what was asked first. */
+  pending: z.preprocess(value => value === null ? {} : value, z.record(z.string().max(160), z.lazy(() => slowLoopPendingSchema))).default({}),
 }).strict();
 export type SlowLoopState = z.infer<typeof slowLoopStateSchema>;
 
@@ -502,7 +507,7 @@ export const daemonStateSchema = z.object({
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),
   /** The slow-loop run on that release and the fix item it filed (GY-1775). */
-  slowLoop: slowLoopStateSchema.default(() => ({ release: null, consecutive: 0, filed: {}, pending: null })),
+  slowLoop: slowLoopStateSchema.default(() => ({ release: null, sinceCycle: 0, consecutive: 0, filed: {}, pending: {} })),
   upgrade: upgradeStateSchema, // the between-cycles self-upgrade's progress (GY-437)
   /** The last reload of .graphyard/master.json: what the running loop adopted, or why it refused. */
   config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),

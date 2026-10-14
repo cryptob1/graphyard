@@ -106,6 +106,40 @@ test('unit:slow-loop-files-once — three consecutive cycles past slowCycleMs on
   assert.equal(w.state.slowLoop.consecutive, 4);
   assert.equal(w.requests.length, 1, 'a fourth slow cycle makes no request');
   assert.equal(w.filed.length, 1);
+  // An unanswered filing for one step does not stand in for a later run whose slowest step is another:
+  // the snapshot filing's reply is lost, a fast cycle ends that run, and three slow cycles held by the
+  // decisions step file the decisions item under its own key at the third — while the snapshot ask,
+  // retried to a plane still down on its own record's backoff (one cycle, then two, then four,
+  // whatever the run), is settled afterwards, on a fast cycle, with the body it was first asked under.
+  const apart = world();
+  const snapshotKey = slowLoopIdempotencyKey(releaseA, 'snapshot');
+  apart.lose();
+  await apart.complete(slow(1, 'snapshot')); await apart.complete(slow(2, 'snapshot'));
+  const unanswered = await apart.complete(slow(3, 'snapshot'));
+  assert.equal(unanswered?.state, 'failed');
+  assert.equal(apart.state.slowLoop.pending[`${releaseA}:snapshot`]?.key, snapshotKey, 'the snapshot ask is pending under its key');
+  const onTheFastCycle = await apart.complete(fast(4));
+  assert.equal(onTheFastCycle?.state, 'failed', 'the pending ask is retried on a fast cycle: settling it needs no run');
+  assert.equal(onTheFastCycle?.attempts, 2);
+  assert.equal(apart.state.slowLoop.consecutive, 0);
+  assert.equal(await apart.complete(slow(5)), null, 'the snapshot record backs off two cycles now');
+  const again = await apart.complete(slow(6));
+  assert.equal(again?.attempts, 3, 'retried after two cycles, to a plane still down');
+  apart.restore();
+  const decisions = await apart.complete(slow(7));
+  assert.equal(decisions?.state, 'done');
+  assert.equal(decisions?.work, 'GY-1801', 'the decisions run files its own item at its third slow cycle, while the snapshot ask stands');
+  assert.equal(apart.state.slowLoop.filed[`${releaseA}:decisions`]?.key, 'GY-1801');
+  assert.equal(apart.state.slowLoop.filed[`${releaseA}:snapshot`], undefined, 'the snapshot ask is still unanswered on the cursor');
+  assert.ok(apart.state.slowLoop.pending[`${releaseA}:snapshot`], 'the snapshot body stays pending');
+  assert.equal(await apart.complete(fast(8)), null); assert.equal(await apart.complete(fast(9)), null);
+  const settled = await apart.complete(fast(10));
+  assert.equal(settled?.state, 'done');
+  assert.equal(settled?.work, 'GY-1800', 'the snapshot ask is settled on a fast cycle, four after its last, with the item the plane filed when the reply was lost');
+  assert.deepEqual(apart.requests, [snapshotKey, snapshotKey, snapshotKey, slowLoopIdempotencyKey(releaseA, 'decisions'), snapshotKey], 'each key is asked on its own record: the decisions ask never carried the snapshot body');
+  assert.equal(new Set(apart.bodies.get(snapshotKey)).size, 1, 'every snapshot ask carried its first body');
+  assert.equal(apart.filed.length, 2, 'one item per release and step');
+  assert.deepEqual(apart.state.slowLoop.pending, {}, 'nothing stays pending');
   // A retry after a lost reply: the plane did not answer the first filing, so the next slow cycle asks
   // again under the same key and is answered with the item already filed — nothing new.
   const lost = world();
@@ -113,7 +147,7 @@ test('unit:slow-loop-files-once — three consecutive cycles past slowCycleMs on
   await lost.complete(slow(1)); await lost.complete(slow(2));
   const failed = await lost.complete(slow(3));
   assert.equal(failed?.state, 'failed');
-  assert.match(failed!.detail, /the control plane did not answer, so it is filed on a later slow cycle/);
+  assert.match(failed!.detail, /the control plane did not answer, so it is asked again on a later cycle/);
   assert.equal(failed?.faultClass, undefined, 'an unanswered plane is no loop fault');
   assert.equal(lost.state.slowLoop.filed[`${releaseA}:decisions`], undefined);
   lost.restore();
@@ -134,6 +168,14 @@ test('unit:slow-loop-files-once — three consecutive cycles past slowCycleMs on
   assert.equal(other?.work, 'GY-1801');
   assert.deepEqual(w.requests, [slowLoopIdempotencyKey(releaseA, 'decisions'), slowLoopIdempotencyKey(releaseB, 'decisions')]);
   assert.equal(w.filed.length, 2);
+  // The filings are kept across releases: a deployment rolled back to the first release is one already
+  // filed for, so three slow cycles on it ask nothing and the attention names the item it filed.
+  w.state.release = { commit: releaseA, dirty: false };
+  for (const index of [11, 12, 13]) assert.equal(await w.complete(slow(index)), null);
+  assert.equal(w.state.slowLoop.consecutive, 3, 'the rolled-back release starts its own run');
+  assert.equal(w.requests.length, 2, 'the release rolled back to asks nothing: its item is on the cursor');
+  assert.equal(filedSlowLoopItem(w.state.slowLoop, releaseA, 'decisions')?.key, 'GY-1800');
+  assert.equal((await rule()).slowLoopItemFor(w.state.slowLoop, releaseA, 'decisions', 13), 'GY-1800');
   // Nothing is filed without the operator-agent identity (the effect is absent), though the run is still counted.
   const absent = world();
   const counted = { persist: async () => {} } as unknown as Pick<DaemonEffects, 'fileSlowLoopItem' | 'persist'>;
@@ -144,18 +186,26 @@ test('unit:slow-loop-files-once — three consecutive cycles past slowCycleMs on
   const unreleased = world(null);
   for (const index of [1, 2, 3]) assert.equal(await unreleased.complete(slow(index)), null);
   assert.deepEqual(unreleased.requests, []);
-  // The rule itself: a window is returned only at three consecutive slow cycles on the loaded release.
+  // The rule itself: a window is returned only at three consecutive slow cycles on the loaded release,
+  // read from the retained metrics from the cycle the release was first counted at — a stale count on
+  // the cursor is re-read, not trusted.
   const counting = world();
-  counting.state.metrics.push(slow(1), slow(2));
+  counting.state.metrics.push(slow(1));
+  assert.equal(noteSlowCycle(counting.state), null);
+  assert.equal(counting.state.slowLoop.sinceCycle, 1, 'the run starts at the first cycle counted on the release');
+  counting.state.metrics.push(slow(2));
   assert.equal(noteSlowCycle(counting.state), null);
   counting.state.metrics.push(slow(3));
-  counting.state.slowLoop.consecutive = slowLoopCycles - 1;
+  counting.state.slowLoop.consecutive = 0;
   assert.deepEqual(noteSlowCycle(counting.state)?.window.map(metrics => metrics.cycle), [1, 2, 3]);
+  assert.equal(counting.state.slowLoop.consecutive, slowLoopCycles);
   // The run survives the cursor round-trip: the record parses back as it was written, and an older cursor without it reads as no run.
   const stored = daemonStateSchema.parse(JSON.parse(JSON.stringify(w.state)));
   assert.deepEqual(stored.slowLoop, w.state.slowLoop);
   const { slowLoop: _dropped, ...older } = JSON.parse(JSON.stringify(w.state));
-  assert.deepEqual(daemonStateSchema.parse(older).slowLoop, { release: null, consecutive: 0, filed: {}, pending: null });
+  assert.deepEqual(daemonStateSchema.parse(older).slowLoop, { release: null, sinceCycle: 0, consecutive: 0, filed: {}, pending: {} });
+  const unasked = JSON.parse(JSON.stringify(w.state)); unasked.slowLoop.pending = null;
+  assert.deepEqual(daemonStateSchema.parse(unasked).slowLoop.pending, {}, 'a cursor written before asks were kept by key reads as nothing pending');
 });
 
 test('unit:slow-loop-run-persisted — each count and reset is persisted as it is counted, so three slow cycles spanning a restart file exactly one item and a carried reset files nothing early; an unanswered filing, or one the loop exited in the middle of, is retried from the cursor with the body it was first asked under; an answered refusal backs off', async () => {
@@ -173,6 +223,27 @@ test('unit:slow-loop-run-persisted — each count and reset is persisted as it i
   const acrossTheRestart = await resumed.complete(slow(3));
   assert.equal(acrossTheRestart?.state, 'done');
   assert.deepEqual(resumed.requests, [slowLoopIdempotencyKey(releaseA, 'decisions')], 'the count crossed the bound across the restart');
+  // The run is read from the retained metrics, not counted up: a loop that exits after a cycle's
+  // metrics persisted and before the rule counted it leaves a slow cycle no count ever saw, and the
+  // next cycle counts it — three slow cycles with such an exit in the middle file at the third, not a
+  // fourth; a fast cycle lost the same way still ends the run.
+  const uncounted = world();
+  await uncounted.complete(slow(1));
+  uncounted.state.metrics.push(slow(2)); uncounted.state.cycle = 3; await uncounted.effects.persist(uncounted.state); // runCycle's persist; the process exits before the rule runs
+  const recounted = world(releaseA, daemonStateSchema.parse(JSON.parse(uncounted.writes.at(-1)!)));
+  assert.equal(recounted.state.slowLoop.consecutive, 1, 'the cursor counted one');
+  const third = await recounted.complete(slow(3));
+  assert.equal(third?.state, 'done', 'the uncounted cycle is counted when the next one is: the third slow cycle files');
+  assert.equal(recounted.state.slowLoop.consecutive, 3);
+  const ended = world();
+  await ended.complete(slow(1)); await ended.complete(slow(2));
+  ended.state.metrics.push(fast(3)); ended.state.cycle = 4; await ended.effects.persist(ended.state);
+  const reread = world(releaseA, daemonStateSchema.parse(JSON.parse(ended.writes.at(-1)!)));
+  assert.equal(reread.state.slowLoop.consecutive, 2, 'the cursor still says two');
+  assert.equal(await reread.complete(slow(4)), null);
+  assert.equal(reread.state.slowLoop.consecutive, 1, 'the fast cycle the exit hid ended the run');
+  assert.equal(await reread.complete(slow(5)), null);
+  assert.deepEqual(reread.requests, [], 'two slow cycles after a hidden reset file nothing');
   // A reset the restart carried holds the run honest: two more slow cycles file nothing.
   const after = world(releaseA, daemonStateSchema.parse(JSON.parse(counted.writes.at(-1)!)));
   assert.equal(after.state.slowLoop.consecutive, 0);
@@ -186,10 +257,10 @@ test('unit:slow-loop-run-persisted — each count and reset is persisted as it i
   await lost.complete(slow(1)); await lost.complete(slow(2));
   const failed = await lost.complete(slow(3));
   assert.equal(failed?.state, 'failed');
-  const key = slowLoopIdempotencyKey(releaseA, 'decisions'), onTheCursor = JSON.parse(lost.writes.at(-1)!).slowLoop.pending;
+  const key = slowLoopIdempotencyKey(releaseA, 'decisions'), onTheCursor = JSON.parse(lost.writes.at(-1)!).slowLoop.pending[`${releaseA}:decisions`];
   assert.equal(onTheCursor.key, key, 'the unanswered filing is on the cursor under its key');
   const restarted = world(releaseA, daemonStateSchema.parse(JSON.parse(lost.writes.at(-1)!)), lost.plane);
-  assert.equal(restarted.state.slowLoop.pending?.step, 'decisions');
+  assert.equal(restarted.state.slowLoop.pending[`${releaseA}:decisions`]?.step, 'decisions');
   restarted.restore();
   const retried = await restarted.complete(slow(4));
   assert.equal(retried?.state, 'done');
@@ -197,7 +268,7 @@ test('unit:slow-loop-run-persisted — each count and reset is persisted as it i
   assert.deepEqual(restarted.requests, [key, key], 'the retry asks the same key once more');
   assert.deepEqual(restarted.bodies.get(key), [lost.bodies.get(key)![0], lost.bodies.get(key)![0]], 'the retry asks the original body, byte for byte');
   assert.equal(restarted.filed.length, 1, 'the plane filed it once');
-  assert.equal(restarted.state.slowLoop.pending, null, 'the answered filing is cleared');
+  assert.deepEqual(restarted.state.slowLoop.pending, {}, 'the answered filing is cleared');
   // The loop process exits with the ask in flight (or after the plane answered, before the done record
   // persisted: the cursor is the same): the body went on the cursor before the ask, with the started
   // record, so the restarted loop asks that body under that key and is answered with the item the plane
@@ -208,7 +279,7 @@ test('unit:slow-loop-run-persisted — each count and reset is persisted as it i
   void gone.complete(slow(3)); // never returns: the process is gone
   const midAsk = JSON.parse(await cursorAtTheAsk);
   const actionKey = slowLoopActionKey(releaseA, 'decisions');
-  assert.equal(midAsk.slowLoop.pending?.key, key, 'the body is on the cursor before it is asked');
+  assert.equal(midAsk.slowLoop.pending[`${releaseA}:decisions`]?.key, key, 'the body is on the cursor before it is asked');
   assert.equal(midAsk.actions[actionKey]?.state, 'started', 'the ask is on the cursor as started');
   assert.equal(gone.filed.length, 1, 'the plane filed the item the loop never heard of');
   const revived = world(releaseA, daemonStateSchema.parse(midAsk), gone.plane);
@@ -225,7 +296,7 @@ test('unit:slow-loop-run-persisted — each count and reset is persisted as it i
   assert.deepEqual(revived.requests, [key], 'the restarted loop asks the key once more, at once: an interrupted ask waits for no backoff');
   assert.deepEqual(revived.bodies.get(key), [firstBody, firstBody], 'the restarted loop asks the body it found on the cursor, byte for byte');
   assert.equal(revived.filed.length, 1, 'nothing is filed twice');
-  assert.equal(revived.state.slowLoop.pending, null, 'the answered filing is cleared');
+  assert.deepEqual(revived.state.slowLoop.pending, {}, 'the answered filing is cleared');
   assert.equal(revived.state.actions[actionKey]?.state, 'done');
   assert.equal(revived.state.slowLoop.filed[`${releaseA}:decisions`]?.key, 'GY-1800', 'the cursor now knows the item');
   assert.equal(await revived.complete(slow(5)), null, 'a later slow cycle asks nothing more');
@@ -238,7 +309,7 @@ test('unit:slow-loop-run-persisted — each count and reset is persisted as it i
   await judged.complete(slow(1)); await judged.complete(slow(2));
   const refused = await judged.complete(slow(3));
   assert.equal(refused?.state, 'failed');
-  assert.equal(judged.state.slowLoop.pending, null, 'an answered refusal keeps no pending body');
+  assert.deepEqual(judged.state.slowLoop.pending, {}, 'an answered refusal keeps no pending body');
   assert.match(refused!.detail, /422/);
   assert.ok(!refused!.detail!.includes('did not answer'), 'an answered refusal is not an unanswered plane');
   const askedAt: number[] = [];
@@ -285,7 +356,7 @@ test('unit:slow-loop-item-contents — the filed item names the release commit, 
   assert.equal(before.length, 1);
   assert.doesNotMatch(before[0].text, /GY-\d+/);
   assert.match(before[0].next ?? '', /shorten the decisions step rather than restarting/);
-  w.state.slowLoop = { release: releaseA, consecutive: 2, filed: {}, pending: null };
+  w.state.slowLoop = { release: releaseA, sinceCycle: 0, consecutive: 2, filed: {}, pending: {} };
   const filed = await fileSlowLoopItem(w.state, w.effects, () => now);
   assert.equal(filed?.work, 'GY-1800');
   const after = report(w.state.slowLoop);
@@ -293,7 +364,23 @@ test('unit:slow-loop-item-contents — the filed item names the release commit, 
   assert.match(after[0].text, /Cycle 6 took 110s, past the 60s cycle bound \(p50 12s, p95 121s over the last 30 minutes\).*slowest steps: decisions 100s, merges 3s; the loop filed GY-1800 for this slow run/);
   assert.match(after[0].next ?? '', /GY-1800 owns shortening the decisions step rather than restarting a loop that is still cycling/);
   // The row names the run's item even when one cycle's slowest step differs from the window's, and nothing for another release.
-  assert.equal(slowLoopItemFor(w.state.slowLoop, releaseA, 'merges'), 'GY-1800');
-  assert.equal(slowLoopItemFor(w.state.slowLoop, releaseB, 'decisions'), null);
-  assert.equal(slowLoopItemFor(w.state.slowLoop, null, 'decisions'), null);
+  assert.equal(slowLoopItemFor(w.state.slowLoop, releaseA, 'merges', 6), 'GY-1800');
+  assert.equal(slowLoopItemFor(w.state.slowLoop, releaseB, 'decisions', 6), null);
+  assert.equal(slowLoopItemFor(w.state.slowLoop, null, 'decisions', 6), null);
+  // Only the run that filed it: once a fast cycle ends that run, a slow cycle held by another step is
+  // not that item's work — its criterion and planned file concern the decisions step — so the row says
+  // to shorten the new step, until three such cycles file the new step's own item; the same step
+  // again on this release is that item's work still.
+  assert.equal(await w.complete(fast(7)), null);
+  assert.equal(await w.complete(slow(8, 'merges')), null);
+  assert.equal(slowLoopItemFor(w.state.slowLoop, releaseA, 'merges', 8), null, 'an item an earlier run filed is not claimed for another step');
+  const another = slowCycleAttention({ liveness: { state: 'running' }, cost: { cycle: 8, durationMs: 90_000, slowestSteps: [{ step: 'merges', ms: 80_000 }] } as never, cycleTime, release: w.state.release, slowLoop: w.state.slowLoop });
+  assert.doesNotMatch(another[0].text, /GY-\d+/);
+  assert.match(another[0].next ?? '', /shorten the merges step rather than restarting/);
+  assert.equal(slowLoopItemFor(w.state.slowLoop, releaseA, 'decisions', 8), 'GY-1800', 'the step filed for is named whatever run it is in');
+  assert.equal(await w.complete(slow(9, 'merges')), null);
+  const merges = await w.complete(slow(10, 'merges'));
+  assert.equal(merges?.work, 'GY-1801', 'three cycles held by the new step file its own item');
+  assert.equal(slowLoopItemFor(w.state.slowLoop, releaseA, 'merges', 10), 'GY-1801');
+  assert.equal(slowLoopItemFor(w.state.slowLoop, releaseA, 'snapshot', 10), 'GY-1801', 'within the run, the newest item the run filed');
 });

@@ -307,7 +307,7 @@ export function slowCycleAttention(report: { liveness: Pick<LoopLiveness, 'state
   if (!cost || cost.durationMs <= slowCycleMs || report.liveness.state === 'absent') return [];
   const usual = report.cycleTime?.p50Ms != null ? ` (p50 ${seconds(report.cycleTime.p50Ms)}, p95 ${seconds(report.cycleTime.p95Ms ?? report.cycleTime.p50Ms)} over the last ${Math.round(report.cycleTime.windowMs / 60_000)} minutes)` : '';
   // GY-1775: once three such cycles on this release filed the fix item, the row names it, so the work is owned rather than re-read.
-  const filed = slowLoopItemFor(report.slowLoop, report.release?.commit, cost.slowestSteps[0]?.step);
+  const filed = slowLoopItemFor(report.slowLoop, report.release?.commit, cost.slowestSteps[0]?.step, cost.cycle);
   return [{ subject: 'loop', text: `Cycle ${cost.cycle} took ${seconds(cost.durationMs)}, past the ${seconds(slowCycleMs)} cycle bound${usual}, and every merge, decision and close in it waited that long; slowest steps: ${cost.slowestSteps.map(step => `${step.step} ${seconds(step.ms)}`).join(', ') || 'none recorded'}${filed ? `; the loop filed ${filed} for this slow run` : ''}`,
     ...agentOwner('master', `graphyard master status shows the cycle's timings under daemon.metrics.timings and the loop's cycle time under daemon.cycleTime; ${filed ? `${filed} owns shortening the ${cost.slowestSteps[0]?.step ?? 'slowest'} step` : `shorten the ${cost.slowestSteps[0]?.step ?? 'slowest'} step`} rather than restarting a loop that is still cycling`), ...classified('loop-liveness') }];
 }
