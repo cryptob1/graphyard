@@ -876,6 +876,7 @@ export const allowances: Record<string, Allowance> = {
   'tests/liveness-invariant.test.ts': { why: 't0 (2026-09-20) drives a virtual clock (now = () => new Date(clock)) han', dates: ['2026-09-20'], readings: 17 },
   'tests/loop-faults.test.ts': { why: 'slowPlane\'s Date.now() runs under the cycle tests\' mock.timers clock, and the checkout guards\' snapshots hold no work, so the Date.now() stamping their now meets no lease', dates: ['2026-09-27', '2026-10-01', '2026-10-03', '2026-10-05', '2026-10-06', '2026-10-08'], readings: 7 },
   'tests/loop-liveness-namespace.test.ts': { why: 'the 2026-10-06 instants are the explicit `now` of each loopLiveness call', dates: ['2026-10-06'], readings: 1 },
+  'tests/loop-records-due-observation-reading.test.ts': { why: 'the one Date.now() builds the live lease the close route judges on the database\'s own clock, which no stub reaches', dates: ['2026-10-13'], readings: 1 },
   'tests/loop-self-upgrade.test.ts': { why: 'the 2030-01-01 clock is passed as now: () => clock to performSelfUpgrade', dates: ['2026-10-07', '2030-01-01'], readings: 2 },
   'tests/main-guard.test.ts': { why: '2026-10-05T08:00 is the guard\'s explicit `now` in every runMainGuard/app', dates: ['2026-10-05'], readings: 1 },
   'tests/managed-worktree-root.test.ts': { why: 'the 2026-09-26 `at` is the explicit clock of the AC-2 memory-hold cycles; the 2026-01-02 `observed` is the snapshot clock the reclaim-stamp case hands to runCycle and compares with the stamp, never a wall-clock read', dates: ['2026-01-02', '2026-09-26'], readings: 30 },
