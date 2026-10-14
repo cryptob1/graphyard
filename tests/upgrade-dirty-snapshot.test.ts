@@ -399,7 +399,15 @@ test('unit:snapshot-pin-reported-and-lifted — master status reports the loop\'
   tree = { root, commit: 'c'.repeat(40), modified: [], untracked: [] };
   const elsewhere = await snapshotLoaded.guard.betweenCycles(snapshotLoaded.selfUpgrade);
   assert.match(elsewhere.refusal ?? '', /HEAD moved from/, 'a HEAD moved anywhere else is drift');
-  assert.equal(snapshotLoaded.upgrades.length, 2, 'and drift still skips the upgrade');
+  assert.equal(snapshotLoaded.upgrades.length, 3, 'but the snapshot loop runs no checkout code, so the upgrade still runs (GY-1773)');
+  for (const cycle of [4, 5]) {
+    tree = { root, commit: String(cycle).repeat(40), modified: ['README.md'], untracked: [] };
+    assert.match((await snapshotLoaded.guard.betweenCycles(snapshotLoaded.selfUpgrade)).refusal ?? '', /refuses to start, self-upgrade or restart|HEAD moved/);
+    assert.equal(snapshotLoaded.upgrades.length, cycle, 'a dirty checkout whose HEAD keeps moving never stops later snapshot upgrades');
+  }
+  const stillCheckoutLoaded = guardFor(null, () => tree, logs);
+  await stillCheckoutLoaded.guard.start(loaded);
+  assert.equal((await stillCheckoutLoaded.guard.betweenCycles(stillCheckoutLoaded.selfUpgrade)).upgraded?.outcome, 'skipped');
   tree = { root, commit: tip, modified: [], untracked: [] };
   assert.equal((await snapshotLoaded.guard.betweenCycles(snapshotLoaded.selfUpgrade)).refusal, null, 'a clean checkout at the commit the loop runs refuses nothing');
   assert.equal(snapshotLoaded.guardState.actions['escalation:dirty-checkout']!.state, 'done', 'and settles the escalation');
