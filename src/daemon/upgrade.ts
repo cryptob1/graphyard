@@ -1,18 +1,14 @@
 // Concern: GY-437 — the loop upgrades its own checkout to the merged release, between cycles.
 //
-// After every merge the coordinator used to be restarted by hand: the loop verified deliveries
-// against the deployed release and went on cycling the code it had loaded. The executors already
-// record the release they loaded, and `master executors restart` brings the fleet back onto the
-// checkout's commit; what was missing is the trigger. Between cycles — never mid-cycle — the loop
-// now aligns its checkout with the base branch once the deployment step has verified a delivery
-// is served — or, while production cannot be verified, once the checkout already holds code the
-// running loop has not loaded (GY-1445) — and when the diff touches code the loop or the
-// executors load, it restarts the fleet through `master executors restart` and then re-executes
-// itself through the supervisor unit it runs under. A checkout that is not detached is never
-// touched: the refusal is on the cursor, and `master status` names it until it clears. A dirty
-// checkout is never touched either, but it holds no upgrade back (GY-1773): the loop and the
-// executors restart onto a held-cli snapshot of the merged commit, the checkout left where it
-// stands and named on the cursor with its dirty paths until it is moved onto that commit.
+// Between cycles — never mid-cycle — the loop aligns its checkout with the base branch once the
+// deployment step has verified a delivery is served — or, while production cannot be verified,
+// once the checkout already holds code the running loop has not loaded (GY-1445) — and when the
+// diff touches code the loop or the executors load, it restarts the fleet through
+// `master executors restart` and re-executes itself through its supervisor unit. A checkout that
+// is not detached is never touched: the refusal is on the cursor until it clears. A dirty checkout
+// is never touched either, but holds no upgrade back (GY-1773): the loop and the executors
+// restart onto a held-cli snapshot of the merged commit, the checkout named on the cursor with
+// its dirty paths until it is moved onto that commit.
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
