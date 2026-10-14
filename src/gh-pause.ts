@@ -1,5 +1,6 @@
 // Concern: the gh login's rate limit as a wait — a refusal is classified, the reset read once, and every ungoverned gh read of the loop is skipped until then.
 import type { ChildRun } from './child-runner.js';
+import { ghPausedWording } from './model/fault-classes.js';
 
 const refusal = /API rate limit exceeded|secondary rate limit|abuse detection/i;
 const fallbackMs = 5 * 60_000, ceilingMs = 60 * 60_000;
@@ -19,7 +20,7 @@ export function ghPausedUntil(now: number = Date.now()): number { return pausedU
 
 /** The error a skipped read fails with, so callers treat it as any other failed read. */
 export class GhPausedError extends Error {
-  constructor(readonly until: number) { super(`gh reads are paused until ${new Date(until).toISOString()}: the login's API rate limit was exceeded`); this.name = 'GhPausedError'; }
+  constructor(readonly until: number) { super(`${ghPausedWording.paused} until ${new Date(until).toISOString()}: ${ghPausedWording.limit}`); this.name = 'GhPausedError'; }
 }
 
 /** Fails fast while a rate-limit pause stands; the read is not attempted, so it spends none of the quota. */

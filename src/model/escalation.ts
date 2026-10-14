@@ -44,7 +44,7 @@ export function launchFailedBeforeStart(session: { state?: string; pane?: string
 // raises the concern. An epoch whose lease ran to the worker no-submission renewal refusal unsubmitted
 // was ended by the control plane's own refusal to renew it (GY-1462), which explains it too.
 export type LeaseLapse = 'expired' | 'lost';
-export type LeaseLapseCause = 'submitted' | 'blocked-awaiting-operator' | 'stopped-by-attestation' | 'exhausted-capacity' | 'no-submission-bound';
+export type LeaseLapseCause = 'submitted' | 'blocked-awaiting-operator' | 'stopped-by-attestation' | 'exhausted-capacity' | 'control-plane-stall' | 'no-submission-bound';
 export const attestationKinds = ['blocked', 'stopped-worker'] as const;
 export type AttestationKind = typeof attestationKinds[number];
 /**
@@ -89,8 +89,28 @@ export function submittedEpoch(work: Pick<Work, 'submission'>, epoch: number) { 
 export function workerExhaustion(work: Pick<Work, 'capacity'>, epoch: number): ExhaustionRecord | null {
   return (work.capacity?.exhaustions ?? []).find(entry => entry.role === 'worker' && entry.epoch === epoch) ?? null;
 }
+/**
+ * One gap in the control plane's own reconciliation ticks (engine.ts `notePlaneTick`), read from
+ * the ledger: from the last tick before the gap to the tick that recovered, the plane was not
+ * answering — a deploy, a stalled loop, a database the passes could not reach. A lease that runs
+ * out inside one was not lost by a vanished worker: its renewals could not land because the plane
+ * itself was down (GY-1791: GY-1764's epoch 8 lapsed inside the 2026-10-13T10:32–10:34Z gap and
+ * counted as a lost worker).
+ */
+export interface PlaneStall { from: string; to: string }
+/** The stall that covers `at`, when one does. */
+export function stallCovering(stalls: readonly PlaneStall[], at: number): PlaneStall | null {
+  return stalls.find(stall => at >= Date.parse(stall.from) && at <= Date.parse(stall.to)) ?? null;
+}
+/** How long after a stall's end a raise is still attributed to it: the loss is raised at the first tick after the expiry, and the production lease is 120s, so the expiry lies within one lease of the stall's end (GY-1791). */
+export const planeStallRaiseGraceMs = 120_000;
+/** The stall a lease-loss raised at `raisedAt` stands for, when one does: the stall began before the raise and ended within a lease of it, so it covered the expiry the raise answered. */
+export function stallRaisedInside(stalls: readonly PlaneStall[], raisedAt: string, coverageMs = planeStallRaiseGraceMs): PlaneStall | null {
+  const at = Date.parse(raisedAt);
+  return Number.isFinite(at) ? stalls.find(stall => Date.parse(stall.from) <= at && at <= Date.parse(stall.to) + coverageMs) ?? null : null;
+}
 /** Why a lapse of `lease` is expected lifecycle, or null when the worker silently vanished. */
-export function leaseLapseCause(work: Pick<Work, 'submission' | 'capacity'> & Partial<Work>, lease: Pick<Lease, 'epoch'> & Partial<Pick<Lease, 'expiresAt' | 'owner'>>, attestations: Attestation[] = []): { cause: LeaseLapseCause; attestation: Attestation | null; exhaustion?: ExhaustionRecord } | null {
+export function leaseLapseCause(work: Pick<Work, 'submission' | 'capacity'> & Partial<Work>, lease: Pick<Lease, 'epoch'> & Partial<Pick<Lease, 'expiresAt' | 'owner'>>, attestations: Attestation[] = [], stalls: readonly PlaneStall[] = []): { cause: LeaseLapseCause; attestation: Attestation | null; exhaustion?: ExhaustionRecord; stall?: PlaneStall } | null {
   if (submittedEpoch(work, lease.epoch)) return { cause: 'submitted', attestation: null };
   const blocked = attestationFor(attestations, lease.epoch, 'blocked');
   if (blocked) return { cause: 'blocked-awaiting-operator', attestation: blocked };
@@ -98,6 +118,12 @@ export function leaseLapseCause(work: Pick<Work, 'submission' | 'capacity'> & Pa
   if (stopped) return { cause: 'stopped-by-attestation', attestation: stopped };
   const exhausted = workerExhaustion(work, lease.epoch);
   if (exhausted) return { cause: 'exhausted-capacity', attestation: null, exhaustion: exhausted };
+  // The plane's own recorded outage explains a lapse nothing else does: its renewals could not
+  // land while no tick ran, whatever the worker was doing. A worker that truly vanished mid-stall
+  // is still ended by its session report and the reclaim paths — explained as history, never as a
+  // lease loss.
+  const stall = lease.expiresAt ? stallCovering(stalls, Date.parse(lease.expiresAt)) : null;
+  if (stall) return { cause: 'control-plane-stall', attestation: null, stall };
   if (lapsedAtNoSubmissionBound(work, lease)) return { cause: 'no-submission-bound', attestation: null };
   return null;
 }
@@ -110,8 +136,9 @@ export function classifyLeaseLapse(work: Parameters<typeof leaseLapseCause>[0], 
 // rather than by a human: an escalation reaches a person only when nothing on the record says
 // why the attempt ended.
 export const leaseLossAutoSettlement = 'auto-settled: submitted before expiry';
-export function leaseLossSettlementNote(cause: LeaseLapseCause, attestation: Attestation | null, exhaustion: ExhaustionRecord | null = null) {
+export function leaseLossSettlementNote(cause: LeaseLapseCause, attestation: Attestation | null, exhaustion: ExhaustionRecord | null = null, stall: PlaneStall | null = null) {
   if (cause === 'submitted') return leaseLossAutoSettlement;
+  if (cause === 'control-plane-stall') return `auto-settled: the control plane was not answering between ${stall?.from ?? 'its recorded start'} and ${stall?.to ?? 'its recorded end'} (recorded by its own reconciliation), so renewals could not land and the attempt ended`;
   if (cause === 'no-submission-bound') return `auto-settled: the server refused renewal ${workerNoSubmissionRefusalMs / 60_000} minutes unsubmitted, past the worker no-submission bound, which is why the attempt ended`;
   if (cause === 'exhausted-capacity') return `auto-settled: the ${exhaustion?.profile ?? 'worker'} account ${exhaustion?.account ?? 'it ran on'} reported no quota left for epoch ${exhaustion?.epoch} (recorded by ${exhaustion?.recordedBy ?? 'the loop'} at ${exhaustion?.at}; ${exhaustion?.resetsAt ? `resets ${exhaustion.resetsAt}` : 'no reset time given'}), which is why the attempt ended`;
   const source = attestation ? ` (${attestation.source} by ${attestation.actor} at ${attestation.at})` : '';
@@ -165,14 +192,14 @@ export function endedLeaseLoss(work: Pick<Work, 'stage' | 'epoch' | 'lease' | 's
   return null;
 }
 export type LeaseLossSettlementCause = LeaseLapseCause | 'superseded' | 'ended';
-export interface LeaseLossSettlement { escalation: Escalation; epoch: number; cause: LeaseLossSettlementCause; attestation: Attestation | null; exhaustion?: ExhaustionRecord; note: string }
+export interface LeaseLossSettlement { escalation: Escalation; epoch: number; cause: LeaseLossSettlementCause; attestation: Attestation | null; exhaustion?: ExhaustionRecord; stall?: PlaneStall; note: string }
 /**
  * The standing lease-losses reconciliation settles: one the record explains, one a newer attempt
  * superseded (GY-1390), and — given `now` — one whose attempts have all ended once it has stood
  * `leaseLossSettleMs` (GY-1393). The last two rest only on the record, so an approver asked to
  * confirm them confirmed facts the control plane already held.
  */
-export function settleableLeaseLoss(work: Pick<Work, 'submission' | 'capacity' | 'escalation' | 'escalations'> & Partial<Pick<Work, 'epoch' | 'lease' | 'containmentQuarantine' | 'stage'>>, attestations: Attestation[] = [], now?: number): LeaseLossSettlement[] {
+export function settleableLeaseLoss(work: Pick<Work, 'submission' | 'capacity' | 'escalation' | 'escalations'> & Partial<Pick<Work, 'epoch' | 'lease' | 'containmentQuarantine' | 'stage'>>, attestations: Attestation[] = [], now?: number, stalls: readonly PlaneStall[] = []): LeaseLossSettlement[] {
   const settlements: LeaseLossSettlement[] = [];
   for (const escalation of standingEscalations(work)) {
     const epoch = leaseLossEpoch(escalation);
@@ -180,9 +207,17 @@ export function settleableLeaseLoss(work: Pick<Work, 'submission' | 'capacity' |
     // A lead-raised concern is never settled from the ledger or from the exhaustion record: only
     // the lapse the control plane itself raised is explained by what the control plane wrote. A
     // bound submission explains the epoch whoever raised it, and settles it as it always has.
-    const explained = leaseLapseCause(work, { epoch }, escalation.actor === 'graphyard' ? attestations : []);
+    const explained = leaseLapseCause(work, { epoch }, escalation.actor === 'graphyard' ? attestations : [], escalation.actor === 'graphyard' ? stalls : []);
     if (explained && (escalation.actor === 'graphyard' || explained.cause === 'submitted')) {
-      settlements.push({ escalation, epoch, ...explained, note: leaseLossSettlementNote(explained.cause, explained.attestation, explained.exhaustion ?? null) });
+      settlements.push({ escalation, epoch, ...explained, note: leaseLossSettlementNote(explained.cause, explained.attestation, explained.exhaustion ?? null, explained.stall ?? null) });
+      continue;
+    }
+    // A loss the record cannot otherwise explain, raised for a lapse one of the plane's own stalls
+    // covered: the renewal could not land because the plane was down (GY-1791), which settles it
+    // the way a blocked report does.
+    const stalled = escalation.actor === 'graphyard' ? stallRaisedInside(stalls, escalation.at) : null;
+    if (stalled) {
+      settlements.push({ escalation, epoch, cause: 'control-plane-stall', attestation: null, stall: stalled, note: leaseLossSettlementNote('control-plane-stall', null, null, stalled) });
       continue;
     }
     // A control-plane lapse a newer attempt superseded: nothing explains why the worker vanished,

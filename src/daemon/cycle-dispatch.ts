@@ -10,6 +10,7 @@ import { assertDispatchable, dispatchReserved, type ContainmentAssessment, type 
 import { workspaceDispatchFailure } from '../master/dispatch.js';
 import { standingEscalations } from '../model/escalation.js';
 import { registeredLaunch } from '../model/session-state.js';
+import type { SessionHandleInput } from '../model/sessions.js';
 import { type DaemonAction, message } from './state.js';
 import { decisionKey, dispatchKey } from './reconcile.js';
 import { clearProfileFailure, occupiesRoleBound, profileHealth, readyToRetry, recordProfileFailure } from './sessions.js';
@@ -25,6 +26,37 @@ import { decompositionStep } from '../decomposition-step.js';
 import { judgeHostMemory } from '../master-resources.js';
 import { dispatchBlockRetryMs, dispatchFailureBlockAfter, dispatchFailureBlocker, noteDispatchFailure, planeWideFailure } from './dispatch-failures.js';
 import { closeStanding, closingItems } from './stale-closes.js';
+
+/**
+ * Move a launched session's record onto the epoch its launch actually claimed (GY-1791).
+ *
+ * The registration is written before the claim, so its id guesses the epoch as the dispatch
+ * snapshot's `+ 1`; a launch that claims again after its first runtime refused the prompt claims a
+ * later epoch, and the guess lands on the previous attempt's id — exactly where an older session's
+ * record lives. The resume fence, the watcher and the blocker probes all key an attempt's session
+ * by `principal:epoch`, so a record under the wrong id is a session that can never be verified or
+ * told (GY-1788's resume paste was refused for ever by the pane the old id carried). Once the
+ * launch returns the claimed epoch, the record moves: the guessed id is closed naming the claimed
+ * epoch, and the session is recorded under the claimed epoch's id with the coordinates the launch
+ * returned. No attempt epoch rides either write — only the lease holder may write one (engine.ts)
+ * — and the coordinator's record keys by id alone, as every pre-claim registration does.
+ *
+ * Returns whether a move was written; a launch that failed, or one that claimed the expected
+ * epoch, moves nothing.
+ */
+export async function rekeyLaunchedSession(record: ((handle: SessionHandleInput) => Promise<unknown>) | undefined, handle: SessionHandleInput,
+  expectedEpoch: number, launched: { epoch?: number; pane?: string | null; agentName?: string | null } | undefined,
+  attach?: (pane: string) => string): Promise<boolean> {
+  const claimed = launched?.epoch;
+  if (!record || !Number.isInteger(claimed) || claimed === expectedEpoch) return false;
+  const pane = launched?.pane ?? null, agentName = launched?.agentName ?? null;
+  const moved = `${handle.id.slice(0, handle.id.lastIndexOf(':') + 1)}${claimed}`;
+  await record({ ...handle, state: 'finished', outcome: `registered before the claim: this launch claimed epoch ${claimed}, so its session is recorded as ${moved}` }).catch(() => {});
+  await record({ id: moved, kind: handle.kind, principal: handle.principal, runtime: handle.runtime, host: handle.host,
+    ...(handle.workspace ? { workspace: handle.workspace } : {}), subject: handle.subject, state: 'running',
+    ...(agentName ? { agentName } : {}), ...(pane ? { pane, ...(attach ? { attach: attach(pane) } : {}) } : {}) }).catch(() => {});
+  return true;
+}
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
 export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) {
@@ -326,8 +358,17 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
           id: `${current.profile.principal}:${item.epoch + 1}`, kind: 'implementation', principal: current.profile.principal, runtime: current.profile.kind ?? current.profile.mode, host: config.hostId,
           ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
           subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
-        }, async () => await effects.dispatch(item, current.profile, free, snapshot) as { pane?: string | null; agentName?: string; principal?: string; reclaimed?: string[]; closedAgent?: string } | undefined,
+        }, async () => await effects.dispatch(item, current.profile, free, snapshot) as { pane?: string | null; agentName?: string; principal?: string; reclaimed?: string[]; closedAgent?: string; epoch?: number } | undefined,
         launched => launched, pane => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`);
+        // The registration guessed the epoch as the snapshot's `+ 1`; the launch names the one it
+        // claimed. When a first runtime refused the prompt and the dispatch claimed again, they
+        // differ, and the record moves onto the claimed epoch's id (GY-1791) — the resume fence,
+        // the watcher and the blocker probes all key this attempt by that id.
+        await rekeyLaunchedSession(effects.recordSession ? handle => effects.recordSession!(item, handle) : undefined, {
+          id: `${current.profile.principal}:${item.epoch + 1}`, kind: 'implementation', principal: current.profile.principal, runtime: current.profile.kind ?? current.profile.mode, host: config.hostId,
+          ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
+          subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
+        }, item.epoch + 1, launched as { epoch?: number; pane?: string | null; agentName?: string | null }, pane => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`);
         clearProfileFailure(state, current.profile);
         delete state.dispatchFailures[item.id];
         // The file comes before the claimant keys, so the 2000-character detail bound trims a long
