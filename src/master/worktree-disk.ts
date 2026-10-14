@@ -110,10 +110,10 @@ export interface DiskPressure {
  * loop's latest pass and whether the line's fault stands (`context`, from the daemon cursor) decide
  * whether a low reading is answered and where it recovers (GY-1784).
  */
-export function diskPressure(path: string, free: number | null, thresholdBytes: number, plan: WorktreeReclaimCandidate[], context: { pass?: WorktreePass | null; standing?: boolean; now?: number; reclaimable?: number } = {}): DiskPressure {
+export function diskPressure(path: string, free: number | null, thresholdBytes: number, plan: WorktreeReclaimCandidate[], context: { pass?: WorktreePass | null; standing?: boolean; now?: number; reclaimable?: number | null } = {}): DiskPressure {
   // What the next pass takes back, when the caller counted worktrees removable outright as well; otherwise the disposable dependency trees.
   const reclaimable = context.reclaimable ?? plan.filter(entry => entry.disposable).length;
-  const judged = judgeWorktreeDisk({ freeBytes: free, thresholdBytes, pass: context.pass, standing: context.standing, reclaimable }, context.now ?? Date.now());
+  const judged = judgeWorktreeDisk({ freeBytes: free, thresholdBytes, pass: context.pass, standing: context.standing, reclaimable: context.reclaimable === null ? null : reclaimable }, context.now ?? Date.now());
   const pass = context.pass ?? null;
   return { path, freeBytes: free, thresholdBytes, low: judged.low, reclaimable, worktrees: plan.length,
     unavailable: free === null ? `Free space on ${path} could not be read` : null,
