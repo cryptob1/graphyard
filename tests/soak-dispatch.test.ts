@@ -152,6 +152,81 @@ test('unit:soak-dispatch-pi-fallback — every invariant holds as the registry s
   assert.deepEqual(await readAccountStartFailures(master), {}, 'the healthy start cleared the account\'s run of failures');
 });
 
+test('unit:soak-dispatch-preference-by-risk — every invariant holds as the registry sends each item by the risk class of its planned change and never by its lane: a sensitive planned path rides the strong account although the Pi account is eligible and healthy all day, and a normal plan rides Pi even from a high lane', { timeout: 300_000 }, async () => {
+  // GY-1772: the preference the dispatch path computes (`workerPreference` in `dispatchWork`, the
+  // registry's `workerOrder` on its answer) reads the item's `plannedFiles` against the risk class's
+  // sensitive rules and never the lane, per item and per cycle. Every item here plans its change
+  // before any launch and Pi stays healthy and eligible throughout, so the account each dispatch
+  // starts is the preference's own answer: items 1, 2 and 5 plan a sensitive path (persistence,
+  // migrations, deployment) and ride the strong account although Pi could have taken them; items 3
+  // and 4 plan normal files and start on Pi — item 3 from a lane the dispatch fixes high, item 4 as
+  // the day's unknown-change observations stamp one anyway. An item that plans no files is judged
+  // the same worst case by the unit suite; a day cannot deliver one, since nothing outside an empty
+  // plan may change, so the sensitive plans stand for the class here.
+  const { root, master } = await failoverInstalled();
+  const host = master.hostId ?? 'unknown-host', at = new Date().toISOString();
+  let registry: AgentRegistry = applyRegistryMutation(emptyRegistry(), 'apply', { runtimes: proposedRuntimes.filter(runtime => ['pi', 'claude'].includes(runtime.name)),
+    models: [{ name: 'glm', id: 'zai/glm-5.3' }, { name: 'opus', id: 'claude-opus-5' }],
+    accounts: [{ name: 'claude-b', runtime: 'claude', model: 'opus', credential: { host, home: null } }, { name: 'pi-a', runtime: 'pi', model: 'glm', credential: { host, home: null } }],
+    roles: [{ name: 'worker', accounts: ['claude-b', 'pi-a'], concurrency: 10 }], reason: 'fixture' }, { actor: 'operator', at }).registry;
+  const asked: { work: string | null; prefer: 'fast' | 'strong' | undefined; account: string | null }[] = [];
+  const client: FleetClient = {
+    document: async () => structuredClone(registry),
+    select: async request => {
+      const choice = chooseSession(registry, request, Date.now());
+      asked.push({ work: request.work, prefer: request.prefer, account: choice.account?.name ?? null });
+      if (!choice.account) return { selected: false, reason: choice.reason, skipped: choice.skipped, session: null, account: null, runtime: null, model: null, revision: registry.revision };
+      const session: FleetSession = { id: `session-${registry.sessions.length + 1}`, role: request.role, account: choice.account.name, runtime: choice.runtime.name, model: choice.model.name, host: request.host, work: request.work, principal: request.principal, group: request.group,
+        selectedAt: at, selectedBy: 'master', reason: choice.reason, skipped: choice.skipped, endedAt: null, endReason: null };
+      registry = { ...registry, sessions: [...registry.sessions, session] };
+      return { selected: true, reason: choice.reason, skipped: choice.skipped, session, account: choice.account, runtime: choice.runtime, model: choice.model, policy: choice.policy, revision: registry.revision };
+    },
+    end: async (id, reason) => { registry = { ...registry, sessions: registry.sessions.map(session => session.id === id ? { ...session, endedAt: at, endReason: reason } : session) }; },
+  };
+  const world = new FailoverWorld(new Set());
+  const { items, final, violations, failures, lost, failover } = await simulateDay({
+    hours: 3, failover: { root, master, world, dispatches: [], samples: [], probe: { registry: client, quota: false, cacheMs: 0 } as never,
+      plannedFiles: { 1: ['src/store/soak-item-1.ts'], 2: ['src/soak/item-2.ts', 'migrations/schema/0042_soak.sql'], 5: ['deploy/soak-item-5.env'] }, lanes: { 3: 'high', 4: 'high' } },
+    plan: { items: 5, releaseEveryMs: 5 * minute, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 5, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 5 } },
+  });
+  assert.ok(failover, 'the day ran the registry-backed scenario');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all five items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds across the risk-class selections');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  assert.deepEqual(new Set(failover.dispatches.map(dispatched => dispatched.work)), new Set(items.map(item => item.key)), 'each item was dispatched exactly once');
+  assert.equal(world.closedBrokenPanes, 0, 'no pane was closed for a failed start: every ordered account started');
+  // One launch per dispatch, on the runtime the preference ordered: a strong plan's account is the
+  // strong runtime, a fast plan's is Pi. The strong items queue on the strong account while it is
+  // busy, so the day dispatches them in whatever order the account frees; the selection is what
+  // must not vary.
+  assert.equal(world.kinds.length, failover.dispatches.length, 'each dispatch launched exactly one session');
+  for (const [index, dispatched] of failover.dispatches.entries()) {
+    assert.equal(dispatched.account!.prefer, dispatched.work === items[0].key || dispatched.work === items[1].key || dispatched.work === items[4].key ? 'strong' : 'fast', `${dispatched.work} was sent by its planned change's class`);
+    assert.equal(dispatched.account!.environment, dispatched.account!.prefer === 'strong' ? 'claude-b' : 'pi-a', `${dispatched.work} started on the account the preference ordered`);
+    assert.equal(world.kinds[index], dispatched.account!.prefer === 'strong' ? 'claude' : 'pi', `${dispatched.work} launched the ${world.kinds[index]} runtime the preference ordered`);
+    assert.equal(dispatched.fallback, null, `${dispatched.work} fell forward to no second account`);
+  }
+  // The registry was asked once per item with exactly the preference the plan's class gives, and
+  // the strong asks found Pi eligible all the same: the same healthy account takes the fast items
+  // the same day, so strong was a choice, never a shortage.
+  for (const [n, prefer] of [[1, 'strong'], [2, 'strong'], [3, 'fast'], [4, 'fast'], [5, 'strong']] as const) {
+    const request = asked.find(entry => entry.work === items[n - 1].key);
+    assert.ok(request, `the registry was asked for ${items[n - 1].key}`);
+    assert.equal(request!.prefer, prefer, `${items[n - 1].key} was asked with preference ${prefer}`);
+  }
+  // The lane never decided: both fast items rode a high lane (item 3 fixed by its dispatch, item 4
+  // as stamped) on a normal plan, and still took Pi.
+  for (const n of [3, 4]) assert.equal(final.find(item => item.key === items[n - 1].key)!.lane, 'high', `${items[n - 1].key} rode a high lane and still started on Pi`);
+  // The last dispatch record names the preference that ordered its accounts, beside the account it chose.
+  const last = failover.dispatches.at(-1)!;
+  const record = (await readProfileLaunchRecords(root, [{ name: 'soak-failover' }]))['soak-failover'];
+  assert.equal(record.key, last.work);
+  assert.equal(record.prefer, last.account!.prefer, 'the launch record keeps the preference the dispatch judged');
+  assert.equal(record.account, last.account!.environment);
+  assert.deepEqual(record.failedAccounts, []);
+});
+
 test('unit:soak-invariants-hold — launches that keep failing for one cause are blocked after three with git\'s error named, a refused block is asked for again only after its backoff, the item is dispatched again once unblocked, an item failing for changing causes is never blocked, and every invariant holds', { timeout: 300_000 }, async () => {
   // GY-1078: a launch whose worktree cannot be created spends an epoch and fails with git's stderr.
   // The loop counts consecutive failures of one item with one cause across epochs, records the
