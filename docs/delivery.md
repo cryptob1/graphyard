@@ -8,7 +8,7 @@ Records environments' intended releases, observers verifying ([rollback](recover
 Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`, `release/production` (moved only by `graphyard release`) to candidates' exact SHAs.
 
 - `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N first-parent merges since the last candidate (`GRAPHYARD_RC_MAX_PRS`, 10; rest queue); `.github/workflows/release-candidate.yml` cuts on loop dispatch (cron fallback).
-- `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*` credentials), refused while an unjudged candidate <4h old serves.
+- `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*` credentials), refused while an unjudged candidate <4 h old serves.
 - `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser`, suites ([below](#pre-merge-gate-and-release-candidate-validation); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`.
 - `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`; `release verify --url URL` confirms.
 - Failed candidates file a [hold](validation.md#release-holds) per failed outcome, else a follow-up (`release follow-up ID` retries) as the [filing credential](#release-filing-credential).
@@ -74,7 +74,7 @@ Observers `POST /api/delivery/observe`:
 
 Only complete listings verify (`POST /api/delivery/notify` hints); `graphyard delivery sweep` verifies generations per `freshnessSeconds`; `graphyard delivery` shows state.
 
-`master status` `delivery`: `readyToMerged`, `mergedToProduction`, `stages` p50/p90 (`24h`/`7d`); 7-day p90 over `deliverySpeed` (2h; merged→production 45min) raises attention.
+`master status` `delivery`: `readyToMerged`, `mergedToProduction`, `stages` p50/p90 (`24h`/`7d`); 7-day p90 over `deliverySpeed` (2 h; merged→production 45 min) raises attention.
 
 `POST /api/validation/result` binds manifest, signature, measurements; mismatches record `attribution-undermined`, voiding passes (`GET /api/analytics/attribution`).
 

@@ -176,7 +176,7 @@ test('unit:sudo-form-capture-nonfatal — a missing form, an absent link, a page
     assert.deepEqual(captureSteps(first.steps), [
       ['landing', 'failed: no Confirm-access form found'],
       ['authenticator', 'failed: agent-browser click refused: #totp detached'],
-      ['email', 'failed: no email view control (only a control that sends a code, which is not followed); the page cannot list the controls under "Having problems?"'],
+      ['email', 'failed: no email view link (only a control that sends a code, which is not followed)'],
     ]);
     assert.ok(!broken.clicked.includes('#send-email'), 'the control that emails a code is never used to reach the email view');
 

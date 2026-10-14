@@ -16,15 +16,15 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions, each sta
 
 Goal passes intake, acceptance, approval, planning, approval and delivery. `graphyard goal FILE` records it; acceptance role writes outcomes and required `uat` cases ([validation](validation.md)), non-author-approved. Once merged, `planner` role writes architecture note (at most 400 words) and items, each naming outcomes served, cases to pass, `plannedFiles` and predecessors. A plan leaving outcome uncovered, letting parallel items share file, naming a criterion twice or touching a required case is refused with the reason; three refused rounds hand goal to master. Another identity approves the plan (`goal plan-approve`); loop creates and releases items (`planned`, then `delivering`), dispatching none before its dependencies are delivered. Goal is `delivered` once every item is done and production serves it: deployment of its merge, plus passing smoke proof where policy asks.
 
-An outright 401/403/409/422 refusal redrafts acceptance, or re-releases a plan an hour later, noting it; a 422 plan post is a refused round, others re-post then. `POST /goals/GY-N/land` fetches the base first (≤20s), else answers `503` unrecorded.
+An outright 401/403/409/422 refusal redrafts acceptance, or re-releases a plan an hour later, noting it; a 422 plan post is a refused round, others re-post then. `POST /goals/GY-N/land` fetches the base first (≤20 s), else answers `503` unrecorded.
 
 ## Risk lanes
 
 `src/model/policy.ts` sets **risk lane** (`low`, `medium`, `high`) by paths.
 
-- **High** (4h): `migrations/schema`, `auth/credentials`, `src/store/`, authentication, principals, public API, its assembler, credential bootstrap (`src/server/`), operator agent, proof grants, `src/install/`, `deploy/`, Dockerfile, `compose.yaml`, unobserved changes. Producer proofs, `manual:` attestations, two-party rework.
-- **Medium** (60min): remainder; adds producer-run `unit:`/`integration:`.
-- **Low** (30min): test-only, docs-only, single-module. Required CI, one approval.
+- **High** (4 h): `migrations/schema`, `auth/credentials`, `src/store/`, authentication, principals, public API, its assembler, credential bootstrap (`src/server/`), operator agent, proof grants, `src/install/`, `deploy/`, Dockerfile, `compose.yaml`, unobserved changes. Producer proofs, `manual:` attestations, two-party rework.
+- **Medium** (60 min): remainder; adds producer-run `unit:`/`integration:`.
+- **Low** (30 min): test-only, docs-only, single-module. Required CI, one approval.
 
 **Risk class** (`sensitive`/`normal`; unknown: sensitive), judged from the merge delta, shows in `graphyard status`; lanes still gate github mode.
 

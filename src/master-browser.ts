@@ -60,10 +60,7 @@ export interface BrowserPage {
   fill?(selector: string, value: string): void;
   /** The raw markup of the Confirm-access form(s) on the page, or null when it shows none (GY-1461); redacted before it is kept. */
   markup?(): string | null;
-  /** Every button and link under the element whose text is HEADING (GY-1781: "Having problems?"), by tag and label, so a refused capture names what the page offered. */
-  controls?(heading: string): PageControl[];
 }
-export interface PageControl { tag: string; label: string }
 
 // Runs inside the page. It tags the located element so the following command addresses exactly
 // that element, whatever GitHub's own ids are.
@@ -85,19 +82,6 @@ const locateScript = (kind: string, text: string) => `(() => {
   const marker = 'gy-' + String((window.__graphyardLocated = (window.__graphyardLocated ?? 0) + 1));
   element.setAttribute('data-graphyard-target', marker);
   return JSON.stringify({ selector: '[data-graphyard-target="' + marker + '"]', tag: element.tagName.toLowerCase(), checked: 'checked' in element ? !!element.checked : null, value: 'value' in element ? String(element.value) : null, text: norm(element.textContent), href: element.tagName === 'A' && element.href ? element.href : null, visible: shown(element) });
-})()`;
-
-// Runs inside the page: the buttons and links under the element whose own text is HEADING, by tag
-// and label (GY-1781). GitHub's passkey-first Confirm-access page lists its other methods under
-// "Having problems?"; a page without that heading lists the controls of its whole body instead.
-const controlsScript = (heading: string) => `(() => {
-  const wanted = ${JSON.stringify(heading)};
-  const norm = value => String(value ?? '').replace(/\\s+/g, ' ').trim().toLowerCase();
-  const own = element => norm([...element.childNodes].filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent).join(' ')) || norm(element.textContent);
-  const heading = [...document.querySelectorAll('summary, h1, h2, h3, h4, h5, h6, legend, p, strong, span, div, label')].find(candidate => own(candidate) === norm(wanted)) ?? null;
-  const scope = heading ? heading.closest('details') ?? heading.parentElement ?? document.body : document.body;
-  const controls = [...scope.querySelectorAll('button, input[type=submit], input[type=button], a[href], a[role=button], summary')].filter(candidate => candidate !== heading);
-  return JSON.stringify(controls.slice(0, 30).map(control => ({ tag: control.tagName.toLowerCase(), label: norm(control.tagName === 'INPUT' ? control.value : control.textContent) })));
 })()`;
 
 // Runs inside the page: the outerHTML of every Confirm-access form (one posting to the sudo
@@ -152,7 +136,6 @@ export function agentBrowserPage(browser: MasterBrowser, session: string, run: A
     wait: ms => { invoke('wait', String(ms)); },
     close: () => { try { run([...prefix, 'close']); } catch { /* the session may already be gone */ } },
     markup: () => { const result = invoke('eval', sudoFormScript).result; const value = typeof result === 'string' ? JSON.parse(result) : result; return typeof value === 'string' ? value : null; },
-    controls: heading => { const result = invoke('eval', controlsScript(heading)).result; const value = typeof result === 'string' ? JSON.parse(result) : result; return Array.isArray(value) ? value.filter((control): control is PageControl => !!control && typeof control.tag === 'string' && typeof control.label === 'string') : []; },
   };
 }
 
@@ -200,7 +183,6 @@ export function recordingPage(page: BrowserPage, record: { directory: string; st
     note: (action, args) => step(action, args, () => undefined),
     // The page's markup still carries session-bound values, so the step records only its length.
     ...(page.markup ? { markup: () => { let html: string | null = null; step('markup', [], () => { html = page.markup!(); return html === null ? null : `${html.length} chars`; }); return html; } } : {}),
-    ...(page.controls ? { controls: (heading: string) => step('controls', [heading], () => page.controls!(heading)) } : {}),
     ...(page.fill ? { fill: (selector: string, value: string) => step('fill', [selector, value ? '[code withheld]' : ''], () => {
       try { page.fill!(selector, value); } catch (error) { throw new Error(withheld(error, value)); }
       typed = value !== '';
@@ -368,43 +350,6 @@ export function redactSudoForm(html: string, codes: readonly string[] = [], ever
 // views are kept when the flow itself selects them (SudoOptions.keep).
 const sudoViewLinks: Record<'passkey' | 'authenticator' | 'email', readonly string[]> = { passkey: routeLabels.passkey, authenticator: authenticatorLabels, email: ['Use email', 'Use your email', 'Use an email code', 'Use email code', 'Email code'] };
 export interface CapturedSudoForm { view: 'landing' | 'authenticator' | 'email'; file: string; url: string }
-/** The heading GitHub's passkey-first Confirm-access page lists its other methods under (GY-1781). */
-export const sudoProblemsHeading = 'Having problems?';
-export type ControlActivation = { outcome: 'activated' | 'absent' } | { outcome: 'failed'; failures: string[] };
-/**
- * Activate the Confirm-access control labelled LABEL the way the GitHub Mobile route does (GY-1450,
- * GY-1781): the older page offers a method as a button, the passkey-first page as a form button or
- * a link under "Having problems?". A rendered button is activated first, and an anchor whose click
- * fails is followed through its href instead; when a rendered button's click fails, the link of the
- * same label is located and tried as well. `absent` when the page has no such control, `activated`
- * once one responded (after WAITMS), else the failure of every try.
- */
-export function activateSudoControl(page: BrowserPage, label: string, waitMs: number): ControlActivation {
-  const button = page.locate('button', label);
-  const rendered = !!button && button.visible !== false;
-  const controls = [button, rendered ? null : page.locate('link', label)].filter((control): control is Located => !!control);
-  if (!controls.length) return { outcome: 'absent' };
-  controls.sort((a, b) => Number(b.visible !== false) - Number(a.visible !== false));
-  const failures: string[] = [];
-  for (let index = 0; index < controls.length; index += 1) {
-    const control = controls[index];
-    try { page.click(control.selector); page.wait(waitMs); return { outcome: 'activated' }; }
-    catch (error) { failures.push(error instanceof Error ? error.message : String(error)); }
-    if (control.href) { page.open(control.href); return { outcome: 'activated' }; }
-    if (rendered && control === button) {
-      const link = page.locate('link', label);
-      if (link && link.selector !== button.selector) controls.push(link);
-    }
-  }
-  return { outcome: 'failed', failures };
-}
-/** The controls under "Having problems?" as a refused capture names them: `button "Use GitHub Mobile", a "Use your password"`. */
-export function describeSudoControls(page: BrowserPage, heading = sudoProblemsHeading) {
-  if (!page.controls) return `the page cannot list the controls under "${heading}"`;
-  let controls: PageControl[];
-  try { controls = page.controls(heading); } catch (error) { return `the controls under "${heading}" could not be listed: ${error instanceof Error ? error.message : String(error)}`; }
-  return controls.length ? `controls under "${heading}": ${controls.map(control => `${control.tag} "${control.label}"`).join(', ')}` : `no control under "${heading}"`;
-}
 
 /** The views of a Confirm-access page saved for fixtures: the one it loaded on and each method's (GY-1482). */
 export const confirmAccessViews = ['landing', 'passkey', 'authenticator', 'email', 'mobile'] as const;
@@ -436,13 +381,10 @@ export async function captureConfirmAccess(page: BrowserPage, directory: string,
 }
 /**
  * Keep the markup of a Confirm-access page's forms for fixtures (GY-1461): the view it landed on,
- * then each code view it offers (authenticator app, email code), opened through its own control —
- * a rendered button first, then a link — never typed into or submitted, and the landing page
- * reopened afterwards so the flow proceeds exactly as before. A code view is kept only once its
- * page actually opened: a control the page never answers is a recorded failure, never a landing
- * form kept under the view's name (GY-1781 review). Each form is redacted before it is written.
- * A failure is recorded as a step with its error and never thrown; the capture stops once its time
- * budget is spent.
+ * then each code view it offers (authenticator app, email code), opened by its link alone — nothing
+ * is typed or submitted — and the landing page reopened afterwards so the flow proceeds exactly as
+ * before. Each form is redacted before it is written. A failure is recorded as a step with its error
+ * and never thrown; the capture stops once its time budget is spent.
  *
  * The same reads are saved as the flow's Confirm-access captures too (GY-1482, ONCAPTURE), with the
  * passkey view besides: opened by its link, or, on a page that asks for the passkey on the view it
@@ -453,9 +395,7 @@ export async function captureSudoForms(page: BrowserPage, directory: string, opt
   const failed = (view: string, error: unknown) => page.note?.('sudo-form-capture', [view, `failed: ${error instanceof Error ? error.message : String(error)}`]);
   const missed = (view: string, error: unknown) => page.note?.('confirm-access-capture', [view, `failed: ${error instanceof Error ? error.message : String(error)}`]);
   if (!page.markup) { failed('landing', 'the page cannot read markup'); return captured; }
-  // GY-1781: each code view's control is looked for as a button and as a link under every label it
-  // may carry, and a view is read once it opens, so the budget allows for those extra page reads.
-  const now = options.now ?? (() => new Date()), budgetMs = options.budgetMs ?? 45_000;
+  const now = options.now ?? (() => new Date()), budgetMs = options.budgetMs ?? 30_000;
   const started = now().getTime();
   let landing: string, text: string;
   try { landing = page.url(); text = page.text(); } catch (error) { failed('landing', error); return captured; }
@@ -486,52 +426,18 @@ export async function captureSudoForms(page: BrowserPage, directory: string, opt
     if (now().getTime() - started >= budgetMs) { fail(view, `capture budget of ${Math.round(budgetMs / 1000)}s spent`); break; }
     try {
       if (moved) { page.open(landing); moved = false; }
-      if (view === 'passkey') {
-        // The passkey view is reached by its link alone: a "Use passkey" button starts WebAuthn.
-        let link: Located | null = null;
-        for (const label of sudoViewLinks.passkey) { link = page.locate('link', label); if (link) break; }
-        if (!link) { if (landingHtml) await confirmAccess('passkey', landingHtml); else missed('passkey', 'no passkey view link and no landing form'); continue; }
-        moved = true;
-        try { page.click(link.selector); } catch (error) { if (!link.href) throw error; page.open(link.href); }
-        page.wait(1_000);
-      } else {
-        // GY-1781: a code view opens through whichever control carries one of its labels, a rendered
-        // button first and then a link, as the GitHub Mobile route does: the passkey-first page
-        // offers "Use your authenticator app" under "Having problems?" as a form button, not a link.
-        // When no label is offered at all, the failure names every control under that heading.
-        let activated: string | null = null;
-        for (const label of sudoViewLinks[view]) {
-          const result = activateSudoControl(page, label, 1_000);
-          if (result.outcome === 'absent') continue;
-          moved = true;
-          if (result.outcome === 'failed') throw new Error(result.failures.join('; then the link of the same label: '));
-          activated = label; break;
-        }
-        if (!activated) throw new Error(`${view === 'email' ? 'no email view control (only a control that sends a code, which is not followed)' : 'no authenticator view control'}; ${describeSudoControls(page)}`);
-        // The view is kept only once it actually opened (GY-1781 review): a click the page never
-        // answers would otherwise keep the landing form under the view's name.
-        awaitView(view);
-      }
+      let link: Located | null = null;
+      for (const label of sudoViewLinks[view]) { link = page.locate('link', label); if (link) break; }
+      if (!link && view === 'passkey') { if (landingHtml) await confirmAccess('passkey', landingHtml); else missed('passkey', 'no passkey view link and no landing form'); continue; }
+      if (!link) throw new Error(view === 'email' ? 'no email view link (only a control that sends a code, which is not followed)' : 'no authenticator view link');
+      moved = true;
+      try { page.click(link.selector); } catch (error) { if (!link.href) throw error; page.open(link.href); }
+      page.wait(1_000);
       await keep(view);
     } catch (error) { fail(view, error); }
   }
   if (moved) restoreSudoLanding(page, landing, text, failed);
   return captured;
-
-  // The view has opened once the page's text differs from the landing's: a view the page switches
-  // to client-side can take a moment longer than the activation's own wait, within the budget. A
-  // view that never opens is a failure, never a capture: a landing still shown after the reads is
-  // thrown so no markup is kept under the view's name (GY-1781 review).
-  function awaitView(view: 'authenticator' | 'email') {
-    for (let tries = 0; tries < 4; tries += 1) {
-      let shown: string;
-      try { shown = page.text(); } catch (error) { throw new Error(`the ${view} view could not be read after its control was activated: ${error instanceof Error ? error.message : String(error)}`); }
-      if (shown !== text) return;
-      if (now().getTime() - started >= budgetMs) break;
-      page.wait(1_000);
-    }
-    throw new Error(`the ${view} view did not open: its control was activated but the page still shows the view it landed on, so nothing is kept for it`);
-  }
 }
 /**
  * Reopen a Confirm-access page's landing view after a capture moved off it, retrying once, until it
@@ -698,14 +604,29 @@ export async function passSudo(page: BrowserPage, options: SudoOptions) {
     if (state!.method !== method) { page.note?.('sudo-method', [method]); state = { ...state!, method }; }
   };
   // The older page offers GitHub Mobile as a button; the passkey-first page keeps that button
-  // hidden and offers a "Use GitHub Mobile" control under "Having problems?": activateSudoControl
-  // tries a rendered button first, then the link, and the capture opens code views the same way.
+  // hidden and offers a "Use GitHub Mobile" link under "Having problems?". A rendered control is
+  // activated first, and an anchor whose click fails is followed through its href instead. When a
+  // rendered button's click fails, the link of the same label is located and tried as well.
   const issue = (label: string) => {
     if (attempt >= maxAttempts) throw new Error(`GitHub Mobile confirmation was re-issued ${attempt} times without approval; approve the prompt on your device and rerun master browser ${options.flow}`);
-    const result = activateSudoControl(page, label, Math.min(pollMs, 1_000));
-    if (result.outcome === 'absent') throw new Error(`Confirm-access page offers no "${label}" control; only GitHub Mobile confirmation is automated, so confirm access in your own browser and rerun master browser ${options.flow}`);
+    const button = page.locate('button', label);
+    const rendered = !!button && button.visible !== false;
+    const controls = [button, rendered ? null : page.locate('link', label)].filter((control): control is Located => !!control);
+    if (!controls.length) throw new Error(`Confirm-access page offers no "${label}" control; only GitHub Mobile confirmation is automated, so confirm access in your own browser and rerun master browser ${options.flow}`);
+    controls.sort((a, b) => Number(b.visible !== false) - Number(a.visible !== false));
     attempt += 1;
-    if (result.outcome === 'failed') throw new Error(`Confirm-access "${label}" could not be activated (${result.failures.join('; ')}); confirm access in your own browser and rerun master browser ${options.flow}`);
+    const failures: string[] = [];
+    for (let index = 0; index < controls.length; index += 1) {
+      const control = controls[index];
+      try { page.click(control.selector); page.wait(Math.min(pollMs, 1_000)); return; }
+      catch (error) { failures.push(error instanceof Error ? error.message : String(error)); }
+      if (control.href) { page.open(control.href); return; }
+      if (rendered && control === button) {
+        const link = page.locate('link', label);
+        if (link && link.selector !== button.selector) controls.push(link);
+      }
+    }
+    throw new Error(`Confirm-access "${label}" could not be activated (${failures.join('; ')}); confirm access in your own browser and rerun master browser ${options.flow}`);
   };
   for (;;) {
     const current = page.url(), text = page.text();

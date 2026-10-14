@@ -250,7 +250,7 @@ test('unit:master-browser-capture-outcomes — sudo already held, an unreachable
     assert.equal(sendOnly.result.reason, 'Kept 3 Confirm-access view(s) as redacted markup: landing, passkey, authenticator; the email method is offered only by a control that sends a code, which the capture never follows, so no email view is expected');
     assert.deepEqual(outcomeStep(sendOnly.record), [['applied', sendOnly.result.reason]]);
     assert.deepEqual(sendOnly.record.after, { url: PERMISSIONS, views: ['landing', 'passkey', 'authenticator'], missed: [] });
-    assert.ok(sendOnly.record.steps.some((step: { action: string; args: string[] }) => step.action === 'sudo-form-capture' && step.args[0] === 'email' && step.args[1] === 'failed: no email view control (only a control that sends a code, which is not followed); the page cannot list the controls under "Having problems?"'), 'the send-only email method is a recorded step, not a missed view');
+    assert.ok(sendOnly.record.steps.some((step: { action: string; args: string[] }) => step.action === 'sudo-form-capture' && step.args[0] === 'email' && step.args[1] === 'failed: no email view link (only a control that sends a code, which is not followed)'), 'the send-only email method is a recorded step, not a missed view');
     assert.deepEqual(sendOnly.record.confirmAccess.map((capture: { view: string }) => capture.view), ['landing', 'passkey', 'authenticator']);
     assert.equal(await exists(join(root, sendOnly.result.record, 'confirm-access', 'confirm-access-email.html')), false, 'no email fixture is written: no code was sent');
     assert.match(sendOnly.result.next, /master browser fixtures/);
