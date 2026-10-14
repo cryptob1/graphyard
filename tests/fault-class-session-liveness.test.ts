@@ -756,6 +756,26 @@ test('integration:fault-class-session-liveness GY-1764 escalation:lease-loss —
   } finally { for (const client of held) client.release(); }
 });
 
+test('integration:fault-class-session-liveness GY-1764 escalation:lease-loss — a beat records the time it landed, not the time it was sent, and beats never pile up behind a lease pool that is not answering', async () => {
+  // The plane beats on its own timer; the first beat lands before the timer starts.
+  const stop = await stallEngine.startPlaneBeat(20);
+  // Then every lease-pool connection is held, as a black-holed path holds them: a beat sent now waits.
+  const held = await Promise.all(Array.from({ length: (stallStore.leasePool as unknown as { options: { max: number } }).options.max }, () => stallStore.leasePool.connect()));
+  try {
+    const sentAt = (await stallStore.pool.query('SELECT now() AS at')).rows[0].at as Date;
+    const beat = stallEngine.recordPlaneLiveness();
+    await delay(1_100);
+    // Behind it waits at most the timer's one in-flight beat: later intervals join no queue until the pool answers.
+    assert.ok(stallStore.leasePool.waitingCount <= 2, `the base queued a beat per interval behind the held pool: ${stallStore.leasePool.waitingCount} waiting`);
+    const landedAt = (await stallStore.pool.query('SELECT now() AS at')).rows[0].at as Date;
+    for (const client of held.splice(0)) client.release();
+    await beat;
+    const tick = (await stallStore.leasePool.query('SELECT tick_at FROM plane_liveness WHERE id = true')).rows[0].tick_at as Date;
+    assert.ok(tick.getTime() >= landedAt.getTime(), `the base stamped the beat when it was sent (${sentAt.toISOString()}); it landed at ${landedAt.toISOString()} and the record says ${tick.toISOString()}`);
+    assert.ok(tick.getTime() - sentAt.getTime() >= 1_000, 'the held second is on the record, not replayed away');
+  } finally { stop(); for (const client of held) client.release(); }
+});
+
 test('integration:fault-class-session-liveness GY-1788 action:session — the control plane moves a launcher\u2019s session record in one transaction: the record under the claimed epoch runs, the guessed record is closed', async () => {
   let work = await stallEngine.execute(human, 'create', null, stallInput('session-rekey'), stallId());
   work = await stallEngine.execute(human, 'ready', work.id, {}, stallId());

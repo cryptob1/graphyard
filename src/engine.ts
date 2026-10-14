@@ -2939,7 +2939,7 @@ export class Engine {
     // The plane's liveness is read before this pass classes any lapse (GY-1791): the pass that meets
     // a lease the stall let run out must already find the stall on the record. The independent beat
     // (startPlaneBeat) keeps the tick moving through a long pass, so a pass's own length is no gap.
-    await this.recordPlaneLiveness(new Date());
+    await this.recordPlaneLiveness();
     try { await this.reconcilePass(tickStarted); }
     finally { this.eventLoopLag.stop(); }
   }
@@ -2958,12 +2958,19 @@ export class Engine {
    * that serves them. The request pool exhausted behind slow queries while heartbeats still land is
    * no stall — a tick there would have recorded one and explained away a worker that truly vanished
    * — and a lease pool that cannot take this tick's connection could not take a renewal either.
+   *
+   * The time recorded is read once the lease pool has answered (the connection taken and the
+   * transaction open), never when the beat was sent: a beat held behind a black-holed connection
+   * records when it landed, so beats that waited out an outage cannot replay the times they were
+   * sent at over the gap and move the tick past a stall nothing recorded. A caller measuring a
+   * simulated clock passes `at`.
    */
-  async recordPlaneLiveness(at: Date = new Date()) {
+  async recordPlaneLiveness(at?: Date) {
     let db: PoolClient | null = null;
     try {
       db = await this.store.leasePool.connect();
       await db.query('BEGIN');
+      at ??= new Date();
       await db.query('INSERT INTO plane_liveness(id,tick_at) VALUES(true,$1) ON CONFLICT (id) DO NOTHING', [at]);
       const previous = (await db.query('SELECT tick_at FROM plane_liveness WHERE id = true FOR UPDATE')).rows[0].tick_at as Date;
       if (at.getTime() > previous.getTime()) {
@@ -2977,9 +2984,21 @@ export class Engine {
       await db?.query('ROLLBACK').catch(() => {}); // the next beat records it
     } finally { db?.release(); }
   }
-  /** Beat the plane's liveness on a timer of its own, so slow serial work between passes is never read as an outage. */
-  startPlaneBeat(): () => void {
-    const timer = setInterval(() => { void this.recordPlaneLiveness(); }, planeStallMs / 6);
+  /**
+   * Beat the plane's liveness on a timer of its own, so slow serial work between passes is never
+   * read as an outage. The first beat lands before this resolves, so a server starts answering
+   * heartbeats with the gap since its previous process already on the record. One beat is in flight
+   * at a time: a beat the lease pool has not answered is not joined by the next interval's, so an
+   * outage queues no pile of beats to land together when the pool answers again.
+   */
+  async startPlaneBeat(intervalMs = planeStallMs / 6): Promise<() => void> {
+    await this.recordPlaneLiveness();
+    let inFlight = false;
+    const timer = setInterval(() => {
+      if (inFlight) return;
+      inFlight = true;
+      void this.recordPlaneLiveness().finally(() => { inFlight = false; });
+    }, intervalMs);
     timer.unref();
     return () => clearInterval(timer);
   }

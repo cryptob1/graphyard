@@ -170,8 +170,8 @@ export async function main(options: MainOptions = {}) {
     }
     handle(req, res);
   });
-
   let receiptsPrunedAt = 0, ledgerCompactedAt = 0;
+  const stopPlaneBeat = await engine.startPlaneBeat(); // the gap since the previous process ticked is on the record before the first heartbeat is answered (GY-1791)
   const reconciliation = startReconciliation(async step => {
     if (!ready) { await step('validation.startup', () => runStartupValidation()); if (!ready) return; }
     // The delivery sweep is bounded per tick and resumes from its persisted cursor, so a
@@ -188,9 +188,6 @@ export async function main(options: MainOptions = {}) {
       if (preflight) await announcePreflight(preflight);
     }
   }, 2000);
-  // The gap since the previous process ticked is on the record before the first heartbeat is answered (GY-1791).
-  await engine.recordPlaneLiveness();
-  const stopPlaneBeat = engine.startPlaneBeat();
   http.listen(options.port ?? Number(process.env.PORT ?? 4310), options.host ?? process.env.HOST ?? '127.0.0.1', () => console.log(`Graphyard listening on port ${(http.address() as AddressInfo).port}; GitHub ${github ? 'connected' : 'not configured'}`));
   await once(http, 'listening');
   void runStartupValidation();
