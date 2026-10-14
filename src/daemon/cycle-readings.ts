@@ -106,8 +106,8 @@ export function readingDueNow(cycle: Cycle): boolean {
  * a recorded pass — its close refused or failed in the cycle that recorded it, or the pass recorded by
  * hand — is closed on the release the pass was taken on, under the same idempotency key, the pass
  * after it was recorded and, once a close itself has failed, on that close's own failure backoff —
- * never the read backoff — until it closes. `served` is the release observation this cycle verified: while that observation
- * is still in flight (`stillVerifying`) every due reading is deferred, never taken on the release the
+ * never the read backoff — until it closes. `served` is the release observation this cycle verified:
+ * while that observation is still in flight (`stillVerifying`) every due reading is deferred, never taken on the release the
  * last cycle observed, which the plane may no longer serve. The reads run under the deployment step's
  * budget, keyed per item: one still running at the bound is left in flight and resumed next cycle,
  * and its answer names the release it read, so an answer for a release the plane has moved past is
