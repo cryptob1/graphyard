@@ -8,20 +8,14 @@ import { stepCallCarried } from './step-budget.js';
 import { message, type DaemonAction } from './state.js';
 import type { Cycle } from './cycle.js';
 
-/** A judgement run that returned nothing is tried again after this long: each try is a paid model run. */
-export const caseChangeRetryMs = 60 * 60_000;
-/** The control plane refusing the posted verdict is asked again after this long, reusing the verdict. */
-export const caseChangeStepRetryMs = 10 * 60_000;
-
 interface Finished { judgement: Judgement | null; runs: string[]; deferred?: string }
 const live = new Map<string, Promise<void>>();
 const finished = new Map<string, Finished>();
-const retryAt = new Map<string, number>();
 export async function caseChangeJudgementsSettled() { await Promise.all([...live.values()]); }
-export function clearCaseChangeJudgements() { for (const store of [live, finished, retryAt]) store.clear(); }
+export function clearCaseChangeJudgements() { for (const store of [live, finished]) store.clear(); }
 
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
-/** The requested changes of a goal, oldest first: one is judged at a time, so the verdict names its change unambiguously. */
+/** The requested changes of a goal, oldest first: each is judged by its own run, so the verdict names its change unambiguously. */
 export const requestedCaseChanges = (goal: Goal): CaseChange[] => goal.caseChanges.filter(change => change.state === 'requested');
 
 export function caseChangePrompt(config: { repository: string }, goal: Goal, change: CaseChange) {
@@ -37,33 +31,32 @@ export function caseChangePrompt(config: { repository: string }, goal: Goal, cha
 
 type Note = (goal: Goal, outcome: DaemonAction['state'], detail: string, caught?: unknown) => Promise<void>;
 
-/** One loop step over a goal's requested case changes: launch the approver's judgement, then post the verdict it returned. */
+/** One loop step over a goal's requested case changes: each is launched, or its returned verdict posted, in this cycle. */
 export async function caseChangeStep(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal, note: Note) {
-  const change = requestedCaseChanges(goal)[0];
-  if (!change || !acceptance.judgeCaseChange) return;
+  if (!acceptance.judgeCaseChange) return;
+  for (const change of requestedCaseChanges(goal)) await changeStep(cycle, acceptance, goal, change, note);
+}
+
+async function changeStep(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal, change: CaseChange, note: Note) {
   // Its own note key, so the goal's acceptance note and this change's never overwrite each other.
   const about = { ...goal, id: `${goal.id}:case-change:${change.id}` } as Goal;
-  const due = (step: string) => cycle.clock >= (retryAt.get(`${change.id}:${step}`) ?? -Infinity);
-  const later = (step: string, ms: number) => { retryAt.set(`${change.id}:${step}`, cycle.clock + ms); };
   const result = finished.get(change.id);
   if (result) {
     if (!result.judgement) {
-      finished.delete(change.id); later('judge', result.deferred ? 5 * 60_000 : caseChangeRetryMs);
+      finished.delete(change.id);
       return note(about, result.deferred ? 'waiting' : 'failed', result.deferred
-        ? `The approver is at its registry capacity (${result.deferred}); the judgement of ${change.work}'s case change ${change.id} is launched again in five minutes`
-        : `The approver returned no judgement on ${change.work}'s case change ${change.id}: ${result.runs.join('; ')}; it is judged again in an hour`);
+        ? `The approver is at its registry capacity (${result.deferred}); the judgement of ${change.work}'s case change ${change.id} is launched again next cycle`
+        : `The approver returned no judgement on ${change.work}'s case change ${change.id}: ${result.runs.join('; ')}; it is judged again next cycle`);
     }
-    if (!due('verdict')) return;
-    try { await acceptance.judgeCaseChange(goal, change, result.judgement); }
+    try { await acceptance.judgeCaseChange?.(goal, change, result.judgement); }
     catch (error) {
       if (stepCallCarried(error)) throw error;
-      later('verdict', caseChangeStepRetryMs);
-      return note(about, 'failed', `The approver's ${result.judgement.verdict} of ${change.work}'s case change ${change.id} could not be recorded: ${message(error)}; it is posted again in ten minutes`, error);
+      return note(about, 'failed', `The approver's ${result.judgement.verdict} of ${change.work}'s case change ${change.id} could not be recorded: ${message(error)}; it is posted again next cycle`, error);
     }
     finished.delete(change.id);
     return note(about, 'done', `The approver ${result.judgement.verdict === 'approve' ? 'approved' : 'refused'} ${change.work}'s case change ${change.id} (${change.cases.join(', ')}): ${clip(result.judgement.reason, 600)}`);
   }
-  if (live.has(change.id) || !due('judge')) return;
+  if (live.has(change.id)) return;
   const run = runHeadless(acceptance, 'judge', goal, caseChangePrompt(cycle.config, goal, change), payload => {
     const parsed = judgementPayloadSchema.parse(payload);
     if (parsed.goal !== goal.key) throw new Error(`the answer names ${parsed.goal}, not ${goal.key}`);

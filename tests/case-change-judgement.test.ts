@@ -43,11 +43,18 @@ test('unit:case-change-judged-by-loop — a requested case change is judged by t
   assert.deepEqual(posted, [`GOAL-1 ${pending.id} approve`]);
   assert.match(notes.at(-1)!, /approved GY-1800's case change/);
 
-  // A run that names the wrong goal returns no judgement: it is tried again in an hour, not posted.
+  // A run that names the wrong goal returns no judgement: it is tried again next cycle, not posted.
   posted.length = 0; prompts.length = 0;
   verdict = { goal: 'GOAL-9', verdict: 'approve', reason: 'wrong goal' };
   await step(); await step();
   assert.deepEqual(posted, []); assert.match(notes.at(-1)!, /returned no judgement/);
   const runs = prompts.length;
-  await step(60_000); assert.equal(prompts.length, runs, 'a failed run waits its interval');
+  await step(60_000); assert.ok(prompts.length > runs, 'a failed run is launched again the next cycle');
+
+  // Two requested changes of one goal are both launched in one cycle.
+  clearCaseChangeJudgements(); prompts.length = 0; posted.length = 0; verdict = { goal: 'GOAL-1', verdict: 'approve', reason: 'ok' };
+  const second = { ...change('requested'), id: 'second-change', work: 'GY-1801' } as CaseChange;
+  goal.caseChanges.push(second);
+  await step();
+  assert.equal(prompts.length, 2, 'every requested change is launched within one cycle');
 });
