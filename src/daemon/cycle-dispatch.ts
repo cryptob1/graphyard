@@ -25,11 +25,12 @@ import { decompositionStep } from '../decomposition-step.js';
 import { judgeHostMemory } from '../master-resources.js';
 import { dispatchBlockRetryMs, dispatchFailureBlockAfter, dispatchFailureBlocker, noteDispatchFailure, planeWideFailure } from './dispatch-failures.js';
 import { closeStanding, closingItems } from './stale-closes.js';
+import { guardCarried, settleCarriedWrites } from './carried-writes.js';
 import { carriedCall, owedWrite, recordCarried, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
 export const dispatchStep = (cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) =>
-  withinStepBudget(cycle, 'dispatch', ['decide', 'approver', 'roleHealth', 'escalationSessions', 'reportCapacity', 'planeHealth', 'hostMemory', 'blockDispatch', 'decisions'], bounded => dispatchStepWithin(bounded, health, assessments)); // GY-1774: every call the step makes — the role and plane health reads, the escalation listing, each capacity report, the memory reading, the blocker record, the decision history, the cap decision and its approver launch — is bounded
+  withinStepBudget(cycle, 'dispatch', ['decide', 'approver', 'roleHealth', 'escalationSessions', 'reportCapacity', 'planeHealth', 'hostMemory', 'blockDispatch', 'decisions', 'recordDecomposition', 'recordResearch'], bounded => dispatchStepWithin(bounded, health, assessments)); // GY-1774: every call the step makes — the role and plane health reads, the escalation listing, each capacity report, the memory reading, the split and research records, the blocker record, the decision history, the cap decision and its approver launch — is bounded
 async function dispatchStepWithin(cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, credentials, open } = cycle;
   // 4. Dispatch claimable work to a healthy profile. The launcher claims under the worker's own
@@ -93,12 +94,15 @@ async function dispatchStepWithin(cycle: Cycle, health: ReturnType<typeof profil
   const decomposing = new Set(offered.filter(item => decompositionHold(item, clock)).map(item => item.id));
   if (effects.recordDecomposition && effects.research && config.run?.research) await isolate('dispatch', null, 'decomposition', async () => {
     const research = researchSettings(config.run), settings = decompositionSettings(config.run);
-    const step = await decompositionStep({ items: offered.filter(item => !held885.has(item.id) && !decomposing.has(item.id)), clock, settings, config, cwd: effects.research!.cwd,
-      runner: effects.research!.runner ?? researchRunner(research), model: research.model, record: effects.recordDecomposition! });
+    const guarded = guardCarried(effects.recordDecomposition!), eligible = offered.filter(item => !held885.has(item.id) && !decomposing.has(item.id));
+    const step = await decompositionStep({ items: eligible, clock, settings, config, cwd: effects.research!.cwd,
+      runner: effects.research!.runner ?? researchRunner(research), model: research.model, record: guarded.write });
     for (const id of step.held) decomposing.add(id);
+    for (const id of guarded.carried.keys()) decomposing.add(id); // a record carried past its bound holds its item: the next cycle writes it again
+    await settleCarriedWrites(cycle, 'decomposition', eligible, guarded.carried);
     for (const action of step.actions) {
       const item = offered.find(entry => entry.key === action.work)!, key = `decomposition:${item.id}:${action.state}`;
-      if (!detailChanged(state.actions[key], action.detail)) continue;
+      if (guarded.carried.has(item.id) || !detailChanged(state.actions[key], action.detail)) continue;
       performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: null, epoch: item.epoch, state: 'done', detail: action.detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
     }
   });
@@ -111,12 +115,15 @@ async function dispatchStepWithin(cycle: Cycle, health: ReturnType<typeof profil
   const held = new Set([...held885, ...decomposing, ...new Set(offered.filter(item => researchHold(item, clock)).map(item => item.id))]);
   if (effects.recordResearch && effects.research && config.run?.research) await isolate('dispatch', null, 'research', async () => {
     const settings = researchSettings(config.run);
-    const step = await researchStep({ items: offered.filter(item => !held.has(item.id)), clock, settings, config, cwd: effects.research!.cwd,
-      runner: effects.research!.runner ?? researchRunner(settings), record: effects.recordResearch! });
+    const guarded = guardCarried(effects.recordResearch!), eligible = offered.filter(item => !held.has(item.id));
+    const step = await researchStep({ items: eligible, clock, settings, config, cwd: effects.research!.cwd,
+      runner: effects.research!.runner ?? researchRunner(settings), record: guarded.write });
     for (const id of step.held) held.add(id);
+    for (const id of guarded.carried.keys()) held.add(id); // a record carried past its bound holds its item: the next cycle writes it again
+    await settleCarriedWrites(cycle, 'research', eligible, guarded.carried);
     for (const action of step.actions) {
       const item = offered.find(entry => entry.key === action.work)!, key = `research:${item.id}:${action.state}`;
-      if (!detailChanged(state.actions[key], action.detail)) continue;
+      if (guarded.carried.has(item.id) || !detailChanged(state.actions[key], action.detail)) continue;
       // A notice, never a failed action: research that fails is recorded on the item and holds nothing.
       performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: null, epoch: item.epoch, state: 'done', detail: action.detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
     }

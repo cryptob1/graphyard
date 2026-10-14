@@ -194,7 +194,7 @@ export async function recordCarried(cycle: CarriedCycle, key: string, row: Carri
   performed.push(await record(state, key, { kind: row.kind, work: row.work, principal: row.principal ?? null, epoch: row.epoch ?? null, state: 'waiting', detail: `${what} was carried to the next cycle: ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist, null));
 }
 /** Retire a carried row once its call answered: the row is done, with the carried attempts it counted, so nothing stays carried past the answer. */
-async function retireCarried(cycle: CarriedCycle, key: string, previous: DaemonAction, detail: string) {
+export async function retireCarried(cycle: CarriedCycle, key: string, previous: DaemonAction, detail: string) {
   const { state, now, performed, effects } = cycle;
   if (state.actions[key] !== previous) return; // recorded anew meanwhile: carried again, or settled by the caller's own row
   performed.push(await record(state, key, { kind: previous.kind, work: previous.work, principal: previous.principal, epoch: previous.epoch, state: 'done', detail: detail.slice(0, 2000), attempts: previous.attempts, cycle: state.cycle }, now(), effects.persist, null));
@@ -277,10 +277,10 @@ export async function retryOwedWrites(cycle: CarriedCycle, calls: readonly (keyo
  * `waiting` and retried next cycle, the best-effort writes owed to the step's calls are retried first,
  * and once the step returns the budget ends, so a launch it handed to the launcher passes through unbounded.
  */
-export async function withinStepBudget<T>(cycle: Cycle, step: BoundedStep, calls: readonly (keyof DaemonEffects)[], body: (bounded: Cycle) => Promise<T>): Promise<T> {
+export async function withinStepBudget<T>(cycle: Cycle, step: BoundedStep, calls: readonly (keyof DaemonEffects)[], body: (bounded: Cycle) => Promise<T>, identity: Pick<BoundOptions, 'key'> = {}): Promise<T> {
   const budget = stepBudget(cycle.now, (cycle.config?.run?.intervalSeconds ?? 20) * 1000); // a cycle built by hand (a step's own test) may carry no run settings
   // Nested steps (the resume step runs inside the sessions step) bound the effects beneath every earlier bound, never a bound's own race.
-  const effects = boundedCalls(unboundedEffects(cycle.effects), cycle.state as DaemonState, cycle.now, budget.left, { step, calls });
+  const effects = boundedCalls(unboundedEffects(cycle.effects), cycle.state as DaemonState, cycle.now, budget.left, { step, calls, ...identity });
   const bounded: Cycle = { ...cycle, effects, isolate: carriedIsolate({ ...cycle, effects }, step) };
   try { await retryOwedWrites(bounded, calls); return await body(bounded); } finally { budget.end(); }
 }

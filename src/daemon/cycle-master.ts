@@ -10,7 +10,8 @@ import { sessionCapMs } from '../model/registry-sessions.js';
 import { masterHandover, masterSessionBudgetMs, masterHeartbeatIntervalMs, masterWakeText, masterProfile } from '../master/master-session.js';
 import { outputReadDue } from './cycle-sessions.js';
 import type { Cycle } from './cycle.js';
-import { withinStepBudget } from './step-budget.js';
+import { callKey, carriedCall, owedWrite, stepCallCarried, withinStepBudget } from './step-budget.js';
+import { canonicalJson } from '../onboarding.js';
 
 /** The launcher key the master launch records its started entry under: one in flight at a time. */
 export const masterLaunchKey = 'master:launch';
@@ -32,7 +33,9 @@ export const masterMergeDeferralMs = 30 * 60_000;
  * material subjects — the heartbeat only as the fallback. A loop wired without `effects.masterSession`
  * keeps cycling exactly as before.
  */
-export const masterSessionStep = (cycle: Cycle) => withinStepBudget(cycle, 'master', ['promptSession'], masterSessionStepWithin); // GY-1774: the wake's runtime call is bounded; a slow one is carried and the wake is made again next cycle
+export const masterSessionStep = (cycle: Cycle) => withinStepBudget(cycle, 'master', ['promptSession', 'herdr', 'sessionOutput', 'endRegistrySession', 'holdAccount', 'closeSession'], masterSessionStepWithin, { key: wakeKey }); // GY-1774: every runtime, output and registry call the step makes is bounded; a slow one is carried and made again next cycle
+/** A wake is the call for the subjects it names: a wake for other subjects never joins one still in flight, while a heartbeat's changing quiet minutes do not make it another call. */
+export const wakeKey = (call: string, args: unknown[]) => call === 'promptSession' ? canonicalJson([callKey(call, [args[0]]), String(args[1]).replace(/for \d+ minutes/, 'for N minutes')]) : null;
 async function masterSessionStepWithin(cycle: Cycle) {
   const { config, state, effects, now, clock, snapshot, performed, isolate } = cycle;
   const launcher = effects.masterSession;
@@ -40,7 +43,10 @@ async function masterSessionStepWithin(cycle: Cycle) {
   // Owed releases first: a leaked row holds the role's single slot, so the launch below would be refused until it is gone.
   await isolate('failover', null, 'master-session', () => releaseOwedSessions(cycle));
   const master = state.master;
-  let herdr = effects.herdr ? await Promise.resolve(effects.herdr()) : { agents: cycle.agents, available: true };
+  const unobserved = { agents: cycle.agents, available: false };
+  // A reading that is carried past its bound says nothing about the session, as one Herdr could not answer.
+  const readHerdr = () => effects.herdr ? carriedCall(cycle, 'master', 'session', 'herdr', () => Promise.resolve(effects.herdr!()), () => unobserved) : Promise.resolve({ agents: cycle.agents, available: true });
+  let herdr = await readHerdr();
   const budgetMs = masterSessionBudgetMs(config), heartbeatMs = masterHeartbeatIntervalMs(config);
   const listed = (name: string | null | undefined) => !!name && herdr.agents.some(candidate => candidate.name === name);
   // A launch the previous process handed over and died inside is nothing this cycle can wait on:
@@ -80,7 +86,7 @@ async function masterSessionStepWithin(cycle: Cycle) {
         // times are kept on the session record, so a relaunched master is read at once.
         const stopped = stoppedStates.includes(handle.agent_status ?? '');
         const due = outputReadDue(master, herdr.agents, handle, stopped, clock);
-        const output = due && effects.sessionOutput ? await Promise.resolve(effects.sessionOutput(handle)).catch(() => null) : null;
+        const output = due && effects.sessionOutput ? await carriedCall(cycle, 'master', 'session', 'sessionOutput', () => Promise.resolve(effects.sessionOutput!(handle)).catch(error => { if (stepCallCarried(error)) throw error; return null; }), () => null) : null;
         const signal = output ? (stopped ? detectExhaustion(output, clock) : detectRetryingExhaustion(output, clock)) : null;
         if (signal) {
           rotated = await rotateMasterSession(cycle, 'exhausted', `${master.agentName} ${stopped ? 'stopped' : 'is retrying'} on its provider's limit notice: ${signal.reason}${signal.resetsAt ? `; resets ${signal.resetsAt}` : ''}`, signal.resetsAt);
@@ -99,7 +105,8 @@ async function masterSessionStepWithin(cycle: Cycle) {
     }
   }
 
-  if (rotated) herdr = await Promise.resolve(effects.herdr ? effects.herdr() : { agents: cycle.agents, available: true });
+  if (rotated) herdr = await readHerdr();
+  if (herdr.available === false) return;
 
   // Adoption: a session the loop did not launch (a human `master start`) is supervised from here — never a second.
   // Everything below reads `state.master` afresh: a rotation above replaced the record, and the
@@ -198,7 +205,12 @@ async function rotateMasterSession(cycle: Cycle, cause: MasterRotationCause, det
   const master = state.master;
   const reason = `master session ${master.agentName} ended (${cause}): ${detail.slice(0, 300)}`;
   const released = master.session && effects.endRegistrySession ? await effects.endRegistrySession(master.session, reason).then(() => true, () => false) : true;
-  if (cause === 'exhausted' && master.account) await effects.holdAccount?.(master.account, { at: new Date(clock).toISOString(), resetsAt, reason: detail.slice(0, 500), role: masterProfile, profile: masterProfile, work: null }).catch(() => {});
+  // A hold carried past its bound is owed: the next start of the step writes it again, joining the call in flight.
+  if (cause === 'exhausted' && master.account) {
+    const account = master.account;
+    await owedWrite(cycle, `master:hold:${account}`, { kind: 'failover', work: null }, `Holding the master's account ${account}`, 'holdAccount',
+      bounded => bounded.holdAccount?.(account, { at: new Date(clock).toISOString(), resetsAt, reason: detail.slice(0, 500), role: masterProfile, profile: masterProfile, work: null }));
+  }
   if (master.pane) {
     try { await effects.closeSession(master.pane); }
     catch (error) { if (!paneAlreadyGone(error)) throw error; }

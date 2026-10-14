@@ -312,13 +312,14 @@ test('unit:step-calls-bounded — every named step runs under the shared bound w
   const sb = await helper();
   const steps: Record<string, { file: string; calls: string[] }> = {
     blockers: { file: 'cycle-blockers.ts', calls: ['approver', 'closeSession', 'deferWindow', 'probeBlocker', 'decisions', 'approverLaunches', 'recordBlockerProbe', 'recordSession'] },
-    dispatch: { file: 'cycle-dispatch.ts', calls: ['decide', 'approver', 'roleHealth', 'escalationSessions', 'reportCapacity', 'planeHealth', 'hostMemory', 'blockDispatch', 'decisions'] },
+    dispatch: { file: 'cycle-dispatch.ts', calls: ['decide', 'approver', 'roleHealth', 'escalationSessions', 'reportCapacity', 'planeHealth', 'hostMemory', 'blockDispatch', 'decisions', 'recordDecomposition', 'recordResearch'] },
     'review-cap': { file: 'cycle-review-cap.ts', calls: ['withdrawReview', 'wakeObservation', 'decisions'] },
     scope: { file: 'cycle-scope.ts', calls: ['decideScope', 'widenScope', 'reviewFindings', 'basePaths', 'baseText', 'baseMentions', 'baseSuccessions', 'repositoryFiles', 'decisions'] },
     sessions: { file: 'cycle-sessions.ts', calls: ['closeSession', 'endSession', 'relaunch', 'answerSession', 'promptSession', 'launchedSessions', 'sessionOutput', 'herdr', 'escalationSessions', 'recordSession', 'stopSupervisor', 'reportCapacity', 'holdAccount', 'selectedAccount', 'preserveWork', 'endEscalation', 'markEscalation', 'relaunchEscalation', 'containment'] },
     resume: { file: 'cycle-resume.ts', calls: ['promptSession', 'closeSession', 'stopSupervisor', 'recordSession', 'preserveWork', 'reportCapacity', 'containment', 'controlPlaneClock', 'settleContainment'] },
     reclaim: { file: 'cycle-reclaim.ts', calls: ['panes', 'closeSession', 'reclaim', 'herdr', 'reclaimResources', 'containment', 'controlPlaneClock', 'settleContainment', 'preserveWork', 'reportCapacity'] },
     triage: { file: 'cycle-triage.ts', calls: ['recordTriage', 'withdrawTriage'] },
+    master: { file: 'cycle-master.ts', calls: ['promptSession', 'herdr', 'sessionOutput', 'endRegistrySession', 'holdAccount', 'closeSession'] },
   };
   for (const [step, { file, calls }] of Object.entries(steps)) {
     const source = readFileSync(`${root}src/daemon/${file}`, 'utf8');
@@ -711,4 +712,59 @@ test('unit:step-calls-applied-once — the step-level helpers: a carried read an
   assert.equal(fresh.calls.length, 0, 'nothing is re-sent');
   assert.equal(restarted.actions['owed:handle:GY-14:1'].state, 'done');
   assert.match(restarted.actions['owed:handle:GY-14:1'].detail, /^Recording GY-14's handle was in flight when the loop last stopped: whether it landed is unknown, and a best-effort record is not sent again/);
+});
+
+// --- the review's findings on b859a10f, each pinned (GY-1774 rework) -----------------------------------------------
+
+test('unit:step-calls-bounded — dispatch: a split or research record carried past its bound holds its item, is recorded carried with no failed action, and the next cycle\'s record joins the call and retires the row', async () => {
+  const { guardCarried, settleCarriedWrites } = await import('../src/daemon/carried-writes.js');
+  const sb = await helper();
+  const slow = hanging(), work = quiet('GY-9');
+  const cfg = config(), state = emptyDaemonState(cfg);
+  const make = () => ({ config: cfg, state, now: () => clock, performed: [], effects: effects([work], { recordResearch: slow.call as DaemonEffects['recordResearch'] }), isolate: async (_k: unknown, _i: unknown, _n: unknown, body: () => Promise<unknown>) => body() }) as unknown as Parameters<Helper['withinStepBudget']>[0];
+  const pass = () => sb.withinStepBudget(make(), 'dispatch', ['recordResearch'], async bounded => {
+    const guarded = guardCarried(bounded.effects.recordResearch!);
+    await guarded.write(work, { event: 'started' } as never).catch(() => {});
+    await settleCarriedWrites(bounded, 'research', [work], guarded.carried);
+    return guarded.carried;
+  });
+  assert.ok((await pass()).has(work.id), 'the carried record is remembered by item, to hold it');
+  assert.ok(sb.carriedRow(state.actions[`carried:dispatch:research:${work.id}`]), 'recorded carried on the item\'s row');
+  assert.deepEqual(faults(state), []);
+  assert.ok((await pass()).has(work.id));
+  assert.equal(slow.calls.length, 1, 'the retry joined the record in flight');
+  slow.answer(undefined);
+  await settle();
+  assert.equal((await pass()).size, 0, 'the answer is consumed by the retry');
+  assert.equal(slow.calls.length, 1, 'never sent twice');
+  assert.equal(state.actions[`carried:dispatch:research:${work.id}`]?.state, 'done', 'the row is retired');
+  const dispatch = readFileSync(`${root}src/daemon/cycle-dispatch.ts`, 'utf8');
+  assert.match(dispatch, /record: guarded\.write/);
+});
+
+test('unit:step-calls-bounded — master: a Herdr reading that does not answer returns the step, is carried with no fault and read again next cycle, joining it', async () => {
+  const sb = await helper();
+  const reading = hanging<{ agents: HerdrAgent[]; available: boolean }>();
+  const { masterSessionStep } = await import('../src/daemon/cycle-master.js');
+  const cfg = config(), state = emptyDaemonState(cfg);
+  const fx = effects([], { herdr: reading.call as DaemonEffects['herdr'], masterSession: { launch: async () => { throw new Error('a launch is not reached while Herdr is unobserved'); } } } as unknown as Partial<DaemonEffects>);
+  const step = (at: number) => returns(masterSessionStep({ config: cfg, state, effects: fx, now: () => at, clock: at, snapshot: { work: [], now: iso(0), jobs: [] }, performed: [], agents: [], launcher: { busy: () => false, keys: () => [] },
+    isolate: async (_k: unknown, _i: unknown, _n: unknown, body: () => Promise<unknown>) => body() } as unknown as Parameters<typeof masterSessionStep>[0]));
+  await step(clock);
+  assert.ok(sb.carriedRow(state.actions['carried:master:herdr']), `carried on the step's row: ${JSON.stringify(Object.keys(state.actions))}`);
+  assert.deepEqual(faults(state), []);
+  await step(clock + 60_000);
+  assert.equal(reading.calls.length, 1, 'joined, one reading');
+  const source = readFileSync(`${root}src/daemon/cycle-master.ts`, 'utf8');
+  assert.doesNotMatch(source, /await Promise\.resolve\(effects\.herdr/, 'no unbounded Herdr read remains in the step');
+});
+
+test('unit:step-calls-applied-once — master: a wake for other subjects is another call, never the carried earlier wake\'s answer; a heartbeat\'s quiet minutes do not make it another', async () => {
+  const { wakeKey } = await import('../src/daemon/cycle-master.js');
+  const { masterWakeText } = await import('../src/master/master-session.js');
+  const agent = { name: 'graphyard-master', pane_id: 'p1' };
+  const key = (text: string) => wakeKey('promptSession', [agent, text]);
+  assert.notEqual(key(masterWakeText('cli', ['GY-1'], false, 0)), key(masterWakeText('cli', ['GY-2'], false, 0)));
+  assert.equal(key(masterWakeText('cli', [], true, 12)), key(masterWakeText('cli', [], true, 13)));
+  assert.equal(wakeKey('herdr', []), null);
 });
