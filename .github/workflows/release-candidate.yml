@@ -39,6 +39,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+    environment: uat
     outputs:
       id: ${{ steps.pin.outputs.id }}
       sha: ${{ steps.pin.outputs.sha }}

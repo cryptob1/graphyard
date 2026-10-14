@@ -134,6 +134,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+    environment: uat
     outputs:
       id: \${{ steps.cut.outputs.id }}
       sha: \${{ steps.cut.outputs.sha }}
