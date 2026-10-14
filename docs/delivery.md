@@ -78,4 +78,4 @@ Only complete listings verify (`POST /api/delivery/notify` hints); `graphyard de
 
 `POST /api/validation/result` binds manifest, signature, measurements; mismatches record `attribution-undermined`, voiding passes (`GET /api/analytics/attribution`).
 
-A loop-owned post-deploy observation item is never dispatched: the loop reads it in deployment verification; a pass closes it `delivered-observation`.
+A loop-owned post-deploy observation item is never dispatched: the loop reads it in deployment verification; a pass closes it `delivered-observation` (one pass needs every proof passing on one serving release; readings wait while the release observation is in flight; its superseded pull request is recorded `owed` in the closure and closed on GitHub only after the closure commits, retried until closed).
