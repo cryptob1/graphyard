@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { admin, demand, type Principal } from './model.js';
 import { flakiness, type RunIdentity, type ScenarioRun } from './model/test-cases.js';
 import { testSummary, type CaseSummary } from './test-runs.js';
-import { caseRunner } from './e2e/case.js';
+import { caseDirectory, caseRunner, caseSchema, scenarioDefinition, type E2eCase } from './e2e/case.js';
 import type { Store } from './store.js';
 
 /**
@@ -56,8 +56,37 @@ export function capacityLimitRedispatchRevision(createdAt = '1970-01-01T00:00:00
   return { ...definition, revision: 1, hash: createHash('sha256').update(JSON.stringify(definition)).digest('hex'), createdAt, createdBy };
 }
 
-/** Every scenario revision this release ships in code (GY-1708). */
-export const shippedScenarioRevisions = (): Scenario[] => [capacityLimitRedispatchRevision()];
+/**
+ * GY-1800: the fixture project's declared application cases. GOAL-1's required uat cases
+ * (candidate-batches-five, candidate-gates-promotion, preview-serves-change, previews-for-declared-apps,
+ * production-exact-verification) create work whose criteria cite `e2e:fixture-static-home` and
+ * `e2e:fixture-compose-app`, and create refuses a proof naming a scenario the registry lacks, so
+ * every candidate failed at its first create until revision 1 of each shipped here. They target
+ * `any`: each runs against a change's preview of the fixture site or app, never UAT itself. The
+ * matching files under `e2e/cases/` stay the source e2e sync revises later.
+ */
+export const fixtureStaticHomeScenario = 'fixture-static-home';
+export const fixtureComposeAppScenario = 'fixture-compose-app';
+const fixtureCase = (id: string, what: string, title: string, description: string, heading: string): E2eCase => caseSchema.parse({
+  id, title, description, tags: ['fixture', 'preview'], target: 'any', required: false,
+  steps: [{ kind: 'browser', name: `open the ${what}'s preview`, action: 'open', path: '/' }, { kind: 'browser', action: 'expectText', text: heading, exact: false }],
+});
+/** The fixture cases exactly as their files under `e2e/cases/` define them. */
+export const fixtureCases = (): E2eCase[] => [
+  fixtureCase(fixtureStaticHomeScenario, 'static site', "The fixture static site's home shows the change",
+    "The declared static site of the fixture project, served in a change's local preview: its home page shows the site, and the change on it.", 'Fixture static site'),
+  fixtureCase(fixtureComposeAppScenario, 'compose app', "The fixture compose app's page shows the change",
+    "The declared Compose-backed application of the fixture project, served in a change's local preview against its own database: its page shows the running app, and the change on it.", 'Fixture compose app'),
+];
+
+/** Revision 1 of a case shipped in code: exactly the revision `e2e sync` registers from its file under `e2e/cases/`. */
+export function shippedCaseRevision(definition: E2eCase, createdAt = '1970-01-01T00:00:00.000Z', createdBy = 'graphyard'): Scenario {
+  const scenario = scenarioDefinition({ file: `${caseDirectory}/${definition.id}.json`, definition });
+  return { ...scenario, revision: 1, hash: createHash('sha256').update(JSON.stringify(scenario)).digest('hex'), createdAt, createdBy };
+}
+
+/** Every scenario revision this release ships in code (GY-1708, GY-1800). */
+export const shippedScenarioRevisions = (): Scenario[] => [capacityLimitRedispatchRevision(), ...fixtureCases().map(definition => shippedCaseRevision(definition))];
 
 /** The shipped revision for `id`, or undefined when this release does not ship one. */
 export const shippedScenario = (id: string): Scenario | undefined => shippedScenarioRevisions().find(entry => entry.id === id);

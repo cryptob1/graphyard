@@ -102,6 +102,32 @@ test('unit:e2e-case-format — a case is a JSON file under e2e/cases/ with id, t
   await assert.rejects(loadCases(dir), /e2e\/cases\/bad\.json: tags\.0: a tag is lower-case/);
 });
 
+test('unit:e2e-case-proofs-resolve-on-fresh-registry — every e2e: proof a case under e2e/cases/ cites names a scenario src/scenarios.ts ships, whose case file of that id defines the same case, so create never refuses it on a fresh registry', async () => {
+  // GY-1800: imported here so a tree without the fixture revisions fails this case, not the file.
+  const { fixtureCases, shippedScenarioRevisions } = await import('../src/scenarios.js');
+  const shipped = await loadCases(root);
+  // Only a revision shipped in code exists on a fresh registry before the required cases run: a case
+  // file is registered by `graphyard e2e sync`, which no release candidate's uat job runs first, so a
+  // proof whose scenario only a case file defines still makes create answer 409 there.
+  const defined = new Set(shippedScenarioRevisions().map(scenario => scenario.id));
+  const caseFiles = new Set(shipped.map(entry => entry.definition.id));
+  const proofs = (value: unknown): string[] => typeof value === 'string' ? (value.startsWith('e2e:') ? [value] : [])
+    : Array.isArray(value) ? value.flatMap(proofs) : value && typeof value === 'object' ? Object.values(value).flatMap(proofs) : [];
+  const cited = new Map<string, string[]>();
+  for (const entry of shipped) for (const proof of new Set(proofs(entry.definition.steps))) cited.set(proof, [...(cited.get(proof) ?? []), entry.file]);
+  assert.ok((cited.get('e2e:fixture-static-home')?.length ?? 0) >= 5, "GOAL-1's required cases cite e2e:fixture-static-home");
+  const unresolved = [...cited].filter(([proof]) => !defined.has(proof.slice('e2e:'.length)))
+    .map(([proof, files]) => `${proof} (cited by ${files.join(', ')}${caseFiles.has(proof.slice('e2e:'.length)) ? '; e2e/cases/ defines it, but only e2e sync registers a case file' : ''})`);
+  assert.deepEqual(unresolved, [], 'a proof naming a scenario src/scenarios.ts does not ship makes create answer 409 on a fresh registry (GY-1800)');
+  // A scenario shipped in code from a case definition is exactly the case file of that id, so sync revises it from the file later.
+  assert.ok(fixtureCases, 'src/scenarios.ts ships the fixture cases');
+  for (const definition of fixtureCases()) {
+    const entry = shipped.find(candidate => candidate.definition.id === definition.id);
+    assert.ok(entry, `e2e/cases/${definition.id}.json ships beside its revision`);
+    assert.deepEqual(scenarioDefinition(entry), scenarioDefinition({ file: entry.file, definition }));
+  }
+});
+
 test('unit:e2e-case-sync-revisions — e2e sync registers each case as a scenario revision; editing a case adds a new immutable revision and e2e:ID proofs keep their pinned revision', async () => {
   const dir = await repository({ 'sync-a.json': http200('sync-a'), 'sync-b.json': http200('sync-b', { tags: ['api', 'board'] }) });
   const cases = await loadCases(dir);

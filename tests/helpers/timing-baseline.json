@@ -362,6 +362,7 @@
     "tests/doctor-allowlist-prose.test.ts": 2241,
     "tests/doctor-setup-from-zero.test.ts": 2600,
     "tests/drained-fleet-dispatch.test.ts": 2423,
+    "tests/e2e-case-proofs-resolve-on-fresh-registry.test.ts": 3000,
     "tests/e2e-cases.test.ts": 6500,
     "tests/ended-attempt-fence.test.ts": 1929,
     "tests/ended-attempt-frees-slot.test.ts": 1221,
