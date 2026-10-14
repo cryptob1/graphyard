@@ -118,7 +118,7 @@ export async function controlPlaneMerger(cycle: Pick<Cycle, 'effects' | 'state'>
 }
 
 /** Step 2: decide the open scope requests, and measure the decision budget over what is still waiting. */
-export const scopeStep = (cycle: Cycle) => withinStepBudget(cycle, 'scope', ['decideScope', 'widenScope', 'reviewFindings', 'basePaths', 'baseText', 'baseMentions', 'baseSuccessions', 'repositoryFiles', 'decisions'], scopeStepWithin); // GY-1774: every call the step makes — the decision, the finding-grounded widening and the reads that ground it, the tree read, the held-ask history — is bounded
+export const scopeStep = (cycle: Cycle) => withinStepBudget(cycle, 'scope', ['decideScope', 'widenScope', 'reviewFindings', 'basePaths', 'baseText', 'baseMentions', 'baseSuccessions', 'repositoryFiles', 'decisions', 'mergeWriter'], scopeStepWithin); // GY-1774: every call the step makes — the decision, the finding-grounded widening and the reads that ground it, the tree read, the held-ask history, the merge-mode read — is bounded
 async function scopeStepWithin(cycle: Cycle) {
   const { state, effects, now, clock, performed, isolate, open } = cycle;
   if (await controlPlaneMerger(cycle)) return { settled: new Map<string, Work>(), budget: scopeBudget([], state.scope, clock) };
@@ -365,7 +365,7 @@ const baseSuccessors = (effects: Cycle['effects'], item: Work) => effects.baseSu
  * audited additive requirements revision naming each successor's ground. Nothing is removed, and an
  * item whose successors are all planned already is left alone, so a standing re-plan never churns.
  */
-export const successorStep = (cycle: Cycle, settled: ReadonlyMap<string, Work> = new Map()) => withinStepBudget(cycle, 'scope', ['baseSuccessions', 'replan'], bounded => successorStepWithin(bounded, settled)); // GY-1774: the succession read and the re-plan are bounded
+export const successorStep = (cycle: Cycle, settled: ReadonlyMap<string, Work> = new Map()) => withinStepBudget(cycle, 'scope', ['baseSuccessions', 'replan', 'mergeWriter'], bounded => successorStepWithin(bounded, settled)); // GY-1774: the succession read and the re-plan are bounded
 async function successorStepWithin(cycle: Cycle, settled: ReadonlyMap<string, Work>) {
   const { state, effects, now, performed, isolate, open } = cycle;
   if (!effects.baseSuccessions || !effects.replan || await controlPlaneMerger(cycle)) return;

@@ -314,7 +314,7 @@ test('unit:step-calls-bounded — every named step runs under the shared bound w
     blockers: { file: 'cycle-blockers.ts', calls: ['approver', 'closeSession', 'deferWindow', 'probeBlocker', 'decisions', 'approverLaunches', 'recordBlockerProbe', 'recordSession'] },
     dispatch: { file: 'cycle-dispatch.ts', calls: ['decide', 'approver', 'agents', 'roleHealth', 'escalationSessions', 'reportCapacity', 'planeHealth', 'hostMemory', 'blockDispatch', 'decisions', 'recordDecomposition', 'recordResearch'] },
     'review-cap': { file: 'cycle-review-cap.ts', calls: ['withdrawReview', 'wakeObservation', 'decisions'] },
-    scope: { file: 'cycle-scope.ts', calls: ['decideScope', 'widenScope', 'reviewFindings', 'basePaths', 'baseText', 'baseMentions', 'baseSuccessions', 'repositoryFiles', 'decisions'] },
+    scope: { file: 'cycle-scope.ts', calls: ['decideScope', 'widenScope', 'reviewFindings', 'basePaths', 'baseText', 'baseMentions', 'baseSuccessions', 'repositoryFiles', 'decisions', 'mergeWriter'] },
     sessions: { file: 'cycle-sessions.ts', calls: ['closeSession', 'endSession', 'relaunch', 'answerSession', 'promptSession', 'launchedSessions', 'sessionOutput', 'herdr', 'escalationSessions', 'recordSession', 'stopSupervisor', 'reportCapacity', 'holdAccount', 'selectedAccount', 'preserveWork', 'endEscalation', 'markEscalation', 'relaunchEscalation', 'containment'] },
     resume: { file: 'cycle-resume.ts', calls: ['promptSession', 'closeSession', 'stopSupervisor', 'recordSession', 'preserveWork', 'reportCapacity', 'containment', 'controlPlaneClock', 'settleContainment'] },
     reclaim: { file: 'cycle-reclaim.ts', calls: ['panes', 'closeSession', 'reclaim', 'herdr', 'reclaimResources', 'containment', 'controlPlaneClock', 'settleContainment', 'preserveWork', 'reportCapacity'] },
@@ -329,7 +329,7 @@ test('unit:step-calls-bounded — every named step runs under the shared bound w
   assert.match(decisions, /boundedDecisions\(boundedCalls\(await decisionReads\(.*\), cycle\.heldDecisions, now, \(\) => budgetLeft\(\), \{ step: 'approvers', calls: approverCalls \}\)/, 'the approvers step\'s calls are bounded within the decisions step');
   assert.match(decisions, /const approverCalls: readonly \(keyof DaemonEffects\)\[\] = \['approver', 'endRegistrySession', 'resume', 'withdraw', 'closeSession', 'herdr', 'approverLaunches', 'approverLaunch', 'sessionOutput', 'recordSession', 'holdAccount', 'reportCapacity', 'reconcileSessions'\]/);
   // The successor re-plan of the scope step runs under the same bound with its own calls; the approvers' isolation is carried-aware like every bounded step's.
-  assert.match(readFileSync(`${root}src/daemon/cycle-scope.ts`, 'utf8'), /withinStepBudget\(cycle, 'scope', \['baseSuccessions', 'replan'\], bounded => successorStepWithin\(bounded, settled\)\)/);
+  assert.match(readFileSync(`${root}src/daemon/cycle-scope.ts`, 'utf8'), /withinStepBudget\(cycle, 'scope', \['baseSuccessions', 'replan', 'mergeWriter'\], bounded => successorStepWithin\(bounded, settled\)\)/);
   assert.match(readFileSync(`${root}src/daemon/cycle-approvers.ts`, 'utf8'), /isolate = carriedIsolate\(carried, 'approvers'\)/);
   // The preservation an ended attempt makes (sessions, resume, reclaim) carries like any other call: no failed preserve, no fault.
   assert.match(readFileSync(`${root}src/daemon/preserve.ts`, 'utf8'), /if \(stepCallCarried\(error\)\) \{ await recordCarried\(/);
@@ -767,4 +767,38 @@ test('unit:step-calls-applied-once — master: a wake for other subjects is anot
   assert.notEqual(key(masterWakeText('cli', ['GY-1'], false, 0)), key(masterWakeText('cli', ['GY-2'], false, 0)));
   assert.equal(key(masterWakeText('cli', [], true, 12)), key(masterWakeText('cli', [], true, 13)));
   assert.equal(wakeKey('herdr', []), null);
+});
+
+test('unit:step-calls-bounded — an effect object named in the bound (the merge writer, the acceptance role) is bounded method by method; a finished handle record waits for the running one of an item whose revision moved; a phase\'s nested effects wait at its gate', async () => {
+  const { boundedCalls, boundedPhase, stepCallCarried } = await helper();
+  const kept = {}, slow = new Promise<string>(() => {}), now = () => clock;
+  let merges = 0;
+  const effects = { stepCallBoundMs: 30, mergeWriter: { merger: () => { merges += 1; return slow; } }, recordSession: async () => undefined } as unknown as DaemonEffects;
+  const bounded = boundedCalls(effects, kept, now, () => 1000, { step: 'scope', calls: ['mergeWriter', 'recordSession'] });
+  // The merge-mode read of the scope step: a slow answer is carried, never held; the retry joins it.
+  await assert.rejects(() => bounded.mergeWriter!.merger(), (error: unknown) => stepCallCarried(error));
+  await assert.rejects(() => bounded.mergeWriter!.merger(), (error: unknown) => stepCallCarried(error));
+  assert.equal(merges, 1);
+  // A handle record's key names the item, not its revision.
+  const order: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const recording = { stepCallBoundMs: 20, recordSession: async (_work: unknown, handle: { state: string }) => { order.push(`start:${handle.state}`); if (handle.state === 'running') await gate; order.push(`end:${handle.state}`); } } as unknown as DaemonEffects;
+  const records = boundedCalls(recording, {}, now, () => 1000, { step: 'resume', calls: ['recordSession'] });
+  const running = { id: 'w1', key: 'GY-1', epoch: 1, policyRevision: 1 }, advanced = { ...running, policyRevision: 2 };
+  await assert.rejects(() => records.recordSession!(running as never, { id: 'h', state: 'running' } as never), (error: unknown) => stepCallCarried(error));
+  await assert.rejects(() => records.recordSession!(advanced as never, { id: 'h', state: 'finished' } as never), (error: unknown) => stepCallCarried(error));
+  assert.deepEqual(order, ['start:running']);
+  release(); await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(order, ['start:running', 'end:running', 'start:finished', 'end:finished']);
+  // A phase's acceptance goals() answered after its step returned starts no call behind it.
+  let goals = 0;
+  const phaseCycle = { state: { actions: {}, cycle: 1 }, now, performed: [], effects: { persist: async () => undefined, acceptance: { goals: async () => { goals += 1; } } } } as unknown as Cycle;
+  let later!: () => Promise<void>, resumeFirst!: () => void;
+  const first = new Promise<void>(resolve => { resumeFirst = resolve; });
+  let left: number | null = 1000;
+  await boundedPhase(phaseCycle, 'triage', 'acceptance', () => left, async phase => { await first; later = async () => { await phase.effects.acceptance!.goals!(); }; await later(); });
+  left = null;
+  resumeFirst(); await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(goals, 0);
 });

@@ -87,14 +87,15 @@ export function callIdentity(arg: unknown): unknown {
 /** The arguments that name a call's identity: free text — a reason, a prompt, a message, an outcome — is left out, so a re-worded retry still joins its call; a call that takes none, or only this cycle's reading of the world (an inventory, a snapshot), is one call however the reading moved. */
 const identityArguments: Partial<Record<keyof DaemonEffects, number[]>> = {
   promptSession: [0], withdraw: [0, 1], widenScope: [0, 1, 2], withdrawReview: [0, 1], endRegistrySession: [0], endSession: [0], decide: [0, 1, 3], replan: [0, 1], withdrawTriage: [0, 1],
-  blockDispatch: [0], holdAccount: [0], endEscalation: [0], markEscalation: [0], relaunchEscalation: [0], stopSupervisor: [0, 1], recordSession: [0], reportCapacity: [0], settleContainment: [0], containment: [0],
+  blockDispatch: [0], holdAccount: [0], endEscalation: [0], markEscalation: [0], relaunchEscalation: [0], stopSupervisor: [0, 1], recordSession: [], reportCapacity: [0], settleContainment: [0], containment: [0],
   reclaim: [], reclaimResources: [], panes: [], herdr: [], roleHealth: [], escalationSessions: [], launchedSessions: [], approverLaunches: [], planeHealth: [], hostMemory: [], repositoryFiles: [], reconcileSessions: [],
 };
 /** What a call's key carries beside its arguments: a scope decision is keyed by the ask it decides (the item's `scopeRequest`), a session record by the handle and state it writes, a capacity report by the event it reports, a settlement by the fence's epoch. */
 const keyedBeside = (call: string, args: unknown[]): unknown[] => {
   const second = args[1] as Record<string, unknown> | undefined;
   if (call === 'decideScope') return [callIdentity((args[0] as Work | undefined)?.scopeRequest ?? null)];
-  if (call === 'recordSession') return [second?.id ?? null, second?.state ?? null];
+  // A handle record is keyed by the item's id, never its revision or head: the item advancing between the running and the finished record must not part them.
+  if (call === 'recordSession') return [(args[0] as Work | undefined)?.id ?? null, second?.id ?? null, second?.state ?? null];
   if (call === 'reportCapacity') return [second?.event ?? null, second?.role ?? null, second?.epoch ?? null, second?.requestId ?? null, second?.cause ?? null];
   if (call === 'settleContainment') return [second?.epoch ?? null];
   // A hold is keyed by the exhaustion it records (never when it was seen), a mark by the state it writes, an end by the resolution it gives: a different one never joins, nor consumes the answer of, another.
@@ -134,10 +135,7 @@ const cycleOf = (kept: object) => typeof (kept as { cycle?: unknown }).cycle ===
 export function boundedCalls(effects: DaemonEffects, kept: object, clockMs: () => number, budgetLeft: () => number | null, options: BoundOptions): DaemonEffects {
   const pending = inFlight.get(kept) ?? inFlight.set(kept, new Map()).get(kept)!;
   const bounded = new Set<PropertyKey>(options.calls);
-  const proxy: DaemonEffects = new Proxy(effects, { get: (target, property, receiver) => {
-    const fn = Reflect.get(target, property, receiver);
-    if (!bounded.has(property) || typeof fn !== 'function') return fn;
-    const call = String(property);
+  const wrap = (call: string, target: object, fn: (...args: unknown[]) => unknown) => {
     return (...args: unknown[]) => {
       const left = budgetLeft();
       if (left === null) return fn.call(target, ...args);
@@ -176,6 +174,14 @@ export function boundedCalls(effects: DaemonEffects, kept: object, clockMs: () =
       // An answer within the bound is this call's own, applied now: nothing is kept for a retry.
       return Promise.race([flight.promise, expired]).finally(() => { stopped = true; clearTimeout(timer); if (!carried && pending.get(key) === flight) pending.delete(key); });
     };
+  };
+  // An effect object named in `calls` (the merge writer's reads, the acceptance role, the planner) is bounded method by method as `object.method`, so its external calls wait under the same bound.
+  const proxy: DaemonEffects = new Proxy(effects, { get: (target, property, receiver) => {
+    const fn = Reflect.get(target, property, receiver);
+    if (!bounded.has(property)) return fn;
+    if (typeof fn === 'function') return wrap(String(property), target, fn);
+    if (!fn || typeof fn !== 'object') return fn;
+    return new Proxy(fn, { get: (inner, method) => { const member = Reflect.get(inner, method); return typeof member === 'function' ? wrap(`${String(property)}.${String(method)}`, inner, member) : member; } });
   } });
   beneath.set(proxy, effects);
   return proxy;
@@ -300,10 +306,15 @@ export async function withinStepBudget<T>(cycle: Cycle, step: BoundedStep, calls
 /** The nested phases still running when their step's budget passed, per kept state: one phase runs once at a time, and a later cycle joins it instead of starting it again. */
 const phases = new WeakMap<object, Map<string, { promise: Promise<void>; gate: PhaseGate }>>();
 /** The calls a nested phase makes wait at its gate, open only while a cycle's step awaits the phase: a phase answered after its step returned starts no fresh call behind it, and resumes under the next cycle's budget that joins it. */
-interface PhaseGate { open: boolean; waiters: (() => void)[] }
+interface PhaseGate { open: boolean; over: boolean; waiters: (() => void)[] }
+const openGate = (gate: PhaseGate) => { gate.open = true; for (const release of gate.waiters.splice(0)) release(); };
 const gated = (cycle: Cycle, gate: PhaseGate): Cycle => ({ ...cycle, effects: new Proxy(cycle.effects, { get: (target, property, receiver) => {
   const fn = Reflect.get(target, property, receiver);
-  return typeof fn === 'function' && property !== 'persist' ? async (...args: unknown[]) => { while (!gate.open) await new Promise<void>(resolve => gate.waiters.push(resolve)); return fn.apply(target, args); } : fn;
+  const hold = (owner: object, member: (...args: unknown[]) => unknown) => async (...args: unknown[]) => { while (!gate.open) await new Promise<void>(resolve => gate.waiters.push(resolve)); return member.apply(owner, args); };
+  if (typeof fn === 'function') return property !== 'persist' ? hold(target, fn) : fn;
+  // The acceptance role's and the planner's effects are objects of calls: each waits at the gate too.
+  if (fn && typeof fn === 'object' && (property === 'acceptance' || property === 'planner')) return new Proxy(fn, { get: (inner, method) => { const member = Reflect.get(inner, method); return typeof member === 'function' ? hold(inner, member) : member; } });
+  return fn;
 } }) });
 /**
  * A nested phase whose calls the effects' bound does not reach (the acceptance role's and the planner's own goals, headless runs and posts)
@@ -320,13 +331,14 @@ export async function boundedPhase(cycle: Cycle, step: BoundedStep, name: string
   }
   if (!entry) {
     sent = true;
-    const gate: PhaseGate = { open: true, waiters: [] };
-    const own: Promise<void> = run(gated(cycle, gate)).finally(() => { if (running.get(key)?.promise === own) running.delete(key); });
+    const gate: PhaseGate = { open: true, over: false, waiters: [] };
+    // A phase that has run through holds nothing: a call it detached (a draft still running) goes on, behind no gate.
+    const own: Promise<void> = run(gated(cycle, gate)).finally(() => { gate.over = true; openGate(gate); if (running.get(key)?.promise === own) running.delete(key); });
     own.catch(() => {});
     running.set(key, entry = { promise: own, gate });
   }
   const { gate } = entry, flight = entry.promise;
-  gate.open = true; for (const release of gate.waiters.splice(0)) release();
+  openGate(gate);
   const left = budgetLeft(), boundMs = stepCallBoundMs, capped = left === null ? boundMs : Math.max(0, Math.min(boundMs, left)), startedAt = cycle.now(), wall = Date.now();
   let timer: ReturnType<typeof setTimeout> | undefined, stopped = false, carried = false;
   const expired = new Promise<never>((_, reject) => {
@@ -342,6 +354,6 @@ export async function boundedPhase(cycle: Cycle, step: BoundedStep, name: string
     if (!carried) throw error;
     await recordCarried(cycle, `carried:${key}`, { kind: 'decision', work: null }, error, `The ${step} step's ${name} phase`);
     return;
-  } finally { stopped = true; clearTimeout(timer); gate.open = false; }
+  } finally { stopped = true; clearTimeout(timer); if (!gate.over) gate.open = false; }
   if (carriedRow(previous)) await retireCarried(cycle, `carried:${key}`, previous, `The ${step} step's ${name} phase, carried on cycle ${previous.cycle}, ran through on its retry`);
 }

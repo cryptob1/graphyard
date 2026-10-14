@@ -271,7 +271,7 @@ async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLi
     const waited = [state.actions[keys.blocker], state.actions[keys.scope]].filter((action): action is DaemonAction => action?.state === 'waiting');
     const decision = item.scopeDecision, decidedAt = decision?.epoch === epoch ? Date.parse(decision.at) : NaN;
     const unmarked = !state.actions[keys.scope] && Number.isFinite(decidedAt) && now() - decidedAt <= idleLeaseMs
-      && !Object.entries(state.actions).some(([key, action]) => key.startsWith(`resume:prompt:${item.id}:${epoch}:`) && action.state !== 'failed' && Date.parse(action.at) >= decidedAt);
+      && !Object.entries(state.actions).some(([key, action]) => key.startsWith(`resume:prompt:${item.id}:${epoch}:`) && action.state !== 'failed' && !carriedRow(action) && Date.parse(action.at) >= decidedAt);
     if (waited.length || unmarked) {
       // The recorded pane is listed again: an absence a reclaim bound was started on no longer
       // stands, and a later one starts the bound afresh (GY-953). The name's holder listing while
@@ -283,7 +283,8 @@ async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLi
         await entry(clearedBlockerKey(item, epoch), 'done', blocker ? `"${blocker.slice(0, 300)}"` : 'its earlier blocker');
       const changed = [state.actions[keys.blocker] ? `its blocker${blocker ? ` ("${blocker.slice(0, 300)}")` : ''} was cleared` : null, state.actions[keys.scope] || unmarked ? scopeChange(item) : null].filter(Boolean).join(', and ');
       const promptKey = `resume:prompt:${item.id}:${epoch}:${waited[0]?.at ?? decision!.at}`, previous = state.actions[promptKey];
-      if (previous && previous.state !== 'failed') { await drop(keys.blocker, keys.scope); return; }
+      // A re-prompt carried past its bound is owed: the waits stand until its retry completes (below).
+      if (previous && previous.state !== 'failed' && !carriedRow(previous)) { await drop(keys.blocker, keys.scope); return; }
       // No session to tell (1d settles a dead one), or one on a runtime prompt (1b answers that first).
       if (!agent || !pane || status === 'blocked') {
         // A recorded pane a live runtime no longer lists cannot be told (GY-940): 1d reads the
