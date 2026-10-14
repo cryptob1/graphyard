@@ -415,8 +415,21 @@ async function firstParentCommitsAsync(git: AsyncGit, tip: string, since: string
 export const syncLedger = (git: Git, base: string) => git(['fetch', '--quiet', '--force', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`, '+refs/tags/*:refs/tags/*']);
 export const syncLedgerAsync = (git: AsyncGit, base: string) => git(['fetch', '--quiet', '--force', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`, '+refs/tags/*:refs/tags/*']);
 
+/**
+ * GY-1802: the pending outcomes are resolved once the capped candidate SHA is chosen, from that
+ * SHA: `undelivered` names the items merged after it, still queued, whatever the plane says.
+ */
+export interface PendingCut { sha: string; undelivered: ReadonlySet<string> }
+export type PendingResolver = (cut: PendingCut) => readonly string[];
+export type AsyncPendingResolver = (cut: PendingCut) => Promise<readonly string[]>;
+const pendingCut = (candidate: ReleaseCandidate, commits: readonly CommitSummary[]): PendingCut => ({
+  sha: candidate.sha,
+  undelivered: new Set(itemsFromCommits(commits.slice(0, Math.max(0, commits.findIndex(commit => commit.sha === candidate.sha)))).map(item => item.key)),
+});
+const markPending = (candidate: ReleaseCandidate, pending: readonly string[]) => { if (pending.length) candidate.pendingOutcomes = [...new Set(pending)].sort(); };
+
 /** Cut a candidate from the remote base branch's tip, as recorded in the remote's tags. */
-export function cut(git: Git, options: { base: string; trigger: CutTrigger; now: Date; push: boolean; maxPrs?: number; pendingOutcomes?: readonly string[] }) {
+export function cut(git: Git, options: { base: string; trigger: CutTrigger; now: Date; push: boolean; maxPrs?: number; pendingOutcomes?: PendingResolver }) {
   syncLedger(git, options.base);
   const tip = git(['rev-parse', `refs/remotes/origin/${options.base}`]).trim();
   const ledger = readLedger(git);
@@ -425,12 +438,13 @@ export function cut(git: Git, options: { base: string; trigger: CutTrigger; now:
   let commits = firstParentCommits(git, tip, promoted?.sha ?? null);
   // Never promoted, the read is bounded to the newest 200: a latest candidate older than that is read up to, so the cap counts from it rather than from the window's edge.
   if (!promoted && latest && !commits.some(commit => commit.sha === latest.sha)) commits = [...firstParentCommits(git, tip, latest.sha), ...firstParentCommits(git, latest.sha, null)];
-  const result = cutCandidate({ tip, now: options.now, trigger: options.trigger, latest, promoted, maxPrs, commits, pendingOutcomes: options.pendingOutcomes });
+  const result = cutCandidate({ tip, now: options.now, trigger: options.trigger, latest, promoted, maxPrs, commits });
+  if (result.cut && options.pendingOutcomes) markPending(result.candidate, options.pendingOutcomes(pendingCut(result.candidate, commits)));
   if (result.cut) writeRecord(git, `${candidateTagPrefix}${result.candidate.id}`, result.candidate.sha, result.candidate, options.push);
   return result;
 }
 /** Async cut for the loop's local ports (GY-1526): same ledger rules as `cut`, through AsyncGit. */
-export async function cutAsync(git: AsyncGit, options: { base: string; trigger: CutTrigger; now: Date; push: boolean; maxPrs?: number; pendingOutcomes?: readonly string[] }) {
+export async function cutAsync(git: AsyncGit, options: { base: string; trigger: CutTrigger; now: Date; push: boolean; maxPrs?: number; pendingOutcomes?: PendingResolver | AsyncPendingResolver }) {
   await syncLedgerAsync(git, options.base);
   const tip = (await git(['rev-parse', `refs/remotes/origin/${options.base}`])).trim();
   const ledger = await readLedgerAsync(git);
@@ -438,7 +452,8 @@ export async function cutAsync(git: AsyncGit, options: { base: string; trigger: 
   const maxPrs = options.maxPrs ?? maxPrsFrom(process.env.GRAPHYARD_RC_MAX_PRS);
   let commits = await firstParentCommitsAsync(git, tip, promoted?.sha ?? null);
   if (!promoted && latest && !commits.some(commit => commit.sha === latest.sha)) commits = [...await firstParentCommitsAsync(git, tip, latest.sha), ...await firstParentCommitsAsync(git, latest.sha, null)];
-  const result = cutCandidate({ tip, now: options.now, trigger: options.trigger, latest, promoted, maxPrs, commits, pendingOutcomes: options.pendingOutcomes });
+  const result = cutCandidate({ tip, now: options.now, trigger: options.trigger, latest, promoted, maxPrs, commits });
+  if (result.cut && options.pendingOutcomes) markPending(result.candidate, await options.pendingOutcomes(pendingCut(result.candidate, commits)));
   if (result.cut) await writeRecordAsync(git, `${candidateTagPrefix}${result.candidate.id}`, result.candidate.sha, result.candidate, options.push);
   return result;
 }

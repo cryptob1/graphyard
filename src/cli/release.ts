@@ -9,7 +9,7 @@ import {
   ledgerStatus, maxPrsFrom, promote, readLedger, readRecords, readServed, recordSoak, syncLedger, unacceptedFlaky, validateAndRecord, writeRecord, type CutTrigger, type FlakyAcceptance, type SoakRecord, type Suite,
 } from '../release-candidate.js';
 import { acceptancesFrom, foldHolds, foldRecord, holdItemsFor, holdTag, holdTagPrefix, releaseHolds, type HoldRecord } from '../release-holds.js';
-import { pendingAtCut } from '../release-pending.js';
+import { pendingFromPlane, readPlane } from '../release-pending.js';
 import { checkRepositoryContract, contractFile, loadContract } from '../e2e/case.js';
 
 const switches = new Set(['no-push', 'api']);
@@ -102,8 +102,12 @@ export const releaseCommands = defineCommands([
         if (trigger !== 'schedule' && trigger !== 'manual') throw new Error('--trigger is schedule or manual');
         const maxPrs = maxPrsFrom(options.one('max-prs') ?? process.env.GRAPHYARD_RC_MAX_PRS);
         // GY-1802: the outcomes whose plan is not delivered yet ride the candidate as pending; a plane that cannot be read names none.
-        const pendingOutcomes = await pendingAtCut({ contract: async () => { try { return git(['show', `origin/${base}:${contractFile}`]); } catch { return null; } },
-          goals: async () => (await api('goals?open=1')).goals, stage: async key => (await api(`work/${encodeURIComponent(key)}`))?.stage });
+        const plane = await readPlane({ goals: async () => (await api('goals?open=1')).goals, stage: async key => (await api(`work/${encodeURIComponent(key)}`))?.stage });
+        const pendingOutcomes = (at: { sha: string; undelivered: ReadonlySet<string> }) => {
+          let source: string | null = null;
+          try { source = git(['show', `${at.sha}:${contractFile}`]); } catch { source = null; }
+          return pendingFromPlane(plane, source, at);
+        };
         return print(cut(git, { base, trigger, now: new Date(), push, maxPrs, pendingOutcomes }));
       }
       if (id === 'status' || !id) { syncLedger(git, base); return print(ledgerStatus(readLedger(git))); }

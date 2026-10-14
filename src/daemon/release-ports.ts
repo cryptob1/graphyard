@@ -147,7 +147,7 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
       // The cut rule (candidate-cut.ts) alone decides a cut: not due, nothing is tagged or pushed.
       if (!due) return { cut: false, reason: `the cut rule is not due (${settings.everyMerges} merges or ${settings.idleMinutes} idle minutes)` };
       const plane = options.plane;
-      const pendingOutcomes = plane ? await pendingAtCut({ contract: async () => { try { return await gitAsync('show', `${ref}:${contractFile}`); } catch { return null; } }, goals: plane.goals, stage: plane.stage }) : [];
+      const pendingOutcomes = plane ? (cutAt: { sha: string; undelivered: ReadonlySet<string> }) => pendingAtCut({ contract: async sha => { try { return await gitAsync('show', `${sha}:${contractFile}`); } catch { return null; } }, goals: plane.goals, stage: plane.stage }, cutAt) : undefined;
       const result = await cutAsync(git, { base, trigger: 'manual', now: new Date(now()), push: true, maxPrs: settings.everyMerges, pendingOutcomes });
       return result.cut ? { cut: true, candidate: toCandidate(result.candidate) } : { cut: false, reason: result.reason };
     },

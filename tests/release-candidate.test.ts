@@ -481,11 +481,11 @@ test('unit:candidate-records-pending-outcomes-at-cut — the candidate records, 
   // Cut in each state. The pending cut records the outcome on the candidate; the delivered cut records none, and its case blocks like any required case.
   const repo = await repository();
   repo.merge('GY-901', 901);
-  const owed = cut(repo.git, { base: 'main', trigger: 'manual', now: new Date('2026-10-03T12:00:00Z'), push: true, pendingOutcomes: pendingOutcomeIds(contract, goal, () => 'delivering') }) as any;
+  const owed = cut(repo.git, { base: 'main', trigger: 'manual', now: new Date('2026-10-03T12:00:00Z'), push: true, pendingOutcomes: () => pendingOutcomeIds(contract, goal, () => 'delivering') }) as any;
   assert.ok(owed.cut);
   assert.deepEqual(owed.candidate.pendingOutcomes, ['goal-outcome']);
   repo.merge('GY-902', 902);
-  const delivered = cut(repo.git, { base: 'main', trigger: 'manual', now: new Date('2026-10-03T13:00:00Z'), push: true, pendingOutcomes: pendingOutcomeIds(contract, goal, () => 'done') }) as any;
+  const delivered = cut(repo.git, { base: 'main', trigger: 'manual', now: new Date('2026-10-03T13:00:00Z'), push: true, pendingOutcomes: () => pendingOutcomeIds(contract, goal, () => 'done') }) as any;
   assert.ok(delivered.cut);
   assert.equal(delivered.candidate.pendingOutcomes, undefined, 'a delivered outcome is recorded as no longer pending');
   // A cut whose caller holds no goal record records none, and such a candidate blocks exactly as one cut before GY-1802.
@@ -1068,14 +1068,17 @@ test('unit:pending-at-cut-reads-the-plane — repeated cuts read the plane\'s go
     plan: { note: 'n', items: [{ ref: 'routes', title: 'Routes', description: '', outcomes: ['goal-outcome'], cases: ['goal-case'], criteria: [], plannedFiles: ['src/x.ts'], dependsOn: [] }] },
     items: [{ ref: 'routes', key: 'GY-900', id: 'w-1' }] };
   let stage = 'build';
-  const read = (source: string | null = contract, goals: any[] = [merged]) => pendingAtCut({ contract: async () => source, goals: async () => goals, stage: async () => stage });
+  const at = { sha: 'b'.repeat(40), undelivered: new Set<string>() };
+  const read = (source: string | null = contract, goals: any[] = [merged], cutAt = at) => pendingAtCut({ contract: async () => source, goals: async () => goals, stage: async () => stage }, cutAt);
   assert.deepEqual(await read(), ['goal-outcome'], 'before the serving item is done the outcome is pending');
   assert.deepEqual(await read(), ['goal-outcome'], 'a repeated cut reads the same');
   stage = 'done';
   assert.deepEqual(await read(), [], 'after the serving item is done the next cut records none');
+  assert.deepEqual(await read(contract, [merged], { ...at, undelivered: new Set(['GY-900']) }), ['goal-outcome'], 'a serving item merged after the capped candidate is still undelivered there');
+  assert.deepEqual(await read(contract, [{ ...merged, plan: null, items: [] }]), ['goal-outcome'], 'a merged goal with no approved plan yet leaves its outcome pending');
   assert.deepEqual(await read(contract, []), [], 'a delivered goal is no longer listed: nothing pends');
   assert.deepEqual(await read(null), [], 'no contract names none');
-  assert.deepEqual(await pendingAtCut({ contract: async () => contract, goals: async () => { throw new Error('plane down'); }, stage: async () => stage }), [], 'an unreadable plane names none, so the candidate blocks as before');
+  assert.deepEqual(await pendingAtCut({ contract: async () => contract, goals: async () => { throw new Error('plane down'); }, stage: async () => stage }, at), [], 'an unreadable plane names none, so the candidate blocks as before');
   // The case both outcomes bind keeps blocking while the plain outcome is delivered; only the goal-only case pends.
   const parsed = JSON.parse(contract);
   assert.deepEqual(contractPendingCases(parsed, ['goal-outcome']), ['goal-case']);

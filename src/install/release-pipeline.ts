@@ -145,6 +145,9 @@ jobs:
       - name: Cut a release candidate from ${base}'s tip, pinned to its exact SHA
         id: cut
         shell: bash
+        env:
+          GRAPHYARD_URL: \${{ vars.GRAPHYARD_URL }}
+          GRAPHYARD_TOKEN: \${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
         run: |
           set -euo pipefail
           ${cli} release cut --base ${base} --trigger "\${{ github.event_name == 'schedule' && 'schedule' || 'manual' }}" | tee cut.json

@@ -4,30 +4,45 @@ import { parseContract, type ReleaseContract } from './e2e/case.js';
 import { pendingOutcomeIds, type GoalDelivery } from './release-candidate.js';
 
 /**
- * The plane's goal record as the cut's pending-outcome check reads it: every merged goal with an
- * approved plan, its protected outcomes, and each plan item's serving outcomes with the work item
+ * The plane's goal record as the cut's pending-outcome check reads it: every merged goal (one
+ * with no approved plan yet has no items, so its outcomes are all pending), its protected outcomes, and each plan item's serving outcomes with the work item
  * created for it (null until the plan is released).
  */
 export function goalDeliveries(goals: readonly Goal[]): GoalDelivery[] {
-  return goals.filter(goal => goal.merged && goal.plan).map(goal => ({
+  return goals.filter(goal => goal.merged).map(goal => ({
     outcomes: goal.protected.outcomes,
     items: (goal.plan?.items ?? []).map(item => ({ outcomes: item.outcomes, key: goal.items?.find(released => released.ref === item.ref)?.key ?? null })),
   }));
 }
 
-/**
- * The outcomes pending at a cut, read where the cut runs with the plane in hand: the contract
- * source at the base tip, the plane's open goals, and the stage of each serving item. Any read that
- * fails names none, so the candidate blocks exactly as before rather than passing on a guess.
- */
-export async function pendingAtCut(input: { contract: () => Promise<string | null>; goals: () => Promise<readonly Goal[]>; stage: (key: string) => Promise<string | undefined> }): Promise<string[]> {
+/** The plane read once before a cut: goal deliveries and the stage of each serving item; null when any read fails. */
+export interface PlaneSnapshot { deliveries: GoalDelivery[]; stages: Map<string, string | undefined> }
+export async function readPlane(input: { goals: () => Promise<readonly Goal[]>; stage: (key: string) => Promise<string | undefined> }): Promise<PlaneSnapshot | null> {
   try {
-    const source = await input.contract();
-    if (!source) return [];
-    const contract: ReleaseContract = parseContract(source);
     const deliveries = goalDeliveries(await input.goals());
     const keys = [...new Set(deliveries.flatMap(goal => goal.items.map(item => item.key)).filter((key): key is string => !!key))];
-    const stages = new Map(await Promise.all(keys.map(async key => [key, await input.stage(key)] as const)));
-    return pendingOutcomeIds(contract, deliveries, key => stages.get(key));
+    return { deliveries, stages: new Map(await Promise.all(keys.map(async key => [key, await input.stage(key)] as const))) };
+  } catch { return null; }
+}
+
+/**
+ * The outcomes pending at a cut, from the plane read beforehand and the contract source at the
+ * candidate's own SHA. An item whose merge lies after the candidate (queued) is still undelivered
+ * there. A plane or contract that cannot be read names none, so the candidate blocks exactly as
+ * before rather than passing on a guess.
+ */
+export function pendingFromPlane(plane: PlaneSnapshot | null, source: string | null, cut: { undelivered: ReadonlySet<string> }): string[] {
+  try {
+    if (!plane || !source) return [];
+    const contract: ReleaseContract = parseContract(source);
+    return pendingOutcomeIds(contract, plane.deliveries, key => cut.undelivered.has(key) ? undefined : plane.stages.get(key));
   } catch { return []; }
+}
+
+/** Async form for the loop's cut: reads the plane, then the contract at the candidate's SHA. */
+export async function pendingAtCut(input: { contract: (sha: string) => Promise<string | null>; goals: () => Promise<readonly Goal[]>; stage: (key: string) => Promise<string | undefined> }, cut: { sha: string; undelivered: ReadonlySet<string> }): Promise<string[]> {
+  const plane = await readPlane(input);
+  let source: string | null = null;
+  try { source = await input.contract(cut.sha); } catch { source = null; }
+  return pendingFromPlane(plane, source, cut);
 }
