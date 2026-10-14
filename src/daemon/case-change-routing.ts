@@ -75,9 +75,10 @@ async function caseChangeStepWithin(cycle: Cycle, budgetLeft: () => number | nul
     performed.push(await record(state, key, { kind: 'decision', work: change.work, principal: null, state: outcome, detail: clip(detail, 1000), attempts: (state.actions[key]?.attempts ?? 0) + (outcome === 'failed' ? 1 : 0), cycle: state.cycle }, now(), effects.persist));
   };
   const changes = await isolate('decision', null, 'the requested case changes', () => effects.caseChanges!());
-  const standing = new Set((changes ?? []).map(change => change.id));
+  if (!changes) return; // the read was carried, not answered: no authoritative list, so every kept verdict waits for the retry
+  const standing = new Set(changes.map(change => change.id));
   for (const id of [...pending.keys()]) if (!standing.has(id)) pending.delete(id); // judged meanwhile (by hand, or already applied): nothing left to post
-  for (const change of changes ?? []) if (budgetLeft() !== 0) await isolate('decision', null, `${change.goal}'s case change ${change.id}`, async () => {
+  for (const change of changes) if (budgetLeft() !== 0) await isolate('decision', null, `${change.goal}'s case change ${change.id}`, async () => {
     const name = `${change.goal}'s case change ${change.id} (${change.cases.join(', ')} for ${change.work})`, result = pending.get(change.id);
     if (result?.judgement) {
       try { await effects.judgeCaseChange!(change, result.judgement); }

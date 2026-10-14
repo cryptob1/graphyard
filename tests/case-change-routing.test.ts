@@ -54,7 +54,7 @@ function harness(respond: (goal: string) => unknown, post?: (change: CaseChangeR
   if (stage) goal = { ...goal, stage };
   const acceptance = { settings: diagnosticianSettings({}), cwd: process.cwd(), runner: async (_role: string, attempt: string) => ({ runner: stubRunner(() => respond(goal.key), prompts, tools, gate), runtime: 'stub', model: attempt }) } as unknown as AcceptanceEffects;
   const state = emptyDaemonState(config), performed: unknown[] = [];
-  let clock = Date.parse('2026-10-14T00:00:00Z');
+  let clock = Date.parse('2026-10-14T00:00:00Z'), carried = false;
   const effects = { acceptance, persist: async () => {}, caseChanges: async () => requestedCaseChanges([goal]),
     judgeCaseChange: async (change: CaseChangeRequest, judgement: CaseChangeJudgement) => {
       if (post) await post(change, judgement);
@@ -63,9 +63,9 @@ function harness(respond: (goal: string) => unknown, post?: (change: CaseChangeR
     } };
   const step = async (advance = 20_000) => {
     clock += advance;
-    await caseChangeStep({ config, state, effects, now: () => clock, clock, snapshot: { work: [] }, performed, isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() } as unknown as Cycle);
+    await caseChangeStep({ config, state, effects, now: () => clock, clock, snapshot: { work: [] }, performed, isolate: async (_k: string, _i: unknown, name: string, body: () => Promise<unknown>) => carried && name.startsWith('the requested case changes') ? undefined : body() } as unknown as Cycle);
   };
-  return { step, prompts, tools, posted, state, get goal() { return goal; }, settle: caseChangesSettled };
+  return { step, carryRead: (value: boolean) => { carried = value; }, prompts, tools, posted, state, get goal() { return goal; }, settle: caseChangesSettled };
 }
 
 test('unit:case-change-routed-to-approver — a requested case change is put to an approver run within one cycle and its verdict is applied as case-change-approve or case-change-refuse with the reason recorded', async () => {
@@ -148,4 +148,16 @@ test('unit:case-change-routed-to-approver — a change requested on a delivered 
   assert.equal(requestedCaseChanges([h.goal]).length, 1, 'a delivered goal\'s requested change is listed');
   await h.step(); await h.settle(); await h.step();
   assert.equal(h.goal.caseChanges[0].state, 'approved');
+});
+
+test('unit:case-change-retry-and-status — a read carried past its bound keeps a finished verdict, which is posted when the read answers, with no second approver', async () => {
+  clearCaseChanges();
+  const h = harness(key => ({ goal: key, verdict: 'approve', reason: 'Corrected' }));
+  await h.step(); await h.settle();
+  h.carryRead(true); await h.step(); await h.step();
+  assert.equal(h.posted.length, 0, 'nothing is posted from a read that did not answer');
+  h.carryRead(false); await h.step();
+  assert.equal(h.prompts.length, 1, 'the first verdict was kept, not asked for again');
+  assert.equal(h.goal.caseChanges[0].state, 'approved');
+  assert.equal(h.posted.length, 1);
 });
