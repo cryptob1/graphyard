@@ -18,7 +18,7 @@ Both: `timeoutSeconds` (600). Case `secrets: ["NAME"]` from `~/.config/graphyard
 
 ## Release verdicts
 
-One retry: **passed**; **failed** (both); **flaky** (retry passed at same served SHA; `RUN:attempt-1`, `RUN:attempt-2`); **unrun** (stopped by a failed required case; listed apart; never in a managed repository); **pending** (required case whose outcome no done item serves, `rc/ID` `pendingOutcomes`, plane-read cut: never blocks unless a delivered outcome shares it). Only failed or unaccepted flaky required cases block; optional ones marked on **Tests**.
+One retry: **passed**; **failed** (both); **flaky** (retry passed at same SHA; `RUN:attempt-1`, `RUN:attempt-2`); **unrun** (stopped by a failed required case; listed apart; never in a managed repository); **pending** (required case whose outcome no done item serves, `rc/ID` `pendingOutcomes`, plane-read cut: never blocks unless a delivered outcome shares it; the workflow's token cannot read the plane: it warns, records none). Only failed or unaccepted flaky required cases block; optional ones marked on **Tests**.
 
 Flaky required cases block promotion until `evidence` decision (`{"case":ID,"runId":RUN,"sha":FULL_SHA}` on hold item, another agent approving) accepts; refused unless both attempts recorded at that SHA. `release promote` reads only that run's and SHA's applied decisions, and its workflow's `release promote ID` (`GRAPHYARD_URL`, `GRAPHYARD_TOKEN`) only passing UATs.
 
@@ -26,7 +26,7 @@ Flaky required cases block promotion until `evidence` decision (`{"case":ID,"run
 
 ## Flake ledger
 
-A required check failing then passing its one rerun at the same SHA (PR `checkReruns` `passed`, main `mainGuardFlakes`) is a flake: the loop reads that job's log once into `.graphyard/flake-ledger.json` (0600; ≤500 entries, 30 days). A test leading with a proof id (`unit:`/`integration:`) flaking 3+ times on 2+ SHAs in 7 days gets one P1 `Flaky test: NAME` item naming its proof; none more while open or 7 days after closing. Gates never read it: nothing is skipped or quarantined.
+A required check failing then passing its one rerun at the same SHA (PR `checkReruns` `passed`, main `mainGuardFlakes`) is a flake: the loop reads that job's log once into `.graphyard/flake-ledger.json` (0600; ≤500 entries, 30 days). A `unit:`/`integration:` test flaking 3+ times on 2+ SHAs in 7 days gets one P1 `Flaky test: NAME` item naming its proof; none while open or 7 days after. Gates never read it; nothing is skipped.
 
 ## Goals and acceptance
 

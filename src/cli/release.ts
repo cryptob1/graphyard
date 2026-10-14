@@ -102,7 +102,10 @@ export const releaseCommands = defineCommands([
         if (trigger !== 'schedule' && trigger !== 'manual') throw new Error('--trigger is schedule or manual');
         const maxPrs = maxPrsFrom(options.one('max-prs') ?? process.env.GRAPHYARD_RC_MAX_PRS);
         // GY-1802: the outcomes whose plan is not delivered yet ride the candidate as pending. A credential that cannot read the plane (the workflow's release filing token) names none, and the loop's cut records them.
-        const plane = await readPlane({ goals: async () => (await api('goals?open=1')).goals, stage: async key => servingStage(await api(`work/${encodeURIComponent(key)}`)) });
+        let unread: string | null = null;
+        const read = async <T>(path: string, pick: (answer: any) => T): Promise<T> => { try { return pick(await api(path)); } catch (error: any) { unread ??= error?.message ?? String(error); throw error; } };
+        const plane = await readPlane({ goals: () => read('goals?open=1', answer => answer.goals), stage: key => read(`work/${encodeURIComponent(key)}`, servingStage) });
+        if (!plane) console.error(`release cut: the plane could not be read (${unread ?? 'no answer'}); no outcome is recorded pending, so a required case bound to an undelivered outcome blocks this candidate`);
         const pendingOutcomes = (at: { sha: string; undelivered: ReadonlySet<string> }) => {
           let source: string | null = null;
           try { source = git(['show', `${at.sha}:${contractFile}`]); } catch { source = null; }
