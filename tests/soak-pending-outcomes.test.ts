@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { contractPendingCases, cutCandidate, type CommitSummary, type ReleaseCandidate } from '../src/release-candidate.js';
-import { pendingFromPlane, readPlane, type PlaneSnapshot } from '../src/release-pending.js';
+import { pendingFromPlane, readPlane, servingStage, type PlaneSnapshot } from '../src/release-pending.js';
 
 /**
  * GY-1802: a simulated run of release candidates across days. A merged goal's plan is delivered
@@ -45,4 +45,11 @@ test('unit:soak-pending-outcomes — pending outcomes recorded per candidate cle
   // An item merged after the candidate's SHA is undelivered there, whatever the plane says.
   stage = 'done';
   assert.deepEqual(pendingFromPlane(await read(), source, { undelivered: new Set(['GY-9001']) }), ['goal-outcome']);
+});
+
+test('unit:soak-pending-outcomes — an item closed without delivery does not deliver its outcome', async () => {
+  const goals = [{ merged: true, protected: { outcomes: ['goal-outcome'] }, plan: { items: [{ ref: 'a', outcomes: ['goal-outcome'] }] }, items: [{ ref: 'a', key: 'GY-9001' }] }] as any;
+  const pendingFor = async (work: any) => pendingFromPlane(await readPlane({ goals: async () => goals, stage: async () => servingStage(work) }), source, { undelivered: new Set() });
+  assert.deepEqual(await pendingFor({ stage: 'done', closure: { kind: 'duplicate' } }), ['goal-outcome']);
+  assert.deepEqual(await pendingFor({ stage: 'done' }), []);
 });

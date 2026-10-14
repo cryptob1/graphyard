@@ -1,6 +1,8 @@
 // Concern: which contract outcomes are still pending at a cut (GY-1802), distilled from the plane's goal and work records.
 import type { Goal } from './model/goal.js';
 import { parseContract, type ReleaseContract } from './e2e/case.js';
+import { isDelivered } from './model/closure.js';
+import type { Work } from './model.js';
 import { pendingOutcomeIds, type GoalDelivery } from './release-candidate.js';
 
 /**
@@ -14,6 +16,9 @@ export function goalDeliveries(goals: readonly Goal[]): GoalDelivery[] {
     items: (goal.plan?.items ?? []).map(item => ({ outcomes: item.outcomes, key: goal.items?.find(released => released.ref === item.ref)?.key ?? null })),
   }));
 }
+
+/** The stage the cut reads for a work item: `done` only when it was delivered; one closed without delivery (duplicate, superseded, obsolete) serves nothing, so reads as `closed`. */
+export const servingStage = (work: Pick<Work, 'stage' | 'closure'> | undefined | null): string | undefined => !work ? undefined : isDelivered(work) ? 'done' : work.stage === 'done' ? 'closed' : work.stage;
 
 /** The plane read once before a cut: goal deliveries and the stage of each serving item; null when any read fails. */
 export interface PlaneSnapshot { deliveries: GoalDelivery[]; stages: Map<string, string | undefined> }
