@@ -50,11 +50,6 @@ head. Make `complete` your last action: do not heartbeat, edit, or push after it
 next renewal is refused and the supervisor stops the session; that is the attempt
 ending, not lease loss. CI, trusted evidence, independent review, and Graphyard's
 merge gate decide progression. Report blockers explicitly.
-Main guard: when main's CI fails a required check, the guard reverts the merge that
-broke it. A revert whose own checks fail with the failing test names main shows is
-recorded as a base failure of main, not a culprit — one attention row names the test,
-the merge keeps its delivery, and no further revert is filed for that set until main
-passes ([delivery](docs/delivery.md#main-guard)): fix the failing test forward.
 Park a decision only a human may make with `park GY-N EPOCH KIND NEEDED... --ask ASK
 [--step STEP]... --recommend TEXT --why WHY -- REASON`. Write ASK, STEP, TEXT and WHY for a
 non-technical reader: ASK is one sentence naming the action they take, each STEP one plain

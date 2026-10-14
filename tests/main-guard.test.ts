@@ -50,7 +50,7 @@ function world(history: MainCommit[], items: Work[]) {
   // CI's failed-tests annotations by check-run id (GY-1789): the failing test names a run published.
   const annotations = new Map<number, string[]>();
   const calls = { opened: [] as string[], merged: [] as number[], closed: [] as { pr: number; reason: string }[], approved: [] as number[] };
-  let next = 900, refuse: string | null = null;
+  let next = 900, refuse: string | null = null, onto: string | null = null;
   const ports: MainGuardPorts = {
     reverting: async () => items.filter(work => work.mainGuardReverts?.some(revert => revert.state === 'opened')),
     culprit: async mergeSha => items.find(work => work.delivery?.mergeSha === mergeSha || work.mainGuardReverts?.some(revert => revert.mergeSha === mergeSha)) ?? null,
@@ -62,7 +62,8 @@ function world(history: MainCommit[], items: Work[]) {
       const pr = next++, head = sha(`e${pr}`);
       pulls.set(pr, { merged: false, mergeSha: null, open: true, mergeable: true, head });
       pushers.set(pr, 'graphyard-app'); revertDiffs.set(pr, inverseOf(mergeDiff(mergeSha)));
-      return { pr, head };
+      // The tip the revert was merged onto, as the real opener reads it (GY-1789); absent, the guard falls back to its history read.
+      return { pr, head, ...(onto ? { onto } : {}) };
     },
     pull: async pr => pulls.get(pr)!,
     mergeChanges: async mergeSha => mergeDiff(mergeSha),
@@ -86,7 +87,7 @@ function world(history: MainCommit[], items: Work[]) {
     standingBaseFailures: async () => items.flatMap(work => (work.mainGuardReverts ?? []).filter(revert => revert.cause === 'base-failure' && revert.baseFailure && !revert.baseFailure.cleared).map(revert => ({ work, revert }))),
     record: async (snapshot, revert) => { applyMainGuardRevert(items.find(work => work.id === snapshot.id)!, revert, new Date(at)); },
   };
-  return { ports, checks, pulls, calls, items, revertDiffs, approvals, annotations, refuse: (reason: string | null) => { refuse = reason; } };
+  return { ports, checks, pulls, calls, items, revertDiffs, approvals, annotations, refuse: (reason: string | null) => { refuse = reason; }, openOnto: (tip: string | null) => { onto = tip; } };
 }
 
 test('unit:main-guard-reverts-breaking-merge a merge that fails a check its parent passed is reverted by an App-merged revert PR and its item reopened', async () => {
@@ -930,13 +931,22 @@ test('unit:main-guard-revert-shares-failure — the inference needs every failin
   run.fake.annotations.set(501, ['a novel typecheck error']);
   await runMainGuard(ports, live);
   assert.deepEqual(run.fake.calls.opened, [B, C], 'the novel typecheck failure of C is judged and reverted though the old test also fails');
-  const covered = delivered('GY-4', sha('d4'), 704); run.fake.items.push(covered);
-  tip.unshift({ sha: covered.delivery!.mergeSha, parent: C });
-  run.fake.checks.set(covered.delivery!.mergeSha, fail(600, 'test', 'typecheck'));
-  run.fake.annotations.set(600, failing); run.fake.annotations.set(601, ['typecheck error']);
-  const before = run.fake.calls.opened.length;
+  // C's revert passes and merges, so no revert is in flight and its merge R is green on main. A merge
+  // D on top of R that fails exactly the recorded set is reached and judged, and not reverted.
+  const cRevert = itemC.mainGuardReverts![0].revert!;
+  run.fake.checks.set(cRevert.head, green);
   await runMainGuard(ports, live);
-  assert.equal(run.fake.calls.opened.length, before, 'a merge whose whole failure set the record covers is not reverted');
+  assert.equal(itemC.mainGuardReverts![0].state, 'merged');
+  const R = run.fake.pulls.get(cRevert.pr)!.mergeSha!, D = sha('d4'), covered = delivered('GY-4', D, 704);
+  run.fake.items.push(covered);
+  tip.unshift({ sha: R, parent: C }); tip.unshift({ sha: D, parent: R });
+  run.fake.checks.set(R, green); run.fake.checks.set(D, fail(600, 'test', 'typecheck'));
+  run.fake.annotations.set(600, failing); run.fake.annotations.set(601, ['typecheck error']);
+  const judged = await runMainGuard(ports, live);
+  assert.equal(judged.main.state, 'broken', 'D is read against the green merge below it');
+  assert.equal(judged.main.state === 'broken' && judged.main.culprit, D);
+  assert.deepEqual(run.fake.calls.opened, [B, C], 'a merge whose whole failure set the record covers is not reverted');
+  assert.equal(covered.mainGuardReverts, undefined);
 
   // A revert opened while a later merge sat on main proves nothing about the merge: it stays a culprit attribution.
   const later = await start([{ sha: C, parent: B }, { sha: B, parent: A }, { sha: A, parent: base }], fail(300, 'test'));
@@ -944,4 +954,17 @@ test('unit:main-guard-revert-shares-failure — the inference needs every failin
   later.fake.checks.set(later.revert.head, fail(410, 'test')); later.fake.annotations.set(410, failing);
   await runMainGuard(later.fake.ports, options());
   assert.equal(later.item.mainGuardReverts![0].cause, 'checks-failed');
+
+  // A merge that lands between the guard's history read and the opening sits in the revert's tree
+  // just the same: the record binds the tip the opener merged onto, and the inference is not made.
+  const raced = world([{ sha: B, parent: A }, { sha: A, parent: base }], [delivered('GY-1', B, 701)]);
+  raced.checks.set(base, green); raced.checks.set(A, green); raced.checks.set(B, fail(300, 'test')); raced.annotations.set(300, failing);
+  raced.openOnto(C);
+  await runMainGuard(raced.ports, options());
+  const racedRecord = raced.items[0].mainGuardReverts![0];
+  assert.equal(racedRecord.openedOn, C, 'the record binds the tip the opener merged onto, not the history read');
+  assert.deepEqual(Object.keys(racedRecord.revert!).sort(), ['head', 'pr'], 'the tip is not kept on the pull request record');
+  raced.checks.set(racedRecord.revert!.head, fail(410, 'test')); raced.annotations.set(410, failing);
+  await runMainGuard(raced.ports, options());
+  assert.equal(raced.items[0].mainGuardReverts![0].cause, 'checks-failed', 'a revert opened onto a later tip proves nothing about the merge');
 });

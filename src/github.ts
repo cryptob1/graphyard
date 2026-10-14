@@ -2345,9 +2345,11 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * Opens the revert of exactly the merge `mergeSha` as a pull request (GY-1250): a commit
    * restoring the merge's first parent's tree on top of the merge, merged by GitHub onto main's tip
    * on a `graphyard-revert/` branch, so the revert undoes that merge's change alone and keeps every
-   * later one. A conflict with a later merge is refused, with nothing left behind.
+   * later one. A conflict with a later merge is refused, with nothing left behind. `onto` is the
+   * tip the revert was merged onto, read here and not from an earlier history read (GY-1789): only a
+   * revert opened onto the merge itself can prove a failure it shares with main is main's own.
    */
-  async openMainRevert(work: Work, mergeSha: string, reason: string): Promise<{ pr: number; head: string } | { refusal: string }> {
+  async openMainRevert(work: Work, mergeSha: string, reason: string): Promise<{ pr: number; head: string; onto: string } | { refusal: string }> {
     const merge = await this.request(`/commits/${mergeSha}`);
     const parent = merge?.parents?.[0]?.sha;
     demand(typeof parent === 'string' && /^[a-f0-9]{40}$/.test(parent), `GitHub did not return the first parent of ${mergeSha}`, 502);
@@ -2368,7 +2370,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const existing = (await this.request(`/pulls?state=open&head=${encodeURIComponent(`${this.config.repository.split('/')[0]}:${ref}`)}`)) as any[];
     const pull = existing?.[0] ?? await this.request('/pulls', 'POST', { title, head: ref, base: this.config.base, body: `${reason}\n\nOpened by Graphyard's main guard (GY-1250). The App merges it, bound to this head, once its own required checks pass; a revert that conflicts or fails them is closed after this one attempt.` });
     demand(Number.isSafeInteger(pull?.number), 'GitHub did not open the revert pull request', 502);
-    return { pr: pull.number, head };
+    return { pr: pull.number, head, onto: tip };
   }
   /** A revert pull request as the main guard reads it: merged, still open, mergeable, and its head. */
   async revertPull(pr: number): Promise<{ merged: boolean; mergeSha: string | null; open: boolean; mergeable: boolean | null; head: string }> {

@@ -104,7 +104,7 @@ export interface MainGuardRevert {
   red?: boolean;
   /** Cause `cancelled` (GY-1468): the workflow run that stayed cancelled past the rerun bound, and its last attempt. */
   run?: { id: number; attempt: number | null };
-  /** The tip of main when the revert was opened (GY-1789): only a revert opened onto the merge itself proves a failure is main's own, since a later merge in the revert's tree could account for it. */
+  /** The tip of main the revert was merged onto, as the opener read it (GY-1789): only a revert opened onto the merge itself proves a failure is main's own, since a later merge in the revert's tree could account for it. */
   openedOn?: string;
   /** Cause `base-failure` (GY-1789): the failure the revert shared with main — per check, the failing test names and the two runs that showed them — and, once main passed again, where. */
   baseFailure?: { shared: { check: string; tests: string[]; run: number | null; revertRun: number | null }[]; cleared?: { at: string; sha: string | null } | null };
@@ -271,8 +271,8 @@ export interface MainGuardPorts {
   /** Main's first-parent history, newest first. */
   history(): Promise<MainCommit[]>;
   checks(sha: string): Promise<CheckRun[]>;
-  /** Opens the revert pull request of exactly `mergeSha` onto main's tip, or says why it cannot (a conflict). */
-  openRevert(work: Work, mergeSha: string, reason: string): Promise<{ pr: number; head: string } | { refusal: string }>;
+  /** Opens the revert pull request of exactly `mergeSha` onto main's tip, or says why it cannot (a conflict); `onto` is that tip as the opener read it, not as an earlier history read saw it (GY-1789). */
+  openRevert(work: Work, mergeSha: string, reason: string): Promise<{ pr: number; head: string; onto?: string } | { refusal: string }>;
   pull(pr: number): Promise<{ merged: boolean; mergeSha: string | null; open: boolean; mergeable: boolean | null; head: string }>;
   /** The files the merge commit `mergeSha` changed against its first parent. */
   mergeChanges(mergeSha: string): Promise<FileChange[]>;
@@ -502,7 +502,12 @@ export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOpti
   try {
     const opened = await ports.openRevert(work, broken.culprit, `${work.key}'s merge ${broken.culprit.slice(0, 12)} broke main: ${broken.failing.join(', ')} failed on it while its parent ${broken.parent.slice(0, 12)} passed${note}. Graphyard's main guard reverts it so main is green again; ${work.key} is reopened for a rework round.`);
     if ('refusal' in opened) await write(work, { ...base, state: 'abandoned', settledAt: at, reason: opened.refusal, cause: 'conflict', red: true });
-    else await write(work, { ...base, revert: opened });
+    else {
+      // The tip the opener merged onto binds `openedOn` (GY-1789): a merge that landed between the
+      // history read and the opening sits in the revert's tree, and the base-failure inference must see it.
+      const { onto, ...revert } = opened;
+      await write(work, { ...base, ...(onto ? { openedOn: onto } : {}), revert });
+    }
   } catch (error) {
     // One attempt: a revert that could not be opened is abandoned, never retried.
     await write(work, { ...base, state: 'abandoned', settledAt: at, reason: `the revert could not be opened: ${message(error)}`, cause: 'unopened', red: true }).catch(failure => tick.errors.push(`${work.key}: ${message(failure)}`));
