@@ -398,7 +398,7 @@ export async function reclaimStep(cycle: Cycle) {
       const report = await effects.reclaim(snapshot.work, clock);
       state.reclaim = reclaimSummarySchema.parse({ at: report.at, scanned: report.scanned, removed: report.removed.length, kept: report.kept.length,
         freedBytes: report.freedBytes, freeBytes: report.freeAfter === null ? null : Math.max(0, Math.round(report.freeAfter)), errors: [...report.errors, ...(report.trees?.errors ?? []), ...(report.checkouts?.errors ?? [])].map(entry => entry.slice(0, 500)).slice(0, 20),
-        checkouts: report.checkouts?.removed.length ?? 0, checkoutsOffVolume: report.checkouts?.sharesVolume === false ? report.checkouts.removed.length : 0, rootFreeBytes: report.checkouts?.freeBytes == null ? null : Math.max(0, Math.round(report.checkouts.freeBytes)),
+        checkouts: report.checkouts?.removed.length ?? 0, checkoutsOffVolume: (report.checkouts as { sharesVolume?: boolean } | undefined)?.sharesVolume === false ? report.checkouts?.removed.length ?? 0 : 0, rootFreeBytes: report.checkouts?.freeBytes == null ? null : Math.max(0, Math.round(report.checkouts.freeBytes)),
         trees: report.trees?.removed.length ?? 0, treeBacklog: report.trees?.backlog ?? 0 });
       const trees = report.trees?.removed.length ?? 0;
       if (report.trees && (trees || report.trees.errors.length)) {

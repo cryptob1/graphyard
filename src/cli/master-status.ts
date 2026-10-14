@@ -1,7 +1,8 @@
 import { workerLaunchStatus } from '../master/dispatch.js';
 import { type HumanRequestRow } from '../model/human-request.js';
 import { herdrAttachCommand } from '../master/herdr.js';
-import { agentOwner, assessContainment, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, statusWorktreeInventory, managedRootStatus, planWorktreeReclaim, reclaimableNow, reclaimIdleMs, worktreesDirectory, type AttentionItem, type MasterConfig, observeHerdrAgents, installationOwner } from '../master.js';
+import { agentOwner, assessContainment, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, statusWorktreeInventory, managedRootStatus, planWorktreeReclaim, reclaimIdleMs, worktreesDirectory, type AttentionItem, type MasterConfig, observeHerdrAgents, installationOwner } from '../master.js';
+import { reclaimableNow } from '../master/worktrees.js';
 import { standingDiskLine, worktreePassOf } from '../master/worktree-disk.js';
 import { type Work } from '../model/work.js';
 import { installationMerger } from '../executor.js';
