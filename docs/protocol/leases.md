@@ -16,7 +16,7 @@ Workers never use host `gh` logins; launchers mint into `worker-sessions/GY-N-EP
 - `submit` (CLI `complete`); later heartbeats get `Implementation lease for epoch N ended when GY-N was submitted; stop heartbeating after complete`.
 - `park` (human-only request naming every human step; widenings and deferred steps refuse: `scope-request`) or `blocked` releases.
 - Coordinator `capacity` (`event: "exhausted"`) frees another account; every attempt end closes its scope request.
-- Expiry, classed by epoch's ledger: unwithdrawn pre-release `blocked` report → `lease.expired` cause `blocked-awaiting-operator`; admin `--previous-worker-stopped` → `stopped-by-attestation`; `capacity.exhausted` → `exhausted-capacity`; lapse inside a recorded `plane.stall` → `lease.expired` cause `control-plane-stall`; renewed to the 130-min no-submission refusal unsubmitted → `no-submission-bound`; none → `lease-loss` escalation, auto-settled on the record alone ([settling](../delegation.md#who-may-settle-what)).
+- Expiry, classed by epoch's ledger: unwithdrawn pre-release `blocked` report → `lease.expired` cause `blocked-awaiting-operator`; admin `--previous-worker-stopped` → `stopped-by-attestation`; `capacity.exhausted` → `exhausted-capacity`; lapse inside a recorded `plane.stall` (the gap since the previous pass is recorded at the start of each pass, before any lapse is classed) → `lease.expired` cause `control-plane-stall`; renewed to the 130-min no-submission refusal unsubmitted → `no-submission-bound`; none → `lease-loss` escalation, auto-settled on the record alone ([settling](../delegation.md#who-may-settle-what)).
 
 ## Blocked work unblocks itself
 

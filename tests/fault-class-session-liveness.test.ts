@@ -665,7 +665,7 @@ test('integration:fault-class-session-liveness GY-1764 escalation:lease-loss —
   // And a loss the base raised and held settles itself once the stall is on the record: this one
   // lapsed just before the stall began, so the grace does not rescue it and the first tick after
   // the stall raised the loss — within the stall's reach (stallRaisedInside) — and reconciliation
-  // settles it with the stall as its note in the same pass, where the base held it for an approver.
+  // settles it with the stall as its note on the pass after the one that recorded it, where the base held it for an approver.
   let lost = await stallEngine.execute(human, 'create', null, stallInput('plane-stall-loss'), stallId());
   lost = await stallEngine.execute(human, 'ready', lost.id, {}, stallId());
   lost = await stallEngine.execute(stallWorker, 'claim', lost.id, {}, stallId());
@@ -677,4 +677,23 @@ test('integration:fault-class-session-liveness GY-1764 escalation:lease-loss —
   assert.match(settledRows.at(-1)!.note, /not answering between/);
   assert.equal((await stallEvents(lost.id, 'lease.expired')).length, 0, 'the lapse itself was a loss, not an explained expiry');
   assert.deepEqual(await readPlaneStalls(stallStore.pool, Date.parse(stall.from) - 1_000, Date.parse(stall.to) + 1_000), [stall], 'the reader the classification uses reads the stall back');
+});
+
+test('integration:fault-class-session-liveness GY-1764 escalation:lease-loss — the pass that first detects the stall is the pass that meets the expired lease, and it keeps the lease', async () => {
+  let work = await stallEngine.execute(human, 'create', null, stallInput('plane-stall-first-pass'), stallId());
+  work = await stallEngine.execute(human, 'ready', work.id, {}, stallId());
+  work = await stallEngine.execute(stallWorker, 'claim', work.id, {}, stallId());
+  await stallEngine.reconcile();
+  // No stall is on the record yet: the plane was down from 90 s ago, and the lease ran out inside it.
+  const before = Number((await stallStore.pool.query(`SELECT count(*) AS n FROM events WHERE kind = 'plane.stall'`)).rows[0].n);
+  await stallStore.pool.query('UPDATE plane_liveness SET tick_at = tick_at - interval \'90 seconds\'');
+  await stallOverwrite(work.id, document => { document.lease!.expiresAt = new Date(Date.now() - 45_000).toISOString(); });
+  await stallEngine.reconcile();
+  assert.equal(Number((await stallStore.pool.query(`SELECT count(*) AS n FROM events WHERE kind = 'plane.stall'`)).rows[0].n), before + 1, 'this very pass recorded the stall');
+  assert.deepEqual(await stallEscalations(work.id), [], 'the recovery pass raised a lease loss the stall it detected explains');
+  const after = await stallDocument(work.id) as Work;
+  assert.ok(after.lease, 'the lease survived the recovery pass');
+  assert.ok(Date.parse(after.lease!.expiresAt) > Date.now(), 'and was extended past now');
+  const renewed = await stallEngine.execute(stallWorker, 'heartbeat', work.id, { epoch: work.epoch }, stallId());
+  assert.ok(renewed.lease, 'the supervisor\'s heartbeat lands on a live lease');
 });

@@ -2924,21 +2924,25 @@ export class Engine {
     // The event-loop lag over the tick's window (GY-1777): a timer's overrun past its 10 ms
     // resolution, so a tick slowed by a starved loop is told apart from one waiting on I/O.
     this.eventLoopLag.start();
+    // The gap since the previous pass is recorded before this pass classes any lapse (GY-1791):
+    // the pass that meets a lease the stall let run out must already find the stall on the record.
+    await this.notePlaneTick(new Date(), true);
     try { await this.reconcilePass(tickStarted); }
     finally { this.eventLoopLag.stop(); }
-    await this.notePlaneTick(new Date());
+    // A pass that itself ran long moves the tick forward, so its own length is never read as a stall.
+    if (performance.now() - tickStarted > planeStallMs / 6) await this.notePlaneTick(new Date(), false);
   }
   /**
-   * Record this pass in the plane's own liveness (GY-1791), and a gap past `planeStallMs` since
+   * Record this pass in the plane's own liveness (GY-1791) at its start, and a gap past `planeStallMs` since
    * the previous pass as one `plane.stall` ledger row. That row is what lets the plane explain its
    * own outages: a lease lapsing inside a recorded stall is history with its cause, never a lease
    * loss (leaseLapseCause), and renewal grace keeps the lease live for a supervisor still retrying
    * (GY-558's rule). Best effort beside the pass — liveness bookkeeping never fails reconciliation.
    */
-  private async notePlaneTick(at: Date) {
+  private async notePlaneTick(at: Date, detect: boolean) {
     try {
       const previous = ((await this.store.pool.query('SELECT tick_at FROM plane_liveness WHERE id = true')).rows[0]?.tick_at ?? null) as Date | null;
-      if (previous && at.getTime() - previous.getTime() > planeStallMs)
+      if (detect && previous && at.getTime() - previous.getTime() > planeStallMs)
         await this.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)',
           ['graphyard', 'plane.stall', JSON.stringify({ details: { from: new Date(previous).toISOString(), to: at.toISOString() } })]);
       await this.store.pool.query('INSERT INTO plane_liveness(id,tick_at) VALUES(true,$1) ON CONFLICT (id) DO UPDATE SET tick_at = EXCLUDED.tick_at', [at]);
