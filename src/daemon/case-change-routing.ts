@@ -65,7 +65,7 @@ async function judge(cycle: Cycle, change: CaseChangeRequest): Promise<Pending> 
  * for the next cycle. The control plane keeps the independence rules: the approver identity is neither the requester nor an implementer of the item.
  */
 export const caseChangeStep = (cycle: Cycle, outerLeft: () => number = () => Number.POSITIVE_INFINITY) => cycle.effects.caseChanges && cycle.effects.judgeCaseChange && outerLeft() > 0
-  ? withinStepBudget(cycle, 'decisions', ['caseChanges', 'judgeCaseChange'], caseChangeStepWithin) : Promise.resolve();
+  ? withinStepBudget(cycle, 'decisions', ['caseChanges', 'judgeCaseChange'], caseChangeStepWithin, {}, outerLeft) : Promise.resolve(); // the step shares what the decisions budget has left, never a fresh one
 async function caseChangeStepWithin(cycle: Cycle, budgetLeft: () => number | null) {
   const { state, effects, now, performed } = cycle;
   const isolate = carriedIsolate(cycle, 'decisions');
@@ -93,9 +93,10 @@ async function caseChangeStepWithin(cycle: Cycle, budgetLeft: () => number | nul
     }
     if (result) {
       pending.delete(change.id);
-      return note(change, result.deferred ? 'waiting' : 'failed', result.deferred
+      await note(change, result.deferred ? 'waiting' : 'failed', result.deferred
         ? `The approver role is at its registry capacity (${result.deferred}); ${name} stays requested and is put to an approver next cycle`
-        : `The approver returned no judgement on ${name}: ${result.runs.join('; ')}; it stays requested and is put to an approver again next cycle`);
+        : `The approver returned no judgement on ${name}: ${result.runs.join('; ')}; it stays requested and is put to an approver again`);
+      if (result.deferred) return;
     }
     if (live.has(change.id)) return;
     live.set(change.id, judge(cycle, change).catch(error => ({ judgement: null, runs: [message(error)] } as Pending)).then(done => { pending.set(change.id, done); }).finally(() => live.delete(change.id)));

@@ -6,6 +6,7 @@ import { applyGoalCommand, recordGoal, type Goal } from '../src/model/goal.js';
 import { caseChangeGoalsPath, requestedCaseChanges, type CaseChangeRequest } from '../src/model/goal-plan.js';
 import { RefusedResponse } from '../src/model/refusal.js';
 import type { AcceptanceEffects } from '../src/daemon/acceptance.js';
+import { stepBudget } from '../src/daemon/step-budget.js';
 import { caseChangeStep, caseChangesSettled, clearCaseChanges, type CaseChangeJudgement } from '../src/daemon/case-change-routing.js';
 import { emptyDaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
@@ -100,9 +101,9 @@ test('unit:case-change-retry-and-status — an unanswered case change stays requ
   assert.deepEqual(requestedCaseChanges([h.goal]).map(entry => [entry.goal, entry.id, entry.work, entry.cases]), [['GOAL-9', change.id, 'GY-1', ['signup-case']]], 'a requested change is listed among the decisions owed');
   await h.step(); await h.settle(); await h.step();
   assert.equal(h.goal.caseChanges[0].state, 'requested', 'no answer leaves it requested');
-  assert.match(h.state.actions[`case-change:${change.id}`].detail, /returned no judgement.*stays requested and is put to an approver again next cycle/);
-  await h.step(); await h.settle();
-  assert.equal(h.prompts.length, 3, 'the next cycle asks again (the first cycle ran the primary and the fallback)');
+  assert.match(h.state.actions[`case-change:${change.id}`].detail, /Launched an independent approver/, 'the unanswered change is relaunched in the cycle that finds it unanswered');
+  await h.settle();
+  assert.equal(h.prompts.length, 3, 'the same cycle that records the failure asks again (the first cycle ran the primary and the fallback)');
   await h.step();
   assert.equal(h.goal.caseChanges[0].state, 'approved');
   assert.equal(h.posted.length, 1, 'the verdict is applied once');
@@ -160,4 +161,12 @@ test('unit:case-change-retry-and-status — a read carried past its bound keeps 
   assert.equal(h.prompts.length, 1, 'the first verdict was kept, not asked for again');
   assert.equal(h.goal.caseChanges[0].state, 'approved');
   assert.equal(h.posted.length, 1);
+});
+
+test('unit:case-change-retry-and-status — a step nested in the decisions budget is capped by what that budget has left, never a fresh one', () => {
+  let outer = 1;
+  const nested = stepBudget(() => 0, 20_000, () => outer);
+  assert.equal(nested.left(), 1, 'one millisecond left outside is one millisecond inside');
+  outer = 0;
+  assert.equal(nested.left(), 0, 'a spent outer budget spends the nested one');
 });
