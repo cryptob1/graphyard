@@ -52,6 +52,7 @@ async function world(label: string, tipTouches: 'code' | 'docs' = 'code') {
   await writeFile(join(origin, 'src', 'daemon', 'state.ts'), "export const upgradeStallCauses = ['checkout-failed', 'release-lagged', 'snapshot-failed'] as const;\n");
   await writeFile(join(origin, 'package.json'), '{ "type": "module" }\n');
   await writeFile(join(origin, 'README.md'), 'release A\n');
+  await writeFile(join(origin, 'tsconfig.json'), '{}\n');
   await writeFile(join(origin, 'docs.md'), 'docs for A\n');
   git(origin, 'init', '-q', '-b', 'main');
   git(origin, 'add', '.');
@@ -344,7 +345,7 @@ test('unit:snapshot-pin-reported-and-lifted — master status reports the loop\'
   assert.equal(w.launch('watch', 'GY-1', '1').release, 'B', 'the launcher still loads the snapshot');
   const keptNamed = leftBehindCheckoutAttention(state.upgrade.snapshot, tip, root);
   assert.match(keptNamed[0].text, /not from the coordinator checkout, which holds that commit but is dirty in loaded code \(dirty: README\.md, src\/cli\.ts\); every command/);
-  assert.match(keptNamed[0].next, /^Return the checkout's loaded paths \(src\/, scripts\/, bin\/, package\.json\) to the commit, which lifts the pin/);
+  assert.match(keptNamed[0].next, /^Return the checkout's loaded paths \(src\/, scripts\/, bin\/, package\.json, tsconfig\.json\) to the commit, which lifts the pin/);
   git(root, 'checkout', '-q', '--', 'src/cli.ts');
   assert.equal(status(root), ' M README.md', 'the loaded code is clean again; the operator\'s edit stands');
   // A pointer whose removal fails still pins the launcher: the lift is not reported and retries.
@@ -524,4 +525,44 @@ test('unit:dirty-path-named-with-an-arrow — a modified tracked file whose name
   git(root, 'mv', 'new name.txt', 'new -> name.ts');
   const arrowed = await upgrade.checkoutState(root, run);
   assert.deepEqual(arrowed.dirtyPaths, ['new -> name.ts'], 'a destination holding " -> " is named whole');
+});
+
+test('unit:snapshot-pin-holds-launcher-tsconfig-and-foreign-head — a dirty launcher holds the snapshot restart owed, a clean detached foreign HEAD is no restart target while the pin stands, and a dirty tsconfig.json keeps the pin on a checkout moved onto the snapshot', async () => {
+  // The launcher runs before the pin redirects any module, so an edited one restarts nothing.
+  const l = await world('launcher-dirty');
+  git(l.root, 'add', 'bin');
+  git(l.root, 'commit', '-q', '-m', 'launcher');
+  const launched = git(l.root, 'rev-parse', 'HEAD');
+  await writeFile(join(l.root, 'bin', 'graphyard.mjs'), '#!/usr/bin/env node\nconsole.log("edited");\n');
+  const state = emptyDaemonState(l.master);
+  state.release = { commit: launched, dirty: true };
+  state.deployment = verified(l.tip);
+  const { calls, deps } = recording(l.root);
+  const held = await performSelfUpgrade(l.master, state, deps());
+  assert.equal(held.outcome, 'failed', JSON.stringify(held));
+  assert.match(JSON.stringify(held), /launcher \(bin\/graphyard\.mjs\) is dirty/);
+  assert.deepEqual([calls.executors.length, calls.self, readHeldCli(l.root)], [0, 0, null], 'nothing restarted, nothing pinned');
+  assert.equal(state.upgrade.pending?.to, l.tip, 'the restart stays owed');
+  // A clean detached HEAD that is neither the snapshot nor the commit the operator left is a foreign move.
+  const f = await world('foreign-head');
+  const { state: after, calls: fleet, deps: fdeps, snapshot } = await snapshotUpgrade(f);
+  after.release = { commit: f.tip, dirty: false };
+  await writeFile(join(f.origin, 'docs.md'), 'docs for C\n');
+  git(f.origin, 'commit', '-q', '-am', 'release C');
+  git(f.root, 'fetch', '-q', 'origin');
+  git(f.root, 'checkout', '-q', 'README.md');
+  git(f.root, 'checkout', '-q', '--detach', git(f.origin, 'rev-parse', 'HEAD'));
+  assert.equal(status(f.root), '');
+  const foreign = await performSelfUpgrade(f.master, after, fdeps({ loadedFrom: join(snapshot, 'src', 'daemon', 'upgrade.ts') }));
+  assert.equal(foreign.outcome, 'skipped', JSON.stringify(foreign));
+  assert.deepEqual([fleet.executors.length, fleet.self, readHeldCli(f.root)], [1, 1, f.tip], 'no restart onto the foreign HEAD; the pin stands');
+  // Moved onto the snapshot's commit with tsconfig.json dirty: the launcher would run the edit, so the pin stays.
+  const t = await world('tsconfig-dirty');
+  const { state: moved, deps: tdeps } = await snapshotUpgrade(t);
+  moved.release = { commit: t.tip, dirty: false };
+  git(t.root, 'checkout', '-q', '--detach', t.tip);
+  await writeFile(join(t.root, 'tsconfig.json'), '{ "compilerOptions": {} }\n');
+  const kept = await performSelfUpgrade(t.master, moved, tdeps());
+  assert.equal(kept.outcome, 'skipped', JSON.stringify(kept));
+  assert.equal(readHeldCli(t.root), t.tip, 'the pin stays');
 });

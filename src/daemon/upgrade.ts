@@ -28,7 +28,7 @@ import { checkoutState, type CheckoutState } from './checkout-state.js';
  * touches none of this cannot change what a running process executes, so the checkout moves and
  * nothing is restarted.
  */
-const loadedPrefixes = ['src/', 'scripts/', 'bin/'], loadedFiles = ['package.json'];
+const loadedPrefixes = ['src/', 'scripts/', 'bin/'], loadedFiles = ['package.json', 'tsconfig.json'], launcherFiles = ['bin/graphyard.mjs', 'bin/held-release-hooks.mjs'];
 /** The action a failure before any restart attempt is recorded on (GY-1445): never one of the release's attempts. */
 export const alignKey = 'upgrade:align';
 /**
@@ -116,7 +116,7 @@ export function leftBehindCheckoutAttention(left: { at: string; commit: string; 
   // The checkout since moved onto the commit, but with loaded code still dirty in it: the pin stays until that is clean.
   const onto = sameCommit(left.checkout, left.commit);
   return [{ subject: 'upgrade', text: `The loop and the executors run ${shortCommit(left.commit)} from its held snapshot under ${root}/.graphyard/held-cli, not from the coordinator checkout, which ${onto ? `holds that commit but is dirty in loaded code${named}` : `stood dirty at ${shortCommit(left.checkout)}${named} when the self-upgrade ran at ${left.at} and was left where it stands`}; every command the checkout's launcher starts loads the snapshot while the pin stands.`,
-    ...agentOwner('master', onto ? `Return the checkout's loaded paths (src/, scripts/, bin/, package.json) to the commit, which lifts the pin: git -C ${root} status --porcelain names them (graphyard master checkout-restore REASON saves the dirty paths and returns them to HEAD)`
+    ...agentOwner('master', onto ? `Return the checkout's loaded paths (src/, scripts/, bin/, package.json, tsconfig.json) to the commit, which lifts the pin: git -C ${root} status --porcelain names them (graphyard master checkout-restore REASON saves the dirty paths and returns them to HEAD)`
       : `Move the checkout onto the commit the loop runs, which lifts the pin: git -C ${root} status --porcelain names what is in it, and git -C ${root} checkout --detach ${left.commit} moves it (graphyard master checkout-restore REASON saves the dirty paths and returns them to HEAD first)`) }];
 }
 
@@ -364,6 +364,10 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
    */
   const finish = async (pending: { from: string | null; to: string; code: boolean }, held = false, left: LeftBehind | null = null): Promise<SelfUpgradeOutcome> => {
     const aligned = held && !sameCommit(release, pending.to) ? state.upgrade.alignedRelease : release ?? state.upgrade.alignedRelease;
+    // GY-1773: the checkout's launcher runs before the pin redirects any module, so an edited launcher
+    // would run its own code on the restart: the restart stays owed on the cursor until it is clean.
+    const edited = left?.dirty.filter(path => launcherFiles.includes(path)) ?? [];
+    if (left && edited.length) return failed(`the restart onto the held snapshot of ${shortCommit(pending.to)} waits: the checkout's launcher (${edited.join(', ')}) is dirty at ${shortCommit(left.checkout)} and would run its edits before the pin redirects any module; return it to the commit and the restart goes through`, 'snapshot-failed');
     if (!pending.code && !left) {
       state.upgrade.pending = null;
       state.upgrade.last = { at: at(), from: pending.from, to: pending.to, code: false, executors: null, self: false };
@@ -562,7 +566,8 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     // Cleaned and detached where it stood, it is moved below as any clean checkout is.
     const left = state.upgrade.snapshot, onSnapshot = !!left && sameCommit(loaded, left.commit);
     if (left && head && onSnapshot && sameCommit(head, left.commit)) return lift(head, standing!);
-    const stays = !!left && !!head && (standing!.dirty === true || standing!.detached !== true);
+    // A clean detached HEAD that is neither the snapshot nor the checkout left behind is a foreign move: the pin stands.
+    const stays = !!left && !!head && (standing!.dirty === true || standing!.detached !== true || head !== left.checkout);
     if (stays && !onSnapshot) {
       // The owed restart keeps the alignment's own `code`: a docs-only snapshot whose re-execution
       // failed still owes the loop alone, never a fleet restart nothing the executors run calls for.
