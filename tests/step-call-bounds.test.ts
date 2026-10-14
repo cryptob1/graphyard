@@ -241,6 +241,28 @@ test('unit:step-calls-bounded — approvers: an approver launch that does not an
   assert.ok(Object.values(state.approvals).some(watch => watch.agentName === 'graphyard-approver'), 'the launch that answered is applied once, on the watch');
 });
 
+test('unit:step-calls-bounded — approvers: with no Herdr read configured, the runtime inventory read the step takes in its place is bounded the same: carried, it leaves the decision owed with no fault, and the next cycle joins the read in flight', async () => {
+  const sb = await helper();
+  const slow = hanging<HerdrAgent[]>(), work = item('GY-3');
+  // The cycle's own observation reads the inventory before any step and is not this item's; the read that hangs is the approvers step's, the first taken after the decision is requested. The later cycles' retries join the read in flight or consume its answer, so they make no read of their own.
+  let requested = false;
+  const fx = effects([work], { herdr: undefined, decide: async () => { requested = true; return { id: 'decision-1' }; }, agents: ((...args: unknown[]) => requested ? slow.call(...args) : []) as DaemonEffects['agents'] });
+  const state = emptyDaemonState(config());
+  const result = await cycle(state, fx, clock);
+  assert.equal(slow.calls.length, 1, 'the approvers step read the inventory through agents()');
+  const recorded = result.actions.filter(action => action.kind === 'decision' && action.work === 'GY-3');
+  assert.ok(recorded.some(action => /the approvers step's 30 ms per-call bound passed before the agents call answered; the call stays owed and is retried next cycle/.test(action.detail)), JSON.stringify(recorded));
+  assert.ok(!recorded.some(action => action.state === 'failed'), 'a carried inventory read is not a failure');
+  assert.deepEqual(faults(state), []);
+  requested = false;
+  await cycle(state, fx, clock + 60_000);
+  assert.equal(slow.calls.length, 1, 'the next cycle joined the read still in flight');
+  slow.answer([]);
+  await new Promise(resolve => setTimeout(resolve, 5));
+  await cycle(state, fx, clock + 120_000);
+  assert.ok(Object.values(state.approvals).some(watch => watch.work === 'GY-3' && watch.agentName === 'graphyard-approver'), `the read that answered is consumed once and the approver launched: ${JSON.stringify(Object.values(state.approvals))}`);
+});
+
 test('unit:step-calls-bounded — blockers: launching the approver of a needs-decision blocker is bounded; carried, it is retried next cycle and joins the launch in flight', async () => {
   const sb = await helper();
   const decision = '5b1e7c3a-9d2f-4e61-8a0b-2c4d6e8f0a1b', slow = hanging<{ agentName: string; pane: string }>();
@@ -331,7 +353,7 @@ test('unit:step-calls-bounded — every named step runs under the shared bound w
   }
   const decisions = readFileSync(`${root}src/daemon/cycle-decisions.ts`, 'utf8');
   assert.match(decisions, /boundedDecisions\(boundedCalls\(await decisionReads\(.*\), cycle\.heldDecisions, now, \(\) => budgetLeft\(\), \{ step: 'approvers', calls: approverCalls \}\)/, 'the approvers step\'s calls are bounded within the decisions step');
-  assert.match(decisions, /const approverCalls: readonly \(keyof DaemonEffects\)\[\] = \['approver', 'endRegistrySession', 'resume', 'withdraw', 'closeSession', 'herdr', 'approverLaunches', 'approverLaunch', 'sessionOutput', 'recordSession', 'holdAccount', 'reportCapacity', 'reconcileSessions'\]/);
+  assert.match(decisions, /const approverCalls: readonly \(keyof DaemonEffects\)\[\] = \['approver', 'endRegistrySession', 'resume', 'withdraw', 'closeSession', 'herdr', 'agents', 'approverLaunches', 'approverLaunch', 'sessionOutput', 'recordSession', 'holdAccount', 'reportCapacity', 'reconcileSessions'\]/);
   // The successor re-plan of the scope step runs under the same bound with its own calls; the approvers' isolation is carried-aware like every bounded step's.
   assert.match(readFileSync(`${root}src/daemon/cycle-scope.ts`, 'utf8'), /withinStepBudget\(cycle, 'scope', \['baseSuccessions', 'replan', 'mergeWriter'\], bounded => successorStepWithin\(bounded, settled\)\)/);
   assert.match(readFileSync(`${root}src/daemon/cycle-approvers.ts`, 'utf8'), /isolate = carriedIsolate\(carried, 'approvers'\)/);
