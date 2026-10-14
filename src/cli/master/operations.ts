@@ -170,6 +170,23 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     const event = await masterMutation('coordinator/recovered', { from: before?.sha ?? null, to, reason }, undefined, token);
     return print({ recovered: true, from: before?.sha ?? null, to, previous: pinned.previous, unit: loopUnitOf(root, undefined, effects.host.home), unitFile: unit.wrote, event });
   }
+  // GY-1779: the master's hand record of a loop-owned observation item's reading the loop could not take from this host
+  // (`pendingReadings` in master status names why), bound as the loop's own: the release the loop last verified serving,
+  // the parent delivery's merge and the item's policy revision; the loop closes a passing one next cycle.
+  if (id === 'reading') {
+    const [key, result, ...rest] = args, detail = rest.join(' ').trim();
+    if (!key || (result !== 'pass' && result !== 'fail') || !detail) throw new Error('Use master reading GY-N pass|fail DETAIL (the measured values, as observed on the serving release)');
+    const snapshot = await masterApi('work-snapshot');
+    const work = snapshot.work.find((item: any) => item.id === key || item.key === key);
+    if (!work) throw new Error(`Unknown work item ${key}`);
+    const { followUpRequest } = await import('../../model/observation-window.js');
+    const request = followUpRequest(work), parent = request ? snapshot.work.find((item: any) => item.id === request.work) : null;
+    const served = (await readDaemonState(root, master).catch(() => null))?.deployment;
+    if (!served?.sha || served.source === 'unavailable') throw new Error('The loop has not verified a serving release; the reading is bound to one, so run the loop first');
+    if (request && !parent?.delivery) throw new Error(`${work.key}'s follow-up request names ${request.work}, which is not a delivered item`);
+    const reading = { proof: (work.criteria as { proofs: string[] }[]).flatMap(criterion => criterion.proofs)[0], sha: served.sha, baseSha: request ? parent.delivery.mergeSha : served.sha, policyRevision: work.policyRevision, result, detail: detail.slice(0, 2000) };
+    return print(await masterMutation(`work/${work.id}/reading`, reading));
+  }
   if (id === 'verify-deployment') {
     if (!args[0]) throw new Error('Use master verify-deployment GY-N');
     const snapshot = await masterApi('work-snapshot');

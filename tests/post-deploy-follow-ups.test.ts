@@ -232,8 +232,8 @@ test('unit:observation-window-holds-dispatch — a released follow-up is not dis
   for (const at of [releasedAt, '2026-10-17T14:31:37.000Z', '2026-10-18T03:11:01.999Z']) {
     const account = actionAccount(item, all, new Date(at));
     assert.equal(account.action, null, `no action at ${at}`);
-    assert.deepEqual([account.gate, account.refusal, account.wait?.kind, account.wait?.on], ['build', 'Worker has not submitted implementation for this attempt', 'window', null]);
-    assert.match(account.wait!.detail, new RegExp(`^GY-1689 waits for the loop's reading of .*, which can first exist at ${notBefore} \\(GY-1685 merged at .*\\); the loop records it, and no worker is dispatched$`));
+    assert.deepEqual([account.gate, account.refusal, account.wait?.kind, account.wait?.on], ['build', 'Worker has not submitted implementation for this attempt', 'window', 'loop']);
+    assert.match(account.wait!.detail, new RegExp(`^GY-1689 waits for the loop's reading of .*, which can first exist at ${notBefore} \\(GY-1685 merged at .*\\); the loop records it once it can exist, and no worker is dispatched$`));
     assert.equal(nextAction(item, all, new Date(at)), null);
     const queued = { ...item, actionQueue: { actions: [], history: [] } } as Work;
     assert.deepEqual(reconcileActions(queued, [gy1685, queued], new Date(at)), [], 'the dispatch step is asked for nothing');
@@ -244,7 +244,7 @@ test('unit:observation-window-holds-dispatch — a released follow-up is not dis
     assert.equal(livenessFallback(item, all, new Date(at)), null);
     assert.deepEqual(stalledItems(all, new Date(at)), []);
     const listed = actionlessItems(all, new Date(at)).find(entry => entry.key === 'GY-1689')!;
-    assert.deepEqual([listed.outcome, listed.waitingOn], ['waiting-on', null]);
+    assert.deepEqual([listed.outcome, listed.waitingOn], ['waiting-on', 'loop']);
     assert.match(listed.detail, new RegExp(`can first exist at ${notBefore}`));
     assert.deepEqual(stalledCards(all, Date.parse(at)), []);
     assert.equal(actionlessCards(all, Date.parse(at)).find(card => card.item.key === 'GY-1689')!.movedBy, `its observation window, which closes at ${notBefore}`);
@@ -274,11 +274,11 @@ test('unit:observation-window-holds-dispatch — a released follow-up is not dis
     assert.equal(later.observationWindow!.waiting, false);
     assert.equal(plainStatus(hand, Date.parse(at)).sentence, 'Waiting for someone to pick this up');
   }
-  // GY-1762: the system-driven one is never dispatched, even once its window has closed: the reading is owed
-  // to the loop (an escalation), the item stays counted waiting, and only a recorded trusted reading ends that.
+  // GY-1762: the system-driven one is never dispatched, even once its window has closed: the reading is the
+  // loop's own (GY-1779: a wait on the loop, never an escalation), the item stays counted waiting, and only a recorded trusted reading ends that.
   for (const at of [notBefore, '2026-10-18T09:00:00.000Z']) {
     const account = actionAccount(item, all, new Date(at));
-    assert.equal(account.action?.kind, 'escalate', `owed, not dispatched, at ${at}`);
+    assert.deepEqual([account.action, account.wait?.kind, account.wait?.on], [null, 'window', 'loop'], `due to the loop, not dispatched, at ${at}`);
     assert.equal(dispatchable(item, Date.parse(at)), false, `not dispatchable at ${at}`);
     assert.throws(() => assertDispatchable(item, all, at), /Dispatch waits for the loop's observation/);
     const later = buildMasterStatus({ work: all, now: at }, [], []);
@@ -308,9 +308,9 @@ test('unit:observation-window-holds-dispatch — a released follow-up is not dis
     assert.deepEqual([entry.observationWindow!.waiting, entry.observationWindow!.notBefore, entry.attention], [true, live, null]);
     assert.equal(plainStatus(gy1724, Date.parse(at)).sentence, `Waiting for its observation window — the reading it owes can first exist at ${live}`);
   }
-  // GY-1762: past the instant the reading is owed to the loop; the item is escalated for it, never dispatched.
+  // GY-1762: past the instant the reading is the loop's to record (GY-1779); the item waits on the loop, never dispatched and never escalated.
   for (const at of [live, '2026-10-13T08:00:00.000Z']) {
-    assert.equal(actionAccount(gy1724, pair, new Date(at)).action?.kind, 'escalate', `GY-1724's reading is owed at ${at}`);
+    assert.deepEqual([actionAccount(gy1724, pair, new Date(at)).action, actionAccount(gy1724, pair, new Date(at)).wait?.on], [null, 'loop'], `GY-1724's reading is due to the loop at ${at}`);
     const queued = { ...gy1724, actionQueue: { actions: [], history: [] } } as Work;
     assert.ok(reconcileActions(queued, [gy1700, queued], new Date(at)).every(entry => entry.action.kind !== 'dispatch'));
     assert.throws(() => assertDispatchable(gy1724, pair, at), /Dispatch waits for the loop's observation/);

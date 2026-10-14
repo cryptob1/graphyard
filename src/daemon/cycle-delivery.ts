@@ -14,6 +14,7 @@ import type { Cycle } from './cycle.js';
 import { defaultDeploymentReuseMinutes, defaultPromoteEveryMinutes, deploymentDetail, deploymentStepBudgetMs, promotionCycle, promotionWorkflow, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
 import { mainGuardAttention } from '../main-guard.js';
 import { promotionFreeze } from './main-watch.js';
+import { readingsStep } from './cycle-readings.js';
 import { openThroughputOwner, throughputAnsweredAt, throughputClaim, throughputDecisionCause, throughputDecisionRelease, throughputHandAsked, throughputOwnerAnsweredBy, throughputOwnerClosure, throughputOwnerItem, throughputRemeasureAt, throughputSelfAsked, throughputStallText, type ThroughputStall } from '../throughput.js';
 
 /**
@@ -249,6 +250,9 @@ export async function deploymentStep(cycle: Cycle) {
     }
   });
   if (smokeDeferred) deferred.push(`${smokeDeferred} deliveries' deployment records and smoke requests`);
+  // 7c. GY-1779: the loop's own due readings of loop-owned observation items on the release verified above (cycle-readings.ts).
+  const readingsDeferred = await readingsStep(cycle, served, deadline);
+  if (readingsDeferred) deferred.push(`${readingsDeferred} loop-owned observation readings`);
   await noteDeploymentBudget(cycle, budgetMs, deferred);
 }
 

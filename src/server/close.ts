@@ -9,7 +9,7 @@ import { save } from '../store.js';
 import { foldDecisions } from '../model/approval.js';
 import { authenticated, digest, receipt, record } from './decisions.js';
 import type { Services } from './routes.js';
-import { lockedWork } from '../store/locked-read.js';
+import { lockedWork, workIdByRef } from '../store/locked-read.js';
 
 type Db = pg.PoolClient;
 
@@ -36,6 +36,11 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     const base = (await services.github!.baseBranch()).tip;
     ancestry = { base, contained: await services.github!.contains(ref, base) };
   }
+  // GY-1779: a loop-owned observation item closed on the loop's reading leaves no pull request open: a
+  // worker's unsubmitted candidate from before the loop held it (GY-1725, #1172) is closed on GitHub as
+  // superseded by the reading, outside the transaction like the ancestry read. One already closed is
+  // left as it is, and a refused close below leaves the reading recorded for the next attempt.
+  const superseded = data.kind === 'delivered-observation' ? await supersededPullRequest(services, id, data.reason) : null;
   return services.engine.store.transaction(async (db: Db, now: Date) => {
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay as unknown as Work;
@@ -67,10 +72,23 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     // The engine's own ledger entries for this evaluation (see waits.ts); internal to its transactions.
     await (services.engine as unknown as { recordDispatch(db: Db, work: Work, now: Date): Promise<void> }).recordDispatch(db, work!, now);
     for (const request of settled.cancelled) await record(db, work!, 'graphyard', 'dispatch.cancelled', { details: { ...request, at: now.toISOString() } });
-    await save(db, work!, actor.id, 'work.closed', now, { closure, actor: actor.id, reason: data.reason, cancelled: settled.cancelled.map(request => request.id), withdrawn: settled.withdrawn?.id ?? null, agentRequests: settled.agentRequests });
+    await save(db, work!, actor.id, 'work.closed', now, { closure, actor: actor.id, reason: data.reason, cancelled: settled.cancelled.map(request => request.id), withdrawn: settled.withdrawn?.id ?? null, agentRequests: settled.agentRequests, ...(superseded ? { pullRequest: superseded } : {}) });
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
     return work!;
   });
+}
+
+/**
+ * GY-1779: the open pull request of the item being closed as delivered-observation, closed on GitHub as
+ * superseded by the loop's reading; null when the item carries none. GitHub is required to close one.
+ */
+async function supersededPullRequest(services: Services, id: string, reason: string): Promise<{ pr: number; outcome: 'closed' | 'already-closed' } | null> {
+  const work: Work | undefined = (await services.engine.store.pool.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [id])).rows[0]?.document;
+  const pr = work?.candidate?.pr ?? work?.submission?.pr ?? null;
+  if (!work || !pr || work.stage === 'done' || work.observation?.merged) return null;
+  demand(services.github, `GitHub integration is required to close ${work.key}'s pull request #${pr} as superseded by the loop's reading`, 503);
+  const outcome = await services.github!.closeSupersededPullRequest(pr, `Closed by Graphyard: ${work.key}'s only work is the loop's post-deploy reading of the serving release, which the loop recorded itself; this pull request is superseded by that reading. ${reason}`.slice(0, 2000));
+  return { pr, outcome };
 }
 
 /**
