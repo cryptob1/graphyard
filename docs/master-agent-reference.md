@@ -11,7 +11,7 @@ Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON`; auto-gran
 
 ## Conflict avoidance
 
-Dispatch is optimistic (overlap holds nothing), smallest scope first ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)); `git merge-tree` reports `conflicts`; approvals survive base refreshes ([carry](github.md#bindings-and-carry)); one on current head dismissed `The merge-base changed after approval.` is restored, never re-posted. A branch never keeps another item's unlanded commits (build gate refuses): `git reset --hard REVIEWED_HEAD`, `sync GY-N`, `restore-branch GY-N EPOCH`.
+Dispatch is optimistic (overlap holds nothing), smallest scope first ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)); `git merge-tree` reports `conflicts`; approvals survive base refreshes ([carry](github.md#bindings-and-carry)); one on current head dismissed `The merge-base changed after approval.` is restored, never re-posted. A branch must never keep another item's unlanded commits (build gate refuses): `git reset --hard REVIEWED_HEAD`, `sync GY-N`, `restore-branch GY-N EPOCH`.
 
 ## GitHub administration through the browser
 
@@ -33,7 +33,7 @@ Declared slot not `active`: `resources` fault naming `journalctl --user -u graph
 
 ## Recovery
 
-Dead supervisor fences item; `containment` lists survivor pid, cmdline, cwd: `settleable: true` → loop settles; past grace+10min `master settle-containment GY-N REASON`, else stop recorded scope unit (`containment.scope`), request `rework`. Unexplained lapses raise `lease-loss` (`blocked-awaiting-operator`, `stopped-by-attestation`: history); admins settle explained: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns handler: `master decide GY-N resolve … --context FINGERPRINT REASON`. Named-reset exhaustion holds login twins fleet-wide.
+Dead supervisor fences item; `containment` lists survivor pid, cmdline and cwd: `settleable: true` → loop settles; past grace+10min `master settle-containment GY-N REASON`, else stop recorded scope unit (`containment.scope`), request `rework`. Unexplained lapses raise `lease-loss` (`blocked-awaiting-operator`, `stopped-by-attestation`: history); admins settle explained: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns handler: `master decide GY-N resolve … --context FINGERPRINT REASON`. Named-reset exhaustion holds login twins fleet-wide.
 
 ### Producer-runtime faults
 
@@ -51,4 +51,4 @@ Unacted producer requests (unstarted, refused, launch-exited) relaunch on untrie
 
 Target (10+ deliveries): submit→merge p50 ≤30min, p90 ≤60min. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; verdict `speed.submitToMerge`; `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
 
-Every loop step calling an approver, decision or session keeps a two-fifths interval budget (30 s floor): each is bound to 10 s or the budget left; a slower call is carried (`waiting`, no fault) and retried next cycle, joining its call in flight; one `decision.*` ledger read names moved items, an unmoved history is kept unread. Standing/held/approved-resume waits stay live, no fault; quarantine pauses matching held asks, covering fail clears; 5xx/stale retries unless moot.
+Every loop step calling an approver, decision or session keeps a two-fifths interval budget (30s floor): each is bound to 10s or the budget left; a slower call is carried (`waiting`, no fault) and retried next cycle, joining its call in flight; one `decision.*` ledger read names moved items, an unmoved history is kept unread. Standing/held/approved-resume waits stay live, no fault; quarantine pauses matching held asks, covering fail clears; 5xx/stale retries unless moot.
