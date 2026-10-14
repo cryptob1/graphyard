@@ -138,9 +138,10 @@ export async function resourceStatus(root: string, master: MasterConfig, observe
   // cursor, and the panes the reclaim pass has seen unowned, from its own record.
   const upgrade = owedUpgrade(await (deps.cursor ?? (() => readDaemonState(root, master)))().catch(() => null));
   const reclaim = await readReclaimState(root);
+  // The worktree-disk reading judges the current plan beside the pass (GY-1784 review): what is disposable now decides whether the loop's latest pass answers it, so the registry and the `disk` line of master status answer alike.
   const readings = readResources({ now, reviews: observed.reviews, producers: observed.producers, agents: observed.agents, work: observed.work,
     profiles: { workers: master.workers, reviewers: master.reviewers, producers: master.producers },
-    plane: await readPlaneResources(master.url, deps.fetcher), loop: observed.loop, revision, upgrade, reclaimSeen: reclaim.seen, disk: await readDisk(root, master), tmp: await readTmpInodes(root) });
+    plane: await readPlaneResources(master.url, deps.fetcher), loop: observed.loop, revision, upgrade, reclaimSeen: reclaim.seen, disk: await readDisk(root, master, undefined, { work: observed.work, now }), tmp: await readTmpInodes(root) });
   const attention = resourceAttention(readings);
   return { readings, attention, report: resourceReport(readings, reclaim.reports.at(-1) ?? null), upgrade };
 }

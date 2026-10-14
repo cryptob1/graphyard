@@ -696,8 +696,13 @@ test('unit:disk-pressure-drained-flap — the derived disk-pressure line gets th
     const stale = observe(9_900_000_000, disk.worktreePassCurrentMs + 1);
     assert.match(stale.lines[0].text, /found nothing reclaimable .* outside its reach: free host data on the volume, raise run\.diskThresholdGb .*; that pass is past its 30-minute currency bound/);
     assert.equal(state.faults.instances.filter(instance => instance.kind === 'disk-pressure').length, 1, 'the standing line is one instance however its wording moves');
-    // Drained and current again: the line ends.
-    assert.deepEqual(observe(9_900_000_000).lines, []); assert.equal(standing(), false);
+    // Drained and current again while the fault stands: the line holds — a fresh drained pass ends it only past the recovery band (GY-1784 review, AC-4).
+    const held = observe(9_900_000_000);
+    assert.equal(held.lines.length, 1, 'a standing line is not answered, however fresh the drained pass');
+    assert.match(held.lines[0].text, /the reading's fault stands, so it holds until free space recovers past the 1\.0 GB band above the 10\.0 GB line, whatever that pass answered/);
+    assert.equal(state.faults.instances.filter(instance => instance.kind === 'disk-pressure').length, 1, 'the hold opens no new instance');
+    // Recovered past the band while the pass is current and drained: the line ends.
+    assert.deepEqual(observe(threshold + disk.diskRecoveryBandBytes(threshold), 60_000).lines, []); assert.equal(standing(), false);
     // The wobble GY-1782 recorded, with a stale pass so the line is raised: 9.98 → 10.24 → 9.95 → 10.33 → 9.9 GB is one instance, not one per crossing.
     const walk = [9_980_000_000, 10_240_000_000, 9_950_000_000, 10_330_000_000, 9_900_000_000].map(free => observe(free, 2 * hour));
     assert.deepEqual(walk.map(step => step.opened), [['disk-pressure'], [], [], [], []]);
@@ -707,6 +712,8 @@ test('unit:disk-pressure-drained-flap — the derived disk-pressure line gets th
     assert.deepEqual(observe(threshold + disk.diskRecoveryBandBytes(threshold), 2 * hour).lines, []); assert.equal(standing(), false);
     assert.deepEqual(observe(10_500_000_000, 2 * hour).lines, [], 'above the line with no standing fault, the band does not apply');
     assert.deepEqual(observe(9_990_000_000, 2 * hour).opened, ['disk-pressure']);
+    // Recovered once more, so no fault stands: the hard line is all that overrides the answered gate.
+    assert.deepEqual(observe(threshold + disk.diskRecoveryBandBytes(threshold), 60_000).lines, []);
     // The hard line: at or below the floor the line is raised though the pass is current and drained.
     const floor = disk.diskExhaustionFloorBytes(threshold);
     assert.equal(observe(floor + 1).lines.length, 0, 'just above the floor the drained pass answers');

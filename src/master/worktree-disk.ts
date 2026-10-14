@@ -11,12 +11,16 @@ import type { WorktreeReclaimCandidate } from './worktrees.js';
  * (master-resources.ts), the `disk` line of master status and the loop's derived fault (daemon/faults.ts):
  *  - answered: while the loop's latest worktree-reclaim pass is current (`worktreePassCurrentMs`) and
  *    drained — it removed nothing, left no reclaimable worktrees, took no unowned managed checkout,
- *    met no error, and nothing is disposable now — a low reading is reported and raises nothing: what
- *    holds the volume is outside the loop's reach, which is the operator's to decide;
+ *    met no error, and nothing is disposable now over the current plan, which the caller computes
+ *    beside the reading (a plan it cannot read never answers) — and the reading's own fault does not
+ *    stand, a low reading is reported and raises nothing: what holds the volume is outside the loop's
+ *    reach, which is the operator's to decide;
  *  - hard line: at or below the exhaustion floor (`diskExhaustionFloorBytes`, half the warn line) the
  *    reading raises attention whatever the pass answered, as a write failing ENOSPC/EDQUOT always did;
  *  - recovery band: a low reading whose fault stands recovers only `diskRecoveryBandBytes` (a tenth of
- *    the warn line) above it, so one wobble across the line is one fault, not an instance per crossing.
+ *    the warn line) above it, and is never answered while it stands — a fresh drained pass that catches
+ *    it partway into the band ends it only for the next stale pass to open another — so one wobble across
+ *    the line is one fault, not an instance per crossing.
  */
 /** The loop's latest worktree-reclaim pass as the disk readings judge it: the cursor's reclaim summary, projected. */
 export interface WorktreePass { at: string; removed: number; trees: number; treeBacklog: number; checkouts: number; errors: number; freeBytes: number | null }
@@ -40,10 +44,10 @@ export interface WorktreeDiskInputs {
   freeBytes: number | null; thresholdBytes: number;
   /** The loop's latest worktree-reclaim pass; null or absent when none is recorded or the cursor is unread. */
   pass?: WorktreePass | null;
-  /** Whether this line's fault stands in the loop's record: the recovery band applies. */
+  /** Whether this line's fault stands in the loop's record: the recovery band applies, and the reading is not answered while it does (GY-1784 review: a fresh drained pass must not end a standing fault inside the band). */
   standing?: boolean;
-  /** What is disposable now, by the plan over the current inventory, when the caller has one. */
-  reclaimable?: number;
+  /** What is disposable now, by the plan over the current inventory: a number when the caller computed it, null when the plan could not be read (a drained pass is then not enough — the reading is never answered on a plan it does not know), absent when the caller judges from the pass alone. */
+  reclaimable?: number | null;
 }
 export interface WorktreeDiskJudgement {
   /** The headroom below which the reading is low: the warn line, raised by the recovery band while its fault stands. */
@@ -65,16 +69,20 @@ export function judgeWorktreeDisk(input: WorktreeDiskInputs, now: number): Workt
   const free = input.freeBytes, low = free !== null && free < warnBelow, atFloor = free !== null && free <= floorBytes;
   const pass = input.pass ?? null, at = pass ? Date.parse(pass.at) : Number.NaN, reclaimable = input.reclaimable ?? 0;
   const current = Number.isFinite(at) && now - at < worktreePassCurrentMs;
-  const drained = !!pass && pass.removed === 0 && pass.trees === 0 && pass.treeBacklog === 0 && pass.checkouts === 0 && pass.errors === 0 && reclaimable === 0;
-  const answered = low && !atFloor && current && drained;
+  // Drained needs the plan too: a pass that removed nothing can still have reach now, over worktrees that turned disposable after it ran (GY-1784 review) — and when the plan could not be read (null) the reading is never answered on it.
+  const drained = !!pass && input.reclaimable !== null && pass.removed === 0 && pass.trees === 0 && pass.treeBacklog === 0 && pass.checkouts === 0 && pass.errors === 0 && reclaimable === 0;
+  // A standing fault is never answered: the recovery band is its recovery line, and a fresh drained pass that catches the reading partway into the band closes it only for the next stale pass to open another (GY-1784 review, AC-4).
+  const answered = low && !atFloor && current && drained && !input.standing;
   // The detail every line carries: the band it stands in, the pass's reach, and why it is raised or answered.
   const band = input.standing && free !== null && free >= input.thresholdBytes ? `within the ${gigabytes(bandBytes)} recovery band above the ${gigabytes(input.thresholdBytes)} line, so the low reading whose fault stands is this same one` : null;
   const reach = !pass ? 'the loop has recorded no worktree-reclaim pass'
+    : input.reclaimable === null ? 'what is disposable now could not be read beside the reading, so it stands until the next plan over the inventory'
     : drained ? `the loop's latest worktree-reclaim pass at ${pass.at} found nothing reclaimable (no disposable dependency directories, reclaimable worktrees or unowned managed checkouts), so the volume's remaining holders are outside its reach: ${outsideReachRemedy}`
     : `the loop's latest worktree-reclaim pass at ${pass.at} still has reach (${passParts(pass, reclaimable)})`;
   const why = atFloor ? `at or below the ${gigabytes(floorBytes)} exhaustion floor, which raises attention whatever that pass answered`
     : answered ? `that pass is current, so only free space at or below the ${gigabytes(floorBytes)} floor raises attention`
-    : pass && !current ? `that pass is past its ${worktreePassCurrentMs / 60_000}-minute currency bound, so the reading stands until the next pass` : null;
+    : pass && !current ? `that pass is past its ${worktreePassCurrentMs / 60_000}-minute currency bound, so the reading stands until the next pass`
+    : input.standing ? `the reading's fault stands, so it holds until free space recovers past the ${gigabytes(bandBytes)} band above the ${gigabytes(input.thresholdBytes)} line, whatever that pass answered` : null;
   const detail = low ? [band, reach, why].filter(Boolean).join('; ') : null;
   return { warnBelow, bandBytes, floorBytes, low, atFloor, current, drained, answered, detail };
 }
