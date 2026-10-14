@@ -862,17 +862,20 @@ test('unit:mechanical-plan-cleared-on-failed-read', async () => {
 //   the goal every five-minute poll. The route now approves the verified head with the independent
 //   approver App (GY-1291's), as the main guard's reverts are approved, and an unconfigured approver is
 //   named in the waiting detail.
-test('manual:fault-class-decision — action:decision|GY-1459|2026-10-14T04:54:55.483Z: a plan-report write that times out is a retried action, not a decision fault', async () => {
+/**
+ * GY-1459 as the loop held it: a confirmed plan from before the ledger ceased to carry it, whose clear
+ * meets the loop's 30-second write timeout on every attempt. `state` is the loop's, `cycles` how many
+ * two-minute cycles to run from 04:50; the attempts the clear made and the item are returned.
+ */
+async function timedOutClearReplay(state: ReturnType<typeof emptyDaemonState>, cycles: number) {
   const minute = 60_000, start = Date.parse('2026-10-14T04:50:00.000Z');
   const iso = (at: number) => new Date(at).toISOString();
   const head = '632185dd17dd'.padEnd(40, '0');
   const review = { reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'APPROVED', id: 5499583025, submittedAt: iso(start - 35 * minute), mechanical: 2 };
   const candidate = { sha: head, baseSha: '1'.repeat(40), pr: 1169, branch: 'graphyard/gy-1459-1', author: 'implementer' };
-  const state = emptyDaemonState(config());
-  // GY-1459 as the loop held it: a confirmed plan from before the ledger ceased to carry it, whose clear
-  // met the loop's 30-second write timeout on every attempt.
-  let confirmedAt = iso(start - 11 * minute);
+  const confirmedAt = iso(start - 11 * minute);
   const attempts: ({ reviewId: number; head: string } | null)[] = [];
+  let now = start;
   const work = (): Work => ({
     id: 'work-1459', key: 'GY-1459', title: 'GY-1459', description: '', type: 'bug', priority: 2, dependencies: [], plannedFiles: ['src/'],
     criteria: [{ id: 'AC-1', text: 'It works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 3, policyRevision: 1,
@@ -890,14 +893,39 @@ test('manual:fault-class-decision — action:decision|GY-1459|2026-10-14T04:54:5
     mechanicalFixes: async () => ({ requests: [] }),
     recordMechanicalPlan: async (_item: Work, plan: { reviewId: number; head: string } | null) => { attempts.push(plan); throw new Error('The operation was aborted due to timeout'); },
   } as unknown as Parameters<typeof daemon.runCycle>[2];
-  let now = start;
+  for (let step = 0; step < cycles; step++, now += 2 * minute) await daemon.runCycle(config(), state, effects, () => now);
+  return { attempts, work: work(), start };
+}
+const timedOutClearDetail = `Could not report GY-1459's mechanical plan (none): The operation was aborted due to timeout; the review gate drops the hold once its last confirmation passes 5 minutes old`;
+
+test('manual:fault-class-decision — action:decision|GY-1459|2026-10-14T04:54:55.483Z: a plan-report write that times out is a retried action, not a decision fault', async () => {
+  const state = emptyDaemonState(config());
   const faultsBefore = state.faults.instances.length;
-  for (let step = 0; step < 2; step++, now += 2 * minute) await daemon.runCycle(config(), state, effects, () => now);
+  const { attempts } = await timedOutClearReplay(state, 2);
   assert.ok(attempts.length >= 2, 'the clear is attempted within the cycle and again the next');
   const row = state.actions['mechanical-plan:work-1459'];
   assert.equal(row?.state, 'failed', 'the failed write stays a visible, retried action');
-  assert.match(row!.detail, /mechanical plan \(none\): The operation was aborted due to timeout/);
+  assert.equal(row!.detail, timedOutClearDetail);
+  assert.equal(row!.faultClass, undefined, 'and carries no fault class');
   assert.deepEqual(state.faults.instances.slice(faultsBefore).map(entry => entry.kind).filter(kind => /decision|escalation/.test(kind)), [], 'the timeout counts no decision fault: the gate drops the hold at mechanicalPlanFreshMs whatever the write does');
+});
+
+// The row a loop before this change stored for the same timed-out clear counts as a decision fault,
+// and its text never changes, so an unchanged-detail guard alone would keep it counting (Codex, PR
+// #1203): the first cycle after the upgrade rewrites it without the class, and files no instance.
+test('manual:fault-class-decision — a stored counting failure of the same clear is rewritten without its fault class once the write stops counting, under the same text', async () => {
+  const state = emptyDaemonState(config());
+  const at = '2026-10-14T04:48:00.000Z';
+  storeAction(state, 'mechanical-plan:work-1459', { kind: 'decision', work: 'GY-1459', principal: null, state: 'failed', detail: timedOutClearDetail, attempts: 3, epoch: 1, cycle: 7, at });
+  assert.equal(state.actions['mechanical-plan:work-1459']!.faultClass, 'decision', 'the stored row counts, as the loop before this change stored it');
+  const instancesBefore = state.faults.instances.length;
+  await timedOutClearReplay(state, 1);
+  const row = state.actions['mechanical-plan:work-1459']!;
+  assert.equal(row.state, 'failed');
+  assert.equal(row.detail, timedOutClearDetail, 'the same text');
+  assert.equal(row.faultClass, undefined, 'rewritten without the fault class on the first cycle after the upgrade');
+  assert.equal(row.attempts, 4, 'as one more attempt of the same failure');
+  assert.deepEqual(state.faults.instances.slice(instancesBefore).filter(entry => /decision|escalation/.test(entry.kind)).map(entry => `${entry.kind} ${entry.subject}`), [], 'and no further decision instance is filed');
 });
 
 test('manual:fault-class-decision — action:decision|GY-1775|2026-10-14T06:43:08.482Z: a write refused because the item was delivered meanwhile is settled — no report, no hold, no instance', async () => {

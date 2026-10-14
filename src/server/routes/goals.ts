@@ -68,13 +68,11 @@ const mergeMethod = () => (['MERGE', 'SQUASH', 'REBASE'] as const).find(method =
  * the App-bound `Graphyard / merge` and `graphyard/landable` verdicts a managed base branch requires:
  * here the control-plane App publishes both on exactly the approved head — the approval by an identity
  * other than its author is its gate — and merges head-bound, as the main guard lands a revert. GitHub
- * still enforces CI and its review rules, so a merge it refuses is `waiting`: since GY-1795 the
- * independent approver App approves the pull request at exactly the verified head before the merge
- * (GY-1291's approver, as the main guard's reverts are approved), so the last-pusher approval rule
- * GitHub enforces on a branch the control-plane App pushed no longer strands an approved goal. A pull
- * request whose head moved off the approved one, or that conflicts with its base, is never landed; one
- * GitHub merged at any other head or base (an administrative bypass) is `unapproved`, never accepted
- * after the fact.
+ * still enforces CI and its review rules, so a merge it refuses is `waiting`; since GY-1795 the
+ * independent approver App (GY-1291's) approves exactly the verified head first, so the last-pusher
+ * rule on a branch the control-plane App pushed no longer strands an approved goal. A pull request
+ * whose head moved off the approved one, or that conflicts with its base, is never landed; one GitHub
+ * merged at any other head or base (an administrative bypass) is `unapproved`, never accepted after the fact.
  */
 export async function landAcceptance(github: LandingGitHub, goal: Goal): Promise<Landing> {
   const { pr } = goal.acceptance!, { head, by, reason } = goal.approval!;
@@ -93,12 +91,11 @@ export async function landAcceptance(github: LandingGitHub, goal: Goal): Promise
   if (!(existing?.status === body.status && existing.conclusion === body.conclusion && existing.external_id === body.external_id && existing.output?.title === body.output.title && existing.output?.summary === body.output.summary))
     await github.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
   await github.upsertLandable(landableCarried(goal, head, 'Landable', summary));
-  // GY-1795: a managed base branch requires an approval from someone other than the last pusher, and the
-  // control-plane App pushed the acceptance branch — its own App-bound verdicts above never satisfy the
-  // rule, which left GOAL-1 approved and unmerged from its acceptance on. The independent approver App
-  // approves at exactly the verified head, as the main guard's reverts are approved (GY-1291); a refused
-  // approval still tries the merge, as the guard's do, and an unconfigured approver is named when the
-  // merge is refused, so the stuck landing reads as the configuration gap it is (GY-1335's wording).
+  // GY-1795: the base requires an approval from someone other than the last pusher, and the control-plane
+  // App pushed the acceptance branch, so its own App-bound verdicts above never satisfy the rule (GOAL-1
+  // sat approved and unmerged on it). The independent approver App approves exactly the verified head, as
+  // the main guard's reverts are approved (GY-1291); a refused approval still tries the merge, as the
+  // guard's do, and an unconfigured approver is named when the merge is refused (GY-1335's wording).
   let unconfigured = false, approvalRefusal: string | null = null;
   try { unconfigured = await github.approveAcceptance(pr, head, `Graphyard's acceptance landing: ${summary}`) === 'unconfigured'; }
   catch (error) { approvalRefusal = error instanceof Error ? error.message : String(error); }

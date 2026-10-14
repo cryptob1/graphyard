@@ -26,7 +26,8 @@ export interface FakePull {
 }
 export interface FakeReview { id: number; pr: number; sha: string; state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED'; by: Actor; body: string }
 export interface FakeCheckRun { id: number; name: string; head_sha: string; status: 'completed'; conclusion: 'success' | 'failure'; external_id: string; output: { title: string; summary: string }; app: { id: number } }
-export interface Protection { checks: { context: string; app_id: number | null }[]; requiredApprovals: number }
+/** Branch protection; `lastPushApproval` is GitHub's "Require approval of the most recent reviewable push" (GY-1795): an approval by the identity that pushed the head does not count. */
+export interface Protection { checks: { context: string; app_id: number | null }[]; requiredApprovals: number; lastPushApproval?: boolean }
 export interface Approval { kind: 'app-approval'; app: string; by: string; approved: boolean }
 export interface HumanStep { action: string; by: Actor; detail: string }
 
@@ -127,7 +128,7 @@ export class FakeGitHub {
   /** `PUT /repos/:owner/:repo/branches/main/protection`, by an App installed here or a command with the operator's credential. */
   protect(protection: Protection, by: Actor) {
     this.person(by, 'protect', 'branch protection set by hand');
-    this.protection = { checks: protection.checks.map(check => ({ ...check })), requiredApprovals: protection.requiredApprovals };
+    this.protection = { checks: protection.checks.map(check => ({ ...check })), requiredApprovals: protection.requiredApprovals, ...(protection.lastPushApproval ? { lastPushApproval: true } : {}) };
   }
 
   // ---- Branches, commits and Actions ------------------------------------------------------------------
@@ -196,6 +197,8 @@ export class FakeGitHub {
     }
     const approvals = new Set(this.reviews.filter(entry => entry.pr === pr && entry.sha === head && entry.state === 'APPROVED' && entry.by !== pull.author).map(entry => entry.by));
     if (approvals.size < (this.protection?.requiredApprovals ?? 0)) return `At least ${this.protection!.requiredApprovals} approving review is required by reviewers with write access.`;
+    // GY-1795: under the last-push rule the head's pusher cannot approve its own push, so an App that pushed the branch and approved it satisfies nothing — the rule that stranded GOAL-1.
+    if (this.protection?.lastPushApproval && ![...approvals].some(by => by !== this.commits.get(head)?.author)) return 'New changes require approval from someone other than the last pusher.';
     return null;
   }
   /** Merge PR at HEAD, as BY, under the branch's protection; the base branch moves to a merge commit holding the head's files. */
@@ -229,7 +232,7 @@ export class FakeGitHub {
   landing(app: FakeApp, approver?: FakeApp) {
     const as: Actor = `app:${app.slug}`;
     return {
-      config: { base: this.defaultBranch, appId: app.id, repository: this.repository },
+      config: { base: this.defaultBranch, appId: app.id, installationId: app.installationId ?? 0, privateKey: app.pem, repository: this.repository },
       request: async (path: string, method = 'GET', body?: any) => {
         const pr = Number(path.match(/^\/(?:pulls|issues)\/(\d+)/)?.[1]);
         if (method === 'GET' && path.startsWith('/pulls/')) return this.view(pr);
