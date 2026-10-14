@@ -117,7 +117,7 @@ test('unit:shadow-compare — compareVerdicts gives agree-pass, agree-fail, shad
   assert.equal(compareVerdicts(fail, githubOutcome(redelivered, pass.head)), 'shadow-only-fail');
   // A revert the guard opened or abandoned already judged the merge; a record whose cause is a cancelled CI run judged nothing.
   const guarded = (revert: Record<string, unknown>) => item({ id: 'g', key: 'GY-9', stage: 'done', candidate: { sha: pass.head }, delivery: delivery(sha('g-merge')), mainGuardReverts: [revert] });
-  assert.deepEqual([githubOutcome(guarded(revertOf(sha('g-merge'), 'opened')), pass.head), githubOutcome(guarded(revertOf(sha('g-merge'), 'abandoned', { cause: 'conflict' })), pass.head), githubOutcome(guarded(revertOf(sha('g-merge'), 'abandoned', { cause: 'cancelled' })), pass.head)], ['reverted', 'reverted', 'merged']);
+  assert.deepEqual([githubOutcome(guarded(revertOf(sha('g-merge'), 'opened')), pass.head), githubOutcome(guarded(revertOf(sha('g-merge'), 'abandoned', { cause: 'conflict' })), pass.head), githubOutcome(guarded(revertOf(sha('g-merge'), 'abandoned', { cause: 'cancelled' })), pass.head), githubOutcome(guarded(revertOf(sha('g-merge'), 'abandoned', { cause: 'base-failure' })), pass.head)], ['reverted', 'reverted', 'merged', 'merged']);
   // A reverted item is reopened with its delivery and candidate cleared. The verdict remembers the merge it saw delivered, so the
   // revert of exactly that merge still reads through the rework and the redelivery, while the new head is judged on its own merge.
   const first = sha('merge-1'), second = sha('merge-2'), newHead = sha('new-head');
