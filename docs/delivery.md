@@ -7,9 +7,9 @@ Records intended releases, verifying observers ([rollback](recovery.md#rollback)
 
 Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`, `release/production` (moved only by `graphyard release`) to candidates' SHAs.
 
-- `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N first-parent merges since the last candidate (`GRAPHYARD_RC_MAX_PRS`, 10; rest queue); `.github/workflows/release-candidate.yml` cuts on loop dispatch (cron fallback). A cut holding the plane's goal record records pending outcomes as `rc/ID`'s `pendingOutcomes`.
-- `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*` credentials); refused while an unjudged candidate <4h old serves.
-- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser`, suites ([below](#pre-merge-gate-and-release-candidate-validation); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`, reading [`pendingOutcomes`](validation.md#release-verdicts) off it: a pending outcome's failing case pends, never blocking.
+- `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N first-parent merges since the last candidate (`GRAPHYARD_RC_MAX_PRS`, 10; rest queue); `.github/workflows/release-candidate.yml` cuts on loop dispatch (cron fallback). A cut holding the plane's goal record records `rc/ID`'s `pendingOutcomes`.
+- `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*` credentials); refused while an unjudged candidate under 4h serves.
+- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser`, suites ([below](#pre-merge-gate-and-release-candidate-validation); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`, reading [`pendingOutcomes`](validation.md#release-verdicts) off it: a pending outcome's case pends, never blocking.
 - `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`; `release verify --url URL` confirms.
 - Failed candidates file a [hold](validation.md#release-holds) per failed outcome, else a follow-up (`release follow-up ID`) as the [filing credential](#release-filing-credential).
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records advisory `rc-soak/ID`.
