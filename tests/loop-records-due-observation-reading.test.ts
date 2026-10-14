@@ -130,7 +130,7 @@ test('integration:loop-records-due-observation-reading — the deployment-verifi
   assert.equal(run.closed.length, 3);
 });
 
-test('integration:loop-records-due-observation-reading — a follow-up owing a second proof reads only the proof its request names through the parent; the other is never read as the first', async () => {
+test('integration:loop-records-due-observation-reading — a follow-up owing a second proof reads a proof no parent proof stands behind as unavailable, never as the first', async () => {
   const second = 'manual:other-check-on-serving-release', multi = followUp(1735, { criteria: [followUp(1735).criteria[0], { id: 'AC-2', text: 'a second check', proofs: [second] }] });
   const asked: string[] = [];
   // The parent's filer would read the request's proof observed: the second proof must not borrow that.
@@ -138,7 +138,29 @@ test('integration:loop-records-due-observation-reading — a follow-up owing a s
   const run = await cycleOver([parent, multi], await temporaryDirectory('loop-readings-multi'), reader);
   assert.deepEqual(asked, [proof], 'only the request\'s own proof is read through the parent proof');
   assert.deepEqual(run.recorded, [], 'a reading waits for every proof: nothing is recorded while the second cannot be taken');
-  assert.match(run.state.actions[`reading:${multi.id}`]!.detail, /manual:other-check-on-serving-release is not the proof this follow-up's request names/);
+  assert.match(run.state.actions[`reading:${multi.id}`]!.detail, /manual:other-check-on-serving-release is not the item proof of any post-deploy proof of GY-1700/);
+});
+
+test('integration:loop-records-due-observation-reading — an added proof with its own parent post-deploy check is read through that parent proof, and an older parent carried only by the serving release\'s retained containment is read', async () => {
+  const added = 'manual:post-deploy/other-check', addedOwn = 'manual:other-check-on-serving-release';
+  const two = { ...parent, criteria: [parent.criteria[0], { id: 'AC-3', text: 'another live check', proofs: [added] }] } as Work;
+  const multi = followUp(1736, { criteria: [followUp(1736).criteria[0], { id: 'AC-2', text: 'a second check', proofs: [addedOwn] }] });
+  const asked: string[] = [];
+  const reader: DaemonEffects['readPostDeploy'] = async input => { asked.push(input.proof); return { result: 'pass', detail: 'read' }; };
+  const settled = { release: serving, settled: { [two.key]: serving } };
+  const run = await cycleOver([two, multi], await temporaryDirectory('loop-readings-added'), reader, now, { observeDeployment: async () => ({ source: 'endpoint', sha: serving, at: iso(now - 60_000), reason: null, deployed: [], pending: [], requests: 1, containment: settled }) as never });
+  assert.deepEqual(asked.sort(), [added, proof].sort(), 'each item proof reads through the parent proof it was filed for');
+  assert.equal(run.recorded.length, 2);
+});
+
+test('integration:loop-records-due-observation-reading — a due reading never stands on a reused observation: production may have rolled within the reuse window', async () => {
+  const item = followUp(1737), directory = await temporaryDirectory('loop-readings-reuse'), observed: number[] = [];
+  const made = await makeCycle([parent, item], directory, async () => ({ result: 'pass', detail: 'read' }), now, { observeDeployment: async () => { observed.push(1); return made.served() as never; } });
+  (made.cycle.config.run as { deploymentReuseMinutes?: number }).deploymentReuseMinutes = 15;
+  made.state.deployment = { ...made.served(), at: iso(now - 60_000), pending: [] } as never;
+  const { deploymentStep } = await import('../src/daemon/cycle-delivery.js');
+  await deploymentStep(made.cycle);
+  assert.equal(observed.length, 1, 'the due reading reads the release afresh');
 });
 
 test('integration:loop-records-due-observation-reading — the serving release not yet observed carrying the parent\'s merge, or unobserved this cycle, records why and takes no reading', async () => {

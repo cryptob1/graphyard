@@ -66,6 +66,8 @@ async function projections(parent: Pick<Work, 'criteria'>, patterns?: PatternRea
 
 /** The item proof a follow-up is filed with for a parent's post-deploy proof (master-verification's filer). */
 const followUpItemProof = (parentProof: string) => `manual:${parentProof.slice(postDeployProofPrefix.length).replace(/\//g, '-')}-on-serving-release`;
+/** The parent's post-deploy proof an item proof of its follow-up stands for, or null when none does. */
+const parentProofOf = (parent: Pick<Work, 'criteria'>, proof: string) => parent.criteria.flatMap(entry => entry.proofs).find(entry => entry.startsWith(postDeployProofPrefix) && followUpItemProof(entry) === proof) ?? null;
 type Taken = { proof: string; reading: PostDeployReading };
 /** What one single-flight read of an item answers: the release it was read on, so an answer for a release the plane no longer serves is discarded, and the readings or the failure. */
 type Read = { release: string } & ({ readings: Taken[] } | { error: unknown });
@@ -75,6 +77,13 @@ const newestLoopReading = (item: Work, proof: string) => item.evidence.filter(en
 const detailOf = (entry: Taken) => (entry.reading as { detail: string }).detail.slice(0, 2000);
 /** The pull request a delivered-observation closure still owes GitHub, as the close's answer or the snapshot's document carries it. */
 const owedPullRequest = (work: unknown) => { const closure = (work as Pick<Work, 'closure'> | null | undefined)?.closure; return closure?.kind === 'delivered-observation' && closure.pullRequest?.outcome === 'owed' ? closure.pullRequest.pr : null; };
+
+/** Whether a loop-owned reading is due this cycle, so the step reads the serving release afresh rather than standing on an older observation of it. */
+export function readingDueNow(cycle: Cycle): boolean {
+  const { state, now, snapshot, open } = cycle;
+  return open.some(item => !item.blocker && !(item.lease && Date.parse(item.lease.expiresAt) > now()) && loopObservationProofs(item)
+    && !!loopObservation(item, new Date(now()), snapshot.work)?.due && readingDue(state.actions[readingKey(item)], state.cycle));
+}
 
 /**
  * Step 7c. Every loop-owned observation item whose reading is due (`loopObservation(...).due`) is read
@@ -152,7 +161,9 @@ export async function readingsStep(cycle: Cycle, served: DaemonState['deployment
     if (!effects.recordReading) return note('waiting', `${item.key}'s reading is due on release ${short(release)}, and this loop records no readings: it runs without the coordinator's reading effect`);
     const request = followUpRequest(item), parent = request ? snapshot.work.find(entry => entry.id === request.work) : item;
     if (!parent || (request && !parent.delivery)) return note('waiting', `${item.key}'s reading is due on release ${short(release)}, and its follow-up request names ${request?.work ?? 'no item'}, which is not a delivered item; the reading has no merge to bind to`);
-    if (request && !served!.deployed.includes(parent.key)) return note('waiting', `${item.key}'s reading is due, and the release the control plane serves (${short(release)}) is not observed carrying ${parent.key}'s merge ${short(parent.delivery!.mergeSha)}; the loop reads it on a release that does`);
+    // The observation's deployed list is cut to the newest deliveries; an older parent is carried by the retained containment of the serving release.
+    const carried = (key: string) => served!.deployed.includes(key) || (served!.containment?.release === served!.sha && Object.hasOwn(served!.containment.settled, key));
+    if (request && !carried(parent.key)) return note('waiting', `${item.key}'s reading is due, and the release the control plane serves (${short(release)}) is not observed carrying ${parent.key}'s merge ${short(parent.delivery!.mergeSha)}; the loop reads it on a release that does`);
     const baseSha = request ? parent.delivery!.mergeSha : release;
     const proofs = loopObservationProofs(item) ?? [];
     // The reads — the report once, then the parent's own check through the filer and the proof's reader —
@@ -165,9 +176,10 @@ export async function readingsStep(cycle: Cycle, served: DaemonState['deployment
       const checks = effects.postDeployFiler ? await effects.postDeployFiler({ work: parent, release, now: new Date(now()).toISOString(), projections: read.filer, ...servedAt }) : [];
       for (const proof of proofs) {
         if (loopReadingOn(item, proof, release)?.result === 'pass') { readings.push({ proof, reading: { result: 'pass', detail: 'already recorded' } }); continue; }
-        // A follow-up's request names one parent proof, and only the item proof filed for it reads through it: any other proof of the item is a different check, never read as the first.
-        if (request && proof !== followUpItemProof(request.proof)) { readings.push({ proof, reading: { unavailable: `${proof} is not the proof this follow-up's request names (${request.proof}), so no parent check stands for it` } }); continue; }
-        const parentProof = request ? request.proof : proof, criterion = parent.criteria.find(entry => entry.proofs.includes(parentProof)) ?? null;
+        // A follow-up item proof reads through the parent post-deploy proof it was filed for (the request's own, or one added later with its own parent check); a proof no parent proof stands behind is never read as another.
+        const parentProof = request ? parentProofOf(parent, proof) : proof;
+        if (parentProof === null) { readings.push({ proof, reading: { unavailable: `${proof} is not the item proof of any post-deploy proof of ${parent.key}, so no parent check stands for it` } }); continue; }
+        const criterion = parent.criteria.find(entry => entry.proofs.includes(parentProof)) ?? null;
         // The parent's own check first: the filer verify-deployment uses reads whether the parent already carries a trusted passing observation of the proof on this release.
         const check = checks.find(entry => entry.proof === parentProof);
         if (check?.result === 'observed') { readings.push({ proof, reading: { result: 'pass', detail: `the post-deploy-checks filer reads ${parent.key} ${check.criterion}'s ${parentProof} observed on release ${short(release)}: a trusted passing record is bound there` } }); continue; }
