@@ -527,7 +527,7 @@ test('unit:coordinator-checkout-drift-detected — the loop cycles nothing from 
   } finally { await fixture.cleanup(); }
 });
 
-test('unit:coordinator-checkout-drift-detected — the loop checks the checkout every cycle: a tree that turns dirty under a running loop is attention, and the self-upgrade waits', async () => {
+test('unit:coordinator-checkout-drift-detected — the loop checks the checkout every cycle: a tree that turns dirty under a running loop is attention, and the self-upgrade still runs (GY-1773: a dirty tree is upgraded by snapshot, never a reason to wait)', async () => {
   const fixture = await installed();
   try {
     const { config, cleanup } = fixture;
@@ -543,10 +543,14 @@ test('unit:coordinator-checkout-drift-detected — the loop checks the checkout 
     const state = emptyDaemonState(config);
     await runDaemon(config, state, loopEffects([], { selfUpgrade: async () => { upgrades++; return { outcome: 'skipped' as const, reason: 'nothing deployed yet' }; } }),
       loopOptions(fixture, { checkout }));
-    assert.equal(upgrades, 0, 'the self-upgrade is skipped from the cycle the tree turned dirty');
+    // GY-1773: the dirty tree used to skip the self-upgrade here, and left the loop on stale code
+    // for as long as it stood; it is escalated as before, and the upgrade runs — from a dirty tree
+    // it snapshots the merged commit under .graphyard/held-cli and restarts onto that.
+    assert.equal(upgrades, 1, 'the self-upgrade runs from the cycle the tree turned dirty: a dirty tree holds it back no longer');
     const escalation = state.actions['escalation:dirty-checkout'];
     assert.ok(escalation, 'the turned-dirty tree is raised as attention');
     assert.match(escalation.detail, /src\/loop\.ts/);
+    assert.match(escalation.detail, /The self-upgrade is not held by it: a merged release restarts the loop and the executors onto a held snapshot of it, the checkout left where it stands/, 'and says the upgrade is not held by it');
     await cleanup();
   } finally { await fixture.cleanup(); }
 });

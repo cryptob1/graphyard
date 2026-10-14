@@ -289,6 +289,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   checkoutRestart?: { moveAt: number; restartAt: number; kind: 'forward' | 'foreign'; doctor?: { scenario: string; from: number; outage: { from: number; to: number } } };
   /** GY-1773: once the dirty window closes, the operator moves the checkout onto the commit the loop runs from its held snapshot, which lifts the pin. */
   dirtyLift?: boolean;
+  /** GY-1773: when a commit touching no loaded code (a docs page) lands on the base branch, so a deploy after it serves a docs-only head. */
+  docsOnlyCommit?: number;
   /**
    * GY-1585: production promotes a release cut `cutAgoMs` before each deploy, so every deploy serves
    * a base tip the branch has already moved past, and the coordinator checkout answers
@@ -2484,7 +2486,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     held: [] as string[], owed: [] as { to: string; state: string; attempts: number }[], unit: { watchdogSec: plan.driftedWatchdogSec, rewrites: 0 },
     starts: 0, watchdog: [] as { failed: number; attempts: number; windowSec: number }[],
     /** GY-1773: every pin the launcher received or lost, and each cycle's view of the checkout, the pin and the checkout the cursor names left behind. */
-    pins: [] as { at: number; commit: string | null }[], samples: [] as { elapsed: number; head: string; dirty: boolean; pin: string | null; snapshot: { at: string; commit: string; checkout: string | null; dirty: string[] } | null; outcome: SelfUpgradeOutcome['outcome'] | null }[] };
+    pins: [] as { at: number; commit: string | null }[], samples: [] as { elapsed: number; head: string; dirty: boolean; pin: string | null; snapshot: { at: string; commit: string; checkout: string | null; dirty: string[] } | null; outcome: SelfUpgradeOutcome['outcome'] | null; last: { to: string; code: boolean; self: boolean } | null }[],
+    /** GY-1773: the docs-only commit `docsOnlyCommit` landed, once it has. */
+    docsOnly: null as string | null };
   /** The paths the base branch changed between two commits: every merged pull request's files, and what any other commit added or removed. */
   const changedPaths = (from: string, to: string) => {
     const paths = new Set<string>(), seen = new Set<string>(), queue = [to];
@@ -2782,6 +2786,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       ? new Set([...github.prs.values()].filter(pr => pr.open).map(pr => pr.head)) : new Set<string>();
     // A change landed on main outside Graphyard, moving the base under candidates already pushed.
     if (!noticed && elapsed >= plan.notice) { noticed = true; github.commit('Add NOTICE to the base branch', [...github.files, 'NOTICE']); }
+    // GY-1773: a docs-only commit on the base branch — the next deploy serves a head whose diff from what the loop runs touches no loaded code.
+    if (options.docsOnlyCommit !== undefined && upgrades.docsOnly === null && elapsed >= options.docsOnlyCommit) upgrades.docsOnly = github.commit('Add a docs page to the base branch', [...github.files, 'docs/soak-note.md']).sha;
     // A test breaks on main outside Graphyard, and is repaired eleven minutes later (GY-528). Only
     // the 24-hour main day runs it: its candidates are held without rework either way, and that
     // day is where the filing, rerun and refresh recovery is asserted. The window is sized to the
@@ -3208,7 +3214,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       } else assert.equal(guardReads.agents, readsBefore, 'a clean checkout costs no Herdr inventory read');
       if (upgraded) upgrades.outcomes.push(upgraded.outcome);
       // GY-1773: each cycle's view of the checkout, the pin and the checkout the cursor names left behind.
-      upgrades.samples.push({ elapsed, head: checkout.head, dirty: checkout.dirty, pin: releaseLagDay.pin, snapshot: state.upgrade.snapshot ? { ...state.upgrade.snapshot } : null, outcome: upgraded?.outcome ?? null });
+      upgrades.samples.push({ elapsed, head: checkout.head, dirty: checkout.dirty, pin: releaseLagDay.pin, snapshot: state.upgrade.snapshot ? { ...state.upgrade.snapshot } : null, outcome: upgraded?.outcome ?? null,
+        last: state.upgrade.last ? { to: state.upgrade.last.to, code: state.upgrade.last.code, self: state.upgrade.last.self } : null });
       if (options.releaseLag) {
         const rows = Object.entries(state.actions).filter(([key]) => key.startsWith('upgrade:')), held = state.actions['upgrade:held'];
         releaseLagDay.passes.push({ elapsed, outcome: upgraded?.outcome ?? null, pending: state.upgrade.pending?.to ?? null, stall: state.upgrade.stalled?.cause ?? null, held: held ? { state: held.state, attempts: held.attempts } : null,

@@ -257,7 +257,8 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     const needsScratch = Boolean(raw.research) || 'diagnostician' in raw;
     // GY-1773: a loop the launcher pinned to a held snapshot (the self-upgrade from a dirty checkout)
     // runs the snapshot's commit, whatever the checkout beside it holds: that is its release.
-    const snapshot = options.loadedSnapshot ? options.loadedSnapshot() : loadedHeldSnapshot(coordinatorCheckoutRoot(config.cliPath));
+    // The read tolerates a configuration without a CLI launcher (no root to read under): such a loop runs the checkout.
+    const snapshot = options.loadedSnapshot ? options.loadedSnapshot() : typeof config.cliPath === 'string' ? loadedHeldSnapshot(coordinatorCheckoutRoot(config.cliPath)) : null;
     const loadedRelease = snapshot ? { commit: snapshot, dirty: false } : raw.loadedRelease ?? null;
     const scratchDirectory = needsScratch ? await openResearchScratch(researchScratchSource(config, options.repository), config, loadedRelease?.commit ?? null, log) : null;
     const scoped = new Proxy(raw, { get(target, property, receiver) {

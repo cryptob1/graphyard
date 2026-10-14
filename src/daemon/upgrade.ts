@@ -116,8 +116,11 @@ export function loadedHeldSnapshot(root: string, loadedFrom = fileURLToPath(impo
 export function leftBehindCheckoutAttention(left: { at: string; commit: string; checkout: string | null; dirty: string[] } | null | undefined, held: string | null, root: string): AttentionItem[] {
   if (!left || !sameCommit(held, left.commit)) return [];
   const named = left.dirty.length ? ` (dirty: ${left.dirty.slice(0, 8).join(', ')}${left.dirty.length > 8 ? `; and ${left.dirty.length - 8} more` : ''})` : '';
-  return [{ subject: 'upgrade', text: `The loop and the executors run ${shortCommit(left.commit)} from its held snapshot under ${root}/.graphyard/held-cli, not from the coordinator checkout, which stood dirty at ${shortCommit(left.checkout)}${named} when the self-upgrade ran at ${left.at} and was left where it stands; every command the checkout's launcher starts loads the snapshot while the pin stands.`,
-    ...agentOwner('master', `Move the checkout onto the commit the loop runs, which lifts the pin: git -C ${root} status --porcelain names what is in it, and git -C ${root} checkout --detach ${left.commit} moves it (graphyard master checkout-restore REASON saves the dirty paths and returns them to HEAD first)`) }];
+  // The checkout since moved onto the commit, but with loaded code still dirty in it: the pin stays until that is clean.
+  const onto = sameCommit(left.checkout, left.commit);
+  return [{ subject: 'upgrade', text: `The loop and the executors run ${shortCommit(left.commit)} from its held snapshot under ${root}/.graphyard/held-cli, not from the coordinator checkout, which ${onto ? `holds that commit but is dirty in loaded code${named}` : `stood dirty at ${shortCommit(left.checkout)}${named} when the self-upgrade ran at ${left.at} and was left where it stands`}; every command the checkout's launcher starts loads the snapshot while the pin stands.`,
+    ...agentOwner('master', onto ? `Return the checkout's loaded paths (src/, scripts/, bin/, package.json) to the commit, which lifts the pin: git -C ${root} status --porcelain names them (graphyard master checkout-restore REASON saves the dirty paths and returns them to HEAD)`
+      : `Move the checkout onto the commit the loop runs, which lifts the pin: git -C ${root} status --porcelain names what is in it, and git -C ${root} checkout --detach ${left.commit} moves it (graphyard master checkout-restore REASON saves the dirty paths and returns them to HEAD first)`) }];
 }
 
 /** The supervisor unit the loop itself runs under, when systemd supervises it: read from the process's own cgroup, like an executor's. */
@@ -525,7 +528,15 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
    * GY-1773: the checkout was moved onto the commit the loop runs from its held snapshot: the pin
    * is lifted, the launcher runs the checkout again, and nothing restarts — the code is the same.
    */
-  const lift = async (commit: string): Promise<SelfUpgradeOutcome> => {
+  const lift = async (commit: string, standing: CheckoutState): Promise<SelfUpgradeOutcome> => {
+    // Loaded code still dirty in the moved checkout: the launcher would run the edits, not the
+    // commit, so the pin stays and the cursor names the checkout as it stands now, dirty at the
+    // commit itself; an edit outside the loaded paths changes nothing a process runs and lifts.
+    if (standing.dirty === true && upgradeTouchesCode(standing.dirtyPaths)) {
+      const left = state.upgrade.snapshot!, dirty = standing.dirtyPaths.slice(0, 20);
+      if (left.checkout !== commit || left.dirty.join('\n') !== dirty.join('\n')) { state.upgrade.snapshot = { ...left, checkout: commit, dirty }; await persist(); }
+      return { outcome: 'skipped', reason: `the checkout holds ${shortCommit(commit)}, the commit the loop runs from its held snapshot, but loaded code is dirty in it (${dirty.filter(path => upgradeTouchesCode([path])).slice(0, 8).join(', ')}); the pin stays until it is clean` };
+    }
     await holdCli(null).catch(() => {});
     delete state.upgrade.snapshot;
     state.upgrade.refused = null;
@@ -564,10 +575,13 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     // running the snapshot (a re-execution that failed) still owes that restart, onto the snapshot.
     // Cleaned and detached where it stood, it is moved below as any clean checkout is.
     const left = state.upgrade.snapshot, onSnapshot = !!left && sameCommit(loaded, left.commit);
-    if (left && head && onSnapshot && sameCommit(head, left.commit)) return lift(head);
+    if (left && head && onSnapshot && sameCommit(head, left.commit)) return lift(head, standing!);
     const stays = !!left && !!head && head === left.checkout && (standing!.dirty === true || standing!.detached !== true);
     if (stays && !onSnapshot) {
-      state.upgrade.pending = { from: loaded, to: left!.commit, code: true };
+      // The owed restart keeps the alignment's own `code`: a docs-only snapshot whose re-execution
+      // failed still owes the loop alone, never a fleet restart nothing the executors run calls for.
+      const last = state.upgrade.last;
+      state.upgrade.pending = { from: loaded, to: left!.commit, code: last && sameCommit(last.to, left!.commit) ? last.code : true };
       await persist();
       return finish(state.upgrade.pending, false, { checkout: left!.checkout, dirty: left!.dirty });
     }
@@ -594,9 +608,10 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   const held = state.upgrade.pending;
   if (held?.code && state.upgrade.stalled?.cause === 'release-lagged') {
     const holding = await checkoutState(deps.root, deps.run);
-    if (holding.commit === held.to) return finish(held, true);
-    // GY-1773: a hold placed from a dirty checkout completes onto a snapshot, the checkout still behind it.
+    // GY-1773: a hold completes onto a snapshot whenever the checkout is dirty — one dirtied after
+    // the hold moved it onto the commit included: the restart never runs a dirty tree's code.
     if (holding.dirty === true) return finish(held, true, { checkout: holding.commit, dirty: holding.dirtyPaths });
+    if (holding.commit === held.to) return finish(held, true);
   }
 
   // 2. The base tip, from a fresh fetch.
@@ -609,9 +624,9 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     // an origin outage never holds the loop on stale code (GY-1445). A newer tip waits for the next
     // pass that can fetch.
     const owed = state.upgrade.pending, holding = owed ? await checkoutState(deps.root, deps.run) : null;
-    if (owed && holding!.commit === owed.to) return finish(owed);
     // GY-1773: a snapshot restart owed from a dirty checkout needs no fetch either: the commit is already held.
     if (owed?.code && holding!.dirty === true) return finish(owed, false, { checkout: holding!.commit, dirty: holding!.dirtyPaths });
+    if (owed && holding!.commit === owed.to) return finish(owed);
     return unaligned(`the base branch could not be fetched: ${message(error)}`, 'fetch-failed');
   }
 
@@ -634,7 +649,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     }
     const cleared = !!state.upgrade.refused;
     state.upgrade.alignedRelease = release ?? state.upgrade.alignedRelease;
-    if (state.upgrade.snapshot) return lift(to);
+    if (state.upgrade.snapshot) return lift(to, checkout);
     state.upgrade.refused = null;
     unstall();
     await persist();
@@ -648,7 +663,12 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     // The fetch already brought the tip's objects, which the snapshot shares.
     const owed = state.upgrade.pending?.code === true;
     if (state.upgrade.pending) { state.upgrade.pending = null; await persist(); }
-    const from = checkout.commit, base = unverified && loaded ? loaded : from, left: LeftBehind = { checkout: from, dirty: checkout.dirtyPaths };
+    // The diff's base is what runs: the loop already on a held snapshot runs that commit, and the
+    // checkout's own HEAD, behind it since it was left there, says nothing about what is loaded — a
+    // tip that reverts the snapshot's loaded-code change shares the checkout's tree yet moves the
+    // executors' code, and a docs-only tip over a code snapshot moves none of it.
+    const runs = !!loaded && (unverified || sameCommit(loaded, state.upgrade.snapshot?.commit));
+    const from = checkout.commit, base = runs ? loaded! : from, left: LeftBehind = { checkout: from, dirty: checkout.dirtyPaths };
     let changed: string[], code: boolean;
     try {
       changed = (await git('diff', '--name-only', `${base}..${to}`)).split('\n').map(path => path.trim()).filter(Boolean);
