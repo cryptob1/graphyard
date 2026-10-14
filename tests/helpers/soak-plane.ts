@@ -200,7 +200,16 @@ export type RegistryFailover = Failover & {
   /** The fleet probe whose registry decides each launch's account instead of the profile's local accounts. */
   probe?: import('../../src/fleet.js').FleetProbe;
   /** The lane the day dispatches its items as; the simulated items ride the high lane otherwise. */
-  lane?: 'low' | 'medium' | 'high' }
+  lane?: 'low' | 'medium' | 'high';
+  /**
+   * GY-1772: per-item overrides, by the day's item number: the lane the item's dispatch rides and
+   * the files the item plans. A planned path is seeded onto the day's base tree and is what the
+   * item's session pushes, so the change the control plane sees is the change the dispatch
+   * preference judged; the lane is what `dispatchWork` is handed, whatever the day's items would
+   * otherwise ride.
+   */
+  lanes?: Record<number, 'low' | 'medium' | 'high'>;
+  plannedFiles?: Record<number, readonly string[]> }
 
 /**
  * The Herdr side of the failover day: the panes the real `dispatchWork` creates live in the same
