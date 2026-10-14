@@ -820,6 +820,7 @@
     "tests/capacity-hold-respects-machine-bounds.test.ts": 4000,
     "tests/scenario-capacity-limit-redispatch-registered.test.ts": 4500,
     "tests/chart-exercise-port-forward.test.ts": 16000,
-    "tests/webhook-ignored-reason.test.ts": 3000
+    "tests/webhook-ignored-reason.test.ts": 3000,
+    "tests/worktree-inventory-unreadable-cache.test.ts": 300
   }
 }
