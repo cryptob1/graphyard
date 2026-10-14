@@ -337,7 +337,17 @@ export function sudoInstruction(state: Pick<SudoState, 'code' | 'method' | 'url'
     return lines.join('\n');
   }
   const mobile = state.code ? `Approve the GitHub Mobile prompt on ${device} and choose ${state.code}` : 'Confirm access to GitHub on your device (GitHub Mobile or your passkey)';
-  return state.fallback ? `${mobile}, or, if no prompt arrived, confirm with your ${state.fallback.method === 'passkey' ? 'passkey' : 'password'} at ${state.fallback.url}` : mobile;
+  const prompt = state.fallback ? `${mobile}, or, if no prompt arrived, confirm with your ${state.fallback.method === 'passkey' ? 'passkey' : 'password'} at ${state.fallback.url}` : mobile;
+  // GY-1459: the same page offers its code methods and, on a profile copy, the local App page: both are named beside the prompt.
+  const where = [route.page ? `at ${route.page}` : '', route.command ? `with ${route.command} CODE` : ''].filter(Boolean).join(' or ');
+  const codes = where ? (['authenticator', 'email'] as const).filter(method => state.offered?.includes(method)) : [];
+  const copy = route.profile ? route.profile.mode === 'copy' : !!(route.copy ?? state.copy);
+  const more = [
+    ...(codes.includes('authenticator') ? [`Or enter your authenticator app's 6-digit code ${where}: the drive types it within 2 s`] : []),
+    ...(codes.includes('email') ? [`Or ask for an email code ${[route.page ? `at ${route.page}` : '', route.command ? `with ${route.command} email` : ''].filter(Boolean).join(' or ')}, then enter its 6 digits ${where}`] : []),
+    ...(copy && route.page ? [`Or open ${route.page} in your own browser and click its button there: your own GitHub session holds sudo mode, and setup continues by itself once GitHub returns you to that page`] : []),
+  ];
+  return [prompt, ...more].join('\n');
 }
 /**
  * Why a Confirm-access wait gave up, naming the method actually in use: the GitHub Mobile prompt
@@ -806,7 +816,10 @@ export async function passSudo(page: BrowserPage, options: SudoOptions): Promise
     if (!field || !page.fill) {
       page.note?.('sudo-code', [method, field ? 'page cannot type' : 'no code field']);
       if (field) return 'done';
-      if (state!.field !== 'missing') { state = { ...state!, field: 'missing' }; await options.onCode(state); }
+      if (state!.field !== 'missing') {
+        if (state!.method === 'mobile') page.note?.('sudo-method', [method]);
+        state = { ...state!, field: 'missing', ...(state!.method === 'mobile' ? { method } : {}) }; await options.onCode(state);
+      }
       return 'missing';
     }
     try { page.fill(field.selector, submission.code); } catch (error) { throw new Error(withheld(error, submission.code)); }
@@ -823,6 +836,42 @@ export async function passSudo(page: BrowserPage, options: SudoOptions): Promise
     if (state!.field) { const { field: _missing, ...rest } = state!; state = rest; }
     if (state!.method !== method) { page.note?.('sudo-method', [method]); state = { ...state!, method }; }
     return 'done';
+  };
+  // GY-1459: the code view is opened and its field rendered before the operator is invited to enter a code, so a code
+  // entered at any moment is typed at once; a code that arrives while the field renders is kept in `early` and typed first.
+  let early = null as SudoCodeSubmission | null, prepared = false;
+  const prepare = async () => {
+    if (!options.readCode || !offered.has('authenticator') || state?.emailed || codeField('authenticator')) return;
+    const view = control(authenticatorLabels);
+    if (!view) return;
+    activate(view);
+    if (!prepared) { prepared = true; await keep('authenticator'); }
+    for (let check = 1; check < codeFieldChecks && !codeField('authenticator'); check += 1) {
+      early ??= await options.readCode() ?? null;
+      if (early) return;
+      page.wait(codeFieldCheckMs);
+    }
+  };
+  // The code handed to the waiting run (GY-1459), whichever method the page is showing: a finished step settles the pass,
+  // a typed code is 'entered', and a kept code that found no field is tried again on a freshly loaded page.
+  const takeHanded = async (current: string): Promise<SudoPass | 'entered' | null> => {
+    // A TOTP window is 30 s and GitHub accepts its neighbours: a kept code is dropped once it may be stale.
+    if (held && now().getTime() - Date.parse(held.at) > heldCodeMs) { page.note?.('sudo-code', ['authenticator', 'kept code expired']); held = null; }
+    let submission = early ?? await options.readCode?.() ?? null; early = null;
+    // A kept code is tried on a freshly loaded page: the view that failed to render its field is reloaded first.
+    if (!submission && held && now().getTime() - heldTried >= reloadMs) { page.open(current); submission = held; }
+    if (submission?.kind === 'settled') {
+      // The step was finished on the local App page in the operator's own browser, after this wait began.
+      if (Date.parse(submission.at) < started) return null;
+      page.note?.('sudo-settled', ['local App page']);
+      state = { ...state!, state: 'approved' }; await options.onSettled?.(state);
+      return { passed: true, attempts: attempt, code: state.code, settled: true };
+    }
+    if (!submission) return null;
+    const outcome = await enter(submission);
+    held = outcome === 'missing' && submission.kind === 'code' ? submission : null; heldTried = now().getTime();
+    lastReload = now().getTime();
+    return 'entered';
   };
   // The older page offers GitHub Mobile as a button; the passkey-first page keeps that button
   // hidden and offers a "Use GitHub Mobile" control under "Having problems?": activateSudoControl
@@ -856,44 +905,35 @@ export async function passSudo(page: BrowserPage, options: SudoOptions): Promise
         const method = pageMethods.find(method => methods[method])!;
         page.note?.('sudo-method', [method]);
         if (method !== 'password') await keep(method);
+        await prepare();
         state = waiting({ code: null, method, url: current, offered: listed(), ...(page.copy ? { copy: true } : {}) });
         await options.onCode(state);
       } else {
-        // GY-1459: a kept code is tried again once per re-check while it may still be valid (a TOTP window is 30 s; GitHub accepts its neighbours).
-        if (held && now().getTime() - Date.parse(held.at) > heldCodeMs) { page.note?.('sudo-code', ['authenticator', 'kept code expired']); held = null; }
-        let submission = await options.readCode?.() ?? null;
-        // A kept code is tried on a freshly loaded page: the view that failed to render its field is reloaded first.
-        if (!submission && held && now().getTime() - heldTried >= reloadMs) { page.open(current); submission = held; }
-        if (submission?.kind === 'settled') {
-          // The step was finished on the local App page in the operator's own browser, after this wait began.
-          if (Date.parse(submission.at) >= started) {
-            page.note?.('sudo-settled', ['local App page']);
-            state = { ...state, state: 'approved' }; await options.onSettled?.(state);
-            return { passed: true, attempts: attempt, code: state.code, settled: true };
-          }
-          submission = null;
-        }
-        if (submission) {
-          const outcome = await enter(submission);
-          held = outcome === 'missing' && submission.kind === 'code' ? submission : null; heldTried = now().getTime();
-          lastReload = now().getTime(); continue;
-        }
+        const taken = await takeHanded(current);
+        if (taken === 'entered') continue;
+        if (taken) return taken;
         // Re-check whether the shared session holds sudo mode now: the page no longer asks on reload.
-        if (now().getTime() - lastReload >= reloadMs) { lastReload = now().getTime(); page.open(current); continue; }
+        if (now().getTime() - lastReload >= reloadMs) { lastReload = now().getTime(); page.open(current); await prepare(); continue; }
       }
       await sleep(options.readCode ? Math.min(pollMs, codePollMs) : pollMs);
       continue;
     }
     if (!state && !detected.code) { issue('Use GitHub Mobile'); continue; }
+    // GY-1459: a code handed to a run waiting on a GitHub Mobile prompt is typed as well; the page offers Mobile beside its code views.
+    if (state?.method === 'mobile' && options.readCode) {
+      const taken = await takeHanded(current);
+      if (taken === 'entered') continue;
+      if (taken) return taken;
+    }
     if (state && detected.expired && !detected.code) { issue(detected.mobileOffered ? 'Use GitHub Mobile' : 'Try again'); state = null; continue; }
     if (detected.code && detected.code !== state?.code) {
       if (state?.method !== 'mobile') page.note?.('sudo-method', ['mobile']);
-      state = waiting({ code: detected.code, method: 'mobile', url: current });
+      state = waiting({ code: detected.code, method: 'mobile', url: current, offered: listed() });
       await keep('mobile', [detected.code]);
       await options.onCode(state);
     } else if (!state) {
       page.note?.('sudo-method', ['mobile']);
-      state = waiting({ code: null, method: 'mobile', url: current });
+      state = waiting({ code: null, method: 'mobile', url: current, offered: listed() });
       await keep('mobile');
       await options.onCode(state);
     } else if (state.code && !state.fallback && (offered.has('passkey') || offered.has('password')) && now().getTime() - Date.parse(state.issuedAt) >= mobileFallbackMs) {
@@ -903,7 +943,7 @@ export async function passSudo(page: BrowserPage, options: SudoOptions): Promise
       page.note?.('sudo-fallback', [method, state.fallback!.url]);
       await options.onCode(state);
     }
-    await sleep(pollMs);
+    await sleep(state?.method === 'mobile' && options.readCode ? Math.min(pollMs, codePollMs) : pollMs);
   }
 }
 

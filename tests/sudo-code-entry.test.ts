@@ -200,7 +200,7 @@ test('unit:sudo-code-entry — an email code is requested, then typed into the e
     },
     sleep: async () => {} });
   assert.deepEqual(result, { passed: true, attempts: 0, code: null });
-  assert.deepEqual(fake.state.clicked, ['#email-send', '#verify'], 'GitHub was asked to email a code, which was then entered');
+  assert.deepEqual(fake.state.clicked, ['#totp-link', '#email-send', '#verify'], 'the authenticator view is prepared before the invitation; GitHub was asked to email a code, which was then entered');
   assert.deepEqual(fake.state.typed, ['654321']);
   assert.match(handed[1], new RegExp(`GitHub emailed you a code: enter its 6 digits at ${LOCAL.replace(/\./g, '\\.')} or with graphyard up --sudo-code CODE`));
   assert.ok(!handed.join('\n').includes('654321'));

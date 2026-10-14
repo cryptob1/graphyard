@@ -259,3 +259,29 @@ test('unit:sudo-copy-profile-routes — on a profile copy the handoff offers the
     assert.equal(JSON.parse(await readFile(`${root}/.graphyard/master-actions/sudo-code.json`, 'utf8')).kind, 'settled', 'registering on the page signals the waiting drive');
   } finally { await new Promise<void>(accept => setup.http.close(() => accept())); }
 });
+
+test('unit:sudo-code-direct — a code handed while a GitHub Mobile prompt waits is typed, and a profile copy\'s Mobile handoff offers the code methods and the local App page', async () => {
+  const { passSudo, sudoInstruction } = await browser();
+  const fake = fixturePage({ renderWaits: [1] });
+  let mobile = false;
+  const base = fake.page;
+  const page: BrowserPage = { ...base, copy: true,
+    text: () => mobile && fake.state.view === 'passkey' ? 'Confirm access\nGitHub Mobile\n42\nUse your authenticator app\nUse passkey' : base.text(),
+    open(url) { mobile = false; base.open(url); },
+    click(selector) { if (selector === 'a[href="/sessions/sudo?mobile=1"]') mobile = true; else base.click(selector); },
+  };
+  const handed: SudoState[] = [];
+  let reads = 0;
+  const clock = { at: 0 };
+  // A drive that never types the code ends at the deadline, so the case fails instead of hanging.
+  const result = await passSudo(page, { flow: 'installation-accept', record: 'graphyard up', prefer: 'mobile', timeoutMs: 60_000, pollMs: 500, maxAttempts: 2, now: () => new Date(clock.at),
+    readCode: () => ++reads < 3 ? null : { kind: 'code', code: CODE, at: new Date(clock.at).toISOString() },
+    onCode: state => { handed.push(state); }, sleep: async ms => { clock.at += ms; } }).catch(error => ({ passed: false, error }));
+  assert.equal(result.passed, true);
+  assert.deepEqual(fake.state.submitted, [CODE], 'the code handed beside the Mobile prompt reached the TOTP field');
+  const instruction = sudoInstruction(handed[0], 'your phone', { page: LOCAL, command: 'graphyard up --sudo-code', profile: { mode: 'copy', name: 'Default' } });
+  assert.match(instruction, /^Approve the GitHub Mobile prompt on your phone and choose 42/);
+  assert.match(instruction, new RegExp(`Or enter your authenticator app's 6-digit code at ${LOCAL} or with graphyard up --sudo-code CODE`));
+  assert.match(instruction, new RegExp(`Or open ${LOCAL} in your own browser and click its button there`));
+  assert.doesNotMatch(instruction, /own Chrome/);
+});
