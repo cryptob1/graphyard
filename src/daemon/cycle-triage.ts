@@ -22,9 +22,9 @@ async function triageBacklogStepWithin(cycle: Cycle, budgetLeft: () => number | 
   };
   // The acceptance role's goals (GY-1417) move first: they need no research account.
   // GY-1774: both phases wait under the step's budget; a slow answer is carried and joined next cycle, never holding the phases after it.
-  await boundedPhase(cycle, 'triage', 'acceptance', budgetLeft, () => acceptanceStep(cycle));
+  await boundedPhase(cycle, 'triage', 'acceptance', budgetLeft, phase => acceptanceStep(phase));
   // A goal whose acceptance merged is planned, its plan judged, released and delivered (GY-1418).
-  await boundedPhase(cycle, 'triage', 'planner', budgetLeft, () => plannerStep(cycle));
+  await boundedPhase(cycle, 'triage', 'planner', budgetLeft, phase => plannerStep(phase));
   if (!effects.recordTriage || !effects.research || !config.run?.research) return;
   await isolate('decision', null, 'triage', async () => {
     const settings = researchSettings(config.run);

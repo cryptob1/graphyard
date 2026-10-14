@@ -51,3 +51,37 @@ test('unit:step-calls-bounded — triage: a phase starts nothing once the step b
   assert.equal(state.actions['owed:handle:1:h:running'].state, 'done');
   assert.match(state.actions['owed:handle:1:h:running'].detail, /superseded/);
 });
+
+test('unit:step-calls-bounded — triage: a phase answered after its step returned starts no fresh call behind it, and resumes only under the next cycle that joins it', async () => {
+  const { boundedPhase } = await helper();
+  const state = { cycle: 1, actions: {} as Record<string, any>, faults: {} };
+  const calls: string[] = [];
+  const cycle = { state, now: () => Date.now(), performed: [] as unknown[], effects: { persist: async () => {}, goals: async () => { calls.push('goals'); }, post: async () => { calls.push('post'); } } } as any;
+  let release!: () => void;
+  const run = async (phase: any) => { await new Promise<void>(resolve => { release = resolve; }); await phase.effects.goals(); await phase.effects.post(); };
+  await boundedPhase(cycle, 'triage', 'acceptance', () => 60, run);
+  release();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(calls, [], 'the late answer started no call once the step had returned');
+  state.cycle = 2;
+  await boundedPhase(cycle, 'triage', 'acceptance', () => 500, run);
+  assert.deepEqual(calls, ['goals', 'post'], 'the next cycle that joined it let it go on');
+});
+
+test('unit:step-calls-bounded — sessions: a finished handle record is sent only after the running one still in flight settles', async () => {
+  const { boundedCalls } = await helper();
+  const order: string[] = [];
+  let release!: () => void;
+  const effects = { recordSession: async (_work: unknown, handle: { state: string }) => { if (handle.state === 'running') await new Promise<void>(resolve => { release = resolve; }); order.push(handle.state); } } as any;
+  const kept = {};
+  const bounded = boundedCalls(effects, kept, () => Date.now(), () => 1_000, { step: 'sessions', calls: ['recordSession'], boundMs: () => 40 });
+  const work = { id: 'w', key: 'GY-1', epoch: 1 };
+  await assert.rejects(bounded.recordSession!(work as any, { id: 'h', state: 'running' } as any), /stays owed/);
+  const finished = bounded.recordSession!(work as any, { id: 'h', state: 'finished' } as any).catch(() => 'carried');
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.deepEqual(order, [], 'the finished record waits for the running one');
+  release();
+  await finished;
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.deepEqual(order, ['running', 'finished'], 'the finished record lands last');
+});

@@ -155,7 +155,9 @@ export function boundedCalls(effects: DaemonEffects, kept: object, clockMs: () =
       let flight = joined;
       if (!flight) {
         // A call that throws before it is made (a programming error, not a slow answer) throws to its caller as it always did: it is no flight.
-        const result = Promise.resolve(fn.call(target, ...args));
+        // A finished handle record follows the running one still unanswered (GY-1774): it is sent once that settles, so a delayed running write can never land after the finished one and reopen the handle.
+        const second = args[1] as Record<string, unknown> | undefined, prior = call === 'recordSession' && second?.state === 'finished' ? pending.get(options.key?.(call, [args[0], { ...second, state: 'running' }]) ?? callKey(call, [args[0], { ...second, state: 'running' }])) : undefined;
+        const result = Promise.resolve(prior && !prior.settledAt ? prior.promise.then(() => undefined, () => undefined).then(() => fn.call(target, ...args)) : fn.call(target, ...args));
         const own: Flight = { promise: result, settledAt: null }, done = () => { own.settledAt = { cycle: cycleOf(kept), wall: Date.now() }; };
         result.then(done, done);
         pending.set(key, own);
@@ -296,26 +298,35 @@ export async function withinStepBudget<T>(cycle: Cycle, step: BoundedStep, calls
 }
 
 /** The nested phases still running when their step's budget passed, per kept state: one phase runs once at a time, and a later cycle joins it instead of starting it again. */
-const phases = new WeakMap<object, Map<string, Promise<void>>>();
+const phases = new WeakMap<object, Map<string, { promise: Promise<void>; gate: PhaseGate }>>();
+/** The calls a nested phase makes wait at its gate, open only while a cycle's step awaits the phase: a phase answered after its step returned starts no fresh call behind it, and resumes under the next cycle's budget that joins it. */
+interface PhaseGate { open: boolean; waiters: (() => void)[] }
+const gated = (cycle: Cycle, gate: PhaseGate): Cycle => ({ ...cycle, effects: new Proxy(cycle.effects, { get: (target, property, receiver) => {
+  const fn = Reflect.get(target, property, receiver);
+  return typeof fn === 'function' && property !== 'persist' ? async (...args: unknown[]) => { while (!gate.open) await new Promise<void>(resolve => gate.waiters.push(resolve)); return fn.apply(target, args); } : fn;
+} }) });
 /**
  * A nested phase whose calls the effects' bound does not reach (the acceptance role's and the planner's own goals, headless runs and posts)
  * waits under the step's budget: past it the phase keeps running, the step goes on, and the phase is recorded `waiting` on the step's row;
  * the next cycle joins the run still in flight (or finds it settled) rather than starting a second, so a slow answer never holds a later phase.
  */
-export async function boundedPhase(cycle: Cycle, step: BoundedStep, name: string, budgetLeft: () => number | null, run: () => Promise<void>): Promise<void> {
+export async function boundedPhase(cycle: Cycle, step: BoundedStep, name: string, budgetLeft: () => number | null, run: (gated: Cycle) => Promise<void>): Promise<void> {
   const running = phases.get(cycle.state) ?? phases.set(cycle.state, new Map()).get(cycle.state)!, key = `${step}:${name}`, previous = cycle.state.actions[`carried:${key}`];
-  let flight = running.get(key), sent = false;
+  let entry = running.get(key), sent = false;
   // A step whose budget is spent starts no phase: it stays owed to the next cycle, which starts it on a fresh budget.
-  if (!flight && budgetLeft() === 0) {
+  if (!entry && budgetLeft() === 0) {
     await recordCarried(cycle, `carried:${key}`, { kind: 'decision', work: null }, new StepCallCarriedError(`the ${step} step's budget passed before the ${name} phase was made (${stepCallBoundMs} ms per call, 0 ms left); the phase stays owed and is retried next cycle`, false), `The ${step} step's ${name} phase`);
     return;
   }
-  if (!flight) {
+  if (!entry) {
     sent = true;
-    const own: Promise<void> = run().finally(() => { if (running.get(key) === own) running.delete(key); });
+    const gate: PhaseGate = { open: true, waiters: [] };
+    const own: Promise<void> = run(gated(cycle, gate)).finally(() => { if (running.get(key)?.promise === own) running.delete(key); });
     own.catch(() => {});
-    running.set(key, flight = own);
+    running.set(key, entry = { promise: own, gate });
   }
+  const { gate } = entry, flight = entry.promise;
+  gate.open = true; for (const release of gate.waiters.splice(0)) release();
   const left = budgetLeft(), boundMs = stepCallBoundMs, capped = left === null ? boundMs : Math.max(0, Math.min(boundMs, left)), startedAt = cycle.now(), wall = Date.now();
   let timer: ReturnType<typeof setTimeout> | undefined, stopped = false, carried = false;
   const expired = new Promise<never>((_, reject) => {
@@ -331,6 +342,6 @@ export async function boundedPhase(cycle: Cycle, step: BoundedStep, name: string
     if (!carried) throw error;
     await recordCarried(cycle, `carried:${key}`, { kind: 'decision', work: null }, error, `The ${step} step's ${name} phase`);
     return;
-  } finally { stopped = true; clearTimeout(timer); }
+  } finally { stopped = true; clearTimeout(timer); gate.open = false; }
   if (carriedRow(previous)) await retireCarried(cycle, `carried:${key}`, previous, `The ${step} step's ${name} phase, carried on cycle ${previous.cycle}, ran through on its retry`);
 }
