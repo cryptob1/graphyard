@@ -1,9 +1,9 @@
 // Concern: GY-1773 — how the coordinator checkout stands (commit, HEAD, dirty paths), read from git.
 import type { ChildRun } from '../child-runner.js';
 
-/** How the coordinator checkout stands: its commit, whether HEAD is detached, and whether tracked files differ from the commit (`dirtyPaths` names them). */
+/** How the coordinator checkout stands: its commit, whether HEAD is detached, and whether tracked files differ from the commit (`dirtyPaths` names them: both paths of a rename). */
 export interface CheckoutState { commit: string | null; detached: boolean | null; dirty: boolean | null; dirtyPaths: string[]; branch: string | null }
-/** The paths of a porcelain status: the second of a rename's pair is the path the tree holds. */
+/** A porcelain path unquoted: git quotes one holding spaces at either end, control characters, a quote or a backslash. */
 const unquotePath = (path: string) => {
   if (!path.startsWith('"') || !path.endsWith('"') || path.length < 2) return path;
   const escapes: Record<string, number> = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11, '"': 34, '\\': 92 };
@@ -24,18 +24,24 @@ const quotedEnd = (text: string) => {
   return -1;
 };
 /**
- * Only a rename or copy line holds a pair; a modified path that itself contains " -> " is one path.
- * An unquoted pair is ambiguous when the destination holds " -> " too, so it yields every possible
- * destination, longest first, and `checkoutState` keeps the one the index holds.
+ * The paths one porcelain line names: one for a modified path (even one that itself contains
+ * " -> "), both of a rename or copy — the source the commit holds and the destination the tree
+ * holds (GY-1773: a rename out of a loaded path leaves the tree without that source, which the
+ * loaded-path decisions must see). An unquoted pair is ambiguous when either side holds " -> ",
+ * so it yields every possible split, longest destination first, and `checkoutState` keeps the
+ * one whose destination the index holds.
  */
-const porcelainCandidates = (line: string): { paths: string[]; pair: boolean } => {
+const porcelainCandidates = (line: string): { pairs: [string, string][]; single: string | null } => {
   const text = line.slice(3).trim();
-  if (!/[RC]/.test(line.slice(0, 2))) return { paths: [unquotePath(text)], pair: false };
+  if (!/[RC]/.test(line.slice(0, 2))) return { pairs: [], single: unquotePath(text) };
   const end = quotedEnd(text);
-  if (end >= 0) return { paths: [unquotePath(text.slice(end + 1).startsWith(' -> ') ? text.slice(end + 5).trim() : text)], pair: false };
+  if (end >= 0) {
+    const rest = text.slice(end + 1);
+    return rest.startsWith(' -> ') ? { pairs: [[unquotePath(text.slice(0, end + 1)), unquotePath(rest.slice(4).trim())]], single: null } : { pairs: [], single: unquotePath(text) };
+  }
   const pieces = text.split(' -> ');
-  const paths = pieces.slice(1).map((_, i) => unquotePath(pieces.slice(i + 1).join(' -> ').trim()));
-  return { paths: paths.length ? paths : [unquotePath(text)], pair: paths.length > 1 };
+  const pairs = pieces.slice(1).map((_, i): [string, string] => [unquotePath(pieces.slice(0, i + 1).join(' -> ').trim()), unquotePath(pieces.slice(i + 1).join(' -> ').trim())]);
+  return pairs.length ? { pairs, single: null } : { pairs: [], single: unquotePath(text) };
 };
 export async function checkoutState(root: string, run: ChildRun): Promise<CheckoutState> {
   const git = (...args: string[]) => run('git', ['-C', root, ...args]);
@@ -48,10 +54,10 @@ export async function checkoutState(root: string, run: ChildRun): Promise<Checko
   let dirty: boolean | null, dirtyPaths: string[] = [];
   try {
     for (const line of (await git('status', '--porcelain', '--untracked-files=no')).split('\n').filter(entry => entry.length > 3)) {
-      const { paths, pair } = porcelainCandidates(line);
-      let chosen = paths.at(-1)!;
-      if (pair) for (const path of paths) { if ((await git('--literal-pathspecs', 'ls-files', '--', path)).trim()) { chosen = path; break; } }
-      if (chosen) dirtyPaths.push(chosen);
+      const { pairs, single } = porcelainCandidates(line);
+      let named = single ? [single] : pairs.at(-1)!;
+      if (pairs.length > 1) for (const pair of pairs) { if ((await git('--literal-pathspecs', 'ls-files', '--', pair[1])).trim()) { named = pair; break; } }
+      for (const path of named) if (path && !dirtyPaths.includes(path)) dirtyPaths.push(path);
     }
     dirty = dirtyPaths.length > 0;
   } catch { dirty = null; dirtyPaths = []; }

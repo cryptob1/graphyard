@@ -978,6 +978,6 @@ test('unit:docs-only-alignment-unaffected — a move touching no loaded code com
 test('unit:gy-1773-quoted-porcelain-paths — a dirty loaded file whose name Git quotes is still named by its real path, so it counts as loaded code', async () => {
   const status = ' M "src/a b.ts"\n M "src/caf\\303\\251.ts"\nR  "old.txt" -> "src/n\\"q.ts"\n';
   const state = await checkoutState('/repo', async (_command, args) => args.includes('status') ? status : 'abc123\n');
-  assert.deepEqual(state.dirtyPaths, ['src/a b.ts', 'src/café.ts', 'src/n"q.ts']);
+  assert.deepEqual(state.dirtyPaths, ['src/a b.ts', 'src/café.ts', 'old.txt', 'src/n"q.ts'], 'both paths of a rename, the quoted destination unquoted (GY-1773)');
   assert.equal(upgradeTouchesCode(state.dirtyPaths), true);
 });
