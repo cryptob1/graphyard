@@ -231,9 +231,8 @@ export async function writeWorktreeInventoryCache(root: string, cache: WorktreeI
  * The worktree inventory as `master status` reads it: the cache the loop's reclaim step keeps —
  * one file read and one read of the directory's names, whatever the number of trees; only a host
  * whose loop has never reclaimed walks the trees, once, leaving the cache behind. No Git runs
- * here, and unreadability is asked before the cache is trusted (GY-1793): a directory unreadable
- * since a drained pass wrote an empty cache reads as unknown, as with no cache, the cache stands
- * for the day readability returns, and a readable one answers from it unchanged.
+ * here, and unreadability is asked before the cache is trusted (GY-1793): an unreadable directory
+ * reads as unknown, as with no cache, the cache standing for when it returns; a readable one answers from it.
  */
 export async function statusWorktreeInventory(root: string, now = Date.now()): Promise<{ entries: WorktreeEntry[]; at: string; cached: boolean; unreadable?: boolean; held?: HeldWorktree[] }> {
   const cache = await readWorktreeInventoryCache(root), unreadable = await worktreesUnreadable(root);
