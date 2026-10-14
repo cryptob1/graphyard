@@ -6,6 +6,7 @@ Paths: src/master/**, src/master.ts, src/reviewer.ts
 - `tests/dispatch-collision.test.ts`, `tests/dispatch-overlap.test.ts`, `tests/dispatch-race-guard.test.ts`: dispatch.
 - `tests/launch-prompt-delivery.test.ts`, `tests/project-memory.test.ts`: session requests.
 - `tests/master.test.ts`, `tests/master-daemon.test.ts`, `tests/managed-worktree-root.test.ts`.
+- `tests/loop-records-due-observation-reading.test.ts`, `tests/loop-observation-waits-for-loop-recording.test.ts`: the loop's own post-deploy readings (GY-1779) and the wait on them.
 - `tests/release-lag-ancestry.test.ts`: the release-lag report asks git once per loaded release, never once per delivery, and reads as before.
 
 ## Drive

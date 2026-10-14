@@ -5,18 +5,19 @@ import { execFileSync } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { agentOwner, loadMasterConfig, masterConfigSchema, setupMaster, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { agentOwner, diskExhaustion, loadMasterConfig, masterConfigSchema, setupMaster, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { cycleDelay, cycleFaults, emptyDaemonState, loopLiveness, runCycle, type DaemonEffects, type LoopState } from '../src/master-daemon.js';
 import { launchAppearanceMs } from '../src/daemon/effects.js';
 import type { Work } from '../src/model.js';
 import type { ReviewRecord } from '../src/reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from '../src/producer.js';
-import { baseReclaimGates, describeReclaim, finishedSessionGraceMs, ledgerRetentionMs, loadedRevision, nameReclaimBoundMs, readReclaimReports, readResources, readGitHubBudget, reclaimResources, resourceAttention, resourceReportFile, selfUpgradeBoundMs, stuckSessionMs, unownedPaneConfirmMs, type PlaneReading, type ResourceInputs } from '../src/master-resources.js';
+import { attributeRefusal, attributionFor, baseReclaimGates, describeReclaim, finishedSessionGraceMs, ledgerRetentionMs, loadedRevision, nameReclaimBoundMs, readDisk, readReclaimReports, readResources, readGitHubBudget, reclaimResources, resourceAttention, resourceReportFile, selfUpgradeBoundMs, stuckSessionMs, unownedPaneConfirmMs, type PlaneReading, type ResourceInputs } from '../src/master-resources.js';
+import type { WorktreePass } from '../src/master/worktree-disk.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { classifyAttention, trackFaults } from '../src/model/fault-classes.js';
 import { attributeAttention, resourceStatus } from '../src/master-status.js';
 import * as masterResources from '../src/master-resources.js';
-import { writeFile } from 'node:fs/promises';
+import { writeFile, rm } from 'node:fs/promises';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -1123,4 +1124,237 @@ test('integration:recurring-resources-idle-cadence-files-nothing — idle/action
   assert.equal(opened.filter(subject => subject === 'resource:executor-liveness').length, 0, 'no executor-liveness instances open');
   assert.equal(state.faults.instances.filter(instance => instance.subject === 'resource:executor-liveness').length, 0, 'the fault record holds none');
   assert.equal(opened.filter(subject => subject === 'resource:github-budget').length, 6, 'the spent budget opens one instance per recurrence');
+});
+
+// ---- GY-1782 / GY-1784: the worktree-disk reading on a shared volume wobbling across its warn line ----
+/**
+ * GY-1782: three resources faults in 33 minutes on resource:worktree-disk — 04:26:49, 04:44:57 and
+ * 04:59:46Z on 14 October 2026, "1012.0 GB used of 1022.0 GB, 10.0 GB left", then 10.0 and 9.9 GB —
+ * on the host's root volume, 99% full of the operator's own data, while the loop's latest reclaim
+ * pass had nothing left to take (scanned 240, removed 0, trees 0, 0 bytes freed). Each dip under the
+ * 10 GB line opened an instance; hours later master status read the volume 0.24–0.33 GB above it.
+ */
+const gy1782 = {
+  path: '/home/vish/code/graphyard/.graphyard/worktrees', totalBytes: 1_022_042_832_896, thresholdBytes: 10_000_000_000,
+  instances: [['2026-10-14T04:26:49.223Z', 9_980_000_000], ['2026-10-14T04:44:57.303Z', 9_950_000_000], ['2026-10-14T04:59:46.203Z', 9_900_000_000]] as const,
+  /** The loop's latest pass as daemon.reclaim recorded it, drained: nothing removed, no trees, no backlog, no checkouts, no errors. */
+  pass: (at: number, overrides: Partial<WorktreePass> = {}): WorktreePass => ({ at: iso(at), removed: 0, trees: 0, treeBacklog: 0, checkouts: 0, errors: 0, freeBytes: 10_333_892_608, ...overrides }),
+};
+const diskInputs = (now: number, freeBytes: number, extra: Partial<NonNullable<ResourceInputs['disk']>> = {}) =>
+  inputs({ now, disk: { path: gy1782.path, totalBytes: gy1782.totalBytes, freeBytes, thresholdBytes: gy1782.thresholdBytes, ...extra } });
+const diskReading = (input: ResourceInputs) => readResources(input).find(reading => reading.resource === 'worktree-disk')!;
+
+test('manual:fault-class-resources — GY-1782: a low worktree-disk reading on a volume whose remaining holders are outside the loop\'s reach, its latest reclaim pass current and drained, is a resources fault on the base and none on the candidate', async () => {
+  for (const [at, freeBytes] of gy1782.instances) {
+    const now = Date.parse(at);
+    // REPRODUCE against base: the reading judged free bytes against the line alone, with no pass to answer it.
+    assert.deepEqual(faults(diskInputs(now, freeBytes)), ['resource:worktree-disk'], `${at}: the base faulted on the line alone`);
+    // CANDIDATE: the loop's pass, current (recorded a cycle to twenty minutes earlier) and drained, answers it.
+    for (const age of [60_000, 20 * 60_000]) {
+      const input = diskInputs(now, freeBytes, { pass: gy1782.pass(now - age) });
+      assert.deepEqual(faults(input), [], `${at}: answered by the pass ${age / 60_000} minutes earlier`);
+      const reading = diskReading(input);
+      assert.equal(reading.state, 'low', 'master status still reports the reading low'); assert.equal(reading.answered, true);
+      assert.deepEqual({ used: reading.used, bound: reading.bound, headroom: reading.headroom, warnBelow: reading.warnBelow }, { used: gy1782.totalBytes - freeBytes, bound: gy1782.totalBytes, headroom: freeBytes, warnBelow: gy1782.thresholdBytes });
+      assert.match(reading.detail!, /found nothing reclaimable .* outside its reach: free host data on the volume, raise run\.diskThresholdGb in \.graphyard\/master\.json, or move the worktree root/);
+      assert.match(reading.detail!, /that pass is current, so only free space at or below the 5\.0 GB floor raises attention/);
+    }
+  }
+  // The pass and the standing line reach the reading through master status, from the daemon cursor beside the credential.
+  // Looked up at run time, so the base (which has no such reader) fails here as a test case.
+  const readDiskCursor = (masterResources as Partial<typeof masterResources>).readDiskCursor;
+  assert.equal(typeof readDiskCursor, 'function', 'master status reads the loop\'s pass and the standing line from the cursor');
+  const directory = await temporaryDirectory('gy-1782-cursor');
+  const now = Date.parse(gy1782.instances[2][0]);
+  const master = (threshold: number) => ({ credentialFile: join(directory, 'graphyard.token'), run: { diskThresholdGb: threshold / 1e9 } } as unknown as MasterConfig);
+  const summary = (at: number, overrides: Record<string, unknown> = {}) => ({ at: iso(at), scanned: 240, removed: 0, kept: 240, freedBytes: 0, freeBytes: 10_333_892_608, errors: [], checkouts: 0, rootFreeBytes: null, trees: 0, treeBacklog: 120, ...overrides });
+  // The GY-1782 cursor as recorded: treeBacklog 120 is reach the pass has not used, so the reading is not answered by it.
+  await writeFile(join(directory, 'graphyard.daemon.json'), JSON.stringify({ reclaim: summary(now - 5 * 60_000), faults: { open: {} } }));
+  assert.deepEqual(await readDiskCursor!(master(1)), { reclaim: { at: iso(now - 5 * 60_000), removed: 0, trees: 0, treeBacklog: 120, checkouts: 0, errors: 0, freeBytes: 10_333_892_608 }, open: {} });
+  // The volume this test runs on, read as master status reads it, with the line set so the reading is low and above the floor.
+  const probe = (await readDisk(directory, master(1)))!, threshold = Math.round(probe.freeBytes * 1.5);
+  const read = (await readDisk(directory, master(threshold)))!;
+  assert.deepEqual({ pass: read.pass, standing: read.standing }, { pass: { at: iso(now - 5 * 60_000), removed: 0, trees: 0, treeBacklog: 120, checkouts: 0, errors: 0, freeBytes: 10_333_892_608 }, standing: false });
+  assert.deepEqual(faults(inputs({ now, disk: read })), ['resource:worktree-disk'], 'the backlog is reach the pass has not used');
+  await writeFile(join(directory, 'graphyard.daemon.json'), JSON.stringify({ reclaim: summary(now - 5 * 60_000, { treeBacklog: 0 }), faults: { open: { 'resource-bound|resource:worktree-disk|coordinator worktree disk low': 'x' } } }));
+  const drained = (await readDisk(directory, master(threshold)))!;
+  assert.equal(drained.standing, true, 'the standing line is read from the record');
+  // GY-1784 review, AC-4: a fresh drained pass never ends a standing fault — the band is its recovery line, and an early close is the next stale pass's new instance.
+  assert.deepEqual(faults(inputs({ now, disk: drained })), ['resource:worktree-disk'], 'the standing fault holds though the pass is current and drained');
+  const holding = diskReading(inputs({ now, disk: drained }));
+  assert.equal(holding.answered, undefined);
+  assert.match(holding.detail!, /the reading's fault stands, so it holds until free space recovers past the .* band above the .* line, whatever that pass answered/);
+  await writeFile(join(directory, 'graphyard.daemon.json'), JSON.stringify({ reclaim: summary(now - 5 * 60_000, { treeBacklog: 0 }), faults: { open: {} } }));
+  assert.deepEqual(faults(inputs({ now, disk: (await readDisk(directory, master(threshold)))! })), [], 'with no fault standing, the same current drained pass answers');
+  assert.deepEqual(await readDiskCursor!({ credentialFile: join(directory, 'other.token') } as unknown as MasterConfig), null, 'the cursor beside another credential is not there: the reading judges as before');
+  await writeFile(join(directory, 'graphyard.daemon.json'), 'not json');
+  assert.deepEqual((await readDisk(directory, master(threshold)))!.pass, null, 'an unreadable cursor answers nothing and fails nothing');
+});
+
+test('unit:worktree-disk-answer-needs-drained-pass — the same low reading still faults when the pass is stale past its currency bound or left anything reclaimable: disposable dependency directories, reclaimable worktrees or unowned managed checkouts', async () => {
+  const { worktreePassCurrentMs } = await import('../src/master/worktree-disk.js');
+  assert.equal(worktreePassCurrentMs, 30 * 60_000);
+  const [at, freeBytes] = gy1782.instances[2], now = Date.parse(at);
+  assert.deepEqual(faults(diskInputs(now, freeBytes, { pass: gy1782.pass(now - 5 * 60_000) })), []);
+  // Stale: recorded at the bound or beyond, or never.
+  for (const age of [worktreePassCurrentMs, worktreePassCurrentMs + 1, 3 * 3_600_000]) {
+    const input = diskInputs(now, freeBytes, { pass: gy1782.pass(now - age) });
+    assert.deepEqual(faults(input), ['resource:worktree-disk'], `a pass ${age / 60_000} minutes old answers nothing`);
+    assert.equal(diskReading(input).answered, undefined);
+    assert.match(diskReading(input).detail!, /found nothing reclaimable .* outside its reach: .*; that pass is past its 30-minute currency bound, so the reading stands until the next pass/);
+  }
+  const unrecorded = diskInputs(now, freeBytes, { pass: null });
+  assert.deepEqual(faults(unrecorded), ['resource:worktree-disk']);
+  assert.match(diskReading(unrecorded).detail!, /the loop has recorded no worktree-reclaim pass$/);
+  // Current, but it left something reclaimable: each kind alone keeps the fault, and the detail names it.
+  const left: [Partial<WorktreePass>, RegExp][] = [[{ removed: 3 }, /3 dependency directories removed/], [{ trees: 1 }, /1 worktrees removed/], [{ treeBacklog: 120 }, /120 reclaimable worktrees left for the next cycle/], [{ checkouts: 2 }, /2 unowned managed checkouts removed/], [{ errors: 1 }, /1 errors/]];
+  for (const [overrides, pattern] of left) {
+    const input = diskInputs(now, freeBytes, { pass: gy1782.pass(now - 5 * 60_000, overrides) });
+    assert.deepEqual(faults(input), ['resource:worktree-disk'], JSON.stringify(overrides));
+    assert.equal(diskReading(input).answered, undefined);
+    assert.match(diskReading(input).detail!, /still has reach \(/); assert.match(diskReading(input).detail!, pattern);
+  }
+  // A reading within its line is never answered, whatever the pass: there is nothing to answer.
+  const fine = diskReading(diskInputs(now, 40_000_000_000, { pass: gy1782.pass(now - 60_000) }));
+  assert.equal(fine.state, 'ok'); assert.equal(fine.answered, undefined); assert.equal(fine.detail, gy1782.path);
+});
+
+test('unit:worktree-disk-hard-line — at or below the exhaustion floor the reading raises attention and faults whatever the pass answered, an ENOSPC/EDQUOT refusal keeps its attribution, and diskExhaustion is unchanged', async () => {
+  const { diskExhaustionFloorBytes } = await import('../src/master/worktree-disk.js');
+  const floor = diskExhaustionFloorBytes(gy1782.thresholdBytes); assert.equal(floor, 5_000_000_000, 'half the warn line');
+  const now = Date.parse(gy1782.instances[0][0]), pass = gy1782.pass(now - 60_000);
+  assert.deepEqual(faults(diskInputs(now, floor + 1, { pass })), [], 'just above the floor the drained pass answers');
+  for (const freeBytes of [floor, floor - 1, 1_000_000, 0]) {
+    const input = diskInputs(now, freeBytes, { pass, standing: true });
+    assert.deepEqual(faults(input), ['resource:worktree-disk'], `${freeBytes} bytes free`);
+    const reading = diskReading(input);
+    assert.equal(reading.answered, undefined); assert.equal(reading.state, freeBytes === 0 ? 'exhausted' : 'low');
+    assert.match(reading.detail!, /at or below the 5\.0 GB exhaustion floor, which raises attention whatever that pass answered/);
+    assert.match(resourceAttention([reading])[0].text, /^Coordinator worktree disk is (low|at its bound): /);
+  }
+  // A write failing ENOSPC/EDQUOT is attributed to the exhausted reading as before, and judged by diskExhaustion as before.
+  const exhausted = diskReading(diskInputs(now, 0, { pass }));
+  assert.equal(attributionFor('Command failed: git worktree add\nfatal: No space left on device', [exhausted])?.resource, 'worktree-disk');
+  assert.equal(attributionFor('pwd: write error: Disk quota exceeded', [exhausted])?.resource, 'worktree-disk');
+  assert.equal(attributionFor('write failed: ENOSPC', [exhausted])?.resource, 'worktree-disk');
+  assert.equal(attributionFor('No space left on device', [diskReading(diskInputs(now, floor, { pass }))]), null, 'attribution takes an exhausted reading, not a low one, as before');
+  assert.match(attributeRefusal(new Error('git worktree add failed: No space left on device'), [exhausted]).message, /^Coordinator worktree disk is at its bound: 1022\.0 GB used of 1022\.0 GB, 0\.0 GB left/);
+  assert.equal(diskExhaustion(Object.assign(new Error('write failed'), { code: 'ENOSPC' })), 'the volume is full (ENOSPC)');
+  assert.equal(diskExhaustion(Object.assign(new Error('write failed'), { code: 'EDQUOT' })), "the host's disk quota is exhausted (EDQUOT)");
+  assert.equal(diskExhaustion(Object.assign(new Error('Command failed: git status'), { stderr: 'pwd: write error: Disk quota exceeded\n' })), "the host's disk quota is exhausted (EDQUOT)");
+  assert.equal(diskExhaustion(new Error('cp: error writing: No space left on device')), 'the volume is full (ENOSPC)');
+  assert.equal(diskExhaustion(new Error('connect ECONNREFUSED')), null);
+});
+
+test('unit:worktree-disk-hysteresis — a low reading that recovers above the warn line by less than the recovery band keeps its standing instance: one wobble across the line is one fault, not a new instance per crossing', async () => {
+  const { diskRecoveryBandBytes, standingDiskLine } = await import('../src/master/worktree-disk.js');
+  const band = diskRecoveryBandBytes(gy1782.thresholdBytes); assert.equal(band, 1_000_000_000, 'a tenth of the warn line');
+  const config = budgetConfig, state = emptyDaemonState(config);
+  let now = Date.parse(gy1782.instances[0][0]);
+  /** One faults step over the reading, the pass stale (so the line is raised, not answered) and the standing line read from the record as readDisk reads it. */
+  const observe = (freeBytes: number) => {
+    const input = diskInputs(now, freeBytes, { pass: gy1782.pass(now - 2 * 3_600_000), standing: standingDiskLine(state.faults.open, 'resource-bound') });
+    const reported = resourceAttention(readResources(input));
+    const opened = trackFaults(state.faults, cycleFaults(state, [], now, { config, reported }).filter(fault => fault.faultClass === 'resources'), iso(now)).map(fault => fault.subject);
+    now += 15 * 60_000;
+    return { opened, reading: diskReading(input) };
+  };
+  // The GY-1782 wobble, 9.98 → 10.24 → 9.95 → 10.33 → 9.9 GB: the base opened an instance per dip; the candidate holds one.
+  const walk = [9_980_000_000, 10_240_000_000, 9_950_000_000, 10_330_000_000, 9_900_000_000].map(observe);
+  assert.deepEqual(walk.map(step => step.opened), [['resource:worktree-disk'], [], [], [], []]);
+  assert.deepEqual(walk.map(step => step.reading.state), ['low', 'low', 'low', 'low', 'low']);
+  assert.equal(walk[0].reading.warnBelow, gy1782.thresholdBytes); assert.equal(walk[1].reading.warnBelow, gy1782.thresholdBytes + band, 'while its fault stands the reading recovers only past the band');
+  assert.match(walk[1].reading.detail!, /^\/home\/vish\/code\/graphyard\/\.graphyard\/worktrees; within the 1\.0 GB recovery band above the 10\.0 GB line, so the low reading whose fault stands is this same one; /);
+  assert.equal(state.faults.instances.filter(instance => instance.subject === 'resource:worktree-disk').length, 1);
+  // Recovered past the band: the instance ends; the next dip under the line is a new one.
+  const recovered = observe(gy1782.thresholdBytes + band);
+  assert.equal(recovered.reading.state, 'ok'); assert.deepEqual(recovered.opened, []); assert.equal(standingDiskLine(state.faults.open, 'resource-bound'), false);
+  assert.deepEqual(observe(9_990_000_000).opened, ['resource:worktree-disk']);
+  assert.equal(state.faults.instances.filter(instance => instance.subject === 'resource:worktree-disk').length, 2);
+  // Without a standing fault the band is not in force: the line is the configured one.
+  assert.equal(diskReading(diskInputs(now, gy1782.thresholdBytes, { pass: null, standing: false })).state, 'ok');
+  assert.equal(diskReading(diskInputs(now, gy1782.thresholdBytes - 1, { pass: null })).state, 'low');
+  // GY-1784 review, AC-4: the pass current and drained never ends a standing line — the band is its recovery line.
+  const standingDrained = diskInputs(now, 9_900_000_000, { pass: gy1782.pass(now - 60_000), standing: true });
+  assert.deepEqual(faults(standingDrained), ['resource:worktree-disk'], 'the standing instance holds though the pass is current and drained');
+  assert.equal(diskReading(standingDrained).answered, undefined);
+});
+
+test('unit:worktree-disk-answer-holds-standing — a fresh drained pass catching a standing fault partway into the band ends nothing: the instance holds to the recovery line, and one wobble stays one instance', async () => {
+  const { diskRecoveryBandBytes, standingDiskLine } = await import('../src/master/worktree-disk.js');
+  const band = diskRecoveryBandBytes(gy1782.thresholdBytes);
+  const config = budgetConfig, state = emptyDaemonState(config);
+  let now = Date.parse(gy1782.instances[2][0]);
+  /** One faults step over the reading, the pass `age` old and (`drained`) drained, the standing line read from the record as readDisk reads it. */
+  const observe = (freeBytes: number, age: number, drained = true) => {
+    const input = diskInputs(now, freeBytes, { pass: gy1782.pass(now - age, drained ? {} : { removed: 2 }), standing: standingDiskLine(state.faults.open, 'resource-bound') });
+    const reported = resourceAttention(readResources(input));
+    const opened = trackFaults(state.faults, cycleFaults(state, [], now, { config, reported }).filter(fault => fault.faultClass === 'resources'), iso(now)).map(fault => fault.subject);
+    now += 15 * 60_000;
+    return { opened, reading: diskReading(input) };
+  };
+  // A stale, non-drained pass opens the fault at 9.9 GB — the review's opening.
+  assert.deepEqual(observe(9_900_000_000, 2 * 3_600_000, false).opened, ['resource:worktree-disk']);
+  // A fresh drained pass observes 10.2 GB — above the line, partway into the band: the instance stands, the reading is not answered.
+  const partway = observe(gy1782.thresholdBytes + band / 2, 60_000);
+  assert.deepEqual(partway.opened, [], 'the standing instance holds, and no new one opens');
+  assert.equal(partway.reading.state, 'low', 'inside the band the reading is still low');
+  assert.equal(partway.reading.warnBelow, gy1782.thresholdBytes + band, 'the reading recovers only past the band while its fault stands');
+  assert.equal(partway.reading.answered, undefined);
+  assert.match(partway.reading.detail!, /within the 1\.0 GB recovery band above the 10\.0 GB line/);
+  assert.match(partway.reading.detail!, /the reading's fault stands, so it holds until free space recovers past the 1\.0 GB band above the 10\.0 GB line, whatever that pass answered/);
+  // The stale pass below the line whose dip the old early close would have turned into a second instance.
+  const dip = observe(9_950_000_000, 2 * 3_600_000);
+  assert.deepEqual(dip.opened, [], 'the same wobble is still the same instance');
+  assert.equal(state.faults.instances.filter(instance => instance.subject === 'resource:worktree-disk').length, 1, 'one instance through the whole wobble');
+  // Past the recovery line the instance ends; the next dip under the line, answered by the drained pass, opens no new one.
+  const recovered = observe(gy1782.thresholdBytes + band, 60_000);
+  assert.equal(recovered.reading.state, 'ok');
+  assert.equal(standingDiskLine(state.faults.open, 'resource-bound'), false, 'the instance ended at the recovery line');
+  assert.deepEqual(observe(9_900_000_000, 60_000).opened, [], 'a dip under the line with no standing fault is answered, not a new instance');
+  assert.equal(state.faults.instances.filter(instance => instance.subject === 'resource:worktree-disk').length, 1);
+});
+
+test('unit:worktree-disk-answer-needs-current-plan — a drained pass is not enough when a finished worktree turned disposable after it ran: the reading is answered only on a plan that counts nothing, and never on one it cannot read', async () => {
+  const [, freeBytes] = gy1782.instances[1], now = Date.parse(gy1782.instances[1][0]);
+  // The pass removed nothing and is current; a finished worktree became disposable since: the reading is not answered.
+  const turned = diskInputs(now, freeBytes, { pass: gy1782.pass(now - 60_000), reclaimable: 2 });
+  assert.deepEqual(faults(turned), ['resource:worktree-disk'], 'disposable worktrees are reach the pass has not used');
+  const turnedReading = diskReading(turned);
+  assert.equal(turnedReading.answered, undefined);
+  assert.equal(turnedReading.reclaimable, 2, 'the reading reports what a reclaim gives back now');
+  assert.match(turnedReading.detail!, /still has reach \(2 worktrees disposable now\)/);
+  // The plan reads empty: the same pass answers as before.
+  const drained = diskInputs(now, freeBytes, { pass: gy1782.pass(now - 60_000), reclaimable: 0 });
+  assert.deepEqual(faults(drained), []); assert.equal(diskReading(drained).answered, true);
+  // A plan that cannot be read (null) never answers: the reading stands until the next plan over the inventory.
+  const unread = diskInputs(now, freeBytes, { pass: gy1782.pass(now - 60_000), reclaimable: null });
+  assert.deepEqual(faults(unread), ['resource:worktree-disk'], 'an unread plan is never a drained one');
+  assert.equal(diskReading(unread).answered, undefined);
+  assert.match(diskReading(unread).detail!, /what is disposable now could not be read beside the reading/);
+  // The plan reaches the reading through readDisk, computed over the inventory: a tree a delivered item holds, with an install a fresh one recreates, is disposable now; once it is gone, the same pass answers.
+  const directory = await temporaryDirectory('gy-1784-plan');
+  try {
+    const tree = join(directory, '.graphyard', 'worktrees', 'GY-99-1');
+    await mkdir(join(tree, 'node_modules'), { recursive: true });
+    const work = [{ key: 'GY-99', stage: 'done', epoch: 1, workspaces: [{ path: tree, epoch: 1, branch: 'graphyard/gy-99-1' }] }] as unknown as Work[];
+    const master = { credentialFile: join(directory, 'graphyard.token'), run: { diskThresholdGb: gy1782.thresholdBytes / 1e9 } } as unknown as MasterConfig;
+    const cursor = { reclaim: gy1782.pass(now - 60_000), open: {} };
+    const planned = (await readDisk(directory, master, cursor, { work, now }))!;
+    assert.equal(planned.reclaimable, 1, 'readDisk computes what is disposable now beside the pass');
+    assert.deepEqual(faults(inputs({ now, disk: { ...planned, freeBytes, totalBytes: gy1782.totalBytes } })), ['resource:worktree-disk'], 'the registry answers only on the plan it read');
+    await writeFile(join(directory, '.graphyard', 'worktree-inventory.json'), JSON.stringify({ at: iso(now - 30_000), entries: [{ path: tree, name: 'GY-99-1', activityAt: now - 30_000, dependencies: [] }], held: [] }));
+    const taken = (await readDisk(directory, master, cursor, { work, now }))!;
+    // A delivered tree with no install left is still removable outright (worktreeRemovalReason), so the plan counts it: the reading is not answered until the pass has removed it (GY-1784 review, AC-2).
+    assert.equal(taken.reclaimable, 1, 'a finished tree holding no dependency directory is reach the pass has not used');
+    assert.deepEqual(faults(inputs({ now, disk: { ...taken, freeBytes, totalBytes: gy1782.totalBytes } })), ['resource:worktree-disk']);
+    await writeFile(join(directory, '.graphyard', 'worktree-inventory.json'), JSON.stringify({ at: iso(now - 30_000), entries: [], held: [] }));
+    const removed = (await readDisk(directory, master, cursor, { work, now }))!;
+    assert.equal(removed.reclaimable, 0, 'the plan reads empty once the tree is gone');
+    taken.reclaimable = removed.reclaimable;
+    assert.deepEqual(faults(inputs({ now, disk: { ...taken, freeBytes, totalBytes: gy1782.totalBytes } })), [], 'the drained pass over the drained plan answers');
+    // A plan that cannot be read leaves the reading standing: the input records null, and the registry never answers on it.
+    const unreadPlan = { ...planned, reclaimable: null };
+    assert.deepEqual(faults(inputs({ now, disk: { ...unreadPlan, freeBytes, totalBytes: gy1782.totalBytes } })), ['resource:worktree-disk'], 'null: the reading stands until the next plan');
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

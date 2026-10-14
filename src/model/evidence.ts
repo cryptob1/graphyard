@@ -28,6 +28,13 @@ export interface Evidence {
    */
   scopeFiles?: string[];
   revocation?: { at: string; actor: string; reason: string };
+  /**
+   * GY-1779: the control plane's own reading of a loop-owned observation item's proof on the serving
+   * release, recorded by the loop's deployment-verification step through the coordinator: `sha` is the
+   * release the control plane observed serving the parent delivery's merge (`baseSha`), and `detail`
+   * names the measured values. The one reading `loopObservation` binds to a later serving release.
+   */
+  reading?: { detail: string };
   provenance?: {
     provider: 'github-actions'; repository: string; workflowCommit: string;
     runId: string; runAttempt: number;

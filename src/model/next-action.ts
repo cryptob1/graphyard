@@ -7,6 +7,7 @@ import { isDelivered } from './closure.js';
 import { openAgentRequests } from './agent-requests.js';
 import { refusalAction, reviewStandstill } from './refusal-mapping.js';
 import { loopObservation, loopObservationProofs, observationWindowHold, type Work } from './work.js';
+import { observationPass } from './loop-observation.js';
 import { nextActionLlmRoles, type NextAction, type NextActionInputs, type NextActionKind } from './action-kinds.js';
 import type { ActionAccount, ActionWait } from './action-account.js';
 import { carriedAction, type OpenAction } from './concerns.js';
@@ -237,13 +238,16 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
       const window = observationWindowHold(work, now);
       // A loop-owned observation item names its own wait below: it is never dispatched, at the instant or after.
       if (window && !loopObservationProofs(work)) return waits({ kind: 'window', on: null, detail: `${key} waits for its observation window: the reading it owes can first exist at ${window.notBefore} (${window.detail}); the loop dispatches it then` }, failing.name, refusal);
-      // GY-1762: nothing a code worker can do; the loop's own reading ends the wait.
+      // GY-1762: nothing a code worker can do; the loop's own reading ends the wait. GY-1779: due or
+      // not, the wait is on the loop, whose deployment-verification step records the reading; it is
+      // never an operator-proof escalation, and an unsubmitted worker candidate left on the item
+      // (GY-1725) changes nothing: the loop's reading supersedes it.
       const observing = loopObservation(work, now, all);
-      // Once the reading can exist it is owed: the operator-proof escalation carries it, still never a code worker.
-      if (observing?.due) return make('escalate', `${key} owes ${observing.waitingFor}; no code worker can record it`, { kind: 'escalate', trigger: 'operator-proof', detail: observing.waitingFor }, `observation:${work.epoch}`, failing.name, refusal);
-      if (observing) return waits({ kind: 'window', on: null, detail: `${key} waits for ${observing.waitingFor}; the loop records it, and no worker is dispatched` }, failing.name, refusal);
-      // The reading is recorded but the item is still open: it still has no code for a worker, so it goes to the operator to close.
-      if (loopObservationProofs(work)) return make('escalate', `${key} has its reading recorded and is still open; no code worker can finish it, so it needs closing`, { kind: 'escalate', trigger: 'operator-proof', detail: 'the loop-owned observation reading is recorded; close the item' }, `observation-recorded:${work.epoch}`, failing.name, refusal);
+      if (observing) return waits({ kind: 'window', on: 'loop', detail: `${key} waits for ${observing.waitingFor}; the loop records it${observing.due ? ' in its deployment-verification step' : ' once it can exist'}, and no worker is dispatched` }, failing.name, refusal);
+      // The passing reading is recorded (by the loop, or by hand) and the item is still open: the same
+      // step closes it on that reading's release, so the wait stays on the loop — never an operator-proof escalation.
+      const pass = loopObservationProofs(work) ? observationPass(work, now, all) : null;
+      if (pass) return waits({ kind: 'window', on: 'loop', detail: `${key}'s reading of ${pass.readings.map(entry => entry.proof).join(', ')} passed on release ${short(pass.release)} and the item is still open; the loop closes it as delivered-observation in its deployment-verification step, and no worker is dispatched` }, failing.name, refusal);
       return make('dispatch', `${key} is ready and unassigned: ${refusal}`, dispatchInputs(work), `dispatch:${work.epoch}`, failing.name, refusal);
     }
     // A review refusal the reviewer's own reading already answered says "approval is required"
