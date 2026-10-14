@@ -9,7 +9,7 @@ import { answeredRereviewKey, cappedEscalationKey, cappedFilingKey, cappedRefusa
 // The one function only this change adds is read off the namespace, so on the base the proof fails as test cases rather than failing to load (GY-1174 exercise).
 import * as reviewCapModule from '../src/daemon/cycle-review-cap.js';
 const stalledReviewCapAttention = reviewCapModule.stalledReviewCapAttention;
-import { workAttentionOwner } from '../src/master/attention.js';
+import { agentOwner, workAttentionOwner } from '../src/master/attention.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 
 // GY-1810, observed on GY-1802 (medium lane) and twice on GY-1773, 2026-10-14: head 2beea67af645 was
@@ -191,6 +191,11 @@ test('unit:no-phantom-review-relaunch-row — GY-1810 AC-2: master status shows 
   assert.equal(bare.work[0]!.attentionOwner!.role, 'master');
   assert.match(bare.attentionItems[0]!.text!, /review-cap step is stalled/);
   assert.equal(bare.attentionItems.length, 1, 'one row per item, replaced in place');
+  // The item's other attention entries (supervised session, remedy, capacity) keep their own text and next action.
+  const others = [{ subject: item.key, text: 'Its supervised session is not answering', ...agentOwner('master', 'graphyard master sessions GY-1802') }, { subject: item.key, text: 'Capacity is spent', ...agentOwner('control plane', 'Wait for a free slot') }];
+  const many = stalledReviewCapAttention({ work: [row(item)], attentionItems: [others[0]!, { subject: item.key, text: 'Outstanding change requests must be resolved through a new review', ...ownerOf(item) }, others[1]!] }, [item], {}, 3, at);
+  assert.deepEqual(many.attentionItems.filter(entry => !/review-cap step is stalled/.test(entry.text)).map(entry => [entry.text, entry.next]), [['Its supervised session is not answering', 'graphyard master sessions GY-1802'], ['Capacity is spent', 'Wait for a free slot']]);
+  assert.equal(many.attentionItems.filter(entry => /review-cap step is stalled/.test(entry.text)).length, 1, 'only the review-gate entry is replaced');
 
   // The step's escalation stands: the row carries it, naming the head, the refusals and the answering command.
   const detail = `${item.key} is in review round 4, past its cap of 3, and ${reviewer} names a blocking finding on ${H.slice(0, 12)}: not withdrawn a third time. Read the refusals with graphyard master decisions GY-1802, then request the rework with graphyard master decide GY-1802 rework --precedent id1,id2 REASON`;

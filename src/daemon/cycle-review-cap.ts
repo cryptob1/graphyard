@@ -123,7 +123,7 @@ export function refusedAnswerStanding<D extends Parameters<typeof refusedCapAnsw
     && Date.parse(entry.requestedAt ?? '') > Date.parse(refused.refusal?.at ?? refused.requestedAt ?? ''))
     .sort((a, b) => Date.parse(a.requestedAt!) - Date.parse(b.requestedAt!));
   const answer = answers.find(entry => Date.parse(entry.requestedAt!) > submitted && !chained(entry))
-    ?? asked.find(entry => Date.parse(entry.requestedAt!) > submitted) ?? null;
+    ?? (asked.length && Date.parse(asked[0]!.requestedAt!) > submitted ? asked[0]! : null);
   const judged = [...answers, ...asked].filter(entry => entry !== answer && (chained(entry)
     || Date.parse(entry.requestedAt!) <= submitted && Date.parse(entry.refusal?.at ?? entry.requestedAt!) < submitted));
   const standing = [...answers, ...asked];
@@ -422,18 +422,21 @@ const reviewCapHold = (item: Work, cursor: ReviewCapCursor | null | undefined): 
  */
 export function stalledReviewCapAttention<T extends { work: Array<{ key: string; attention: string | null; attentionOwner?: { next: string } | null; refusal?: { gate?: string } | null }>; attentionItems: AttentionItem[]; counts?: { attention: number } }>(
   status: T, all: readonly Work[], cursor: ReviewCapCursor | null | undefined, cap = defaultReviewRoundCap, now = Date.now()): T {
-  const held = new Map<string, { text: string; next: string }>();
+  const held = new Map<string, { text: string; next: string; was: { text: string | null; next: string } }>();
   for (const row of status.work) {
     if (row.refusal?.gate !== 'review' || !row.attentionOwner?.next.includes('the loop relaunches the review on its own')) continue;
     const item = all.find(candidate => candidate.key === row.key);
     if (!item || !reviewCapHoldsHead(item, all, cursor, reviewRoundCapOf({ reviewRoundCap: cap }), now)) continue;
     const sha = item.candidate!.sha, escalation = cursor?.actions?.[`escalation:review-cap:${item.id}:${sha}`];
-    held.set(row.key, escalation?.detail ? { text: `${row.key}'s review-cap step is stalled on ${sha.slice(0, 12)}: ${escalation.detail}`, next: escalation.detail }
-      : { text: `${row.key}'s review-cap step is stalled on ${sha.slice(0, 12)}: ${reviewCapHold(item, cursor)}`, next: `graphyard master decisions ${row.key}` });
+    const was = { text: row.attention, next: row.attentionOwner.next };
+    held.set(row.key, escalation?.detail ? { text: `${row.key}'s review-cap step is stalled on ${sha.slice(0, 12)}: ${escalation.detail}`, next: escalation.detail, was }
+      : { text: `${row.key}'s review-cap step is stalled on ${sha.slice(0, 12)}: ${reviewCapHold(item, cursor)}`, next: `graphyard master decisions ${row.key}`, was });
   }
   if (!held.size) return status;
   const rows = status.work.map(row => held.has(row.key) ? { ...row, attention: held.get(row.key)!.text, attentionOwner: agentOwner('master', held.get(row.key)!.next) } : row);
-  const attentionItems = status.attentionItems.map(entry => held.has(entry.subject)
+  // Only the review-gate entry the work row represents is replaced; the item's supervised, remedy and capacity entries keep their own text and next action.
+  const gate = (entry: AttentionItem) => { const was = held.get(entry.subject)?.was; return !!was && entry.text === was.text && entry.next === was.next; };
+  const attentionItems = status.attentionItems.map(entry => gate(entry)
     ? { ...entry, text: held.get(entry.subject)!.text, ...agentOwner('master', held.get(entry.subject)!.next) } : entry);
   return { ...status, work: rows, attentionItems };
 }
