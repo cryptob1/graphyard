@@ -10,15 +10,18 @@ import { roleSessionMaximumMs } from '../model/sessions.js';
 import { credentialBlockedKey, credentialBlockedReason, credentialFailure } from '../worker-credential.js';
 import type { Cycle } from './cycle.js';
 import { settleEndedAttemptFence, supervisorStillRunning } from './cycle-reclaim.js';
-import { carriedRow, recordCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
+import { carriedRow, owedWrite, recordCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
 
 /** A worker's implementation handle, written by the loop: the one record `master status` and the item's history show of it. */
 export function workerHandle(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string | null, outcome: string, finished: boolean) {
   const { config, effects } = cycle;
-  return effects.recordSession?.(item, { id: `${profile.principal}:${epoch}`, kind: 'implementation', principal: profile.principal, runtime: profile.kind ?? profile.mode, host: config.hostId,
-    ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
-    ...(pane ? { pane, attach: `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` } : {}),
-    subject: `${item.key}: ${item.title}`.slice(0, 300), state: finished ? 'finished' : 'running', outcome: outcome.slice(0, 500) }).catch(() => {}) ?? Promise.resolve();
+  if (!effects.recordSession) return Promise.resolve();
+  // GY-1774: a best-effort record, owed to the next cycle when carried past the step's bound, never re-sent with the action it follows; refused, it is let go as before.
+  return owedWrite(cycle, `handle:${item.id}:${profile.principal}:${epoch}`, { kind: 'session', work: item.key, principal: profile.principal, epoch }, `Recording ${profile.agentName}'s implementation handle on ${item.key} epoch ${epoch}`, 'recordSession',
+    fx => fx.recordSession!(item, { id: `${profile.principal}:${epoch}`, kind: 'implementation', principal: profile.principal, runtime: profile.kind ?? profile.mode, host: config.hostId,
+      ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
+      ...(pane ? { pane, attach: `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` } : {}),
+      subject: `${item.key}: ${item.title}`.slice(0, 300), state: finished ? 'finished' : 'running', outcome: outcome.slice(0, 500) }));
 }
 
 /**
@@ -34,7 +37,7 @@ export async function endWorkerAttempt(cycle: Cycle, item: Work, profile: Worker
   const halt = async () => {
     try {
       if (scope && effects.stopSupervisor) { await effects.stopSupervisor({ id: item.id, key: item.key, epoch, owner: profile.principal, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: item.lease!.expiresAt }, 'SIGTERM'); stop = `its supervisor (pid ${scope.pid}) was stopped through ${scope.unit}`; }
-    } catch (error) { stop = `its supervisor could not be signalled (${message(error)}) and stops on the ended lease`; }
+    } catch (error) { if (stepCallCarried(error)) throw error; stop = `its supervisor could not be signalled (${message(error)}) and stops on the ended lease`; } // GY-1774: a carried stop is the ending's carried call
     // A session already gone from Herdr has no pane left to close (GY-867 ends such attempts too).
     if (pane) await effects.closeSession(pane);
   };
@@ -143,7 +146,7 @@ export function checkPaneStillBelongs(item: Work, handleId: string, pane: string
  * refusing every resolution for ever (GY-953).
  */
 export const resumeStep = (cycle: Cycle, failedOver: Set<string>, listingLive: boolean) =>
-  withinStepBudget(cycle, 'resume', ['promptSession', 'closeSession'], bounded => resumeStepWithin(bounded, failedOver, listingLive)); // GY-1774: the re-prompts and the pane close are bounded
+  withinStepBudget(cycle, 'resume', ['promptSession', 'closeSession', 'stopSupervisor', 'recordSession', 'preserveWork', 'reportCapacity', 'containment', 'controlPlaneClock', 'settleContainment'], bounded => resumeStepWithin(bounded, failedOver, listingLive)); // GY-1774: every call the step makes — the re-prompts, the pane close, the supervisor stop, the handle record, the preservation and the fence settlement — is bounded
 async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLive: boolean) {
   const { config, state, effects, now, clock, performed, isolate, agents, heldBy } = cycle;
   const live = new Set<string>();

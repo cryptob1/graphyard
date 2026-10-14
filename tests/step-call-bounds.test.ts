@@ -9,6 +9,9 @@ import { launchAppearanceMs } from '../src/daemon/effects.js';
 import { idleLeaseMs } from '../src/daemon/cycle-resume.js';
 import { overlongMarker } from '../src/daemon/reblocked-attempts.js';
 import type { Observation, Work } from '../src/model.js';
+import type { Cycle } from '../src/daemon/cycle.js';
+import type { DaemonAction } from '../src/daemon/state.js';
+import type { BlockerProbeResult } from '../src/daemon/blocker-probes.js';
 
 /**
  * GY-1774: every loop step that calls an approver, a decision or a session is bounded like the decisions step (GY-1766).
@@ -304,14 +307,14 @@ test('unit:step-calls-bounded — dispatch: the cap decision of an item held at 
 test('unit:step-calls-bounded — every named step runs under the shared bound with the calls the item names, and the triage record passes through once the step has ended', async () => {
   const sb = await helper();
   const steps: Record<string, { file: string; calls: string[] }> = {
-    blockers: { file: 'cycle-blockers.ts', calls: ['approver', 'closeSession'] },
-    dispatch: { file: 'cycle-dispatch.ts', calls: ['decide', 'approver'] },
-    'review-cap': { file: 'cycle-review-cap.ts', calls: ['withdrawReview', 'wakeObservation'] },
-    scope: { file: 'cycle-scope.ts', calls: ['decideScope', 'widenScope'] },
-    sessions: { file: 'cycle-sessions.ts', calls: ['closeSession', 'endSession', 'relaunch', 'answerSession', 'promptSession', 'launchedSessions'] },
-    resume: { file: 'cycle-resume.ts', calls: ['promptSession', 'closeSession'] },
-    reclaim: { file: 'cycle-reclaim.ts', calls: ['panes', 'closeSession'] },
-    triage: { file: 'cycle-triage.ts', calls: ['recordTriage'] },
+    blockers: { file: 'cycle-blockers.ts', calls: ['approver', 'closeSession', 'deferWindow', 'probeBlocker', 'decisions', 'approverLaunches', 'recordBlockerProbe', 'recordSession'] },
+    dispatch: { file: 'cycle-dispatch.ts', calls: ['decide', 'approver', 'roleHealth', 'escalationSessions', 'reportCapacity', 'planeHealth', 'hostMemory', 'blockDispatch', 'decisions'] },
+    'review-cap': { file: 'cycle-review-cap.ts', calls: ['withdrawReview', 'wakeObservation', 'decisions'] },
+    scope: { file: 'cycle-scope.ts', calls: ['decideScope', 'widenScope', 'reviewFindings', 'basePaths', 'baseText', 'baseMentions', 'baseSuccessions', 'repositoryFiles', 'decisions'] },
+    sessions: { file: 'cycle-sessions.ts', calls: ['closeSession', 'endSession', 'relaunch', 'answerSession', 'promptSession', 'launchedSessions', 'sessionOutput', 'herdr', 'escalationSessions', 'recordSession', 'stopSupervisor', 'reportCapacity', 'holdAccount', 'selectedAccount', 'preserveWork', 'endEscalation', 'markEscalation', 'relaunchEscalation', 'containment'] },
+    resume: { file: 'cycle-resume.ts', calls: ['promptSession', 'closeSession', 'stopSupervisor', 'recordSession', 'preserveWork', 'reportCapacity', 'containment', 'controlPlaneClock', 'settleContainment'] },
+    reclaim: { file: 'cycle-reclaim.ts', calls: ['panes', 'closeSession', 'reclaim', 'herdr', 'reclaimResources', 'containment', 'controlPlaneClock', 'settleContainment', 'preserveWork', 'reportCapacity'] },
+    triage: { file: 'cycle-triage.ts', calls: ['recordTriage', 'withdrawTriage'] },
   };
   for (const [step, { file, calls }] of Object.entries(steps)) {
     const source = readFileSync(`${root}src/daemon/${file}`, 'utf8');
@@ -319,7 +322,12 @@ test('unit:step-calls-bounded — every named step runs under the shared bound w
   }
   const decisions = readFileSync(`${root}src/daemon/cycle-decisions.ts`, 'utf8');
   assert.match(decisions, /boundedDecisions\(boundedCalls\(await decisionReads\(.*\), cycle\.heldDecisions, now, \(\) => budgetLeft\(\), \{ step: 'approvers', calls: approverCalls \}\)/, 'the approvers step\'s calls are bounded within the decisions step');
-  assert.match(decisions, /const approverCalls: readonly \(keyof DaemonEffects\)\[\] = \['approver', 'endRegistrySession', 'resume', 'withdraw', 'closeSession'\]/);
+  assert.match(decisions, /const approverCalls: readonly \(keyof DaemonEffects\)\[\] = \['approver', 'endRegistrySession', 'resume', 'withdraw', 'closeSession', 'herdr', 'approverLaunches', 'approverLaunch', 'sessionOutput', 'recordSession', 'holdAccount', 'reportCapacity', 'reconcileSessions'\]/);
+  // The successor re-plan of the scope step runs under the same bound with its own calls; the approvers' isolation is carried-aware like every bounded step's.
+  assert.match(readFileSync(`${root}src/daemon/cycle-scope.ts`, 'utf8'), /withinStepBudget\(cycle, 'scope', \['baseSuccessions', 'replan'\], bounded => successorStepWithin\(bounded, settled\)\)/);
+  assert.match(readFileSync(`${root}src/daemon/cycle-approvers.ts`, 'utf8'), /isolate = carriedIsolate\(carried, 'approvers'\)/);
+  // The preservation an ended attempt makes (sessions, resume, reclaim) carries like any other call: no failed preserve, no fault.
+  assert.match(readFileSync(`${root}src/daemon/preserve.ts`, 'utf8'), /if \(stepCallCarried\(error\)\) \{ await recordCarried\(/);
   // Triage: the record is bounded while the step runs; once the step has returned its budget is gone, so the step's own effects pass through, and cycle-triage.ts bounds a late record by the per-call bound alone (below).
   const recorded = hanging();
   const cfg = config(), state = emptyDaemonState(cfg);
@@ -387,7 +395,7 @@ test('unit:step-calls-bounded — review-cap: a withdrawal in flight across cycl
     const fx = effects([work], { decisions: async () => ({ decisions: [decision('refused')] }), stepCallBoundMs: 30, ...overrides } as Partial<DaemonEffects>);
     let tick = clock;
     const step = async () => { state.cycle++; tick += 60_000; await returns(reviewCapStep({ config: cfg, state, effects: fx, performed, now: () => tick, open: [work], snapshot: { work: [work], now: iso(tick - clock) }, heldDecisions: emptyHeldDecisions(), isolate: async (_kind: unknown, _item: unknown, _name: unknown, body: () => Promise<unknown>) => body() } as never)); };
-    return { state, step };
+    return { state, step, work };
   };
   // A nits-only change request: the withdrawal hangs across more cycles than the cap allows failures — one send, joined each cycle, no escalation.
   const withdrawal = hanging();
@@ -416,6 +424,11 @@ test('unit:step-calls-bounded — review-cap: a withdrawal in flight across cycl
   await refused.step();
   assert.equal(wake.calls.length, 1, 'the next cycle retried the wake and joined the one in flight');
   assert.ok(sb.carriedRow(refused.state.actions[wakeKey]));
+  // The withdrawal that owes the wake dismissed the change request: the next snapshot reads no capped review on the head, and the owed wake is still retried, found by its row alone.
+  refused.work.observation = { ...refused.work.observation!, reviews: [] } as Observation;
+  await refused.step();
+  assert.equal(wake.calls.length, 1, 'with the change request gone from the snapshot the wake is still retried, joining the one in flight');
+  assert.ok(sb.carriedRow(refused.state.actions[wakeKey]), `still carried once the capped review reads null: ${JSON.stringify(refused.state.actions[wakeKey])}`);
   wake.answer(undefined);
   await new Promise(resolve => setTimeout(resolve, 5));
   await refused.step();
@@ -488,4 +501,190 @@ test('unit:step-calls-bounded — triage: the record a settled run makes after t
   assert.equal(slow.calls.length, 1, 'the answer was consumed, never sent again');
   assert.equal(state.actions[key]?.state, 'done', JSON.stringify(state.actions[key]));
   assert.match(state.actions[key]!.detail, /Recorded the triage judgement of GY-13 \(release\) whose write was carried from an earlier cycle/);
+});
+
+// --- the review's findings on 20c8b1e7, each pinned (GY-1774 rework, round 3) -----------------------------------------
+
+/** A call that never answers on its own, each made separately, so a settled one is not the next one's answer. */
+function hangingEach<T = unknown>() {
+  const calls: { args: unknown[]; answer: (value: T) => void }[] = [];
+  return { calls, call: ((...args: unknown[]) => new Promise<T>(answer => { calls.push({ args, answer }); })) as unknown as (...args: any[]) => any };
+}
+const settle = () => new Promise(resolve => setTimeout(resolve, 5));
+
+test('unit:step-calls-applied-once — a carried call\'s answer is kept until its owed retry consumes it, whatever the run interval: it outlives two 900 s intervals and is dropped only once three cycles have begun since it settled, so a retry never sends a call whose answer is kept', async () => {
+  const sb = await helper();
+  assert.equal(sb.settledKeepCycles, 3, 'an answer is kept by cycles, never by a clock an interval could outrun');
+  const kept = { cycle: 10 }, slow = hangingEach<{ profile: string }>();
+  let tick = clock;
+  const fx = sb.boundedCalls(effects([], { promptSession: slow.call as DaemonEffects['promptSession'] }), kept, () => tick, () => 10_000, { step: 'resume', calls: ['promptSession'] });
+  const agent = { name: 'graphyard-claude-a', pane_id: 'pane-1' } as HerdrAgent;
+  await assert.rejects(fx.promptSession!(agent, 'resume GY-1') as Promise<void>, sb.stepCallCarried);
+  slow.calls[0].answer({ profile: 'x' });
+  await settle();
+  // Two run intervals of 900 s pass on the loop's clock before the retry comes on the next cycle: well past the ten minutes an earlier revision kept it.
+  tick += 2 * 900_000; kept.cycle = 11;
+  assert.deepEqual(await fx.promptSession!(agent, 'resume GY-1'), { profile: 'x' }, 'the retry on the next cycle consumes the kept answer, however long the interval');
+  assert.equal(slow.calls.length, 1, 'and sends nothing: the effect is applied once');
+  // Kept while fewer than settledKeepCycles cycles have begun since it settled.
+  await assert.rejects(fx.promptSession!(agent, 'resume GY-1') as Promise<void>, sb.stepCallCarried);
+  assert.equal(slow.calls.length, 2, 'once consumed, the next call is fresh');
+  slow.calls[1].answer({ profile: 'y' });
+  await settle();
+  kept.cycle = 13;
+  assert.deepEqual(await fx.promptSession!(agent, 'resume GY-1'), { profile: 'y' }, 'two cycles on, the answer is still kept and consumed');
+  assert.equal(slow.calls.length, 2);
+  // Dropped once settledKeepCycles cycles have begun since it settled with no retry consuming it: the work it served moved on.
+  await assert.rejects(fx.promptSession!(agent, 'resume GY-1') as Promise<void>, sb.stepCallCarried);
+  slow.calls[2].answer({ profile: 'z' });
+  await settle();
+  kept.cycle = 16;
+  await assert.rejects(fx.promptSession!(agent, 'resume GY-1') as Promise<void>, sb.stepCallCarried);
+  assert.equal(slow.calls.length, 4, 'an answer three cycles old with no retry is dropped, and the call is a fresh send');
+});
+
+test('unit:step-calls-bounded — blockers: an environmental probe and its record are bounded; carried, the item\'s handling is recorded carried with no fault, the next cycle joins the probe still running and consumes its answer, and the record is joined until it answers', async () => {
+  const sb = await helper();
+  const probing = hanging<BlockerProbeResult>(), recording = hanging<Work>();
+  const work = quiet('GY-11', { blocker: 'graphyard complete failed: HTTP 502 Bad Gateway from the control plane', blockerProbe: null } as Partial<Work>);
+  const fx = effects([work], { probeBlocker: probing.call as DaemonEffects['probeBlocker'], recordBlockerProbe: recording.call as DaemonEffects['recordBlockerProbe'] } as Partial<DaemonEffects>);
+  const state = emptyDaemonState(config()), key = `carried:blocker:${work.id}`;
+  await cycle(state, fx, clock);
+  assert.equal(probing.calls.length, 1, 'the probe was started');
+  assert.ok(sb.carriedRow(state.actions[key]), `the item's handling is recorded carried: ${JSON.stringify(Object.keys(state.actions))}`);
+  assert.match(state.actions[key].detail, /the blockers step's 30 ms per-call bound passed before GY-11's probeBlocker call answered; the call stays owed and is retried next cycle/);
+  assert.deepEqual(faults(state), [], 'a carried probe is no fault');
+  assert.equal(recording.calls.length, 0, 'nothing is recorded before the probe answers');
+  await cycle(state, fx, clock + 60_000);
+  assert.equal(probing.calls.length, 1, 'the next cycle joined the probe still running');
+  assert.ok(sb.carriedRow(state.actions[key]), 'still carried');
+  probing.answer({ probe: 'the server reports healthy', passed: false, detail: 'the server answered 500 on /healthz' });
+  await settle();
+  await cycle(state, fx, clock + 120_000);
+  assert.equal(probing.calls.length, 1, 'the retry consumed the probe\'s answer, never probing again');
+  assert.equal(state.actions[key]?.state, 'done', `the carried handling ran through: ${JSON.stringify(state.actions[key])}`);
+  assert.equal(recording.calls.length, 1, 'the answer was recorded on the item');
+  const row = state.actions[`blocker:${work.id}`];
+  assert.ok(sb.carriedRow(row), `the record is carried on the item's blocker row: ${JSON.stringify(row)}`);
+  assert.match(row.detail, /the blockers step's 30 ms per-call bound passed before GY-11's recordBlockerProbe call answered/);
+  assert.deepEqual(faults(state), []);
+  await cycle(state, fx, clock + 180_000);
+  assert.equal(recording.calls.length, 1, 'the next cycle recorded the probe again and joined the write in flight');
+  recording.answer(work);
+  await settle();
+  await cycle(state, fx, clock + 240_000);
+  assert.equal(recording.calls.length, 1, 'the write\'s answer was consumed: recorded once');
+  assert.equal(state.actions[`blocker:${work.id}`]?.state, 'done', `the blocker row settles once the record answered: ${JSON.stringify(state.actions[`blocker:${work.id}`])}`);
+  assert.match(state.actions[`blocker:${work.id}`]!.detail, /the loop re-checks it every cycle: the server reports healthy fails/);
+});
+
+test('unit:step-calls-bounded — reclaim: the worktree reclaim is bounded; carried, it is recorded on the step\'s row with no fault, the next cycle reclaims again and joins it, and its answer, once consumed, is applied and retires the row', async () => {
+  const sb = await helper();
+  const slow = hanging<unknown>();
+  const fx = effects([], { reclaim: slow.call as DaemonEffects['reclaim'] } as Partial<DaemonEffects>);
+  const state = emptyDaemonState(config()), key = 'carried:reclaim:reclaim';
+  await cycle(state, fx, clock);
+  assert.equal(slow.calls.length, 1, 'the reclaim was started');
+  assert.ok(sb.carriedRow(state.actions[key]), `the reclaim is recorded carried on the step's row: ${JSON.stringify(Object.keys(state.actions))}`);
+  assert.match(state.actions[key].detail, /the reclaim step's 30 ms per-call bound passed before the reclaim call answered; the call stays owed and is retried next cycle/);
+  assert.deepEqual(faults(state), [], 'a carried reclaim is no fault');
+  assert.ok(!state.reclaim, 'nothing is applied before it answers');
+  await cycle(state, fx, clock + 60_000);
+  assert.equal(slow.calls.length, 1, 'the next cycle reclaimed again and joined the one in flight');
+  slow.answer({ root: '/repo', at: iso(60_000), applied: true, scanned: 2, idleMs: 0, removed: [], kept: [], freeBefore: null, freeAfter: 10e9, freedBytes: 0, errors: [] });
+  await settle();
+  await cycle(state, fx, clock + 120_000);
+  assert.equal(slow.calls.length, 1, 'the answer was consumed, not reclaimed again');
+  assert.equal((state.reclaim as unknown as { at?: string } | undefined)?.at, iso(60_000), `the consumed report is applied: ${JSON.stringify(state.reclaim)}`);
+  assert.equal(state.actions[key]?.state, 'done', `the row is retired once the call answered: ${JSON.stringify(state.actions[key])}`);
+});
+
+test('unit:step-calls-bounded — sessions and dispatch: the listings the steps read at their own level are bounded; carried, each is recorded on the step\'s row with no fault and answered with what the step had, the next cycle reads again and joins it, and the answer retires the row', async () => {
+  const sb = await helper();
+  const listing = hanging<never[]>(), roles = hanging<Record<string, never>>();
+  const fx = effects([], { launchedSessions: listing.call as DaemonEffects['launchedSessions'], roleHealth: roles.call as DaemonEffects['roleHealth'], sessionOutput: () => null, reportCapacity: async work => work } as Partial<DaemonEffects>);
+  const state = emptyDaemonState(config());
+  await cycle(state, fx, clock);
+  for (const [key, call] of [['carried:sessions:launchedSessions', listing], ['carried:dispatch:roleHealth', roles]] as const) {
+    assert.equal(call.calls.length, 1, `${key} was read once`);
+    assert.ok(sb.carriedRow(state.actions[key]), `the read is recorded carried on its step's row: ${JSON.stringify(Object.keys(state.actions))}`);
+  }
+  assert.match(state.actions['carried:sessions:launchedSessions'].detail, /the sessions step's 30 ms per-call bound passed before the launchedSessions call answered/);
+  assert.match(state.actions['carried:dispatch:roleHealth'].detail, /the dispatch step's 30 ms per-call bound passed before the roleHealth call answered/);
+  assert.deepEqual(faults(state), [], 'a carried read is no fault');
+  await cycle(state, fx, clock + 60_000);
+  assert.equal(listing.calls.length, 1, 'the next cycle read the listing again and joined the read in flight');
+  assert.equal(roles.calls.length, 1, 'the next cycle read the role health again and joined the read in flight');
+  listing.answer([]); roles.answer({});
+  await settle();
+  await cycle(state, fx, clock + 120_000);
+  assert.equal(state.actions['carried:sessions:launchedSessions']?.state, 'done', 'the listing answered: its row is retired');
+  assert.equal(state.actions['carried:dispatch:roleHealth']?.state, 'done', 'the role health answered: its row is retired');
+});
+
+test('unit:step-calls-applied-once — resume: the handle a re-prompt records is a best-effort write; carried, it is owed and retried at the next step start that bounds it, joining the write, and the re-prompt it followed is never sent again', async () => {
+  const sb = await helper();
+  const prompts = hanging(), handles = hanging(), agents = [{ name: 'graphyard-claude-a', pane_id: 'pane-1', agent_status: 'idle', agent: 'claude' } as HerdrAgent];
+  const handle = { id: 'graphyard-claude-a:1', kind: 'implementation', principal: 'graphyard-claude-a', epoch: 1, runtime: 'claude', host: 'machine-a', pane: 'pane-1', agentName: 'graphyard-claude-a', state: 'running', subject: 'GY-12', startedAt: iso(-600_000) };
+  const work = quiet('GY-12', { lease: { epoch: 1, owner: 'graphyard-claude-a', expiresAt: iso(7_200_000) }, sessions: [handle], workspaces: [{ host: 'machine-a', path: '/repo/.graphyard/worktrees/GY-12-1', branch: 'graphyard/gy-12-1', epoch: 1, owner: 'graphyard-claude-a' }] } as unknown as Partial<Work>);
+  const fx = effects([work], { promptSession: async (...args: unknown[]) => { prompts.calls.push(args); }, recordSession: handles.call as DaemonEffects['recordSession'] }, agents), cfg = config({ workers: [profile()] });
+  const state = emptyDaemonState(cfg), key = `owed:handle:${work.id}:graphyard-claude-a:1`;
+  await cycle(state, fx, clock, cfg);
+  await cycle(state, fx, clock + idleLeaseMs + 60_000, cfg);
+  assert.equal(prompts.calls.length, 1, 'past the idle bound the worker is re-prompted');
+  assert.equal(handles.calls.length, 1, 'and its handle recorded');
+  assert.ok(sb.carriedRow(state.actions[key]), `the handle record is owed on its own row: ${JSON.stringify(Object.keys(state.actions))}`);
+  assert.match(state.actions[key].detail, /the resume step's 30 ms per-call bound passed before GY-12's recordSession call answered/);
+  assert.deepEqual(faults(state), []);
+  await cycle(state, fx, clock + idleLeaseMs + 120_000, cfg);
+  assert.equal(prompts.calls.length, 1, 'the re-prompt the record followed is never sent again');
+  assert.equal(handles.calls.length, 1, 'the owed record was retried at the step start and joined the write in flight');
+  assert.ok(sb.carriedRow(state.actions[key]));
+  handles.answer(undefined);
+  await settle();
+  await cycle(state, fx, clock + idleLeaseMs + 180_000, cfg);
+  assert.equal(handles.calls.length, 1, 'the write\'s answer was consumed: recorded once');
+  assert.equal(state.actions[key]?.state, 'done', `the owed row is retired: ${JSON.stringify(state.actions[key])}`);
+  assert.equal(prompts.calls.length, 1);
+});
+
+test('unit:step-calls-applied-once — the step-level helpers: a carried read answers with its fallback and its row is retired by the answer; an owed write is retried only by a step that bounds its call; a write owed by a loop since restarted is retired unsent, its landing unknown', async () => {
+  const sb = await helper();
+  const cfg = config(), performed: DaemonAction[] = [];
+  const health = hanging<string | null>(), handles = hanging();
+  const fx = effects([], { planeHealth: health.call as DaemonEffects['planeHealth'], recordSession: handles.call as DaemonEffects['recordSession'] } as Partial<DaemonEffects>);
+  const stepCycle = (state: DaemonState, effectsOf = fx) => ({ config: cfg, state, now: () => clock, effects: effectsOf, performed, isolate: async (_kind: unknown, _item: unknown, _name: unknown, body: () => Promise<unknown>) => body() }) as unknown as Cycle;
+  const state = emptyDaemonState(cfg);
+  const held = await sb.withinStepBudget(stepCycle(state), 'dispatch', ['planeHealth'], bounded => sb.carriedCall(bounded, 'dispatch', 'dispatch', 'planeHealth', () => bounded.effects.planeHealth!(), error => `held: ${(error as Error).message}`));
+  assert.match(held ?? '', /^held: the dispatch step's 30 ms per-call bound passed before the planeHealth call answered/);
+  assert.ok(sb.carriedRow(state.actions['carried:dispatch:planeHealth']), 'the read is recorded carried on the step\'s row');
+  health.answer(null);
+  await settle();
+  const read = await sb.withinStepBudget(stepCycle(state), 'dispatch', ['planeHealth'], bounded => sb.carriedCall(bounded, 'dispatch', 'dispatch', 'planeHealth', () => bounded.effects.planeHealth!(), () => 'fallback'));
+  assert.equal(read, null, 'the retry consumed the kept answer');
+  assert.equal(health.calls.length, 1);
+  assert.equal(state.actions['carried:dispatch:planeHealth'].state, 'done', 'the answer retired the row');
+  const write = (fxOf: DaemonEffects) => fxOf.recordSession!(quiet('GY-13'), { id: 'h', kind: 'implementation', state: 'running' } as never);
+  await sb.withinStepBudget(stepCycle(state), 'resume', ['recordSession'], bounded => sb.owedWrite(bounded, 'handle:GY-13:1', { kind: 'session', work: 'GY-13' }, 'Recording GY-13\'s handle', 'recordSession', write));
+  assert.ok(sb.carriedRow(state.actions['owed:handle:GY-13:1']), 'the write is owed on its row');
+  assert.equal(handles.calls.length, 1);
+  await sb.withinStepBudget(stepCycle(state), 'blockers', ['approver'], async () => {});
+  assert.equal(handles.calls.length, 1, 'a step that does not bound the call leaves it owed');
+  assert.ok(sb.carriedRow(state.actions['owed:handle:GY-13:1']));
+  await sb.withinStepBudget(stepCycle(state), 'sessions', ['recordSession'], async () => {});
+  assert.equal(handles.calls.length, 1, 'the next start of a step that bounds the call retried it, joining the write in flight');
+  assert.ok(sb.carriedRow(state.actions['owed:handle:GY-13:1']), 'still owed');
+  handles.answer(undefined);
+  await settle();
+  await sb.withinStepBudget(stepCycle(state), 'resume', ['recordSession'], async () => {});
+  assert.equal(handles.calls.length, 1, 'the answer was consumed: written once');
+  assert.equal(state.actions['owed:handle:GY-13:1'].state, 'done', 'the owed row is retired');
+  // A loop since restarted holds the row but no write: whether the write landed is unknown, so it is retired, never re-sent.
+  const restarted = emptyDaemonState(cfg), fresh = hanging();
+  restarted.actions['owed:handle:GY-14:1'] = { kind: 'session', work: 'GY-14', principal: null, epoch: null, state: 'waiting', attempts: 1, cycle: 0, at: iso(0),
+    detail: `Recording GY-14's handle was carried to the next cycle: the resume step's 30 ms per-call bound passed before GY-14's recordSession call answered; the call stays owed and is retried next cycle` };
+  await sb.withinStepBudget(stepCycle(restarted, effects([], { recordSession: fresh.call as DaemonEffects['recordSession'] } as Partial<DaemonEffects>)), 'resume', ['recordSession'], async () => {});
+  assert.equal(fresh.calls.length, 0, 'nothing is re-sent');
+  assert.equal(restarted.actions['owed:handle:GY-14:1'].state, 'done');
+  assert.match(restarted.actions['owed:handle:GY-14:1'].detail, /^Recording GY-14's handle was in flight when the loop last stopped: whether it landed is unknown, and a best-effort record is not sent again/);
 });

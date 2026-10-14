@@ -5,6 +5,7 @@ import type { WorkerProfile } from '../master.js';
 import { type DaemonAction, type DaemonState, message, storeAction } from './state.js';
 import { readyToRetry } from './sessions.js';
 import type { DaemonEffects } from './effects.js';
+import { recordCarried, stepCallCarried } from './step-budget.js';
 
 /** Put an action on the cursor, through storeAction, which bounds it and notes it against the fault record (GY-173). */
 export async function record(state: DaemonState, key: string, action: Omit<DaemonAction, 'at' | 'epoch' | 'faultClass'> & { at?: string; epoch?: number | null }, now: number, persist: DaemonEffects['persist'], faultKind?: FaultKind | null) {
@@ -40,6 +41,8 @@ export async function preserveInterruptedAttempt(state: DaemonState, effects: Da
     const where = partialWork.commit ? ` at ${partialWork.commit.slice(0, 12)}${partialWork.branch ? ` on ${partialWork.branch}` : ''}${partialWork.path ? ` (${partialWork.path})` : ''}` : '';
     return performed[performed.push(await record(state, key, { kind: 'preserve', work: item.key, principal, epoch, state: 'done', detail: `${item.key} attempt ${epoch} ${observed}. Partial work ${partialWork.state}${where}${partialWork.detail ? `: ${partialWork.detail}` : ''}; the attempt ended on the record and the next attempt's request names the commit`, attempts, cycle: state.cycle }, now(), effects.persist)) - 1];
   } catch (error) {
+    // GY-1774: a preservation past the step's bound is in flight, no fault: its row waits, and the next cycle preserves again, joining the write or consuming its answer.
+    if (stepCallCarried(error)) { await recordCarried({ state, now, performed, effects }, key, { kind: 'preserve', work: item.key, principal, epoch }, error, `Keeping what attempt ${epoch} of ${item.key} left in its worktree`); return state.actions[key]; }
     return performed[performed.push(await record(state, key, { kind: 'preserve', work: item.key, principal, epoch, state: 'failed', detail: `${item.key} attempt ${epoch} ${observed}, but its partial work could not be put on the record: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist)) - 1];
   }
 }

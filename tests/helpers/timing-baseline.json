@@ -262,7 +262,7 @@
     "tests/soak-silent-exhaustion.test.ts": 2500,
     "tests/soak-intervention-pattern-escalation-build.test.ts": 1892,
     "tests/stale-close-convergence.test.ts": 1902,
-    "tests/step-call-bounds.test.ts": 1500,
+    "tests/step-call-bounds.test.ts": 3000,
     "tests/soak-step-call-bounds.test.ts": 60000,
     "tests/vanished-reviewer-slot.test.ts": 1500,
     "tests/stale-release-decision.test.ts": 1874,

@@ -13,7 +13,7 @@ import { boundedCalls, carriedRow, recordCarried, stepCallBoundMs, stepCallCarri
  * Step 7c. Start a triage run for each machine-filed item awaiting triage, on the research account (`run.research`): an unconfigured loop
  * triages nothing, and the item is raised as attention once it has waited a day.
  */
-export const triageBacklogStep = (cycle: Cycle) => withinStepBudget(cycle, 'triage', ['recordTriage'], triageBacklogStepWithin); // GY-1774: the triage record is bounded
+export const triageBacklogStep = (cycle: Cycle) => withinStepBudget(cycle, 'triage', ['recordTriage', 'withdrawTriage'], triageBacklogStepWithin); // GY-1774: the triage record and the closure withdrawal are bounded
 async function triageBacklogStepWithin(cycle: Cycle) {
   const { config, state, effects, now, snapshot, clock, performed, isolate } = cycle;
   const note = async (key: string, work: string | null, outcome: 'done' | 'failed', detail: string) => {

@@ -14,7 +14,7 @@ import type { Cycle } from './cycle.js';
 import { sessionExhaustion } from './cycle-sessions.js';
 import { decisionFailureKind, resumedApplication } from './decision-reads.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
-import type { FaultKind } from '../model/fault-classes.js'; import { recordCarried, stepCallCarried } from './step-budget.js';
+import type { FaultKind } from '../model/fault-classes.js'; import { carriedIsolate, owedWrite, recordCarried, stepCallCarried } from './step-budget.js';
 
 /**
  * The approver sessions step 4c puts its decisions to (GY-1147 moved them here from
@@ -24,11 +24,11 @@ import type { FaultKind } from '../model/fault-classes.js'; import { recordCarri
 export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, stamp: string,
   note: (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at?: number, faultKind?: FaultKind | null) => Promise<unknown>,
   capacities: RoleCapacity[], approversSpent: boolean) {
-  const { config, state, now, snapshot, clock, performed, isolate } = cycle;
+  const { config, state, now, snapshot, clock, performed } = cycle, carried = { ...cycle, effects }, isolate = carriedIsolate(carried, 'approvers'); // GY-1774: a carried call reaching the isolation is recorded, no fault
   // One Herdr read serves the step, and is taken again after anything that changes the inventory.
   let inventory: { agents: HerdrAgent[]; available: boolean } | null = null;
   const sessions = async () => inventory ??= await effects.herdr?.() ?? { agents: await effects.agents(), available: true };
-  const invalidate = () => { inventory = null; };
+  const invalidate = () => { inventory = null; }, listingLost = (error: unknown): never[] => { if (stepCallCarried(error)) throw error; return []; }; // GY-1774: a carried launch listing is the handling's carried call, recorded by the isolation and retried next cycle; a refused one reads as empty, as before
   const unknownSessionDetail = (session: string, error: unknown) => `Approver registry session ${session} is taken as ended: the registry no longer knows this session (${message(error)})`;
   /**
    * End the agent registry session a watch's launch holds (GY-182). At a role concurrency of 1 a
@@ -84,7 +84,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       // Its launcher closed it, so the record ends now with why, rather than waiting for the
       // session report to find the pane gone (GY-172).
       const handle = (item.sessions ?? []).find(entry => entry.id === approverSessionId(watch.decision) && entry.state === 'running');
-      if (handle) await effects.recordSession?.(item, { id: handle.id, kind: handle.kind, runtime: handle.runtime, host: handle.host, subject: handle.subject, state: 'finished', outcome: `closed by the loop: ${why}`.slice(0, 500) }).catch(() => { /* the report closes it once the pane is gone */ });
+      if (handle && effects.recordSession) await owedWrite(carried, `handle:${item.id}:${handle.id}`, { kind: 'close', work: item.key, epoch: item.epoch }, `Recording approver session ${watch.agentName}'s handle on ${item.key} as closed`, 'recordSession', fx => fx.recordSession!(item, { id: handle.id, kind: handle.kind, runtime: handle.runtime, host: handle.host, subject: handle.subject, state: 'finished', outcome: `closed by the loop: ${why}`.slice(0, 500) })); // best effort: the report closes it once the pane is gone; carried, it is owed (GY-1774)
       await note(key, item, 'close', 'done', `Closed approver session ${watch.agentName} (${session.agent_status ?? 'unknown'}): ${why}`); return true;
     }
     catch (error) { invalidate(); if (stepCallCarried(error)) { await recordCarried(cycle, key, { kind: 'close', work: item.key, epoch: item.epoch }, error, `Closing approver session ${watch.agentName}`); return false; } watch.closeAttempts += 1; await note(key, item, 'close', 'failed', `Could not close approver session ${watch.agentName}: ${message(error)}`); return false; }
@@ -99,7 +99,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     if (watch.agentName || watch.pane || watch.settledAt || !seen.available || cycle.launcher.busy(approverLaunchKey(watch.decision))) return;
     const name = approverSessionName(item, watch.decision), agent = seen.agents.find(candidate => candidate.name === name && candidate.pane_id);
     if (!agent) return;
-    const own = boundLaunch(await effects.approverLaunches?.().catch(() => []) ?? [], agent);
+    const own = boundLaunch(await effects.approverLaunches?.().catch(listingLost) ?? [], agent);
     // A leftover its own record already dates stalled past its start bound is no new launch: the relaunch's launcher closes it (GY-1598).
     if (own && approverStallVerdict(agent, own.launchedAt, launchStartMs(config), clock).close) return;
     // GY-1612: the cycle that first saw the pane is stamped before the end below is tried, so registry refusals delay none of its bound.
@@ -121,7 +121,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     if (!watch.pane || !watch.agentName || watch.settledAt || !seen.available || seen.agents.some(candidate => candidate.pane_id === watch.pane)) return true;
     const moved = seen.agents.find(candidate => candidate.name === watch.agentName && candidate.pane_id && candidate.pane_id !== watch.pane);
     if (!moved) return true;
-    const fresh = boundLaunch(records ?? await effects.approverLaunches?.().catch(() => []) ?? [], moved);
+    const fresh = boundLaunch(records ?? await effects.approverLaunches?.().catch(listingLost) ?? [], moved);
     // One the registry could not be told keeps its id on the watch, unbound, and is ended again next cycle before the rebind: the
     // replacement shares its name, so step 4d cannot tell the predecessor's slot from a live one, and a lost id would hold it for good.
     // GY-1612: the cycle that first saw the pane is stamped on the watch before that end is tried, so registry refusals in between
@@ -168,10 +168,10 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     }
     // An adopted session keeps the account its launch chose: that is the account it spends. GY-1604: only a record naming the pane it is
     // listed in is its launch's; an earlier same-name launch's record (the replacement's could not be written) gives it nothing of its own.
-    const recorded = listed ? await effects.approverLaunch?.(name).catch(() => null) ?? null : null;
+    const recorded = listed ? await effects.approverLaunch?.(name).catch(error => { if (stepCallCarried(error)) throw error; return null; }) ?? null : null;
     const adopted = recorded?.pane && recorded.pane === listed?.pane_id ? recorded : null;
     // GY-1612: an adopted session keeps its own pane-bound record's launch time, so supervision judges its real age, not a fresh interval.
-    const adoptedAt = adopted && listed ? boundLaunch(await effects.approverLaunches?.().catch(() => []) ?? [], listed)?.launchedAt : undefined;
+    const adoptedAt = adopted && listed ? boundLaunch(await effects.approverLaunches?.().catch(listingLost) ?? [], listed)?.launchedAt : undefined;
     // A session the watch still holds past its close attempts is ended before the watch forgets it.
     // While the registry cannot be told, its id stays on the watch and no replacement is launched:
     // at a role concurrency of 1 the live slot would refuse it, and the id is the only way to end it.
@@ -298,7 +298,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     if (!agent) return false;
     // Provider messages only (GY-421); working counts only beside the retry marker (GY-973).
     const notice = effects.sessionOutput
-      ? await Promise.resolve(effects.sessionOutput(agent)).then(output => output ? sessionExhaustion(output, stoppedStates.includes(agent.agent_status ?? ''), watch.runtime ?? approverRuntime(config), clock) : null, () => null)
+      ? await Promise.resolve(effects.sessionOutput(agent)).then(output => output ? sessionExhaustion(output, stoppedStates.includes(agent.agent_status ?? ''), watch.runtime ?? approverRuntime(config), clock) : null, error => { if (stepCallCarried(error)) throw error; return null; })
       : null;
     const handle = (item.sessions ?? []).find(entry => entry.id === approverSessionId(watch.decision) && entry.state === 'running');
     const launchedAt = watch.launchedAt ? Date.parse(watch.launchedAt) : Number.NaN;
@@ -347,7 +347,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       Object.assign(watch, { launches: Math.max(0, watch.launches - 1), agentName: null, pane: null });
       const next = await launch(item, watch, false);
       performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'done', detail: `${ended} judging ${watch.action} decision ${watch.decision}; ${next}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-    } catch (error) {
+    } catch (error) { if (stepCallCarried(error)) { await recordCarried(carried, key, { kind: 'failover', work: item.key, epoch: item.epoch }, error, `Failing over approver session ${watch.agentName ?? '(closed)'} for ${item.key}`); return true; } // GY-1774
       performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `approver session ${watch.agentName ?? '(closed)'} for ${item.key} exhausted ${spentOn} (${signal.reason}) but could not be failed over: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     }
     return true;
@@ -378,7 +378,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     const name = approverSessionName(item, watch.decision), seen = await sessions();
     const agent = seen.available ? seen.agents.find(candidate => candidate.name === name) : undefined;
     if (!agent?.pane_id) return 'replace';
-    const own = boundLaunch(await effects.approverLaunches?.().catch(() => []) ?? [], agent);
+    const own = boundLaunch(await effects.approverLaunches?.().catch(listingLost) ?? [], agent);
     // The launcher's own never-started predicate decides, not the watch's step: a session that has started (working past the judge
     // bound, blocked) is one the launcher refuses to replace, so only adopting it lets supervision reach it. An idle one's screen is read
     // as the launcher reads it: a moving screen, or one showing its decision, has started, and a loop reading no screens adopts it.
@@ -472,7 +472,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
   const superviseHandApprovers = () => isolate('decision', null, 'hand-approvers', async () => {
     const seen = await sessions();
     if (!seen.available) return;
-    const records = await effects.approverLaunches?.().catch(() => []) ?? [];
+    const records = await effects.approverLaunches?.().catch(listingLost) ?? [];
     const watched = Object.values(state.approvals);
     for (const agent of seen.agents) {
       if (!agent.name || !agent.pane_id || watched.some(watch => watch.agentName === agent.name)) continue;
@@ -485,7 +485,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       if (!item) continue;
       let decision = record?.decision ?? null;
       if (!decision) {
-        const history = effects.decisions ? await effects.decisions(item).then(result => result.decisions, () => null) : null;
+        const history = effects.decisions ? await effects.decisions(item).then(result => result.decisions, error => { if (stepCallCarried(error)) throw error; return null; }) : null;
         decision = history?.find(entry => approverSessionName(item, entry.id) === agent.name)?.id ?? null;
         // A delivered item's approver is closed whatever it judges; it is named for its session.
         if (!decision && item.stage === 'done') decision = agent.name;
@@ -505,7 +505,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       if (!record.work || !record.decision || seen.agents.some(agent => agent.name === record.agentName) || watched.some(watch => watch.decision === record.decision || watch.agentName === record.agentName)) continue;
       const item = snapshot.work.find(candidate => candidate.key === record.work);
       if (!item || item.stage === 'done' || !effects.decisions) continue;
-      const judged = await effects.decisions(item).then(result => result.decisions.find(entry => entry.id === record.decision) ?? null, () => null);
+      const judged = await effects.decisions(item).then(result => result.decisions.find(entry => entry.id === record.decision) ?? null, error => { if (stepCallCarried(error)) throw error; return null; });
       if (judged?.state !== 'requested') continue;
       const watch = state.approvals[`${handWatchPrefix}${record.decision}`] = approvalWatchSchema.parse({ work: item.key, action: judged.action, decision: record.decision, requestedAt: stamp, agentName: record.agentName,
         launchedAt: record.launchedAt, launches: 1, account: record.account, runtime: record.runtime, session: record.session });
@@ -521,7 +521,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       if (!item) why = `${watch.work} is no longer open`;
       else if (item.stage === 'done') why = `${item.key} is delivered`;
       else if (effects.decisions) {
-        judged = await effects.decisions(item).then(result => result.decisions.find(entry => entry.id === watch.decision) ?? null, () => undefined);
+        judged = await effects.decisions(item).then(result => result.decisions.find(entry => entry.id === watch.decision) ?? null, error => { if (stepCallCarried(error)) throw error; return undefined; });
         if (judged === null) why = `${item.key} holds no decision ${watch.decision}`;
         else if (judged && !['requested', 'approved'].includes(judged.state)) why = `its decision is ${judged.state}`;
         if (judged) watch.action = judged.action;

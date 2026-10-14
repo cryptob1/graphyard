@@ -2294,7 +2294,10 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       if (at < window.from || at >= window.to) return;
       budgetDay.slowCalls++; budgetDay.cycleSlow++; budgetDay.slowed[name] = (budgetDay.slowed[name] ?? 0) + 1; fenced.drift += window.ms; await moveClock(window.ms);
     };
-    for (const name of ['closeSession', 'approver', 'decide', 'promptSession', 'wakeObservation', 'decideScope', 'widenScope', 'withdrawReview', 'endSession'] as const) {
+    for (const name of ['closeSession', 'approver', 'decide', 'promptSession', 'wakeObservation', 'decideScope', 'widenScope', 'withdrawReview', 'endSession',
+      // GY-1774 round 3: the steps' other external calls — probes, records, holds, settlements, the reads that ground a widening — answer slowly too. Each slowed call costs the day `ms` of its
+      // clock whatever the bound (the clock moves before the call answers), so the calls slowed here are the ones a cycle makes a few of, never the inventories and readings every cycle takes.
+      'recordBlockerProbe', 'probeBlocker', 'deferWindow', 'settleContainment', 'stopSupervisor', 'reportCapacity', 'holdAccount', 'preserveWork', 'blockDispatch', 'reviewFindings', 'basePaths', 'replan'] as const) {
       const original = effects[name] as ((...args: unknown[]) => unknown) | undefined;
       if (!original) continue;
       (effects as unknown as Record<string, unknown>)[name] = async (...args: unknown[]) => { await slow(name); return original(...args); };

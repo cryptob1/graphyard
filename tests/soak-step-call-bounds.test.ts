@@ -32,6 +32,9 @@ test('unit:soak-invariants-hold — a day of approver, decision and session call
   // The bound's economy: the window slowed calls of more than one step, and every cycle it touched stays inside the run interval.
   assert.ok(budgetDay.slowCalls, 'the window slowed the steps\' calls');
   assert.ok(Object.keys(budgetDay.slowed).length >= 2, `calls of several kinds were slowed: ${JSON.stringify(budgetDay.slowed)}`);
+  // Round 3: the steps' other external calls — reads, records, probes — are slowed and carried like their approver, decision and session calls.
+  const sessionCalls = ['closeSession', 'approver', 'decide', 'promptSession', 'wakeObservation', 'decideScope', 'widenScope', 'withdrawReview', 'endSession'];
+  assert.ok(Object.keys(budgetDay.slowed).some(name => !sessionCalls.includes(name)), `calls beyond the approver, decision and session ones were slowed: ${JSON.stringify(budgetDay.slowed)}`);
   const intervalMs = soakConfig.run.intervalSeconds * 1000;
   assert.deepEqual(budgetDay.cycles.filter(entry => entry.spentMs > intervalMs).map(entry => `cycle ${entry.cycle}: ${entry.spentMs}ms, ${entry.slow} slow calls`), [], 'every cycle stays within the interval');
   // Calls were carried while the plane was slow, and none stays carried once it is fast again: each was joined or its answer consumed, and its work settled.

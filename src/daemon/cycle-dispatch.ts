@@ -25,11 +25,11 @@ import { decompositionStep } from '../decomposition-step.js';
 import { judgeHostMemory } from '../master-resources.js';
 import { dispatchBlockRetryMs, dispatchFailureBlockAfter, dispatchFailureBlocker, noteDispatchFailure, planeWideFailure } from './dispatch-failures.js';
 import { closeStanding, closingItems } from './stale-closes.js';
-import { recordCarried, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
+import { carriedCall, owedWrite, recordCarried, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
 export const dispatchStep = (cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) =>
-  withinStepBudget(cycle, 'dispatch', ['decide', 'approver'], bounded => dispatchStepWithin(bounded, health, assessments)); // GY-1774: the cap decision and its approver launch are bounded
+  withinStepBudget(cycle, 'dispatch', ['decide', 'approver', 'roleHealth', 'escalationSessions', 'reportCapacity', 'planeHealth', 'hostMemory', 'blockDispatch', 'decisions'], bounded => dispatchStepWithin(bounded, health, assessments)); // GY-1774: every call the step makes — the role and plane health reads, the escalation listing, each capacity report, the memory reading, the blocker record, the decision history, the cap decision and its approver launch — is bounded
 async function dispatchStepWithin(cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, credentials, open } = cycle;
   // 4. Dispatch claimable work to a healthy profile. The launcher claims under the worker's own
@@ -131,10 +131,10 @@ async function dispatchStepWithin(cycle: Cycle, health: ReturnType<typeof profil
   //     exactly as it would have, and the escalation is withdrawn the cycle an account returns.
   const capacities: RoleCapacity[] = [roleCapacity('worker', config.workers.filter(worker => worker.mode === 'launch'), credentials)];
   if (effects.reportCapacity) {
-    const others = await effects.roleHealth?.().catch(() => null) ?? {};
+    const others = (effects.roleHealth ? await carriedCall(cycle, 'dispatch', 'capacity', 'roleHealth', () => effects.roleHealth!(), () => null).catch(() => null) : null) ?? {};
     for (const role of ['reviewer', 'producer', 'approver', 'escalation-handler'] as const) if (others[role]) capacities.push(roleCapacity(role, others[role]!.profiles, others[role]!.health));
     // A waiting record whose escalation no longer stands waits on nothing: step 1 drops it.
-    const waitingEscalations = new Set((await effects.escalationSessions?.().catch(() => [] as EscalationSession[]) ?? [])
+    const waitingEscalations = new Set((effects.escalationSessions ? await carriedCall(cycle, 'dispatch', 'capacity', 'escalationSessions', () => effects.escalationSessions!(), () => [] as EscalationSession[]).catch(() => [] as EscalationSession[]) : [])
       .filter(session => session.waiting && open.some(item => item.key === session.work && standingEscalations(item).some(entry => entry.trigger === session.trigger))).map(session => session.work));
     // An item waits on the approver role while it needs a decision no approver session is judging.
     const unjudged = new Set(open.filter(item => {
@@ -163,14 +163,14 @@ async function dispatchStepWithin(cycle: Cycle, health: ReturnType<typeof profil
           const standing = standingCapacity(item, capacity.role)[0];
           if (standing && capacitySignature(standing.role, standing.accounts) === signature) continue;
           try { await effects.reportCapacity(item, { event: 'escalated', role: capacity.role, accounts: capacity.accounts }); }
-          catch (error) { performed.push(await record(state, `${key}:${item.id}`, { kind: 'capacity', work: item.key, principal: null, state: 'failed', detail: `Could not record the ${capacity.role} capacity escalation on ${item.key}: ${message(error)}`, attempts: (state.actions[`${key}:${item.id}`]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist)); }
+          catch (error) { if (stepCallCarried(error)) { await recordCarried(cycle, `${key}:${item.id}`, { kind: 'capacity', work: item.key }, error, `Recording the ${capacity.role} capacity escalation on ${item.key}`); continue; } performed.push(await record(state, `${key}:${item.id}`, { kind: 'capacity', work: item.key, principal: null, state: 'failed', detail: `Could not record the ${capacity.role} capacity escalation on ${item.key}: ${message(error)}`, attempts: (state.actions[`${key}:${item.id}`]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist)); }
         }
         const detail = `${describeCapacity(capacity.role, capacity.accounts)}${waiting.length ? `; waiting: ${waiting.map(item => item.key).join(', ')}` : ''}`;
         if (detailChanged(previous, detail)) performed.push(await record(state, key, { kind: 'capacity', work: null, principal: null, state: 'done', detail, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
         continue;
       }
       const restored = open.filter(item => standingCapacity(item, capacity.role).length);
-      for (const item of restored) await effects.reportCapacity(item, { event: 'restored', role: capacity.role, reason: `An account for the ${capacity.role} role reports quota again` }).catch(() => {});
+      for (const item of restored) await owedWrite(cycle, `capacity-restored:${item.id}:${capacity.role}`, { kind: 'capacity', work: item.key }, `Recording that the ${capacity.role} role's capacity is restored on ${item.key}`, 'reportCapacity', fx => fx.reportCapacity!(item, { event: 'restored', role: capacity.role, reason: `An account for the ${capacity.role} role reports quota again` })); // GY-1774: best effort, owed when carried
       if (restored.length || previous && !previous.detail.startsWith('Restored')) {
         performed.push(await record(state, key, { kind: 'capacity', work: null, principal: null, state: 'done', detail: `Restored: a ${capacity.role} account reports quota again; ${capacity.role} launches resume${restored.length ? ` for ${restored.map(item => item.key).join(', ')}` : ''}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
       }
@@ -212,7 +212,8 @@ async function dispatchStepWithin(cycle: Cycle, health: ReturnType<typeof profil
 
   // A plane that cannot record what a launch produces is not dispatched into (GY-132): the worker
   // could not claim, and its work would be recorded nowhere. One escalation names the cause.
-  const unrecordable = claimable.length && !workersSpent && effects.planeHealth ? await effects.planeHealth() : null;
+  // GY-1774: a health read carried past the step's bound holds dispatch this cycle, as an unanswered plane cannot record a launch; the next cycle reads again, joining it.
+  const unrecordable = claimable.length && !workersSpent && effects.planeHealth ? await carriedCall(cycle, 'dispatch', 'dispatch', 'planeHealth', () => effects.planeHealth!(), error => `the control plane's health read was carried to the next cycle, which reads it again: ${message(error)}`) : null;
   if (unrecordable && detailChanged(state.actions['escalation:dispatch:plane'], `Dispatch held: ${unrecordable}`))
     performed.push(await record(state, 'escalation:dispatch:plane', { kind: 'escalation', work: null, principal: null, state: 'done', detail: `Dispatch held: ${unrecordable}`, attempts: (state.actions['escalation:dispatch:plane']?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   // A host below its memory floor launches no worker (GY-612): the crossing is recorded once each
@@ -293,7 +294,7 @@ async function dispatchStepWithin(cycle: Cycle, health: ReturnType<typeof profil
     if (!effects.blockDispatch) return note('waiting', `${reason}. This loop cannot record a blocker, so it holds ${item.key} itself until it restarts`);
     if (previous?.state === 'failed' && now() - Date.parse(previous.at) < dispatchBlockRetryMs(previous.attempts)) return [];
     try { await effects.blockDispatch(item, reason); }
-    catch (error) { return note('failed', `Could not record the blocker on ${item.key}, so the loop holds it and asks again after ${dispatchBlockRetryMs((previous?.attempts ?? 0) + 1) / 60_000} minutes: ${message(error)}. ${reason}`, true); }
+    catch (error) { if (stepCallCarried(error)) { await recordCarried(cycle, key, { kind: 'escalation', work: item.key, epoch: item.epoch }, error, `Recording the blocker on ${item.key}`); return []; } return note('failed', `Could not record the blocker on ${item.key}, so the loop holds it and asks again after ${dispatchBlockRetryMs((previous?.attempts ?? 0) + 1) / 60_000} minutes: ${message(error)}. ${reason}`, true); }
     delete state.dispatchFailures[item.id];
     return note('done', `Recorded the blocker on ${item.key}: ${reason}. It is dispatched again once the blocker is cleared (graphyard unblock ${item.key} REASON)`);
   }
@@ -412,7 +413,7 @@ export const memoryActionKey = 'escalation:dispatch:memory';
 export async function hostMemoryStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'config' | 'performed'>) {
   const { state, effects, now, config, performed } = cycle;
   if (!effects.hostMemory) return false;
-  const reading = await effects.hostMemory().catch(() => null);
+  const reading = await carriedCall(cycle, 'dispatch', 'escalation', 'hostMemory', () => effects.hostMemory!(), () => null).catch(() => null);
   // An unreadable host keeps the last judgment: a deferral is not lifted by a failed read.
   if (!reading) return !!state.memory?.low;
   const judged = judgeHostMemory(state.memory, reading, now(), config.hostId ?? null);
@@ -429,7 +430,7 @@ export async function hostMemoryStep(cycle: Pick<Cycle, 'state' | 'effects' | 'n
  */
 async function capResumeApprovedAt(cycle: Cycle, item: Work): Promise<number> {
   if (!cycle.effects.decisions) return 0;
-  const history = await cycle.effects.decisions(item).then(result => result.decisions, () => []);
+  const history = await cycle.effects.decisions(item).then(result => result.decisions, error => { if (stepCallCarried(error)) throw error; return []; }); // GY-1774: a carried read is the item's carried handling
   let resume = 0;
   for (const entry of history) {
     if (entry.state !== 'applied' || (entry.action !== 'rework' && entry.action !== 'unblock')) continue;
@@ -469,7 +470,7 @@ async function holdAtCap(cycle: Cycle, item: Work, hold: AttemptRetryHold) {
   const note = async (outcome: 'done' | 'failed', detail: string) => {
     if (detailChanged(state.actions[key], detail)) performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   };
-  const history = effects.decisions ? await effects.decisions(item).then(result => result.decisions, () => undefined) : undefined;
+  const history = effects.decisions ? await effects.decisions(item).then(result => result.decisions, error => { if (stepCallCarried(error)) throw error; return undefined; }) : undefined; // GY-1774
   const standing = history?.filter(entry => entry.action === 'rework' && ['requested', 'approved'].includes(entry.state));
   const mine = standing?.find(entry => entry.input?.binding === binding);
   const refused = history?.find(entry => entry.action === 'rework' && entry.state === 'refused' && entry.input?.binding === binding);
