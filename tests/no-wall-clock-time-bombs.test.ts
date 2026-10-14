@@ -849,6 +849,7 @@ export const allowances: Record<string, Allowance> = {
   'tests/github-http.test.ts': { why: 'the 2026-09-18 suspended_at is installation fixture data preflight reads for truthiness only', dates: ['2026-09-18'], readings: 13 },
   'tests/github-rate-budget.test.ts': { why: 'The 2026-09-21 item stamps and PR payload dates are past fixtures that evaluate\'s real new Date() only trails, the 2026-10-10 webhook attempts are judged by the now each corroboration case hands in', dates: ['2026-09-21', '2026-10-10'], readings: 31 },
   'tests/github.test.ts': { why: 'the 2026-01-01, 2026-09-17 and 2026-10-05 instants are fixture stamps and fixed clocks handed to enforcement and reconcileCheckReruns', dates: ['2026-01-01', '2026-09-17', '2026-10-05'], readings: 3 },
+  'tests/case-change-routing.test.ts': { why: 'the 2026-10-14 daemon clock is handed to caseChangeStep as its clock', dates: ['2026-10-14'], readings: 3 },
   'tests/goal-acceptance.test.ts': { why: 'the 2026-10-07 daemon clock lies behind every approval the server stamps, so the day-after-approval verdict needs the explicit Date.now() + 25h', dates: ['2026-10-07'], readings: 4 },
   'tests/goal-pipeline-outright-refusals.test.ts': { why: 'the 2026-10-10T00:00Z daemon clock lies behind every goal stamped with new Date(), so no acceptanceStuckMs bound is crossed', dates: ['2026-10-10'], readings: 4 },
   'tests/goal-planner.test.ts': { why: 'the 2026-10-07 clock is handed to plannerStep as its now', dates: ['2026-10-07'], readings: 6 },

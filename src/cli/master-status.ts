@@ -5,6 +5,7 @@ import { agentOwner, assessContainment, diskPressure, diskPressureAttention, dis
 import { reclaimableNow } from '../master/worktrees.js';
 import { standingDiskLine, worktreePassOf } from '../master/worktree-disk.js';
 import { type Work } from '../model/work.js';
+import { pendingCaseChanges } from './master-status-case-changes.js';
 import { installationMerger } from '../executor.js';
 import { leftBehindCheckoutAttention, readHeldCli } from '../daemon/upgrade.js';
 import { baseFailureAttention, daemonSummary, loopAttention, readDaemonState } from '../master-daemon.js';
@@ -129,7 +130,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
   const merger = installationMerger({ loop: { configured: !!setup.supervisor.installed, running: !!cycling?.running, autoMerge: master.autoMerge },
     declaration: executors.supervision.declaration, served: executors.presence.served });
-  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...conflicted, ...stuck.attentionItems, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...triage, ...owed.items, ...status.attentionItems, ...(sudo ? [{ subject: 'installation', text: sudo.instruction,
+  const { changes: caseChanges, items: caseChangeItems } = await pendingCaseChanges(sections, masterApi);
+  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...conflicted, ...stuck.attentionItems, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...triage, ...owed.items, ...caseChangeItems, ...status.attentionItems, ...(sudo ? [{ subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [])];
   // First: loop health, dispatcher, unclaimable actions, merger, release lag (GY-437); nothing below moves until they do.
   const ahead = [...loopItems, ...dispatchItems, ...executors.attention, ...merger.attention, ...lag.attention];
@@ -149,7 +151,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // item is the pipeline working, one with nothing moving it is the pipeline stopped.
       actionless: actionless.length, actorless: actorless.length, livenessViolations: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
       ...backlog,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + triage.length + ahead.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length + delivery.attention.length } }, snapshot.work);
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + triage.length + ahead.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + caseChangeItems.length + resources.attention.length + delivery.attention.length } }, snapshot.work);
   const sectionsReport = await assembleStatusSections({
     master, snapshot, coordinator, cli, probe, observation, health, hs,
     merger, setup, administration, daemon, dispatch, reviewRecords, producerRecords,
@@ -161,6 +163,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     ...mergeWriterLine(coordinator),
     ...status, ...attributed, ...faulted(attributeAttention(attributed.attentionItems, resources.readings)), resources: resources.report,
     unavailable: sections.unavailable,
+    pendingCaseChanges: caseChanges,
     docsBudget: docs,
     // GY-1511: the Herdr server holding this install's agents, and the one command that opens them on this host.
     herdr: { instance: master.herdrInstance ?? null, attach: herdrAttachCommand(master.herdrInstance ?? null), running: runtime.available },

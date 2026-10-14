@@ -416,6 +416,7 @@
     "tests/formal-review-baseline-pr.test.ts": 2900,
     "tests/generated-files-setup.test.ts": 3386,
     "tests/generated-index.test.ts": 5748,
+    "tests/gh-pause-review-launch.test.ts": 971,
     "tests/github-budget.test.ts": 3755,
     "tests/github-cache-persistence.test.ts": 1287,
     "tests/github-delivery.test.ts": 3351,
