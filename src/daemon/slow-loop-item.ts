@@ -20,7 +20,7 @@ export const slowLoopCycles = 3;
  * without timings. A step this table does not name is filed by name alone, with no file to plan.
  */
 export const stepSourceFiles: Record<string, string> = {
-  snapshot: 'src/daemon/cycle.ts', 'follow-up threads': 'src/daemon/cycle.ts', measure: 'src/daemon/cycle.ts', reconcile: 'src/daemon/cycle-resume.ts',
+  snapshot: 'src/daemon/cycle.ts', 'follow-up threads': 'src/daemon/cycle.ts', measure: 'src/daemon/cycle.ts', reconcile: 'src/daemon/cycle.ts',
   'merge settings': 'src/daemon/effects.ts', observe: 'src/daemon/effects.ts', credentials: 'src/daemon/effects.ts', setup: 'src/cli/master-setup.ts',
   launches: 'src/daemon/cycle-dispatch.ts', dispatch: 'src/daemon/cycle-dispatch.ts', close: 'src/daemon/cycle-sessions.ts', 'master session': 'src/daemon/cycle-master.ts',
   scope: 'src/daemon/cycle-scope.ts', successors: 'src/daemon/cycle-scope.ts', 'host supervision': 'src/daemon/cycle-host.ts', blockers: 'src/daemon/cycle-blockers.ts',
