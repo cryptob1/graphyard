@@ -27,8 +27,9 @@ const root = new URL('..', import.meta.url).pathname;
 let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
 before(async () => {
-  // Offset 28: free in the reserved 200-port window.
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 28;
+  // Offset 31: free in the reserved 200-port window under the bare defaults and under the required
+  // check alike (offset 28 is GRAPHYARD_EVENTS_TEST_PORT there; tests/timing-stability.test.ts refuses a shared port).
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 31;
   database = new EmbeddedPostgres({
     databaseDir: await temporaryDirectory('e2e-case-proofs-fresh-registry'),
     user: 'graphyard', password: 'testing-only', port, persistent: false,
