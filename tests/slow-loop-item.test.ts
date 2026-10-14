@@ -3,7 +3,8 @@ import test from 'node:test';
 import type { Work } from '../src/model.js';
 import type { DaemonEffects } from '../src/daemon/effects.js';
 import { cycleTimes, slowCycleAttention, slowCycleMs } from '../src/daemon/liveness.js';
-import { fileSlowLoopItem, filedSlowLoopItem, noteSlowCycle, slowLoopCycles, slowLoopIdempotencyKey, slowLoopItem, slowLoopItemFor, stepSourceFile } from '../src/daemon/slow-loop-item.js';
+/** The filing rule, imported when each test runs: on a tree without it (verify's base exercise) the proof fails as a case, not at load (GY-1418). */
+const rule = () => import('../src/daemon/slow-loop-item.js');
 import { type CycleMetrics, cycleMetricsSchema, type DaemonState, daemonStateSchema, emptyCycleSteps } from '../src/daemon/state.js';
 import { masterConfigSchema } from '../src/master.js';
 import { emptyDaemonState } from '../src/master-daemon.js';
@@ -50,11 +51,12 @@ function world(release: string | null = releaseA) {
     },
   } as unknown as Pick<DaemonEffects, 'fileSlowLoopItem' | 'persist'> & { fileSlowLoopItem: NonNullable<DaemonEffects['fileSlowLoopItem']> };
   /** Runs one completed cycle through the filing rule, as run.ts does after runCycle. */
-  const complete = async (metrics: CycleMetrics) => { state.metrics.push(metrics); state.cycle = metrics.cycle + 1; return fileSlowLoopItem(state, effects, () => base + (metrics.cycle + 1) * minute); };
+  const complete = async (metrics: CycleMetrics) => { state.metrics.push(metrics); state.cycle = metrics.cycle + 1; return (await rule()).fileSlowLoopItem(state, effects, () => base + (metrics.cycle + 1) * minute); };
   return { state, effects, filed, requests, complete, lose: () => { plane = 'lost'; }, restore: () => { plane = 'up'; } };
 }
 
 test('unit:slow-loop-files-once — three consecutive cycles past slowCycleMs on one release file exactly one item under the release-and-step key; a fourth slow cycle and a retry after a lost reply file nothing new; two slow cycles file nothing; a slow run on another release files its own item', async () => {
+  const { fileSlowLoopItem, filedSlowLoopItem, noteSlowCycle, slowLoopCycles, slowLoopIdempotencyKey } = await rule();
   const w = world();
   // Two slow cycles, then a fast one: the run ends short of the bound and nothing is filed.
   assert.equal(await w.complete(slow(1)), null);
@@ -117,12 +119,12 @@ test('unit:slow-loop-files-once — three consecutive cycles past slowCycleMs on
   for (const index of [1, 2, 3]) assert.equal(await unreleased.complete(slow(index)), null);
   assert.deepEqual(unreleased.requests, []);
   // The rule itself: a window is returned only at three consecutive slow cycles on the loaded release.
-  const rule = world();
-  rule.state.metrics.push(slow(1), slow(2));
-  assert.equal(noteSlowCycle(rule.state), null);
-  rule.state.metrics.push(slow(3));
-  rule.state.slowLoop.consecutive = slowLoopCycles - 1;
-  assert.deepEqual(noteSlowCycle(rule.state)?.window.map(metrics => metrics.cycle), [1, 2, 3]);
+  const counting = world();
+  counting.state.metrics.push(slow(1), slow(2));
+  assert.equal(noteSlowCycle(counting.state), null);
+  counting.state.metrics.push(slow(3));
+  counting.state.slowLoop.consecutive = slowLoopCycles - 1;
+  assert.deepEqual(noteSlowCycle(counting.state)?.window.map(metrics => metrics.cycle), [1, 2, 3]);
   // The run survives the cursor round-trip: the record parses back as it was written, and an older cursor without it reads as no run.
   const stored = daemonStateSchema.parse(JSON.parse(JSON.stringify(w.state)));
   assert.deepEqual(stored.slowLoop, w.state.slowLoop);
@@ -131,6 +133,7 @@ test('unit:slow-loop-files-once — three consecutive cycles past slowCycleMs on
 });
 
 test('unit:slow-loop-item-contents — the filed item names the release commit, the cycle p50 and p95, the slowest step with its source file and the slowest external call, and the slow-cycle attention row names the item\'s key once it is filed', async () => {
+  const { fileSlowLoopItem, slowLoopItem, slowLoopItemFor, stepSourceFile } = await rule();
   const window = [slow(4, 'decisions', 121_000), slow(5, 'decisions', 95_000), slow(6, 'decisions', 110_000)];
   const metrics = [fast(1), fast(2), fast(3), ...window];
   const now = base + 7 * minute;
