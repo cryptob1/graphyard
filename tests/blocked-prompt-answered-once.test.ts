@@ -114,3 +114,24 @@ test('unit:blocked-prompt-answered-once — GY-1774: a continuation prompt carri
     assert.deepEqual(log.keys, [['2']], 'the retry resumed at the continuation: the decline keys were not sent again');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test('unit:blocked-prompt-answered-once — GY-1774: a carried continuation is retried inside the settle window, without the decline keys', async () => {
+  const { directory, master } = await setup();
+  try {
+    const item = { current: held() };
+    const { log, effects } = harness(dangerousRm, item);
+    let release!: () => void;
+    const prompts: string[] = [];
+    effects.promptSession = (_agent, text) => { prompts.push(text); return new Promise<void>(resolve => { release = resolve; }); };
+    (effects as { stepCallBoundMs?: number }).stepCallBoundMs = 30;
+    const state = emptyDaemonState(master);
+    await runCycle(master, state, effects, () => clock + 20_000);
+    assert.deepEqual(log.keys, [['2']], 'the decline was sent');
+    assert.equal(prompts.length, 1, 'the continuation was sent and did not answer in time');
+    release();
+    await new Promise(resolve => setTimeout(resolve, 5));
+    await runCycle(master, state, effects, () => clock + 25_000);
+    assert.equal(prompts.length, 2, 'the continuation was retried within the settle window');
+    assert.deepEqual(log.keys, [['2']], 'the retry resumed at the continuation: the decline keys were not sent again');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

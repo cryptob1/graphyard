@@ -434,12 +434,12 @@ async function closeStepWithin(cycle: Cycle) {
     }
     const answeredKey = `session:answered:${slot}:${agent.pane_id}:${digest}`, answered = state.actions[answeredKey];
     if (prompt.kind === 'destructive-command' && prompt.keys && effects.answerSession && (answered?.attempts ?? 0) < blockedPromptAnswers) {
-      // An answered dialog is given time to close before it is answered again.
-      if (answered && now() - Date.parse(answered.at) < blockedPromptSettleMs) return;
-      const attempts = (answered?.attempts ?? 0) + 1;
-      await record(state, answeredKey, { kind: 'session', work: item.key, principal, epoch, state: 'started', detail: `${who} on ${item.key} is blocked on its runtime's destructive-command prompt "${prompt.text}"; declining it with "${prompt.answer}"`, attempts, cycle: state.cycle }, now(), effects.persist);
       // The decline keys are sent once: a retry of a carried continuation resumes at the prompt, never at the keys.
       const declinedKey = `${answeredKey}:declined`, resume = answered?.state === 'waiting' && state.actions[declinedKey]?.state === 'done';
+      // An answered dialog is given time to close before it is answered again; a carried continuation owes only its paste, so it is not held.
+      if (answered && !resume && now() - Date.parse(answered.at) < blockedPromptSettleMs) return;
+      const attempts = (answered?.attempts ?? 0) + 1;
+      await record(state, answeredKey, { kind: 'session', work: item.key, principal, epoch, state: 'started', detail: `${who} on ${item.key} is blocked on its runtime's destructive-command prompt "${prompt.text}"; declining it with "${prompt.answer}"`, attempts, cycle: state.cycle }, now(), effects.persist);
       try {
         if (!resume) {
           await record(state, declinedKey, { kind: 'session', work: item.key, principal, epoch, state: 'started', detail: `${who} on ${item.key}: declining its runtime's destructive-command prompt "${prompt.text}" with "${prompt.answer}"`, attempts, cycle: state.cycle }, now(), effects.persist);
