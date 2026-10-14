@@ -19,7 +19,7 @@ export const stepBudgetMs = (intervalMs: number) => Math.max(actionableIntervalM
 /** How long one external call may take before the step returns and carries the call's work to the next cycle (GY-1766, GY-1774). */
 export const stepCallBoundMs = 10_000;
 /** The steps bounded this way, by the name their carried calls record (GY-1774); `decisions` keeps GY-1766's wording. */
-export type BoundedStep = 'decisions' | 'approvers' | 'blockers' | 'dispatch' | 'review-cap' | 'scope' | 'sessions' | 'resume' | 'reclaim' | 'triage';
+export type BoundedStep = 'decisions' | 'approvers' | 'blockers' | 'dispatch' | 'review-cap' | 'scope' | 'sessions' | 'resume' | 'reclaim' | 'triage' | 'master';
 
 /**
  * A step's clock. `left()` is the budget still unspent, which caps every call's bound while the
@@ -28,9 +28,10 @@ export type BoundedStep = 'decisions' | 'approvers' | 'blockers' | 'dispatch' | 
  * so it passes through unbounded, exactly as it did before.
  */
 export function stepBudget(now: () => number, intervalMs: number) {
-  const startedAt = now(), budgetMs = stepBudgetMs(intervalMs);
+  const startedAt = now(), wallStartedAt = Date.now(), budgetMs = stepBudgetMs(intervalMs);
   let ended = false;
-  return { budgetMs, left: (): number | null => ended ? null : Math.max(0, budgetMs - (now() - startedAt)), end: () => { ended = true; } };
+  // The spent share is the larger of the loop's clock and the wall, so a fixed or simulated clock never lets a step go on past its budget on the wall.
+  return { budgetMs, left: (): number | null => ended ? null : Math.max(0, budgetMs - Math.max(now() - startedAt, Date.now() - wallStartedAt)), end: () => { ended = true; } };
 }
 
 /** A call that passed its bound (GY-1766/GY-1774): the per-call bound, or the step budget left it is capped by, or a budget already spent before the call could be made. Its work stays owed, with the attempt recorded, and is retried next cycle. */
@@ -136,8 +137,8 @@ export function boundedCalls(effects: DaemonEffects, kept: object, clockMs: () =
       if (left === null) return fn.call(target, ...args);
       const startedAt = clockMs(), wall = Date.now(), boundMs = options.boundMs?.(effects) ?? (effects as { stepCallBoundMs?: number }).stepCallBoundMs ?? stepCallBoundMs, capped = Math.max(0, Math.min(boundMs, left)), budgeted = capped < boundMs;
       const key = options.key?.(call, args) ?? callKey(call, args);
-      // An answer no retry consumed within the keep is dropped: the work it served moved on.
-      for (const [other, flight] of pending) if (flight.settledAt && (cycleOf(kept) - flight.settledAt.cycle >= settledKeepCycles || wall - flight.settledAt.wall >= settledKeepMs)) pending.delete(other);
+      // An answer no retry consumed within the keep is dropped: the work it served moved on. The call's own key is checked first (it is consumed below, however late), never swept.
+      for (const [other, flight] of pending) if (other !== key && flight.settledAt && (cycleOf(kept) - flight.settledAt.cycle >= settledKeepCycles || wall - flight.settledAt.wall >= settledKeepMs)) pending.delete(other);
       const joined = pending.get(key);
       // The retry of a carried call that settled meanwhile consumes its answer: applied once, never sent again.
       if (joined?.settledAt) { pending.delete(key); return joined.promise; }

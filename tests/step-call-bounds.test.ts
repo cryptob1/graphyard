@@ -538,13 +538,32 @@ test('unit:step-calls-applied-once — a carried call\'s answer is kept until it
   kept.cycle = 13;
   assert.deepEqual(await fx.promptSession!(agent, 'resume GY-1'), { profile: 'y' }, 'two cycles on, the answer is still kept and consumed');
   assert.equal(slow.calls.length, 2);
-  // Dropped once settledKeepCycles cycles have begun since it settled with no retry consuming it: the work it served moved on.
+  // An owed item delayed past the keep still consumes its own answer: the sweep never drops the retry's key before it is checked.
   await assert.rejects(fx.promptSession!(agent, 'resume GY-1') as Promise<void>, sb.stepCallCarried);
   slow.calls[2].answer({ profile: 'z' });
   await settle();
   kept.cycle = 16;
+  assert.deepEqual(await fx.promptSession!(agent, 'resume GY-1'), { profile: 'z' }, 'the late retry consumes its own answer, never sending again');
+  assert.equal(slow.calls.length, 3);
+  // An answer of another key nobody retries is dropped once it is three cycles old.
+  const other = { name: 'graphyard-claude-b', pane_id: 'pane-2' } as HerdrAgent;
+  await assert.rejects(fx.promptSession!(other, 'resume GY-2') as Promise<void>, sb.stepCallCarried);
+  slow.calls[3].answer({ profile: 'w' });
+  await settle();
+  kept.cycle = 20;
   await assert.rejects(fx.promptSession!(agent, 'resume GY-1') as Promise<void>, sb.stepCallCarried);
-  assert.equal(slow.calls.length, 4, 'an answer three cycles old with no retry is dropped, and the call is a fresh send');
+  await assert.rejects(fx.promptSession!(other, 'resume GY-2') as Promise<void>, sb.stepCallCarried);
+  assert.equal(slow.calls.length, 6, 'with no retry inside the keep the answer is dropped and the call is a fresh send');
+});
+
+test('unit:step-calls-bounded — a step budget is spent on the wall as well as the loop clock, so a fixed clock never lets a step outlast it', async () => {
+  const sb = await helper();
+  const budget = sb.stepBudget(() => 1000, 1000);
+  assert.ok(budget.left()! > 0);
+  const real = Date.now;
+  try { Date.now = () => real() + sb.stepBudgetMs(1000) + 1; assert.equal(budget.left(), 0, 'the wall spent the budget under a fixed clock'); } finally { Date.now = real; }
+  budget.end();
+  assert.equal(budget.left(), null);
 });
 
 test('unit:step-calls-bounded — blockers: an environmental probe and its record are bounded; carried, the item\'s handling is recorded carried with no fault, the next cycle joins the probe still running and consumes its answer, and the record is joined until it answers', async () => {

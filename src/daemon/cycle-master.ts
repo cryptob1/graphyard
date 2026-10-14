@@ -10,6 +10,7 @@ import { sessionCapMs } from '../model/registry-sessions.js';
 import { masterHandover, masterSessionBudgetMs, masterHeartbeatIntervalMs, masterWakeText, masterProfile } from '../master/master-session.js';
 import { outputReadDue } from './cycle-sessions.js';
 import type { Cycle } from './cycle.js';
+import { withinStepBudget } from './step-budget.js';
 
 /** The launcher key the master launch records its started entry under: one in flight at a time. */
 export const masterLaunchKey = 'master:launch';
@@ -31,7 +32,8 @@ export const masterMergeDeferralMs = 30 * 60_000;
  * material subjects — the heartbeat only as the fallback. A loop wired without `effects.masterSession`
  * keeps cycling exactly as before.
  */
-export async function masterSessionStep(cycle: Cycle) {
+export const masterSessionStep = (cycle: Cycle) => withinStepBudget(cycle, 'master', ['promptSession'], masterSessionStepWithin); // GY-1774: the wake's runtime call is bounded; a slow one is carried and the wake is made again next cycle
+async function masterSessionStepWithin(cycle: Cycle) {
   const { config, state, effects, now, clock, snapshot, performed, isolate } = cycle;
   const launcher = effects.masterSession;
   if (!launcher) return;
