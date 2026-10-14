@@ -289,6 +289,12 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * with manual proofs only; the control plane takes no filing between `outage.from` and `outage.to`.
    */
   checkoutRestart?: { moveAt: number; restartAt: number; kind: 'forward' | 'foreign'; doctor?: { scenario: string; from: number; outage: { from: number; to: number } } };
+  /** GY-1773: once the dirty window closes, the operator moves the checkout onto the commit the loop runs from its held snapshot, which lifts the pin. */
+  dirtyLift?: boolean;
+  /** GY-1773: inside this window the dirty checkout's HEAD follows the base tip each cycle, so it already holds the deployed commit; it is put back when the window closes. */
+  dirtyTipHold?: { from: number; to: number };
+  /** GY-1773: when a commit touching no loaded code (a docs page) lands on the base branch, so a deploy after it serves a docs-only head. */
+  docsOnlyCommit?: number;
   /**
    * GY-1585: production promotes a release cut `cutAgoMs` before each deploy, so every deploy serves
    * a base tip the branch has already moved past, and the coordinator checkout answers
@@ -2472,6 +2478,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // A detached checkout of the base branch, at the tip the day starts on; git answers from the
   // simulated GitHub, and a restart of the fleet or of the loop itself is recorded, not performed.
   const checkout = { head: github.tip, origin: github.tip, dirty: false };
+  /** GY-1773: the commit of the held snapshot this loop's modules were loaded from — a restart from a dirty checkout loads the pinned snapshot; the checkout guard judges the checkout against it. */
+  let loadedSnapshot: string | null = null;
   /**
    * GY-1531: the restart day as the loop saw it — the commit its process loaded, when the checkout
    * moved onto one it did not, the loaded-revision reading and the guard's refusal and escalation row
@@ -2507,7 +2515,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const upgrades = { fetches: 0, checkouts: [] as { at: number; from: string; to: string }[], executors: [] as string[], self: 0, outcomes: [] as SelfUpgradeOutcome['outcome'][],
     /** GY-916: the restarts refused on a held claim, the owed restart sampled each cycle it stood, and the unit the supervisor runs. */
     held: [] as string[], owed: [] as { to: string; state: string; attempts: number }[], unit: { watchdogSec: plan.driftedWatchdogSec, rewrites: 0 },
-    starts: 0, watchdog: [] as { failed: number; attempts: number; windowSec: number }[] };
+    starts: 0, watchdog: [] as { failed: number; attempts: number; windowSec: number }[],
+    /** GY-1773: every pin the launcher received or lost, and each cycle's view of the checkout, the pin and the checkout the cursor names left behind. */
+    pins: [] as { at: number; commit: string | null }[], samples: [] as { elapsed: number; head: string; dirty: boolean; pin: string | null; snapshot: { at: string; commit: string; checkout: string | null; dirty: string[] } | null; outcome: SelfUpgradeOutcome['outcome'] | null; last: { to: string; code: boolean; self: boolean } | null }[],
+    /** GY-1773: the docs-only commit `docsOnlyCommit` landed, once it has. */
+    docsOnly: null as string | null };
   /** The paths the base branch changed between two commits: every merged pull request's files, and what any other commit added or removed. */
   const changedPaths = (from: string, to: string) => {
     const paths = new Set<string>(), seen = new Set<string>(), queue = [to];
@@ -2545,6 +2557,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     root: '/soak/coordinator', run: coordinatorGit, now: clock.now, persist: async () => {},
     holdCli: async commit => {
       if (commit === null && releaseLagDay.pin && clock.now() - dayStart >= (options.releaseLag?.fleet?.stalePinAt ?? Infinity)) throw new Error('EACCES: the pin could not be removed');
+      upgrades.pins.push({ at: clock.now(), commit });
       releaseLagDay.pin = commit;
     },
     restartExecutors: async to => {
@@ -2563,10 +2576,14 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       return { wrote: 'updated', reason: null };
     },
     // The supervisor re-executes the loop: the next process loads the release the checkout holds, as runDaemon records it,
-    // and starts under the unit as it now stands.
+    // and starts under the unit as it now stands. GY-1773: a restart from a dirty checkout runs the held snapshot the
+    // launcher is pinned to, so the next process loads the snapshot's commit — never the dirty checkout's HEAD — and the
+    // checkout guard reads it as the snapshot the loop runs from.
     restartSelf: async () => {
-      if (options.releaseLag) releaseLagDay.restarts.push({ elapsed: clock.now() - dayStart, kind: 'self', to: checkout.head, served: production.sha, contained: github.contains(production.sha, checkout.head), pin: releaseLagDay.pin });
-      upgrades.self++; state.release = { commit: checkout.head, dirty: checkout.dirty }; restartDay.loaded = checkout.head; await processStart(state); },
+      const snapshotLoad = checkout.dirty && releaseLagDay.pin ? releaseLagDay.pin : null;
+      loadedSnapshot = snapshotLoad;
+      if (options.releaseLag) releaseLagDay.restarts.push({ elapsed: clock.now() - dayStart, kind: 'self', to: snapshotLoad ?? checkout.head, served: production.sha, contained: github.contains(production.sha, snapshotLoad ?? checkout.head), pin: releaseLagDay.pin });
+      upgrades.self++; state.release = { commit: snapshotLoad ?? checkout.head, dirty: false }; restartDay.loaded = snapshotLoad ?? checkout.head; await processStart(state); },
   });
   /** What runDaemon does once per process start: the supervisor's watchdog window judged against the interval (GY-916). */
   const processStart = async (state: DaemonState) => {
@@ -2588,16 +2605,20 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // it reads the tree and HEAD each cycle, raises the refusal naming the paths, the HEAD and the
   // panes pointing at the checkout, and lets the self-upgrade run only on a clean checkout at the
   // commit the loop runs. Its Herdr inventory reads are counted, to bound them.
-  const guardReads = { agents: 0, refused: 0, transitions: 0, details: new Set<string>(), headMoves: 0, foreignHead: sha('foreign-head', 1) };
+  let tipHeldFrom: string | null = null;
+  const guardReads = { agents: 0, refused: 0, transitions: 0, details: new Set<string>(), headMoves: 0, tipHolds: new Set<string>(), foreignHead: sha('foreign-head', 1) };
   // One guard per loop process, as runDaemon builds it: the restart day's new process builds its own.
   const newGuard = () => coordinatorCheckoutGuard({
     state: () => state, snapshot, persist: async () => {}, now: clock.now, log: line => { if (options.checkoutRestart) restartDay.journal.push({ elapsed: clock.now() - dayStart, line }); }, applies: () => true,
     read: async () => ({ root: '/soak/coordinator', commit: checkout.head, modified: checkout.dirty ? ['src/master.ts'] : [], untracked: [] }),
     agents: () => { guardReads.agents++; return herdr.list(); },
+    runsSnapshot: () => loadedSnapshot,
   });
   let guard = newGuard();
   await guard.start(checkout.head);
   let movedFrom: string | null = null, lastRefusal: string | null = null;
+  /** GY-1773 with `dirtyLift`: the operator's move of the checkout onto the pinned commit, once made. */
+  let dirtyLift: { at: number; from: string; to: string } | null = null;
   /** The cursor's upgrade actions and the refusal's attempts, sampled every cycle the checkout stood refused. */
   const refusalSamples: { keys: number; attempts: number; head: boolean }[] = [];
   // Session launches run beside the cycle (GY-616): the loop carries one launcher across its
@@ -2797,6 +2818,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       ? new Set([...github.prs.values()].filter(pr => pr.open).map(pr => pr.head)) : new Set<string>();
     // A change landed on main outside Graphyard, moving the base under candidates already pushed.
     if (!noticed && elapsed >= plan.notice) { noticed = true; github.commit('Add NOTICE to the base branch', [...github.files, 'NOTICE']); }
+    // GY-1773: a docs-only commit on the base branch — the next deploy serves a head whose diff from what the loop runs touches no loaded code.
+    if (options.docsOnlyCommit !== undefined && upgrades.docsOnly === null && elapsed >= options.docsOnlyCommit) upgrades.docsOnly = github.commit('Add a docs page to the base branch', [...github.files, 'docs/soak-note.md']).sha;
     // A test breaks on main outside Graphyard, and is repaired eleven minutes later (GY-528). Only
     // the 24-hour main day runs it: its candidates are held without rework either way, and that
     // day is where the filing, rerun and refresh recovery is asserted. The window is sized to the
@@ -3181,6 +3204,16 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       // simulated checkout. GY-866: inside the head-move window HEAD stands at a commit the loop
       // never aligned to, and is put back where it was when the window closes.
       checkout.dirty = elapsed >= plan.dirtyCheckout.from && elapsed < plan.dirtyCheckout.to;
+      // GY-1773 with `dirtyLift`: once the operator is done in the checkout, they answer the left-behind
+      // attention by moving it onto the commit the loop runs from its held snapshot — the move that
+      // lifts the pin on the next pass.
+      if (options.dirtyLift && !checkout.dirty && dirtyLift === null && releaseLagDay.pin && checkout.head !== releaseLagDay.pin) {
+        dirtyLift = { at: clock.now(), from: checkout.head, to: releaseLagDay.pin };
+        checkout.head = releaseLagDay.pin;
+      }
+      const tipHold = options.dirtyTipHold && checkout.dirty && elapsed >= options.dirtyTipHold.from && elapsed < options.dirtyTipHold.to;
+      if (tipHold) { tipHeldFrom ??= checkout.head; checkout.head = github.tip; guardReads.tipHolds.add(github.tip); }
+      else if (tipHeldFrom !== null) { checkout.head = tipHeldFrom; tipHeldFrom = null; }
       const moved = elapsed >= plan.headMove.from && elapsed < plan.headMove.to;
       if (moved && movedFrom === null) { movedFrom = checkout.head; checkout.head = guardReads.foreignHead; guardReads.headMoves++; }
       if (!moved && movedFrom !== null) { checkout.head = movedFrom; movedFrom = null; }
@@ -3215,6 +3248,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         refusalSamples.push({ keys: Object.keys(state.actions).filter(key => key.startsWith('upgrade:') || key.startsWith('escalation:dirty-checkout')).length, attempts: state.actions['escalation:dirty-checkout']?.attempts ?? 0, head: moved });
       } else assert.equal(guardReads.agents, readsBefore, 'a clean checkout costs no Herdr inventory read');
       if (upgraded) upgrades.outcomes.push(upgraded.outcome);
+      // GY-1773: each cycle's view of the checkout, the pin and the checkout the cursor names left behind.
+      upgrades.samples.push({ elapsed, head: checkout.head, dirty: checkout.dirty, pin: releaseLagDay.pin, snapshot: state.upgrade.snapshot ? { ...state.upgrade.snapshot } : null, outcome: upgraded?.outcome ?? null,
+        last: state.upgrade.last ? { to: state.upgrade.last.to, code: state.upgrade.last.code, self: state.upgrade.last.self } : null });
       if (options.releaseLag) {
         const rows = Object.entries(state.actions).filter(([key]) => key.startsWith('upgrade:')), held = state.actions['upgrade:held'];
         releaseLagDay.passes.push({ elapsed, outcome: upgraded?.outcome ?? null, pending: state.upgrade.pending?.to ?? null, stall: state.upgrade.stalled?.cause ?? null, held: held ? { state: held.state, attempts: held.attempts } : null,
@@ -3415,7 +3451,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, limitMenuDay, menuReset, menuNotice, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, githubStatusReads, credentialReads, blockerRecords, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
     wakes, lateReading, staleMerges, restartLog, hostDay, guardDay, mainWatchDay, budgetDay, slowPlaneDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, loopWakeDay: loopWakeDay || null,
-    holdThrowDay, restartDay: options.checkoutRestart ? restartDay : null, releaseLagDay: options.releaseLag ? releaseLagDay : null, fleetDay: options.releaseLag?.fleet ? fleetDay : null, failedLaunches };
+    holdThrowDay, restartDay: options.checkoutRestart ? restartDay : null, releaseLagDay: options.releaseLag ? releaseLagDay : null, fleetDay: options.releaseLag?.fleet ? fleetDay : null, dirtyLift: options.dirtyLift ? dirtyLift : null, failedLaunches };
 }
 
 /**

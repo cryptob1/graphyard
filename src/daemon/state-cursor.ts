@@ -167,6 +167,7 @@ export function boundDaemonState(state: DaemonState): DaemonState {
     if (state.upgrade.pending) state.upgrade.pending = { ...state.upgrade.pending, from: cut(state.upgrade.pending.from, 40), to: cut(state.upgrade.pending.to, 40) };
     if (state.upgrade.stalled) state.upgrade.stalled = { ...state.upgrade.stalled, reason: cut(state.upgrade.stalled.reason, 500) };
     if (state.upgrade.last) state.upgrade.last = { ...state.upgrade.last, from: cut(state.upgrade.last.from, 40), to: cut(state.upgrade.last.to, 40), executors: cut(state.upgrade.last.executors, 300) };
+    if (state.upgrade.snapshot) state.upgrade.snapshot = { ...state.upgrade.snapshot, commit: cut(state.upgrade.snapshot.commit, 40), checkout: cut(state.upgrade.snapshot.checkout, 40), dirty: state.upgrade.snapshot.dirty.slice(0, 20).map(path => cut(path, 300)) };
   }
   if (state.config) state.config = { ...state.config, changed: state.config.changed.slice(0, 100).map(entry => cut(entry, 100)), refused: cut(state.config.refused, 1000) };
   if (state.reclaim) state.reclaim.errors = state.reclaim.errors.slice(0, 20).map(entry => cut(entry, 500));
