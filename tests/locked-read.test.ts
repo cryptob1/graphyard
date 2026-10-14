@@ -370,6 +370,8 @@ test('unit:reconcile-lock-hold-bounded — a full reconciliation pass over 1000 
   // a reset view: its pass is a full, writing pass — every seeded row reprojected, as a restarted
   // server's first pass over an unprojected ledger is (GY-1124) — whatever ran before it. The seed
   // is small enough that the opening read stays inside the kept per-batch margin on a loaded runner.
+  // The template is ensured here too, so the case stands on its own when an earlier case did not run.
+  await ensureTemplate();
   await seed(100, 0);
   assert.ok(template, 'the test seeded its own ledger rows');
   engine.resetReconcileView();

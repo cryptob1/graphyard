@@ -50,8 +50,13 @@
 // runs that showed them) instead of a culprit, raising one attention row naming the shared test,
 // leaving the delivery and any rework alone — and, while that failure set stands, files no further
 // revert for it: a later merge that fails the same tests is given its one rerun (GY-1497) and left
-// delivered, main stays red, and each new merge re-runs main's CI once more until a run passes. When
-// main passes again the record is cleared, so the next red main with the same tests is judged afresh.
+// delivered, main stays red, and each new merge re-runs main's CI once more until a run passes. A
+// later merge whose whole failing set the standing record covers is recorded on its own item as
+// covered by it (cause `base-failure` too, no revert, no second attention row), so the history read
+// advances past it, across ticks and restarts, and a merge above it with a novel failure is still
+// judged. A merge recorded as a base failure is never cached as concluded: its verdict is re-read
+// each tick it is main's tip, so a rerun of its own run that passes turns main green. When main
+// passes again every record is cleared, so the next red main with the same tests is judged afresh.
 //
 // The judgement and the reopen are pure; the GitHub job loop runs the guard with the App's client
 // (`guardGitHubMain` in github.ts) and the loop raises the attention (cycle-delivery.ts).
@@ -106,8 +111,13 @@ export interface MainGuardRevert {
   run?: { id: number; attempt: number | null };
   /** The tip of main the revert was merged onto, as the opener read it (GY-1789): only a revert opened onto the merge itself proves a failure is main's own, since a later merge in the revert's tree could account for it. */
   openedOn?: string;
-  /** Cause `base-failure` (GY-1789): the failure the revert shared with main — per check, the failing test names and the two runs that showed them — and, once main passed again, where. */
-  baseFailure?: { shared: { check: string; tests: string[]; run: number | null; revertRun: number | null }[]; cleared?: { at: string; sha: string | null } | null };
+  /**
+   * Cause `base-failure` (GY-1789): the failure the revert shared with main — per check, the failing
+   * test names and the two runs that showed them — and, once main passed again, where. A merge
+   * recorded while that failure stood, failing only what the record covers, holds the same cause
+   * with no revert and `coveredBy` naming the merge whose record covered it (`revertRun` null).
+   */
+  baseFailure?: { shared: { check: string; tests: string[]; run: number | null; revertRun: number | null }[]; coveredBy?: string; cleared?: { at: string; sha: string | null } | null };
 }
 /**
  * Why a revert was abandoned: GitHub's approval rule or the approver App refused its approval or
@@ -351,8 +361,10 @@ export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOpti
   const tick: MainGuardTick = { main: { state: 'unknown' }, steps: [], errors: [], flakes: [] };
   const reruns = options.reruns ?? new Map<string, MainRerun>(), timeoutMs = options.checksTimeoutMs ?? revertChecksTimeoutMs;
   // A concluded verdict is kept across ticks; a pending one only for this tick, so a commit whose CI
-  // is still running is read once per tick, not once per look at it.
-  const pending = new Map<string, CommitVerdict>();
+  // is still running is read once per tick, not once per look at it. A merge recorded as a base
+  // failure of main (GY-1789) is kept for this tick only as well: its own run may be rerun by hand
+  // and pass, and a concluded failure cached before the record would keep main red for ever.
+  const pending = new Map<string, CommitVerdict>(), baseFailed = new Set<string>();
   const verdict = async (sha: string) => {
     const known = verdicts.get(sha) ?? pending.get(sha);
     if (known) return known;
@@ -369,7 +381,7 @@ export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOpti
       if (read.verdict === 'pass') rerun.passed = Object.fromEntries(rerun.failing.map(name => [name, latest.get(name)?.id ?? null]));
     }
     // A cancelled verdict is not concluded either: the guard reruns it, and the rerun is judged afresh.
-    (read.verdict === 'pending' || read.verdict === 'cancelled' || rerun ? pending : verdicts).set(sha, read);
+    (read.verdict === 'pending' || read.verdict === 'cancelled' || rerun || baseFailed.has(sha) ? pending : verdicts).set(sha, read);
     return read;
   };
   const write = async (work: Work, revert: MainGuardRevert) => {
@@ -379,6 +391,8 @@ export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOpti
   const abandon = async (work: Work, revert: MainGuardRevert, cause: MainGuardAbandonCause, reason: string, extra: Partial<MainGuardRevert> = {}) => {
     if (revert.revert) await ports.closeRevert(revert.revert.pr, `Closed by Graphyard's main guard after one attempt: ${reason}`).catch(error => tick.errors.push(`closing revert PR #${revert.revert!.pr}: ${message(error)}`));
     await write(work, { ...revert, ...extra, state: 'abandoned', settledAt: at, reason, cause, red: cause === 'base-failure' ? undefined : true });
+    // The merge's concluded failure, cached before its record, is evicted (GY-1789 review): while the record stands it is read afresh each tick.
+    if (cause === 'base-failure') { verdicts.delete(revert.mergeSha); baseFailed.add(revert.mergeSha); }
   };
 
   // 1. Settle every revert in flight: merged, merged now, or abandoned after its one attempt.
@@ -445,9 +459,10 @@ export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOpti
   if (!options.required.length) return tick;
   let history: MainCommit[] = [];
   const standing = await ports.standingBaseFailures?.().catch(() => []) ?? [];
+  for (const { revert } of standing) if (!revert.baseFailure?.cleared) { baseFailed.add(revert.mergeSha); verdicts.delete(revert.mergeSha); }
   try {
     history = await ports.history();
-    tick.main = await readMain(history, verdict, new Set(standing.filter(({ revert }) => !revert.baseFailure?.cleared).map(({ revert }) => revert.mergeSha)));
+    tick.main = await readMain(history, verdict, baseFailed);
   } catch (error) { tick.errors.push(`reading main: ${message(error)}`); return tick; }
   // Main passed again (GY-1789): every base failure of main it stood behind clears, so the next red
   // main with the same tests is judged afresh.
@@ -492,13 +507,17 @@ export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOpti
     if (decided.pending) { verdicts.delete(broken.culprit); tick.main = { state: 'pending', probe: broken.culprit, rerun: { failing: broken.failing } }; return tick; }
     note = decided.note;
   } catch (error) { tick.errors.push(`rerunning main's failed run on ${broken.culprit.slice(0, 12)}: ${message(error)}`); return tick; }
-  // GY-1789: a failure set a revert already proved to be main's own is nobody's culprit to revert.
-  // The merge keeps its delivery and nothing is recorded against it: main stays red, the standing
-  // attention row names the failure, and each new merge re-runs main once more until a run passes.
-  // The rerun entry is kept, so a later tick asks it whether the rerun ran instead of GitHub.
-  if (await sharesRecordedFailure(ports, options, testNames, standing, broken)) return tick;
   reruns.delete(broken.culprit);
-  const base: MainGuardRevert = { mergeSha: broken.culprit, pr: work.submission?.pr ?? null, failing: broken.failing, revert: null, state: 'opened', at, settledAt: null, revertSha: null, reason: null, openedOn: history[0]?.sha };
+  const base: MainGuardRevert = { mergeSha: broken.culprit, pr: work.submission?.pr ?? null, failing: broken.failing, revert: null, state: 'opened', at, settledAt: null, revertSha: null, reason: null };
+  // GY-1789: a failure set a revert already proved to be main's own is nobody's culprit to revert.
+  // The merge keeps its delivery and no rework is asked: main stays red, the standing attention row
+  // names the failure, and each new merge re-runs main once more until a run passes. The merge is
+  // recorded as covered by that record, so the history read advances past it to the merges above.
+  const covered = await coveredByRecordedFailure(ports, options, testNames, standing, broken);
+  if (covered) {
+    await abandon(work, base, 'base-failure', coveredReason(broken, covered), { baseFailure: { shared: covered.shared, coveredBy: covered.by, cleared: null } }).catch(error => tick.errors.push(`${work.key}: ${message(error)}`));
+    return tick;
+  }
   try {
     const opened = await ports.openRevert(work, broken.culprit, `${work.key}'s merge ${broken.culprit.slice(0, 12)} broke main: ${broken.failing.join(', ')} failed on it while its parent ${broken.parent.slice(0, 12)} passed${note}. Graphyard's main guard reverts it so main is green again; ${work.key} is reopened for a rework round.`);
     if ('refusal' in opened) await write(work, { ...base, state: 'abandoned', settledAt: at, reason: opened.refusal, cause: 'conflict', red: true });
@@ -506,7 +525,7 @@ export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOpti
       // The tip the opener merged onto binds `openedOn` (GY-1789): a merge that landed between the
       // history read and the opening sits in the revert's tree, and the base-failure inference must see it.
       const { onto, ...revert } = opened;
-      await write(work, { ...base, ...(onto ? { openedOn: onto } : {}), revert });
+      await write(work, { ...base, openedOn: onto ?? history[0]?.sha, revert });
     }
   } catch (error) {
     // One attempt: a revert that could not be opened is abandoned, never retried.
@@ -556,23 +575,32 @@ export function baseFailureReason(revert: Pick<MainGuardRevert, 'revert' | 'merg
 }
 
 /**
- * Whether the standing base failures of main (GY-1789) cover the broken merge's whole failing set:
- * every check that failed here is one a record names, with the same failing test names. A check no
- * record covers, or a run that published no names, is a failure the records do not cover, and the
- * revert goes ahead as before.
+ * The standing base failure of main (GY-1789) that covers the broken merge's whole failing set:
+ * every check that failed here is one a record names, with the same failing test names. Null when
+ * a check no record covers, or a run that published no names, is among them: that is a failure the
+ * records do not cover, and the revert goes ahead as before. `by` is the merge whose record covered
+ * the first check; `shared` names the merge's own runs, with no revert run.
  */
-async function sharesRecordedFailure(ports: MainGuardPorts, options: MainGuardOptions, testNames: Map<number, string[] | null>, standing: { work: Work; revert: MainGuardRevert }[], broken: { culprit: string; failing: string[] }): Promise<boolean> {
-  if (!ports.failedTests || !standing.length) return false;
+async function coveredByRecordedFailure(ports: MainGuardPorts, options: MainGuardOptions, testNames: Map<number, string[] | null>, standing: { work: Work; revert: MainGuardRevert }[], broken: { culprit: string; failing: string[] }): Promise<{ by: string; shared: NonNullable<MainGuardRevert['baseFailure']>['shared'] } | null> {
+  if (!ports.failedTests || !standing.length || !broken.failing.length) return null;
   const ids = options.runIds?.get(broken.culprit);
+  const shared: NonNullable<MainGuardRevert['baseFailure']>['shared'] = [];
+  let by: string | null = null;
   for (const check of broken.failing) {
     const id = ids?.[check];
-    if (id == null) return false;
+    if (id == null) return null;
     const current = await namedTests(ports, testNames, id);
-    if (!current?.length) return false;
-    const covered = standing.some(({ revert }) => !revert.baseFailure?.cleared && (revert.baseFailure?.shared ?? []).some(shared => shared.check === check && JSON.stringify(shared.tests) === JSON.stringify(current)));
-    if (!covered) return false;
+    if (!current?.length) return null;
+    const record = standing.find(({ revert }) => !revert.baseFailure?.cleared && (revert.baseFailure?.shared ?? []).some(entry => entry.check === check && JSON.stringify(entry.tests) === JSON.stringify(current)));
+    if (!record) return null;
+    by ??= record.revert.baseFailure?.coveredBy ?? record.revert.mergeSha;
+    shared.push({ check, tests: current, run: id, revertRun: null });
   }
-  return broken.failing.length > 0;
+  return by ? { by, shared } : null;
+}
+/** Why a merge was left delivered under a standing base failure of main (GY-1789): the covering merge, the checks and their failing test names. */
+function coveredReason(broken: { culprit: string }, covered: { by: string; shared: { check: string; tests: string[]; run: number | null }[] }): string {
+  return `merge ${broken.culprit.slice(0, 12)} fails only what main's standing base failure (recorded on merge ${covered.by.slice(0, 12)}) covers: ${covered.shared.map(entry => `${entry.check} with ${entry.tests.length} failing test${entry.tests.length === 1 ? '' : 's'} (${entry.tests.slice(0, 2).join(', ')}${entry.tests.length > 2 ? ', …' : ''}) on run ${entry.run ?? '?'}`).join('; ')} — no revert is filed and the merge keeps its delivery`;
 }
 
 /**
@@ -661,7 +689,8 @@ const causeText: Record<MainGuardAbandonCause, string> = {
  * pruned row had stopped, which only recovery does.
  */
 export function mainGuardAttention(all: Pick<Work, 'key' | 'mainGuardReverts'>[], since = -Infinity, held: (key: string) => boolean = () => false): { key: string; work: string; text: string; red: string[]; recovered: string }[] {
-  return all.flatMap(work => (work.mainGuardReverts ?? []).filter(revert => revert.state === 'abandoned' && (held(`escalation:main-guard:${revert.mergeSha}`) || !(Date.parse(revert.settledAt ?? revert.at) <= since))).map(revert => {
+  // A merge covered by a standing base failure (GY-1789) raises no row of its own: the covering record's row names the failure set once.
+  return all.flatMap(work => (work.mainGuardReverts ?? []).filter(revert => revert.state === 'abandoned' && !revert.baseFailure?.coveredBy && (held(`escalation:main-guard:${revert.mergeSha}`) || !(Date.parse(revert.settledAt ?? revert.at) <= since))).map(revert => {
     // A cancelled run (GY-1468) broke nothing: the line is the infrastructure fault, raised once.
     if (revert.cause === 'cancelled') return { key: `escalation:main-guard:${revert.mergeSha}`, work: work.key, red: [], text: `Main guard: ${work.key}'s merge ${revert.mergeSha.slice(0, 12)}${revert.pr ? ` (PR #${revert.pr})` : ''} — ${revert.reason ?? 'its CI run stayed cancelled'}. Fix the CI infrastructure and rerun run ${revert.run?.id ?? '?'}: until a rerun concludes, main stays pending and no later merge is judged; a real failure on that rerun is still reverted.`, recovered: '' };
     // A base failure of main (GY-1789) is nobody's culprit: the line names the shared test, once.

@@ -14,25 +14,25 @@ Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`
 - Failed candidates file a [hold](validation.md#release-holds) per failed outcome, else a follow-up (`release follow-up ID` retries) as the [filing credential](#release-filing-credential).
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records advisory `rc-soak/ID`.
 
-**The master loop drives promotion** (`promote=true`) once main differs from the last `rc-production/` and cut SHAs, nothing queued, and `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`; 10, `0` off) passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`, `GRAPHYARD_PRODUCTION_URL`; no workflow; managed repositories run [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. A `GRAPHYARD_UAT_STATIC` site's [merge-writer](delivery-redesign.md#merge-writer) trials run pre-build required/uat cases uncredentialed: failing or secret-declaring required ones, or none runnable, fail it; timeouts re-queue (`mergeLedger.trial.preview`). `release status` lists candidates; `release GY-N EPOCH` leases. Needs `vars.UAT_URL`/`PRODUCTION_URL`, tokens.
+**The master loop promotes** (`promote=true`) once main differs from the last `rc-production/` and cut SHAs, nothing is queued and `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`; 10, `0` off) passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`, `GRAPHYARD_PRODUCTION_URL`; no workflow; managed repositories run [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. A `GRAPHYARD_UAT_STATIC` site's [merge-writer](delivery-redesign.md#merge-writer) trials run pre-build required/uat cases uncredentialed: failing or secret-declaring required ones, or none runnable, fail it; timeouts re-queue (`mergeLedger.trial.preview`). `release status` lists candidates; `release GY-N EPOCH` leases. Needs `vars.UAT_URL`/`PRODUCTION_URL`, tokens.
 
 ### Release filing credential
 
-UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds and follow-ups as operator agent `graphyard-release-follow-up` (only `intent:create`, work items `*`). The loop's hourly `master setup --apply` keeps it with the admin token (issuing, rotating; storing the uat secret via `gh`); without one, `master status` names the administrator's step (`graphyard operator-agent setup FILE --token-stdin`, FILE `{"id":"graphyard-release-follow-up","displayName":"Release follow-up","capabilities":["intent:create"],"scope":{"repositories":["OWNER/REPO"],"workItems":["*"]},"reason":"..."}`). `doctor`: `FAIL release-filing` when refused. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` with only `e2e:record`, never admin.
+UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds and follow-ups as operator agent `graphyard-release-follow-up` (only `intent:create`, work items `*`). The loop's hourly `master setup --apply` keeps it with the admin token (issues, rotates, stores the uat secret via `gh`); without one `master status` names the administrator's step (`graphyard operator-agent setup FILE --token-stdin`, FILE `{"id":"graphyard-release-follow-up","displayName":"Release follow-up","capabilities":["intent:create"],"scope":{"repositories":["OWNER/REPO"],"workItems":["*"]},"reason":"..."}`). `doctor`: `FAIL release-filing` when refused. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN` (`graphyard-e2e-recorder`, only `e2e:record`, never admin).
 
 ### Pre-merge gate and release-candidate validation
 
-Required: `typecheck`, `test` (`ci.yml`, <10 min); per candidate `releaseCandidateTests`, container, chart, soak/timing (advisory); UAT's `zero-touch` suite (`up --agent --goal`) must merge a first item; any other human step blocks.
+Required: `typecheck`, `test` (`ci.yml`, <10 min); per candidate `releaseCandidateTests`, container, chart, soak/timing (advisory); UAT's `zero-touch` suite (`up --agent --goal`) must merge a first item; other human steps block.
 
 `deploy/helm/exercise.sh` forwards a kubectl-chosen free port, re-forwarding a lost or foreign one within `FORWARD_BUDGET` seconds; waits for the rollout's new Ready pod, retrying transient API failures (empty reply, reset, stall, non-2xx, bodiless 2xx), else ending `api METHOD /api/PATH failed after 15 attempts: status STATUS, body: BODY`.
 
 ### One delivery path
 
-Exact-head gates merge; [candidates](#release-candidates) deploy. [The redesign](delivery-redesign.md) lets only Graphyard write main.
+Exact-head gates merge; [candidates](#release-candidates) deploy; [the redesign](delivery-redesign.md): only Graphyard writes main.
 
 ### Main guard
 
-Every 30 s the main guard reruns, then reverts, merges failing required checks their parents passed; the [revert approver App](deployment.md#variables) approves only a green exact inverse, a third refusal abandons (`approval-refused`). A revert failing the merge's same named tests is abandoned `base-failure` (delivery kept): one attention row names the test; no further revert for that set; main reruns once per new merge; cleared when main passes.
+Every 30 s the main guard reruns, then reverts, merges failing required checks their parents passed; the [revert approver App](deployment.md#variables) approves only a green exact inverse, a third refusal abandons (`approval-refused`). A revert failing the merge's named tests is abandoned `base-failure` (delivery kept): one attention row names the test; no further revert for that set; main reruns once per new merge; one failing only that set is recorded covered (`coveredBy`, read past); cleared when main passes.
 
 ## Managed repositories
 
@@ -52,13 +52,13 @@ Every 30 s the main guard reruns, then reverts, merges failing required checks t
 {"registration":{"id":"production-builder","revision":1},"sourceSha":"0123456789abcdef0123456789abcdef01234567","buildInputsDigest":"sha256:5b8e0d3a7f21c94e6082d5b1a3f7c0e94d26b8a15f309c7e4b1d02a6f8395c7e","artifacts":[{"service":"api","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},{"service":"web","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"}],"provenanceUrl":"https://ci.example.test/builds/812"}
 ```
 
-`POST /api/delivery/release` names build, members (reverted: `included: false`):
+`POST /api/delivery/release` names build, members (reverted: `included:false`):
 
 ```json
 {"id":"2026.09.18-1","expectedRevision":0,"environment":{"id":"production","revision":1},"sourceSha":"0123456789abcdef0123456789abcdef01234567","buildId":"5d7c6b7e-8c35-4b3f-9c4a-0a1f2e3d4c5b","manifest":[{"service":"api","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},{"service":"web","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"}],"members":[{"workId":"2f7d1a5e-3b8c-4d9e-8f10-1a2b3c4d5e6f","mergeSha":"89abcdef0123456789abcdef0123456789abcdef","included":true},{"workId":"3a8e2b6f-4c9d-4eaf-9021-2b3c4d5e6f70","mergeSha":"9abcdef0123456789abcdef0123456789abcdef0","included":false,"note":"Reverted"}]}
 ```
 
-`POST /api/delivery/approve` `{"release":{...},"environment":{...}}`, then select (one per generation):
+`POST /api/delivery/approve`, then select (one per generation):
 
 ```json
 {"environment":{"id":"production","revision":1},"release":{"id":"2026.09.18-1","revision":1},"expectedGeneration":3,"approvalId":"0c1d2e3f-4a5b-4c6d-8e7f-90a1b2c3d4e5"}
