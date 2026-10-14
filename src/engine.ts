@@ -58,6 +58,7 @@ import { credentialBlockedReason, credentialFailure } from './worker-credential.
 import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordAssignmentStart, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 import { dispatchFailureBlockAfter } from './daemon/dispatch-failures.js';
 import { loopOwnedRefusal } from './model/loop-owned.js';
+import { loopObservationProofs } from './model/loop-observation.js';
 import { assertDecisionAuthority, foldDecisions, liveLeaseRevisionRefusal, quarantinedRevisionRefusal, requiredDecisionCapabilities, type Decision, type HeldApplication } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
 import { deliverSplitParent, splitChildRevisionRefusal } from './decomposition.js';
@@ -181,6 +182,10 @@ const commands = {
   // The coordinator's observation of the running release covering a delivered merge. It names the
   // serving commit and where it was read; whether it is exact is derived, never asserted.
   deployment: z.object({ sha, mergeSha: sha, source: z.enum(['endpoint', 'github-deployment']), observedAt: z.iso.datetime() }).strict(),
+  // GY-1779: the loop's own reading of a loop-owned observation item's proof on the serving release,
+  // recorded through the coordinator by its deployment-verification step: `sha` is the release the
+  // control plane observed serving the parent delivery's merge `baseSha`; `detail` names the measured values.
+  reading: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), result: z.enum(['pass', 'fail']), detail: z.string().trim().min(1).max(2000) }).strict(),
   revoke: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
   // The durable handle a launched session records on the item: its runtime and host, the runtime's
   // own workspace, tab and pane, and the transcript it writes. A fact, never authority; see model/sessions.ts.
@@ -1887,6 +1892,21 @@ export class Engine {
         // would otherwise read as an abandoned assignment. The workspace and `lastAssignment`
         // keep the attempt attributable, and rework still needs the stopped-worker attestation.
         work.lease = null;
+      }
+      if (command === 'reading') {
+        demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+        // The one record of this kind: the loop's reading of a proof only it records (GY-1762), bound as loopObservation reads it.
+        const proofs = loopObservationProofs(work);
+        demand(!!proofs?.includes(data.proof), `${work.key} is not a loop-owned observation item owing ${data.proof}; a reading is recorded only on an item whose every criterion is a post-deploy observation the loop takes`, 409);
+        demand(data.policyRevision === work.policyRevision, `The reading names policy revision ${data.policyRevision}; ${work.key} is at ${work.policyRevision}`, 409);
+        const request = followUpRequest(work), parent = request ? all.find(item => item.id === request.work) : null;
+        if (request) {
+          demand(!!parent?.delivery, `${work.key}'s follow-up request names ${request.work}, which is not a delivered item; its reading has no merge to bind to`, 409);
+          demand(data.baseSha === parent!.delivery!.mergeSha, `The reading's base ${data.baseSha.slice(0, 12)} is not ${parent!.key}'s merge ${parent!.delivery!.mergeSha.slice(0, 12)}: a reading is bound to the parent delivery's merge`, 409);
+        } else demand(data.sha === data.baseSha, 'A reading of an item that follows no delivery is bound to the serving release alone: sha and baseSha name it', 409);
+        demand(!work.observationWindow || Date.parse(work.observationWindow.notBefore) <= now.getTime(), `${work.key}'s reading can first exist at ${work.observationWindow?.notBefore}; one taken before then is not recorded`, 409);
+        const evidence: Evidence = { id: randomUUID(), proof: data.proof, sha: data.sha, baseSha: data.baseSha, policyRevision: data.policyRevision, producer: actor.id, trusted: true, result: data.result, executed: 1, skipped: 0, at: now.toISOString(), reading: { detail: data.detail } };
+        work.evidence.push(evidence);
       }
       if (command === 'deployment') {
         demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);

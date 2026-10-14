@@ -878,7 +878,7 @@ export const allowances: Record<string, Allowance> = {
   'tests/loop-liveness-namespace.test.ts': { why: 'the 2026-10-06 instants are the explicit `now` of each loopLiveness call', dates: ['2026-10-06'], readings: 1 },
   'tests/loop-self-upgrade.test.ts': { why: 'the 2030-01-01 clock is passed as now: () => clock to performSelfUpgrade', dates: ['2026-10-07', '2030-01-01'], readings: 2 },
   'tests/main-guard.test.ts': { why: '2026-10-05T08:00 is the guard\'s explicit `now` in every runMainGuard/app', dates: ['2026-10-05'], readings: 1 },
-  'tests/managed-worktree-root.test.ts': { why: 'the 2026-09-26 `at` is the explicit clock of the AC-2 memory-hold cycles', dates: ['2026-09-26'], readings: 30 },
+  'tests/managed-worktree-root.test.ts': { why: 'the 2026-09-26 `at` is the explicit clock of the AC-2 memory-hold cycles; the 2026-01-02 `observed` is the snapshot clock the reclaim-stamp case hands to runCycle and compares with the stamp, never a wall-clock read', dates: ['2026-01-02', '2026-09-26'], readings: 30 },
   'tests/master-autonomy.test.ts': { why: 'the 2030-01-01 lease expiry and quarantine instants are judged by buildM', dates: ['2030-01-01'], readings: 2 },
   'tests/master-browser.test.ts': { why: '2026-09-18T12:00 is the stub flow\'s ticking `now` and the recording page', dates: ['2026-09-18'], readings: 3 },
   'tests/master-loop-resilience.test.ts': { why: 'the 2026-09-19 at dates the fixture item (createdAt/stageEnteredAt, alre', dates: ['2026-09-19', '2026-10-09'], readings: 24 },

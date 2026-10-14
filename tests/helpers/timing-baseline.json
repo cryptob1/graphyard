@@ -513,6 +513,8 @@
     "tests/liveness-invariant.test.ts": 4326,
     "tests/locked-read-bound.test.ts": 18600,
     "tests/locked-read.test.ts": 17399,
+    "tests/loop-observation-waits-for-loop-recording.test.ts": 1500,
+    "tests/loop-records-due-observation-reading.test.ts": 3000,
     "tests/loop-faults-dispatch-wake.test.ts": 2375,
     "tests/loop-faults.test.ts": 2260,
     "tests/loop-liveness-namespace.test.ts": 500,
@@ -755,6 +757,7 @@
     "tests/sudo-code-entry.test.ts": 1000,
     "tests/sudo-fallback.test.ts": 1500,
     "tests/sudo-form-capture.test.ts": 1000,
+    "tests/sudo-totp-field.test.ts": 1000,
     "tests/supervised-local.test.ts": 1000,
     "tests/supervisor-renewal.test.ts": 80263,
     "tests/sync-no-tags.test.ts": 700,
@@ -819,6 +822,8 @@
     "tests/capacity-hold-respects-machine-bounds.test.ts": 4000,
     "tests/scenario-capacity-limit-redispatch-registered.test.ts": 4500,
     "tests/chart-exercise-port-forward.test.ts": 16000,
-    "tests/webhook-ignored-reason.test.ts": 3000
+    "tests/webhook-ignored-reason.test.ts": 3000,
+    "tests/worktree-inventory-unreadable-cache.test.ts": 300,
+    "tests/soak-worktree-inventory-unreadable.test.ts": 1000
   }
 }

@@ -27,7 +27,7 @@ import { launchProducer, producerPrompt, readProducerLedger, reclaimCheckouts, r
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile } from '../src/reviewer.js';
 import { allocateSessionCheckout, dataDirectory, defaultWorktreeRoot, inspectWorktreeRoot, orphanGraceMs, probeFilesystem, reclaimCommand, reclaimSessionCheckouts, removeSessionCheckout, sessionCheckout, sweepAbandonedRoots, verifyWorktreeRoot, worktreeRoot, worktreeRootBudgetBytes, worktreeRootMinFreeBytes, type FilesystemProbe } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): the 2026-09-26 `at` is the explicit clock of the AC-2 memory-hold cycles (snapshot now iso(at), () => at); the earlier tests derive every grace/expiry instant from Date.now() itself.
+// Time-bomb allowance (GY-1694): the 2026-09-26 `at` is the explicit clock of the AC-2 memory-hold cycles; the 2026-01-02 `observed` is the snapshot clock the reclaim-stamp case hands to runCycle and compares with the stamp, never a wall-clock read (snapshot now iso(at), () => at); the earlier tests derive every grace/expiry instant from Date.now() itself.
 
 // Each test is named for the proof it produces: integration:managed-worktree-root,
 // integration:ephemeral-checkout-reclaim, integration:worktree-root-preflight and
@@ -728,4 +728,15 @@ test('unit:dispatch-defers-on-host-memory — below the memory floor the loop de
   await runExecutorTick({ id: 'executor-a', host: 'machine-a' }, { claim: async request => { claims.push(request.kinds); return { action: null }; }, settle: async () => {},
     handlers: { dispatch: async () => 'launched', resync: async () => 'resynced' }, launchHold: () => hostMemoryHold('machine-a', async () => memory, () => at) });
   assert.ok(claims[0].includes('dispatch'), 'the executor claims dispatch rows again');
+});
+
+test('the reclaim pass is stamped with the cycle snapshot clock, not a later wall-clock read', async () => {
+  const config = { version: 1, url: 'https://graphyard.example', credentialFile: '/dev/null', cliPath: '/x', repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'host', masterAgentName: 'master', autoMerge: true, mergeMethod: 'merge', workers: [], reviewers: [], producers: [], run: masterRunSchema.parse({}) } as any;
+  const seen: Array<number | undefined> = [];
+  const observed = '2026-01-02T03:04:05.000Z';
+  const effects = { snapshot: async () => ({ work: [], now: observed }), agents: () => [], credentials: async () => ({}), closePane: () => {}, dispatch: async () => ({}), observeDeployment: async () => null,
+    recordDeployment: async () => ({}), merge: async () => ({}), requestProof: () => {}, requestSmoke: () => {}, persist: async () => {},
+    reclaim: async (_work: unknown, now?: number) => { seen.push(now); return { root: '/x', at: observed, applied: true, scanned: 0, idleMs: 0, removed: [], kept: [], freeBefore: null, freeAfter: null, freedBytes: 0, errors: [] }; } } as unknown as DaemonEffects;
+  await runCycle(config, emptyDaemonState(config), effects);
+  assert.deepEqual(seen, [Date.parse(observed)]);
 });

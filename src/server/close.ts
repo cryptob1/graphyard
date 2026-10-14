@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import { demand, operatorCapability, type Principal, type Work } from '../model.js';
 import { closeRefusal, closeSchema, closureRefRefusal, commitRef, itemRef, type Closure } from '../model/closure.js';
+import { deliveredObservationRefusal } from '../model/loop-observation.js';
 import { dispatchHistoryLimit, type DispatchRequest } from '../model/dispatch.js';
 import { humanRequestBlocker, retainedHumanRequests, type HumanRequest } from '../model/human-request.js';
 import { decisionGroundsMovedSince } from '../engine.js';
@@ -9,7 +10,7 @@ import { save } from '../store.js';
 import { foldDecisions } from '../model/approval.js';
 import { authenticated, digest, receipt, record } from './decisions.js';
 import type { Services } from './routes.js';
-import { lockedWork } from '../store/locked-read.js';
+import { lockedWork, workIdByRef } from '../store/locked-read.js';
 
 type Db = pg.PoolClient;
 
@@ -36,7 +37,16 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     const base = (await services.github!.baseBranch()).tip;
     ancestry = { base, contained: await services.github!.contains(ref, base) };
   }
-  return services.engine.store.transaction(async (db: Db, now: Date) => {
+  // GY-1779: a loop-owned observation item closed on the loop's reading leaves no pull request open: a
+  // worker's unsubmitted candidate from before the loop held it (GY-1725, #1172) is closed on GitHub as
+  // superseded by the reading. GitHub is never touched before the closure is committed: the transaction
+  // below authorises the close under the item's lock and records the pull request as owed in the closure
+  // itself, and the close on GitHub follows the commit (`settleOwedPullRequest`), so a close the
+  // transaction refuses — a lease, policy, evidence or caller ground that moved — mutates nothing
+  // outside Graphyard. A closure that already stands with its pull request still owed (the GitHub
+  // close after an earlier commit failed) is settled first; the transaction then replays the receipt.
+  if (data.kind === 'delivered-observation') await settleOwedPullRequest(services, caller, id);
+  const closed = await services.engine.store.transaction(async (db: Db, now: Date) => {
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay as unknown as Work;
     demand(['admin', 'coordinator', 'operator-agent'].includes(actor.role), 'Only the master (coordinator or operator agent) or an admin may close work', 403);
@@ -48,9 +58,10 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     const moved = judged === undefined ? null : await decisionGroundsMovedSince(db, work!, judged);
     if (moved) demand(false, `${moved[0].toUpperCase()}${moved.slice(1)} since approved revision ${judged} moved the decision's grounds; the close was not applied`, 409);
     const refused = closeRefusal(judged !== undefined && work!.lease ? { ...work!, lease: null } : work!, now.getTime()); demand(!refused, refused!, 409);
-    const badRef = closureRefRefusal(work!, all, data.kind, ref); demand(!badRef, badRef!, 422);
+    const badRef = closureRefRefusal(work!, all, data.kind, ref) ?? (data.kind === 'delivered-observation' ? deliveredObservationRefusal(work!, all, ref!, now) : null); demand(!badRef, badRef!, 422);
     if (ancestry) demand(ancestry.contained, `Commit ${ref} is not an ancestor of the base branch (${ancestry.base.slice(0, 12)}); an item is superseded only by work that landed`, 422);
-    const closure: Closure = { kind: data.kind, reason: data.reason, ref, by: actor.id, at: now.toISOString(), from: work!.stage };
+    const pullRequest = data.kind === 'delivered-observation' ? supersededPullRequest(work!) : null;
+    const closure: Closure = { kind: data.kind, reason: data.reason, ref, by: actor.id, at: now.toISOString(), from: work!.stage, ...(pullRequest ? { pullRequest } : {}) };
     const settled = settleOpenRequests(work!, closure, now);
     // A lapsed lease reconciliation never reached ends here, as released; so does a live one an approved close decision ends.
     // GY-1687: apply held requirements decisions before terminalizing — applyHeldDecisions refuses done items, and
@@ -67,9 +78,54 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     // The engine's own ledger entries for this evaluation (see waits.ts); internal to its transactions.
     await (services.engine as unknown as { recordDispatch(db: Db, work: Work, now: Date): Promise<void> }).recordDispatch(db, work!, now);
     for (const request of settled.cancelled) await record(db, work!, 'graphyard', 'dispatch.cancelled', { details: { ...request, at: now.toISOString() } });
-    await save(db, work!, actor.id, 'work.closed', now, { closure, actor: actor.id, reason: data.reason, cancelled: settled.cancelled.map(request => request.id), withdrawn: settled.withdrawn?.id ?? null, agentRequests: settled.agentRequests });
+    await save(db, work!, actor.id, 'work.closed', now, { closure, actor: actor.id, reason: data.reason, cancelled: settled.cancelled.map(request => request.id), withdrawn: settled.withdrawn?.id ?? null, agentRequests: settled.agentRequests, ...(pullRequest ? { pullRequest } : {}) });
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
     return work!;
+  });
+  // The committed closure's pull request is closed on GitHub now; one GitHub refuses stays owed on the closure, for the next close call.
+  return data.kind === 'delivered-observation' ? await settleOwedPullRequest(services, caller, id) ?? closed : closed;
+}
+
+const readDocument = async (services: Services, ref: string): Promise<Work | undefined> => (await services.engine.store.pool.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [ref])).rows[0]?.document;
+
+/**
+ * GY-1779: the open pull request a delivered-observation closure supersedes, as the closure records it
+ * (owed, closed once the closure is committed); null when the item carries none or it merged.
+ */
+const supersededPullRequest = (work: Work): NonNullable<Closure['pullRequest']> | null => {
+  const pr = work.candidate?.pr ?? work.submission?.pr ?? null;
+  return !pr || work.observation?.merged ? null : { pr, outcome: 'owed' };
+};
+
+/**
+ * GY-1779: closes on GitHub the pull request a committed delivered-observation closure still owes, and
+ * records the outcome on the closure; null when the item owes none (not closed so, or already settled).
+ * The caller is authorised under the lock before GitHub is touched, as the close itself is; a GitHub
+ * refusal leaves the pull request owed, named in the error, and the next close call for the item
+ * settles it. The outcome is recorded under the item's lock in its own transaction, outside which the
+ * GitHub call runs: external I/O never runs inside a coordination transaction.
+ */
+async function settleOwedPullRequest(services: Services, caller: Principal, id: string): Promise<Work | null> {
+  const owed = await services.engine.store.transaction(async (db: Db, now: Date) => {
+    const work = (await lockedWork(db, [id])).find(item => item.id === id || item.key === id);
+    if (!work || work.closure?.kind !== 'delivered-observation' || work.closure.pullRequest?.outcome !== 'owed') return null;
+    const actor = await authenticated(services, db, now, caller);
+    demand(['admin', 'coordinator', 'operator-agent'].includes(actor.role), 'Only the master (coordinator or operator agent) or an admin may close work', 403);
+    if (actor.role === 'operator-agent') operatorCapability(actor, 'intent:create', work, services.repository);
+    return { work, actor: actor.id };
+  });
+  if (!owed) return null;
+  const { work, actor } = owed, pr = work.closure!.pullRequest!.pr;
+  demand(services.github, `${work.key} is closed as delivered-observation and its pull request #${pr} is still owed: GitHub integration is required to close it as superseded by the loop's reading`, 503);
+  let outcome: 'closed' | 'already-closed';
+  try { outcome = await services.github!.closeSupersededPullRequest(pr, `Closed by Graphyard: ${work.key}'s only work is the loop's post-deploy reading of the serving release, which the loop recorded itself; this pull request is superseded by that reading. ${work.closure!.reason}`.slice(0, 2000)); }
+  catch (error) { demand(false, `${work.key} is closed as delivered-observation and its pull request #${pr} could not be closed on GitHub, so it stays owed and is closed on the next close call: ${error instanceof Error ? error.message : String(error)}`, 502); }
+  return services.engine.store.transaction(async (db: Db, now: Date) => {
+    const current = (await lockedWork(db, [id])).find(item => item.id === id || item.key === id); demand(current, 'Work item not found', 404);
+    if (current!.closure?.pullRequest?.outcome !== 'owed') return current!;
+    current!.closure = { ...current!.closure!, pullRequest: { pr, outcome: outcome! } };
+    await save(db, current!, actor, 'work.pull-request-closed', now, { pr, outcome: outcome!, closure: current!.closure });
+    return current!;
   });
 }
 

@@ -62,11 +62,17 @@ export const coordinationRelevance = (keep: number) => `LATERAL jsonb_to_record(
 /**
  * The evidence records the coordination view keeps, decided in SQL so a long history of superseded
  * heads never leaves the database: those on the candidate's exact head and base, those a carry
- * decision carried, and those on a head a request names. The view's own filter then applies the
- * exact rule (which carry applies to the candidate), so this keeps a superset of what it keeps.
+ * decision carried, those on a head a request names, the parent's own `manual:post-deploy/*` evidence on any release (the readings step passes the
+ * summary to the release filer, which reads whether the serving release already carries a passing
+ * record), and the loop's own post-deploy readings
+ * (`reading`, GY-1779: bound to the serving release of an item that may carry no candidate, and
+ * the one record the loop's readings step and `loopObservation` consult on the snapshot). The
+ * view's own filter then applies the exact rule (which carry applies to the candidate), so this
+ * keeps a superset of what it keeps.
  */
 const relevantEvidence = `((entry->>'sha' = r.head AND entry->>'baseSha' IS NOT DISTINCT FROM r.base)
-    OR entry->>'id' = ANY(r.carried) OR entry->>'sha' = ANY(r.requested))`;
+    OR entry->>'id' = ANY(r.carried) OR entry->>'sha' = ANY(r.requested) OR ${object("entry->'reading'")}
+    OR entry->>'proof' LIKE 'manual:post-deploy/%')`;
 
 /**
  * One document as the coordination view reads it: the pipeline timeline dropped, its rework-round

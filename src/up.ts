@@ -984,7 +984,7 @@ export const upUsage = [
   '  --goal FILE                submit the goal in FILE once the checklist is green',
   "  --browser-profile PROFILE  the Chrome profile signed in to GitHub (default: the master's, else another install's for the same login); unused with --merger control-plane",
   '  --github-mobile            approve Confirm access with GitHub Mobile (the default whenever the page offers it)',
-  '  --sudo-code CODE|email     hand the waiting run a 6-digit Confirm-access code, or ask GitHub to email one',
+  '  --sudo-code CODE|email     hand the waiting run a Confirm-access code (6 digits from an authenticator app, 8 from an email), or ask GitHub to email one',
   '  --confirm-price X          consent to a created server\'s monthly price (passed to install)',
   '  --max-monthly N            consent to any monthly price up to N (passed to install)',
   '  --ssh-key NAME             the SSH key a created server is reached with (passed to install)',
@@ -1008,7 +1008,7 @@ export async function upSudoCode(root: string, args: string[]) {
   const at = args.findIndex(arg => arg === '--sudo-code' || arg.startsWith('--sudo-code='));
   if (at < 0) return null;
   const kind = await submitSudoCode(root, args[at].includes('=') ? args[at].slice('--sudo-code='.length) : args[at + 1] ?? '');
-  return { ok: true, handed: kind === 'email' ? 'a request for an emailed code' : 'a 6-digit code', next: 'The waiting graphyard up types it into GitHub\'s Confirm-access page within its next check.' };
+  return { ok: true, handed: kind === 'email' ? 'a request for an emailed code' : 'a code', next: 'The waiting graphyard up types it into GitHub\'s Confirm-access page within its next check.' };
 }
 
 /** A shell word: plain when it needs no quoting, otherwise single-quoted. */
@@ -1108,9 +1108,10 @@ class AppRejected extends Error {}
  * profile — register the App, then install it on the repository alone (GitHub preselects it from
  * `repository_ids[]`). A Confirm-access prompt is passed with passSudo, the page's own confirmation
  * first (GY-1442): the handoff names a sudo-protected page to confirm access on once in the
- * operator's own Chrome, which the shared GitHub session then carries, and every method the page
- * offers; the drive re-checks every 10 s and types in an authenticator or email code handed over
- * on the manifest page or with `graphyard up --sudo-code` (GY-1450). GY-1510: GitHub Mobile is
+ * operator's own Chrome when the drive shares their profile (on a copy, GY-1459, the local App page
+ * opened in their own browser instead), and every method the page offers; the drive re-checks
+ * every 10 s and types in an authenticator or email code handed over on the manifest page or with
+ * `graphyard up --sudo-code` (GY-1450), within 2 s of it being entered (GY-1459). GY-1510: GitHub Mobile is
  * triggered whenever the page offers it (a passkey or code only when it does not, or when the
  * operator chose `sudo: 'passkey-or-password'`), handed off as one sentence naming its number; a
  * prompt that expires unapproved is requested afresh up to upMobileReprompts times, each new number
@@ -1134,7 +1135,8 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
   // The operator's up command past its repository (upCommandFlags), for the rerun and the App-import route; the rerun keeps its --reuse-app too.
   const upFlags = options.upFlags ?? ' --agent';
   const rerun = `graphyard up --repo ${options.repository}${options.reuseFlags ?? ''}${upFlags}`, importRoute = appImportRoute(options.repository, upFlags);
-  let setupPage: string | null = null, resumeChecked = false;
+  let setupPage: string | null = null, resumeChecked = false, settledLocally = false;
+  const driveStarted = (options.now ?? (() => new Date()))();
   const awaitSudo = async (handoff: Handoff) => {
     const onCode = async (state: SudoState) => {
       // The first confirmation a rerun meets resumes the one handed off before (within a day), when it is the same page method.
@@ -1145,7 +1147,7 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
       await options.remember?.(resumed ? { ...state, issuedAt: resumed.issuedAt } : state);
       if (resumed) options.onResume?.(resumed);
       // GY-1510: a GitHub Mobile prompt is handed off as one plain sentence naming its number.
-      else handoff(state.method === 'mobile' ? sudoInstruction(state, 'your phone') : [sudoInstruction(state, 'your phone', { ...(options.readCode ? { page: setupPage, command: 'graphyard up --sudo-code' } : {}), profile: options.profile ?? null }), importRoute].join('\n'),
+      else handoff(state.method === 'mobile' ? sudoInstruction(state, 'your phone', { ...(options.readCode ? { page: setupPage, command: 'graphyard up --sudo-code' } : {}), profile: options.profile ?? null }) : [sudoInstruction(state, 'your phone', { ...(options.readCode ? { page: setupPage, command: 'graphyard up --sudo-code' } : {}), profile: options.profile ?? null }), importRoute].join('\n'),
         { url: state.fallback?.url ?? state.url ?? page.url(), code: state.code });
       if (options.noWait) throw new SudoNoWait(`GitHub asks to confirm access before it creates the App, and --no-wait does not wait for it. ${importRoute}; or rerun ${rerun} without --no-wait to wait for the confirmation.`);
     };
@@ -1155,9 +1157,10 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
       // the operator chose otherwise; the page's own confirmation or a code only when it offers none.
       const mobile = () => offeredSudoMethods(page.text()).mobile && !!(page.locate('button', 'Use GitHub Mobile') ?? page.locate('link', 'Use GitHub Mobile'));
       const prefer = options.sudo ?? (mobile() ? 'mobile' : 'passkey-or-password');
-      const passed = await passSudo(page, { flow: 'installation-accept', record: options.record ?? 'graphyard up', sleep: options.sleep, now: options.now, timeoutMs: options.timeoutMs ?? upAgentWaitMs, prefer, readCode: options.readCode,
+      const passed = await passSudo(page, { flow: 'installation-accept', record: options.record ?? 'graphyard up', sleep: options.sleep, now: options.now, timeoutMs: options.timeoutMs ?? upAgentWaitMs, prefer, readCode: options.readCode, settledSince: driveStarted,
         maxAttempts: 1 + upMobileReprompts,
         onCode, onSettled: state => options.remember?.(state.state === 'approved' ? null : state) });
+      settledLocally = !!passed.settled;
       return passed.passed;
     } catch (error: any) {
       if (error instanceof SudoNoWait) throw error;
@@ -1168,12 +1171,22 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
   };
   // GitHub's rejection of the manifest or App form, when the page shows one (GY-1510).
   const rejected = () => { if (!/^https:\/\/github\.com\//.test(page.url())) return; const error = githubAppError(page.text()); if (error) throw new AppRejected(error); };
+  // The step was finished on the local App page in the operator's own browser (GY-1459): the copied page still shows
+  // Confirm access, so the setup page is loaded afresh and the step is not pressed again.
+  const settledOut = () => {
+    if (!settledLocally) return false;
+    settledLocally = false;
+    if (setupPage) page.open(setupPage);
+    return true;
+  };
   const press = async (kind: 'button' | 'link', text: string, handoff: Handoff, after = false) => {
     await awaitSudo(handoff);
+    if (settledOut()) return;
     const control = page.locate(kind, text);
     if (!control) { rejected(); throw new Error(`the page offers no "${text}" ${kind}`); }
     page.click(control.selector); page.wait(2_000);
     await awaitSudo(handoff);
+    if (settledOut()) return;
     if (after) rejected();
   };
   return async (url: string, handoff: Handoff): Promise<DriveOutcome> => {
@@ -1186,6 +1199,7 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
         if (!register) break;
         page.click(register.selector); page.wait(2_000);
         const confirmed = await awaitSudo(handoff);
+        if (settledOut()) { if (submissions === 0) continue; break; }
         // Confirmed on a reloaded page: GitHub shows the plain new-App form, so submit the manifest again.
         if (confirmed && submissions === 0 && !page.locate('button', `Create GitHub App for ${owner}`)) continue;
         await press('button', `Create GitHub App for ${owner}`, handoff, true);
