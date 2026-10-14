@@ -16,7 +16,7 @@ import type { DaemonState } from './state.js';
  * its share; a request already in flight at the bound finishes, so the step overruns by one call
  * at most. The loop comes back inside the actionable cadence and starts with what it put off.
  */
-export const decisionBudgetMs = stepBudgetMs;
+export const decisionBudgetMs = (intervalMs: number) => stepBudgetMs(intervalMs);
 
 /** The items the step left for the next cycle come first, in the order they were put off; the rest keep `order`. */
 export function deferredFirst(order: Work[], deferred: readonly string[]) {
@@ -51,9 +51,9 @@ export function decisionBudget(state: Pick<DaemonState, 'decisionsDeferred'>, no
 }
 
 /** How long one owed decision's approver call may take before the step returns and carries it to the next cycle (GY-1766); the shared per-call bound (GY-1774). */
-export const decisionCallBoundMs = stepCallBoundMs;
+export const decisionCallBoundMs = 10_000;
 /** GY-1766. A decision call that passed its bound — the per-decision bound, or the step budget left it is capped by: the decision stays owed, with its attempt recorded, and is retried next cycle. */
-export const decisionCallCarried = stepCallCarried;
+export const decisionCallCarried: typeof stepCallCarried = (...args) => stepCallCarried(...args);
 /** The decide calls unanswered when their bound passed are keyed to the request they belong to — the item's binding-bearing identity (head, base, policy revision, epoch), the action and the input — so a retry joins its own call only: a changed head, criterion or action never joins an older call's answer nor has its own request suppressed. */
 const decidingKey = (item: Work, rest: unknown[]) => canonicalJson([item.id, item.candidate?.sha ?? null, item.candidate?.baseSha ?? null, item.policyRevision, item.epoch, rest[0], rest[2] ?? null]);
 /**

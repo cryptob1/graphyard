@@ -98,9 +98,9 @@ test('unit:step-calls-bounded — a bounded call past the per-call bound rejects
   const capped = sb.boundedCalls(effects([], { closeSession: slow.call as DaemonEffects['closeSession'], stepCallBoundMs: 10_000 } as Partial<DaemonEffects>), {}, () => clock, () => 20, { step: 'reclaim', calls: ['closeSession'] });
   await assert.rejects(capped.closeSession('pane-9') as Promise<void>, /the reclaim step's budget passed before pane pane-9's closeSession call answered \(10000 ms per call, 20 ms left\); the call stays owed/);
   assert.equal(sb.stepBudgetMs(60_000), 30_000, 'the step budget is the decisions step\'s two-fifths share, never under the actionable cadence');
-  assert.equal(decisionBudgetMs, sb.stepBudgetMs, 'the decisions step shares it');
+  assert.equal(decisionBudgetMs(60_000), sb.stepBudgetMs(60_000), 'the decisions step shares it');
   assert.equal(decisionCallBoundMs, 10_000, 'and the 10 s per-call bound');
-  assert.equal(decisionCallCarried, sb.stepCallCarried, 'and the carried reading');
+  assert.equal(decisionCallCarried('the decisions step\'s 10000 ms per-decision bound passed before x answered; the decision stays owed and is retried next cycle'), true, 'and the carried reading');
 });
 
 test('unit:step-calls-applied-once — a retried call joins the one in flight under the same key, a changed argument makes its own call, and an answer within the bound is applied as before', async () => {
@@ -634,7 +634,8 @@ test('unit:step-calls-applied-once — resume: the handle a re-prompt records is
   assert.equal(prompts.calls.length, 1, 'past the idle bound the worker is re-prompted');
   assert.equal(handles.calls.length, 1, 'and its handle recorded');
   assert.ok(sb.carriedRow(state.actions[key]), `the handle record is owed on its own row: ${JSON.stringify(Object.keys(state.actions))}`);
-  assert.match(state.actions[key].detail, /the resume step's 30 ms per-call bound passed before GY-12's recordSession call answered/);
+  // The blockers step starts after the sessions step in the same cycle and retries the owed write first, joining the call still in flight.
+  assert.match(state.actions[key].detail, /step's 30 ms per-call bound passed before GY-12's recordSession call answered/);
   assert.deepEqual(faults(state), []);
   await cycle(state, fx, clock + idleLeaseMs + 120_000, cfg);
   assert.equal(prompts.calls.length, 1, 'the re-prompt the record followed is never sent again');
