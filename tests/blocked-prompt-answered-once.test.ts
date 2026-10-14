@@ -136,3 +136,28 @@ test('unit:blocked-prompt-answered-once — GY-1774: a carried continuation answ
     assert.deepEqual(log.keys, [['2']], 'the retry resumed at the continuation: the decline keys were not sent again');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test('unit:blocked-prompt-answered-once — GY-1774: a carried continuation is retried after the declined dialog has closed, never dropped with it', async () => {
+  const { directory, master } = await setup();
+  try {
+    const item = { current: held() };
+    let screen = dangerousRm;
+    const { log, effects } = harness(dangerousRm, item);
+    effects.sessionOutput = () => screen;
+    let release!: () => void;
+    const prompts: string[] = [];
+    effects.promptSession = (_agent, text) => { prompts.push(text); return new Promise<void>(resolve => { release = resolve; }); };
+    (effects as { stepCallBoundMs?: number }).stepCallBoundMs = 30;
+    const state = emptyDaemonState(master);
+    await runCycle(master, state, effects, () => clock + 20_000);
+    assert.deepEqual(log.keys, [['2']], 'the decline was sent');
+    assert.equal(Object.values(state.actions).filter(row => row.state === 'waiting' && row.detail.includes('destructive-command prompt')).length, 1, 'the continuation is carried');
+    screen = '';
+    release();
+    await new Promise(resolve => setTimeout(resolve, 5));
+    await runCycle(master, state, effects, () => clock + 60_000);
+    assert.equal(Object.values(state.actions).filter(row => row.state === 'waiting' && row.detail.includes('destructive-command prompt')).length, 0, 'the carried continuation was retried with the dialog gone');
+    assert.equal(Object.values(state.actions).filter(row => row.state === 'done' && row.detail.includes('told it to continue')).length, 1, 'and ran through');
+    assert.deepEqual(log.keys, [['2']], 'the decline keys were not sent again');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

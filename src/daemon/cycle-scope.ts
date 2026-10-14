@@ -20,7 +20,7 @@ import { boundDetail, detailChanged, namePaths } from './decisions.js';
 import { findingRecheckMs, record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import type { MergerMode } from '../merger-mode.js';
-import { carriedRow, recordCarried, retireCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
+import { carriedCall, carriedRow, recordCarried, retireCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
 
 /** A requested path the loop grants without an approver, and the audited ground it stands on; `companion` marks a GY-955 companion. */
 export interface ScopeGround { path: string; ground: string; companion?: boolean }
@@ -107,14 +107,17 @@ const knownMerger = new WeakMap<object, MergerMode>();
  * fails closed, and the scope actions wait for a cycle whose read succeeds, so a transient status
  * error never raises a scope request under the control plane.
  */
-export async function controlPlaneMerger(cycle: Pick<Cycle, 'effects' | 'state'>): Promise<boolean> {
+export async function controlPlaneMerger(cycle: Cycle): Promise<boolean> {
   const reads = cycle.effects.mergeWriter;
   if (!reads) return false;
+  const unknown = () => knownMerger.get(cycle.state) !== 'github';
   try {
-    const mode = await reads.merger();
+    // GY-1774: a read carried past the step's bound is recorded as the step's waiting call, joined or consumed next cycle, and keeps the known mode meanwhile.
+    const mode = await carriedCall<MergerMode | null>(cycle, 'scope', 'scope', 'mergeWriter', () => reads.merger(), () => null);
+    if (mode === null) return unknown();
     knownMerger.set(cycle.state, mode);
     return mode === 'control-plane';
-  } catch { return knownMerger.get(cycle.state) !== 'github'; }
+  } catch { return unknown(); }
 }
 
 /** Step 2: decide the open scope requests, and measure the decision budget over what is still waiting. */

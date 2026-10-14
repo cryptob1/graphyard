@@ -16,8 +16,10 @@ import { blockedPromptAnswers, blockedPromptFailMs, blockedPromptSettleMs, failo
 import { checkPaneStillBelongs, endWorkerAttempt, resumeStep, workerHandle } from './cycle-resume.js';
 import type { Cycle } from './cycle.js';
 import { settleEndedAttemptFence, supervisorStillRunning } from './cycle-reclaim.js';
-import { carriedCall, owedWrite, supersedeOwed, recordCarried, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
+import { carriedCall, carriedRow, owedWrite, supersedeOwed, recordCarried, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
 
+/** GY-1774: the continuation each session slot still owes after its decline keys were sent, kept while a carried prompt is retried (lost with the loop, when the session's own idle handling takes over). */
+const owedContinuations = new WeakMap<object, Map<string, { key: string; text: string; outcome: string }>>();
 export { idleLeaseMs, idleReclaimMs, idleRepromptGraceMs, resumeWaitKey, idleLeaseKey, resumePromptText, idlePromptText } from './cycle-resume.js';
 
 /** Steps 1–1d: close finished sessions, fail over exhausted ones, and settle what dead workers and orphaned supervisors left. */
@@ -415,7 +417,24 @@ async function closeStepWithin(cycle: Cycle) {
   const unblock = async (who: string, slot: string, agent: HerdrAgent, item: Work, principal: string | null, epoch: number | null, directory: string | null,
     handle: (outcome: string, finished: boolean) => Promise<unknown>, fail: (reason: string) => Promise<string>) => {
     const prompt = await readPrompt(agent);
-    if (!prompt) return;
+    if (!prompt) {
+      // GY-1774: the dialog closed after its decline keys were sent, but the continuation carried past the bound is still owed to the session: it is told now, never dropped with the dialog.
+      const owing = owedContinuations.get(state)?.get(slot);
+      if (!owing) return;
+      const row = state.actions[owing.key];
+      if (!carriedRow(row)) { owedContinuations.get(state)!.delete(slot); return; }
+      try {
+        await effects.promptSession?.(agent, owing.text);
+        owedContinuations.get(state)!.delete(slot);
+        performed.push(await record(state, owing.key, { kind: 'session', work: item.key, principal, epoch, state: 'done', detail: `${who} on ${item.key}: the loop ${owing.outcome}`, attempts: row.attempts, cycle: state.cycle }, now(), effects.persist));
+        await handle(`The loop ${owing.outcome}`, false);
+      } catch (error) {
+        if (stepCallCarried(error)) return recordCarried(cycle, owing.key, { kind: 'session', work: item.key, principal, epoch }, error, `Declining the destructive-command prompt of ${who} on ${item.key}`);
+        owedContinuations.get(state)!.delete(slot);
+        performed.push(await record(state, owing.key, { kind: 'session', work: item.key, principal, epoch, state: 'failed', detail: `${who} on ${item.key} declined its runtime's destructive-command prompt, but telling it to continue failed: ${message(error)}`, attempts: row.attempts, cycle: state.cycle }, now(), effects.persist));
+      }
+      return;
+    }
     const digest = promptDigest(prompt.text);
     const trustKey = `session:trust:${slot}`, relaunched = state.actions[trustKey];
     if (prompt.kind === 'folder-trust' && relaunched?.state !== 'done') {
@@ -446,8 +465,11 @@ async function closeStepWithin(cycle: Cycle) {
           await effects.answerSession(agent, prompt.keys);
           await record(state, declinedKey, { kind: 'session', work: item.key, principal, epoch, state: 'done', detail: `${who} on ${item.key}: declined its runtime's destructive-command prompt "${prompt.text}" with "${prompt.answer}"`, attempts, cycle: state.cycle }, now(), effects.persist);
         }
-        await effects.promptSession?.(agent, continueAfterDecline(item.key, prompt, directory));
         const outcome = `answered its runtime's destructive-command prompt "${prompt.text}" with "${prompt.answer}" and told it to continue with a safe alternative (explicit paths or a mktemp -d directory)`;
+        const text = continueAfterDecline(item.key, prompt, directory);
+        (owedContinuations.get(state) ?? owedContinuations.set(state, new Map()).get(state)!).set(slot, { key: answeredKey, text, outcome });
+        await effects.promptSession?.(agent, text);
+        owedContinuations.get(state)!.delete(slot);
         performed.push(await record(state, answeredKey, { kind: 'session', work: item.key, principal, epoch, state: 'done', detail: `${who} on ${item.key}: the loop ${outcome}`, attempts, cycle: state.cycle }, now(), effects.persist));
         await handle(`The loop ${outcome}`, false);
       } catch (error) {

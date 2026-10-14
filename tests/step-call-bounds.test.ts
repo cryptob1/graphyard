@@ -802,3 +802,30 @@ test('unit:step-calls-bounded — an effect object named in the bound (the merge
   resumeFirst(); await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(goals, 0);
 });
+
+test('unit:step-calls-bounded — a merge-mode read carried past its bound is recorded as a waiting attempt and keeps the known mode; a carried acceptance write is carried, never noted as a failure', async () => {
+  const { boundedCalls, stepCallCarried, carriedRow } = await helper();
+  const { controlPlaneMerger } = await import('../src/daemon/cycle-scope.js');
+  const { acceptanceStep } = await import('../src/daemon/acceptance.js');
+  const now = () => clock;
+  let mode: Promise<string> = Promise.resolve('github');
+  const raw = { stepCallBoundMs: 30, persist: async () => undefined, mergeWriter: { merger: () => mode } } as unknown as DaemonEffects;
+  const state = { actions: {}, cycle: 1 } as unknown as DaemonState;
+  const make = (effects: DaemonEffects) => ({ state, now, performed: [], effects: boundedCalls(effects, {}, now, () => 1000, { step: 'scope', calls: ['mergeWriter'] }) }) as unknown as Cycle;
+  assert.equal(await controlPlaneMerger(make(raw)), false, 'a read that answers sets the known mode');
+  mode = new Promise<string>(() => {});
+  assert.equal(await controlPlaneMerger(make(raw)), false, 'a carried read keeps the known mode');
+  const row = (state.actions as Record<string, DaemonAction>)['carried:scope:mergeWriter'];
+  assert.ok(carriedRow(row), 'the carried read is recorded as a waiting attempt');
+  // An acceptance write that is carried rethrows to the carried isolation, so the goal is recorded waiting and no failure note is written.
+  const goal = { id: 'g1', key: 'GY-G1', stage: 'awaiting-approval', revision: 1 };
+  const closing = { stepCallBoundMs: 30, persist: async () => undefined, acceptance: { settings: { enabled: true }, goals: async () => [{ ...goal, stage: 'acceptance-drafting', refusal: { pr: 9, reason: 'no', by: 'x' } }], close: () => new Promise<void>(() => {}) } } as unknown as DaemonEffects;
+  const acceptanceState = { actions: {}, cycle: 1 } as unknown as DaemonState;
+  const performed: DaemonAction[] = [];
+  const cycle = { state: acceptanceState, now, clock, performed, config: {}, isolate: async (_kind: string, _item: unknown, _name: string, body: () => Promise<unknown>) => body(), effects: boundedCalls(closing, {}, now, () => 1000, { step: 'triage', calls: ['acceptance'] }) } as unknown as Cycle;
+  await acceptanceStep(cycle);
+  const rows = Object.values(acceptanceState.actions as Record<string, DaemonAction>);
+  assert.equal(rows.filter(entry => entry.state === 'failed').length, 0, 'no failure is noted for a carried close');
+  assert.ok(rows.some(entry => carriedRow(entry)), 'the carried close is recorded waiting');
+  assert.ok(stepCallCarried('x') === false);
+});
