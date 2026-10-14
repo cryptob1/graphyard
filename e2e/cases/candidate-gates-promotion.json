@@ -1,0 +1,220 @@
+{
+  "id": "candidate-gates-promotion",
+  "title": "A passing candidate promotes bound to its merge commit; a failing one never does",
+  "description": "A passing candidate is promoted to production as the release bound to its member's exact merge commit. A following change passes its own preview but breaks a combined required case: its candidate fails, the failed case is recorded by name on the candidate, it is not promoted, and production keeps the previous release bound to the same merge commit.",
+  "tags": [
+    "api",
+    "delivery",
+    "candidates"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "create a change that passes",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "criteria": [
+          {
+            "id": "AC-1",
+            "proofs": [
+              "e2e:fixture-static-home"
+            ],
+            "text": "The fixture site's home shows this change"
+          }
+        ],
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        },
+        "priority": 3,
+        "title": "E2E case {{case}} run {{run}} passing",
+        "type": "feature"
+      },
+      "status": 200,
+      "expect": [],
+      "save": {
+        "id": "idP"
+      }
+    },
+    {
+      "kind": "http",
+      "name": "cut its candidate",
+      "method": "POST",
+      "path": "/api/candidates",
+      "body": {
+        "trigger": "manual"
+      },
+      "status": 200,
+      "expect": [
+        {
+          "path": "id",
+          "type": "string"
+        }
+      ],
+      "save": {
+        "id": "candidateId"
+      }
+    },
+    {
+      "kind": "http",
+      "name": "the candidate passed and was promoted",
+      "method": "GET",
+      "path": "/api/candidates/{{candidateId}}",
+      "status": 200,
+      "expect": [
+        {
+          "path": "validation.result",
+          "equals": "pass"
+        },
+        {
+          "path": "validation.cases.0.result",
+          "equals": "pass"
+        },
+        {
+          "path": "members.0.workId",
+          "equals": "{{idP}}"
+        },
+        {
+          "path": "members.0.mergeSha",
+          "type": "string"
+        },
+        {
+          "path": "promotion.environment",
+          "equals": "production"
+        },
+        {
+          "path": "promotion.releaseId",
+          "type": "string"
+        }
+      ],
+      "save": {
+        "releaseId": "promotion.releaseId",
+        "mergeSha": "members.0.mergeSha"
+      }
+    },
+    {
+      "kind": "http",
+      "name": "production expects the release bound to that merge commit",
+      "method": "GET",
+      "path": "/api/delivery",
+      "status": 200,
+      "expect": [
+        {
+          "path": "environments.0.id",
+          "equals": "production"
+        },
+        {
+          "path": "environments.0.expected.releaseId",
+          "equals": "{{releaseId}}"
+        },
+        {
+          "path": "environments.0.expected.sourceSha",
+          "equals": "{{mergeSha}}"
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "create a change that breaks a combined required case",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "criteria": [
+          {
+            "id": "AC-1",
+            "proofs": [
+              "e2e:fixture-compose-app"
+            ],
+            "text": "Change the compose app's greeting and remove the static site's home heading"
+          }
+        ],
+        "description": "Passes its own declared case in preview, but breaks a required case only the combined candidate run covers.",
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        },
+        "priority": 3,
+        "title": "E2E case {{case}} run {{run}} breaking",
+        "type": "feature"
+      },
+      "status": 200,
+      "expect": [],
+      "save": {
+        "id": "idF"
+      }
+    },
+    {
+      "kind": "http",
+      "name": "cut the next candidate",
+      "method": "POST",
+      "path": "/api/candidates",
+      "body": {
+        "trigger": "manual"
+      },
+      "status": 200,
+      "expect": [
+        {
+          "path": "id",
+          "type": "string"
+        }
+      ],
+      "save": {
+        "id": "candidateId2"
+      }
+    },
+    {
+      "kind": "http",
+      "name": "the failed candidate records its failed case and never promoted",
+      "method": "GET",
+      "path": "/api/candidates/{{candidateId2}}",
+      "status": 200,
+      "expect": [
+        {
+          "path": "validation.result",
+          "equals": "fail"
+        },
+        {
+          "path": "validation.failed",
+          "includes": "fixture-static-home"
+        },
+        {
+          "path": "promotion",
+          "equals": null
+        },
+        {
+          "path": "sourceSha",
+          "type": "string"
+        },
+        {
+          "path": "members.0.workId",
+          "equals": "{{idF}}"
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "production still expects the passing candidate's release",
+      "method": "GET",
+      "path": "/api/delivery",
+      "status": 200,
+      "expect": [
+        {
+          "path": "environments.0.expected.releaseId",
+          "equals": "{{releaseId}}"
+        },
+        {
+          "path": "environments.0.expected.sourceSha",
+          "equals": "{{mergeSha}}"
+        }
+      ]
+    }
+  ]
+}
