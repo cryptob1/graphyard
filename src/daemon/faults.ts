@@ -7,6 +7,7 @@ import { forgetDoneLinks, linkInstance } from '../model/fault-record.js';
 import { buildMasterStatus, diskThresholdBytes, type AttentionItem, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { hostMemoryAttention } from '../master-resources.js';
+import { judgeWorktreeDisk, standingDiskLine, worktreePassOf, worktreeVolumeWording } from '../master/worktree-disk.js';
 import { qualifyTimingFailures, type CheckAnnotations } from '../cli/timing-failures.js';
 import { type DaemonAction, type DaemonState, faultActionKey, message } from './state.js';
 export { unboundedAttemptKey };
@@ -55,6 +56,8 @@ export interface FaultSources {
   herdrUnavailable?: boolean;
   /** The loop puts a rule-refused scope request to the independent approver (GY-176), so that refusal is still being decided (GY-1085). */
   scopeRoutes?: boolean;
+  /** What is disposable now over the current worktree inventory (GY-1784): null when the plan could not be read, absent when the loop has no reading of it. */
+  worktreeReclaimable?: number | null;
 }
 /**
  * What this cycle saw standing wrong, classified (GY-173): every open item's own faults
@@ -115,9 +118,17 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
     // one spent GitHub budget holding five subjects at once was six instances of its class. The resource's own line stands for it,
     // and where none was listed the first symptom does.
     for (const fault of attributed) if (!derived.some(other => other.kind === fault.kind && other.subject === fault.subject)) derived.push(fault);
+    // The worktree volume at the last reclaim, judged as the registry reading judges it (GY-1784): a low reading the pass answered — current
+    // and drained, the volume above its floor — raises nothing, and one whose fault stands is still low inside the recovery band.
     const reclaim = state.reclaim, below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
-    if (reclaim && (below(reclaim.freeBytes, diskThresholdBytes(config)) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config))))
-      derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Free space below its configured bound at the last reclaim (${reclaim.at})` });
+    if (reclaim) {
+      const judged = judgeWorktreeDisk({ freeBytes: reclaim.freeBytes, thresholdBytes: diskThresholdBytes(config), pass: worktreePassOf(reclaim), standing: standingDiskLine(state.faults.open, 'disk-pressure'), reclaimable: sources.worktreeReclaimable }, now);
+      if (judged.low && !judged.answered)
+        derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `${worktreeVolumeWording}below its configured bound at the last reclaim (${reclaim.at})` });
+      // The managed root's own minimum is its own condition, judged on the root's reading alone: the worktree volume's recovery band never holds it open.
+      if (below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config)))
+        derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Managed worktree root free space is below its minimum at the last reclaim (${reclaim.at})` });
+    }
     // A host below its memory floor defers every launch on it (GY-612): one instance for the whole dip. A fault is its
     // wording, and the attention item's text names consumers whose ranking moves from cycle to cycle, so this wording
     // carries none of it — the attention item keeps the moving detail, and the instance stands until memory recovers.
@@ -613,7 +624,8 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
   // judged on each observation over the same snapshot; each violation is one fault of its class below.
   const invariants = checkInvariants(state.invariants, { work: snapshot.work, now: clock, thresholds: config.invariants, metrics: state.metrics, approvals: state.approvals, docsSyncs: state.docsSyncs,
     agents: herdrRead.available ? seen : null, build: controlPlane?.build?.commit ?? null });
-  trackFaults(state.faults, [...cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available, scopeRoutes: !!effects.decide && !!effects.approver }), ...invariantFaults(invariants)],
+  const worktreeReclaimable = effects.worktreeReclaimable ? await effects.worktreeReclaimable(snapshot.work, clock).catch(() => null) : undefined;
+  trackFaults(state.faults, [...cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available, scopeRoutes: !!effects.decide && !!effects.approver, worktreeReclaimable }), ...invariantFaults(invariants)],
     new Date(clock).toISOString(), partial || (herdrRead.available ? false : new Set<string>([...herdrFaultKinds, invariantFaultKind('lingering-sessions')])));
   // GY-1357: the filings and the diagnoses' moves share what the observation left of the budget.
   await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed, filings);
