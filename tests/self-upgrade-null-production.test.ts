@@ -215,16 +215,17 @@ test('unit:loaded-revision-names-last-restart-attempt — a restart owed that ca
   assert.deepEqual({ since: state.upgrade.stalled?.since, at: state.upgrade.stalled?.at }, { since: iso(faultAt), at: iso(clock.now) });
   assert.match(loadedRevision(state, revision, clock.now).detail!, /since 2026-10-07T09:28:59\.761Z, last attempted 2026-10-07T09:33:59\.761Z/);
 
-  // A dirty checkout is a different cause: the stall is renamed and starts again.
+  // An unreachable origin is a different cause: the stall is renamed and starts again. (A dirty
+  // checkout is none since GY-1773: it is upgraded by snapshot.)
   fake.originTip = tip;
-  fake.dirty = ' M src/daemon/run.ts\n';
+  fake.fetchFails = 'fatal: unable to access origin';
   clock.now = faultAt + 10 * minute;
-  assert.equal((await performSelfUpgrade(master, state, deps(fake, clock, fleet))).outcome, 'refused');
-  assert.deepEqual({ cause: state.upgrade.stalled?.cause, since: state.upgrade.stalled?.since }, { cause: 'checkout-dirty', since: iso(clock.now) });
-  assert.match(loadedRevision(state, revision, clock.now).detail!, /stalled on checkout-dirty/);
+  assert.equal((await performSelfUpgrade(master, state, deps(fake, clock, fleet))).outcome, 'failed');
+  assert.deepEqual({ cause: state.upgrade.stalled?.cause, since: state.upgrade.stalled?.since }, { cause: 'fetch-failed', since: iso(clock.now) });
+  assert.match(loadedRevision(state, revision, clock.now).detail!, /stalled on fetch-failed/);
 
   // Executors refused on held claims: the stall names the claim, and the retry keeps it within headroom.
-  fake.dirty = '';
+  fake.fetchFails = null;
   fleet.held = true;
   clock.now = faultAt + 15 * minute;
   assert.equal((await performSelfUpgrade(master, state, deps(fake, clock, fleet))).outcome, 'pending');
