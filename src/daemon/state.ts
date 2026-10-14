@@ -11,6 +11,7 @@ import { boundDetail } from './decisions.js';
 import { waitReason } from '../model/action-kinds.js'; import { timingsSchema } from '../master/timings.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
 import { docsSyncWatchSchema, routedConflictSchema } from '../model/docs-sync.js'; import { unansweredStands } from '../model/fault-record.js';
+import { emptySlowLoopState, slowLoopStateSchema } from './slow-loop-item.js'; // lazy below: it imports this module
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
 import { itemClockSchema, latencySampleSchema } from './latency-clock.js';
@@ -45,15 +46,12 @@ export type DaemonAction = z.infer<typeof daemonActionSchema>;
 const percentileSchema = z.object({ count: z.number().int().min(0), p50Ms: z.number().int().min(0), p90Ms: z.number().int().min(0) }).strict();
 const noMeasurement = { count: 0, p50Ms: 0, p90Ms: 0 };
 /**
- * The six phases of one cycle, in the order the cycle runs them. Each carries the milliseconds
- * the cycle spent in it (`ms`) and, of those, how many it spent waiting on a child process
- * (`childWaitMs`): Herdr, gh, git or systemctl, run through the asynchronous runner and metered
- * by its ledger (child-runner.ts). The difference is the step's own work. A cycle that outgrows
- * its interval therefore says both which step took the time and whether that step was computing
- * or waiting — eighty seconds waiting on gh and eighty seconds of the loop's own work are
- * different faults, and only the second is a loop to worry about. The six sum to a little under
- * `durationMs`: the remainder is the cursor writes and the measurement itself, which belong to no
- * step.
+ * The six phases of one cycle, in the order the cycle runs them. Each carries the milliseconds the cycle spent in it (`ms`) and, of
+ * those, how many it spent waiting on a child process (`childWaitMs`): Herdr, gh, git or systemctl, run through the asynchronous runner
+ * and metered by its ledger (child-runner.ts). The difference is the step's own work. A cycle that outgrows its interval therefore says
+ * both which step took the time and whether that step was computing or waiting — eighty seconds waiting on gh and eighty seconds of the
+ * loop's own work are different faults, and only the second is a loop to worry about. The six sum to a little under `durationMs`: the
+ * remainder is the cursor writes and the measurement itself, which belong to no step.
  */
 export const cycleStepNames = ['observe', 'close', 'decisions', 'dispatch', 'merge', 'deployment'] as const;
 export type CycleStepName = typeof cycleStepNames[number];
@@ -301,13 +299,11 @@ export const carriedSession = (prior: ApprovalWatch) => ({ launches: prior.launc
   exhaustedAt: prior.exhaustedAt, account: prior.account, runtime: prior.runtime, session: prior.session, movedPane: prior.movedPane });
 
 /**
- * The loop's own failures (GY-119). A cycle that throws — a control-plane read that timed out, a
- * runtime call that failed, a configuration reload that could not be read — is a failed cycle, not
- * the end of the process: it is recorded here, the cycle counter advances, and the next cycle runs
- * after a delay that grows with the consecutive count. An unhandled rejection or uncaught exception
- * anywhere in the process — a detached promise in the dispatcher, an approver watch, a Herdr read —
- * is caught at the process level and counted here too. The supervisor's restart is reserved for a
- * process that hangs, which the watchdog detects; nothing here ends the process.
+ * The loop's own failures (GY-119). A cycle that throws — a control-plane read that timed out, a runtime call that failed, a
+ * configuration reload that could not be read — is a failed cycle, not the end of the process: it is recorded here, the cycle counter
+ * advances, and the next cycle runs after a delay that grows with the consecutive count. An unhandled rejection or uncaught exception
+ * anywhere in the process — a detached promise in the dispatcher, an approver watch, a Herdr read — is caught at the process level and
+ * counted here too. The supervisor's restart is reserved for a process that hangs, which the watchdog detects; nothing here ends the process.
  */
 export const cycleFailureSchema = z.object({
   /** Failed cycles since the last one that completed; the backoff and the attention item read it. */
@@ -389,6 +385,7 @@ export type DoctorPendingFile = z.infer<typeof doctorPendingFileSchema>;
  */
 export const loopReleaseSchema = z.object({ commit: z.string().regex(/^[0-9a-f]{40}$/).nullable(), dirty: z.boolean().nullable() }).strict();
 export type LoopRelease = z.infer<typeof loopReleaseSchema>;
+export type { SlowLoopState } from './slow-loop-item.js'; // the slow-loop run (GY-1775): its schema lives with its rule
 
 /** The causes an owed self-upgrade restart stalls on (GY-1445); `release-lagged` (GY-1585) is a held restart, not a fault. */
 export const upgradeStallCauses = ['executors-refused', 'executors-unavailable', 'supervisor-unreachable', 'checkout-dirty', 'checkout-not-detached', 'fetch-failed', 'checkout-failed', 'release-lagged'] as const;
@@ -487,6 +484,7 @@ export const daemonStateSchema = z.object({
   mergeWriter: z.lazy(() => mergeWriterStateSchema).default(() => emptyMergeWriterState()), // GY-1524: the control-plane merge executor's queue, flight, last delivery and refusals
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),
+  slowLoop: z.lazy(() => slowLoopStateSchema).default(() => emptySlowLoopState()), // the slow-loop run on that release and the fix item it filed (GY-1775)
   upgrade: upgradeStateSchema, // the between-cycles self-upgrade's progress (GY-437)
   /** The last reload of .graphyard/master.json: what the running loop adopted, or why it refused. */
   config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),
