@@ -7,7 +7,7 @@ import { forgetDoneLinks, linkInstance } from '../model/fault-record.js';
 import { buildMasterStatus, diskThresholdBytes, type AttentionItem, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { hostMemoryAttention } from '../master-resources.js';
-import { judgeWorktreeDisk, standingDiskLine, worktreePassOf } from '../master/worktree-disk.js';
+import { judgeWorktreeDisk, standingDiskLine, worktreePassOf, worktreeVolumeWording } from '../master/worktree-disk.js';
 import { qualifyTimingFailures, type CheckAnnotations } from '../cli/timing-failures.js';
 import { type DaemonAction, type DaemonState, faultActionKey, message } from './state.js';
 export { unboundedAttemptKey };
@@ -121,8 +121,11 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
     const reclaim = state.reclaim, below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
     if (reclaim) {
       const judged = judgeWorktreeDisk({ freeBytes: reclaim.freeBytes, thresholdBytes: diskThresholdBytes(config), pass: worktreePassOf(reclaim), standing: standingDiskLine(state.faults.open, 'disk-pressure') }, now);
-      if ((judged.low && !judged.answered) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config)))
-        derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Free space ${reclaim.freeBytes !== null && reclaim.freeBytes !== undefined && reclaim.freeBytes >= diskThresholdBytes(config) ? 'within the recovery band above' : 'below'} its configured bound at the last reclaim (${reclaim.at})${judged.detail ? `; ${judged.detail}` : ''}` });
+      if (judged.low && !judged.answered)
+        derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `${worktreeVolumeWording}${reclaim.freeBytes !== null && reclaim.freeBytes !== undefined && reclaim.freeBytes >= diskThresholdBytes(config) ? 'within the recovery band above' : 'below'} its configured bound at the last reclaim (${reclaim.at})${judged.detail ? `; ${judged.detail}` : ''}` });
+      // The managed root's own minimum is its own condition, judged on the root's reading alone: the worktree volume's recovery band never holds it open.
+      if (below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config)))
+        derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Managed worktree root free space is below its minimum at the last reclaim (${reclaim.at})` });
     }
     // A host below its memory floor defers every launch on it (GY-612): one instance for the whole dip. A fault is its
     // wording, and the attention item's text names consumers whose ranking moves from cycle to cycle, so this wording

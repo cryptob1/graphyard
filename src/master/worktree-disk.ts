@@ -1,4 +1,5 @@
 // Concern: the worktree volume's readings — disk pressure, its answered gate, hard line and recovery band.
+import { wording } from '../model/fault-wording.js';
 import { agentOwner, type AttentionItem } from './attention.js';
 import type { WorktreeReclaimCandidate } from './worktrees.js';
 
@@ -37,7 +38,9 @@ export const diskExhaustionFloorBytes = (thresholdBytes: number) => thresholdByt
 export const diskLineSubjects = { 'resource-bound': 'resource:worktree-disk', 'disk-pressure': 'disk' } as const;
 /** Whether a fault of `kind` on its disk subject stands in the loop's record (`faults.open`, keyed kind|subject|wording). */
 export const standingDiskLine = (open: Record<string, string> | null | undefined, kind: keyof typeof diskLineSubjects) =>
-  !!open && Object.keys(open).some(key => key.startsWith(`${kind}|${diskLineSubjects[kind]}|`));
+  !!open && Object.keys(open).some(key => key.startsWith(`${kind}|${diskLineSubjects[kind]}|`) && !(kind === 'disk-pressure' && !key.slice(`${kind}|${diskLineSubjects[kind]}|`.length).startsWith(wording(worktreeVolumeWording))));
+/** The wording of the worktree volume's own disk-pressure fault: the managed root's minimum is a separate fault on the same subject and never stands for this one (GY-1784 review). */
+export const worktreeVolumeWording = 'Free space ';
 /** What a drained pass leaves the operator: the three choices that move the number. */
 export const outsideReachRemedy = 'free host data on the volume, raise run.diskThresholdGb in .graphyard/master.json, or move the worktree root (.graphyard/worktrees, and run.worktreeRoot for the managed checkouts) to a dedicated volume';
 export interface WorktreeDiskInputs {
@@ -53,6 +56,8 @@ export interface WorktreeDiskJudgement {
   /** The headroom below which the reading is low: the warn line, raised by the recovery band while its fault stands. */
   warnBelow: number; bandBytes: number; floorBytes: number;
   low: boolean; atFloor: boolean; current: boolean; drained: boolean;
+  /** What is reclaimable now is nothing (the plan was read and holds nothing disposable, no reclaimable worktrees wait on the next cycle, no error): the remaining holders are outside the loop's reach, whatever the last pass removed. */
+  outOfReach: boolean;
   /** Low, above the floor, and the pass current and drained: reported, raising nothing. */
   answered: boolean;
   /** Why the reading stands as it does, for the detail of each line; null when it is simply within its line. */
@@ -71,20 +76,21 @@ export function judgeWorktreeDisk(input: WorktreeDiskInputs, now: number): Workt
   const current = Number.isFinite(at) && now - at < worktreePassCurrentMs;
   // Drained needs the plan too: a pass that removed nothing can still have reach now, over worktrees that turned disposable after it ran (GY-1784 review) — and when the plan could not be read (null) the reading is never answered on it.
   const drained = !!pass && input.reclaimable !== null && pass.removed === 0 && pass.trees === 0 && pass.treeBacklog === 0 && pass.checkouts === 0 && pass.errors === 0 && reclaimable === 0;
+  const outOfReach = !pass ? input.reclaimable === 0 : input.reclaimable === undefined ? drained : input.reclaimable === 0 && pass.treeBacklog === 0 && pass.errors === 0;
   // A standing fault is never answered: the recovery band is its recovery line, and a fresh drained pass that catches the reading partway into the band closes it only for the next stale pass to open another (GY-1784 review, AC-4).
   const answered = low && !atFloor && current && drained && !input.standing;
   // The detail every line carries: the band it stands in, the pass's reach, and why it is raised or answered.
   const band = input.standing && free !== null && free >= input.thresholdBytes ? `within the ${gigabytes(bandBytes)} recovery band above the ${gigabytes(input.thresholdBytes)} line, so the low reading whose fault stands is this same one` : null;
   const reach = !pass ? 'the loop has recorded no worktree-reclaim pass'
     : input.reclaimable === null ? 'what is disposable now could not be read beside the reading, so it stands until the next plan over the inventory'
-    : drained ? `the loop's latest worktree-reclaim pass at ${pass.at} found nothing reclaimable (no disposable dependency directories, reclaimable worktrees or unowned managed checkouts), so the volume's remaining holders are outside its reach: ${outsideReachRemedy}`
+    : outOfReach ? `${drained ? `the loop's latest worktree-reclaim pass at ${pass.at} found nothing reclaimable` : `nothing is reclaimable now (the loop's latest worktree-reclaim pass at ${pass.at} took back${passParts(pass, 0) ? ` ${passParts(pass, 0)}` : ' nothing'})`} (no disposable dependency directories, reclaimable worktrees or unowned managed checkouts), so the volume's remaining holders are outside its reach: ${outsideReachRemedy}`
     : `the loop's latest worktree-reclaim pass at ${pass.at} still has reach (${passParts(pass, reclaimable)})`;
   const why = atFloor ? `at or below the ${gigabytes(floorBytes)} exhaustion floor, which raises attention whatever that pass answered`
     : answered ? `that pass is current, so only free space at or below the ${gigabytes(floorBytes)} floor raises attention`
     : pass && !current ? `that pass is past its ${worktreePassCurrentMs / 60_000}-minute currency bound, so the reading stands until the next pass`
     : input.standing ? `the reading's fault stands, so it holds until free space recovers past the ${gigabytes(bandBytes)} band above the ${gigabytes(input.thresholdBytes)} line, whatever that pass answered` : null;
   const detail = low ? [band, reach, why].filter(Boolean).join('; ') : null;
-  return { warnBelow, bandBytes, floorBytes, low, atFloor, current, drained, answered, detail };
+  return { warnBelow, bandBytes, floorBytes, low, atFloor, current, drained, outOfReach, answered, detail };
 }
 
 export interface DiskPressure {
@@ -108,7 +114,7 @@ export function diskPressure(path: string, free: number | null, thresholdBytes: 
   const pass = context.pass ?? null;
   return { path, freeBytes: free, thresholdBytes, low: judged.low, reclaimable, worktrees: plan.length,
     unavailable: free === null ? `Free space on ${path} could not be read` : null,
-    answered: judged.answered, drained: reclaimable === 0 && (!pass || judged.drained), warnBelow: judged.warnBelow, detail: judged.detail };
+    answered: judged.answered, drained: reclaimable === 0 && judged.outOfReach, warnBelow: judged.warnBelow, detail: judged.detail };
 }
 const gigabytes = (bytes: number) => `${(bytes / 1e9).toFixed(1)} GB`;
 /**

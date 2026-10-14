@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { wording } from '../src/model/fault-wording.js';
+import { standingDiskLine } from '../src/master/worktree-disk.js';
 import { dependencyDirectories, diskExhaustion, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, inventoryWorktrees, masterConfigSchema, planWorktreeReclaim, prepareWorkerLaunch, reclaimIdleMs, reclaimWorktrees, removeReclaimableWorktrees, statusWorktreeInventory, writeWorktreeInventoryCache, worktreeReclaimAuditFile, saveWorkerProfile, setupMaster, shareDependencies, sharedInstallSource, workerPrompt, worktreesDirectory, writeFailure, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import { cycleFaults, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { readResources, resourceAttention } from '../src/master-resources.js';
@@ -770,4 +772,20 @@ test('unit:disk-pressure-attention-names-outside-reach — with nothing reclaima
   assert.match(reading[0].text, /Coordinator worktree disk is low: 1012\.2 GB used of 1022\.0 GB, 9\.8 GB left — \/home\/vish\/code\/graphyard\/\.graphyard\/worktrees; the loop's latest worktree-reclaim pass at .* found nothing reclaimable \(no disposable dependency directories, reclaimable worktrees or unowned managed checkouts\), so the volume's remaining holders are outside its reach: free host data on the volume, raise run\.diskThresholdGb/);
   assert.doesNotMatch(reading[0].text, /Reclaim them before the volume fills/);
   assert.match(reading[0].next, /free host data on the volume, raise run\.diskThresholdGb, or move the worktree root to a dedicated volume/);
+});
+
+test('unit:disk-reach-now — a pass that removed the last disposable material leaves both lines describing nothing reclaimable now, and the managed root fault never stands for the worktree volume', async () => {
+  const at = new Date(Date.now() - 60_000).toISOString(), pass = { at, removed: 3, trees: 0, treeBacklog: 0, checkouts: 0, errors: 0, freeBytes: 4_000_000_000 };
+  const low = diskPressure('/w', 4_000_000_000, 10_000_000_000, [], { pass });
+  assert.equal(low.drained, true, 'nothing is reclaimable now, whatever the pass removed');
+  assert.equal(low.answered, false, 'the pass is not a drained pass, so it does not answer');
+  const [item] = diskPressureAttention(low);
+  assert.match(item.text, /outside the loop's reach/);
+  assert.doesNotMatch(item.text, /Reclaim them before the volume fills|still has reach/);
+  const backlog = diskPressure('/w', 4_000_000_000, 10_000_000_000, [], { pass: { ...pass, treeBacklog: 2 } });
+  assert.equal(backlog.drained, false, 'worktrees waiting on the next cycle are reach');
+  // A root-minimum fault on the shared subject is not the worktree volume's fault: it never applies the recovery band.
+  const open = (text: string) => ({ [`disk-pressure|disk|${wording(text)}`]: 'x' });
+  assert.equal(standingDiskLine(open('Managed worktree root free space is below its minimum at the last reclaim (t)'), 'disk-pressure'), false);
+  assert.equal(standingDiskLine(open('Free space below its configured bound at the last reclaim (t)'), 'disk-pressure'), true);
 });
