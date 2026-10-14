@@ -158,6 +158,20 @@ export class Store {
     } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
     finally { client.release(); }
   }
+  /**
+   * The items whose candidate or submission names pull request `pr` (GY-1778): what the CI plan
+   * step asks for. A settled match is served as the work index's stored summary and an open one
+   * whole; the match is decided on the index's `pr` column for every settled row, so no settled
+   * document is read, and an open item's document is read only to check its submission.
+   */
+  async workForPullRequest(pr: number): Promise<Work[]> {
+    const rows = (await this.pool.query(`SELECT w.number, CASE WHEN COALESCE(i.settled, false) AND i.summary IS NOT NULL THEN i.summary ELSE w.document END AS document
+      FROM work_items w LEFT JOIN work_index i ON i.id = w.id
+      WHERE CASE WHEN i.pr = $1 THEN true WHEN COALESCE(i.settled, false) THEN false
+        ELSE graphyard_number(w.document->'candidate'->'pr') = $1 OR graphyard_number(w.document->'submission'->'pr') = $1 END
+      ORDER BY w.number`, [pr])).rows;
+    return rows.map(row => row.document);
+  }
   async workSnapshot(): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[] }> {
     const row = (await this.pool.query("SELECT COALESCE(jsonb_agg(document ORDER BY number), '[]'::jsonb) AS work, statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs FROM work_items")).rows[0];
     return { work: row.work, now: row.observed_at.toISOString(), jobs: row.jobs };

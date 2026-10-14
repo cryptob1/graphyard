@@ -615,7 +615,9 @@ export function readCappedRefusal(config: Pick<MasterConfig, 'url' | 'credential
       };
       const { cappedRefusalRequest } = await import('./daemon/cycle-review-cap.js');
       const history = ((await read(`work/${encodeURIComponent(work.id)}/decisions`)).decisions ?? []) as Parameters<typeof cappedRefusalRequest>[3];
-      // The open items, for the follow-ups the master filed, are read only once a refusal binds the head.
+      // The open items, for the follow-ups the master filed, are read only once a refusal binds the
+      // head, and as the fleet `GET /api/work` serves (GY-1778): every open item whole and each
+      // settled delivery as its stored summary, never the settled documents.
       if (!cappedRefusalRequest(work, sha, config, history, [])) return null;
       const request = cappedRefusalRequest(work, sha, config, history, await read('work') as Work[]);
       return request ? { request } : null;
