@@ -282,7 +282,7 @@ const worker: Principal = { id: 'readings-worker', role: 'worker', sessionKind: 
 const credentials = [operator, coordinator, worker].map(principal => ({ ...principal, token: `readings-${principal.id}-${'x'.repeat(32)}` }));
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 191;
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1790;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('loop-readings-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('readings_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/readings_test`); await store.init();
