@@ -27,7 +27,7 @@ import { describeTimings } from '../master/timings.js';
 import { stopDoctorRuns, doctorReport } from './doctor.js';
 import { mainWatchSummary } from './main-watch.js';
 import { shadowGateSummary } from './cycle-shadow.js';
-import { fileSlowLoopItem } from './slow-loop-item.js';
+import { adoptLoopRelease, fileSlowLoopItem } from './slow-loop-item.js';
 import { mergeWriterSummary } from './cycle-merge-writer.js';
 import { detachRuns } from '../runner/registry.js';
 import type { LoopWake } from './loop-wake.js';
@@ -267,6 +267,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     // GY-437: the release is this process's, never the cursor's: a loop re-executed onto a moved
     // checkout must not report the release the process before it loaded.
     state.release = raw.loadedRelease ?? null;
+    adoptLoopRelease(state); // GY-1775: a release other than the cursor's starts the slow-loop run at this process's first cycle, persisted before it runs
     await effects.persist(state);
     // Under a supervisor that watches for keep-alives, a hung cycle is a restart rather than a
     // silent pipeline; a window that would restart a healthy loop is recorded and left to the

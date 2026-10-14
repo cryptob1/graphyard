@@ -9,7 +9,7 @@ import type { DaemonEffects } from './effects.js';
 import { cycleTimes, slowCycleMs } from './liveness.js';
 import { record } from './preserve.js';
 import { readyToRetry } from './sessions.js';
-import { type CycleMetrics, type DaemonAction, type DaemonState, message, type SlowLoopState } from './state.js';
+import { type CycleMetrics, type DaemonAction, type DaemonState, message } from './state.js';
 
 /** Consecutive cycles past `slowCycleMs` on one loaded release before the loop files the item. */
 export const slowLoopCycles = 3;
@@ -71,6 +71,25 @@ export const slowLoopPendingSchema = z.object({
   release: z.string().max(40), step: z.string().max(80), key: z.string().max(200), cycles: z.array(z.number().int().min(0)).min(1).max(slowLoopCycles), at: z.string().max(40), input: slowLoopItemInputSchema,
 }).strict();
 export type PendingSlowLoop = z.infer<typeof slowLoopPendingSchema>;
+/**
+ * The slow-loop run on the cursor (`daemonStateSchema.slowLoop`): the trailing completed cycles past
+ * the cycle bound on the release the loop loaded, read from the retained metrics from the cycle that
+ * release was first counted at, so a cycle persisted by a loop that exited before counting it is
+ * counted by the next; the fix item filed per release and slowest step (keyed `RELEASE:STEP`), kept
+ * across releases so a release rolled back to files nothing new and the slow-cycle attention names
+ * the item; and the filings the control plane never answered, by the same key, each replayed with
+ * its first body on its own backoff.
+ */
+export const slowLoopStateSchema = z.object({
+  release: z.string().max(40).nullable().default(null),
+  /** The cycle the loaded release was first counted at: the run is the trailing slow cycles from it. */
+  sinceCycle: z.number().int().min(0).default(0),
+  consecutive: z.number().int().min(0).default(0),
+  filed: z.record(z.string().max(160), z.object({ key: z.string().max(40), step: z.string().max(80), file: z.string().max(200).nullable(), cycle: z.number().int().min(0), at: z.string().max(40) }).strict()).default({}),
+  pending: z.preprocess(value => value === null ? {} : value, z.record(z.string().max(160), slowLoopPendingSchema)).default({}),
+}).strict();
+export type SlowLoopState = z.infer<typeof slowLoopStateSchema>;
+export const emptySlowLoopState = (): SlowLoopState => ({ release: null, sinceCycle: 0, consecutive: 0, filed: {}, pending: {} });
 /** Filings kept on the cursor, newest by cycle; the bound keeps a release rolled back to from filing again without the cursor growing without end. */
 export const retainedSlowLoopFilings = 20;
 /** Unanswered asks kept on the cursor, newest by their first ask; more than this many needs a plane down across that many distinct runs. */
@@ -124,6 +143,22 @@ export function noteSlowCycle(state: Pick<DaemonState, 'metrics' | 'release' | '
   state.slowLoop.consecutive = consecutive;
   if (!release || consecutive < slowLoopCycles) return null;
   return { release, window: state.metrics.slice(-slowLoopCycles) };
+}
+
+/**
+ * At a loop process's startup, with the release it loaded (run.ts, before the startup persist): a
+ * release other than the cursor's starts the run at this process's first cycle, before any cycle of
+ * its is persisted. A process that exits after its first cycle's metrics persisted and before the
+ * rule counted it then leaves a cursor already naming the release, so the next process on it reads
+ * that cycle into the run and three slow cycles file at the third, not a fourth; `noteSlowCycle`'s
+ * own reset, at the first cycle it counts, stands only for a cursor no startup adopted. Returns
+ * whether the cursor changed.
+ */
+export function adoptLoopRelease(state: Pick<DaemonState, 'cycle' | 'release' | 'slowLoop'>): boolean {
+  const release = state.release?.commit ?? null;
+  if (state.slowLoop.release === release) return false;
+  state.slowLoop.release = release; state.slowLoop.sinceCycle = state.cycle; state.slowLoop.consecutive = 0;
+  return true;
 }
 
 /**

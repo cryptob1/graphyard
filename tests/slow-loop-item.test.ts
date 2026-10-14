@@ -384,3 +384,26 @@ test('unit:slow-loop-item-contents — the filed item names the release commit, 
   assert.equal(slowLoopItemFor(w.state.slowLoop, releaseA, 'merges', 10), 'GY-1801');
   assert.equal(slowLoopItemFor(w.state.slowLoop, releaseA, 'snapshot', 10), 'GY-1801', 'within the run, the newest item the run filed');
 });
+
+test('unit:slow-loop-release-adopted-at-startup — a loop process adopts the release it loaded at its startup, so a process that exits after its first slow cycle\'s metrics persisted and before the rule counted it leaves a cursor the next process on the release counts that cycle from: three slow cycles file at the third, not a fourth', async () => {
+  const { adoptLoopRelease, slowLoopIdempotencyKey } = await rule();
+  // Release A ran and ended a run; the loop is re-executed onto release B and adopts it at startup, before any cycle of its runs.
+  const onA = world(releaseA);
+  await onA.complete(slow(1)); await onA.complete(fast(2));
+  const onB = world(releaseB, daemonStateSchema.parse(JSON.parse(onA.writes.at(-1)!)));
+  assert.equal(onB.state.slowLoop.release, releaseA, 'the cursor still names the release before');
+  assert.equal(adoptLoopRelease(onB.state), true, 'the startup adopts the loaded release');
+  assert.deepEqual({ release: onB.state.slowLoop.release, sinceCycle: onB.state.slowLoop.sinceCycle, consecutive: onB.state.slowLoop.consecutive }, { release: releaseB, sinceCycle: 3, consecutive: 0 }, "the run starts at this process's first cycle");
+  assert.equal(adoptLoopRelease(onB.state), false, 'adopted once: the same release changes nothing');
+  await onB.effects.persist(onB.state); // run.ts persists the adopted release before the first cycle runs
+  // The first slow cycle on B: runCycle persists its metrics, and the process exits before the rule counts it.
+  onB.state.metrics.push(slow(3)); onB.state.cycle = 4; await onB.effects.persist(onB.state);
+  const next = world(releaseB, daemonStateSchema.parse(JSON.parse(onB.writes.at(-1)!)));
+  assert.equal(adoptLoopRelease(next.state), false, 'the next process on the release keeps the cursor as it stood');
+  assert.equal(await next.complete(slow(4)), null);
+  assert.equal(next.state.slowLoop.consecutive, 2, 'the cycle the exit hid is counted with the next');
+  const third = await next.complete(slow(5));
+  assert.equal(third?.state, 'done', 'the third slow cycle on the release files');
+  assert.deepEqual(next.requests, [slowLoopIdempotencyKey(releaseB, 'decisions')], 'one item, under the new release\'s key');
+  assert.ok(next.state.slowLoop.filed[`${releaseA}:decisions`] === undefined && Object.keys(next.state.slowLoop.filed).length === 1, 'nothing was filed for the release before, whose run ended');
+});

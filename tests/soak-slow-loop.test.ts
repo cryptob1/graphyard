@@ -11,8 +11,9 @@ import type { Work } from '../src/model.js';
 // simulated clock) runs five-minute cycles past the 60 s bound whenever the day's script says a
 // step holds the time: the clock the cycle is measured with advances inside the effect that step
 // runs, so the cycle's duration and its slowest step are the scripted ones. The serving release
-// changes every 54 cycles, one release runs three slow cycles across a process restart (the state
-// is reloaded from the cursor between cycles), another loses the filing's reply twice before the
+// changes every 54 cycles, one release's loop process exits after its first slow cycle's metrics
+// persisted and before the rule counted it (the next process reloads the cursor as it stood then,
+// and the run crosses the bound at the third slow cycle), another loses the filing's reply twice before the
 // control plane answers, another's loop process exits with the filing's POST in flight (the plane
 // commits the item; the loop is reloaded from the cursor as it stood at that ask), the last loses
 // one step's filing to a plane that stays down while a fast cycle ends that run and three cycles held
@@ -55,8 +56,13 @@ const stretch = (cycle: number): { slow: boolean; hold: 'snapshot' | 'credential
   if (release === 5) return { slow: index < 3 || (index >= 4 && index < 7), hold: index < 3 ? 'snapshot' : 'credentials' };
   return { slow: false, hold: 'snapshot' };
 };
-/** The cycles a restart runs between (the release 2 count crosses the bound across the one at 109). */
-const restarts = new Set([2 * releaseEvery + 1]);
+/**
+ * The cycle whose loop process exits after runCycle persisted its metrics and before the rule counted
+ * it: release 2's first slow cycle, so the next process, on the same release, reloads the cursor as it
+ * stood then (the release adopted at startup, the cycle uncounted) and the run crosses the bound at
+ * the third slow cycle, at 110, not a fourth.
+ */
+const exitsBeforeCount = new Set([2 * releaseEvery]);
 /**
  * The cycles whose filing ask the control plane never answered: release 3 loses its reply twice; the
  * last release's snapshot ask is lost at its third slow cycle and at its retries one and two cycles
@@ -72,6 +78,7 @@ test('integration:soak-slow-loop — over a simulated day of slow cycles across 
   const filed: { key: string; work: string; title: string }[] = [], asks: { key: string; body: string }[] = [], lateAsks: string[] = [], schemaRefusals: string[] = [];
   const receipts = new Map<string, { fingerprint: string; result: Work }>(), answered = new Set<string>();
   let now = start, hold: 'snapshot' | 'credentials' | null = null, plane: 'up' | 'lost' | 'exit' = 'up', next = 40, cursor: string | null = null, cursorAtTheExit: string | null = null;
+  let running = -1, cursorBeforeCount: string | null = null;
   const fingerprint = (body: string) => createHash('sha256').update(body).digest('hex');
   const effects: DaemonEffects = {
     agents: () => [],
@@ -79,7 +86,12 @@ test('integration:soak-slow-loop — over a simulated day of slow cycles across 
     snapshot: async () => { if (hold === 'snapshot') now += holdMs; return { work: [] as Work[], now: new Date(now).toISOString() }; },
     closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async state => { cursor = JSON.stringify(state); },
+    recordDeployment: async () => {}, requestSmoke: () => {},
+    persist: async state => {
+      cursor = JSON.stringify(state);
+      // The exit before the count: runCycle's persist of the cycle's metrics is the last write the process makes.
+      if (exitsBeforeCount.has(running) && state.metrics.at(-1)?.cycle === running && !cursorBeforeCount) cursorBeforeCount = cursor;
+    },
     fileSlowLoopItem: async (input, key) => {
       const parsed = slowLoopItemInputSchema.safeParse(input), body = JSON.stringify(input);
       if (!parsed.success) schemaRefusals.push(`${key}: ${parsed.error.message}`);
@@ -124,8 +136,10 @@ test('integration:soak-slow-loop — over a simulated day of slow cycles across 
     effects.loadedRelease = { commit: release, dirty: false };
     plane = lostReplies.has(cycle) ? 'lost' : exits.has(cycle) ? 'exit' : 'up';
     // A restart reloads the cursor: what the loop's persists last wrote, never the live state. After
-    // the exit, the cursor as it stood at the ask: the exited process persisted nothing after it.
-    if (restarts.has(cycle)) state = daemonStateSchema.parse(JSON.parse(cursor!));
+    // the exit before the count, the cursor as runCycle left it; after the exit with the ask in
+    // flight, the cursor as it stood at the ask: the exited process persisted nothing after either.
+    running = cycle;
+    if (cursorBeforeCount) { state = daemonStateSchema.parse(JSON.parse(cursorBeforeCount)); cursorBeforeCount = null; }
     if (cursorAtTheExit) { state = daemonStateSchema.parse(JSON.parse(cursorAtTheExit)); cursorAtTheExit = null; }
     const ran = await runDaemon(config, state, effects, options(cycle));
     if (ran.failed.length) failedCycles.push(`cycle ${cycle}: ${ran.failed.map(failure => failure.reason).join('; ')}`);
