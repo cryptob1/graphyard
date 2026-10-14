@@ -432,3 +432,27 @@ test('unit:snapshot-pin-reported-and-lifted — master status reports the loop\'
   const refused = await runDaemon(master, refusedState, effects(refusedUpgrades), options(null));
   assert.deepEqual([refused.cycles.length, refusedUpgrades.count, refusedState.release], [0, 0, { commit: loaded, dirty: true }], 'a loop loaded from the dirty checkout still cycles nothing');
 });
+
+test('unit:snapshot-pin-survives-dirty-head-move — a dirty checkout whose HEAD moves to another commit while the pin stands is no restart target: the aligned release owes nothing, the loop and the executors keep running the snapshot, and the pin stands', async () => {
+  const w = await world('head-move');
+  const { root, origin, loaded, tip, master } = w;
+  const { state, calls, deps, snapshot } = await snapshotUpgrade(w);
+  state.release = { commit: tip, dirty: false };
+  const pass = (offset: number) => performSelfUpgrade(master, state, deps({ loadedFrom: join(snapshot, 'src', 'daemon', 'upgrade.ts'), now: () => clock + offset }));
+  assert.equal((await pass(1_000)).outcome, 'skipped');
+  // The operator's HEAD moves, edit carried, onto a commit that is neither the one they left nor the snapshot's.
+  await writeFile(join(origin, 'docs.md'), 'docs for C\n');
+  git(origin, 'commit', '-q', '-am', 'release C');
+  git(root, 'fetch', '-q', 'origin');
+  git(root, 'checkout', '-q', '--detach', git(origin, 'rev-parse', 'HEAD'));
+  assert.notEqual(git(root, 'rev-parse', 'HEAD'), loaded);
+  assert.equal(status(root), ' M README.md', 'the move carried the edit; the tree is still dirty');
+  for (const offset of [2_000, 3_000]) {
+    const moved = await pass(offset);
+    assert.equal(moved.outcome, 'skipped', JSON.stringify(moved));
+  }
+  assert.equal(state.upgrade.pending ?? null, null, 'no restart is owed onto the dirty checkout');
+  assert.deepEqual(calls, { executors: [tip], self: 1 }, 'nothing restarted beyond the snapshot upgrade');
+  assert.equal(readHeldCli(root), tip, 'the pin stands');
+  assert.equal(w.launch('watch', 'GY-1', '1').release, 'B', 'the launcher still loads the snapshot');
+});

@@ -585,7 +585,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     // Cleaned and detached where it stood, it is moved below as any clean checkout is.
     const left = state.upgrade.snapshot, onSnapshot = !!left && sameCommit(loaded, left.commit);
     if (left && head && onSnapshot && sameCommit(head, left.commit)) return lift(head, standing!);
-    const stays = !!left && !!head && head === left.checkout && (standing!.dirty === true || standing!.detached !== true);
+    const stays = !!left && !!head && (standing!.dirty === true || standing!.detached !== true);
     if (stays && !onSnapshot) {
       // The owed restart keeps the alignment's own `code`: a docs-only snapshot whose re-execution
       // failed still owes the loop alone, never a fleet restart nothing the executors run calls for.

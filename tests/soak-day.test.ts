@@ -779,7 +779,7 @@ test('unit:soak-invariants-hold — a coordinator checkout dirty across several 
   // the loop restarted onto the third head, so its diff from the snapshot the loop runs touches no
   // loaded code, and the snapshot restart is the loop's alone, the executors kept running.
   const deploys = [2 * hour, 4 * hour, 6 * hour, 6 * hour + 45 * minute];
-  const day = await simulateDay({ hours: 8, dirtyLift: true, docsOnlyCommit: 6 * hour + 30 * minute, plan: { deploys, dirtyCheckout: { from: hour, to: 7 * hour }, headMove: { from: 99 * hour, to: 100 * hour }, heldClaimRestarts: 0, deaths: new Set() } });
+  const day = await simulateDay({ hours: 8, dirtyLift: true, docsOnlyCommit: 6 * hour + 30 * minute, plan: { deploys, dirtyCheckout: { from: hour, to: 7 * hour }, headMove: { from: 5 * hour, to: 5 * hour + 30 * minute }, heldClaimRestarts: 0, deaths: new Set() } });
   assertLaunchesConfined(day, coordinatorRoot!);
   const { upgrades, state, production, checkout, dirtyLift, cycles, violations, failures, lost, guardReads, github, dayStart } = day;
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -795,7 +795,12 @@ test('unit:soak-invariants-hold — a coordinator checkout dirty across several 
   const dirtySamples = upgrades.samples.filter(sample => sample.dirty);
   assert.ok(dirtySamples.length >= 20, `the checkout stood dirty across ${dirtySamples.length} cycles`);
   const startTip = upgrades.samples[0].head;
-  assert.ok(dirtySamples.every(sample => sample.head === startTip), 'the checkout never moved while it stood dirty');
+  const moveWindow = (sample: { elapsed: number }) => sample.elapsed >= 5 * hour && sample.elapsed < 5 * hour + 30 * minute;
+  assert.ok(dirtySamples.filter(sample => !moveWindow(sample)).every(sample => sample.head === startTip), 'the checkout never moved while it stood dirty, but for the operator\'s HEAD move');
+  // GY-1773: the operator's HEAD moved to another commit while the pin stood and a release was aligned: no restart was owed onto the dirty tree, and the pin held through the window.
+  const movedSamples = upgrades.samples.filter(sample => sample.dirty && moveWindow(sample));
+  assert.equal(guardReads.headMoves, 1, 'the day moved the dirty checkout\'s HEAD once');
+  assert.ok(movedSamples.length >= 3 && movedSamples.every(sample => sample.head !== startTip && sample.pin !== null && sample.snapshot !== null && sample.outcome === 'skipped'), 'the pin and the snapshot record stood, and the upgrade skipped, every cycle the dirty HEAD stood moved');
   assert.deepEqual(upgrades.checkouts, [], 'the loop never moved the checkout: a dirty tree is never touched');
   assert.equal(upgrades.outcomes.length, cycles, 'the self-upgrade ran after every cycle of the day, refused nowhere');
   assert.ok(guardReads.refused >= 10, `the dirty tree stood escalated (${guardReads.refused} refused cycles) while the upgrade kept running`);
@@ -827,7 +832,7 @@ test('unit:soak-invariants-hold — a coordinator checkout dirty across several 
   assert.ok(upgradeRows.every(key => state.actions[key]!.state === 'done' && state.actions[key]!.attempts <= 3), 'every upgrade row done, its attempts bounded by its head and the pass that lifted the last one');
   assert.equal(state.upgrade.refused, null, 'nothing is refused');
   const escalation = state.actions['escalation:dirty-checkout'];
-  assert.ok(escalation && escalation.attempts >= 2 && escalation.attempts <= upgrades.self + 1, `the escalation grew only when what it named changed — the snapshot each restart runs (${escalation?.attempts} attempts)`);
+  assert.ok(escalation && escalation.attempts >= 2 && escalation.attempts <= upgrades.self + 1 + 2 * guardReads.headMoves, `the escalation grew only when what it named changed — the snapshot each restart runs (${escalation?.attempts} attempts)`);
   // The operator's move onto the pinned commit: the pin lifts, the cursor stops naming the checkout,
   // and the day ends with the loop running the commit the checkout holds.
   const pinnedCommit = upgrades.pins.map(entry => entry.commit).filter(commit => commit !== null).at(-1)!;
