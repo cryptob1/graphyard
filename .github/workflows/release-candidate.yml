@@ -39,7 +39,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
-    environment: uat
     outputs:
       id: ${{ steps.pin.outputs.id }}
       sha: ${{ steps.pin.outputs.sha }}
@@ -54,9 +53,6 @@ jobs:
       - name: Cut a release candidate from main's tip, or pin the dispatched SHA or tagged commit
         id: pin
         shell: bash
-        env:
-          GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
-          GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
         run: |
           set -euo pipefail
           if [[ -n "$PINNED" ]]; then
