@@ -29,7 +29,7 @@ export const planTool = 'graphyard_plan';
 /** The judgement run's Pi role and tool: the approver identity's verdict on one plan. */
 export const planJudgeRole = 'plan-judge';
 export const planJudgementTool = 'graphyard_plan_judgement';
-/** A run that returned nothing, or a plan refused before approval, is tried again after this long: each try is a paid model run. */
+/** A run that returned nothing (a timeout, an exit, no payload), or a plan refused before approval, is tried again after this long: each try is a paid model run. A payload plan validation refused feeds its reason back and is tried again in planStepRetryMs (GY-1803). */
 export const planRetryMs = 60 * 60_000;
 /** A step that only talks to the control plane (post, release, deliver) is retried after this long, reusing the run's result. */
 export const planStepRetryMs = 10 * 60_000;
@@ -60,7 +60,7 @@ export interface PlannerEffects {
 }
 
 /** A finished run, kept until it is posted; `deferred` names the full role no run started on. */
-interface Pending { revision: number; plan?: GoalPlan | null; judgement?: PlanJudgement | null; runs: string[]; deferred?: string }
+interface Pending { revision: number; plan?: GoalPlan | null; judgement?: PlanJudgement | null; runs: string[]; deferred?: string; invalid?: string }
 const live = new Map<string, Promise<void>>();
 const pending = new Map<string, Pending>();
 /** When each goal's next try of a step may run: `${goal.id}:${step}`. */
@@ -80,7 +80,9 @@ export function plannerPrompt(config: { repository: string }, goal: Goal) {
     + `Then call the ${planTool} tool exactly once with goal "${goal.key}", a note of at most ${planNoteMaxWords} words (stack, module layout, data and deploy approach), and items: `
     + 'each item a ref (lower-case letters, digits and -), a title, a description, the outcome ids it serves, the case ids it must make pass (at least the case of every outcome it serves), '
     + 'criteria (AC-1, AC-2, ... each id once, each with text and unit:, integration: or manual: proofs), the plannedFiles it changes, and dependsOn naming the refs it must land after. '
-    + 'Every outcome is served by at least one item. Items that may run in parallel (neither depends on the other) share no planned file: make one depend on the other or split the files. '
+    + 'Every outcome is served by at least one item. '
+    + 'A criterion observed on the serving release — production, the deployed release, the restarted loop: an outcome no head can show before merge — must name a manual:post-deploy/NAME proof on the item that ships the change (the reviewer judges it on that head\'s pre-merge evidence, and the serving release is checked after), beside at least one criterion with a unit:, integration: or manual: proof a head can show before merge: no item may consist of post-deploy criteria alone. '
+    + 'Items that may run in parallel (neither depends on the other) share no planned file: make one depend on the other or split the files. '
     + 'No item plans a change to a required case or e2e/contract.json. Answer any refusal of the last plan. Stop after the call.\n\n'
     + `The goal, as JSON:\n${clip(JSON.stringify(input), 50_000)}`;
 }
@@ -96,8 +98,9 @@ export function planJudgementPrompt(config: { repository: string }, goal: Goal) 
 }
 
 /** One headless run, primary then fallback, as the acceptance role runs (GY-1417); a registry role at its concurrency defers the goal instead of starting a fallback. */
-async function runHeadless<T>(planner: PlannerEffects, role: 'plan' | 'judge', goal: Goal, prompt: string, validate: (payload: unknown) => T): Promise<{ payload: T | null; runs: string[]; deferred?: string }> {
-  const runs: string[] = [];
+async function runHeadless<T>(planner: PlannerEffects, role: 'plan' | 'judge', goal: Goal, prompt: string, validate: (payload: unknown) => T): Promise<{ payload: T | null; runs: string[]; deferred?: string; invalid?: string }> {
+  const runs: string[] = [], reasons: string[] = [];
+  let invalid: string | undefined;
   const [env, tool] = role === 'plan' ? [plannerRole, planTool] : [planJudgeRole, planJudgementTool];
   for (const attempt of ['primary', 'fallback'] as const) {
     let chosen: PlannerRun;
@@ -111,16 +114,20 @@ async function runHeadless<T>(planner: PlannerEffects, role: 'plan' | 'judge', g
     await Promise.resolve(chosen.release?.(`the ${attempt} ${role === 'plan' ? 'plan' : 'plan judgement'} of ${goal.key} ended`)).catch(() => {});
     if (result.ok) return { payload: result.payload, runs };
     runs.push(`${chosen.model} ${result.failure.reason}: ${clip(result.failure.detail, 300)}`);
+    reasons.push(result.failure.reason);
+    // A payload the schema refused is the one failure the next run can answer: its reason is kept for the goal's refusal (GY-1803).
+    if (result.failure.reason === 'invalid-payload') invalid = clip(result.failure.detail, 2000);
     if (result.failure.reason === 'cancelled') break;
   }
-  return { payload: null, runs };
+  // The reason is carried back only when every run failed validation: a run that failed otherwise (a timeout, an exit) says nothing about the payload.
+  return { payload: null, runs, ...(reasons.length && reasons.every(reason => reason === 'invalid-payload') ? { invalid } : {}) };
 }
 const ofGoal = (goal: Goal, parsed: { goal: string }) => { if (parsed.goal !== goal.key) throw new Error(`the answer names ${parsed.goal}, not ${goal.key}`); };
 function launch(cycle: Cycle, planner: PlannerEffects, goal: Goal, role: 'plan' | 'judge') {
   const run = role === 'plan'
     ? runHeadless(planner, role, goal, plannerPrompt(cycle.config, goal), payload => {
       const { goal: named, ...plan } = planPayloadSchema.parse(payload); ofGoal(goal, { goal: named }); return plan;
-    }).then(result => ({ revision: goal.revision, plan: result.payload, runs: result.runs, deferred: result.deferred }))
+    }).then(result => ({ revision: goal.revision, plan: result.payload, runs: result.runs, deferred: result.deferred, invalid: result.invalid }))
     : runHeadless(planner, role, goal, planJudgementPrompt(cycle.config, goal), payload => { const parsed = planJudgementSchema.parse(payload); ofGoal(goal, parsed); return parsed; })
       .then(result => ({ revision: goal.revision, judgement: result.payload, runs: result.runs, deferred: result.deferred }));
   live.set(goal.id, run.catch(error => ({ revision: goal.revision, [role === 'plan' ? 'plan' : 'judgement']: null, runs: [message(error)] }))
@@ -171,6 +178,19 @@ async function planning(cycle: Cycle, planner: PlannerEffects, goal: Goal, note:
   if (result && 'plan' in result) {
     if (!result.plan && result.deferred) return deferred(cycle, goal, result, 'plan', note);
     if (!result.plan) {
+      // A payload plan validation refused never reached a post, so nothing said why (GY-1803): the
+      // reason is recorded the same way a refused plan is (plan-invalid, so it counts toward
+      // maxPlanRounds across restarts), the next prompt carries it as lastRefusal, and the retry
+      // waits ten minutes, not the hour a paid run waits.
+      if (result.invalid) {
+        if (!due(cycle, goal, 'post')) return;
+        const reason = `the ${planTool} payload failed validation: ${result.invalid}`;
+        try { await planner.invalid(goal, reason); }
+        catch (error) { if (stepCallCarried(error)) throw error; later(cycle, goal, 'post', planStepRetryMs); return note(goal, 'failed', `The planner returned no plan for ${goal.key}: ${clip(reason, 300)}, but the refusal could not be recorded: ${message(error)}; it is recorded again in ten minutes`); }
+        pending.delete(goal.id); later(cycle, goal, 'plan', planStepRetryMs);
+        const last = (goal.planDrafts ?? 0) + 1 >= maxPlanRounds;
+        return note(goal, 'failed', `The planner returned no plan for ${goal.key}: ${reason}; ${last ? `that was plan ${maxPlanRounds} of ${maxPlanRounds}, so the loop plans no more and leaves it to the master` : 'it is planned again in ten minutes, answering that'}`);
+      }
       pending.delete(goal.id); later(cycle, goal, 'plan', planRetryMs);
       return note(goal, 'failed', `The planner returned no plan for ${goal.key}: ${result.runs.join('; ')}; it is planned again in an hour`);
     }
