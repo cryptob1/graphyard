@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
 import type { MasterConfig } from '../master.js';
 import type { Work } from '../model/work.js';
+import type { Goal } from '../model/goal.js';
+import { pendingAtCut } from '../release-pending.js';
 import { installIdFor } from '../install/types.js';
 import { candidateSettings, mergeWriterSettings, shadowGateSettings } from '../master/merge-writer-settings.js';
 import { parseVerificationMap, type VerificationMap } from '../model/verification-maps.js';
@@ -69,7 +71,9 @@ export function lastJson(output: string): unknown {
 export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run' | 'repository' | 'credentialFile'>, root: string, run: ChildRun,
   options: { base: string; record: (work: Pick<Work, 'id' | 'key'>, event: RevertRecordEvent) => Promise<unknown>; environment?: NodeJS.ProcessEnv; now?: () => number; trial?: RevertPorts['trial'];
     /** Files a failed managed candidate's follow-up or hold item, answering its key (GY-1535). */
-    file?: (item: object, requestId: string) => Promise<string> }): LocalReleasePorts | null {
+    file?: (item: object, requestId: string) => Promise<string>;
+    /** The plane's open goals and each work item's stage, so a cut records the outcomes whose plan is not delivered yet as pending (GY-1802). */
+    plane?: { goals: () => Promise<readonly Goal[]>; stage: (key: string) => Promise<string | undefined> } }): LocalReleasePorts | null {
   const environment = options.environment ?? process.env;
   const uatUrl = environment[localReleaseVariables.uatUrl], productionUrl = environment[localReleaseVariables.productionUrl], uatStatic = environment[localReleaseVariables.uatStatic];
   if (!uatUrl && !uatStatic) return null;
@@ -142,7 +146,9 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
       if (newest && !ledger.uat.some(record => record.id === newest.id) && now() - Date.parse(newest.cutAt) < uatValidationWindowMs) return { cut: false, resume: toCandidate(newest) };
       // The cut rule (candidate-cut.ts) alone decides a cut: not due, nothing is tagged or pushed.
       if (!due) return { cut: false, reason: `the cut rule is not due (${settings.everyMerges} merges or ${settings.idleMinutes} idle minutes)` };
-      const result = await cutAsync(git, { base, trigger: 'manual', now: new Date(now()), push: true, maxPrs: settings.everyMerges });
+      const plane = options.plane;
+      const pendingOutcomes = plane ? (cutAt: { sha: string; undelivered: ReadonlySet<string> }) => pendingAtCut({ contract: async sha => { try { return await gitAsync('show', `${sha}:${contractFile}`); } catch { return null; } }, goals: plane.goals, stage: plane.stage }, cutAt) : undefined;
+      const result = await cutAsync(git, { base, trigger: 'manual', now: new Date(now()), push: true, maxPrs: settings.everyMerges, pendingOutcomes });
       return result.cut ? { cut: true, candidate: toCandidate(result.candidate) } : { cut: false, reason: result.reason };
     },
     uat: async id => { const deployed = await deployToUatAsync(git, id, base, new Date(now())); return { sha: deployed.sha }; },
