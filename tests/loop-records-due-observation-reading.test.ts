@@ -138,7 +138,7 @@ test('integration:loop-records-due-observation-reading — a follow-up owing a s
   const run = await cycleOver([parent, multi], await temporaryDirectory('loop-readings-multi'), reader);
   assert.deepEqual(asked, [proof], 'only the request\'s own proof is read through the parent proof');
   assert.deepEqual(run.recorded, [], 'a reading waits for every proof: nothing is recorded while the second cannot be taken');
-  assert.match(run.state.actions[`reading:${multi.id}`]!.detail, /manual:other-check-on-serving-release is not the item proof of any post-deploy proof of GY-1700/);
+  assert.match(run.state.actions[`reading:${multi.id}`]!.detail, /manual:other-check-on-serving-release is not the item proof of exactly one post-deploy proof of GY-1700/);
 });
 
 test('integration:loop-records-due-observation-reading — an added proof with its own parent post-deploy check is read through that parent proof, and an older parent carried only by the serving release\'s retained containment is read', async () => {
@@ -151,6 +151,40 @@ test('integration:loop-records-due-observation-reading — an added proof with i
   const run = await cycleOver([two, multi], await temporaryDirectory('loop-readings-added'), reader, now, { observeDeployment: async () => ({ source: 'endpoint', sha: serving, at: iso(now - 60_000), reason: null, deployed: [], pending: [], requests: 1, containment: settled }) as never });
   assert.deepEqual(asked.sort(), [added, proof].sort(), 'each item proof reads through the parent proof it was filed for');
   assert.equal(run.recorded.length, 2);
+});
+
+test('integration:loop-records-due-observation-reading — an unreleased item or one with unfinished dependencies is not read, recorded or closed', async () => {
+  const unreleased = followUp(1741, { ready: false }), waiting = followUp(1742, { dependencies: [base(1799).id] }), blocker = base(1799, { stage: 'ready' });
+  const asked: string[] = [];
+  const run = await cycleOver([parent, unreleased, waiting, blocker], await temporaryDirectory('loop-readings-unreleased'), async input => { asked.push(input.item.key); return { result: 'pass', detail: 'read' }; });
+  assert.deepEqual(asked, [], 'neither item is read');
+  assert.deepEqual([run.recorded, run.closed], [[], []]);
+});
+
+test('integration:loop-records-due-observation-reading — two parent proofs sharing one item proof name are never confused: the request\'s own proof is read, an unrequested ambiguous one is unavailable', async () => {
+  const first = 'manual:post-deploy/a/b', second = 'manual:post-deploy/a-b', shared = 'manual:a-b-on-serving-release';
+  const two = { ...parent, criteria: [{ id: 'AC-2', text: 'first', proofs: [first] }, { id: 'AC-3', text: 'second', proofs: [second] }] } as Work;
+  const request = (name: string) => `Post-deploy follow-up: post-deploy:${parentId}:AC-3:${name}:${filed}\n\nowed`;
+  const asked: string[] = [];
+  const reader: DaemonEffects['readPostDeploy'] = async input => { asked.push(input.proof); return { result: 'pass', detail: 'read' }; };
+  const mine = followUp(1743, { description: request(second), criteria: [{ id: 'AC-1', text: 'second', proofs: [shared] }] });
+  await cycleOver([two, mine], await temporaryDirectory('loop-readings-collide-own'), reader);
+  assert.deepEqual(asked, [second], 'the proof the follow-up was filed for, not the first that shares its name');
+  asked.length = 0;
+  const other = followUp(1744, { description: request('manual:post-deploy/elsewhere'), criteria: [{ id: 'AC-1', text: 'ambiguous', proofs: [shared] }] });
+  const run = await cycleOver([two, other], await temporaryDirectory('loop-readings-collide-ambiguous'), reader);
+  assert.deepEqual([asked, run.recorded], [[], []], 'an ambiguous name reads as neither');
+});
+
+test('integration:loop-records-due-observation-reading — a definite fail is recorded and escalated although another proof of the item is unavailable', async () => {
+  const second = 'manual:post-deploy/other-check', secondOwn = 'manual:other-check-on-serving-release';
+  const two = { ...parent, criteria: [parent.criteria[0], { id: 'AC-3', text: 'another live check', proofs: [second] }] } as Work;
+  const multi = followUp(1745, { criteria: [followUp(1745).criteria[0], { id: 'AC-2', text: 'a second check', proofs: [secondOwn] }] });
+  const reader: DaemonEffects['readPostDeploy'] = async input => input.proof === proof ? { result: 'fail', detail: 'three failed deliveries' } : { unavailable: 'no reader' };
+  const run = await cycleOver([two, multi], await temporaryDirectory('loop-readings-fail-unavailable'), reader);
+  assert.deepEqual(run.recorded.map(entry => [entry.reading.proof, entry.reading.result]), [[own, 'fail']]);
+  assert.match(run.state.actions[`escalation:reading:${multi.id}`]!.detail, /three failed deliveries/);
+  assert.deepEqual(run.closed, []);
 });
 
 test('integration:loop-records-due-observation-reading — a due reading never stands on a reused observation: production may have rolled within the reuse window', async () => {

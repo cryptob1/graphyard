@@ -66,8 +66,16 @@ async function projections(parent: Pick<Work, 'criteria'>, patterns?: PatternRea
 
 /** The item proof a follow-up is filed with for a parent's post-deploy proof (master-verification's filer). */
 const followUpItemProof = (parentProof: string) => `manual:${parentProof.slice(postDeployProofPrefix.length).replace(/\//g, '-')}-on-serving-release`;
-/** The parent's post-deploy proof an item proof of its follow-up stands for, or null when none does. */
-const parentProofOf = (parent: Pick<Work, 'criteria'>, proof: string) => parent.criteria.flatMap(entry => entry.proofs).find(entry => entry.startsWith(postDeployProofPrefix) && followUpItemProof(entry) === proof) ?? null;
+/**
+ * The parent's post-deploy proof an item proof of its follow-up stands for, or null when none does or
+ * the name is ambiguous. The item proof name is lossy (a slash becomes a hyphen), so two parent proofs
+ * can share one: the request's own proof wins for the proof it was filed for; any other name must have
+ * exactly one parent proof, never the first of several.
+ */
+const parentProofOf = (parent: Pick<Work, 'criteria'>, proof: string, requested?: string) => {
+  const matches = [...new Set(parent.criteria.flatMap(entry => entry.proofs))].filter(entry => entry.startsWith(postDeployProofPrefix) && followUpItemProof(entry) === proof);
+  return requested && matches.includes(requested) ? requested : matches.length === 1 ? matches[0] : null;
+};
 type Taken = { proof: string; reading: PostDeployReading };
 /** What one single-flight read of an item answers: the release it was read on, so an answer for a release the plane no longer serves is discarded, and the readings or the failure. */
 type Read = { release: string } & ({ readings: Taken[] } | { error: unknown });
@@ -75,10 +83,14 @@ const detailOf = (entry: Taken) => (entry.reading as { detail: string }).detail.
 /** The pull request a delivered-observation closure still owes GitHub, as the close's answer or the snapshot's document carries it. */
 const owedPullRequest = (work: unknown) => { const closure = (work as Pick<Work, 'closure'> | null | undefined)?.closure; return closure?.kind === 'delivered-observation' && closure.pullRequest?.outcome === 'owed' ? closure.pullRequest.pr : null; };
 
+/** A loop-owned item the loop may read now: open, released, unclaimed and unblocked, with every dependency done — an item whose work is not released yet is no item to close. */
+const readable = (item: Work, cycle: Pick<Cycle, 'now' | 'snapshot'>) => item.ready && !item.blocker && !(item.lease && Date.parse(item.lease.expiresAt) > cycle.now())
+  && item.dependencies.every(id => cycle.snapshot.work.find(entry => entry.id === id)?.stage === 'done') && !!loopObservationProofs(item);
+
 /** Whether a loop-owned reading is due this cycle, so the step reads the serving release afresh rather than standing on an older observation of it. */
 export function readingDueNow(cycle: Cycle): boolean {
   const { state, now, snapshot, open } = cycle;
-  return open.some(item => !item.blocker && !(item.lease && Date.parse(item.lease.expiresAt) > now()) && loopObservationProofs(item)
+  return open.some(item => readable(item, cycle)
     && !!loopObservation(item, new Date(now()), snapshot.work)?.due && readingDue(state.actions[readingKey(item)], state.cycle));
 }
 
@@ -106,7 +118,7 @@ export function readingDueNow(cycle: Cycle): boolean {
 export async function readingsStep(cycle: Cycle, served: DaemonState['deployment'] | typeof stillVerifying, deadline: number): Promise<number> {
   const { state, effects, now, snapshot, performed, isolate, open } = cycle;
   let deferred = 0;
-  const loopOwned = open.filter(item => !item.blocker && !(item.lease && Date.parse(item.lease.expiresAt) > now()) && loopObservationProofs(item));
+  const loopOwned = open.filter(item => readable(item, cycle));
   const noteFor = (item: Work, key: string, previous: DaemonAction | undefined, attempts: number) => async (outcome: DaemonAction['state'], detail: string) => {
     const entry = await record(state, key, { kind: 'deployment', work: item.key, principal: null, state: outcome, detail: detail.slice(0, 2000), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist);
     if (outcome !== 'waiting' || detailChanged(previous, entry.detail)) performed.push(entry);
@@ -174,8 +186,8 @@ export async function readingsStep(cycle: Cycle, served: DaemonState['deployment
       for (const proof of proofs) {
         if (loopReadingOn(item, proof, release)?.result === 'pass') { readings.push({ proof, reading: { result: 'pass', detail: 'already recorded' } }); continue; }
         // A follow-up item proof reads through the parent post-deploy proof it was filed for (the request's own, or one added later with its own parent check); a proof no parent proof stands behind is never read as another.
-        const parentProof = request ? parentProofOf(parent, proof) : proof;
-        if (parentProof === null) { readings.push({ proof, reading: { unavailable: `${proof} is not the item proof of any post-deploy proof of ${parent.key}, so no parent check stands for it` } }); continue; }
+        const parentProof = request ? parentProofOf(parent, proof, request.proof) : proof;
+        if (parentProof === null) { readings.push({ proof, reading: { unavailable: `${proof} is not the item proof of exactly one post-deploy proof of ${parent.key}, so no parent check stands for it` } }); continue; }
         const criterion = parent.criteria.find(entry => entry.proofs.includes(parentProof)) ?? null;
         // The parent's own check first: the filer verify-deployment uses reads whether the parent already carries a trusted passing observation of the proof on this release.
         const check = checks.find(entry => entry.proof === parentProof);
@@ -197,23 +209,28 @@ export async function readingsStep(cycle: Cycle, served: DaemonState['deployment
     if ('error' in taken.value) return note('failed', `Could not take ${item.key}'s reading on release ${short(release)}: ${message(taken.value.error)}`);
     const readings = taken.value.readings;
     const unavailable = readings.filter(entry => 'unavailable' in entry.reading);
-    if (unavailable.length) return note('waiting', `${item.key}'s reading is due on release ${short(release)} and cannot be taken from this host: ${unavailable.map(entry => `${entry.proof}: ${(entry.reading as { unavailable: string }).unavailable}`).join('; ')}`);
     // Every proof read: record each reading not yet on the item, bound as loopObservation reads it. A pass is recorded
     // once per release; a fail re-read on the backoff on this release stands as recorded while the
     // proof's newest loop reading is already a fail — the escalation below names the values measured now.
     try {
       for (const entry of readings) {
+        if ('unavailable' in entry.reading) continue;
         const reading = entry.reading as { result: 'pass' | 'fail'; detail: string };
+        // A pass waits for every proof to be readable; only a definite fail is recorded past an unavailable one.
+        if (unavailable.length && reading.result === 'pass') continue;
         if (reading.detail === 'already recorded' || (reading.result === 'fail' && loopReadingOn(item, entry.proof, release)?.result === 'fail')) continue;
         await effects.recordReading(item, { proof: entry.proof, sha: release, baseSha, policyRevision: item.policyRevision, result: reading.result, detail: reading.detail.slice(0, 2000) });
       }
     } catch (error) { return note('failed', `Could not record ${item.key}'s reading on release ${short(release)}: ${message(error)}`); }
     const failed = readings.filter(entry => (entry.reading as { result: string }).result === 'fail');
+    const cannot = unavailable.length ? `${item.key}'s reading is due on release ${short(release)} and cannot be taken from this host: ${unavailable.map(entry => `${entry.proof}: ${(entry.reading as { unavailable: string }).unavailable}`).join('; ')}` : null;
+    // A definite fail is recorded and escalated even while another proof is unavailable; a pass never closes past an unread proof.
+    if (!failed.length && cannot) return note('waiting', cannot);
     if (failed.length) {
       const measured = failed.map(entry => `${entry.proof}: ${detailOf(entry)}`).join('; ');
       const escalationKey = readingEscalationKey(item), escalation = `${item.key}'s reading of ${failed.map(entry => entry.proof).join(', ')} failed on the serving release ${short(release)}: ${measured}. The failed reading is recorded on the item; the loop reads it again on its backoff, and a later passing reading closes the item`;
       if (detailChanged(state.actions[escalationKey], escalation)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: escalation.slice(0, 2000), attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-      return note('waiting', `Recorded ${item.key}'s failed reading on release ${short(release)}: ${measured}`);
+      return note('waiting', `Recorded ${item.key}'s failed reading on release ${short(release)}: ${measured}${cannot ? `; ${cannot}` : ''}`);
     }
     return close(item, release, readings.map(entry => ({ proof: entry.proof, detail: detailOf(entry) === 'already recorded' ? loopReadingOn(item, entry.proof, release)!.reading!.detail : detailOf(entry) })), note);
   });

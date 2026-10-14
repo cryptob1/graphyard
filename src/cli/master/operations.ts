@@ -3,7 +3,7 @@ import { parseArgs } from 'node:util';
 import { resourceConflicts } from '../../coordination.js';
 import { handSettlementRefusal } from '../../model/containment.js';
 import { agentToken, dispatchWork, listHerdrAgents, readWorkerCredential, snapshotWithClock, verifyContainmentDeath, withReviewerDefaults, withRoleDefaults } from '../../master.js';
-import { readDaemonState } from '../../master-daemon.js';
+import { observeDeployment, readDaemonState } from '../../master-daemon.js';
 import { localPostDeployChecks, verificationEffects, verifyDeployment, type PostDeployChecksInput } from '../../master-verification.js';
 import { cycleBudget, masterStatusReport } from '../master-status.js';
 import { masterHeartbeatMinutes, masterSessionMinutes } from '../../master/master-session.js';
@@ -186,14 +186,13 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     const proofs = loopObservationProofs(work);
     if (!proofs) throw new Error(`${work.key} is not a loop-owned observation item; a reading is recorded only on an item whose every criterion is a post-deploy observation the loop takes`);
     const request = followUpRequest(work), parent = request ? snapshot.work.find((item: any) => item.id === request.work) : null;
-    const served = (await readDaemonState(root, master).catch(() => null))?.deployment;
-    if (!served?.sha || served.source === 'unavailable') throw new Error('The loop has not verified a serving release; the reading is bound to one, so run the loop first');
-    // The observation is the loop's, taken this cycle or the last: after a rollout or a stopped loop it names a release the plane may no longer serve.
-    const age = Date.now() - Date.parse(served.at);
-    if (!(age <= Math.max(300, master.run.intervalSeconds * 3) * 1000)) throw new Error(`The loop's last verified serving release (${served.sha.slice(0, 12)}) was observed ${Number.isFinite(age) ? `${Math.round(age / 1000)}s ago` : 'at an unknown time'}, too long ago to bind a reading to: run the loop (master status) until it observes the release again`);
+    // The release is observed now, not read from the loop's last cycle: a rollout since then would bind the reading to a release the plane no longer serves.
+    const retained = (await readDaemonState(root, master).catch(() => null))?.deployment?.containment ?? null;
+    const served = await observeDeployment(master, [request && parent?.delivery ? parent : work], effects.run, fetch, () => Date.now(), { root, retained });
+    if (!served.sha || served.source === 'unavailable') throw new Error(`The serving release could not be observed now${served.reason ? `: ${served.reason}` : ''}; the reading is bound to one, so retry once it can be`);
     if (request && !parent?.delivery) throw new Error(`${work.key}'s follow-up request names ${request.work}, which is not a delivered item`);
     // The same check the loop's reading makes: a release not observed carrying the parent's merge is no observation of it.
-    if (request && !(served.deployed as string[]).includes(parent.key)) throw new Error(`${work.key}'s reading is due, and the release the control plane serves (${served.sha.slice(0, 12)}) is not observed carrying ${parent.key}'s merge ${String(parent.delivery.mergeSha).slice(0, 12)}; the loop reads it on a release that does`);
+    if (request && !(served.deployed.includes(parent.key) || (served.containment?.release === served.sha && Object.hasOwn(served.containment.settled, parent.key)))) throw new Error(`${work.key}'s reading is due, and the release the control plane serves (${served.sha.slice(0, 12)}) is not observed carrying ${parent.key}'s merge ${String(parent.delivery.mergeSha).slice(0, 12)}; the loop reads it on a release that does`);
     // The proof named, else the first the loop has no passing reading of on this release, else the first.
     const named = proofs.includes(rest[0]) ? rest[0] : null, detail = (named ? rest.slice(1) : rest).join(' ').trim();
     if (!detail) throw new Error(usage);
