@@ -27,6 +27,7 @@ import { describeTimings } from '../master/timings.js';
 import { stopDoctorRuns, doctorReport } from './doctor.js';
 import { mainWatchSummary } from './main-watch.js';
 import { shadowGateSummary } from './cycle-shadow.js';
+import { adoptLoopRelease, fileSlowLoopItem } from './slow-loop-item.js';
 import { mergeWriterSummary } from './cycle-merge-writer.js';
 import { detachRuns } from '../runner/registry.js';
 import type { LoopWake } from './loop-wake.js';
@@ -71,6 +72,8 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     mergeWriter: mergeWriterSummary(state.mergeWriter),
     // The release this process loaded, and what the between-cycles self-upgrade has done (GY-437).
     release: state.release,
+    // The slow-loop run on that release and the fix item it filed (GY-1775), which the slow-cycle attention names.
+    slowLoop: state.slowLoop,
     upgrade: state.upgrade,
     profiles: state.profiles,
     config: state.config,
@@ -264,6 +267,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     // GY-437: the release is this process's, never the cursor's: a loop re-executed onto a moved
     // checkout must not report the release the process before it loaded.
     state.release = raw.loadedRelease ?? null;
+    adoptLoopRelease(state); // GY-1775: a release other than the cursor's starts the slow-loop run at this process's first cycle, persisted before it runs
     await effects.persist(state);
     // Under a supervisor that watches for keep-alives, a hung cycle is a restart rather than a
     // silent pipeline; a window that would restart a healthy loop is recorded and left to the
@@ -342,6 +346,9 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           const recovered = noteCycleSuccess(state);
           if (recovered) await effects.persist(state);
           cycles.push({ cycle: result.metrics.cycle, actions: result.actions.length, durationMs: result.metrics.durationMs, childWaitMs: result.metrics.childWaitMs ?? 0 });
+          // GY-1775: three consecutive cycles past the cycle bound on one loaded release file the fix item naming the slowest step and call.
+          const slowLoop = await fileSlowLoopItem(state, effects, now);
+          if (slowLoop) log(`[graphyard-master] cycle ${result.metrics.cycle} ${slowLoop.kind} ${slowLoop.state}: ${slowLoop.detail}`);
           for (const action of result.actions) log(`[graphyard-master] cycle ${result.metrics.cycle} ${action.kind} ${action.state}: ${action.detail}`);
           // Both halves of every cycle: what it could act on, and what it did about it — and where its
           // time went: its three slowest steps and its slowest external call (GY-377).
