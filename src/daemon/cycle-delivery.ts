@@ -14,6 +14,7 @@ import type { Cycle } from './cycle.js';
 import { defaultDeploymentReuseMinutes, defaultPromoteEveryMinutes, deploymentDetail, deploymentStepBudgetMs, promotionCycle, promotionWorkflow, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
 import { mainGuardAttention } from '../main-guard.js';
 import { promotionFreeze } from './main-watch.js';
+import { readingDueNow, readingsStep } from './cycle-readings.js';
 import { openThroughputOwner, throughputAnsweredAt, throughputClaim, throughputDecisionCause, throughputDecisionRelease, throughputHandAsked, throughputOwnerAnsweredBy, throughputOwnerClosure, throughputOwnerItem, throughputRemeasureAt, throughputSelfAsked, throughputStallText, type ThroughputStall } from '../throughput.js';
 
 /**
@@ -119,7 +120,8 @@ export async function deploymentStep(cycle: Cycle) {
   // GY-1398: a verified observation younger than the reuse window that already places every
   // delivery and leaves none pending stands as it is: the cycle starts no release read at all.
   const reuseMs = (config.run.deploymentReuseMinutes ?? defaultDeploymentReuseMinutes) * 60_000;
-  const reused = reusableDeployment(state.deployment, delivered, now(), reuseMs);
+  // A due loop-owned reading binds to the release read now: a reused observation up to the window old may name a release production has since left.
+  const reused = !readingDueNow(cycle) && reusableDeployment(state.deployment, delivered, now(), reuseMs);
   const observed = reused ? { ok: true as const, value: state.deployment! } : await withinDeploymentBudget(state, 'observation', () => effects.observeDeployment(delivered, state.deployment?.containment ?? null), deadline, now);
   if (observed === stillVerifying) deferred.push('the release observation');
   else if (!reused) try {
@@ -249,6 +251,11 @@ export async function deploymentStep(cycle: Cycle) {
     }
   });
   if (smokeDeferred) deferred.push(`${smokeDeferred} deliveries' deployment records and smoke requests`);
+  // 7c. GY-1779: the loop's own due readings of loop-owned observation items on the release verified above
+  //     (cycle-readings.ts). An observation still in flight verifies nothing this cycle: the due readings
+  //     are deferred with it, never taken on the release the last cycle observed.
+  const readingsDeferred = await readingsStep(cycle, observed === stillVerifying ? stillVerifying : served, deadline);
+  if (readingsDeferred) deferred.push(`${readingsDeferred} loop-owned observation readings`);
   await noteDeploymentBudget(cycle, budgetMs, deferred);
 }
 
