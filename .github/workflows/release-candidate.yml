@@ -39,11 +39,16 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+    # The cut reads the plane's goals (GY-1802) to record outcomes whose plan is undelivered as pending;
+    # the uat environment holds the credential and URL for that read.
+    environment: uat
     outputs:
       id: ${{ steps.pin.outputs.id }}
       sha: ${{ steps.pin.outputs.sha }}
     env:
       PINNED: ${{ inputs.sha || (github.event_name == 'push' && github.sha) || '' }}
+      GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
+      GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with: { ref: main, fetch-depth: 0 }

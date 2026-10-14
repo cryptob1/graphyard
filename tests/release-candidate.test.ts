@@ -477,6 +477,9 @@ test('unit:candidate-records-pending-outcomes-at-cut — the candidate records, 
     items: [{ ref: 'routes', key: 'GY-900', id: 'w-1' }] };
   const drafting: any = { id: 'g-2', key: 'GOAL-8', merged: null, protected: { cases: [], outcomes: [] }, plan: null, items: [] };
   assert.deepEqual(goalDeliveries([released, drafting]), goal, 'the plane\'s goal record reads as the cut\'s pending-outcome input');
+  // An approved acceptance whose merge is on main before `goal land` recorded it already protects its drafted outcomes.
+  const landing: any = { id: 'g-3', key: 'GOAL-7', stage: 'accepted', merged: null, approval: { by: 'approver', at: '2026-10-03T10:00:00.000Z', reason: 'ok', head: 'b'.repeat(40) }, acceptance: { outcomes: [{ id: 'goal-outcome' }] }, protected: { cases: [], outcomes: [] }, plan: null, items: [] };
+  assert.deepEqual(goalDeliveries([landing]), [{ outcomes: ['goal-outcome'], items: [] }], 'an approved, not yet recorded merge still names its outcomes pending');
 
   // Cut in each state. The pending cut records the outcome on the candidate; the delivered cut records none, and its case blocks like any required case.
   const repo = await repository();

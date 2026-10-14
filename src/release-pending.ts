@@ -6,13 +6,14 @@ import type { Work } from './model.js';
 import { pendingOutcomeIds, type GoalDelivery } from './release-candidate.js';
 
 /**
- * The plane's goal record as the cut's pending-outcome check reads it: every merged goal (one
+ * The plane's goal record as the cut's pending-outcome check reads it: every merged goal, or approved one whose merge may sit on the candidate before it is recorded (one
  * with no approved plan yet has no items, so its outcomes are all pending), its protected outcomes, and each plan item's serving outcomes with the work item
  * created for it (null until the plan is released).
  */
 export function goalDeliveries(goals: readonly Goal[]): GoalDelivery[] {
-  return goals.filter(goal => goal.merged).map(goal => ({
-    outcomes: goal.protected.outcomes,
+  return goals.filter(goal => goal.merged || (goal.stage === 'accepted' && goal.approval && goal.acceptance)).map(goal => ({
+    // An approved acceptance whose merge reached main before `goal land` recorded it still protects what it drafted.
+    outcomes: goal.merged ? goal.protected.outcomes : (goal.acceptance?.outcomes ?? []).map(outcome => outcome.id),
     items: (goal.plan?.items ?? []).map(item => ({ outcomes: item.outcomes, key: goal.items?.find(released => released.ref === item.ref)?.key ?? null })),
   }));
 }
