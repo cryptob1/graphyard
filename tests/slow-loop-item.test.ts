@@ -33,12 +33,14 @@ function cycle(index: number, durationMs: number, steps: Record<string, number>,
 const slow = (index: number, step = 'decisions', ms = 90_000) => cycle(index, ms, { snapshot: 2_000, [step]: ms - 10_000, merges: 3_000 }, [{ kind: 'server', name: 'GET work', ms: 8_000, step: 'snapshot' }, { kind: 'github', name: 'gh pr view', ms: 41_000, step }]);
 const fast = (index: number) => cycle(index, 12_000, { snapshot: 2_000, decisions: 4_000 });
 
-function world(release: string | null = releaseA, initial?: DaemonState) {
+/** The fake control plane: the receipts it holds outlive any one loop process, so a restarted loop asks the plane that already answered. */
+type Plane = { filed: { key: string; work: string; title: string }[]; requests: string[]; bodies: Map<string, string[]>; receipts: Map<string, { fingerprint: string; result: Work }>; counter: { next: number }; mode: 'up' | 'lost' | 'exit'; exited: ((cursor: string) => void) | null };
+const newPlane = (): Plane => ({ filed: [], requests: [], bodies: new Map(), receipts: new Map(), counter: { next: 1800 }, mode: 'up', exited: null });
+
+function world(release: string | null = releaseA, initial?: DaemonState, plane: Plane = newPlane()) {
   const state: DaemonState = initial ?? emptyDaemonState(config);
   state.release = release ? { commit: release, dirty: false } : null;
-  const filed: { key: string; work: string; title: string }[] = [], requests: string[] = [], bodies = new Map<string, string[]>(), writes: string[] = [];
-  const receipts = new Map<string, { fingerprint: string; result: Work }>();
-  let plane: 'up' | 'lost' = 'up', next = 1800;
+  const writes: string[] = [];
   // The control plane fingerprints each Idempotency-Key's parsed body (src/engine.ts:1100-1101, 1155-1158)
   // and refuses a key reused with a different one, so this fake answers a replay only when the body
   // is byte-identical to the one the key was first asked under.
@@ -46,16 +48,17 @@ function world(release: string | null = releaseA, initial?: DaemonState) {
   const effects = {
     persist: async () => { writes.push(JSON.stringify(state)); },
     fileSlowLoopItem: async (input: { title: string }, key: string): Promise<Work> => {
-      requests.push(key);
-      const asked = bodies.get(key) ?? []; bodies.set(key, asked); asked.push(JSON.stringify(input));
-      const seen = receipts.get(key);
-      if (plane === 'lost') {
-        // The plane committed the ask and the reply was lost: the receipt stands, the caller saw nothing.
+      plane.requests.push(key);
+      const asked = plane.bodies.get(key) ?? []; plane.bodies.set(key, asked); asked.push(JSON.stringify(input));
+      const seen = plane.receipts.get(key);
+      if (plane.mode !== 'up') {
+        // The plane committed the ask and the loop saw nothing: the reply was lost, or the loop process exited with the POST in flight.
         if (!seen) {
-          const work = `GY-${next++}`;
-          filed.push({ key, work, title: input.title });
-          receipts.set(key, { fingerprint: fingerprint(input), result: { key: work, title: input.title } as unknown as Work });
+          const work = `GY-${plane.counter.next++}`;
+          plane.filed.push({ key, work, title: input.title });
+          plane.receipts.set(key, { fingerprint: fingerprint(input), result: { key: work, title: input.title } as unknown as Work });
         }
+        if (plane.mode === 'exit') { plane.exited?.(writes.at(-1)!); return new Promise<Work>(() => {}); } // the process is gone: nothing resolves
         throw new Error('Graphyard refused work (502): upstream unavailable');
       }
       if (seen) {
@@ -63,16 +66,19 @@ function world(release: string | null = releaseA, initial?: DaemonState) {
         if (seen.fingerprint !== fingerprint(input)) throw new Error('409: Idempotency key reused with different input');
         return seen.result;
       }
-      const work = `GY-${next++}`;
-      filed.push({ key, work, title: input.title });
+      const work = `GY-${plane.counter.next++}`;
+      plane.filed.push({ key, work, title: input.title });
       const result = { key: work, title: input.title } as unknown as Work;
-      receipts.set(key, { fingerprint: fingerprint(input), result });
+      plane.receipts.set(key, { fingerprint: fingerprint(input), result });
       return result;
     },
   } as unknown as Pick<DaemonEffects, 'fileSlowLoopItem' | 'persist'> & { fileSlowLoopItem: NonNullable<DaemonEffects['fileSlowLoopItem']> };
   /** Runs one completed cycle through the filing rule, as run.ts does after runCycle. */
   const complete = async (metrics: CycleMetrics) => { state.metrics.push(metrics); state.cycle = metrics.cycle + 1; return (await rule()).fileSlowLoopItem(state, effects, () => base + (metrics.cycle + 1) * minute); };
-  return { state, effects, filed, requests, bodies, writes, complete, lose: () => { plane = 'lost'; }, restore: () => { plane = 'up'; } };
+  return { state, effects, plane, filed: plane.filed, requests: plane.requests, bodies: plane.bodies, writes, complete,
+    lose: () => { plane.mode = 'lost'; }, restore: () => { plane.mode = 'up'; },
+    /** The loop process exits with its next ask in flight: resolves with the cursor as it stood at that ask. */
+    exit: () => new Promise<string>(resolve => { plane.mode = 'exit'; plane.exited = resolve; }) };
 }
 
 test('unit:slow-loop-files-once — three consecutive cycles past slowCycleMs on one release file exactly one item under the release-and-step key; a fourth slow cycle and a retry after a lost reply file nothing new; two slow cycles file nothing; a slow run on another release files its own item', async () => {
@@ -152,8 +158,8 @@ test('unit:slow-loop-files-once — three consecutive cycles past slowCycleMs on
   assert.deepEqual(daemonStateSchema.parse(older).slowLoop, { release: null, consecutive: 0, filed: {}, pending: null });
 });
 
-test('unit:slow-loop-run-persisted — each count and reset is persisted as it is counted, so three slow cycles spanning a restart file exactly one item and a carried reset files nothing early, and an unanswered filing is retried from the cursor with the body it was first asked under', async () => {
-  const { slowLoopIdempotencyKey } = await rule();
+test('unit:slow-loop-run-persisted — each count and reset is persisted as it is counted, so three slow cycles spanning a restart file exactly one item and a carried reset files nothing early; an unanswered filing, or one the loop exited in the middle of, is retried from the cursor with the body it was first asked under; an answered refusal backs off', async () => {
+  const { slowLoopActionKey, slowLoopAskReady, slowLoopIdempotencyKey, slowLoopItem } = await rule();
   // Each count and reset lands on the cursor through the persists the rule asks for.
   const counted = world();
   await counted.complete(slow(1)); await counted.complete(slow(2));
@@ -182,25 +188,65 @@ test('unit:slow-loop-run-persisted — each count and reset is persisted as it i
   assert.equal(failed?.state, 'failed');
   const key = slowLoopIdempotencyKey(releaseA, 'decisions'), onTheCursor = JSON.parse(lost.writes.at(-1)!).slowLoop.pending;
   assert.equal(onTheCursor.key, key, 'the unanswered filing is on the cursor under its key');
-  const restarted = world(releaseA, daemonStateSchema.parse(JSON.parse(lost.writes.at(-1)!)));
+  const restarted = world(releaseA, daemonStateSchema.parse(JSON.parse(lost.writes.at(-1)!)), lost.plane);
   assert.equal(restarted.state.slowLoop.pending?.step, 'decisions');
   restarted.restore();
   const retried = await restarted.complete(slow(4));
   assert.equal(retried?.state, 'done');
   assert.equal(retried?.work, 'GY-1800', 'the plane answers the retry with the item it filed when the reply was lost');
-  assert.deepEqual(restarted.requests, [key], 'the retry asks the same key once more');
-  assert.deepEqual(restarted.bodies.get(key), [lost.bodies.get(key)![0]], 'the retry asks the original body, byte for byte');
+  assert.deepEqual(restarted.requests, [key, key], 'the retry asks the same key once more');
+  assert.deepEqual(restarted.bodies.get(key), [lost.bodies.get(key)![0], lost.bodies.get(key)![0]], 'the retry asks the original body, byte for byte');
   assert.equal(restarted.filed.length, 1, 'the plane filed it once');
   assert.equal(restarted.state.slowLoop.pending, null, 'the answered filing is cleared');
-  // An answered refusal is not kept: the plane judged it, so a later cycle asks afresh what the run then sees.
+  // The loop process exits with the ask in flight (or after the plane answered, before the done record
+  // persisted: the cursor is the same): the body went on the cursor before the ask, with the started
+  // record, so the restarted loop asks that body under that key and is answered with the item the plane
+  // filed — the item the loop never learned of — rather than a body rebuilt from its shifted window.
+  const gone = world();
+  await gone.complete(slow(1)); await gone.complete(slow(2));
+  const cursorAtTheAsk = gone.exit();
+  void gone.complete(slow(3)); // never returns: the process is gone
+  const midAsk = JSON.parse(await cursorAtTheAsk);
+  const actionKey = slowLoopActionKey(releaseA, 'decisions');
+  assert.equal(midAsk.slowLoop.pending?.key, key, 'the body is on the cursor before it is asked');
+  assert.equal(midAsk.actions[actionKey]?.state, 'started', 'the ask is on the cursor as started');
+  assert.equal(gone.filed.length, 1, 'the plane filed the item the loop never heard of');
+  const revived = world(releaseA, daemonStateSchema.parse(midAsk), gone.plane);
+  revived.restore();
+  const firstBody = gone.bodies.get(key)![0];
+  // A body rebuilt from the restarted loop's own window is what the plane refuses for this key.
+  const rebuilt = slowLoopItem(releaseA, [slow(2), slow(3), slow(4)], cycleTimes([...revived.state.metrics, slow(4)], base + 5 * minute));
+  assert.notEqual(JSON.stringify(rebuilt), firstBody, 'the shifted window builds a different body');
+  await assert.rejects(revived.effects.fileSlowLoopItem(rebuilt, key), /Idempotency key reused with different input/, 'the plane refuses the rebuilt body under the asked key');
+  revived.requests.length = 0; gone.bodies.set(key, [firstBody]);
+  const answered = await revived.complete(slow(4));
+  assert.equal(answered?.state, 'done');
+  assert.equal(answered?.work, 'GY-1800', 'the plane answers the replay with the item it filed during the ask the exit cut off');
+  assert.deepEqual(revived.requests, [key], 'the restarted loop asks the key once more, at once: an interrupted ask waits for no backoff');
+  assert.deepEqual(revived.bodies.get(key), [firstBody, firstBody], 'the restarted loop asks the body it found on the cursor, byte for byte');
+  assert.equal(revived.filed.length, 1, 'nothing is filed twice');
+  assert.equal(revived.state.slowLoop.pending, null, 'the answered filing is cleared');
+  assert.equal(revived.state.actions[actionKey]?.state, 'done');
+  assert.equal(revived.state.slowLoop.filed[`${releaseA}:decisions`]?.key, 'GY-1800', 'the cursor now knows the item');
+  assert.equal(await revived.complete(slow(5)), null, 'a later slow cycle asks nothing more');
+  assert.deepEqual(revived.requests, [key]);
+  // An answered refusal is not kept: the plane judged it, so a later cycle asks afresh what the run then
+  // sees — after the daemon's usual backoff (readyToRetry), not on every slow cycle.
   const judged = world();
-  judged.effects.fileSlowLoopItem = (async () => { throw new Error('422: the item is refused'); }) as never;
+  let refusals = 0;
+  judged.effects.fileSlowLoopItem = (async () => { refusals += 1; throw new Error('422: the item is refused'); }) as never;
   await judged.complete(slow(1)); await judged.complete(slow(2));
   const refused = await judged.complete(slow(3));
   assert.equal(refused?.state, 'failed');
   assert.equal(judged.state.slowLoop.pending, null, 'an answered refusal keeps no pending body');
   assert.match(refused!.detail, /422/);
   assert.ok(!refused!.detail!.includes('did not answer'), 'an answered refusal is not an unanswered plane');
+  const askedAt: number[] = [];
+  for (const index of [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]) { const before = refusals; await judged.complete(slow(index)); if (refusals > before) askedAt.push(index); }
+  assert.deepEqual(askedAt, [4, 6, 10], 'a refused ask backs off by its attempts (1, 2, then 4 cycles) rather than being asked on every slow cycle');
+  assert.ok(slowLoopAskReady({ state: 'started', cycle: 3, attempts: 1 } as never, 4), 'an ask a restart cut off is ready at the next cycle');
+  assert.ok(!slowLoopAskReady({ state: 'started', cycle: 4, attempts: 1 } as never, 4), 'an ask in flight this cycle is not asked again');
+  assert.ok(!slowLoopAskReady({ state: 'done', cycle: 3, attempts: 1 } as never, 9), 'a done record is never asked again');
 });
 
 test('unit:slow-loop-item-contents — the filed item names the release commit, the cycle p50 and p95, the slowest step with its source file and the slowest external call, and the slow-cycle attention row names the item\'s key once it is filed', async () => {

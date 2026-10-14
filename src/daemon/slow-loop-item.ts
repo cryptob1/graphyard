@@ -8,6 +8,7 @@ import type { Work } from '../model.js';
 import type { DaemonEffects } from './effects.js';
 import { cycleTimes, slowCycleMs } from './liveness.js';
 import { record } from './preserve.js';
+import { readyToRetry } from './sessions.js';
 import { type CycleMetrics, type DaemonAction, type DaemonState, message, type SlowLoopState } from './state.js';
 
 /** Consecutive cycles past `slowCycleMs` on one loaded release before the loop files the item. */
@@ -114,15 +115,29 @@ export function noteSlowCycle(state: Pick<DaemonState, 'metrics' | 'release' | '
 }
 
 /**
+ * The next ask for a record the plane has already answered or interrupted waits as the daemon's other
+ * retries do (`readyToRetry`): an answered refusal backs off by its attempts rather than being asked
+ * again on every slow cycle, and an ask a restart cut off (`started` from an earlier cycle: the loop
+ * exited while the POST was in flight, or before the `done` record persisted) is asked again at once.
+ */
+export function slowLoopAskReady(previous: DaemonAction | undefined, cycle: number) {
+  if (previous?.state === 'started') return previous.cycle < cycle;
+  return readyToRetry(previous, cycle);
+}
+
+/**
  * After a completed cycle: files the fix item once the run reaches three slow cycles on one release,
  * as the operator-agent under the release-and-step idempotency key. Each count and reset is
  * persisted as it is counted — the cycle's metrics were persisted before this call, so an unpersisted
  * count or reset would be lost by a restart, and three slow cycles spanning one would file nothing.
- * A later slow cycle whose window names the step already filed files nothing and makes no request; a
- * retry after a lost reply asks again with the body as it was first asked, under the same key, and is
- * answered with the item already filed — the control plane fingerprints each Idempotency-Key's parsed
- * body and refuses a key reused with a different one. Nothing is filed without the operator-agent
- * identity (`fileSlowLoopItem` absent), as the throughput owner does.
+ * A later slow cycle whose window names the step already filed files nothing and makes no request.
+ * The body is kept on the cursor as `slowLoop.pending` before it is asked, with the `started` record's
+ * persist, and cleared by any answered reply: a retry after a lost reply — the plane did not answer,
+ * or the loop exited while the POST was in flight or before the `done` record persisted — asks again
+ * with the body as it was first asked, under the same key, and is answered with the item already
+ * filed; the control plane fingerprints each Idempotency-Key's parsed body and refuses a key reused
+ * with a different one, so a body rebuilt from a later window would be refused without end. Nothing
+ * is filed without the operator-agent identity (`fileSlowLoopItem` absent), as the throughput owner does.
  */
 export async function fileSlowLoopItem(state: DaemonState, effects: Pick<DaemonEffects, 'fileSlowLoopItem' | 'persist'>, now: () => number): Promise<DaemonAction | null> {
   const before = state.slowLoop, beforeCount = state.slowLoop.consecutive, run = noteSlowCycle(state);
@@ -133,8 +148,12 @@ export async function fileSlowLoopItem(state: DaemonState, effects: Pick<DaemonE
   const pending = state.slowLoop.pending?.release === release ? state.slowLoop.pending : null;
   const input = pending ? pending.input : slowLoopItem(release, window, cycleTimes(state.metrics, now())), step = pending ? pending.step : slowLoopWindow(window).slowest?.step ?? 'unrecorded';
   if (filedSlowLoopItem(state.slowLoop, release, step)) return null;
-  const key = pending?.key ?? slowLoopIdempotencyKey(release, step), actionKey = slowLoopActionKey(release, step),
-    previous = state.actions[actionKey], attempts = previous?.state === 'done' ? 1 : (previous?.attempts ?? 0) + 1;
+  const key = pending?.key ?? slowLoopIdempotencyKey(release, step), actionKey = slowLoopActionKey(release, step), previous = state.actions[actionKey];
+  if (!slowLoopAskReady(previous, state.cycle)) return null;
+  const attempts = previous?.state === 'done' ? 1 : (previous?.attempts ?? 0) + 1;
+  // The body goes on the cursor before it is asked, so a loop that exits mid-ask retries this body, not one rebuilt from a later window.
+  const parsed = slowLoopItemInputSchema.safeParse(input);
+  state.slowLoop.pending = parsed.success ? { release, step, key, input: parsed.data, at: pending?.at ?? new Date(now()).toISOString() } : null;
   await record(state, actionKey, { kind: 'fault', work: null, principal: null, state: 'started',
     detail: pending ? `Asking again for the slow master loop item on release ${release.slice(0, 12)} (the ${step} step), with the body it was first asked under: the control plane never answered`
       : `Filing one item for the slow master loop: ${window.length} consecutive cycles past ${seconds(slowCycleMs)} on release ${release.slice(0, 12)}, the ${step} step slowest`,
@@ -146,12 +165,11 @@ export async function fileSlowLoopItem(state: DaemonState, effects: Pick<DaemonE
     state.slowLoop.filed[filedKey(release, step)] = { key: filed.key, step, file: input.plannedFiles?.[0] ?? null, cycle: window.at(-1)!.cycle, at: new Date(now()).toISOString() };
     return record(state, actionKey, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} for the slow master loop on release ${release.slice(0, 12)}: the ${step} step is the slowest across cycles ${window.map(metrics => metrics.cycle).join(', ')}; a later slow run on this release and step returns it`, attempts, cycle: state.cycle }, now(), effects.persist);
   } catch (error) {
-    // A control plane that did not answer refused nothing: the next slow cycle asks again under the same
-    // key, with the body kept as it was asked (GY-1344, GY-1345). An answered refusal is not kept: the
-    // plane judged it, so a later cycle may ask afresh what the run then sees.
+    // A control plane that did not answer refused nothing: the body stays pending and the next slow cycle
+    // asks it again under the same key (GY-1344, GY-1345). An answered refusal is not kept: the plane
+    // judged it, so a later cycle, after the backoff, may ask afresh what the run then sees.
     const unanswered = planeWideRefusal(error);
-    const parsed = unanswered ? slowLoopItemInputSchema.safeParse(input) : null;
-    state.slowLoop.pending = parsed?.success ? { release, step, key, input: parsed.data, at: new Date(now()).toISOString() } : null;
+    if (!unanswered) state.slowLoop.pending = null;
     return record(state, actionKey, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the item for the slow master loop on release ${release.slice(0, 12)}${unanswered ? ' (the control plane did not answer, so it is filed on a later slow cycle)' : ''}: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist, unanswered ? null : undefined);
   }
 }
