@@ -90,7 +90,7 @@ export function workerExhaustion(work: Pick<Work, 'capacity'>, epoch: number): E
   return (work.capacity?.exhaustions ?? []).find(entry => entry.role === 'worker' && entry.epoch === epoch) ?? null;
 }
 /**
- * One gap in the control plane's own reconciliation ticks (engine.ts `notePlaneTick`), read from
+ * One gap in the control plane's own reconciliation ticks (engine.ts `recordPlaneLiveness`), read from
  * the ledger: from the last tick before the gap to the tick that recovered, the plane was not
  * answering — a deploy, a stalled loop, a database the passes could not reach. A lease that runs
  * out inside one was not lost by a vanished worker: its renewals could not land because the plane

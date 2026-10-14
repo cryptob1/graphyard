@@ -33,23 +33,37 @@ const count = async (kind: string) => Number((await store.pool.query('SELECT cou
 const total = async () => Number((await store.pool.query('SELECT count(*) AS n FROM events')).rows[0].n);
 const document = async (id: string) => (await store.pool.query('SELECT document FROM work_items WHERE id=$1', [id])).rows[0].document as Work;
 
+// The simulated clock: the database stamps ledger rows with its own clock, so a span of time is
+// simulated by moving everything already recorded back by it — the ledger, the liveness tick and
+// the stalls' own bounds — which is what the passes would see after that long.
+const shift = async (ms: number) => {
+  const client = await store.pool.connect();
+  try {
+    await client.query('SET session_replication_role = replica'); // the ledger is append-only: only a simulated past moves it
+    await client.query(`UPDATE events SET created_at = created_at - $1 * interval '1 millisecond'`, [ms]);
+    for (const bound of ['from', 'to'])
+      await client.query(`UPDATE events SET payload = jsonb_set(payload, '{details,${bound}}', to_jsonb(to_char(((payload#>>'{details,${bound}}')::timestamptz - $1 * interval '1 millisecond') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))) WHERE kind = 'plane.stall'`, [ms]);
+  } finally { await client.query('RESET session_replication_role').catch(() => {}); client.release(); }
+  await store.pool.query(`UPDATE plane_liveness SET tick_at = tick_at - $1 * interval '1 millisecond'`, [ms]);
+};
+
 test('unit:soak-plane-stall — three simulated days of passes: one stall row per gap, no event per tick, and a lease that ran out inside a gap survives the pass that detects it', { timeout: 240_000 }, async () => {
   let work = await engine.execute(human, 'create', null, { title: 'plane-stall-soak', plannedFiles: ['src/plane-stall-soak.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
   work = await engine.execute(human, 'ready', work.id, {}, randomUUID());
   work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
   await engine.reconcile();
 
-  const gapsPerDay = 3, quietPasses = 4, days = 3;
-  let gaps = 0;
+  const gapsPerDay = 3, quietPasses = 4, days = 3, gapMs = 8 * 3_600_000;
+  let gaps = 0, simulated = 0;
   for (let day = 0; day < days; day++) for (let gap = 0; gap < gapsPerDay; gap++) {
     for (let pass = 0; pass < quietPasses; pass++) {
       const events = await total();
       await engine.reconcile();
       assert.equal(await total(), events, 'an ordinary pass appends no event: the liveness row is overwritten, never logged per tick');
     }
-    // The plane was down for 90 s: the lease ran out inside the gap, and the pass that ends the
-    // gap is the pass that first meets both the gap and the expired lease.
-    await store.pool.query(`UPDATE plane_liveness SET tick_at = tick_at - interval '${Math.round((planeStallMs + 30_000) / 1000)} seconds'`);
+    // The plane was down for eight hours: the lease ran out inside the gap, and the pass that ends
+    // the gap is the pass that first meets both the gap and the expired lease.
+    await shift(gapMs); simulated += gapMs;
     const doc = await document(work.id);
     // A renewal between gaps clears the last gap's grace, as a heartbeat does.
     delete (doc.lease as { renewalFault?: unknown }).renewalFault;
@@ -63,7 +77,17 @@ test('unit:soak-plane-stall — three simulated days of passes: one stall row pe
     assert.ok(after.lease && Date.parse(after.lease.expiresAt) > Date.now(), 'the lease survived the recovery pass');
     assert.deepEqual(standingEscalations(after).map(entry => entry.trigger), [], 'no lease loss stands');
   }
+  assert.ok(simulated >= days * 24 * 3_600_000, 'the run spans three simulated days');
   assert.equal(await count('plane.stall'), gaps, 'one stall row per gap over the whole run');
   assert.equal(Number((await store.pool.query('SELECT count(*) AS n FROM plane_liveness')).rows[0].n), 1, 'the liveness record stays one row');
   assert.equal(await count('lease.expired'), 0, 'no lapse was recorded: the stall kept the lease live');
+});
+
+test('unit:soak-plane-stall — two recorders racing one gap record it once, and a recorder that falls back records nothing', async () => {
+  await shift(planeStallMs * 3);
+  const before = await count('plane.stall');
+  await Promise.all([engine.recordPlaneLiveness(), engine.recordPlaneLiveness()]);
+  assert.equal(await count('plane.stall'), before + 1, 'the gap is one row however many recorders meet it');
+  await engine.recordPlaneLiveness(new Date(Date.now() - planeStallMs * 5));
+  assert.equal(await count('plane.stall'), before + 1, 'an earlier clock reading moves nothing');
 });

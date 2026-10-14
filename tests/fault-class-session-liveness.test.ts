@@ -394,7 +394,7 @@ test('unit:fault-class-session-liveness GY-1571 — only a worker handle for an 
 // out, the lapse was raised as a lease loss, and the instance counted against the session. The
 // candidate bounds each attempt by the window it serves and, when the window closes on a request
 // that was never answered at all, rides one further lease period past the deadline — where the
-// plane's own stall record (notePlaneTick) keeps the lease live, GY-558's rule for the plane's own
+// plane's own stall record (recordPlaneLiveness) keeps the lease live, GY-558's rule for the plane's own
 // failures, so a recovery inside the allowance lands a renewal and the attempt survives.
 //
 // GY-1788: the launcher registered the attempt's session before its claim under the snapshot's

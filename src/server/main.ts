@@ -188,6 +188,9 @@ export async function main(options: MainOptions = {}) {
       if (preflight) await announcePreflight(preflight);
     }
   }, 2000);
+  // The gap since the previous process ticked is on the record before the first heartbeat is answered (GY-1791).
+  await engine.recordPlaneLiveness();
+  const stopPlaneBeat = engine.startPlaneBeat();
   http.listen(options.port ?? Number(process.env.PORT ?? 4310), options.host ?? process.env.HOST ?? '127.0.0.1', () => console.log(`Graphyard listening on port ${(http.address() as AddressInfo).port}; GitHub ${github ? 'connected' : 'not configured'}`));
   await once(http, 'listening');
   void runStartupValidation();
@@ -195,7 +198,7 @@ export async function main(options: MainOptions = {}) {
   const close = async () => {
     closing = true;
     services.readiness = false; // soft-accept webhooks before the pool drains (GY-1700)
-    reconciliation.stop(); watching?.stop(); watching = null; await observing?.stop(); observing = null; await scanning?.stop(); scanning = null; retroIndex.stop();
+    reconciliation.stop(); stopPlaneBeat(); watching?.stop(); watching = null; await observing?.stop(); observing = null; await scanning?.stop(); scanning = null; retroIndex.stop();
     process.off('SIGTERM', shutdown); process.off('SIGINT', shutdown);
     await new Promise<void>(resolve => http.close(() => resolve()));
     await Promise.resolve(githubCache?.close());

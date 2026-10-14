@@ -285,7 +285,7 @@ export async function readAttestations(db: { query: (text: string, values: unkno
 }
 /**
  * The plane stalls recorded around `fromMs`..`untilMs` (wall-clock ms): the gaps in the
- * reconciliation loop's own ticks (notePlaneTick), each once in the ledger with no work of its
+ * reconciliation loop's own ticks (recordPlaneLiveness), each once in the ledger with no work of its
  * own. They are read beside the attestations wherever a lapse is classed, so a lease that ran out
  * while the plane itself was down is explained by the plane's record rather than counted as a
  * lost worker (GY-1791). The `created_at` index serves the read; the window is bounded by the
@@ -1215,7 +1215,7 @@ export class Engine {
    * first fault after its last renewal and inside its expiry window extends it to one lease period
    * after that fault, once — a later fault before a successful renewal extends nothing. A lease
    * whose worker stopped renewing has no such record and expires as before. A gap in the plane's
-   * own ticks (notePlaneTick) that covers the expiry is the same server-side fault in the plane
+   * own ticks (recordPlaneLiveness) that covers the expiry is the same server-side fault in the plane
    * itself (GY-1791): renewals could not land while no tick ran, so a supervisor still retrying
    * finds the lease live and renews, where the base lapsed it and raised a lease loss.
    */
@@ -2924,29 +2924,46 @@ export class Engine {
     // The event-loop lag over the tick's window (GY-1777): a timer's overrun past its 10 ms
     // resolution, so a tick slowed by a starved loop is told apart from one waiting on I/O.
     this.eventLoopLag.start();
-    // The gap since the previous pass is recorded before this pass classes any lapse (GY-1791):
-    // the pass that meets a lease the stall let run out must already find the stall on the record.
-    await this.notePlaneTick(new Date(), true);
+    // The plane's liveness is read before this pass classes any lapse (GY-1791): the pass that meets
+    // a lease the stall let run out must already find the stall on the record. The independent beat
+    // (startPlaneBeat) keeps the tick moving through a long pass, so a pass's own length is no gap.
+    await this.recordPlaneLiveness(new Date());
     try { await this.reconcilePass(tickStarted); }
     finally { this.eventLoopLag.stop(); }
-    // A pass that itself ran long moves the tick forward, so its own length is never read as a stall.
-    if (performance.now() - tickStarted > planeStallMs / 6) await this.notePlaneTick(new Date(), false);
   }
   /**
-   * Record this pass in the plane's own liveness (GY-1791) at its start, and a gap past `planeStallMs` since
-   * the previous pass as one `plane.stall` ledger row. That row is what lets the plane explain its
-   * own outages: a lease lapsing inside a recorded stall is history with its cause, never a lease
-   * loss (leaseLapseCause), and renewal grace keeps the lease live for a supervisor still retrying
+   * Record the plane's own liveness (GY-1791): the process beating on its own timer (startPlaneBeat),
+   * before it answers requests (the server's startup), and at the start of every pass all call this.
+   * A gap past `planeStallMs` since the previous record is one `plane.stall` ledger row, read, appended
+   * and moved forward in one transaction under the row's lock, so a failed write leaves the old tick
+   * and a concurrent process sees the gap once. That row is what lets the plane explain its own
+   * outages: a lease lapsing inside a recorded stall is history with its cause, never a lease loss
+   * (leaseLapseCause), and renewal grace keeps the lease live for a supervisor still retrying
    * (GY-558's rule). Best effort beside the pass — liveness bookkeeping never fails reconciliation.
    */
-  private async notePlaneTick(at: Date, detect: boolean) {
+  async recordPlaneLiveness(at: Date = new Date()) {
+    let db: PoolClient | null = null;
     try {
-      const previous = ((await this.store.pool.query('SELECT tick_at FROM plane_liveness WHERE id = true')).rows[0]?.tick_at ?? null) as Date | null;
-      if (detect && previous && at.getTime() - previous.getTime() > planeStallMs)
-        await this.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)',
-          ['graphyard', 'plane.stall', JSON.stringify({ details: { from: new Date(previous).toISOString(), to: at.toISOString() } })]);
-      await this.store.pool.query('INSERT INTO plane_liveness(id,tick_at) VALUES(true,$1) ON CONFLICT (id) DO UPDATE SET tick_at = EXCLUDED.tick_at', [at]);
-    } catch { /* the next pass records it; the plane's liveness is never reconciliation's failure */ }
+      db = await this.store.pool.connect();
+      await db.query('BEGIN');
+      await db.query('INSERT INTO plane_liveness(id,tick_at) VALUES(true,$1) ON CONFLICT (id) DO NOTHING', [at]);
+      const previous = (await db.query('SELECT tick_at FROM plane_liveness WHERE id = true FOR UPDATE')).rows[0].tick_at as Date;
+      if (at.getTime() > previous.getTime()) {
+        if (at.getTime() - previous.getTime() > planeStallMs)
+          await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)',
+            ['graphyard', 'plane.stall', JSON.stringify({ details: { from: previous.toISOString(), to: at.toISOString() } })]);
+        await db.query('UPDATE plane_liveness SET tick_at = $1 WHERE id = true', [at]);
+      }
+      await db.query('COMMIT');
+    } catch {
+      await db?.query('ROLLBACK').catch(() => {}); // the next beat records it
+    } finally { db?.release(); }
+  }
+  /** Beat the plane's liveness on a timer of its own, so slow serial work between passes is never read as an outage. */
+  startPlaneBeat(): () => void {
+    const timer = setInterval(() => { void this.recordPlaneLiveness(); }, planeStallMs / 6);
+    timer.unref();
+    return () => clearInterval(timer);
   }
   private async reconcilePass(tickStarted: number) {
     // A process's first pass would otherwise open on a cold stand-in cache and project every open
@@ -3205,7 +3222,7 @@ export class Engine {
     // attestation. It is read only where a lapse or a standing lease-loss makes it relevant.
     const standingLoss = standingEscalations(work).some(entry => entry.trigger === 'lease-loss');
     const attestations = leaseLost || standingLoss ? await readAttestations(db, work.id) : [];
-    // The plane's own recorded stalls over the last day (notePlaneTick): the read is rare and
+    // The plane's own recorded stalls over the last day (recordPlaneLiveness): the read is rare and
     // indexed, and it serves both the lapse being classed here and the standing losses a recorded
     // stall explains (GY-1791).
     const stalls = leaseLost || standingLoss ? await readPlaneStalls(db, now.getTime() - 24 * 3_600_000, now.getTime()) : [];
