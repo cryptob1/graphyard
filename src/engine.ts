@@ -745,9 +745,9 @@ function faceFields(before: string, after: string): string[] {
 function readsFace(work: Work, move: FaceMove) {
   return work.dependencies.includes(move.id) || (work.children ?? []).includes(move.key);
 }
-/** The slow-tick warning's account of a full pass (GY-1777): at most five moved faces by key and fields, then a count. */
+/** The slow-tick warning's account of a full pass (GY-1777): every moved face, by key and the fields that changed on it. */
 function describeFull(full: ReconcileFull) {
-  const moved = full.moved.length ? `the fleet face of ${full.moved.slice(0, 5).map(move => `${move.key} (${move.fields.join(', ')})`).join(', ')}${full.moved.length > 5 ? ` and ${full.moved.length - 5} more` : ''} moved` : '';
+  const moved = full.moved.length ? `the fleet face of ${full.moved.map(move => `${move.key} (${move.fields.join(', ')})`).join(', ')} moved` : '';
   const cause = { view: 'the kept view was empty (the first pass of this process, or one after a reset)', configuration: 'the merge configuration changed', interval: 'the full-evaluation interval elapsed', faces: moved }[full.cause];
   return full.cause !== 'faces' && moved ? `${cause}, and ${moved}` : cause;
 }

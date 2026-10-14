@@ -104,12 +104,14 @@ test('unit:slow-tick-names-cause — a tick past the bound names the keys and fa
   assert.ok(one.tick.lagMs ? one.tick.lagMs.max >= one.tick.lagMs.p50 && one.line.includes(`p50 ${one.tick.lagMs.p50} ms, max ${one.tick.lagMs.max} ms`) : one.line.includes('no event-loop lag sample'), 'the warning carries the lag the tick recorded');
   await settle();
 
-  // Seven faces moved: five keys are named, then a count.
+  // Seven faces moved: every key is named, each with the fields that changed on it.
   for (const item of items.slice(1, 8)) await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   const many = await slowPass();
   assert.equal(many.tick.full?.moved.length, 7);
-  const named = items.slice(1, 6).map(item => `${item.key} \\([^)]*\\)`).join(', ');
-  assert.match(many.line, new RegExp(`the fleet face of ${named} and 2 more moved`), many.line);
+  const named = items.slice(1, 8).map(item => `${item.key} \\([^)]*\\)`).join(', ');
+  assert.match(many.line, new RegExp(`the fleet face of ${named} moved`), many.line);
+  for (const item of items.slice(1, 8)) assert.match(many.line, new RegExp(`${item.key} \\([^)]*\\bready\\b[^)]*\\)`), many.line);
+  assert.doesNotMatch(many.line, /and \d+ more/, many.line);
   await settle();
 
   // Nothing moved but the clock: the interval is named, and no key.
