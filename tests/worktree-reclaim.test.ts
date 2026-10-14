@@ -789,3 +789,33 @@ test('unit:disk-reach-now — a pass that removed the last disposable material l
   assert.equal(standingDiskLine(open('Managed worktree root free space is below its minimum at the last reclaim (t)'), 'disk-pressure'), false);
   assert.equal(standingDiskLine(open('Free space below its configured bound at the last reclaim (t)'), 'disk-pressure'), true);
 });
+
+test('unit:disk-answer-needs-honest-inputs — a pass dated ahead of the clock, an unreadable inventory and a plan with reach now each leave a low reading raised', async () => {
+  const disk = await import('../src/master/worktree-disk.js');
+  const { disposableWorktrees } = await import('../src/master-resources.js');
+  const credentials = await temporaryDirectory('disk-honest');
+  try {
+    const token = join(credentials, 'coordinator.token'); await writeFile(token, coordinatorToken, { mode: 0o600 });
+    const master = config(token, { diskThresholdGb: 10 }), threshold = diskThresholdBytes(master), now = Date.now(), low = 9_900_000_000;
+    // AC-2: a pass stamped after the judging clock has not occurred there, so it is never current.
+    const future = reclaimSummary(now + 5 * 60_000, low, {}) as Parameters<typeof disk.worktreePassOf>[0];
+    const futureJudged = disk.judgeWorktreeDisk({ freeBytes: low, thresholdBytes: threshold, pass: disk.worktreePassOf(future), reclaimable: 0 }, now);
+    assert.equal(futureJudged.current, false); assert.equal(futureJudged.answered, false);
+    const past = reclaimSummary(now - 60_000, low, {}) as Parameters<typeof disk.worktreePassOf>[0];
+    assert.equal(disk.judgeWorktreeDisk({ freeBytes: low, thresholdBytes: threshold, pass: disk.worktreePassOf(past), reclaimable: 0 }, now).answered, true);
+    // AC-2: a worktree directory that exists but cannot be read is a plan nobody knows, not an empty one.
+    const root = await temporaryDirectory('disk-honest-root');
+    try {
+      await mkdir(join(root, '.graphyard'), { recursive: true });
+      await writeFile(worktreesDirectory(root), 'not a directory');
+      assert.equal(await disposableWorktrees(root, master, { work: [], now }), null);
+      await rm(worktreesDirectory(root), { force: true });
+      assert.equal(await disposableWorktrees(root, master, { work: [], now }), 0, 'a directory that does not exist yet is an empty plan');
+    } finally { await rm(root, { recursive: true, force: true }); }
+    // AC-4: the loop's derived line judges the same plan the registry does: a current drained pass does not answer a plan with reach now.
+    const state = emptyDaemonState(master);
+    state.reclaim = reclaimSummary(now - 60_000, low, {}) as typeof state.reclaim;
+    const kinds = (worktreeReclaimable?: number | null) => cycleFaults(state, [], now, { config: master, worktreeReclaimable }).filter(fault => fault.kind === 'disk-pressure').length;
+    assert.equal(kinds(0), 0); assert.equal(kinds(2), 1); assert.equal(kinds(null), 1);
+  } finally { await rm(credentials, { recursive: true, force: true }); }
+});

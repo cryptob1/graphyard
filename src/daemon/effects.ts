@@ -12,7 +12,7 @@ import { loopBlockerProbe, type BlockerClassification, type BlockerProbeRecord, 
 import { successorWidening } from '../model/successors.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
-import { type HostMemoryReading, type ResourceReclaimReport, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
+import { type HostMemoryReading, type ResourceReclaimReport, disposableWorktrees, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
 import { healUserSupervision, type UserSupervisionAllowance, type UserSupervisionHeal } from '../user-manager.js';
 import { RefusedResponse } from '../model/refusal.js';
 
@@ -202,6 +202,8 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * no Graphyard record, so it needs no credential and is safe to run on every cycle.
    */
   reclaim?: (work: Work[]) => Promise<WorktreeReclaimReport>;
+  /** Worktrees disposable now by the plan over the current inventory (GY-1784); null when the plan cannot be read. */
+  worktreeReclaimable?: (work: Work[], now: number) => Promise<number | null>;
   /** The resource reclaim pass (GY-132): reaps terminal records, closes finished sessions holding profile names, frees stuck sessions' slots; every cycle. */
   reclaimResources?: (work: Work[], agents: HerdrAgent[] | null) => Promise<ResourceReclaimReport>;
   /** Why the plane cannot record a dispatch's result (its /healthz verdict), or null when it can. */
@@ -629,6 +631,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       return followUpThreadIds((await readReviewLedger(root)).reviews, work, reviewer ? { reviewer: `${reviewer.slug}[bot]`, now: at } : undefined);
     },
     closeSession: pane => closeHerdrPane(pane, run),
+    worktreeReclaimable: (work, at) => disposableWorktrees(root, current(), { work, now: at }),
     reclaimResources: (work, agents) => reclaimResources(root, withRoleDefaults(current()), { work, agents }, { closePane: pane => closeHerdrPane(pane, run) }),
     planeHealth: () => dispatchRefusal(current().url, fetcher),
     hostMemory: readHostMemory, healHostSupervision: allow => healUserSupervision(root, {}, allow),

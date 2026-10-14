@@ -73,7 +73,8 @@ export function judgeWorktreeDisk(input: WorktreeDiskInputs, now: number): Workt
   const warnBelow = input.standing ? input.thresholdBytes + bandBytes : input.thresholdBytes;
   const free = input.freeBytes, low = free !== null && free < warnBelow, atFloor = free !== null && free <= floorBytes;
   const pass = input.pass ?? null, at = pass ? Date.parse(pass.at) : Number.NaN, reclaimable = input.reclaimable ?? 0;
-  const current = Number.isFinite(at) && now - at < worktreePassCurrentMs;
+  // A pass dated ahead of the judging clock has not happened yet there: its age is nonnegative or it is not current.
+  const current = Number.isFinite(at) && now - at >= 0 && now - at < worktreePassCurrentMs;
   // Drained needs the plan too: a pass that removed nothing can still have reach now, over worktrees that turned disposable after it ran (GY-1784 review) — and when the plan could not be read (null) the reading is never answered on it.
   const drained = !!pass && input.reclaimable !== null && pass.removed === 0 && pass.trees === 0 && pass.treeBacklog === 0 && pass.checkouts === 0 && pass.errors === 0 && reclaimable === 0;
   const outOfReach = !pass ? input.reclaimable === 0 : input.reclaimable === undefined ? drained : input.reclaimable === 0 && pass.treeBacklog === 0 && pass.errors === 0;

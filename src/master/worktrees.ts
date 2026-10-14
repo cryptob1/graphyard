@@ -230,12 +230,14 @@ export async function writeWorktreeInventoryCache(root: string, cache: WorktreeI
  * one file read, whatever the number of trees. Only a host whose loop has never reclaimed walks
  * the directory, once, and leaves the cache behind for the next call. No Git command runs here.
  */
-export async function statusWorktreeInventory(root: string, now = Date.now()): Promise<{ entries: WorktreeEntry[]; at: string; cached: boolean }> {
+export async function statusWorktreeInventory(root: string, now = Date.now()): Promise<{ entries: WorktreeEntry[]; at: string; cached: boolean; unreadable?: boolean }> {
   const cache = await readWorktreeInventoryCache(root);
   if (cache) return { entries: cache.entries, at: cache.at, cached: true };
+  // A directory that exists but cannot be read is an inventory nobody knows, not an empty one: it is not cached, and callers that judge a plan on it say so (GY-1784 review).
+  const unreadable = await readdir(worktreesDirectory(root)).then(() => false, error => (error as NodeJS.ErrnoException)?.code !== 'ENOENT');
   const entries = await inventoryWorktrees(root, now), at = new Date(now).toISOString();
-  await writeWorktreeInventoryCache(root, { at, entries, held: [] }).catch(() => {});
-  return { entries, at, cached: false };
+  if (!unreadable) await writeWorktreeInventoryCache(root, { at, entries, held: [] }).catch(() => {});
+  return { entries, at, cached: false, ...(unreadable ? { unreadable } : {}) };
 }
 
 /** The attempt epoch a session handle works under: its own, or the one its `principal:epoch` id names. */

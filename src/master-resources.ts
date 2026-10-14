@@ -777,9 +777,10 @@ export async function readDisk(root: string, config: MasterConfig, cursor?: Disk
  * inventory and the snapshot's work. Null when the inventory cannot be read, so a reading is
  * never answered on a plan it does not know (GY-1784 review, AC-2).
  */
-async function disposableWorktrees(root: string, config: MasterConfig, { work, now }: { work: Work[]; now: number }): Promise<number | null> {
+export async function disposableWorktrees(root: string, config: MasterConfig, { work, now }: { work: Work[]; now: number }): Promise<number | null> {
   try {
-    const { entries } = await statusWorktreeInventory(root, now);
+    const { entries, unreadable } = await statusWorktreeInventory(root, now);
+    if (unreadable) return null;
     return planWorktreeReclaim(entries, work, { now, idleMs: reclaimIdleMs(config) }).filter(entry => entry.disposable).length;
   } catch { return null; }
 }
