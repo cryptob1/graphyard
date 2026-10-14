@@ -124,7 +124,7 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
     if (reclaim) {
       const judged = judgeWorktreeDisk({ freeBytes: reclaim.freeBytes, thresholdBytes: diskThresholdBytes(config), pass: worktreePassOf(reclaim), standing: standingDiskLine(state.faults.open, 'disk-pressure'), reclaimable: sources.worktreeReclaimable }, now);
       if (judged.low && !judged.answered)
-        derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `${worktreeVolumeWording}${reclaim.freeBytes !== null && reclaim.freeBytes !== undefined && reclaim.freeBytes >= diskThresholdBytes(config) ? 'within the recovery band above' : 'below'} its configured bound at the last reclaim (${reclaim.at})${judged.detail ? `; ${judged.detail}` : ''}` });
+        derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `${worktreeVolumeWording}below its configured bound at the last reclaim (${reclaim.at})` });
       // The managed root's own minimum is its own condition, judged on the root's reading alone: the worktree volume's recovery band never holds it open.
       if (below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config)))
         derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Managed worktree root free space is below its minimum at the last reclaim (${reclaim.at})` });

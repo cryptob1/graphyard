@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { inventoryWorktrees, loadMasterConfig, planWorktreeReclaim, setupMaster, worktreesDirectory, writeWorktreeInventoryCache, type MasterConfig } from '../src/master.js';
+import { inventoryWorktrees, loadMasterConfig, planWorktreeReclaim, setupMaster, worktreeRemovalReason, worktreesDirectory, writeWorktreeInventoryCache, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { readDisk, readResources, resourceAttention } from '../src/master-resources.js';
 import { diskRecoveryBandBytes, worktreePassCurrentMs, worktreePassOf } from '../src/master/worktree-disk.js';
@@ -79,7 +79,11 @@ test('unit:soak-worktree-disk — over simulated cycles the disk gate answers a 
     /** The cycle's reclaim pass: the real plan decides what is disposable; taking it removes the real directories and reports what it took, and leaves the inventory cache as the real pass does — what it scanned, with what it took gone. */
     const reclaim = async (work: Work[]) => {
       if (passFails) throw new Error('Simulated EIO walking the worktrees');
-      const entries = await inventoryWorktrees(root, now);
+      let entries = await inventoryWorktrees(root, now);
+      // As the real pass does first: a finished tree is removed outright, so its install goes with it.
+      const goners = planWorktreeReclaim(entries, work, { now, idleMs: 3 * hour }).filter(entry => worktreeRemovalReason(entry, work, new Set(), 3 * hour, now) !== null);
+      for (const gone of goners) execFileSync('git', ['worktree', 'remove', '--force', gone.path], { cwd: root });
+      entries = entries.filter(entry => !goners.some(gone => gone.path === entry.path));
       const disposable = planWorktreeReclaim(entries, work, { now, idleMs: 3 * hour }).filter(entry => entry.disposable);
       const removed: string[] = [];
       for (const candidate of disposable) {
@@ -89,7 +93,7 @@ test('unit:soak-worktree-disk — over simulated cycles the disk gate answers a 
       await writeWorktreeInventoryCache(root, { at: iso(now), entries: entries.map(entry => removed.some(path => path.startsWith(`${entry.path}/`)) ? { ...entry, dependencies: [] } : entry), held: [] });
       return { root: trees, at: iso(now), applied: true, scanned: entries.length, removed, kept: [], freeBefore: freeBytes, freeAfter: freeBytes,
         freedBytes: removed.length ? 2_000_000_000 : 0, errors: [],
-        trees: { at: iso(now), limit: 2, removed: [], kept: [], backlog: 0, held: [], errors: [] } };
+        trees: { at: iso(now), limit: 2, removed: goners.map(gone => ({ path: gone.path, key: gone.key, reason: gone.detail, head: null })), kept: [], backlog: 0, held: [], errors: [] } };
     };
     const effects = {
       agents: () => [], credentials: async () => ({}), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},

@@ -133,7 +133,7 @@ export async function removeSessionCheckout(repository: string, base: string, di
 
 /** A directory no record owns is left alone this long: a launch allocates it before it records the session. */
 export const orphanGraceMs = 15 * 60_000;
-export interface CheckoutReclaimReport { root: string; at: string; scanned: number; removed: string[]; kept: string[]; errors: string[]; freeBytes: number | null; /** Abandoned neighbouring roots that held nothing and were removed. */ swept: string[] }
+export interface CheckoutReclaimReport { root: string; at: string; scanned: number; removed: string[]; kept: string[]; errors: string[]; freeBytes: number | null; /** Whether the root is on the assignment worktrees' filesystem; set by the loop, absent when unknown. */ sharesVolume?: boolean; /** Abandoned neighbouring roots that held nothing and were removed. */ swept: string[] }
 /**
  * The reclaim pass. A session settles its own checkout, so what is found here was left by a
  * session that died with its master — a crash between the launch and the ledger write, a host

@@ -94,6 +94,8 @@ export async function worktreeActivity(path: string, now = Date.now()) {
   // A timestamp ahead of the clock must not make a worktree look idle for ever.
   return Math.min(Math.max(0, ...times), now);
 }
+/** Whether the worktree directory exists but cannot be read: an inventory nobody knows, which `inventoryWorktrees` reads as empty. */
+export const worktreesUnreadable = (root: string) => readdir(worktreesDirectory(root)).then(() => false, error => (error as NodeJS.ErrnoException)?.code !== 'ENOENT');
 /** Every assignment worktree on this host and the dependency trees it is holding. */
 export async function inventoryWorktrees(root: string, now = Date.now()): Promise<WorktreeEntry[]> {
   const base = worktreesDirectory(root);
@@ -230,16 +232,28 @@ export async function writeWorktreeInventoryCache(root: string, cache: WorktreeI
  * one file read, whatever the number of trees. Only a host whose loop has never reclaimed walks
  * the directory, once, and leaves the cache behind for the next call. No Git command runs here.
  */
-export async function statusWorktreeInventory(root: string, now = Date.now()): Promise<{ entries: WorktreeEntry[]; at: string; cached: boolean; unreadable?: boolean }> {
+export async function statusWorktreeInventory(root: string, now = Date.now()): Promise<{ entries: WorktreeEntry[]; at: string; cached: boolean; unreadable?: boolean; held?: HeldWorktree[] }> {
   const cache = await readWorktreeInventoryCache(root);
-  if (cache) return { entries: cache.entries, at: cache.at, cached: true };
+  if (cache) return { entries: cache.entries, at: cache.at, cached: true, held: cache.held };
   // A directory that exists but cannot be read is an inventory nobody knows, not an empty one: it is not cached, and callers that judge a plan on it say so (GY-1784 review).
-  const unreadable = await readdir(worktreesDirectory(root)).then(() => false, error => (error as NodeJS.ErrnoException)?.code !== 'ENOENT');
+  const unreadable = await worktreesUnreadable(root);
   const entries = await inventoryWorktrees(root, now), at = new Date(now).toISOString();
   if (!unreadable) await writeWorktreeInventoryCache(root, { at, entries, held: [] }).catch(() => {});
   return { entries, at, cached: false, ...(unreadable ? { unreadable } : {}) };
 }
 
+/**
+ * How many worktrees the loop's next pass would take back: those holding disposable dependency
+ * directories, and those `removeReclaimableWorktrees` removes outright whether or not they hold any
+ * (a delivered tree with no `node_modules`), less the trees held as dirty or unpushed for as long
+ * as their working tree stands unchanged. The disk reading answers a low volume only when this is nothing (GY-1784 review).
+ */
+export function reclaimableNow(plan: WorktreeReclaimCandidate[], entries: WorktreeEntry[], work: Work[], options: { idleMs: number; now: number; held?: HeldWorktree[] }): number {
+  const activity = new Map(entries.map(entry => [entry.path, entry.activityAt]));
+  return plan.filter(candidate => candidate.disposable
+    || (worktreeRemovalReason(candidate, work, new Set(), options.idleMs, options.now) !== null
+      && !(options.held ?? []).some(held => held.path === candidate.path && held.activityAt === activity.get(candidate.path) && !(held.retryAt && Date.parse(held.retryAt) <= options.now)))).length;
+}
 /** The attempt epoch a session handle works under: its own, or the one its `principal:epoch` id names. */
 function sessionEpoch(handle: { id: string; epoch: number | null }) {
   if (handle.epoch !== null) return handle.epoch;

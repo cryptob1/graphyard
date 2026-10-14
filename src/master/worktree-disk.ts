@@ -26,8 +26,9 @@ import type { WorktreeReclaimCandidate } from './worktrees.js';
 /** The loop's latest worktree-reclaim pass as the disk readings judge it: the cursor's reclaim summary, projected. */
 export interface WorktreePass { at: string; removed: number; trees: number; treeBacklog: number; checkouts: number; errors: number; freeBytes: number | null }
 /** The pass the cursor's reclaim summary records, or null when none is recorded. */
-export const worktreePassOf = (summary: { at: string; removed: number; trees?: number; treeBacklog?: number; checkouts?: number; errors?: string[]; freeBytes?: number | null } | null | undefined): WorktreePass | null =>
-  summary ? { at: summary.at, removed: summary.removed, trees: summary.trees ?? 0, treeBacklog: summary.treeBacklog ?? 0, checkouts: summary.checkouts ?? 0, errors: summary.errors?.length ?? 0, freeBytes: summary.freeBytes ?? null } : null;
+export const worktreePassOf = (summary: { at: string; removed: number; trees?: number; treeBacklog?: number; checkouts?: number; checkoutsOffVolume?: number; errors?: string[]; freeBytes?: number | null } | null | undefined): WorktreePass | null =>
+  // Checkouts taken from a managed root on another filesystem freed nothing on the worktree volume, so they do not count against it (GY-1784 review).
+  summary ? { at: summary.at, removed: summary.removed, trees: summary.trees ?? 0, treeBacklog: summary.treeBacklog ?? 0, checkouts: Math.max(0, (summary.checkouts ?? 0) - (summary.checkoutsOffVolume ?? 0)), errors: summary.errors?.length ?? 0, freeBytes: summary.freeBytes ?? null } : null;
 /** How recent the loop's latest worktree-reclaim pass must be to answer a low reading: three reclaim intervals, the /tmp pass's bound (tmpPassCurrentMs). */
 export const worktreePassCurrentMs = 30 * 60_000;
 /** The recovery band above the warn line: a low reading whose fault stands is still low until it recovers past it. */
@@ -109,8 +110,9 @@ export interface DiskPressure {
  * loop's latest pass and whether the line's fault stands (`context`, from the daemon cursor) decide
  * whether a low reading is answered and where it recovers (GY-1784).
  */
-export function diskPressure(path: string, free: number | null, thresholdBytes: number, plan: WorktreeReclaimCandidate[], context: { pass?: WorktreePass | null; standing?: boolean; now?: number } = {}): DiskPressure {
-  const reclaimable = plan.filter(entry => entry.disposable).length;
+export function diskPressure(path: string, free: number | null, thresholdBytes: number, plan: WorktreeReclaimCandidate[], context: { pass?: WorktreePass | null; standing?: boolean; now?: number; reclaimable?: number } = {}): DiskPressure {
+  // What the next pass takes back, when the caller counted worktrees removable outright as well; otherwise the disposable dependency trees.
+  const reclaimable = context.reclaimable ?? plan.filter(entry => entry.disposable).length;
   const judged = judgeWorktreeDisk({ freeBytes: free, thresholdBytes, pass: context.pass, standing: context.standing, reclaimable }, context.now ?? Date.now());
   const pass = context.pass ?? null;
   return { path, freeBytes: free, thresholdBytes, low: judged.low, reclaimable, worktrees: plan.length,

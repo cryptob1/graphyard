@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
-import { agentOwner, atomicPrivateWrite, closeHerdrPane, defaultDiskThresholdGb, diskThresholdBytes, isProfileSession, neverStartedReason, planWorktreeReclaim, privateFile, profileConcurrency, reclaimIdleMs, statusWorktreeInventory, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
+import { agentOwner, atomicPrivateWrite, closeHerdrPane, defaultDiskThresholdGb, diskThresholdBytes, isProfileSession, neverStartedReason, planWorktreeReclaim, reclaimableNow, privateFile, profileConcurrency, reclaimIdleMs, statusWorktreeInventory, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
 import type { HerdrPane } from './master/herdr.js';
 import { judgeWorktreeDisk, standingDiskLine, worktreePassCurrentMs, worktreePassOf, type WorktreePass } from './master/worktree-disk.js';
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
@@ -779,9 +779,9 @@ export async function readDisk(root: string, config: MasterConfig, cursor?: Disk
  */
 export async function disposableWorktrees(root: string, config: MasterConfig, { work, now }: { work: Work[]; now: number }): Promise<number | null> {
   try {
-    const { entries, unreadable } = await statusWorktreeInventory(root, now);
+    const { entries, unreadable, held } = await statusWorktreeInventory(root, now), idleMs = reclaimIdleMs(config);
     if (unreadable) return null;
-    return planWorktreeReclaim(entries, work, { now, idleMs: reclaimIdleMs(config) }).filter(entry => entry.disposable).length;
+    return reclaimableNow(planWorktreeReclaim(entries, work, { now, idleMs }), entries, work, { idleMs, now, held });
   } catch { return null; }
 }
 

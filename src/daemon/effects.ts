@@ -3,6 +3,7 @@ import { wakeOwnObservation } from '../master/base-break-refresh.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { existsSync } from 'node:fs';
+import { worktreeReclaimPass } from './worktree-reclaim.js';
 import { join } from 'node:path';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
@@ -34,14 +35,14 @@ export function refusedBodyDetail(result: unknown): string {
 }
 import { rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
-import { readProducerLedger, saveProducerLedger, launchProducer, reclaimCheckouts } from '../producer.js';
+import { readProducerLedger, saveProducerLedger, launchProducer } from '../producer.js';
 import { dismissApproval, followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
 import { type ReviewFinding, type SuccessionRead, readReviewFindings, basePaths, baseText, baseMentions, successionReader } from '../review-scope.js';
 import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
 import { readApproverLaunches } from '../master/autonomy.js';
 import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
-import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, holdRepeatedLimitAccount, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson, readCredentialFile, withRoleDefaults, heldAwareProbe, type ControlPlaneStatus, type SessionIdentity } from '../master.js';
+import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, holdRepeatedLimitAccount, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, writeFailure, assessContainment, herdrJson, readCredentialFile, withRoleDefaults, heldAwareProbe, type ControlPlaneStatus, type SessionIdentity } from '../master.js';
 import { readControlPlaneClock, type ContainmentObservation, type ControlPlaneClock } from '../master/containment.js';
 import { annotatePaneShell } from '../quarantine.js';
 import { herdrCall, listHerdrPanes, type HerdrPane } from '../master/herdr.js';
@@ -726,20 +727,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // The same pass takes back every ephemeral checkout no live session owns, under the managed root.
     // Finished worktrees are removed outright first, a bounded number per pass (GY-360); the
     // inventory that remains is the one the dependency reclaim judges and `master status` reads.
-    reclaim: async (work, now) => {
-      const config = current(), idleMs = reclaimIdleMs(config);
-      const livePaths = [...(await readReviewLedger(root)).reviews, ...(await readProducerLedger(root)).producers]
-        .filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!);
-      const trees = await removeReclaimableWorktrees(root, work, { idleMs, run, baseBranch: config.baseBranch, limit: config.run.worktreeRemovalLimit, livePaths, now });
-      const report = await reclaimWorktrees(root, work, { idleMs, entries: trees.entries, now });
-      const taken = new Set(report.applied ? report.removed : []);
-      await writeWorktreeInventoryCache(root, { at: trees.at, entries: trees.entries.map(entry => ({ ...entry, dependencies: entry.dependencies.filter(dependency => !taken.has(dependency.path)) })),
-        held: trees.held })
-        .catch(error => report.errors.push(`Worktree inventory cache: ${writeFailure(error, 'Writing the worktree inventory cache').message}`));
-      const withTrees = { ...report, trees };
-      try { return { ...withTrees, checkouts: await reclaimCheckouts(root, config) }; }
-      catch (error) { return { ...withTrees, errors: [...withTrees.errors, `Ephemeral checkouts: ${writeFailure(error, 'Reclaiming the managed worktree root').message}`] }; }
-    },
+    reclaim: (work, now) => worktreeReclaimPass(root, current(), run, work, now),
     // The decision effects exist only while the live configuration names the master's operator-agent identity. Without one the loop
     // has no way to request anything, so the cycle sees them absent and records each routine decision as the escalation naming the
     // two commands, instead of a request that fails on every retry; provisioning the identity brings them back on the next reload, with no restart.

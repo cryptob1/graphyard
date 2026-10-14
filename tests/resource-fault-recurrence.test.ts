@@ -1345,7 +1345,13 @@ test('unit:worktree-disk-answer-needs-current-plan — a drained pass is not eno
     assert.deepEqual(faults(inputs({ now, disk: { ...planned, freeBytes, totalBytes: gy1782.totalBytes } })), ['resource:worktree-disk'], 'the registry answers only on the plan it read');
     await writeFile(join(directory, '.graphyard', 'worktree-inventory.json'), JSON.stringify({ at: iso(now - 30_000), entries: [{ path: tree, name: 'GY-99-1', activityAt: now - 30_000, dependencies: [] }], held: [] }));
     const taken = (await readDisk(directory, master, cursor, { work, now }))!;
-    assert.equal(taken.reclaimable, 0, 'the plan reads empty once the install is gone');
+    // A delivered tree with no install left is still removable outright (worktreeRemovalReason), so the plan counts it: the reading is not answered until the pass has removed it (GY-1784 review, AC-2).
+    assert.equal(taken.reclaimable, 1, 'a finished tree holding no dependency directory is reach the pass has not used');
+    assert.deepEqual(faults(inputs({ now, disk: { ...taken, freeBytes, totalBytes: gy1782.totalBytes } })), ['resource:worktree-disk']);
+    await writeFile(join(directory, '.graphyard', 'worktree-inventory.json'), JSON.stringify({ at: iso(now - 30_000), entries: [], held: [] }));
+    const removed = (await readDisk(directory, master, cursor, { work, now }))!;
+    assert.equal(removed.reclaimable, 0, 'the plan reads empty once the tree is gone');
+    taken.reclaimable = removed.reclaimable;
     assert.deepEqual(faults(inputs({ now, disk: { ...taken, freeBytes, totalBytes: gy1782.totalBytes } })), [], 'the drained pass over the drained plan answers');
     // A plan that cannot be read leaves the reading standing: the input records null, and the registry never answers on it.
     const unreadPlan = { ...planned, reclaimable: null };

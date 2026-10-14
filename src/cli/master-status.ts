@@ -1,7 +1,7 @@
 import { workerLaunchStatus } from '../master/dispatch.js';
 import { type HumanRequestRow } from '../model/human-request.js';
 import { herdrAttachCommand } from '../master/herdr.js';
-import { agentOwner, assessContainment, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, statusWorktreeInventory, managedRootStatus, planWorktreeReclaim, reclaimIdleMs, worktreesDirectory, type AttentionItem, type MasterConfig, observeHerdrAgents, installationOwner } from '../master.js';
+import { agentOwner, assessContainment, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, statusWorktreeInventory, managedRootStatus, planWorktreeReclaim, reclaimableNow, reclaimIdleMs, worktreesDirectory, type AttentionItem, type MasterConfig, observeHerdrAgents, installationOwner } from '../master.js';
 import { standingDiskLine, worktreePassOf } from '../master/worktree-disk.js';
 import { type Work } from '../model/work.js';
 import { installationMerger } from '../executor.js';
@@ -83,7 +83,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
   // The loop's latest pass and the standing disk line, from the cursor, decide whether a low reading is answered and where it recovers (GY-1784).
   const cursor = 'error' in daemonState ? null : daemonState;
-  const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan, { pass: worktreePassOf(cursor?.reclaim), standing: standingDiskLine(cursor?.faults.open, 'disk-pressure'), now: Date.now() });
+  const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan, { reclaimable: reclaimableNow(reclaimPlan, trees, snapshot.work, { idleMs: reclaimIdleMs(master), now: Date.now(), held: 'held' in inventory ? inventory.held : undefined }), pass: worktreePassOf(cursor?.reclaim), standing: standingDiskLine(cursor?.faults.open, 'disk-pressure'), now: Date.now() });
   // The managed root, often its own volume, has its own minimum and budget.
   const managedRoot = await timedStep('managed root', () => managedRootStatus(root, master, [...reviewRecords, ...producerRecords]));
   const hs = hotspots(daemonState);
