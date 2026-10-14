@@ -9,7 +9,7 @@ Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge
 
 `master restart` runs `systemctl --user restart graphyard-master.service` if the [unit](onboarding.md#the-loop-must-be-supervised)'s ExecStart is node `cliPath` (or pin) `master run`, else detached, never from [dirty/non-forward checkouts](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level) ([confined](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level): loop request).
 
-**Cycle cadence.** Loop sleeps `run.intervalSeconds` (≤30 s if actionable); dispatcher ticks wake it.
+**Cycle cadence.** Loop sleeps `run.intervalSeconds` (≤30s if actionable); dispatcher ticks wake it per new subject.
 
 ### System-driven items
 

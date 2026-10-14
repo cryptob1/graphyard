@@ -30,23 +30,38 @@ export function ciPlan(work, head, registry) {
     work: { id: work.id, key: work.key, pr: work.candidate.pr, policyRevision: work.policyRevision, head: work.candidate.sha, base: work.candidate.baseSha } };
 }
 
+/**
+ * The two control-plane reads the plan makes and the abort bound of each (GY-1778), the one place a
+ * bound is named. Each bound covers the plane's measured p95 for that read, from the coordinator
+ * host with the whole fleet settled behind it: `/api/status` at 5 s; the per-item read, the measured
+ * read nearest the filtered work read, at 13 s. A GitHub runner is further from the plane than that
+ * host, so each bound is more than twice its p95.
+ */
+export const planReads = {
+  status: { path: () => 'status', measuredP95Ms: 5_000, abortMs: 15_000 },
+  work: { path: pr => `work?pr=${pr}`, measuredP95Ms: 13_000, abortMs: 30_000 },
+};
+
 export async function planFromControlPlane({ url, token, pr, head, waitMs = 240_000, intervalMs = 10_000, fetcher = fetch, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), registry }) {
   const origin = new URL(url);
   if (origin.protocol !== 'https:' || origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) throw new Error('Enumeration requires a credential-free HTTPS origin');
-  const read = async path => {
-    const response = await fetcher(`${origin.origin}/api/${path}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15_000) });
+  const read = async (bound, ...args) => {
+    const response = await fetcher(`${origin.origin}/api/${bound.path(...args)}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(bound.abortMs) });
     if (!response.ok) throw new Error(`Graphyard refused the enumeration read (${response.status})`);
     return response.json();
   };
-  const status = await read('status');
+  const status = await read(planReads.status);
   if (status.actor?.role !== 'producer') throw new Error('The CI producer credential is not a producer principal');
-  // Observation of a fresh push lags the event by a reconciliation pass; wait for it rather
-  // than planning against the previous head.
+  // The plan needs one item, the one whose candidate names the pull request, and asks for exactly
+  // that (`GET /api/work?pr=N`, a bounded read): the whole work list weighed 134 MB on the
+  // production ledger and outran every bound a runner could hold (GY-1778). Observation of a fresh
+  // push lags the event by a reconciliation pass; wait for it rather than planning against the
+  // previous head.
   const deadline = Date.now() + waitMs;
-  let plan = ciPlan(candidateWork(await read('work'), pr), head, registry);
+  let plan = ciPlan(candidateWork(await read(planReads.work, pr), pr), head, registry);
   while (plan.reason && Date.now() < deadline) {
     await sleep(intervalMs);
-    plan = ciPlan(candidateWork(await read('work'), pr), head, registry);
+    plan = ciPlan(candidateWork(await read(planReads.work, pr), pr), head, registry);
   }
   return plan;
 }

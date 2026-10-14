@@ -337,3 +337,82 @@ test('unit:work-snapshot-paged — GET /api/work-snapshot supports paging with c
   assert.equal(keys(coordination.body).length, 60, 'the coordination view is not paged');
   assert.equal(coordination.body.hasMore, undefined, 'the coordination view carries no paging fields');
 });
+
+test('integration:api-work-bounded-read — GET /api/work serves the fleet (open items whole, settled deliveries as their stored summaries) and ?pr=N only the item naming that pull request, without reading a settled document whole', async () => {
+  // A fleet in production's shape (GY-1778): over a thousand settled deliveries, each weighing
+  // what its session history weighs, behind a handful of open items. store.list() served every
+  // one of them whole: 134 MB, past the CI plan's abort on every acceptance run.
+  const heavy = 'h'.repeat(16 * 1024), settledCount = 1000, now = Date.now();
+  const stamp = (offsetMs = 0) => new Date(now - offsetMs).toISOString();
+  const document = (index: number, overrides: Record<string, unknown>) => ({
+    id: randomUUID(), key: `GY-${5000 + index}`, title: `Fleet item ${index}`, plannedFiles: ['src/'], dependencies: [], criteria: [{ id: 'AC-1', text: 'test', proofs: ['unit:test'] }],
+    gates: [], violations: [], workspaces: [], evidence: [], policy: { checks: [], review: false }, revision: 3, policyRevision: 1, epoch: 1, lease: null,
+    actionQueue: { actions: [], history: [] }, reworkRequested: false, scenarioRequirements: [], observation: null, ready: true, blocker: null, priority: 1,
+    createdAt: stamp(3 * 86_400_000), updatedAt: stamp(86_400_000), stageEnteredAt: stamp(86_400_000),
+    sessions: [{ id: `worker:${index}`, kind: 'implementation', state: 'finished', principal: 'worker', startedAt: stamp(2 * 86_400_000), endedAt: stamp(2 * 86_400_000), updatedAt: stamp(2 * 86_400_000), outcome: heavy }],
+    ...overrides,
+  });
+  // Every tenth delivery was settled without a candidate, its submission alone naming its pull
+  // request: the shape tests/master-verification.test.ts delivers, which the index's `pr` column
+  // (the candidate's) never carries.
+  const settled = Array.from({ length: settledCount }, (_, index) => document(index, { stage: 'done', candidate: index % 10 === 5 ? null : { sha: hex('c'), baseSha: hex('b'), pr: 3000 + index }, submission: { epoch: 1, pr: 3000 + index }, delivery: { mergeSha: hex('a'), mergedAt: stamp(86_400_000) } }));
+  const candidateOpen = document(settledCount, { stage: 'build', candidate: { sha: hex('d'), baseSha: hex('b'), pr: 7777 }, submission: { epoch: 1, pr: 7777 }, lease: { owner: 'worker', epoch: 1, expiresAt: stamp(-600_000) } });
+  const submittedOpen = document(settledCount + 1, { stage: 'build', candidate: null, submission: { epoch: 1, pr: 7778 }, lease: { owner: 'worker', epoch: 1, expiresAt: stamp(-600_000) } });
+  await store.pool.query('INSERT INTO work_items(id, document) SELECT (d->>\'id\')::uuid, d FROM jsonb_array_elements($1::jsonb) AS d', [JSON.stringify([...settled, candidateOpen, submittedOpen])]);
+  assert.equal(Number((await store.pool.query('SELECT count(*) FROM work_index WHERE settled')).rows[0].count), settledCount, 'the work index holds every settled delivery as settled');
+
+  // Every row the store returns while a route answers is watched: a settled document read whole
+  // carries its session history, which its stored summary (no running session, settled) does not.
+  const settledReadWhole = async <T>(run: () => Promise<T>) => {
+    const pool = store.pool as any, original = { query: pool.query, connect: pool.connect };
+    let whole = 0;
+    const count = (result: any) => { for (const row of result?.rows ?? []) if (row?.document?.stage === 'done' && Array.isArray(row.document.sessions) && row.document.sessions.length) whole++; return result; };
+    pool.query = function (...args: any[]) { return original.query.apply(this, args).then(count); };
+    pool.connect = async function (...args: any[]) {
+      if (args.length) return original.connect.apply(this, args);
+      const client = await original.connect.call(this), query = client.query;
+      client.query = function (...args: any[]) { return query.apply(this, args).then(count); };
+      const release = client.release;
+      client.release = function (...args: any[]) { client.query = query; client.release = release; return release.apply(this, args); };
+      return client;
+    };
+    try { return { result: await run(), whole }; } finally { pool.query = original.query; pool.connect = original.connect; }
+  };
+  const items = (body: any) => body as (Work & { summary?: boolean; sessions?: unknown[] })[];
+
+  // The unfiltered form: the fleet GY-1376 defined, every settled delivery as its summary.
+  const fleet = await settledReadWhole(() => get('work'));
+  assert.equal(fleet.result.status, 200, JSON.stringify(fleet.result.body).slice(0, 300));
+  const served = items(fleet.result.body), servedSettled = served.filter(item => item.stage === 'done');
+  assert.ok(servedSettled.length >= settledCount, `the fleet carries every settled delivery (${servedSettled.length})`);
+  assert.ok(served.some(item => item.key === candidateOpen.key && item.sessions?.length === 1), 'an open item is served whole, its sessions included');
+  assert.ok(servedSettled.every(item => !(item.sessions?.length) && !JSON.stringify(item).includes(heavy)), 'a settled delivery is served as its stored summary, never its history');
+  assert.equal(fleet.whole, 0, 'the fleet read reads no settled document whole');
+  assert.ok(fleet.result.bytes < settledCount * heavy.length / 4, `the fleet weighs ${fleet.result.bytes} bytes against ${settledCount * heavy.length} bytes of settled history behind it`);
+
+  // The filtered form: the item whose candidate or submission names the pull request, and nothing else.
+  const byCandidate = await settledReadWhole(() => get('work?pr=7777'));
+  assert.deepEqual(items(byCandidate.result.body).map(item => item.key), [candidateOpen.key], 'the pull request\'s candidate item, whole');
+  assert.equal(items(byCandidate.result.body)[0].sessions?.length, 1);
+  assert.equal(byCandidate.whole, 0, 'the filtered read reads no settled document whole');
+  const bySubmission = await settledReadWhole(() => get('work?pr=7778'));
+  assert.deepEqual(items(bySubmission.result.body).map(item => item.key), [submittedOpen.key], 'an item whose submission alone names the pull request is found');
+  assert.equal(bySubmission.whole, 0);
+  const settledMatch = await settledReadWhole(() => get('work?pr=3006'));
+  assert.deepEqual(items(settledMatch.result.body).map(item => [item.key, item.stage, item.sessions?.length ?? 0]), [[settled[6].key, 'done', 0]], 'a settled match is its stored summary');
+  assert.equal(settledMatch.whole, 0);
+  assert.equal((settled[5] as { candidate?: unknown }).candidate, null, 'the fixture settles item 5 without a candidate');
+  const settledBySubmission = await settledReadWhole(() => get('work?pr=3005'));
+  assert.deepEqual(items(settledBySubmission.result.body).map(item => [item.key, item.stage, item.candidate, item.submission?.pr, item.sessions?.length ?? 0]), [[settled[5].key, 'done', null, 3005, 0]], 'a delivery settled without a candidate, its submission alone naming the pull request, is found as its stored summary');
+  assert.equal(settledBySubmission.whole, 0, 'the submission match reads no settled document whole');
+  const none = await settledReadWhole(() => get('work?pr=99999'));
+  assert.deepEqual(none.result.body, [], 'a pull request no item names answers an empty list');
+  assert.equal(none.whole, 0);
+  assert.equal((await get('work?pr=abc')).status, 400);
+  assert.equal((await get('work?pr=0')).status, 400);
+  assert.equal((await get('work?pr=-7')).status, 400);
+
+  // The settled fleet behind both forms: the route this replaced read all of it whole.
+  const listed = await settledReadWhole(() => store.list());
+  assert.ok(listed.whole >= settledCount, `store.list() reads every settled document whole (${listed.whole}); the route no longer does`);
+});
