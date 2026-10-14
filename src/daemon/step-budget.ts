@@ -40,14 +40,22 @@ export const stepCallCarried = (detail: string | unknown) => / (?:ms per-(?:deci
 export const carriedRow = (row: DaemonAction | undefined) => !!row && row.state === 'waiting' && stepCallCarried(row.detail);
 /** The rejection of a carried call; `sent` says whether this call made the request (one attempt) or joined, or waited for, one already in flight (no new attempt). */
 export class StepCallCarriedError extends Error { constructor(detail: string, readonly sent: boolean) { super(detail); this.name = 'StepCallCarriedError'; } }
+/** The flight a carried call's rejection names, when the call was made or joined: the row that records the call carried owes the flight's answer to its retry (`recordCarried`). A budget-spent rejection names none. */
+const flightOf = new WeakMap<StepCallCarriedError, Flight>();
 /** Whether a carried call was its cycle's own send: a join of the call still in flight is no new attempt, so the attempts a row counts stay the sends actually made. */
 export const carriedCallSent = (error: unknown) => !(error instanceof StepCallCarriedError) || error.sent;
 /**
- * How long the answer of a carried call is kept for the retry that consumes it. The owed retry comes at
- * the next cycle's run of the step, whatever the run interval (up to its 900 s), so the answer is kept
- * by cycles, never by the clock: until `settledKeepCycles` cycles have begun since it settled, which is
- * the retry's cycle and one more, after which the work it served has moved on and the next call is a
- * fresh send. A state that counts no cycles (a bound run on its own) keeps it `settledKeepMs` on the wall.
+ * How long the answer of a carried call is kept for the retry that consumes it. The answer is owed to
+ * the carried row that records the call (`recordCarried`): while that row stands `waiting`, the retry
+ * has not come — earlier calls of the same handling carried again, or a spent step budget, may defer
+ * it for any number of cycles — and the answer is kept for it, however many cycles begin meanwhile,
+ * so the effect is never started twice. The row retired (`retireCarried`: its handling ran through,
+ * consuming the answer or proving it moot) owes it no more. An answer no row owes (its row retired, or
+ * a call whose carry its caller let go) is kept by cycles, never by the clock, whatever the run
+ * interval (up to its 900 s): until `settledKeepCycles` cycles have begun since it settled, which is
+ * the retry's cycle and one more, after which the next call under its key is a fresh send.
+ * `settledKeepMs` on the wall bounds every kept answer, owed or not, and is the whole keep of a state
+ * that counts no cycles (a bound run on its own).
  */
 export const settledKeepCycles = 3, settledKeepMs = 24 * 3_600_000;
 
@@ -121,8 +129,8 @@ export function callWording(call: string, args: unknown[]): CallWording {
   return { what: subject ? `${subject}'s ${call} call` : `the ${call} call`, owed: 'call', per: 'call' };
 }
 
-/** A call carried past its bound: the request still in flight, or — once it settled — its answer, kept until the owed retry consumes it, so the effect is never started twice. */
-interface Flight { promise: Promise<unknown>; settledAt: { cycle: number; wall: number } | null }
+/** A call carried past its bound: the request still in flight, or — once it settled — its answer, kept until the owed retry consumes it, so the effect is never started twice; `owedBy` names the carried rows that owe it to their retry. */
+interface Flight { promise: Promise<unknown>; settledAt: { cycle: number; wall: number } | null; owedBy: Set<string> }
 /** The calls unanswered when their bound passed, per kept state, keyed to the request they belong to, so a retry joins its own call only: a changed head, action or input never joins an older call's answer nor has its own request suppressed. */
 const inFlight = new WeakMap<object, Map<string, Flight>>();
 /** The effects beneath a bound, for a launch the launcher runs beside the cycle: it holds no cycle, so it waits as long as the launch takes. */
@@ -130,6 +138,29 @@ const beneath = new WeakMap<object, DaemonEffects>();
 export const unboundedEffects = (effects: DaemonEffects): DaemonEffects => { let base = effects; while (beneath.has(base)) base = beneath.get(base)!; return base; };
 /** The cycle a kept state counts, which dates a kept answer; a state counting none dates it 0, and the wall keep alone drops it. */
 const cycleOf = (kept: object) => typeof (kept as { cycle?: unknown }).cycle === 'number' ? (kept as { cycle: number }).cycle : 0;
+/** The cursor rows a kept state holds; a state holding none (a bound run on its own) owes no answer by a row. */
+const rowsOf = (kept: object): Record<string, DaemonAction | undefined> => (kept as { actions?: Record<string, DaemonAction | undefined> }).actions ?? {};
+/** Whether a settled flight is still owed its retry: a carried row that recorded it still stands `waiting`, so the handling it belongs to has not run through since and the retry is still to come. */
+const stillOwed = (kept: object, flight: Flight) => { const rows = rowsOf(kept); for (const rowKey of flight.owedBy) if (carriedRow(rows[rowKey])) return true; return false; };
+/**
+ * Mark a carried call's flight owed to the row that records it: its answer is kept for the row's retry
+ * however many cycles begin before that retry comes. A rejection naming no flight (a spent budget made
+ * no call, a phase, an error rebuilt from its message) owes nothing.
+ */
+export function oweCarried(rowKey: string, error: unknown) {
+  const flight = error instanceof StepCallCarriedError ? flightOf.get(error) : undefined;
+  if (flight) flight.owedBy.add(rowKey);
+}
+/**
+ * Release the answers a retired row owed: the row no longer owes them, so an answer no other row owes
+ * is kept by the cycle keep alone, as one nobody carried, and lapses after it. It is not dropped here:
+ * a row is shared by every isolation of its item in its step (the blockers step runs three), so one
+ * isolation running through retires the row another's carried call still owes; that call, retried in
+ * the same cycle, finds its flight and owes it to the row again.
+ */
+function releaseOwed(kept: object, rowKey: string) {
+  for (const flight of inFlight.get(kept)?.values() ?? []) flight.owedBy.delete(rowKey);
+}
 /** A plain object of calls (an effect object, or a port object nested in one): never an array, a promise, a map or another instance, whose members are its own. */
 const plainObject = (value: unknown): value is object => !!value && typeof value === 'object' && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 /**
@@ -164,8 +195,8 @@ export function boundedCalls(effects: DaemonEffects, kept: object, clockMs: () =
       if (left === null) return fn.call(target, ...args);
       const startedAt = clockMs(), wall = Date.now(), boundMs = options.boundMs?.(effects) ?? (effects as { stepCallBoundMs?: number }).stepCallBoundMs ?? stepCallBoundMs, capped = Math.max(0, Math.min(boundMs, left)), budgeted = capped < boundMs;
       const key = options.key?.(call, args) ?? callKey(call, args);
-      // An answer no retry consumed within the keep is dropped, this call's own key included: the work it served has moved on, so a later call under the key is a fresh send and never takes the stale answer for its effect.
-      const stale = (flight: Flight) => !!flight.settledAt && (cycleOf(kept) - flight.settledAt.cycle >= settledKeepCycles || wall - flight.settledAt.wall >= settledKeepMs);
+      // An answer still owed to a carried row that stands is kept for its retry, however many cycles have begun: a retry deferred by earlier calls or a spent budget consumes it and never starts the effect again. One no row owes, unconsumed within the keep, is dropped, this call's own key included: the work it served has moved on, so a later call under the key is a fresh send and never takes the stale answer for its effect.
+      const stale = (flight: Flight) => !!flight.settledAt && (wall - flight.settledAt.wall >= settledKeepMs || (!stillOwed(kept, flight) && cycleOf(kept) - flight.settledAt.cycle >= settledKeepCycles));
       for (const [other, flight] of pending) if (stale(flight)) pending.delete(other);
       const joined = pending.get(key);
       // The retry of a carried call that settled within the keep consumes its answer: applied once, never sent again.
@@ -180,7 +211,7 @@ export function boundedCalls(effects: DaemonEffects, kept: object, clockMs: () =
         // A finished handle record follows the running one still unanswered (GY-1774): it is sent once that settles, so a delayed running write can never land after the finished one and reopen the handle.
         const second = args[1] as Record<string, unknown> | undefined, prior = call === 'recordSession' && second?.state === 'finished' ? pending.get(options.key?.(call, [args[0], { ...second, state: 'running' }]) ?? callKey(call, [args[0], { ...second, state: 'running' }])) : undefined;
         const result = Promise.resolve(prior && !prior.settledAt ? prior.promise.then(() => undefined, () => undefined).then(() => fn.call(target, ...args)) : fn.call(target, ...args));
-        const own: Flight = { promise: result, settledAt: null }, done = () => { own.settledAt = { cycle: cycleOf(kept), wall: Date.now() }; };
+        const own: Flight = { promise: result, settledAt: null, owedBy: new Set() }, done = () => { own.settledAt = { cycle: cycleOf(kept), wall: Date.now() }; };
         result.then(done, done);
         pending.set(key, own);
         flight = own;
@@ -190,7 +221,12 @@ export function boundedCalls(effects: DaemonEffects, kept: object, clockMs: () =
         const tick = () => {
           if (stopped) return;
           const past = Math.max(clockMs() - startedAt, Date.now() - wall);
-          if (past >= capped) { carried = true; return void reject(new StepCallCarriedError(`${budgeted ? `the ${options.step} step's budget passed before ${what} answered (${boundMs} ms per ${per}, ${capped} ms left)` : `the ${options.step} step's ${boundMs} ms per-${per} bound passed before ${what} answered`}; the ${owed} stays owed and is retried next cycle${sent ? '' : ', joining the call still in flight'}`, sent)); }
+          if (past >= capped) {
+            carried = true;
+            const error = new StepCallCarriedError(`${budgeted ? `the ${options.step} step's budget passed before ${what} answered (${boundMs} ms per ${per}, ${capped} ms left)` : `the ${options.step} step's ${boundMs} ms per-${per} bound passed before ${what} answered`}; the ${owed} stays owed and is retried next cycle${sent ? '' : ', joining the call still in flight'}`, sent);
+            flightOf.set(error, flight!);
+            return void reject(error);
+          }
           timer = setTimeout(tick, Math.min(capped - past, 25)); timer.unref?.();
         };
         timer = setTimeout(tick, Math.min(capped, 25)); timer.unref?.();
@@ -225,15 +261,17 @@ interface CarriedRow { kind: DaemonActionKind; work: string | null; principal?: 
  */
 export async function recordCarried(cycle: CarriedCycle, key: string, row: CarriedRow, error: unknown, what: string) {
   const { state, now, performed, effects } = cycle, previous = state.actions[key];
+  oweCarried(key, error); // the row owes the call's answer to its retry, kept until that retry consumes it
   // A `started` row already counted this attempt, and a call never sent (a join, or a spent budget) takes that count off again; a row of any other state counts it here, unless nothing was sent.
   const attempts = previous?.state === 'started' ? Math.max(0, previous.attempts - (carriedCallSent(error) ? 0 : 1)) : !previous ? (carriedCallSent(error) ? 1 : 0) : carriedCallSent(error) ? previous.attempts + 1 : previous.attempts;
   performed.push(await record(state, key, { kind: row.kind, work: row.work, principal: row.principal ?? null, epoch: row.epoch ?? null, state: 'waiting', detail: `${what} was carried to the next cycle: ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist, null));
 }
-/** Retire a carried row once its call answered: the row is done, with the carried attempts it counted, so nothing stays carried past the answer. */
+/** Retire a carried row once its call answered, or its handling ran through without it: the row is done, with the carried attempts it counted, so nothing stays carried past the answer, and an answer the row still owed is released to the cycle keep. */
 export async function retireCarried(cycle: CarriedCycle, key: string, previous: DaemonAction, detail: string) {
   const { state, now, performed, effects } = cycle;
   if (state.actions[key] !== previous) return; // recorded anew meanwhile: carried again, or settled by the caller's own row
   performed.push(await record(state, key, { kind: previous.kind, work: previous.work, principal: previous.principal, epoch: previous.epoch, state: 'done', detail: detail.slice(0, 2000), attempts: previous.attempts, cycle: state.cycle }, now(), effects.persist, null));
+  releaseOwed(state, key);
 }
 
 /**

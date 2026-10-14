@@ -16,7 +16,7 @@ import { blockedPromptAnswers, blockedPromptFailMs, blockedPromptSettleMs, failo
 import { checkPaneStillBelongs, endWorkerAttempt, resumeStep, workerHandle } from './cycle-resume.js';
 import type { Cycle } from './cycle.js';
 import { settleEndedAttemptFence, supervisorStillRunning } from './cycle-reclaim.js';
-import { carriedCall, carriedRow, owedWrite, supersedeOwed, recordCarried, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
+import { carriedCall, carriedRow, oweCarried, owedWrite, supersedeOwed, recordCarried, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
 
 /** GY-1774: the continuation each session slot still owes after its decline keys were sent, kept while a carried prompt is retried (lost with the loop, when the session's own idle handling takes over). */
 const owedContinuations = new WeakMap<object, Map<string, { key: string; text: string; outcome: string }>>();
@@ -331,7 +331,7 @@ async function closeStepWithin(cycle: Cycle) {
             detail = `escalation handler for ${item.key} (${session.trigger}) waited since ${waiting.since} (${waiting.reason}); relaunched as ${launched.agentName} on ${launched.account ?? 'its runtime\'s own account'}`;
           } catch (error) {
             // GY-1774: settled in place, the relaunch is bound like the step's other calls; carried, the record waits and the next cycle joins it.
-            if (stepCallCarried(error)) { sink.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'waiting', detail: `Relaunching the escalation handler for ${item.key} (${session.trigger}) was carried to the next cycle: ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist, null)); return; }
+            if (stepCallCarried(error)) { oweCarried(key, error); sink.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'waiting', detail: `Relaunching the escalation handler for ${item.key} (${session.trigger}) was carried to the next cycle: ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist, null)); return; }
             if (!(error as { capacityExhausted?: boolean })?.capacityExhausted) {
               sink.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `escalation handler for ${item.key} (${session.trigger}) could not be launched again: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
               return;
@@ -373,7 +373,7 @@ async function closeStepWithin(cycle: Cycle) {
             const launched = await effects.relaunchEscalation(session);
             next = `relaunched as ${launched.agentName} on ${launched.account ?? 'its runtime\'s own account'}`;
           } catch (error) {
-            if (stepCallCarried(error)) { sink.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'waiting', detail: `Failing over escalation handler ${session.agentName} for ${item.key} was carried to the next cycle: ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist, null)); return; } // GY-1774
+            if (stepCallCarried(error)) { oweCarried(key, error); sink.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'waiting', detail: `Failing over escalation handler ${session.agentName} for ${item.key} was carried to the next cycle: ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist, null)); return; } // GY-1774
             if (!(error as { capacityExhausted?: boolean })?.capacityExhausted) {
               sink.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `escalation handler ${session.agentName} for ${item.key} exhausted its account (${signal.reason}) but could not be failed over: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
               return;

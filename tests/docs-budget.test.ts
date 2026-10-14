@@ -74,7 +74,7 @@ function baseCount(): DocsBudgetBase {
 /** Facts a criterion requires a budgeted page to state, so trimming for the budget cannot drop them. */
 const REQUIRED_STATEMENTS: [string, RegExp][] = [
   // GY-1774: every step calling an approver, a decision or a session keeps the decisions step's budget and per-call bound; a slow call is carried, never holds the cycle.
-  ['docs/master-agent-reference.md', /Loop steps calling an approver, decision or session keep a two-fifths interval budget \(30s floor\): each external call has 10s or the budget left; a slower one is carried \(`waiting`, no fault\), retried next cycle, joining the call or consuming its kept answer; a spent budget starts none/],
+  ['docs/master-agent-reference.md', /Steps calling an approver, decision or session budget two-fifths of the interval \(30s floor\), each call 10s or what's left; a slower one is carried \(`waiting`, no fault\), retried next cycle, joining it or consuming its answer, kept while its row stands; spent, it starts none/],
   ['docs/master-agent-reference.md', /one `decision\.\*` ledger read names moved items, an unmoved history is kept unread/],
   // GY-1518: the delivery redesign page keeps the merger setting's two values and the one rule.
   ['docs/delivery-redesign.md', /`github` \(default\) or `control-plane`/],

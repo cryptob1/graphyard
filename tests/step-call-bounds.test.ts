@@ -571,6 +571,61 @@ test('unit:step-calls-applied-once — a carried call\'s answer is kept until it
   assert.equal(slow.calls.length, 8, 'with no retry inside the keep the answer is dropped and the call is a fresh send');
 });
 
+test('unit:step-calls-applied-once — an answer owed to a carried row that stands is kept for its retry however many cycles begin before it: a retry deferred by earlier calls or a spent budget consumes it and never starts the effect again; the row retired releases the answer to the cycle keep, after which a call under its key is a fresh send', async () => {
+  const sb = await helper();
+  const state = { actions: {} as Record<string, DaemonAction>, cycle: 10 } as unknown as DaemonState;
+  const carried = () => ({ state, now: () => clock, performed: [], effects: effects([], {}) }) as unknown as Parameters<Helper['recordCarried']>[0];
+  const slow = hangingEach<{ profile: string }>();
+  const fx = sb.boundedCalls(effects([], { promptSession: slow.call as DaemonEffects['promptSession'] }), state, () => clock, () => 10_000, { step: 'resume', calls: ['promptSession'] });
+  const agent = { name: 'graphyard-claude-a', pane_id: 'pane-1' } as HerdrAgent, other = { name: 'graphyard-claude-b', pane_id: 'pane-2' } as HerdrAgent, row = 'carried:session:item-1';
+  const rejection = (call: Promise<unknown>) => call.then(() => assert.fail('the call was carried, never answered'), (error: unknown) => error);
+  // The re-prompt is carried and recorded on the item's row, which owes its answer to the retry.
+  const first = await rejection(fx.promptSession!(agent, 'resume GY-1') as Promise<unknown>);
+  assert.ok(sb.stepCallCarried(first));
+  await sb.recordCarried(carried(), row, { kind: 'session', work: 'GY-1' }, first, 'Re-prompting GY-1');
+  assert.ok(sb.carriedRow(state.actions[row]), JSON.stringify(state.actions[row]));
+  slow.calls[0].answer({ profile: 'owed' });
+  await settle();
+  // The retry is deferred for five cycles: two in which the handling's earlier call is carried again on the same row, three more in which the step's budget is spent before the handling is reached.
+  state.cycle = 12;
+  const spent = sb.boundedCalls(effects([], { promptSession: slow.call as DaemonEffects['promptSession'] }), state, () => clock, () => 0, { step: 'resume', calls: ['promptSession'] });
+  const deferred = await rejection(spent.promptSession!(other, 'close GY-1 first') as Promise<unknown>);
+  assert.ok(sb.stepCallCarried(deferred) && !sb.carriedCallSent(deferred), 'the earlier call is carried unsent on the spent budget');
+  await sb.recordCarried(carried(), row, { kind: 'session', work: 'GY-1' }, deferred, 'Closing GY-1 first');
+  state.cycle = 15;
+  assert.deepEqual(await fx.promptSession!(agent, 'resume GY-1'), { profile: 'owed' }, 'five cycles on, past the keep an unowed answer gets, the retry consumes the answer the row still owes');
+  assert.equal(slow.calls.length, 1, 'and sends nothing: the effect is applied once');
+  // A retry that reaches the call on a spent budget consumes the owed answer too: the effect is done, nothing waits for a fresh budget.
+  const second = await rejection(fx.promptSession!(agent, 'resume GY-1') as Promise<unknown>);
+  await sb.recordCarried(carried(), row, { kind: 'session', work: 'GY-1' }, second, 'Re-prompting GY-1');
+  slow.calls[1].answer({ profile: 'spent' });
+  await settle();
+  state.cycle = 20;
+  assert.deepEqual(await spent.promptSession!(agent, 'resume GY-1'), { profile: 'spent' }, 'consumed on the spent budget, five cycles on');
+  assert.equal(slow.calls.length, 2);
+  // The row retired (its handling ran through) owes the answer no more: it is kept by the cycle keep alone, and a call under its key after the keep is a fresh send.
+  const third = await rejection(fx.promptSession!(agent, 'resume GY-1') as Promise<unknown>);
+  await sb.recordCarried(carried(), row, { kind: 'session', work: 'GY-1' }, third, 'Re-prompting GY-1');
+  slow.calls[2].answer({ profile: 'released' });
+  await settle();
+  await sb.retireCarried(carried(), row, state.actions[row]!, 'Handling GY-1 ran through another way');
+  assert.equal(state.actions[row]?.state, 'done');
+  state.cycle = 23;
+  await assert.rejects(fx.promptSession!(agent, 'resume GY-1') as Promise<void>, sb.stepCallCarried);
+  assert.equal(slow.calls.length, 4, 'three cycles on, the released answer is dropped and the call is a fresh send');
+  // The row carried again by the retry of a sibling isolation (the blockers step runs three per item) owes the flight anew, so its retire between them never costs the answer.
+  await sb.recordCarried(carried(), row, { kind: 'session', work: 'GY-1' }, await rejection(fx.promptSession!(agent, 'resume GY-1') as Promise<unknown>), 'Re-prompting GY-1');
+  await sb.retireCarried(carried(), row, state.actions[row]!, 'A sibling isolation ran through');
+  await sb.recordCarried(carried(), row, { kind: 'session', work: 'GY-1' }, await rejection(fx.promptSession!(agent, 'resume GY-1') as Promise<unknown>), 'Re-prompting GY-1');
+  assert.equal(slow.calls.length, 4, 'the retry joined the call still in flight');
+  slow.calls[3].answer({ profile: 'again' });
+  await settle();
+  state.cycle = 30;
+  assert.deepEqual(await fx.promptSession!(agent, 'resume GY-1'), { profile: 'again' }, 'owed again, the answer is kept for the retry however many cycles begin');
+  assert.equal(slow.calls.length, 4);
+  assert.equal(sb.settledKeepMs, 24 * 3_600_000, 'the wall keep bounds every kept answer, owed or not');
+});
+
 test('unit:step-calls-bounded — a step budget is spent on the wall as well as the loop clock, so a fixed clock never lets a step outlast it', async () => {
   const sb = await helper();
   const budget = sb.stepBudget(() => 1000, 1000);

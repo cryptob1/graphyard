@@ -51,4 +51,4 @@ Unacted producer requests (unstarted, refused, launch-exited) relaunch on untrie
 
 Target: submit→merge p50 ≤30 minutes, p90 ≤60 minutes. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; verdict `speed.submitToMerge`; `scripts/measure-pipeline-speed.mjs` feeds `manual:speed-target-met`.
 
-Loop steps calling an approver, decision or session keep a two-fifths interval budget (30s floor): each external call has 10s or the budget left; a slower one is carried (`waiting`, no fault), retried next cycle, joining the call or consuming its kept answer; a spent budget starts none; one `decision.*` ledger read names moved items, an unmoved history is kept unread. Master, merge-mode, record and triage-phase calls follow.
+Steps calling an approver, decision or session budget two-fifths of the interval (30s floor), each call 10s or what's left; a slower one is carried (`waiting`, no fault), retried next cycle, joining it or consuming its answer, kept while its row stands; spent, it starts none; one `decision.*` ledger read names moved items, an unmoved history is kept unread. Master, merge-mode, record and triage-phase calls too.
