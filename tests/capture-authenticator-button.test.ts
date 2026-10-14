@@ -15,14 +15,18 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * GitHub's passkey-first Confirm-access page offers it under "Having problems?" as a form button, so
  * the authenticator view was never kept and GY-1459's fixture stayed unrecorded. The capture now
  * activates each code view's control the way the GitHub Mobile route does: a rendered button first,
- * then an anchor through its href when its click fails; it waits for the view, keeps it as
- * confirm-access-authenticator.html and returns to the landing view. When no control of any offered
- * label exists, the recorded step names every control under "Having problems?" by tag and label.
+ * then an anchor through its href when its click fails; it keeps a view only once it actually
+ * opened, as confirm-access-authenticator.html, and returns to the landing view. When no control of
+ * any offered label exists, the recorded step names every control under "Having problems?" by tag
+ * and label; when a control answers its click but the page never switches, the view is refused
+ * instead of keeping the still-shown landing form under the view's name.
  *
  * unit:capture-keeps-authenticator-view-from-button — a page whose authenticator method is a form
  * button keeps the authenticator view (the button is tried before any link, and the landing view is
  * restored); a page whose only control is an anchor that refuses its click is followed through its
- * href; a page with no such control refuses the capture with a step naming the controls it saw.
+ * href; a page with no such control refuses the capture with a step naming the controls it saw; a
+ * page whose control answers its click but never switches refuses the authenticator view rather than
+ * keeping the landing form that is still shown as its markup.
  *
  * unit:capture-docs-name-control-kinds — docs/master-agent-reference.md states that the capture
  * follows each offered method's control as a button or a link and that a refused capture's record
@@ -77,7 +81,7 @@ const installation = async (): Promise<InstallationState> => {
 class PasskeyFirstPage {
   view: View = 'landing';
   clicked: string[] = []; opened: string[] = []; located: string[] = []; listed: string[] = [];
-  constructor(readonly mode: 'button' | 'href' | 'none') {}
+  constructor(readonly mode: 'button' | 'href' | 'none' | 'stuck') {}
   page(): BrowserPage {
     const self = this;
     const authenticator = (label: string) => ['Use your authenticator app', 'Use authenticator app', 'Use an authenticator app', 'Authenticator app'].includes(label);
@@ -98,13 +102,13 @@ class PasskeyFirstPage {
         if (kind === 'button' && text === 'Use GitHub Mobile') return located('#mobile', text);
         if (kind === 'button' && text === 'Send a code via email') return located('#send-email', text);
         if (!authenticator(text) || text !== 'Use your authenticator app') return null;
-        if (self.mode === 'button') return kind === 'button' ? located('#totp-button', text) : null;
+        if (self.mode === 'button' || self.mode === 'stuck') return kind === 'button' ? located('#totp-button', text) : null;
         if (self.mode === 'href') return kind === 'button' ? located('#totp-hidden', text, { visible: false }) : located('#totp-anchor', text, { tag: 'a', href: TOTP_HREF });
         return null;
       },
       click(selector) {
         self.clicked.push(selector);
-        if (selector === '#totp-button') { self.view = 'authenticator'; return; }
+        if (selector === '#totp-button') { if (self.mode !== 'stuck') self.view = 'authenticator'; return; }
         if (selector === '#totp-anchor' || selector === '#totp-hidden') throw new Error(`agent-browser click failed: element ${selector} is not clickable`);
         assert.fail(`the capture must not activate ${selector}`);
       },
@@ -175,6 +179,20 @@ test('unit:capture-keeps-authenticator-view-from-button — a form button opens 
     for (const label of ['button:Use your authenticator app', 'link:Use your authenticator app', 'button:Use authenticator app', 'link:Authenticator app']) assert.ok(none.located.includes(label), `${label} was looked for`);
     assert.equal(await exists(join(root, refused.result.record, 'confirm-access', 'confirm-access-authenticator.html')), false);
     assert.match(refused.result.next, /^Inspect .*record\.json and its screenshots, then rerun master browser capture$/);
+
+    // The control answers its click but the page never switches: the view is refused, never kept
+    // from the landing form that is still shown under its name.
+    const stuck = new PasskeyFirstPage('stuck');
+    const unopened = await capture(root, config, stuck);
+    assert.equal(unopened.result.outcome, 'refused'); assert.equal(unopened.result.verified, false);
+    assert.equal(unopened.result.reason, 'Kept landing, passkey but not the offered authenticator view(s); the recorded steps name each failure, so rerun until every offered view is kept; the email method is offered only by a control that sends a code, which the capture never follows, so no email view is expected');
+    assert.deepEqual(unopened.record.after, { url: PERMISSIONS, views: ['landing', 'passkey'], missed: ['authenticator'] }, 'the view that never opened is missed, so the capture is refused');
+    assert.deepEqual(captureSteps(unopened.record, 'authenticator'), ['failed: the authenticator view did not open: its control was activated but the page still shows the view it landed on, so nothing is kept for it'], 'the step names the control that was activated and the landing the page still shows');
+    assert.deepEqual(stuck.clicked, ['#totp-button'], 'the control was activated');
+    assert.deepEqual(stuck.opened, [PERMISSIONS, PERMISSIONS], 'the landing view is reopened for the remaining offered views after the authenticator view failed to open');
+    assert.equal(await exists(join(root, unopened.result.record, 'confirm-access', 'confirm-access-authenticator.html')), false, 'no markup is kept under the view that never opened');
+    assert.equal(await exists(join(root, unopened.result.record, 'sudo-form-authenticator.html')), false);
+    assert.ok(!unopened.record.confirmAccess.some((captured: { view: string }) => captured.view === 'authenticator'), 'record.json holds no authenticator capture');
 
     // The agent-browser page lists the controls by evaluating a script scoped to the heading.
     const { agentBrowserPage } = await browser();

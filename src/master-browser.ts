@@ -436,10 +436,13 @@ export async function captureConfirmAccess(page: BrowserPage, directory: string,
 }
 /**
  * Keep the markup of a Confirm-access page's forms for fixtures (GY-1461): the view it landed on,
- * then each code view it offers (authenticator app, email code), opened by its link alone — nothing
- * is typed or submitted — and the landing page reopened afterwards so the flow proceeds exactly as
- * before. Each form is redacted before it is written. A failure is recorded as a step with its error
- * and never thrown; the capture stops once its time budget is spent.
+ * then each code view it offers (authenticator app, email code), opened through its own control —
+ * a rendered button first, then a link — never typed into or submitted, and the landing page
+ * reopened afterwards so the flow proceeds exactly as before. A code view is kept only once its
+ * page actually opened: a control the page never answers is a recorded failure, never a landing
+ * form kept under the view's name (GY-1781 review). Each form is redacted before it is written.
+ * A failure is recorded as a step with its error and never thrown; the capture stops once its time
+ * budget is spent.
  *
  * The same reads are saved as the flow's Confirm-access captures too (GY-1482, ONCAPTURE), with the
  * passkey view besides: opened by its link, or, on a page that asks for the passkey on the view it
@@ -505,7 +508,9 @@ export async function captureSudoForms(page: BrowserPage, directory: string, opt
           activated = label; break;
         }
         if (!activated) throw new Error(`${view === 'email' ? 'no email view control (only a control that sends a code, which is not followed)' : 'no authenticator view control'}; ${describeSudoControls(page)}`);
-        awaitView();
+        // The view is kept only once it actually opened (GY-1781 review): a click the page never
+        // answers would otherwise keep the landing form under the view's name.
+        awaitView(view);
       }
       await keep(view);
     } catch (error) { fail(view, error); }
@@ -514,14 +519,18 @@ export async function captureSudoForms(page: BrowserPage, directory: string, opt
   return captured;
 
   // The view has opened once the page's text differs from the landing's: a view the page switches
-  // to client-side can take a moment longer than the activation's own wait, within the budget.
-  function awaitView() {
+  // to client-side can take a moment longer than the activation's own wait, within the budget. A
+  // view that never opens is a failure, never a capture: a landing still shown after the reads is
+  // thrown so no markup is kept under the view's name (GY-1781 review).
+  function awaitView(view: 'authenticator' | 'email') {
     for (let tries = 0; tries < 4; tries += 1) {
       let shown: string;
-      try { shown = page.text(); } catch { return; }
-      if (shown !== text || now().getTime() - started >= budgetMs) return;
+      try { shown = page.text(); } catch (error) { throw new Error(`the ${view} view could not be read after its control was activated: ${error instanceof Error ? error.message : String(error)}`); }
+      if (shown !== text) return;
+      if (now().getTime() - started >= budgetMs) break;
       page.wait(1_000);
     }
+    throw new Error(`the ${view} view did not open: its control was activated but the page still shows the view it landed on, so nothing is kept for it`);
   }
 }
 /**
