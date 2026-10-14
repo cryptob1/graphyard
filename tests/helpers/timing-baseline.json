@@ -279,6 +279,7 @@
     "tests/capacity-redispatch-preserves-attempt.test.ts": 12000,
     "tests/capacity-silent-exhaustion.test.ts": 2000,
     "tests/capped-refusal-rereview.test.ts": 600,
+    "tests/capped-second-refusal-withdraws.test.ts": 500,
     "tests/capture-authenticator-button.test.ts": 1000,
     "tests/card-timing.test.ts": 2525,
     "tests/chart-exercise-port-forward.test.ts": 16000,

@@ -9,6 +9,7 @@ import { pendingCaseChanges } from './master-status-case-changes.js';
 import { installationMerger } from '../executor.js';
 import { leftBehindCheckoutAttention, readHeldCli } from '../daemon/upgrade.js';
 import { baseFailureAttention, daemonSummary, loopAttention, readDaemonState } from '../master-daemon.js';
+import { stalledReviewCapAttention } from '../daemon/cycle-review-cap.js';
 import { slowCycleAttention } from '../daemon/liveness.js';
 import { promotionStatus } from '../daemon/deployment.js';
 import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, loopMemoryAttention, readDispatchCursor } from '../auto-dispatch.js';
@@ -103,7 +104,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // Candidate session status, conflict probe and timing failure qualification (GY-1157)
   const { probe, status: pipelined, delivery } = await buildPipelineStatus(root, master, snapshot, coordinator, runtime, credentials, containment, reviews, producers, dispatch.failures, retries, daemonState, cycling, launches, masterApi, sections);
   // A failed check a since-fixed base breakage explains names the refresh that clears it (GY-793).
-  const status = nameBaseBreaks(pipelined, snapshot.work);
+  // GY-1810: a review-gate row saying the loop relaunches the review on its own gives way to the stalled review-cap step wherever the step, not a review, holds the head.
+  const status = nameBaseBreaks(stalledReviewCapAttention(pipelined, snapshot.work, cursor, master.reviewRoundCap, Date.parse(snapshot.now)), snapshot.work);
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device.
   const sudo = administration.sudo;
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
