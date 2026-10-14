@@ -152,11 +152,15 @@ export async function readingsStep(cycle: Cycle, served: DaemonState['deployment
     if (now() >= deadline) { deferred++; return; }
     const observing = loopObservation(item, new Date(now()), snapshot.work);
     // A recorded pass still open: closed on the release it was read on, whatever the plane serves now.
+    // The read backoff paces live reads only (GY-1794): it never holds this close, so a pass recorded
+    // by hand after unavailable or failed readings closes on the next pass and a close that failed is
+    // retried every pass until it lands, under the same idempotency key. A done action stands: that
+    // close has landed, and only the owed pull request is retried, above, on its own key.
     if (!observing) {
       const pass = observationPass(item, new Date(now()), snapshot.work);
       if (!pass) return;
       const key = readingKey(item), previous = state.actions[key];
-      if (!readingDue(previous, state.cycle)) return;
+      if (previous?.state === 'done') return;
       return close(item, pass.release, pass.readings.map(entry => ({ proof: entry.proof, detail: entry.reading?.detail ?? `a trusted passing record by ${entry.producer} at ${entry.at}` })), noteFor(item, key, previous, (previous?.attempts ?? 0) + 1));
     }
     if (!observing.due) return;
