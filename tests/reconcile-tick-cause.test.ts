@@ -70,7 +70,7 @@ async function slowPass() {
 function recordEvaluations() {
   const internals = engine as unknown as { reconcileItem: (db: unknown, work: Work, all: Work[], now: Date, options?: { dryRun?: boolean }) => Promise<boolean> };
   const original = internals.reconcileItem, evaluated: string[] = [];
-  let block = 0, during: (() => Promise<void>) | null = null;
+  let block = 0, during: (() => Promise<void>) | null = null, writing: ((work: Work) => void) | null = null;
   internals.reconcileItem = async function (this: Engine, db, work, all, now, options) {
     if (options?.dryRun) {
       evaluated.push(work.id);
@@ -78,10 +78,13 @@ function recordEvaluations() {
       if (block) { const until = performance.now() + block; block = 0; while (performance.now() < until) { /* starve the loop */ } }
       // Run `during` once, on the first evaluation: a writer outside the tick moving a face mid-pass.
       if (during) { const run = during; during = null; await run(); }
+    } else if (writing) {
+      // Change the document once as the write evaluates it: a write that moves more of the face than the dry run planned.
+      const change = writing; writing = null; change(work);
     }
     return original.call(this, db, work, all, now, options);
   };
-  return { evaluated, blockOnce: (ms: number) => { block = ms; }, duringOnce: (run: () => Promise<void>) => { during = run; }, restore: () => { internals.reconcileItem = original; } };
+  return { evaluated, blockOnce: (ms: number) => { block = ms; }, duringOnce: (run: () => Promise<void>) => { during = run; }, writingOnce: (change: (work: Work) => void) => { writing = change; }, restore: () => { internals.reconcileItem = original; } };
 }
 
 test('unit:slow-tick-names-cause — a tick past the bound names the keys and face fields that made it full, or the interval, and the event-loop lag it ran under', { timeout: 120_000 }, async () => {
@@ -207,5 +210,33 @@ test('unit:own-write-no-full-pass — a face the tick\'s own write moved makes t
     assert.equal(full.evaluated, full.live, 'every live item is evaluated against the face a request moved');
     assert.deepEqual(full.tick.full?.moved.map(move => move.key), [others[0].key]);
     for (const other of others) assert.ok(new Set(recorder.evaluated).has(other.id));
+    recorder.evaluated.length = 0;
+    await settle();
+
+    // A write that evaluates the item again on its current document (its row moved without its
+    // face between the dry run and the write) and drops a relationship: the reader of the dropped
+    // relationship is reached through the document as it stood before the write, not left to the
+    // full-evaluation interval.
+    const holder = await create({ exclusiveResources: ['scanner'] });
+    const peer = await create({ exclusiveResources: ['scanner'] });
+    await engine.execute(operator, 'ready', holder.id, {}, randomUUID());
+    const held = await engine.execute(worker, 'claim', holder.id, {}, randomUUID());
+    await settle();
+    await store.pool.query("UPDATE work_items SET document = jsonb_set(document, '{lease,expiresAt}', to_jsonb($2::text)) WHERE id = $1", [held.id, new Date(Date.now() - 60_000).toISOString()]);
+    // Mid-pass, the row moves on a field outside its face, so the write evaluates the row again in place.
+    recorder.duringOnce(async () => { await store.pool.query("UPDATE work_items SET document = jsonb_set(document, '{updatedAt}', to_jsonb($2::text)) WHERE id = $1", [held.id, new Date().toISOString()]); });
+    recorder.writingOnce(work => { if (work.id === held.id) work.exclusiveResources = []; });
+    recorder.evaluated.length = 0;
+    await engine.reconcile();
+    // The first lapsed item's standing lease-loss keeps it due every pass; the peer is not due yet.
+    assert.ok(recorder.evaluated.includes(held.id) && !recorder.evaluated.includes(peer.id), `the pass evaluated the lapsed holder and not its peer: ${recorder.evaluated.join(', ')}`);
+    const written = (await store.list()).find(entry => entry.id === held.id)!;
+    assert.equal(written.lease, null, 'the lapse was written');
+    assert.deepEqual(written.exclusiveResources ?? [], [], 'the write dropped the exclusive resource');
+    recorder.evaluated.length = 0;
+    const dropped = await slowPass();
+    assert.ok(!dropped.full && !dropped.tick.full, `the pass after the own write is not full: ${dropped.line}`);
+    assert.ok(new Set(recorder.evaluated).has(peer.id), 'the item that shared the dropped resource is evaluated against its release');
+    for (const other of others) assert.ok(!new Set(recorder.evaluated).has(other.id), `${other.key} reads nothing of the moved face and is not evaluated`);
   } finally { recorder.restore(); }
 });

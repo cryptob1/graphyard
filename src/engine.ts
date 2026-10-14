@@ -3070,10 +3070,13 @@ export class Engine {
       if (!row || !pass.fleet.has(plan.id)) return { wrote: false, stale, faceMoved: null, saved: [], apply: () => {} };
       if (row.version !== pass.fleet.get(plan.id)!.version) await pass.reread(db, [plan.id]);
       const entry = pass.fleet.get(plan.id)!;
-      let work = plan.work;
+      let work = plan.work, before = entry.work;
       if (!stale && entry.version === plan.version) await this.writeReconciled(db, work, pass.all(), plan.now);
       else {
-        // In place: a failure from here on clears the kept view, as every rolled-back write does.
+        // In place: a failure from here on clears the kept view, as every rolled-back write does. The
+        // document as it stood is kept apart (GY-1777), so a reader of a relationship the write
+        // removes (a path, a resource, a parent) is reached through it rather than left to the full pass.
+        before = structuredClone(entry.work);
         work = entry.work;
         const wrote = await this.reconcileItem(db, work, pass.all(), now);
         // Items the batch evaluated after this one read it as evaluated: if it came out otherwise, they are evaluated again too.
@@ -3082,7 +3085,7 @@ export class Engine {
       }
       const version = ((await db.query('SELECT xmin::text AS version FROM work_items WHERE id = $1', [plan.id])).rows[0] as { version: string }).version, face = fleetFace(work);
       const saved = await savedVersions(db, [work]);
-      const faceMoved = face !== entry.face ? { move: { id: plan.id, key: work.key, fields: faceFields(entry.face, face) }, before: entry.work, after: work } : null;
+      const faceMoved = face !== entry.face ? { move: { id: plan.id, key: work.key, fields: faceFields(entry.face, face) }, before, after: work } : null;
       return { wrote: true, stale, faceMoved, saved, apply: () => { Object.assign(entry, { work, version, face }); pass.view(); } };
     }, { lane: 'background', coordinationLock: false, retryStaleWrites: false });
   }
