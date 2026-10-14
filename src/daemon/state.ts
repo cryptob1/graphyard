@@ -11,6 +11,7 @@ import { boundDetail } from './decisions.js';
 import { waitReason } from '../model/action-kinds.js'; import { timingsSchema } from '../master/timings.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
 import { docsSyncWatchSchema, routedConflictSchema } from '../model/docs-sync.js'; import { unansweredStands } from '../model/fault-record.js';
+import { slowLoopPendingSchema } from './slow-loop-item.js'; // lazy below: it imports this module
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
 import { itemClockSchema, latencySampleSchema } from './latency-clock.js';
@@ -398,6 +399,8 @@ export const slowLoopStateSchema = z.object({
   release: z.string().max(40).nullable().default(null),
   consecutive: z.number().int().min(0).default(0),
   filed: z.record(z.string().max(160), z.object({ key: z.string().max(40), step: z.string().max(80), file: z.string().max(200).nullable(), cycle: z.number().int().min(0), at: z.string().max(40) }).strict()).default({}),
+  /** A filing the control plane never answered (GY-1775): its original body and key, kept so the retry asks what was asked first. */
+  pending: z.lazy(() => slowLoopPendingSchema).nullable().default(null),
 }).strict();
 export type SlowLoopState = z.infer<typeof slowLoopStateSchema>;
 
@@ -499,7 +502,7 @@ export const daemonStateSchema = z.object({
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),
   /** The slow-loop run on that release and the fix item it filed (GY-1775). */
-  slowLoop: slowLoopStateSchema.default(() => ({ release: null, consecutive: 0, filed: {} })),
+  slowLoop: slowLoopStateSchema.default(() => ({ release: null, consecutive: 0, filed: {}, pending: null })),
   upgrade: upgradeStateSchema, // the between-cycles self-upgrade's progress (GY-437)
   /** The last reload of .graphyard/master.json: what the running loop adopted, or why it refused. */
   config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),

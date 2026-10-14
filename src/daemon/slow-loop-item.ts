@@ -2,6 +2,7 @@
 // the slowest step and the slowest external call, so a regression is owned by an item rather than
 // found by a human reading p50 (GY-1766 was filed by hand after the decisions step held cycles at 121 s).
 import { planeWideRefusal } from '../model/blocker-class.js';
+import { z } from 'zod';
 import type { CallTiming } from '../master/timings.js';
 import type { Work } from '../model.js';
 import type { DaemonEffects } from './effects.js';
@@ -55,8 +56,23 @@ export function slowLoopWindow(window: readonly CycleMetrics[]) {
   return { slowest, call, perCycle: window.map(metrics => ({ cycle: metrics.cycle, durationMs: metrics.durationMs, stepMs: slowest ? (metrics.timings?.steps.find(step => step.step === slowest.step)?.ms ?? (metrics.steps as Record<string, { ms: number }> | undefined)?.[slowest.step]?.ms ?? 0) : 0 })) };
 }
 
+/** The item body as the control plane's create command parses it: bounds the pending filing the cursor keeps. */
+export const slowLoopItemInputSchema = z.object({
+  title: z.string().min(1).max(200), type: z.literal('bug'), priority: z.literal(1),
+  description: z.string().min(1).max(20_000),
+  criteria: z.array(z.object({ id: z.string().regex(/^AC-\d+$/), text: z.string().min(1).max(2000), proofs: z.array(z.string().min(1).max(100)).min(1).max(20) }).strict()).min(1).max(50),
+  plannedFiles: z.array(z.string().min(1).max(500)).max(50).optional(),
+  reason: z.string().min(1).max(2000),
+}).strict();
+export type SlowLoopItemInput = z.infer<typeof slowLoopItemInputSchema>;
+/** A filing the control plane never answered, kept on the cursor so the retry asks the original body under the original key. */
+export const slowLoopPendingSchema = z.object({
+  release: z.string().max(40), step: z.string().max(80), key: z.string().max(200), at: z.string().max(40), input: slowLoopItemInputSchema,
+}).strict();
+export type PendingSlowLoop = z.infer<typeof slowLoopPendingSchema>;
+
 /** The item the loop files for a slow run: the release, the window's percentiles, the slowest step with its file, and the slowest call. */
-export function slowLoopItem(release: string, window: readonly CycleMetrics[], cycleTime: ReturnType<typeof cycleTimes>) {
+export function slowLoopItem(release: string, window: readonly CycleMetrics[], cycleTime: ReturnType<typeof cycleTimes>): SlowLoopItemInput {
   const { slowest, call, perCycle } = slowLoopWindow(window);
   const step = slowest?.step ?? 'unrecorded', file = slowest?.file ?? null, short = release.slice(0, 12);
   const cycles = perCycle.map(entry => `cycle ${entry.cycle} ${seconds(entry.durationMs)}${slowest ? ` (${step} ${seconds(entry.stepMs)})` : ''}`).join(', ');
@@ -75,7 +91,6 @@ export function slowLoopItem(release: string, window: readonly CycleMetrics[], c
     reason: `${window.length} consecutive cycles on release ${short} passed the ${seconds(slowCycleMs)} cycle bound, the ${step} step slowest, and no open item names it`,
   };
 }
-export type SlowLoopItemInput = ReturnType<typeof slowLoopItem>;
 
 /** The item filed for `release` and `step`, when the cursor records one. */
 export const filedSlowLoopItem = (slowLoop: Pick<SlowLoopState, 'filed'> | null | undefined, release: string | null | undefined, step: string | null | undefined) =>
@@ -91,7 +106,7 @@ export function noteSlowCycle(state: Pick<DaemonState, 'metrics' | 'release' | '
   const last = state.metrics.at(-1);
   if (!last) return null;
   const release = state.release?.commit ?? null;
-  if (state.slowLoop.release !== release) state.slowLoop = { release, consecutive: 0, filed: {} };
+  if (state.slowLoop.release !== release) state.slowLoop = { release, consecutive: 0, filed: {}, pending: null };
   state.slowLoop.consecutive = slow(last) ? state.slowLoop.consecutive + 1 : 0;
   if (!release || state.slowLoop.consecutive < slowLoopCycles) return null;
   const window = state.metrics.slice(-slowLoopCycles);
@@ -100,28 +115,44 @@ export function noteSlowCycle(state: Pick<DaemonState, 'metrics' | 'release' | '
 
 /**
  * After a completed cycle: files the fix item once the run reaches three slow cycles on one release,
- * as the operator-agent under the release-and-step idempotency key. A later slow cycle whose window
- * names the step already filed files nothing and makes no request; a retry after a lost reply asks
- * again under the same key and is answered with the item already filed. Nothing is filed without the
- * operator-agent identity (`fileSlowLoopItem` absent), as the throughput owner does.
+ * as the operator-agent under the release-and-step idempotency key. Each count and reset is
+ * persisted as it is counted — the cycle's metrics were persisted before this call, so an unpersisted
+ * count or reset would be lost by a restart, and three slow cycles spanning one would file nothing.
+ * A later slow cycle whose window names the step already filed files nothing and makes no request; a
+ * retry after a lost reply asks again with the body as it was first asked, under the same key, and is
+ * answered with the item already filed — the control plane fingerprints each Idempotency-Key's parsed
+ * body and refuses a key reused with a different one. Nothing is filed without the operator-agent
+ * identity (`fileSlowLoopItem` absent), as the throughput owner does.
  */
 export async function fileSlowLoopItem(state: DaemonState, effects: Pick<DaemonEffects, 'fileSlowLoopItem' | 'persist'>, now: () => number): Promise<DaemonAction | null> {
-  const run = noteSlowCycle(state);
+  const before = state.slowLoop, beforeCount = state.slowLoop.consecutive, run = noteSlowCycle(state);
+  const counted = state.slowLoop !== before || state.slowLoop.consecutive !== beforeCount;
+  if (counted) { try { await effects.persist(state); } catch { /* the next cycle's write carries the count */ } }
   if (!run || !effects.fileSlowLoopItem) return null;
   const { release, window } = run;
-  const input = slowLoopItem(release, window, cycleTimes(state.metrics, now())), step = slowLoopWindow(window).slowest?.step ?? 'unrecorded';
+  const pending = state.slowLoop.pending?.release === release ? state.slowLoop.pending : null;
+  const input = pending ? pending.input : slowLoopItem(release, window, cycleTimes(state.metrics, now())), step = pending ? pending.step : slowLoopWindow(window).slowest?.step ?? 'unrecorded';
   if (filedSlowLoopItem(state.slowLoop, release, step)) return null;
-  const key = slowLoopActionKey(release, step), previous = state.actions[key], attempts = previous?.state === 'done' ? 1 : (previous?.attempts ?? 0) + 1;
-  await record(state, key, { kind: 'fault', work: null, principal: null, state: 'started', detail: `Filing one item for the slow master loop: ${window.length} consecutive cycles past ${seconds(slowCycleMs)} on release ${release.slice(0, 12)}, the ${step} step slowest`, attempts, cycle: state.cycle }, now(), effects.persist);
+  const key = pending?.key ?? slowLoopIdempotencyKey(release, step), actionKey = slowLoopActionKey(release, step),
+    previous = state.actions[actionKey], attempts = previous?.state === 'done' ? 1 : (previous?.attempts ?? 0) + 1;
+  await record(state, actionKey, { kind: 'fault', work: null, principal: null, state: 'started',
+    detail: pending ? `Asking again for the slow master loop item on release ${release.slice(0, 12)} (the ${step} step), with the body it was first asked under: the control plane never answered`
+      : `Filing one item for the slow master loop: ${window.length} consecutive cycles past ${seconds(slowCycleMs)} on release ${release.slice(0, 12)}, the ${step} step slowest`,
+    attempts, cycle: state.cycle }, now(), effects.persist);
   try {
-    const filed = await effects.fileSlowLoopItem(input, slowLoopIdempotencyKey(release, step));
-    if (!filed) return record(state, key, { kind: 'fault', work: null, principal: null, state: 'done', detail: `Nothing filed for the slow master loop on release ${release.slice(0, 12)}: the operator-agent identity is not provisioned`, attempts, cycle: state.cycle }, now(), effects.persist);
+    const filed = await effects.fileSlowLoopItem(input, key);
+    state.slowLoop.pending = null;
+    if (!filed) return record(state, actionKey, { kind: 'fault', work: null, principal: null, state: 'done', detail: `Nothing filed for the slow master loop on release ${release.slice(0, 12)}: the operator-agent identity is not provisioned`, attempts, cycle: state.cycle }, now(), effects.persist);
     state.slowLoop.filed[filedKey(release, step)] = { key: filed.key, step, file: input.plannedFiles?.[0] ?? null, cycle: window.at(-1)!.cycle, at: new Date(now()).toISOString() };
-    return record(state, key, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} for the slow master loop on release ${release.slice(0, 12)}: the ${step} step is the slowest across cycles ${window.map(metrics => metrics.cycle).join(', ')}; a later slow run on this release and step returns it`, attempts, cycle: state.cycle }, now(), effects.persist);
+    return record(state, actionKey, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} for the slow master loop on release ${release.slice(0, 12)}: the ${step} step is the slowest across cycles ${window.map(metrics => metrics.cycle).join(', ')}; a later slow run on this release and step returns it`, attempts, cycle: state.cycle }, now(), effects.persist);
   } catch (error) {
-    // A control plane that did not answer refused nothing: the next slow cycle asks again under the same key (GY-1344, GY-1345).
+    // A control plane that did not answer refused nothing: the next slow cycle asks again under the same
+    // key, with the body kept as it was asked (GY-1344, GY-1345). An answered refusal is not kept: the
+    // plane judged it, so a later cycle may ask afresh what the run then sees.
     const unanswered = planeWideRefusal(error);
-    return record(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the item for the slow master loop on release ${release.slice(0, 12)}${unanswered ? ' (the control plane did not answer, so it is filed on a later slow cycle)' : ''}: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist, unanswered ? null : undefined);
+    const parsed = unanswered ? slowLoopItemInputSchema.safeParse(input) : null;
+    state.slowLoop.pending = parsed?.success ? { release, step, key, input: parsed.data, at: new Date(now()).toISOString() } : null;
+    return record(state, actionKey, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the item for the slow master loop on release ${release.slice(0, 12)}${unanswered ? ' (the control plane did not answer, so it is filed on a later slow cycle)' : ''}: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist, unanswered ? null : undefined);
   }
 }
 

@@ -7,7 +7,7 @@ Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON`; auto-gran
 
 ## Promotion to autonomy
 
-`master promote --admin-token-stdin` makes a supervised install autonomous (`master autonomy --apply` then refuses; `master.json` edits skip checks). Refuses until a reviewer App and profile exist, its bot none of your `gh` login, `operatorLogin`, worker App or principals; logs who, reviewer, time to `.graphyard/master-actions/promotions.jsonl`, provisions operator-agent and approver, writes `supervision: autonomous`; no demotion.
+`master promote --admin-token-stdin` makes a supervised install autonomous (`master autonomy --apply` then refuses; `master.json` edits skip checks). Refuses until a reviewer App and profile exist, its bot none of your `gh` login, `operatorLogin`, worker App or principals; logs to `.graphyard/master-actions/promotions.jsonl`, provisions operator-agent and approver, writes `supervision: autonomous`; no demotion.
 
 ## Conflict avoidance
 
@@ -15,19 +15,13 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 ## GitHub administration through the browser
 
-`master protection --apply` reconciles protection; flows (`master browser app-permissions`, `master browser installation-accept`, `master browser protection`) drive the `master init --browser-profile` profile:
+`master protection --apply` reconciles protection; the `master init --browser-profile` flows, each a `master browser` run: `app-permissions` raises permissions, `installation-accept` accepts requests, `protection` reconciles protection.
 
-Flow | Effect
----|---
-| `app-permissions` | Raise permissions
-| `installation-accept` | Accept requests
-| `protection` | Reconcile protection
-
-Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` (`record.json`, `ledger.json`, redacted Confirm-access markup: `master browser fixtures`); a criterion needing a live one runs `master browser capture [--dry-run]` on the sudo-protected App permissions page, submitting nothing, never a human. *Confirm access* on a GitHub Mobile device: human-only; master never stores cookies, uses merge bypass, pushes code or reads worker credentials. On classifier refusals `master harness claude|codex --apply` writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`, token-minting or mutating `gh api`; missing or retired rules are `harness` drift reapplied each cycle to the loop's CLI checkout (no unit record: self-recorded, else waits), `master status` too (read-only).
+Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` (`record.json`, `ledger.json`, redacted Confirm-access markup: `master browser fixtures`); a criterion needing a live one runs `master browser capture [--dry-run]` on the sudo-protected App permissions page, submitting nothing, never a human. *Confirm access* on a GitHub Mobile device: human-only; master never stores cookies, merge-bypasses, pushes code or reads worker credentials. On classifier refusals `master harness claude|codex --apply` writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`, token-minting or mutating `gh api`; missing or retired rules are `harness` drift reapplied each cycle to the loop's CLI checkout (no unit record: self-recorded, else waits), `master status` too (read-only).
 
 ## Typed actions and executors
 
-`nextAction` (one per item): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`; judgements: `actions.needsHuman`. `init` starts executors; `master executors restart` updates stale slots; verified deployments advance clean checkouts, restart executors and loop. `resync` needs a newer observation. `dispatch`/`request-review` complete when a session already answers the head; busy profiles stall after 30min. Three failures, unchanged reason: stalled rather than retrying (fleet looks idle; plane-wide failure or human-only park is no stall); in no count and no list, but in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate. Ticks requeue ownerless items (`liveness.violations`).
+`nextAction` (one per item): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`; judgements: `actions.needsHuman`. `init` starts executors; `master executors restart` updates stale slots; verified deployments advance clean checkouts, restart executors and loop. `resync` needs a newer observation. `dispatch`/`request-review` complete when a session already answers the head; busy profiles stall after 30min. Three failures, unchanged reason: stalled rather than retrying (fleet looks idle; plane-wide failure or human-only park is no stall); listed only in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate. Ticks requeue ownerless items (`liveness.violations`).
 
 Declared slot not `active`: `resources` fault naming `journalctl --user -u graphyard-executor@N.service` unless stopped <2min. `--install` needs `Restart=always`, `RestartSec` ≤60s. Worker starts fenced <2min retry after lapse; longer fail, named.
 
@@ -41,7 +35,7 @@ Unacted producer requests (unstarted, refused, launch-exited) relaunch on untrie
 
 ## Fault classes
 
-`faultClass` (`master status` `faults`): recurring classes file one item each; instances predating a delivered class item's landing (not opening) link there; triage proposes closing items holding only those, withdrawn on post-landing links; doctor matches standing cover; a resource at bound files `resource:ID`; three consecutive cycles past 60 s on one release file `slow-loop:RELEASE:STEP` (p50/p95, slowest step's file and call; attention names it); also `fleet-capacity`, `unanswered-request` (past `settledAnswerGraceMs`), `configuration`, `decision-unanswered`, and `unclassified` unless (`plane-unavailable`, `fix-item`, `decision-stale`, `overlong-session`). Review unlaunched 15min: `concurrency-starved`, `review-settlement`, `launch-review`; unanswering planes `plane-unavailable`; a `no master role` blocker `configuration`, not `stalled-gate`; pre-start launch failures one.
+`faultClass` (`master status` `faults`): recurring classes file one item each; instances predating a class item's landing (not opening) link there; triage proposes closing items holding only those, withdrawn on post-landing links; doctor matches standing cover; a resource at bound files `resource:ID`; three consecutive cycles past 60 s on one release file `slow-loop:RELEASE:STEP` (p50/p95, slowest step's file and call; attention names it; counts and resets persist across restarts; a lost reply retries its original body); also `fleet-capacity`, `unanswered-request` (past `settledAnswerGraceMs`), `configuration`, `decision-unanswered`, and `unclassified` unless (`plane-unavailable`, `fix-item`, `decision-stale`, `overlong-session`). Review unlaunched 15min: `concurrency-starved`, `review-settlement`, `launch-review`; unanswering planes `plane-unavailable`; a `no master role` blocker `configuration`, not `stalled-gate`; pre-start launch failures one.
 
 ## Shadow merge gate
 
