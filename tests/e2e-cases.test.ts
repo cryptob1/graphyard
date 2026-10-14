@@ -370,6 +370,69 @@ test('unit:e2e-case-verdict-states — a release run ends each case passed, fail
   assert.match(row.slice(0, row.indexOf('</tr>')).replace(/<[^>]+>/g, ' '), /targets uat · +required/);
 });
 
+test('unit:pending-goal-case-does-not-block-candidate — a required case bound to an outcome no delivered item serves yet fails as pending: only a plain required failure blocks, and with the plain one passing the candidate is promotable', async () => {
+  const sha = '5'.repeat(40);
+  const contract = { outcomes: [
+    { id: 'goal-outcome', title: 'A goal outcome', criteria: ['Something a customer can do'], cases: ['pending-case'] },
+    { id: 'plain-outcome', title: 'A plain outcome', criteria: ['Something else a customer does'], cases: ['plain-case'] },
+  ] };
+  const cases = verdictCases({ 'pending-case': { required: true }, 'plain-case': { required: true } });
+  // Both required cases fail; the pending-bound one neither stops the run nor blocks, and its report verdict is as before.
+  const report = await runCases(cases, { url: 'https://uat.example.test', token: 't', runId: 'rc-pending', fetcher: verdictTarget(sha, { 'pending-case': [500], 'plain-case': [500] }), pendingCases: ['pending-case'] });
+  const of = (id: string) => report.cases.find(entry => entry.id === id)!;
+  assert.equal(of('pending-case').verdict, 'failed');
+  assert.equal(of('pending-case').pending, true);
+  assert.equal(of('plain-case').verdict, 'failed', 'a pending failure never stops the run: the plain required case after it still ran');
+  assert.deepEqual([report.passed, report.failed], [0, 2], 'the pending case still counts as failed in the report');
+  const verdict = runner.releaseVerdict(report, [], ['pending-case']);
+  assert.deepEqual(verdict.blocking.map(entry => entry.id), ['plain-case'], 'only the plain required failure blocks');
+  assert.deepEqual(verdict.pending.map(entry => entry.id), ['pending-case']);
+  assert.equal(verdict.passed, false);
+  assert.deepEqual(runner.releaseVerdict(report).blocking.map(entry => entry.id), ['pending-case', 'plain-case'], 'without the candidate\'s pending record both would block');
+  assert.match(summarize(report), /FAIL pending-case \(\d+ ms\)\n     pending: its outcome has no delivered item yet, so it does not block/);
+
+  // With the plain one passing, the pending failure alone leaves the suite passing, the validation passed and the candidate promotable.
+  const target = verdictTarget(sha, { 'pending-case': [500], 'plain-case': [200] });
+  let written: any = null;
+  const suite = await e2eSuite(cases, 't', { fetcher: target, contract, report: async value => { written = value; } }).run('https://uat.example.test', { id: '20261006T120000Z', pendingOutcomes: ['goal-outcome'] });
+  assert.equal(suite.passed, true, suite.detail);
+  assert.match(suite.detail, /pending, not blocking: case pending-case failed at step 1 \(read pending-case\): expected status 200, got 500/);
+  const candidate: ReleaseCandidate = { id: '20261006T120000Z', sha, cutAt: '2026-10-06T12:00:00.000Z', trigger: 'manual', since: null, items: [], pendingOutcomes: ['goal-outcome'] };
+  const uat = assessUat(candidate, { deployedSha: sha, suites: [suite], now: new Date('2026-10-06T12:30:00Z') });
+  assert.equal(uat.result, 'passed', 'a candidate whose only failing required cases are pending passes its uat validation');
+  assert.deepEqual(assessPromotion(candidate, uat, null), { promotable: true, refusals: [], sha, already: false });
+
+  // No release hold: the pending outcome files none, while a plain required failure opens its outcome's hold.
+  const { assessHolds, e2eRecord } = await import('../src/release-holds.js');
+  assert.deepEqual(assessHolds(contract, candidate, { deployedSha: sha, e2e: e2eRecord(written, candidate, contract) }, [], '2026-10-06T12:30:00.000Z'), []);
+  const bothFailing = await runCases(cases, { url: 'https://uat.example.test', token: 't', runId: 'rc-20261006T120000Z', fetcher: verdictTarget(sha, { 'pending-case': [500], 'plain-case': [500] }), pendingCases: ['pending-case'] });
+  const holds = assessHolds(contract, candidate, { deployedSha: sha, e2e: e2eRecord(bothFailing, candidate, contract) }, [], '2026-10-06T12:30:00.000Z');
+  assert.deepEqual(holds.map(entry => [entry.kind, entry.outcome]), [['open', 'plain-outcome']], 'the plain outcome still files its hold');
+});
+
+test('unit:pending-case-named-in-uat-record — the rc-uat record and the Tests page name each pending case as pending with its failing step', async () => {
+  const sha = '6'.repeat(40);
+  const contract = { outcomes: [{ id: 'goal-outcome', title: 'A goal outcome', criteria: ['Something a customer can do'], cases: ['pending-case'] }] };
+  const cases = verdictCases({ 'pending-case': { required: true } });
+  const report = await runCases(cases, { url: 'https://uat.example.test', token: 't', runId: 'rc-20261007T120000Z', fetcher: verdictTarget(sha, { 'pending-case': [500] }), pendingCases: ['pending-case'] });
+  const { e2eRecord } = await import('../src/release-holds.js');
+  const candidate: ReleaseCandidate = { id: '20261007T120000Z', sha, cutAt: '2026-10-07T12:00:00.000Z', trigger: 'manual', since: null, items: [] };
+  const record = e2eRecord(report, candidate, contract)!;
+  const entry = record.cases.find(caseEntry => caseEntry.case === 'pending-case')!;
+  assert.equal(entry.pending, true, 'the rc-uat record names the case as pending');
+  assert.equal(entry.verdict, 'failed', 'the record keeps the verdict it ran to');
+  assert.deepEqual(entry.failingStep, { index: 0, name: 'read pending-case', reason: 'expected status 200, got 500: {"error":"broken"}' }, 'the record names the failing step');
+  // The Tests page run names why the failure did not count, beside the failing step.
+  await syncCases(apiAs(operator), cases);
+  await recordRuns(apiAs(operator), cases, report);
+  const runs = (await call('tests/pending-case/runs', operator)).body.runs as CaseRun[];
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].result, 'fail');
+  assert.match(runs[0].e2e!.failingStep!.reason, /expected status 200, got 500: \{"error":"broken"\}; recorded pending: its outcome has no delivered item yet, so it does not block the candidate/);
+  // docs/validation.md states the pending verdict beside the required, flaky and unrun ones.
+  assert.match(await readFile(new URL('../docs/validation.md', import.meta.url), 'utf8'), /\*\*pending\*\* \(/);
+});
+
 test('unit:e2e-flaky-evidence-decision — a flaky required case blocks promotion until an evidence decision requested and approved by two different agents accepts it, bound to the case, run and exact SHA', async () => {
   // GY-1378's release holds module, loaded here so that without it this case fails on its own.
   const { acceptancesFrom, e2eRecord, holdItem } = await import('../src/release-holds.js');
@@ -648,4 +711,19 @@ test('unit:e2e-command-step-runs — a process producing far more than the kept 
   assert.equal(result.code, 0);
   assert.deepEqual(lastLines(result.output).slice(-2), ['1199999', '1200000']);
   assert.equal(lastLines(result.output).length, 50);
+});
+
+test('unit:pending-flaky-case-latest-run-is-labelled — a pending case that fails then passes keeps a latest Tests page run that fails at its first failing step, labelled pending', async () => {
+  const sha = '7'.repeat(40);
+  const cases = verdictCases({ 'pending-flaky': { required: true } });
+  const report = await runCases(cases, { url: 'https://uat.example.test', token: 't', runId: 'rc-20261008T120000Z', fetcher: verdictTarget(sha, { 'pending-flaky': [500, 200] }), pendingCases: ['pending-flaky'], retries: 1 });
+  const outcome = report.cases.find(entry => entry.id === 'pending-flaky')!;
+  assert.equal(outcome.verdict, 'flaky');
+  assert.equal(outcome.pending, true);
+  await syncCases(apiAs(operator), cases);
+  await recordRuns(apiAs(operator), cases, report);
+  const runs = (await call('tests/pending-flaky/runs', operator)).body.runs as CaseRun[];
+  const latest = runs.reduce((a, b) => (a.seq ?? 0) > (b.seq ?? 0) ? a : b);
+  assert.equal(latest.result, 'fail', 'the latest run is the labelled failure, not the unlabelled pass');
+  assert.match(latest.e2e!.failingStep!.reason, /recorded pending/);
 });
