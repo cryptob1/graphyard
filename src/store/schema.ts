@@ -16,6 +16,7 @@ import { attributionTables } from './tables/attribution.js';
 import { schemaGenerationTables } from './tables/schema-generation.js';
 import { githubCacheTables } from './tables/github-cache.js';
 import { executorPresenceTables } from './tables/executor-presence.js';
+import { planeLivenessTables } from './tables/plane-liveness.js';
 
 /**
  * Every table, in an order a restore can insert without violating references: a table
@@ -24,7 +25,7 @@ import { executorPresenceTables } from './tables/executor-presence.js';
 export const tables: readonly TableDefinition[] = [
   ...workTables, ...mergesTables, ...workIndexTables, ...delegationTables, ...operatorAgentTables, ...proofGrantTables,
   ...validationTables, ...scenarioTables, ...deliveryTables, ...productionTables, ...flowTables, ...attributionTables,
-  ...schemaGenerationTables, ...githubCacheTables, ...executorPresenceTables,
+  ...schemaGenerationTables, ...githubCacheTables, ...executorPresenceTables, ...planeLivenessTables,
 ];
 
 /** The additive startup migration: the append-only trigger function, then each table's DDL. */
