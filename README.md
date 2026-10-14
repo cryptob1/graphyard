@@ -10,7 +10,7 @@ One command, then the [setup checklist](docs/setup-from-zero.md):
 graphyard up --agent --goal GOAL.md
 ```
 
-[Install](docs/install.md), [How Graphyard works](docs/how-graphyard-works.md), [Onboard a repository](docs/onboarding.md), [Documentation](docs/README.md)
+[Install](docs/install.md) · [How Graphyard works](docs/how-graphyard-works.md) · [Onboard a repository](docs/onboarding.md) · [Documentation](docs/README.md)
 
 **[docs/install.md](docs/install.md) is the primary install path** (`install --provider railway|hetzner|compose`). Contribute via [AGENTS.md](AGENTS.md) and [development](docs/development.md). Licence: [Apache 2.0](LICENSE).
 
