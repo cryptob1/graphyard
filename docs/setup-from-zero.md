@@ -3,24 +3,24 @@
 
 > set up Graphyard for OWNER/REPO following docs/setup-from-zero.md
 
-The setup agent acts as the **master** identity `install --apply` records; the operator credential stays human. The [install hard rules](install.md#hard-rules) apply.
+The setup agent acts as the **master** identity `install --apply` records; the operator credential stays with the human. The [install hard rules](install.md#hard-rules) apply.
 
 ## One command: graphyard up
 
 ```sh
 git clone https://github.com/cryptob1/graphyard.git ~/graphyard && (cd ~/graphyard && npm ci)
-cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --agent --repo OWNER/REPO   # --provider compose (default), railway, hetzner
+cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --agent --repo OWNER/REPO   # --provider compose (default), railway or hetzner
 ```
 
-Its one human step: a GitHub Mobile prompt (none with `--merger control-plane`).
+Its only human step: approving a GitHub Mobile prompt (none with `--merger control-plane`).
 
 A new Hetzner server waits (exit 3) for price approval; rerun: `--confirm-price X` or `--max-monthly N` and `--ssh-key NAME`.
 
-`up` runs, in order: preflight, control plane, host supervisor and Herdr, (`--merger control-plane`: deploy key, merger setting,) master identities (`master autonomy --apply`; no admin credential: exit 2; `--local`: none, you merge, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to merge (host install: a person); goals wait. Reruns skip steps `.graphyard/up.json` records. Host Herdr: `install --herdr-only`.
+`up` runs, in order: preflight, control plane, host supervisor and Herdr, (`--merger control-plane`: deploy key, merger setting,) master identities (`master autonomy --apply`; no admin credential: exit 2; `--local`: none, you review and merge, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to merge (a host install: a person); goals wait. Reruns skip steps `.graphyard/up.json` records. Host Herdr: `install --herdr-only`.
 
 ## The Setup page
 
-A step needing a person prints one link (`SERVER/#sign-in=CODE&setup`) and waits until green, signing you in once (within 10 minutes) to the Setup page (Settings → Agents). Green runs end with a fresh link; [phone access](dashboard.md#from-your-phone). Items:
+A step needing a person prints one link (`SERVER/#sign-in=CODE&setup`) and waits until green; it signs you in once (within 10 minutes) to the Setup page (also Settings → Agents). Green runs end with a fresh link; [phone access](dashboard.md#from-your-phone). Items:
 
 | Item | Button
 | --- | ---
@@ -33,7 +33,7 @@ Once green, **Describe what you want built** records a goal (`graphyard goal`).
 
 ## Agent setup: up --agent
 
-`up --agent` takes `[--goal FILE] [--browser-profile PROFILE] [--url URL]` (server: HTTPS/loopback from `master.json` once recorded, else install): stderr JSON (`step-failed`: argv, first stderr line); exit `0`/`1`/`2`/`3` (green/failed/prerequisite/waiting). `--merger control-plane`: no Apps, browser profile, Mobile or `--reviewer`; missing repo: `gh repo create --source . --push`; no `--local`. Else Apps in a signed-in Chrome profile (passed, master's, or same-login install's; none without `--reuse-app`/saved Apps: exit `2`) under `.graphyard/master-actions/`. Handoffs: subscription login approval, *Confirm access* Mobile number. Beside Mobile (or without it): Chrome (shared profile; copy: the App page in your browser); `up --sudo-code CODE|email` (app 6 digits, email 8; typed in 2 s; beside Mobile its code view opens, and a field that renders later is typed then); or import both Apps then `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` → `3`). `--wait MINUTES` (20). Preflight refuses `/tmp`, `/var/tmp`.
+`up --agent` takes `[--goal FILE] [--browser-profile PROFILE] [--url URL]` (server: HTTPS/loopback from `master.json` once recorded, else install): stderr JSON (`step-failed`: argv, first stderr line); exit `0`/`1`/`2`/`3` (green/failed/prerequisite/waiting). `--merger control-plane`: no Apps, browser profile, Mobile or `--reviewer`; missing repo: `gh repo create --source . --push`; no `--local`. Else Apps in a signed-in Chrome profile (passed, master's, or same-login install's; none without `--reuse-app`/saved Apps: exit `2`) under `.graphyard/master-actions/`. Handoffs: subscription login approval, *Confirm access* Mobile number. Beside Mobile: Chrome; `up --sudo-code CODE|email`; or import both Apps then `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` → `3`). `--wait MINUTES` (20). Preflight refuses `/tmp`, `/var/tmp`.
 
 ## Troubleshooting: manual steps
 
@@ -49,7 +49,7 @@ herdr --version
 bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with-parent -- true
 ```
 
-**Verify:** each exits 0; `gh repo view OWNER/REPO --json viewerPermission -q .viewerPermission` prints `ADMIN`. **HUMAN:** `gh auth login` as a repository admin; user namespaces for `bwrap`; free-plan private repositories go public.
+**Verify:** each exits 0; `gh repo view OWNER/REPO --json viewerPermission -q .viewerPermission` prints `ADMIN`. **HUMAN:** `gh auth login` as a repository admin; user namespaces for `bwrap`; a free-plan private repository goes public.
 
 ## 2. Graphyard and the repository
 
@@ -57,7 +57,7 @@ The repository needs a GitHub `origin` and an Actions `pull_request` test workfl
 
 ## 3. Install the control plane
 
-`gy install --provider compose --repo OWNER/REPO --reviewer claude --plan`, then `--apply` ([install](install.md); `gy` is `node ~/graphyard/bin/graphyard.mjs`). Before the App step, `--apply` records the master connection `.graphyard/master.json`, its `0600` credential under the plan's `installDirectory`; `gy doctor` reads as it (`GRAPHYARD_TOKEN_FILE` overrides). **Verify:** `control-plane` and `credentials-file` pass.
+`gy install --provider compose --repo OWNER/REPO --reviewer claude --plan`, then `--apply` ([install](install.md); `gy` is `node ~/graphyard/bin/graphyard.mjs`). Before the App step, `--apply` records the master connection `.graphyard/master.json`, its `0600` credential under the plan's `installDirectory`; `gy doctor` reads as it; `GRAPHYARD_TOKEN_FILE` overrides it. **Verify:** `control-plane` and `credentials-file` pass.
 
 ### Control-plane merger
 
@@ -65,7 +65,7 @@ The repository needs a GitHub `origin` and an Actions `pull_request` test workfl
 
 ## 4. Register the GitHub App
 
-GitHub merger only. `--apply` serves and prints `http://127.0.0.1:4311`, opening no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`. Branch protection: `--apply` protects the base; rerun once `Graphyard / merge` appears to require it; **Verify:** `branch-protection`.
+GitHub merger only. `--apply` serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`. Branch protection: `--apply` protects the base; rerun once `Graphyard / merge` appears to require it; **Verify:** `branch-protection`.
 
 ## 6. Onboard the checkout
 

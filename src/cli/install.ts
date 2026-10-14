@@ -73,7 +73,7 @@ export const installCommands = defineCommands([
       '                                master\'s or same-login other install\'s Chrome profile (none: exit 2), handing off only',
       '                                device approvals. Confirm access: GitHub Mobile when offered (its number; 3 prompts; password link',
       '                                after 60 s); else the page\'s methods, re-checked each 10 s: your Chrome (shared profile; a copy:',
-      '                                the App page in your browser), --sudo-code an authenticator (6-digit) or email (8-digit) code typed in 2 s (email:',
+      '                                the App page in your browser), --sudo-code an authenticator or email code typed in 2 s (email:',
       '                                GitHub sends one), or app import both Apps, --reuse-app each (--no-wait exits 3 saying so). A drive',
       '                                giving up hands off the page; a GitHub rejection exits 1 quoting it. --wait MINUTES bounds a wait',
       '                                (agent: 20); rerun resumes Confirm access; up --help: options, exit codes.',
