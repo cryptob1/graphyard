@@ -32,7 +32,7 @@ Exact-head gates merge; [candidates](#release-candidates) deploy. [The redesign]
 
 ### Main guard
 
-Every 30 s the main guard reruns, then reverts, merges failing required checks their parents passed (`graphyard-revert/`). The [revert approver App](deployment.md#variables) approves only a green exact inverse (`doctor` names missing); a third refusal abandons (`approval-refused`). A revert failing the merge's named tests is abandoned as `base-failure`: one attention row, no further revert, cleared when main passes.
+Every 30 s the main guard reruns, then reverts, merges failing required checks their parents passed (`graphyard-revert/`). The [revert approver App](deployment.md#variables) approves only a green exact inverse (`doctor` names missing); a third refusal abandons (`approval-refused`). A revert (opened on the merge itself) failing every check and named test the merge failed is abandoned as `base-failure`: one attention row, no revert for that set, later merges still judged, cleared when main passes.
 
 ## Managed repositories
 

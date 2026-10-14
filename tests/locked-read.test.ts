@@ -365,13 +365,13 @@ test('unit:locked-read-relative-bound — a full reconciliation pass over 1000 i
 });
 
 test('unit:reconcile-lock-hold-bounded — a full reconciliation pass over 1000 items (600 delivered) holds the coordination lock within a per-batch budget, the opening read bounded on its own, each batch within its budget', async () => {
-  assert.ok(template, 'the benchmark seeded the ledger');
   // unit:locked-read-relative-bound runs first in this file and leaves the ledger reconciled and the
   // engine's reconcile view populated, so this test seeds its own unreconciled rows and starts from
   // a reset view: its pass is a full, writing pass — every seeded row reprojected, as a restarted
   // server's first pass over an unprojected ledger is (GY-1124) — whatever ran before it. The seed
   // is small enough that the opening read stays inside the kept per-batch margin on a loaded runner.
   await seed(100, 0);
+  assert.ok(template, 'the test seeded its own ledger rows');
   engine.resetReconcileView();
   label = 'reconcile'; const from = holds.length;
   await engine.reconcile();
@@ -417,6 +417,8 @@ test('unit:reconcile-lock-hold-bounded — a full reconciliation pass over 1000 
   const second = secondBatches.reduce((sum, entry) => sum + entry.ms, 0);
   console.log(`second reconcile pass: ${secondBatches.length} batches, ${second.toFixed(0)} ms of lock hold`);
   assert.ok(secondBatches.length === 0 || second / secondBatches.length < engine.reconcileBatchMs, `a second pass held the lock ${(second / Math.max(1, secondBatches.length)).toFixed(1)} ms per batch over ${secondBatches.length} batches (total ${second.toFixed(0)} ms)`);
+  const secondLongest = Math.max(0, ...secondBatches.map(entry => entry.ms));
+  assert.ok(secondLongest < engine.reconcileBatchMs + 250, `a second pass's longest batch held the lock ${secondLongest.toFixed(0)} ms against a ${engine.reconcileBatchMs} ms budget`);
   assert.equal(holds.slice(again).reduce((sum, entry) => sum + seededDelivered(entry), 0), 0, 'a second pass reads no delivered document whole');
   // A slow host spends each batch's budget before its rows are done (CI on 2026-10-01: 35 batches
   // read 1082 open documents whole for 407 open items). The next batch reads only as many rows as

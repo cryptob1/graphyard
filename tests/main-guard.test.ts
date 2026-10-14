@@ -891,3 +891,57 @@ test('unit:ci-bubblewrap-install-bounded the CI bubblewrap install retries apt a
   for (const call of step.match(/apt-get (update|install)/g) ?? []) assert.ok(new RegExp(`timeout \\d+ ${call}`).test(step), `${call} is bounded by timeout`);
   assert.equal(step.match(/apt-get (update|install)/g)?.length, 2);
 });
+
+// GY-1789 review: the base-failure inference needs the whole failure set to match, a revert onto the merge alone, and later merges are still judged.
+test('unit:main-guard-revert-shares-failure — the inference needs every failing check of the merge matched, a revert opened onto the merge itself, and never suppresses a novel failure of a later merge', async () => {
+  const failing = ['tests/locked-read.test.ts › unit:reconcile-lock-hold-bounded'];
+  const fail = (id: number, ...names: string[]): CheckRun[] => [{ name: 'test', result: names.includes('test') ? 'failure' : 'success', appId: ci, id }, { name: 'typecheck', result: names.includes('typecheck') ? 'failure' : 'success', appId: ci, id: id + 1 }];
+  const [base, A, B, C] = ['b0', 'a1', 'b2', 'c3'].map(sha);
+  const options = () => ({ required, ciAppIds: [ci], now: new Date(at), verdicts: new Map<string, CommitVerdict>(), reruns: new Map(), runIds: new Map<string, Record<string, number | null>>(), testNames: new Map<number, string[] | null>() });
+  const start = async (tip: MainCommit[], mergeChecks: CheckRun[]) => {
+    const item = delivered('GY-1', B, 701), fake = world(tip, [item]);
+    fake.checks.set(base, green); fake.checks.set(A, green); fake.checks.set(B, mergeChecks);
+    fake.annotations.set(300, failing); fake.annotations.set(301, ['typecheck error']);
+    await runMainGuard(fake.ports, options());
+    return { item, fake, revert: item.mainGuardReverts![0].revert! };
+  };
+
+  // The merge failed test and typecheck, the revert only test: the typecheck failure is the merge's own.
+  let run = await start([{ sha: B, parent: A }, { sha: A, parent: base }], fail(300, 'test', 'typecheck'));
+  run.fake.checks.set(run.revert.head, fail(400, 'test')); run.fake.annotations.set(400, failing);
+  await runMainGuard(run.fake.ports, options());
+  assert.equal(run.item.mainGuardReverts![0].cause, 'checks-failed', 'a check the revert passed is no base failure');
+
+  // Both fail on the revert with the same names on both checks: a base failure covering both.
+  run = await start([{ sha: B, parent: A }, { sha: A, parent: base }], fail(300, 'test', 'typecheck'));
+  run.fake.checks.set(run.revert.head, fail(400, 'test', 'typecheck')); run.fake.annotations.set(400, failing); run.fake.annotations.set(401, ['typecheck error']);
+  await runMainGuard(run.fake.ports, options());
+  assert.equal(run.item.mainGuardReverts![0].cause, 'base-failure');
+  assert.deepEqual(run.item.mainGuardReverts![0].baseFailure!.shared.map(entry => entry.check), ['test', 'typecheck']);
+
+  // A later merge that fails the old test and a novel typecheck is not suppressed; one that fails only the old test is, and is reached with a live guard's maps.
+  const live = options();
+  run.fake.annotations.set(500, failing); run.fake.annotations.set(502, ['a novel typecheck error']);
+  const itemC = delivered('GY-3', C, 703); run.fake.items.push(itemC);
+  const tip: MainCommit[] = [{ sha: C, parent: B }, { sha: B, parent: A }, { sha: A, parent: base }];
+  const ports = { ...run.fake.ports, history: async () => tip };
+  run.fake.checks.set(C, fail(500, 'test', 'typecheck'));
+  run.fake.annotations.set(501, ['typecheck error']);
+  run.fake.annotations.set(501, ['a novel typecheck error']);
+  await runMainGuard(ports, live);
+  assert.deepEqual(run.fake.calls.opened, [B, C], 'the novel typecheck failure of C is judged and reverted though the old test also fails');
+  const covered = delivered('GY-4', sha('d4'), 704); run.fake.items.push(covered);
+  tip.unshift({ sha: covered.delivery!.mergeSha, parent: C });
+  run.fake.checks.set(covered.delivery!.mergeSha, fail(600, 'test', 'typecheck'));
+  run.fake.annotations.set(600, failing); run.fake.annotations.set(601, ['typecheck error']);
+  const before = run.fake.calls.opened.length;
+  await runMainGuard(ports, live);
+  assert.equal(run.fake.calls.opened.length, before, 'a merge whose whole failure set the record covers is not reverted');
+
+  // A revert opened while a later merge sat on main proves nothing about the merge: it stays a culprit attribution.
+  const later = await start([{ sha: C, parent: B }, { sha: B, parent: A }, { sha: A, parent: base }], fail(300, 'test'));
+  later.fake.checks.set(C, fail(310, 'test')); later.fake.annotations.set(310, failing);
+  later.fake.checks.set(later.revert.head, fail(410, 'test')); later.fake.annotations.set(410, failing);
+  await runMainGuard(later.fake.ports, options());
+  assert.equal(later.item.mainGuardReverts![0].cause, 'checks-failed');
+});
