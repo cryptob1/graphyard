@@ -276,8 +276,10 @@ export function verificationMapGround(path: string, text: string | null, item: {
   const paths = verificationMapPaths(text);
   if (!paths) return null;
   const line = `Paths: ${paths.join(', ')}`;
-  // As verificationGlobCovers reads a glob (verification-maps.ts, not imported: it reaches scope.ts back through documentation.ts).
-  const covered = (entry: string) => entry !== path && paths.some(glob => documentationGlobMatches(glob, entry) || pathScope(entry).prefix && glob.startsWith(pathScope(entry).path));
+  // As verificationGlobCovers reads a glob (verification-maps.ts, not imported: it reaches scope.ts back through
+  // documentation.ts): a leading `./` is stripped from the glob as from the entry, so `Paths: ./src/master/**` covers
+  // a planned `src/` the way documentationGlobMatches already covers a planned file under it (review of 8aac4bbf).
+  const covered = (entry: string) => entry !== path && paths.some(glob => documentationGlobMatches(glob, entry) || pathScope(entry).prefix && glob.replace(/^\.\//, '').startsWith(pathScope(entry).path));
   const planned = (item.plannedFiles ?? []).find(covered);
   if (planned) return `${path} is the verification map whose ${line} covers ${planned}, a planned file whose behaviour the item changes`;
   const created = item.criteria.flatMap(criterion => namedPaths(criterion.text)).find(entry => testFile(entry) && covered(entry));

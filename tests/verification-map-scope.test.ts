@@ -83,6 +83,17 @@ test('unit:verification-map-companion — the map whose Paths line covers a plan
   assert.equal(verificationMapGround('verification/master.md', masterMap, { plannedFiles: ['src/master/'], criteria: [] }), mapGround.replace('src/master/release-lag.ts', 'src/master/'));
   assert.equal(verificationMapGround('verification/master.md', masterMap, { plannedFiles: ['src/'], criteria: [] }), mapGround.replace('src/master/release-lag.ts', 'src/'), 'a planned scope that holds the glob');
   assert.equal(verificationMapGround('verification/master.md', masterMap, { plannedFiles: ['src/reviewer.ts'], criteria: [] }), mapGround.replace('src/master/release-lag.ts', 'src/reviewer.ts'), 'a file glob');
+  // Review of 8aac4bbf: a `./`-prefixed glob, which verificationGlobCovers strips, covers a planned scope that holds it
+  // exactly as the bare glob does, so the loop grants the map it selects instead of refusing and routing it.
+  const dottedMap = masterMap.replace(/^Paths:.*$/m, 'Paths: ./src/master/**, ./src/master.ts');
+  const dottedGround = 'verification/master.md is the verification map whose Paths: ./src/master/**, ./src/master.ts covers src/, a planned file whose behaviour the item changes';
+  assert.equal(verificationMapGround('verification/master.md', dottedMap, { plannedFiles: ['src/'], criteria: [] }), dottedGround, 'a ./ glob under a planned scope');
+  assert.equal(verificationMapGround('verification/master.md', dottedMap, { plannedFiles: ['./src/'], criteria: [] }), dottedGround.replace('covers src/', 'covers ./src/'), 'a ./ glob under a ./ planned scope');
+  assert.equal(verificationMapGround('verification/master.md', dottedMap, { plannedFiles: ['src/master/release-lag.ts'], criteria: [] }), dottedGround.replace('covers src/', 'covers src/master/release-lag.ts'), 'a ./ glob over a planned file');
+  assert.equal(verificationMapGround('verification/master.md', dottedMap, { plannedFiles: ['tests/'], criteria: [] }), null, 'a ./ glob outside the planned scope');
+  const dotted = await grounds(item(['src/']), ['verification/master.md'], { ...base, 'verification/master.md': dottedMap });
+  assert.ok(!('refusal' in dotted), 'refusal' in dotted ? dotted.refusal : '');
+  assert.deepEqual(dotted.grounds, [{ path: 'verification/master.md', ground: dottedGround, companion: true }]);
   assert.equal(verificationMapGround('verification/master.md', masterMap, daemonItem()), null, 'covers none of the planned files');
   assert.equal(verificationMapGround('verification/master.md', null, masterItem()), null, 'a map the base does not hold');
   assert.equal(verificationMapGround('verification/master.md', '## Tests\n\n- none', masterItem()), null, 'no Paths line');
