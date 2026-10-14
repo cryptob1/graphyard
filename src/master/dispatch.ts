@@ -224,6 +224,9 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   let delivery: RequestDelivery | null = null, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null;
   let started: 'started' | 'awaiting consent' = 'started', consent: { answered: ConsentAnswer[]; awaiting: ConsentHold | null } = { answered: [], awaiting: null };
   let pushCredential: 'minted' | 'none' = 'none';
+  // The epoch the launch claimed, hoisted for the result: the registration's id is guessed from the
+  // snapshot before the claim, and the caller re-keys the record onto this one (GY-1791).
+  let claimedEpoch: number | undefined;
   const startFailures: AccountStartFailure[] = [];
   let closedAgent: string | null = null;
   if (profile.mode === 'existing') {
@@ -301,6 +304,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
               assertClaimDeadline(work.key, options.claimBy);
               let epoch: number;
               ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed, pushCredential } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.supervisor, options.stopSupervisor, credentialMint, options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps, mergeWriter, round));
+              claimedEpoch = epoch;
               // The epoch this launch claimed outlives the reservation, so a dispatcher still holding the older snapshot is refused cleanly.
               const at = new Date().toISOString();
               await writeFile(dispatchedFile(root, work.key), JSON.stringify({ epoch, at }), { mode: 0o600 }).catch(() => {});
@@ -338,7 +342,12 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     } finally { await unreserve(); }
   }
   const concurrent = concurrentOverlap(work, allWork, Date.parse(observedAt));
-  return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
+  // The epoch the launch claimed rides the result (GY-1791): the launcher registered the session
+  // before the claim under its snapshot's `epoch + 1`, and a dispatch that claims again after its
+  // first runtime refused the prompt claims a later epoch — the record the loop, the resume fence
+  // and every watcher key by `principal:epoch` must carry the one that was claimed, so the caller
+  // re-keys the registration once the claim is known.
+  return { work: work.key, epoch: claimedEpoch, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
     launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery, sandbox, mergeWriter, pushCredential, ...(reclaimed.length ? { reclaimed } : {}), ...(closedAgent ? { closedAgent } : {}),
     // `awaiting consent` is not a started session: the runtime has not read its request (GY-130).
     started, consent: { answered: consent.answered, awaiting: consent.awaiting ? { prompt: consent.awaiting.prompt, kind: consent.awaiting.kind, pane: consent.awaiting.pane, attach: consent.awaiting.attach, releaseAt: consent.awaiting.releaseAt, attention: consentHoldAttention(consent.awaiting) } : null },
@@ -587,6 +596,28 @@ export const destructivePromptGuidance = 'Avoid any command that triggers your r
  * "fix forward" (GY-1477, GY-1567): rewriting a pushed branch is never granted, so the request says so.
  */
 export const branchRewriteGuidance = 'Never force-push or rewrite a branch you have pushed: your runtime refuses it, so fix a pushed commit forward with a new commit and push normally. ';
+/**
+ * The fast mechanical gates (GY-1797): the module and docs budget tests, the docs growth and
+ * glossary gates, the wall-clock bomb scan and the CI shard map, plus the docs page checker. Each
+ * runs locally in seconds, and each is a check CI fails a whole rework round on when a worker
+ * ships past it, so the request names them where the sync rule left the before-push discipline:
+ * after it, before the complete instruction. One exported constant beside the prompt, so the
+ * request (workerPrompt), its test (tests/worker-prompt-gates.test.ts) and the documentation
+ * (docs/coordination.md) read the same list; every entry is a test file or script this repository
+ * carries, and all of them run as one command line, chained with `&&`, so the request names one.
+ */
+export const workerFastGates = {
+  tests: ['tests/module-budgets.test.ts', 'tests/docs-budget.test.ts', 'tests/docs-growth-gate.test.ts', 'tests/docs-glossary.test.ts', 'tests/no-wall-clock-time-bombs.test.ts', 'tests/ci-shards.test.ts'],
+  scripts: ['scripts/check-docs.mjs'],
+} as const;
+/** The list lives in this repository's tree only: no other managed repository carries these files. */
+export const workerFastGatesRepository = 'graphyard';
+/** Only this repository's own requests name the gates; any other repository's request renders exactly as before they existed. */
+const fastGatesApply = (repository?: string) => repository?.split('/').at(-1)?.toLowerCase() === workerFastGatesRepository;
+/** The one command line the gates run as: the test files through the suite's own harness (run-tests.ts reserves the port window a bare run lacks), then the docs checker, chained with `&&`. */
+export const workerFastGatesCommand = `node --import tsx tests/helpers/run-tests.ts ${workerFastGates.tests.join(' ')} && ${workerFastGates.scripts.map(script => `node ${script}`).join(' && ')}`;
+/** The one sentence the request adds: the gates, their one command line, and what to do when one fails. */
+export const workerFastGatesSentence = `Before complete, run the fast gates — \`${workerFastGatesCommand}\` — and fix what they name before pushing, since CI fails on each of them. `;
 export function workerPrompt(
   config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository'>>,
   work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'documentation' | 'description' | 'criteria' | 'researchBrief' | 'candidate' | 'plannedFiles' | 'submission' | 'pipeline'>>,
@@ -622,7 +653,7 @@ export function workerPrompt(
   // so the launcher says which trees are already there rather than leaving it to be guessed.
   const installed = dependencies?.shared.length ? `The assigned worktree needs no dependency install: ${dependencies.shared.map(entry => `${entry.name} ${entry.how === 'reachable' ? 'already resolves to' : 'is shared with'} the install at ${entry.source}`).join(', ')}, for this exact lockfile. Do not install dependencies again unless you change the lockfile. ` : '';
   const memoryDigest = projectMemoryDigest(memory, 'worker', { baseSha });
-  return `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them. `
+  return `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. ${fastGatesApply(config.repository) ? workerFastGatesSentence : ''}Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them. `
     + installed
     + (memoryDigest || '')
     + verificationMapDigest(verificationMaps, work.plannedFiles, 'worker')

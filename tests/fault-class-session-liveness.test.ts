@@ -1,18 +1,41 @@
-import { test } from 'node:test';
+import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import EmbeddedPostgres from 'embedded-postgres';
 import { resolveWork } from '../src/cli/context.js';
 import { acknowledgeContainment, establishContainment } from '../src/quarantine.js';
 import { restartTolerantApi, supervise, throughRestart, transientControlPlaneFailure } from '../src/supervisor.js';
 import { checkInvariants, emptyInvariantRecord } from '../src/model/invariants.js';
 import type { Work } from '../src/model.js';
-import type { SessionHandle } from '../src/model/sessions.js';
-import { awaitRuntimeStart, buildMasterStatus, SessionStartError, type WorkerProfile } from '../src/master.js';
+import { leaseLapseCause, leaseLossReason, settleableLeaseLoss, standingEscalations, type PlaneStall, type Principal } from '../src/model.js';
+// A namespace import, so the base run of this file, which has no lapsedLeaseExpiry, fails only the case that reads it.
+import * as escalationModel from '../src/model/escalation.js';
+import type { SessionHandle, SessionHandleInput } from '../src/model/sessions.js';
+import { awaitRuntimeStart, buildMasterStatus, masterConfigSchema, SessionStartError, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { launchWaitAttention } from '../src/auto-dispatch.js';
+import { GhPausedError } from '../src/gh-pause.js';
+import { emptyDaemonState } from '../src/master-daemon.js';
+import { record } from '../src/daemon/effects.js';
+import { resumeStep } from '../src/daemon/cycle-resume.js';
+import { Store } from '../src/store.js';
+import { Engine, readPlaneStalls } from '../src/engine.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
+import type { Cycle } from '../src/daemon/cycle.js';
+import type { DaemonState } from '../src/master-daemon.js';
+import type { DaemonEffects } from '../src/daemon/effects.js';
 // A namespace import, so the proof producer's run of this file at the base, which has no screenDialog,
 // fails only the case that reads it.
 import * as consent from '../src/consent-prompt.js';
 const { detectConsentPrompt } = consent;
 const screenDialog = (screen: string) => consent.screenDialog?.(screen);
-import { trackFaults, type FaultRecord } from '../src/model/fault-classes.js';
+import { trackFaults, ghPausedWording, faultClassOf, launchWaitKind, type FaultRecord } from '../src/model/fault-classes.js';
+// A namespace import, so the base run of this file, which has no rekeyLaunchedSession, fails only the GY-1788 case that reads it.
+import * as cycleDispatch from '../src/daemon/cycle-dispatch.js';
+const rekeyLaunchedSession = (...args: Parameters<NonNullable<typeof cycleDispatch.rekeyLaunchedSession>>) =>
+  cycleDispatch.rekeyLaunchedSession?.(...args) ?? Promise.resolve(false);
 // A namespace import, so the base run of this file, which has no unclaimedLaunch, fails only the GY-1571 case.
 import * as sessionState from '../src/model/session-state.js';
 const { observeSessions, reportedHandle, sessionLaunchGraceMs } = sessionState;
@@ -20,7 +43,7 @@ const unclaimedLaunch = (...args: Parameters<typeof sessionState.unclaimedLaunch
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { fixtureWork } from '../scripts/dashboard-fixture.mjs';
 import { live } from '../browser-tests/ui-board.js';
-// Time-bomb allowance (GY-1694): the 2026-10-08/09 instants are fixed clocks handed to checkInvariants, observeSessions and buildMasterStatus; new Date()/Date.now() only mint leases for the live supervisor timed by performance.now().
+// Time-bomb allowance (GY-1694): the 2026-10-08/09 and 2026-10-14 instants are fixed clocks handed to checkInvariants, observeSessions, buildMasterStatus, resumeStep and the fake planes; new Date()/Date.now() only mint leases for the live supervisor timed by performance.now().
 
 // GY-1506 names this file for its proof: manual:fault-class-session-liveness. The master loop
 // filed 5 session-liveness faults in 24 hours; the host journal names the two shapes they share.
@@ -358,4 +381,438 @@ test('unit:fault-class-session-liveness GY-1571 — only a worker handle for an 
   assert.equal(unclaimedLaunch({ epoch: 4, lease: null }, handle), false);
   assert.equal(unclaimedLaunch({ epoch: 3, lease: { owner: 'x', epoch: 4, expiresAt: '2026-10-09T00:00:00Z' } }, handle), false);
   assert.equal(unclaimedLaunch({ epoch: 3, lease: null }, { ...handle, kind: 'review' } as SessionHandle), false);
+});
+
+// GY-1791 names this file for its proof too: the loop filed 3 session-liveness faults in 24 hours
+// (2026-10-13T10:35Z escalation:lease-loss on GY-1764, 2026-10-14T06:55Z action:session on GY-1788,
+// 2026-10-14T07:24Z launch-review on GY-1773), and the ledger shows what they share: in each, the
+// record the liveness machinery reads was wrong, or the cause was the plane's or GitHub's own, and
+// the product counted the session instead of resolving it.
+//
+// GY-1764: the control plane stopped reconciling for ~2 minutes (its last tick 10:32:47Z, its
+// recovery 10:34:42Z) and the supervisor's renewals went unanswered with it. The old supervisor
+// awaits the whole client timeout inside one renewal attempt, so a single black-holed request
+// consumed every chance the lease had left: the plane recovered two seconds after the lease ran
+// out, the lapse was raised as a lease loss, and the instance counted against the session. The
+// candidate bounds each attempt by the window it serves and, when the window closes on a request
+// that was never answered at all, rides one further lease period past the deadline — where the
+// plane's own stall record (recordPlaneLiveness) keeps the lease live, GY-558's rule for the plane's own
+// failures, so a recovery inside the allowance lands a renewal and the attempt survives.
+//
+// GY-1788: the launcher registered the attempt's session before its claim under the snapshot's
+// `principal:epoch+1`, but the launch claimed a later epoch (its first runtime refused the prompt),
+// so the live attempt's record sat under the previous attempt's id. The resume fence — which keys
+// the attempt by `principal:epoch` — refused the re-prompt against the pane the old id carried,
+// and the GY-953 follow-through started a reclaim bound only when the attempt's own handle existed
+// without a pane, never when it was absent entirely: the item stood un-promptable. The candidate
+// moves the record onto the epoch the launch claimed once it is known, and the fence's follow-
+// through reclaims the attempt it cannot address, whichever of the two shapes the record has.
+//
+// GY-1773: the gh login's rate-limit pause deferred the reviewer launch, and the wait line the
+// pause produced was filed as launch-review — a launch that did not start — although its own reason
+// names a GitHub read that is paused, which the catalogue owns as github-budget under the
+// observation class. The candidate classifies the wait by that wording, shared with the error the
+// pause throws, so the paused read counts where paused reads count.
+
+const GY1791_NOW = Date.parse('2026-10-14T06:55:00.000Z'), GY1791_AT = (ms: number) => new Date(GY1791_NOW + ms).toISOString();
+
+test('unit:fault-class-session-liveness GY-1773 launch-review — a launch a gh rate-limit pause defers is the paused GitHub read the catalogue owns, not a launch that did not start', () => {
+  // The instance's wait reason, as the pause's own error words it and the dispatcher waits with.
+  const reason = new GhPausedError(GY1791_NOW).message;
+  assert.match(reason, new RegExp(`${ghPausedWording.paused} until .+: ${ghPausedWording.limit.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  const base = launchWaitKind(reason);
+  assert.equal(base, 'github-budget', `the base filed the paused read as ${base}, a session-liveness launch that did not start`);
+  assert.equal(faultClassOf('github-budget'), 'observation');
+
+  // The instance's attention line, and what the loop's record opens for it: no session-liveness
+  // instance; the observation one the catalogue assigns a paused read.
+  const attention = launchWaitAttention([{ kind: 'review', work: 'GY-1773', requestId: '8a846438f97b93a60c5cc44fe6409c11', sha: 'a6d1c5dcf6406a506db99b152977be102e7dcaa3', group: null,
+    requestedAt: GY1791_AT(-16 * 60_000), waitedMs: 16 * 60_000, reason }]);
+  assert.equal(attention.length, 1, 'the 15-minute attention still stands — the pause is visible, only classed honestly');
+  assert.equal(attention[0].kind, 'github-budget');
+  assert.equal(attention[0].faultClass, 'observation');
+  const record: FaultRecord = { instances: [], open: {}, failing: {} };
+  const opened = trackFaults(record, attention.map(entry => ({ kind: entry.kind!, faultClass: entry.faultClass!, subject: entry.subject, text: entry.text })), GY1791_AT(0));
+  assert.equal(opened.filter(entry => entry.faultClass === 'session-liveness').length, 0, 'the base opened a session-liveness instance here');
+  assert.ok(opened.some(entry => entry.kind === 'github-budget' && entry.faultClass === 'observation'));
+});
+
+test('unit:fault-class-session-liveness GY-1788 action:session — a launch that claimed a later epoch moves its record onto the claimed epoch in one verified write, where the resume fence looks', async () => {
+  // The dispatch snapshot was at epoch 0, so the pre-claim registration guessed graphyard-codex-2:1;
+  // the launch refused its first prompt, claimed again, and held epoch 2 (the ledger's shape).
+  const handle: SessionHandleInput = { id: 'graphyard-codex-2:1', kind: 'implementation', principal: 'graphyard-codex-2', runtime: 'claude', host: 'vishrog', workspace: 'w1V',
+    subject: 'GY-1788: Recurring scope faults: 3 in 24 hours', state: 'running' };
+  const launched = { epoch: 2, pane: 'w1V:pPFN', agentName: 'graphyard-opencode-4' };
+  const attach = (pane: string) => `herdr pane attach ${pane} --workspace w1V`;
+  // The control plane's answer to the one write: the document with the record moved (engine.ts
+  // closes the guessed record in the same transaction).
+  const movedDocument = { sessions: [{ id: 'graphyard-codex-2:1', state: 'finished' }, { id: 'graphyard-codex-2:2', state: 'running' }] };
+  const writes: SessionHandleInput[] = [];
+  const moved = await rekeyLaunchedSession(async input => { writes.push(input); return movedDocument; }, handle, 1, launched, attach, 1);
+  assert.deepEqual(moved, { outcome: 'moved', from: 'graphyard-codex-2:1', to: 'graphyard-codex-2:2' }, 'the base moved nothing: the record stayed under the previous attempt\u2019s id');
+  assert.equal(writes.length, 1, 'one write moves the record: the destination; the control plane closes the source in the same transaction');
+  assert.equal(writes[0].id, 'graphyard-codex-2:2');
+  assert.equal(writes[0].state, 'running');
+  assert.equal(writes[0].pane, 'w1V:pPFN');
+  assert.equal(writes[0].attach, 'herdr pane attach w1V:pPFN --workspace w1V');
+  assert.equal(writes[0].agentName, 'graphyard-opencode-4');
+  assert.equal(writes[0].principal, 'graphyard-codex-2');
+  // No attempt epoch rides the write: only the lease holder may write one (engine.ts), and the
+  // coordinator's record keys by id alone, as every pre-claim registration does.
+  assert.equal(writes[0].epoch, undefined);
+  assert.equal((writes[0] as SessionHandle).pane, 'w1V:pPFN');
+
+  // A write the control plane answers with no document landed too: it refuses rather than half-applies.
+  assert.deepEqual(await rekeyLaunchedSession(async () => undefined, handle, 1, launched, attach, 1), { outcome: 'moved', from: 'graphyard-codex-2:1', to: 'graphyard-codex-2:2' });
+
+  // A write that fails is retried as a launch's coordinates are, and a move that never lands is
+  // reported as such — never as a dispatch whose session is addressable — with the guessed record
+  // untouched: nothing closed the source, because nothing ever writes to it.
+  const failing: SessionHandleInput[] = [];
+  const failed = await rekeyLaunchedSession(async input => { failing.push(input); throw new Error('503 the control plane is restarting'); }, handle, 1, launched, attach, 1);
+  assert.deepEqual(failed, { outcome: 'failed', from: 'graphyard-codex-2:1', to: 'graphyard-codex-2:2', reason: '503 the control plane is restarting' });
+  assert.equal(failing.length, 3, 'retried coordinateAttempts times');
+  assert.ok(failing.every(write => write.id === 'graphyard-codex-2:2' && write.state === 'running'), 'every attempt wrote the destination; none touched the source');
+  // So is a write the control plane applied without moving the source: the answer is read, not assumed.
+  const unmoved = await rekeyLaunchedSession(async () => ({ sessions: [{ id: 'graphyard-codex-2:1', state: 'running' }, { id: 'graphyard-codex-2:2', state: 'running' }] }), handle, 1, launched, attach, 1);
+  assert.equal(unmoved.outcome, 'failed');
+  assert.match((unmoved as { reason: string }).reason, /still runs under graphyard-codex-2:1/);
+
+  // A launch that claimed the expected epoch moves nothing.
+  const same: SessionHandleInput[] = [];
+  assert.deepEqual(await rekeyLaunchedSession(async input => { same.push(input); }, handle, 1, { epoch: 1, pane: 'w1V:pPFN', agentName: null }), { outcome: 'unchanged' });
+  assert.deepEqual(same, []);
+  // Nor a launch that failed: there is no claimed epoch to move onto.
+  const none: SessionHandleInput[] = [];
+  assert.deepEqual(await rekeyLaunchedSession(async input => { none.push(input); }, handle, 1, undefined), { outcome: 'unchanged' });
+  assert.deepEqual(none, []);
+});
+
+/** The item, profile and cycle the resume step runs against, as GY-1788's epoch 2 stood at 06:55:54Z: its scope request applied, its waits standing, its session recorded under the previous attempt's id. */
+function unaddressableAttempt() {
+  const item = {
+    id: 'work-1788', key: 'GY-1788', title: 'Recurring scope faults: 3 in 24 hours', description: '', type: 'bug', priority: 1, dependencies: [],
+    criteria: [], plannedFiles: [], stage: 'build', ready: true, createdAt: GY1791_AT(-30 * 60_000), updatedAt: GY1791_AT(-60_000), stageEnteredAt: GY1791_AT(-30 * 60_000),
+    epoch: 2, lease: { owner: 'graphyard-codex-2', epoch: 2, expiresAt: GY1791_AT(60_000) }, workspaces: [], candidate: null, submission: null, blocker: null,
+    scopeRequest: null, scopeDecision: { state: 'approved' as const, reason: 'Additive widening justified by the item\u2019s own triage', at: GY1791_AT(-4_000), decidedBy: 'graphyard-approver',
+      waitedMs: 65_000, paths: ['src/daemon/cycle-scope.ts'], requestedBy: 'graphyard-codex-2', requestedAt: GY1791_AT(-69_000) },
+    sessions: [{ id: 'graphyard-codex-2:1', kind: 'implementation', principal: 'graphyard-codex-2', epoch: null, runtime: 'claude', host: 'vishrog', workspace: 'w1V', tab: null,
+      pane: 'w1V:pPFN', agentName: 'graphyard-opencode-4', role: null, head: null, attach: 'herdr pane attach w1V:pPFN --workspace w1V', transcript: null,
+      subject: 'GY-1788: Recurring scope faults: 3 in 24 hours', startedAt: GY1791_AT(-14 * 60_000), updatedAt: GY1791_AT(-60_000), endedAt: null, state: 'running', outcome: null }],
+    gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], evidence: [], observation: null,
+  } as unknown as Work;
+  const profile = { name: 'claude-senary', principal: 'graphyard-codex-2', agentName: 'graphyard-opencode-4', mode: 'launch', kind: 'claude', credentialFile: '/outside/s6.token', agentArgs: [], environment: {} } as unknown as WorkerProfile;
+  // The runtime lists the profile's agent name in the pane the old id carries — the address the
+  // fence refuses to trust, and the one the loop must be able to move past.
+  const agents = [{ name: 'graphyard-opencode-4', pane_id: 'w1V:pPFN', agent_status: 'idle', agent: { name: 'graphyard-opencode-4' } }];
+  return { item, profile, agents };
+}
+
+async function resumeWorld(item: Work, profile: WorkerProfile, agents: unknown[], shiftMs: { value: number }) {
+  const directory = await temporaryDirectory('session-liveness-resume');
+  const credentialFile = join(directory, 'coordinator.token');
+  await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+  const config: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: '/usr/bin/graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'vishrog', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [profile] });
+  const state: DaemonState = emptyDaemonState(config);
+  const closed: string[] = [], prompts: string[] = [], sessions: SessionHandleInput[] = [];
+  const effects = {
+    persist: async () => {},
+    closeSession: async (pane: string) => { closed.push(pane); },
+    promptSession: async (_agent: unknown, text: string) => { prompts.push(text); },
+    recordSession: async (_work: Work, handle: SessionHandleInput) => { sessions.push(handle); },
+    reportCapacity: async (work: Work, event: { epoch: number }) => {
+      work.capacity = { exhaustions: [...work.capacity?.exhaustions ?? [], { role: 'worker', epoch: event.epoch, cause: 'interrupted', profile: profile.name, account: null, runtime: 'claude', reason: 'ended', resetsAt: null, partialWork: { state: 'clean' as const }, at: GY1791_AT(shiftMs.value), owner: profile.principal, recordedBy: 'coordinator' }], escalations: [] };
+      if (work.lease?.epoch === event.epoch) work.lease = null;
+      return work;
+    },
+  } as unknown as DaemonEffects;
+  const cycle = (now: number) => ({ config, state, effects, now: () => GY1791_NOW + now, clock: GY1791_NOW + now, performed: [], isolate: async (_k: string, _i: unknown, _n: string, fn: () => Promise<unknown>) => fn(), agents, heldBy: () => item } as unknown as Cycle);
+  return { config, state, effects, cycle, closed, prompts, sessions, item, cleanup: () => void directory };
+}
+
+test('unit:fault-class-session-liveness GY-1788 action:session — a cleared wait whose attempt\u2019s own handle is not on the record at all is reclaimed on the bound instead of standing un-promptable for ever', async () => {
+  const { item, profile, agents } = unaddressableAttempt();
+  const world = await resumeWorld(item, profile, agents, { value: 0 });
+  const { state } = world;
+  try {
+    // The wait the loop marked while the scope request stood, and the scope decision that answered it.
+    await record(state, `resume:scope:${item.id}:2`, { kind: 'session', work: item.key, principal: profile.principal, epoch: 2, state: 'waiting',
+      detail: `${item.key} epoch 2 waits on its scope request of ${GY1791_AT(-69_000)} for src/daemon/cycle-scope.ts, and ${profile.agentName} is re-prompted once it is answered`, attempts: 1, cycle: 0 }, GY1791_NOW, world.effects.persist);
+    await resumeStep(world.cycle(0), new Set(), true);
+
+    // The resolution was refused against the pane the old id carries — the instance's own refusal —
+    // and the failed paste opened the action:session fault on both base and candidate.
+    const promptKey = Object.keys(state.actions).find(key => key.startsWith(`resume:prompt:${item.id}:2:`))!;
+    const refusal = state.actions[promptKey];
+    assert.match(refusal.detail, /the recorded pane cannot be re-prompted: pane w1V:pPFN is recorded for GY-1788's session graphyard-codex-2:1/);
+    assert.ok(state.faults.instances.some(instance => instance.kind === 'action:session'), 'the failed paste counts as the action:session instance it was');
+    // The candidate starts the reclaim bound at the first unverifiable observation; the base left
+    // the item standing: no bound, no end, every later cycle refusing the same resolution again.
+    const bound = state.actions[`idle:${item.id}:2`];
+    assert.ok(bound, 'the base started no reclaim bound here: the handle was absent entirely, so GY-953\u2019s guard never fired');
+    assert.match(bound!.detail, /its handle graphyard-codex-2:2 is not on the record \(its launch registered this session under another attempt's id\)/);
+    assert.deepEqual(world.prompts, [], 'nothing is pasted: the pane is not verifiably this attempt\u2019s');
+    assert.equal(world.sessions.length, 0, 'no handle was written by the refusal');
+
+    // A later cycle, past the bound: the attempt is handed to a new one that keeps its branch —
+    // the automatic relaunch the base never did.
+    state.cycle += 1;
+    await resumeStep(world.cycle(150_000), new Set(), true);
+    const done = [...Object.values(state.actions)].find(action => action.state === 'done' && /keeping the attempt's branch/.test(action.detail));
+    assert.ok(done, `the base never ended the attempt: ${[...Object.values(state.actions)].map(action => `${action.kind}:${action.state}`).join(', ')}`);
+    assert.match(done!.detail, /its handle graphyard-codex-2:2 has not been on the record since/);
+    assert.deepEqual(world.prompts, [], 'still nothing pasted');
+    // The loop's own close of the attempt's handle landed under the id the fence keys.
+    assert.ok(world.sessions.some(handle => handle.id === 'graphyard-codex-2:2' && handle.state === 'finished'));
+  } finally { world.cleanup(); }
+});
+
+// The stall the GY-1764 instance flew into: a request that arrives inside the window is never
+// answered — black-holed, the way a proxy holds a connection whose upstream is gone — and the plane
+// answers every request that arrives after the recovery, so a renewal sent then renews for real.
+const STALL_LEASE_MS = 1_200;
+function stallingControlPlane(stallFromMs: number, stallUntilMs: number) {
+  const started = performance.now();
+  const calls: { path: string; at: number; answered: boolean }[] = [];
+  const iso = (elapsed: number) => new Date(Date.parse('2026-10-14T10:00:00.000Z') + elapsed).toISOString();
+  const api = async (path: string, data?: unknown): Promise<any> => {
+    const arrived = performance.now() - started;
+    if (arrived >= stallFromMs && arrived < stallUntilMs) { calls.push({ path, at: arrived, answered: false }); await new Promise<never>(() => {}); }
+    calls.push({ path, at: arrived, answered: true });
+    if (path.endsWith('/heartbeat')) return { updatedAt: iso(arrived), lease: { epoch: 1, expiresAt: iso(arrived + STALL_LEASE_MS) } };
+    throw new Error(`unexpected call ${path} ${JSON.stringify(data)}`);
+  };
+  return { api, calls, elapsed: () => performance.now() - started };
+}
+
+/** One steady-state worker under a control plane that stalls out from under it; `bound` Infinity is the base's wiring, where a request is awaited for as long as the window lasts. */
+async function stalledLaunch(bound: number, stallUntilMs: number) {
+  const plane = stallingControlPlane(200, stallUntilMs);
+  const released: string[] = [];
+  const code = await supervise(process.execPath, ['-e', 'setTimeout(() => {}, 2_200)'], 1, () => plane.api('work/work-1/heartbeat', { epoch: 1 }), {
+    intervalMs: 20, graceMs: 25, ...retry, startupWindowMs: 0, attemptBoundMs: bound,
+    session: { visible: () => null, unconsented: () => null, surrender: async cause => { released.push(cause); } },
+  }).then(ended => ended, () => 1);
+  return { code, released, calls: plane.calls, endedAt: plane.elapsed() };
+}
+
+test('integration:fault-class-session-liveness GY-1764 escalation:lease-loss — a renewal the plane never answers is abandoned and retried, so a plane that recovers inside the lease renews it, while the deadline never moves on an unanswered request', async () => {
+  // The base: the one unanswered renewal was awaited for the whole window (the client timeout is
+  // the lease itself), no retry ever ran inside the lease, and the worker was stopped at the
+  // deadline with the lease lapsed unrenewed although the plane had been back for half a second —
+  // the shape the control plane raised as "Worker graphyard-claude-1 lost lease epoch 8".
+  const base = await stalledLaunch(Number.POSITIVE_INFINITY, 700);
+  assert.equal(base.released.length, 0, 'the base left the lease to lapse unexplained: no release, only the stop at the deadline');
+  assert.equal(base.code, 1, 'the worker was stopped at the lease\u2019s deadline');
+  assert.ok(base.calls.filter(call => call.path.endsWith('/heartbeat') && call.answered).every(call => call.at < 200), 'the base never renewed after the stall began');
+
+  // The candidate: the attempt is given up on at its bound and a fresh one sent, which the
+  // recovered plane answers — the agent runs to its own exit and the lease is released with the
+  // cause, never lapsed.
+  const candidate = await stalledLaunch(150, 700);
+  assert.deepEqual(candidate.released.map(cause => cause.replace(/\s+/g, ' ')), ['the agent process exited (code 0) while its lease was live'], 'the attempt survived the stall and ended on its own');
+  assert.equal(candidate.code, 0);
+  assert.ok(candidate.calls.some(call => call.path.endsWith('/heartbeat') && call.answered && call.at >= 700), 'a renewal landed after the plane recovered');
+  assert.ok(candidate.calls.filter(call => !call.answered).length >= 2, 'the black-holed requests were abandoned and retried inside the lease');
+
+  // And a stall the lease does not outlive: nothing the plane never answered authorises the
+  // worker past the expiry the server issued, so it is stopped at the deadline — with the plane
+  // still down — and never rides out the outage on the chance that the server is also down.
+  const outlived = await stalledLaunch(150, 5_000);
+  assert.equal(outlived.code, 1, 'the worker was stopped when the lease expired');
+  assert.equal(outlived.released.length, 0, 'the lapse is the control plane\u2019s to explain (its own stall record), not a release');
+  assert.ok(outlived.endedAt < 2_000, `the supervisor stopped at the server-issued deadline (${Math.round(outlived.endedAt)} ms), not a lease period later`);
+  assert.ok(outlived.calls.filter(call => call.path.endsWith('/heartbeat') && call.answered).every(call => call.at < 200), 'no renewal was ever answered after the stall began');
+});
+
+// The plane's side of the same instance, on a real store: the tick record, the stall it records,
+// the grace that keeps a lease live across the stall, and the lapse it explains.
+const human: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
+const stallWorker: Principal = { id: 'worker-stall', role: 'worker', sessionKind: 'ai' };
+const stallCoordinator: Principal = { id: 'graphyard-loop', role: 'coordinator', sessionKind: 'ai' };
+let stallDatabase: EmbeddedPostgres, stallStore: Store, stallEngine: Engine;
+before(async () => {
+  const port = Number(process.env.GRAPHYARD_SESSION_LIVENESS_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1800);
+  stallDatabase = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('session-liveness-plane'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  await stallDatabase.initialise(); await stallDatabase.start(); await stallDatabase.createDatabase('graphyard_test');
+  stallStore = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await stallStore.init();
+  stallEngine = new Engine(stallStore, [15368], 120, 'owner/project');
+  stallEngine.principals = [human, stallWorker, stallCoordinator];
+});
+after(async () => { if (stallStore) await stallStore.close(); if (stallDatabase) await stallDatabase.stop(); });
+const stallId = () => randomUUID();
+const stallInput = (title: string) => ({ title, plannedFiles: [`src/${title}.ts`], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] });
+const stallDocument = async (workId: string) => (await stallStore.pool.query('SELECT document FROM work_items WHERE id=$1', [workId])).rows[0].document;
+const stallOverwrite = async (workId: string, mutate: (document: Work) => void) => {
+  const document = await stallDocument(workId); mutate(document);
+  await stallStore.pool.query('UPDATE work_items SET document=$2::jsonb WHERE id=$1', [workId, JSON.stringify(document)]);
+};
+const stallEscalations = async (workId: string) => standingEscalations((await stallDocument(workId)) as Work).map(entry => entry.trigger);
+const stallEvents = async (workId: string, kind: string) => (await stallStore.pool.query(`SELECT payload->'details' AS details FROM events WHERE work_id=$1 AND kind=$2 ORDER BY seq`, [workId, kind])).rows.map(row => row.details);
+
+test('unit:fault-class-session-liveness GY-1764 classification — a lapse inside a recorded plane stall is explained by the stall, and a standing lease-loss settles only when the stall covers the lease\u2019s own expiry', () => {
+  const stall: PlaneStall = { from: GY1791_AT(-90_000), to: GY1791_AT(-5_000) };
+  const lease = { owner: 'graphyard-claude-1', epoch: 8, expiresAt: GY1791_AT(-45_000) };
+  const explained = leaseLapseCause({ submission: null }, lease, [], [stall]);
+  assert.equal(explained?.cause, 'control-plane-stall', 'the base classified this lapse as a loss: no stall record existed');
+  assert.deepEqual(explained?.stall, stall);
+  assert.equal(leaseLapseCause({ submission: null }, lease, [], []), null, 'the same lapse with no recorded stall is still a vanished worker');
+
+  // The escalation the base raised for that lapse, once the stall is on the record: settled by
+  // reconciliation itself, with the stall as its note — the way a blocked report explains a lapse.
+  // The lapse is read from the attempt record the loss ended at the lease's own deadline.
+  const escalation = { trigger: 'lease-loss' as const, reason: leaseLossReason({ owner: lease.owner, epoch: lease.epoch }), at: GY1791_AT(-4_000), actor: 'graphyard' };
+  const attempt = (expiresAt: string) => ({ attempts: [{ epoch: 8, owner: lease.owner, claimedAt: GY1791_AT(-300_000), endedAt: expiresAt, end: 'expired' as const }], interventions: { blocked: 0, requirements: 0 }, submittedAt: null, resubmittedAt: null, reworkRounds: 0 }) as Work['pipeline'];
+  const standing = (pipeline: ReturnType<typeof attempt> | undefined) => ({ submission: null, escalations: [escalation], escalation, epoch: 8, lease: null, stage: 'build' as const, pipeline });
+  const settled = settleableLeaseLoss(standing(attempt(lease.expiresAt)), [], Date.parse(stall.to), [stall]);
+  assert.equal(settled.length, 1);
+  assert.equal(settled[0].cause, 'control-plane-stall');
+  assert.match(settled[0].note, /not answering between/);
+  // A lease that ran out before the plane stalled was lost by its worker, however soon after the
+  // stall the loss was raised: the raise is the first tick after the expiry, which the recovery
+  // tick is for every lapse the stall merely delayed noticing. The stall must cover the expiry.
+  assert.deepEqual(settleableLeaseLoss(standing(attempt(GY1791_AT(-100_000))), [], Date.parse(stall.to), [stall]), [], 'an expiry before the stall is not the stall\u2019s to explain');
+  assert.deepEqual(settleableLeaseLoss(standing(undefined), [], Date.parse(stall.to), [stall]), [], 'with no attempt record of the lapse, nothing places the expiry inside the stall');
+  assert.deepEqual(settleableLeaseLoss(standing(attempt(lease.expiresAt)), [], Date.parse(stall.to), []), [], 'and with no stall on the record the loss stands');
+});
+
+test('integration:fault-class-session-liveness GY-1764 escalation:lease-loss — the plane records its own stall, a heartbeat under it renews, and a lapse it covers is history with its cause', async () => {
+  let work = await stallEngine.execute(human, 'create', null, stallInput('plane-stall-lapse'), stallId());
+  work = await stallEngine.execute(human, 'ready', work.id, {}, stallId());
+  work = await stallEngine.execute(stallWorker, 'claim', work.id, {}, stallId());
+  const epoch = work.epoch;
+
+  // The pass records its tick; a gap past the bound since the previous pass is one stall row.
+  await stallEngine.reconcile();
+  assert.equal((await stallStore.pool.query('SELECT tick_at FROM plane_liveness WHERE id = true')).rows.length, 1);
+  await stallStore.pool.query('UPDATE plane_liveness SET tick_at = tick_at - interval \'90 seconds\'');
+  await stallEngine.reconcile();
+  const stalls = (await stallStore.pool.query(`SELECT payload->'details' AS details FROM events WHERE kind = 'plane.stall'`)).rows.map(row => row.details) as PlaneStall[];
+  assert.equal(stalls.length, 1, 'the gap was recorded once');
+  const stall = stalls[0];
+  assert.ok(Date.parse(stall.to) - Date.parse(stall.from) >= 60_000, `the recorded gap covers the outage: ${stall.from}..${stall.to}`);
+  await stallEngine.reconcile();
+  assert.equal(Number((await stallStore.pool.query(`SELECT count(*) AS n FROM events WHERE kind = 'plane.stall'`)).rows[0].n), 1, 'a pass with no gap records nothing');
+
+  // The renewals the stall ate: the lease ran out inside the gap, and the heartbeat the supervisor
+  // sent once requests were answered again renews — the grace kept the lease live across the stall.
+  await stallOverwrite(work.id, document => { document.lease!.expiresAt = new Date(Date.parse(stall.to) - 45_000).toISOString(); });
+  const renewed = await stallEngine.execute(stallWorker, 'heartbeat', work.id, { epoch }, stallId());
+  assert.ok(renewed.lease && Date.parse(renewed.lease.expiresAt) > Date.parse(stall.to), `the base refused this heartbeat: the lease had lapsed inside the stall (${JSON.stringify(renewed.lease)})`);
+
+  // A loss raised for a lease that ran out before the stall began stands: the worker vanished on its
+  // own, and the stall that merely delayed the plane's noticing explains nothing about it, even
+  // though the first tick after the stall is the one that raised it.
+  let lost = await stallEngine.execute(human, 'create', null, stallInput('plane-stall-loss'), stallId());
+  lost = await stallEngine.execute(human, 'ready', lost.id, {}, stallId());
+  lost = await stallEngine.execute(stallWorker, 'claim', lost.id, {}, stallId());
+  const lostExpiry = new Date(Date.parse(stall.from) - 400_000).toISOString();
+  await stallOverwrite(lost.id, document => { document.lease!.expiresAt = lostExpiry; document.pipeline!.attempts.at(-1)!.claimedAt = new Date(Date.parse(lostExpiry) - 60_000).toISOString(); });
+  await stallEngine.reconcile();
+  assert.deepEqual(await stallEscalations(lost.id), ['lease-loss'], 'a lease that ran out before the plane stalled was lost by its worker and stands');
+  assert.equal((await stallEvents(lost.id, 'escalation.auto-settled')).length, 0, 'the stall recorded after it settles nothing about it');
+  assert.equal(escalationModel.lapsedLeaseExpiry((await stallDocument(lost.id)) as Work, lost.epoch), lostExpiry, 'the attempt record holds the lapse at the lease\u2019s own deadline');
+
+  // Whereas a loss raised while the stall was not yet on the record — the beat's write failed and
+  // the pass classed the lapse without it — settles once the next beat records the stall that
+  // covers the lease's expiry: reconciliation itself, with the stall as its note, where the base
+  // held it for an approver. That stall begins after the earlier loss's expiry, which it leaves standing.
+  let late = await stallEngine.execute(human, 'create', null, stallInput('plane-stall-late-record'), stallId());
+  late = await stallEngine.execute(human, 'ready', late.id, {}, stallId());
+  late = await stallEngine.execute(stallWorker, 'claim', late.id, {}, stallId());
+  const lateExpiry = new Date(Date.parse(stall.from) - 200_000).toISOString();
+  await stallOverwrite(late.id, document => { document.lease!.expiresAt = lateExpiry; document.pipeline!.attempts.at(-1)!.claimedAt = new Date(Date.parse(lateExpiry) - 60_000).toISOString(); });
+  await stallEngine.reconcile();
+  assert.deepEqual(await stallEscalations(late.id), ['lease-loss'], 'no stall covered the expiry yet, so the lapse was a loss');
+  await stallStore.pool.query('UPDATE plane_liveness SET tick_at = $1', [new Date(Date.parse(lateExpiry) - 5_000)]);
+  await stallEngine.reconcile();
+  assert.deepEqual(await stallEscalations(late.id), [], 'the stall the plane recorded afterwards covers the expiry and settles the loss on the record alone');
+  const settledRows = await stallEvents(late.id, 'escalation.auto-settled');
+  assert.ok(settledRows.length, 'the settlement is on the ledger');
+  assert.match(settledRows.at(-1)!.note, /not answering between/);
+  assert.equal((await stallEvents(late.id, 'lease.expired')).length, 0, 'the lapse itself was a loss, not an explained expiry');
+  assert.deepEqual(await stallEscalations(lost.id), ['lease-loss'], 'the earlier loss, whose expiry no stall covers, still stands');
+  assert.ok((await readPlaneStalls(stallStore.pool, Date.parse(stall.from) - 1_000, Date.parse(stall.to) + 1_000)).some(entry => entry.from === stall.from && entry.to === stall.to), 'the reader the classification uses reads the stall back');
+});
+
+test('integration:fault-class-session-liveness GY-1764 escalation:lease-loss — the plane\u2019s tick runs on the lease pool, so a request pool exhausted while renewals still land records no stall', async () => {
+  let work = await stallEngine.execute(human, 'create', null, stallInput('plane-stall-lease-pool'), stallId());
+  work = await stallEngine.execute(human, 'ready', work.id, {}, stallId());
+  work = await stallEngine.execute(stallWorker, 'claim', work.id, {}, stallId());
+  await stallEngine.recordPlaneLiveness();
+  const before = (await stallStore.pool.query('SELECT tick_at FROM plane_liveness WHERE id = true')).rows[0].tick_at as Date;
+  // Every connection of the request pool is held behind slow work; the lease pool is untouched.
+  const held = await Promise.all(Array.from({ length: (stallStore.pool as unknown as { options: { max: number } }).options.max }, () => stallStore.pool.connect()));
+  try {
+    const stalls = Number((await stallStore.leasePool.query(`SELECT count(*) AS n FROM events WHERE kind = 'plane.stall'`)).rows[0].n);
+    const ticked = new Date(before.getTime() + 1_000);
+    await stallEngine.recordPlaneLiveness(ticked);
+    const after = (await stallStore.leasePool.query('SELECT tick_at FROM plane_liveness WHERE id = true')).rows[0].tick_at as Date;
+    assert.equal(after.getTime(), ticked.getTime(), 'the base took the tick\u2019s connection from the request pool, where none was to be had: the tick landed over the lease pool');
+    assert.equal(Number((await stallStore.leasePool.query(`SELECT count(*) AS n FROM events WHERE kind = 'plane.stall'`)).rows[0].n), stalls, 'and a saturated request pool is no stall');
+    // A heartbeat lands on the same path, which is the point: the tick measures what serves renewals.
+    assert.ok((await stallEngine.execute(stallWorker, 'heartbeat', work.id, { epoch: work.epoch }, stallId())).lease, 'renewals still land');
+  } finally { for (const client of held) client.release(); }
+});
+
+test('integration:fault-class-session-liveness GY-1764 escalation:lease-loss — a beat records the time it landed, not the time it was sent, and beats never pile up behind a lease pool that is not answering', async () => {
+  // The plane beats on its own timer; the first beat lands before the timer starts.
+  const stop = await stallEngine.startPlaneBeat(20);
+  // Then every lease-pool connection is held, as a black-holed path holds them: a beat sent now waits.
+  const held = await Promise.all(Array.from({ length: (stallStore.leasePool as unknown as { options: { max: number } }).options.max }, () => stallStore.leasePool.connect()));
+  try {
+    const sentAt = (await stallStore.pool.query('SELECT now() AS at')).rows[0].at as Date;
+    const beat = stallEngine.recordPlaneLiveness();
+    await delay(1_100);
+    // Behind it waits at most the timer's one in-flight beat: later intervals join no queue until the pool answers.
+    assert.ok(stallStore.leasePool.waitingCount <= 2, `the base queued a beat per interval behind the held pool: ${stallStore.leasePool.waitingCount} waiting`);
+    const landedAt = (await stallStore.pool.query('SELECT now() AS at')).rows[0].at as Date;
+    for (const client of held.splice(0)) client.release();
+    await beat;
+    const tick = (await stallStore.leasePool.query('SELECT tick_at FROM plane_liveness WHERE id = true')).rows[0].tick_at as Date;
+    assert.ok(tick.getTime() >= landedAt.getTime(), `the base stamped the beat when it was sent (${sentAt.toISOString()}); it landed at ${landedAt.toISOString()} and the record says ${tick.toISOString()}`);
+    assert.ok(tick.getTime() - sentAt.getTime() >= 1_000, 'the held second is on the record, not replayed away');
+  } finally { stop(); for (const client of held) client.release(); }
+});
+
+test('integration:fault-class-session-liveness GY-1788 action:session — the control plane moves a launcher\u2019s session record in one transaction: the record under the claimed epoch runs, the guessed record is closed', async () => {
+  let work = await stallEngine.execute(human, 'create', null, stallInput('session-rekey'), stallId());
+  work = await stallEngine.execute(human, 'ready', work.id, {}, stallId());
+  const handle = { kind: 'implementation' as const, principal: stallWorker.id, runtime: 'claude', host: 'vishrog', subject: `${work.key}: session-rekey` };
+  // The launcher's pre-claim registration under the snapshot's guess, coordinated once the runtime started.
+  work = await stallEngine.execute(stallCoordinator, 'session', work.id, { ...handle, id: `${stallWorker.id}:1`, state: 'running', pane: 'w1V:pOLD', agentName: 'graphyard-opencode-4' }, stallId());
+  // A review session of another principal, and an already-finished implementation record, are not the moving record's business.
+  work = await stallEngine.execute(stallCoordinator, 'session', work.id, { kind: 'review', principal: 'graphyard-master', runtime: 'codex', host: 'vishrog', subject: 'review', id: 'review-1', state: 'running' }, stallId());
+  // The launch claimed epoch 2: the launcher's one write records the session there.
+  work = await stallEngine.execute(stallCoordinator, 'session', work.id, { ...handle, id: `${stallWorker.id}:2`, state: 'running', pane: 'w1V:pOLD', agentName: 'graphyard-opencode-4' }, stallId());
+  const byId = Object.fromEntries((work.sessions ?? []).map(entry => [entry.id, entry]));
+  assert.equal(byId[`${stallWorker.id}:2`]?.state, 'running');
+  assert.equal(byId[`${stallWorker.id}:2`]?.pane, 'w1V:pOLD');
+  assert.equal(byId[`${stallWorker.id}:1`]?.state, 'finished', 'the base left the guessed record running beside the new one');
+  assert.match(byId[`${stallWorker.id}:1`]?.outcome ?? '', /runs one implementation session on .* at a time.*recorded that session as worker-stall:2/);
+  assert.equal(byId['review-1']?.state, 'running', 'another principal\u2019s session is untouched');
+  // The same document answers the write, so the launcher verifies the move from the answer.
+  const document = await stallDocument(work.id) as Work;
+  assert.equal(document.sessions?.find(entry => entry.id === `${stallWorker.id}:1`)?.state, 'finished');
+  assert.equal(document.sessions?.find(entry => entry.id === `${stallWorker.id}:2`)?.state, 'running');
+});
+
+test('integration:fault-class-session-liveness GY-1764 escalation:lease-loss — the pass that first detects the stall is the pass that meets the expired lease, and it keeps the lease', async () => {
+  let work = await stallEngine.execute(human, 'create', null, stallInput('plane-stall-first-pass'), stallId());
+  work = await stallEngine.execute(human, 'ready', work.id, {}, stallId());
+  work = await stallEngine.execute(stallWorker, 'claim', work.id, {}, stallId());
+  await stallEngine.reconcile();
+  // No stall is on the record yet: the plane was down from 90 s ago, and the lease ran out inside it.
+  const before = Number((await stallStore.pool.query(`SELECT count(*) AS n FROM events WHERE kind = 'plane.stall'`)).rows[0].n);
+  await stallStore.pool.query('UPDATE plane_liveness SET tick_at = tick_at - interval \'90 seconds\'');
+  await stallOverwrite(work.id, document => { document.lease!.expiresAt = new Date(Date.now() - 45_000).toISOString(); });
+  await stallEngine.reconcile();
+  assert.equal(Number((await stallStore.pool.query(`SELECT count(*) AS n FROM events WHERE kind = 'plane.stall'`)).rows[0].n), before + 1, 'this very pass recorded the stall');
+  assert.deepEqual(await stallEscalations(work.id), [], 'the recovery pass raised a lease loss the stall it detected explains');
+  const after = await stallDocument(work.id) as Work;
+  assert.ok(after.lease, 'the lease survived the recovery pass');
+  assert.ok(Date.parse(after.lease!.expiresAt) > Date.now(), 'and was extended past now');
+  const renewed = await stallEngine.execute(stallWorker, 'heartbeat', work.id, { epoch: work.epoch }, stallId());
+  assert.ok(renewed.lease, 'the supervisor\'s heartbeat lands on a live lease');
 });
