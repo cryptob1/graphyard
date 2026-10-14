@@ -35,3 +35,19 @@ test('unit:step-calls-applied-once — differing holds, idle and active marks, a
   assert.equal(callKey('markEscalation', [{ ...session, idleSince: 'x' }]), callKey('markEscalation', [{ ...session, idleSince: 'y' }]));
   assert.notEqual(callKey('endEscalation', [session, 'finished', null]), callKey('endEscalation', [session, 'dropped', null]));
 });
+
+test('unit:step-calls-bounded — triage: a phase starts nothing once the step budget is spent, and a finished handle record supersedes the owed running one', async () => {
+  const { boundedPhase, supersedeOwed, owedWrite } = await helper();
+  const state = { cycle: 1, actions: {} as Record<string, any>, faults: {} };
+  const cycle = { state, now: () => Date.now(), performed: [] as unknown[], effects: { persist: async () => {} } } as any;
+  let starts = 0;
+  await boundedPhase(cycle, 'triage', 'planner', () => 0, async () => { starts++; });
+  assert.equal(starts, 0, 'the spent budget started no phase');
+  assert.equal(state.actions['carried:triage:planner'].state, 'waiting');
+  const { StepCallCarriedError } = await helper();
+  await owedWrite(cycle, 'handle:1:h:running', { kind: 'session', work: 'GY-1' }, 'Recording h running', 'recordSession', async () => { throw new StepCallCarriedError(`the sessions step's 10000 ms per-call bound passed before h's recordSession call answered; the call stays owed and is retried next cycle`, true); });
+  assert.equal(state.actions['owed:handle:1:h:running'].state, 'waiting');
+  await supersedeOwed(cycle, 'handle:1:h:running', 'the finished record');
+  assert.equal(state.actions['owed:handle:1:h:running'].state, 'done');
+  assert.match(state.actions['owed:handle:1:h:running'].detail, /superseded/);
+});

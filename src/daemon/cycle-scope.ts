@@ -20,7 +20,7 @@ import { boundDetail, detailChanged, namePaths } from './decisions.js';
 import { findingRecheckMs, record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import type { MergerMode } from '../merger-mode.js';
-import { carriedRow, recordCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
+import { carriedRow, recordCarried, retireCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
 
 /** A requested path the loop grants without an approver, and the audited ground it stands on; `companion` marks a GY-955 companion. */
 export interface ScopeGround { path: string; ground: string; companion?: boolean }
@@ -371,6 +371,10 @@ async function successorStepWithin(cycle: Cycle, settled: ReadonlyMap<string, Wo
   if (!effects.baseSuccessions || !effects.replan || await controlPlaneMerger(cycle)) return;
   // An item the scope step revised this cycle is re-planned from that revision, never from the
   // snapshot it outdated: the stale revision would be refused, not applied (GY-1235, GY-1293).
+  // A carried re-plan names the policy revision it was made on; once the item moved past that revision (the call landed, or the item left the open ones) nothing retries it, so its row is retired.
+  const current = new Set(open.map(read => { const item = settled.get(read.id) ?? read; return `successors:${item.id}:${item.policyRevision}`; }));
+  for (const [rowKey, row] of Object.entries(state.actions)) if (rowKey.startsWith('successors:') && carriedRow(row) && !current.has(rowKey))
+    await retireCarried(cycle, rowKey, row, `Re-planning ${row.work} onto the successors of its planned files, carried on cycle ${row.cycle}, is moot: the item moved past the policy revision it was made on, or left the open items`);
   for (const read of open) await isolate('scope', read, read.key, async () => {
     const item = settled.get(read.id) ?? read;
     if (item.observation?.merged || !(item.plannedFiles ?? []).length) return;

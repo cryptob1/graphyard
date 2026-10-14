@@ -16,7 +16,7 @@ import { blockedPromptAnswers, blockedPromptFailMs, blockedPromptSettleMs, failo
 import { checkPaneStillBelongs, endWorkerAttempt, resumeStep, workerHandle } from './cycle-resume.js';
 import type { Cycle } from './cycle.js';
 import { settleEndedAttemptFence, supervisorStillRunning } from './cycle-reclaim.js';
-import { carriedCall, owedWrite, recordCarried, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
+import { carriedCall, owedWrite, supersedeOwed, recordCarried, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
 
 export { idleLeaseMs, idleReclaimMs, idleRepromptGraceMs, resumeWaitKey, idleLeaseKey, resumePromptText, idlePromptText } from './cycle-resume.js';
 
@@ -518,7 +518,8 @@ async function closeStepWithin(cycle: Cycle) {
     const handle = async (outcome: string, finished: boolean) => {
       if (!registered || !effects.recordSession) return;
       // GY-1774: a best-effort record, owed to the next cycle when carried, never re-sent with the answer it follows.
-      await owedWrite(cycle, `handle:${item.id}:${registered.id}`, { kind: 'session', work: item.key }, `Recording ${session.role} session ${session.agentName}'s handle on ${item.key}`, 'recordSession', fx => fx.recordSession!(item, { id: registered.id, kind: registered.kind, runtime: registered.runtime, host: registered.host, subject: registered.subject,
+      if (finished) await supersedeOwed(cycle, `handle:${item.id}:${registered.id}:running`, `the finished record of ${session.agentName}'s handle`);
+      await owedWrite(cycle, `handle:${item.id}:${registered.id}:${finished ? 'finished' : 'running'}`, { kind: 'session', work: item.key }, `Recording ${session.role} session ${session.agentName}'s handle on ${item.key}`, 'recordSession', fx => fx.recordSession!(item, { id: registered.id, kind: registered.kind, runtime: registered.runtime, host: registered.host, subject: registered.subject,
         state: finished ? 'finished' : 'running', outcome: outcome.slice(0, 500) }));
     };
     await unblock(`${session.role} session ${session.agentName}`, `${session.role}:${session.record}`, agent, item, null, null, null, handle, async reason => {

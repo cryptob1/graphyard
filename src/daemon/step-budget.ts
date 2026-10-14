@@ -267,6 +267,12 @@ export async function owedWrite(cycle: CarriedCycle, key: string, row: CarriedRo
   owed.delete(rowKey);
   if (carriedRow(previous)) await retireCarried(cycle, rowKey, previous, `${what}, carried on cycle ${previous.cycle}, answered on its retry`);
 }
+/** A newer write of the same subject makes an owed older one moot (a running handle record once the handle is finished): it is let go unsent and its row retired, so a late retry never lands after the newer write and reopens what it ended. */
+export async function supersedeOwed(cycle: CarriedCycle, key: string, why: string) {
+  const rowKey = `${owedPrefix}${key}`, previous = cycle.state.actions[rowKey];
+  owedWrites.get(cycle.state)?.delete(rowKey);
+  if (carriedRow(previous)) await retireCarried(cycle, rowKey, previous, `${previous.detail.replace(/ was carried to the next cycle: .*$/, '')} was superseded by ${why} and is not sent`);
+}
 /** The owed writes a step's start retries: those its bound covers; a row owed by a loop since restarted names a write in flight when it stopped, whose landing is unknown, so it is retired unsent. */
 export async function retryOwedWrites(cycle: CarriedCycle, calls: readonly (keyof DaemonEffects)[]) {
   const owed = owedWrites.get(cycle.state);
@@ -299,6 +305,11 @@ const phases = new WeakMap<object, Map<string, Promise<void>>>();
 export async function boundedPhase(cycle: Cycle, step: BoundedStep, name: string, budgetLeft: () => number | null, run: () => Promise<void>): Promise<void> {
   const running = phases.get(cycle.state) ?? phases.set(cycle.state, new Map()).get(cycle.state)!, key = `${step}:${name}`, previous = cycle.state.actions[`carried:${key}`];
   let flight = running.get(key), sent = false;
+  // A step whose budget is spent starts no phase: it stays owed to the next cycle, which starts it on a fresh budget.
+  if (!flight && budgetLeft() === 0) {
+    await recordCarried(cycle, `carried:${key}`, { kind: 'decision', work: null }, new StepCallCarriedError(`the ${step} step's budget passed before the ${name} phase was made (${stepCallBoundMs} ms per call, 0 ms left); the phase stays owed and is retried next cycle`, false), `The ${step} step's ${name} phase`);
+    return;
+  }
   if (!flight) {
     sent = true;
     const own: Promise<void> = run().finally(() => { if (running.get(key) === own) running.delete(key); });

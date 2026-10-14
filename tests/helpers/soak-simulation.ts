@@ -2302,6 +2302,14 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       if (!original) continue;
       (effects as unknown as Record<string, unknown>)[name] = async (...args: unknown[]) => { await slow(name); return original(...args); };
     }
+    // GY-1774 rework: the acceptance role's and the planner's own goals, runs and posts answer slowly too, so the triage step's nested phases are carried.
+    for (const role of ['acceptance', 'planner'] as const) {
+      const nested = effects[role] as unknown as Record<string, unknown> | undefined;
+      for (const name of Object.keys(nested ?? {})) {
+        const original = nested![name];
+        if (typeof original === 'function' && ['draft', 'judge', 'plan', 'release', 'deliver'].includes(name)) nested![name] = async (...args: unknown[]) => { await slow(`${role}.${name}`); await new Promise(resolve => setTimeout(resolve, 80)); return (original as (...rest: unknown[]) => unknown).apply(nested, args); };
+      }
+    }
   }
   // ---- GY-1562: the slow-answering plane. Inside the window the loop's snapshot read is answered,
   // ---- 200, only after `ms` of the clock, timed as the server request it is (cycle 13964's 95.8 s,

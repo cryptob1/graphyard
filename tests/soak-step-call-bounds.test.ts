@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { minute } from './helpers/soak-world.js';
+import { hour, minute } from './helpers/soak-world.js';
 import { basePlan, coordinatorRoot, soakConfig, soakControlPlanes } from './helpers/soak-plane.js';
 import { assertLaunchesConfined, simulateDay } from './helpers/soak-simulation.js';
 
@@ -42,4 +42,18 @@ test('unit:soak-invariants-hold — a day of approver, decision and session call
   assert.equal(budgetDay.cycles.at(-1)!.carried, 0, `nothing stays carried at the end of the day: ${JSON.stringify(Object.entries(state.actions).filter(([, row]) => row.state === 'waiting' && carried.test(row.detail)))}`);
   // A carried call judged nothing: no fault carries a bound message, however often the bound fired.
   assert.deepEqual(state.faults.instances.filter(instance => carried.test(instance.text)), [], 'no fault is filed for a carried call');
+});
+
+test('unit:soak-invariants-hold — goals drafted, judged and planned while the acceptance and planner calls answer slower than the bound carry the triage phases, hold no cycle past the interval, and are all delivered', { timeout: 900_000 }, async () => {
+  const day = await simulateDay({ hours: 14, acceptance: true, planner: true, slowCalls: { from: 20 * minute, to: 60 * minute, ms: 15_000 }, plan: { ...basePlan, deploys: [2 * hour + 30 * minute, 5 * hour, 9 * hour, 11 * hour, 13 * hour] } });
+  const { violations, failures, lost, state, budgetDay } = day;
+  assert.deepEqual(violations, [], 'every system invariant holds while the nested phases are slow');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  assert.ok(Object.keys(budgetDay.slowed).some(name => /^(?:acceptance|planner)\./.test(name)), `the acceptance and planner calls were slowed: ${JSON.stringify(budgetDay.slowed)}`);
+  const intervalMs = soakConfig.run.intervalSeconds * 1000;
+  assert.deepEqual(budgetDay.cycles.filter(entry => entry.spentMs > intervalMs).map(entry => `cycle ${entry.cycle}: ${entry.spentMs}ms`), [], 'every cycle stays within the interval');
+  assert.ok(Object.keys(state.actions).some(key => /^carried:triage:(?:acceptance|planner)$/.test(key)), 'a slow nested phase was carried to the next cycle');
+  assert.equal(budgetDay.cycles.at(-1)!.carried, 0, `no phase stays carried at the end of the day: ${JSON.stringify(Object.entries(state.actions).filter(([, row]) => row.state === 'waiting' && carried.test(row.detail)))}`);
+  assert.deepEqual(state.faults.instances.filter(instance => carried.test(instance.text)), [], 'no fault is filed for a carried phase');
 });
