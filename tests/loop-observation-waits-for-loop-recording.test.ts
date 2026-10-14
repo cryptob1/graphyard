@@ -8,7 +8,6 @@ import { actionAccount, nextAction } from '../src/model/next-action.js';
 import { reconcileActions } from '../src/model/actions.js';
 import { livenessFallback } from '../src/model/liveness.js';
 import { closeSchema, closureRefRefusal } from '../src/model/closure.js';
-import { deliveredObservationRefusal } from '../src/model/loop-observation.js';
 import * as model from '../src/model.js';
 import type { Work } from '../src/model.js';
 
@@ -102,7 +101,9 @@ test('unit:loop-observation-waits-for-loop-recording — master status lists a d
   assert.deepEqual(listedRead.map(entry => [entry.key, entry.due, entry.passedOn]), [['GY-1726', true, serving]]);
 });
 
-test('unit:loop-observation-waits-for-loop-recording — only the loop\'s recorded reading ends the wait: bound to the filed release, or marked as the loop\'s on the later release the control plane serves; a worker\'s attestation on its own candidate does not', () => {
+test('unit:loop-observation-waits-for-loop-recording — only the loop\'s recorded reading ends the wait: bound to the filed release, or marked as the loop\'s on the later release the control plane serves; a worker\'s attestation on its own candidate does not', async () => {
+  // Imported at call time so the base tree, which lacks the refusal, fails this case rather than the file.
+  const { deliveredObservationRefusal } = await import('../src/model/loop-observation.js') as unknown as { deliveredObservationRefusal: (work: Work, all: Work[], ref: string, now: Date) => string | null };
   const all = [parent];
   const wait = (evidence: object[]) => loopObservation(item(1725, { evidence } as never), new Date(now), all);
   assert.equal(wait([reading()]), null, 'the loop\'s reading on the serving release');
