@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import { caseDirectory, contractFile, parseContract } from '../e2e/case.js';
-import { acceptanceChangeRisk, acceptanceDraftSchema, acceptanceName, acceptanceStuckMs, draftFiles, maxDraftRounds, type AcceptanceDraft, type Goal, type Landing } from '../model/goal.js';
+import { acceptanceChangeRisk, acceptanceDraftSchema, acceptanceName, acceptanceStuckMs, draftFiles, maxDraftRounds, type AcceptanceDraft, type CaseChange, type Goal, type Landing } from '../model/goal.js';
 import type { MergerMode } from '../merger-mode.js';
 import { baseMovedReason } from '../merge-writer/executor.js';
 import type { MergeWriterReads } from './cycle-merge-writer.js';
@@ -27,6 +27,7 @@ import { detailChanged } from './decisions.js';
 import { MergeWriterUnreadError } from '../master/dispatch.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import type { Cycle } from './cycle.js';
+import { caseChangeStep, clearCaseChangeJudgements } from './case-change-judge.js';
 import { carriedIsolate, stepCallCarried } from './step-budget.js';
 
 export const acceptanceRole = 'acceptance';
@@ -68,6 +69,8 @@ export interface AcceptanceEffects {
   draft: (goal: Goal, input: AcceptanceDraft & { pr: number | null; branch: string; head: string }) => Promise<Goal>;
   /** Post the verdict as the approver identity, which never authored a draft. */
   judge: (goal: Goal, judgement: Judgement) => Promise<Goal>;
+  /** GY-1806: post the approver's verdict on a requested case change (goal case-change-approve|refuse) as the approver identity. */
+  judgeCaseChange?: (goal: Goal, change: CaseChange, judgement: Judgement) => Promise<Goal>;
   pullRequest: (pr: number) => Promise<PullRequestState>;
   /**
    * Ask the control plane to land the approved pull request (POST /api/goals/:key/land): it publishes
@@ -132,7 +135,7 @@ const polledAt = new Map<string, number>();
 /** Pull requests closed by this loop or the control plane. */
 const closedPulls = new Set<number>();
 export async function draftsSettled() { await Promise.all([...live.values()]); }
-export function clearDrafts() { for (const store of [live, pending, retryAt, polledAt]) store.clear(); closedPulls.clear(); }
+export function clearDrafts() { for (const store of [live, pending, retryAt, polledAt]) store.clear(); closedPulls.clear(); clearCaseChangeJudgements(); }
 
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 /** `caught` is the error a failed step met: only a plane-wide one (not text a result merely quotes) makes the failure the plane's. */
@@ -170,7 +173,7 @@ export function judgementPrompt(config: { repository: string }, goal: Goal) {
  * its concurrency (or paused) defers the goal instead: no fallback starts, so the operator's limit
  * holds however many goals are open.
  */
-async function runHeadless<T>(acceptance: AcceptanceEffects, role: 'draft' | 'judge', goal: Goal, prompt: string, validate: (payload: unknown) => T): Promise<{ payload: T | null; runs: string[]; deferred?: string }> {
+export async function runHeadless<T>(acceptance: AcceptanceEffects, role: 'draft' | 'judge', goal: Goal, prompt: string, validate: (payload: unknown) => T): Promise<{ payload: T | null; runs: string[]; deferred?: string }> {
   const runs: string[] = [];
   const [env, tool] = role === 'draft' ? [acceptanceRole, acceptanceTool] : [acceptanceJudgeRole, acceptanceJudgementTool];
   for (const attempt of ['primary', 'fallback'] as const) {
@@ -226,7 +229,7 @@ export async function acceptanceStep(cycle: Cycle) {
   };
   // GY-1774: a call carried past the step's bound is recorded waiting on its goal and retried next cycle, never noted as a failure.
   const isolate = carriedIsolate(cycle, 'triage');
-  const goals = await isolate('decision', null, 'the open goals', () => acceptance.goals());
+  const goals = await isolate('decision', null, 'the goals', () => acceptance.goals());
   for (const goal of goals ?? []) {
     await isolate('decision', null, `the acceptance of ${goal.key}`, async () => {
       const result = pending.get(goal.id);
@@ -235,6 +238,8 @@ export async function acceptanceStep(cycle: Cycle) {
       if (goal.stage === 'awaiting-approval') return awaiting(cycle, acceptance, goal, note);
       if (goal.stage === 'accepted') return accepted(cycle, acceptance, goal, note);
     });
+    // GY-1806: a requested case change is judged whatever the goal's stage (a delivered goal included), so no implementer blocks on it.
+    if (goal.caseChanges?.some(change => change.state === 'requested')) await isolate('decision', null, `the case changes of ${goal.key}`, () => caseChangeStep(cycle, acceptance, goal, note));
   }
 }
 
@@ -508,7 +513,7 @@ export function acceptanceEffects(config: MasterConfig, root: string, calls: Cal
   };
   return {
     settings, cwd: root,
-    goals: async () => (await calls.asCoordinator('goals?open=1')).goals,
+    goals: async () => (await calls.asCoordinator('goals')).goals, // every goal: a delivered one still protects its cases and may carry a requested change (GY-1806)
     runner: async (role, attempt, goal) => {
       if (attempt === 'primary') {
         const [name, principal] = role === 'draft' ? [acceptanceRole, config.operatorAgent!.id] as const : ['approver', config.approver!.id] as const;
@@ -521,6 +526,7 @@ export function acceptanceEffects(config: MasterConfig, root: string, calls: Cal
     open: (goal, draft) => openAcceptancePullRequest(run, root, worktreeRoot(root, config), config, goal, draft),
     draft: (goal, input) => calls.asOperatorAgent('POST', `goals/${goal.key}/draft`, input, `acceptance:${goal.id}:${goal.revision}`),
     judge: (goal, judgement) => asApprover(`goals/${goal.key}/${judgement.verdict}`, { reason: judgement.reason }, `acceptance:${goal.id}:${goal.revision}:judged`),
+    judgeCaseChange: (goal, change, judgement) => asApprover(`goals/${goal.key}/case-change-${judgement.verdict}`, { change: change.id, reason: judgement.reason }, `acceptance:${goal.id}:case-change:${change.id}:judged`),
     pullRequest: read,
     land: goal => calls.asOperatorAgent('POST', `goals/${goal.key}/land`, {}, `acceptance:${goal.id}:${goal.revision}:land:${Date.now()}`),
     close: async (pr, comment) => { if ((await read(pr)).state === 'open') await gh(['pr', 'close', String(pr), '--comment', comment, '--delete-branch']); },
