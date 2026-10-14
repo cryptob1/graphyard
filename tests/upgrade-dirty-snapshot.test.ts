@@ -456,3 +456,23 @@ test('unit:snapshot-pin-survives-dirty-head-move — a dirty checkout whose HEAD
   assert.equal(readHeldCli(root), tip, 'the pin stands');
   assert.equal(w.launch('watch', 'GY-1', '1').release, 'B', 'the launcher still loads the snapshot');
 });
+
+test('unit:owed-restart-onto-dirtied-head-snapshots — a restart owed onto loaded code that the checkout already holds is a snapshot restart once the checkout is dirtied, never a restart onto the dirty tree', async () => {
+  const w = await world('owed-dirtied');
+  const { root, loaded, tip, master } = w;
+  git(root, 'fetch', '-q', 'origin');
+  git(root, 'checkout', '-q', '--detach', tip);
+  await dirtied(root);
+  const state = emptyDaemonState(master);
+  state.release = { commit: loaded, dirty: false };
+  state.deployment = verified(tip);
+  state.upgrade.pending = { from: loaded, to: tip, code: true };
+  const { calls, deps } = recording(root);
+  const done = await performSelfUpgrade(master, state, deps());
+  assert.equal(done.outcome, 'upgraded', JSON.stringify(done));
+  assert.equal(readHeldCli(root), tip, 'the launcher is pinned to the snapshot');
+  assert.equal(state.upgrade.snapshot?.commit, tip);
+  assert.equal(w.launch('watch', 'GY-1', '1').release, 'B');
+  assert.deepEqual(calls.executors, [tip]);
+  assert.equal(status(root), ' M README.md', 'the dirty checkout is untouched');
+});
