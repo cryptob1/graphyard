@@ -5,7 +5,8 @@ import { hotFileSet } from '../daemon/hotspots.js';
 import type { ConflictReport } from '../conflicts.js';
 import { standingCapacity, describeCapacity, quotaRoles } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, openHumanRequests } from '../model/human-request.js';
-import { type Work, carriedBindings, describeGround, observationWindowHold, loopObservation, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance } from '../model.js';
+import { observationPass } from '../model/loop-observation.js';
+import { type Work, carriedBindings, describeGround, observationWindowHold, loopObservation, loopObservationProofs, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance } from '../model.js';
 import { containmentAttestation, containmentGraceMs } from '../quarantine.js';
 import { pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, restoredApproval, refusedReconciliation, blockedPastProbe } from '../merge-queue.js';
 import { MERGE_PROTOCOL } from '../protocol-version.js';
@@ -150,7 +151,25 @@ export function concurrencyAttention(reports: RoleConcurrencyReport[]): Attentio
     text: `${report.role} capacity is saturated: ${report.running} session${report.running === 1 ? '' : 's'} running against a limit of ${report.limit} (${report.profiles.map(entry => `${entry.profile} ${entry.running}/${entry.limit}`).join(', ')}), ${report.waiting} request${report.waiting === 1 ? '' : 's'} waiting for a slot, the longest (${report.longest!.work}${report.longest!.group ? ` ${report.longest!.group} proofs` : ''}) for ${Math.round(report.longestWaitMs! / 60_000)} minutes`,
     ...agentOwner('master', `Raise concurrency on a ${report.role} profile in .graphyard/master.json, or add a ${report.role} profile on another account (master ${report.role} add); master run adopts the change on its next tick and starts more sessions without a restart. See docs/onboarding.md#size-review-and-proof-capacity`) }));
 }
-export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles, cliPath = 'graphyard', loop?: { projectMemory?: ProjectMemory | null } | { error: string } | null, supervision?: SupervisionInput) {
+/** The loop's record of an item's reading, as its daemon state carries it under `reading:ITEM:RELEASE` (daemon/cycle-readings.ts). */
+export interface LoopReadingRecord { state: string; detail: string; at: string; work?: string | null }
+export type LoopStatusInput = { projectMemory?: ProjectMemory | null; actions?: Record<string, LoopReadingRecord> } | { error: string } | null | undefined;
+/**
+ * GY-1779: every open item waiting on the loop's own reading — due, or held until its window —
+ * with what it waits for and the loop's last record of taking it: recorded and closed, failed with
+ * the measured values, or why this host could not take it. Listed here, never as a stalled gate.
+ */
+export function pendingReadings(rows: readonly { key: string; stage: string; observing: string | null; observationDue: boolean; observationPassedOn?: string | null }[], work: readonly Work[], loop: LoopStatusInput, now: number) {
+  const actions = loop && !('error' in loop) ? loop.actions ?? {} : {};
+  return rows.filter(row => row.observing).map(row => {
+    const item = work.find(entry => entry.key === row.key)!;
+    const last = actions[`reading:${item.id}`] ?? null;
+    return { key: row.key, stage: row.stage, proofs: loopObservationProofs(item) ?? [], due: row.observationDue, notBefore: item.observationWindow?.notBefore ?? null, waitingFor: row.observing!, passedOn: row.observationPassedOn ?? null,
+      candidate: item.candidate ? { pr: item.candidate.pr, sha: item.candidate.sha } : null,
+      loop: last ? { state: last.state, detail: last.detail, at: last.at, ageMs: Math.max(0, now - Date.parse(last.at)) } : null };
+  });
+}
+export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles, cliPath = 'graphyard', loop?: LoopStatusInput, supervision?: SupervisionInput) {
   const supervised = supervisionReport(supervision, snapshot.work);
   const now = Date.parse(snapshot.now);
   const scheduling = dispatchSchedule(snapshot.work, now);
@@ -180,8 +199,12 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const mergeable = mergeAuthorized(work);
     const dwellMs = now - Date.parse(work.stageEnteredAt);
     // The earliest instant the item's reading can exist (GY-1698), and whether it still holds the dispatch.
-    // GY-1762: waiting on the loop's own live reading, not ready for a worker.
-    const observing = work.stage === 'ready' && !work.blocker && !active ? loopObservation(work, new Date(now), snapshot.work) : null;
+    // GY-1762: waiting on the loop's own live reading, not ready for a worker. GY-1779: at any open stage —
+    // an unsubmitted worker candidate left on the item before the loop held it waits the same way.
+    const observing = !work.blocker && !active ? loopObservation(work, new Date(now), snapshot.work) : null;
+    // A recorded pass still open waits the same way: the loop closes it on that reading's release in the same step.
+    const passed = !work.blocker && !active && !observing && loopObservationProofs(work) ? observationPass(work, new Date(now), snapshot.work) : null;
+    const observingDetail = observing ? observing.waitingFor : passed ? `the loop's close of ${work.key} as delivered-observation on release ${passed.release.slice(0, 12)}, where its reading of ${passed.readings.map(entry => entry.proof).join(', ')} passed, which the loop records in its deployment-verification step` : null;
     const observationWindow = work.observationWindow ? { ...work.observationWindow, waiting: !!observationWindowHold(work, new Date(now)) } : null;
     const review = reviewState(work);
     const assessed = containment[work.id];
@@ -271,9 +294,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : mergeRefusal ? [`GitHub refused the merge request for ${work.key} at ${mergeRefusal.head.slice(0, 12)} since ${mergeRefusal.at}: ${mergeRefusal.reason}`, 'merge-refused']
       : baseRefresh && !work.blocker ? [null, null]
       // A follow-up held on its observation window (GY-1698) is waiting for the instant, not stalled at its gate.
-      : (observationWindow?.waiting || (observing && !observing.due)) && !work.blocker && !active ? [null, null]
-      // The reading is owed now (GY-1762): the loop's own, never a worker's submission the build gate is waiting for.
-      : observing?.due && !work.blocker && !active ? [`${work.key} owes ${observing.waitingFor}; no code worker can record it, so it is escalated for the reading`, 'gate']
+      // GY-1779: a due reading is the loop's own, listed under `pendingReadings` with the loop's last record of it, never a stalled gate.
+      : (observationWindow?.waiting || observingDetail) && !work.blocker && !active ? [null, null]
       : work.blocker || dwellMs > 3_600_000 ? [first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour`, 'gate'] : [null, null];
     const attentionOwner = cause ? workAttentionOwner(work, cause, now) : null;
     if (cause) causes.set(work.key, cause);
@@ -284,7 +306,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // The observation window a windowed post-deploy follow-up carries (GY-1698): `waiting` while it holds the dispatch.
       observationWindow,
       // The loop's observation an all-manual post-deploy item waits for (GY-1762): counted as waiting, never ready.
-      observing: observing ? observing.waitingFor : null, observationDue: !!observing?.due,
+      observing: observingDetail, observationDue: !!observing?.due || !!passed, observationPassedOn: passed?.release ?? null,
       // Set only for an item GitHub merged though its gates had not passed: the merge, the violation and
       // the last refused reconciliation, so the row reads as stuck rather than as a candidate.
       merged,
@@ -346,7 +368,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   const remedyItems: AttentionItem[] = remedies.map(entry => ({ subject: entry.key, text: entry.text, ...classified('unrunnable-remedy'),
     ...agentOwner('master', `Create a work item that lets the ${entry.role} run \`${entry.command}\` (or has the control plane perform it); the ${entry.role} harness rule ${entry.rule} denies it`) }));
   return { observedAt: snapshot.now,
-    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready' && !row.observing).length, waiting: rows.filter(row => row.stage === 'ready' && row.observing).length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + supervised.attentionItems.length + remedyItems.length + capacityItems.length + concurrencyItems.length + installation.attention.length + registry.attentionItems.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
+    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready' && !row.observing).length, waiting: rows.filter(row => row.observing).length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + supervised.attentionItems.length + remedyItems.length + capacityItems.length + concurrencyItems.length + installation.attention.length + registry.attentionItems.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
       // Candidates the guarded merge could take once their gates pass, and the items GitHub already
       // merged though their gates had not passed, which are never candidates and wait on a reconciliation.
       mergeCandidates: rows.filter(row => row.stage === 'merge' && !row.merged).length, mergedUnreconciled: rows.filter(row => row.merged && !row.merged.reverted).length, revertedDeliveries: rows.filter(row => row.merged?.reverted).length,
@@ -369,6 +391,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     // and the blockers whose remedy no launched session may run.
     humanRequests, capacity, concurrency, effectiveConcurrency: fleet, unrunnableRemedies: remedies,
     closed: closedHistory(snapshot.work),
+    // GY-1779: the readings the loop owes loop-owned observation items, with the loop's last record of each (`reading:ITEM:RELEASE`).
+    pendingReadings: pendingReadings(rows, snapshot.work, loop, now),
     workers: workerSessions, reviews, producers: sessions.producers, work: rows, delivered, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation, fleet: registry.fleet,
     // Every split parent and its children's progress (GY-1126): the parent is delivered when they all are.
     splits: splitReport(snapshot.work),

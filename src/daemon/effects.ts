@@ -3,6 +3,7 @@ import { wakeOwnObservation } from '../master/base-break-refresh.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { existsSync } from 'node:fs';
+import { worktreeReclaimPass } from './worktree-reclaim.js';
 import { join } from 'node:path';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
@@ -12,7 +13,7 @@ import { loopBlockerProbe, type BlockerClassification, type BlockerProbeRecord, 
 import { successorWidening } from '../model/successors.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
-import { type HostMemoryReading, type ResourceReclaimReport, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
+import { type HostMemoryReading, type ResourceReclaimReport, disposableWorktrees, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
 import { healUserSupervision, type UserSupervisionAllowance, type UserSupervisionHeal } from '../user-manager.js';
 import { RefusedResponse } from '../model/refusal.js';
 
@@ -34,14 +35,14 @@ export function refusedBodyDetail(result: unknown): string {
 }
 import { rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
-import { readProducerLedger, saveProducerLedger, launchProducer, reclaimCheckouts } from '../producer.js';
+import { readProducerLedger, saveProducerLedger, launchProducer } from '../producer.js';
 import { dismissApproval, followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
 import { type ReviewFinding, type SuccessionRead, readReviewFindings, basePaths, baseText, baseMentions, successionReader } from '../review-scope.js';
 import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
 import { readApproverLaunches } from '../master/autonomy.js';
 import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
-import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, holdRepeatedLimitAccount, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson, readCredentialFile, withRoleDefaults, heldAwareProbe, type ControlPlaneStatus, type SessionIdentity } from '../master.js';
+import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, holdRepeatedLimitAccount, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, writeFailure, assessContainment, herdrJson, readCredentialFile, withRoleDefaults, heldAwareProbe, type ControlPlaneStatus, type SessionIdentity } from '../master.js';
 import { readControlPlaneClock, type ContainmentObservation, type ControlPlaneClock } from '../master/containment.js';
 import { annotatePaneShell } from '../quarantine.js';
 import { herdrCall, listHerdrPanes, type HerdrPane } from '../master/herdr.js';
@@ -69,6 +70,7 @@ import { revertRecordKey } from '../release-revert.js';
 import { readMergeWriter } from '../master/dispatch.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
+import { readingEffects, type ReadingEffects } from './reading-effect.js';
 import type { SlowLoopItemInput } from './slow-loop-item.js';
 import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, recoverMovedHead, type SelfUpgradeDeps, type SelfUpgradeOutcome } from './upgrade.js';
 import { readRelease, restartExecutors } from '../executor-fleet.js';
@@ -107,7 +109,7 @@ export const promptTarget = (agent: Pick<HerdrAgent, 'name' | 'pane_id'>) => age
 
 /** An item the loop files as the operator-agent: a fault-class item, or the docs trim item (GY-574), which names no class. */
 export type LoopFiledItem = Omit<ReturnType<typeof faultClassItem>, 'origin'> & Partial<Pick<ReturnType<typeof faultClassItem>, 'origin'>>;
-export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffects>, ThroughputEffects, FlakeLedgerEffects {
+export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffects>, ThroughputEffects, FlakeLedgerEffects, ReadingEffects {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
   requestProof: (work: Work) => void | Promise<void>;
@@ -201,7 +203,9 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * without it keeps cycling; it simply never reclaims. It touches no checkout, no branch, and
    * no Graphyard record, so it needs no credential and is safe to run on every cycle.
    */
-  reclaim?: (work: Work[]) => Promise<WorktreeReclaimReport>;
+  reclaim?: (work: Work[], now?: number) => Promise<WorktreeReclaimReport>;
+  /** Worktrees disposable now by the plan over the current inventory (GY-1784); null when the plan cannot be read. */
+  worktreeReclaimable?: (work: Work[], now: number) => Promise<number | null>;
   /** The resource reclaim pass (GY-132): reaps terminal records, closes finished sessions holding profile names, frees stuck sessions' slots; every cycle. */
   reclaimResources?: (work: Work[], agents: HerdrAgent[] | null) => Promise<ResourceReclaimReport>;
   /** Why the plane cannot record a dispatch's result (its /healthz verdict), or null when it can. */
@@ -462,8 +466,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
    * The status read faults are classified from, with the loop's own coordinator credential: the
    * operator-agent read withholds held jobs, integration jobs and production (routes/status.ts),
    * so faults in those catalogued kinds could never recur to the loop and file their class (GY-173).
-   * The attention master status adds is read the same way, as `master status` reads it: the
-   * intervention report refuses operator-agent callers (routes/interventions.ts).
+   * The attention master status adds is read the same way, as `master status` reads it: the intervention report refuses operator-agent callers (routes/interventions.ts).
    */
   const asCoordinator = async (path: string, _credential?: string, timeoutMs = 30_000) => {
     const config = current();
@@ -629,6 +632,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       return followUpThreadIds((await readReviewLedger(root)).reviews, work, reviewer ? { reviewer: `${reviewer.slug}[bot]`, now: at } : undefined);
     },
     closeSession: pane => closeHerdrPane(pane, run),
+    worktreeReclaimable: (work, at) => disposableWorktrees(root, current(), { work, now: at }),
     reclaimResources: (work, agents) => reclaimResources(root, withRoleDefaults(current()), { work, agents }, { closePane: pane => closeHerdrPane(pane, run) }),
     planeHealth: () => dispatchRefusal(current().url, fetcher),
     hostMemory: readHostMemory, healHostSupervision: allow => healUserSupervision(root, {}, allow),
@@ -706,7 +710,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await mutate('merge-queue', config);
       publishedMergeQueue = published;
     },
-    ...throughputEffects(root, current, run, asCoordinator, asOperatorAgent), ...flakeLedgerEffects(root),
+    ...throughputEffects(root, current, run, asCoordinator, asOperatorAgent), ...flakeLedgerEffects(root), ...readingEffects(current, mutate, asCoordinator), // GY-1779: the loop's own post-deploy readings
     readThroughputOwner: async owner => await asCoordinator(`work/${encodeURIComponent(owner.id)}`) as Work,
     get fileSlowLoopItem() { /* GY-1775: the slow-loop fix item, filed as the operator-agent (read on each call, as a reload may provision it) under the release-and-step key */ return current().operatorAgent ? (input: SlowLoopItemInput, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
@@ -723,20 +727,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // The same pass takes back every ephemeral checkout no live session owns, under the managed root.
     // Finished worktrees are removed outright first, a bounded number per pass (GY-360); the
     // inventory that remains is the one the dependency reclaim judges and `master status` reads.
-    reclaim: async work => {
-      const config = current(), idleMs = reclaimIdleMs(config);
-      const livePaths = [...(await readReviewLedger(root)).reviews, ...(await readProducerLedger(root)).producers]
-        .filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!);
-      const trees = await removeReclaimableWorktrees(root, work, { idleMs, run, baseBranch: config.baseBranch, limit: config.run.worktreeRemovalLimit, livePaths });
-      const report = await reclaimWorktrees(root, work, { idleMs, entries: trees.entries });
-      const taken = new Set(report.applied ? report.removed : []);
-      await writeWorktreeInventoryCache(root, { at: trees.at, entries: trees.entries.map(entry => ({ ...entry, dependencies: entry.dependencies.filter(dependency => !taken.has(dependency.path)) })),
-        held: trees.held })
-        .catch(error => report.errors.push(`Worktree inventory cache: ${writeFailure(error, 'Writing the worktree inventory cache').message}`));
-      const withTrees = { ...report, trees };
-      try { return { ...withTrees, checkouts: await reclaimCheckouts(root, config) }; }
-      catch (error) { return { ...withTrees, errors: [...withTrees.errors, `Ephemeral checkouts: ${writeFailure(error, 'Reclaiming the managed worktree root').message}`] }; }
-    },
+    reclaim: (work, now) => worktreeReclaimPass(root, current(), run, work, now),
     // The decision effects exist only while the live configuration names the master's operator-agent identity. Without one the loop
     // has no way to request anything, so the cycle sees them absent and records each routine decision as the escalation naming the
     // two commands, instead of a request that fails on every retry; provisioning the identity brings them back on the next reload, with no restart.
