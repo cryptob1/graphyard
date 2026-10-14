@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { heldRelease } from './held-release-hooks.mjs';
 const args = process.argv.slice(2);
@@ -14,7 +14,12 @@ const held = () => {
   const pin = heldRelease(new URL('../', import.meta.url));
   if (!pin || (args[0] === 'master' && args[1] === 'run' && !pin.loop)) return [];
   const data = { from: new URL('../', import.meta.url).href, to: pin.to };
-  const register = `import { register } from 'node:module'; register(${JSON.stringify(new URL('held-release-hooks.mjs', import.meta.url).href)}, { data: ${JSON.stringify(data)} });`;
+  // GY-1790: the resolve hooks that redirect every module are the ones the pinned snapshot holds,
+  // not this checkout's: while the pin stands, what loads is decided by the commit the restart
+  // pinned, so an edited bin/held-release-hooks.mjs in the checkout never runs. A snapshot from
+  // before the hooks file existed keeps this checkout's (it is the bootstrap either way).
+  const hooks = existsSync(new URL('bin/held-release-hooks.mjs', pin.to)) ? new URL('bin/held-release-hooks.mjs', pin.to).href : new URL('held-release-hooks.mjs', import.meta.url).href;
+  const register = `import { register } from 'node:module'; register(${JSON.stringify(hooks)}, { data: ${JSON.stringify(data)} });`;
   return ['--import', `data:text/javascript,${encodeURIComponent(register)}`];
 };
 const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), ...held(), fileURLToPath(new URL('../src/cli.ts', import.meta.url)), ...args], { stdio: 'inherit' });

@@ -42,6 +42,30 @@ export function upgradeTouchesCode(paths: readonly string[]): boolean {
   return paths.some(path => loadedFiles.includes(path) || loadedPrefixes.some(prefix => path.startsWith(prefix)));
 }
 
+/**
+ * A pathname as git prints it, with its C-quote escapes resolved (GY-1790): git quotes a path
+ * holding a quote, a backslash, spaces at either end or control bytes, and a reading that keeps
+ * the quotes misclassifies it (`"src/x.ts"` is not under `src/`) and records a name no commit
+ * holds. The rename-pair reading (`checkoutState`, re-exported below) shares this quoting and
+ * unquotes before it splits a rename on " -> "; this resolves the same form for the line-oriented
+ * `--name-only` listings the alignment classifies.
+ */
+const unquoteGitPath = (path: string): string => {
+  if (!path.startsWith('"') || !path.endsWith('"') || path.length < 2) return path;
+  const escapes: Record<string, number> = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11, '"': 34, '\\': 92 };
+  const bytes: number[] = [];
+  const body = path.slice(1, -1);
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] !== '\\') { bytes.push(...Buffer.from(body[i]!)); continue; }
+    const octal = body.slice(i + 1, i + 4);
+    if (/^[0-3][0-7]{2}$/.test(octal)) { bytes.push(parseInt(octal, 8)); i += 3; }
+    else { const code = escapes[body[++i] ?? '']; bytes.push(code ?? 92); }
+  }
+  return Buffer.from(bytes).toString('utf8');
+};
+/** The real paths one line-oriented git listing names, git's quoting resolved (GY-1790). */
+const listedPaths = (out: string): string[] => out.split('\n').map(path => unquoteGitPath(path.trim())).filter(Boolean);
+
 /** Where the launcher reads the release a held restart pins the CLI to (GY-1585): `{ commit, root, loop }`. */
 export const heldCliPointer = (root: string) => join(root, '.graphyard', 'held-cli.json');
 const heldCliSnapshots = (root: string) => join(root, '.graphyard', 'held-cli');
@@ -582,18 +606,33 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       await persist();
       return finish(state.upgrade.pending, false, { checkout: head, dirty: standing!.dirtyPaths });
     }
-    if (stays) return { outcome: 'skipped', reason: idle };
+    // GY-1790: a checkout moved by hand to another commit while the pin stands keeps the pin and
+    // is named as left behind where it now stands — never taken for the pin's lift, which only a
+    // checkout moved onto the snapshot's own commit and clean there is.
+    if (stays) {
+      if (left!.checkout !== head || (standing!.dirty !== null && left!.dirty.join('\n') !== standing!.dirtyPaths.slice(0, 20).join('\n'))) {
+        state.upgrade.snapshot = { ...left!, checkout: head, dirty: standing!.dirty === null ? left!.dirty : standing!.dirtyPaths.slice(0, 20) };
+        await persist();
+      }
+      return { outcome: 'skipped', reason: idle };
+    }
     const cleaned = !!left && !!head && head === left.checkout;
     if (!cleaned && (!head || head === loaded || processed(head))) return { outcome: 'skipped', reason: idle };
     if (observed && !cleaned) {
       if (promotionHolds(promotionWait(state), loaded, now())) return { outcome: 'skipped', reason: idle };
+      // GY-1790: a status that cannot be read is never taken for clean: the failed read is
+      // recorded and the restart is retried on the first pass that can read the checkout.
+      if (standing!.dirty === null) return unaligned(`the restart onto ${shortCommit(head)} is owed, but whether the coordinator checkout at ${shortCommit(head)} is dirty could not be read; it is never taken for clean, retried next cycle`, 'checkout-failed');
       // The restart owed onto the checkout's own HEAD, with no fetch and no move.
       let code: boolean;
-      try { code = upgradeTouchesCode((await git('diff', '--name-only', `${loaded}..${head}`)).split('\n').map(path => path.trim()).filter(Boolean)); }
+      try { code = upgradeTouchesCode(listedPaths(await git('diff', '--name-only', `${loaded}..${head}`))); }
       catch (error) { return unaligned(`the diff from ${shortCommit(loaded)} to ${shortCommit(head)} could not be read: ${message(error)}`, 'checkout-failed'); }
       state.upgrade.pending = { from: loaded, to: head, code };
       await persist();
-      return finish(state.upgrade.pending);
+      // GY-1790: the checkout may have been dirtied after the restart onto it was first refused or
+      // failed — a retried restart never runs the dirty tree: it goes onto a held snapshot of the
+      // commit, the checkout left behind with its dirty paths.
+      return standing!.dirty === true ? finish(state.upgrade.pending, false, { checkout: head, dirty: standing!.dirtyPaths }) : finish(state.upgrade.pending);
     }
   }
 
@@ -608,6 +647,9 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     // GY-1773: a hold completes onto a snapshot whenever the checkout is dirty — one dirtied after
     // the hold moved it onto the commit included: the restart never runs a dirty tree's code.
     if (holding.dirty === true) return finish(held, true, { checkout: holding.commit, dirty: holding.dirtyPaths });
+    // GY-1790: a status that cannot be read is never taken for clean: the hold stands one more
+    // pass, the failed read recorded, rather than finishing the restart from an unknown tree.
+    if (holding.dirty === null && holding.commit === held.to) return unaligned(`the restart onto ${shortCommit(held.to)} held for the served release is still owed, but whether the coordinator checkout at ${shortCommit(holding.commit)} is dirty could not be read; it is never taken for clean, retried next cycle`, 'checkout-failed');
     if (holding.commit === held.to) return finish(held, true);
   }
 
@@ -623,6 +665,8 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     const owed = state.upgrade.pending, holding = owed ? await checkoutState(deps.root, deps.run) : null;
     // GY-1773: a snapshot restart owed from a dirty checkout needs no fetch either: the commit is already held.
     if (owed?.code && holding!.dirty === true) return finish(owed, false, { checkout: holding!.commit, dirty: holding!.dirtyPaths });
+    // GY-1790: an unreadable status is never taken for clean: the owed restart waits, recorded.
+    if (owed?.code && holding!.dirty === null) return unaligned(`the restart onto ${shortCommit(owed.to)} is still owed, but whether the coordinator checkout at ${shortCommit(holding!.commit)} is dirty could not be read; it is never taken for clean, retried next cycle`, 'checkout-failed');
     if (owed && holding!.commit === owed.to) return finish(owed);
     return unaligned(`the base branch could not be fetched: ${message(error)}`, 'fetch-failed');
   }
@@ -634,12 +678,18 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     // The checkout already holds the tip: finish what an earlier pass still owes, or align and
     // clear a refusal that no longer describes anything.
     // GY-1773: a restart owed onto loaded code is never run from a dirty tree, however the checkout came to hold the tip.
-    if (state.upgrade.pending) return checkout.dirty === true ? finish(state.upgrade.pending, false, { checkout: checkout.commit, dirty: checkout.dirtyPaths }) : finish(state.upgrade.pending);
+    // GY-1790: a status that cannot be read is never taken for clean either: the owed restart
+    // waits, the failed read recorded, rather than finishing from a checkout of unknown dirtiness.
+    if (state.upgrade.pending) {
+      if (checkout.dirty === null) return unaligned(`the restart onto ${shortCommit(to)} is still owed, but whether the coordinator checkout at ${shortCommit(checkout.commit)} is dirty could not be read; it is never taken for clean, retried next cycle`, 'checkout-failed');
+      return checkout.dirty === true ? finish(state.upgrade.pending, false, { checkout: checkout.commit, dirty: checkout.dirtyPaths }) : finish(state.upgrade.pending);
+    }
     // The tip itself is code the running loop never loaded: the restart onto it is owed, verified
     // or not (GY-1464), unless a completed pass already processed it without loaded code.
     if (loaded && loaded !== to && !processed(to)) {
+      if (checkout.dirty === null) return unaligned(`the restart onto ${shortCommit(to)} is owed, but whether the coordinator checkout at ${shortCommit(checkout.commit)} is dirty could not be read; it is never taken for clean, retried next cycle`, 'checkout-failed');
       let code: boolean;
-      try { code = upgradeTouchesCode((await git('diff', '--name-only', `${loaded}..${to}`)).split('\n').map(path => path.trim()).filter(Boolean)); }
+      try { code = upgradeTouchesCode(listedPaths(await git('diff', '--name-only', `${loaded}..${to}`))); }
       catch (error) { return unaligned(`the diff from ${shortCommit(loaded)} to ${shortCommit(to)} could not be read: ${message(error)}`, 'checkout-failed'); }
       state.upgrade.pending = { from: loaded, to, code };
       await persist();
@@ -669,7 +719,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     const from = checkout.commit, base = runs ? loaded! : from, left: LeftBehind = { checkout: from, dirty: checkout.dirtyPaths };
     let changed: string[], code: boolean;
     try {
-      changed = (await git('diff', '--name-only', `${base}..${to}`)).split('\n').map(path => path.trim()).filter(Boolean);
+      changed = listedPaths(await git('diff', '--name-only', `${base}..${to}`));
       code = owed || upgradeTouchesCode(changed);
     } catch (error) { return unaligned(`the diff from ${shortCommit(base)} to ${shortCommit(to)} could not be read: ${message(error)}`, 'checkout-failed'); }
     if (!code) {
@@ -695,7 +745,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   const from = checkout.commit, base = unverified && loaded ? loaded : from;
   let changed: string[], code: boolean;
   try {
-    changed = (await git('diff', '--name-only', `${base}..${to}`)).split('\n').map(path => path.trim()).filter(Boolean);
+    changed = listedPaths(await git('diff', '--name-only', `${base}..${to}`));
     code = owed || upgradeTouchesCode(changed);
   } catch (error) { return unaligned(`the diff from ${shortCommit(base)} to ${shortCommit(to)} could not be read: ${message(error)}`, 'checkout-failed'); }
   await note(`Checking out base tip ${shortCommit(to)} (from ${shortCommit(from)}): ${changed.length} path(s) changed${code ? ', loaded code among them' : ', none of them loaded code'}`, false);
@@ -753,7 +803,7 @@ export async function recoverMovedHead(config: MasterConfig, state: DaemonState,
   try { await git('merge-base', '--is-ancestor', to, served.sha); }
   catch { return { outcome: 'refused', reason: `the verified release ${shortCommit(served.sha)} does not serve it yet`, commit: to, forward: true }; }
   let code: boolean;
-  try { code = upgradeTouchesCode((await git('diff', '--name-only', `${from}..${to}`)).split('\n').map(path => path.trim()).filter(Boolean)); }
+  try { code = upgradeTouchesCode(listedPaths(await git('diff', '--name-only', `${from}..${to}`))); }
   catch (error) { return { outcome: 'failed', reason: `the diff from ${shortCommit(from)} to ${shortCommit(to)} could not be read: ${message(error)}`, forward: true }; }
   const moved = `the coordinator checkout's HEAD moved forward from ${shortCommit(from)} to ${shortCommit(to)} under the running loop; the loop adopted it`;
   state.upgrade.refused = null;
