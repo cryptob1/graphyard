@@ -3,10 +3,12 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { Refusal, demand, resolveEscalation, standingEscalations, type Principal, type Work } from '../model.js';
 import { save, wakeJob } from '../store.js';
-import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, decisionSituation, foldDecisions, requiredDecisionCapabilities, standingRefusal, approvalApplyGraceMs, type Decision, type DecisionState } from '../model/approval.js';
+import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, foldDecisions, judgedSame, requiredDecisionCapabilities, standingRefusal, approvalApplyGraceMs, type Decision, type DecisionState } from '../model/approval.js';
+import { lapsedReauthorization, reworkSituation, standingRequest } from './held-rework.js';
+import { applicationOf, applyApprovedDecision } from './held-decisions.js';
 import { canonical, decisionRace, readDecisions, resolvePin, samePin, type DecisionRecord, type StaleRace } from './decision-ledger.js';
 import type { Services } from './routes.js';
-import { onlyActionsMovedSince, sameBesideBookkeeping } from '../engine.js';
+import { revisionRebase } from '../engine.js';
 import { refuseDecision } from './decision-refusal.js';
 import { precedentAvailability } from './escalation-context.js';
 import { applyTriageClosure } from './followups.js';
@@ -107,13 +109,12 @@ async function recordRequest(services: Services, caller: Principal, id: string, 
     const precondition = decisionPrecondition(data.action, input, work!) ?? await flakyEvidence(db, data.action, input); demand(!precondition, precondition!, 409);
     // An approved decision the item has moved past never blocks this request (GY-1297): it settles superseded here, in this transaction.
     const history = await supersedeMoved(db, work!, (await readDecisions(db, work!)).filter(decision => decision.state === 'approved'), actor).then(() => readDecisions(db, work!));
-    // A refused decision is answered, never retried unchanged (GY-141). A rework or recover
-    // refusal judged the candidate and base it was requested against, and stands only for those (GY-229).
-    const situation = decisionSituation(data.action, work!);
+    // A refused decision is answered, never retried unchanged (GY-141), on its situation (held-rework.ts).
+    const situation = reworkSituation(data.action, work!, history, input);
     // The refused decision travels as a field beside the message (GY-265), so the loop answers it by id.
     const repeated = standingRefusal(history, data.action, input, data.reason, (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b)), data.precedent ?? [], situation);
     if (repeated) throw new Refusal(repeated.message, 409, { standingRefusal: { decision: repeated.decision, action: repeated.action, legacy: repeated.legacy } });
-    const pending = history.find(decision => decision.action === data.action && (decision.state === 'requested' || decision.state === 'approved'));
+    const pending = await standingRequest(history, data.action, work!, (decision, lapsed) => staleEvent(db, { actor, workId: work!.id, decision, ...lapsed }));
     const cited = data.precedent ? [...new Set(data.precedent)].sort() : null;
     // The ledger's "precedent it relied on" is only worth following if it names real decisions:
     // every cited id must be a recorded decision of this same action, on any item of the graph.
@@ -129,7 +130,7 @@ async function recordRequest(services: Services, caller: Principal, id: string, 
     // A spawned handler that reaches the same line as a standing request — same action, same
     // input, same precedent — is following it, not competing with it: its judgement is appended
     // to that decision as a concurrence and the standing decision is returned.
-    if (pending && cited && JSON.stringify(canonical(pending.input)) === JSON.stringify(canonical(input)) && JSON.stringify([...pending.precedent].sort()) === JSON.stringify(cited)) {
+    if (pending && cited && judgedSame(data.action, pending, situation) && JSON.stringify(canonical(pending.input)) === JSON.stringify(canonical(input)) && JSON.stringify([...pending.precedent].sort()) === JSON.stringify(cited)) {
       await record(db, work!, actor.id, 'decision.concurred', { id: pending.id, action: data.action, reason: data.reason, precedent: cited, context: data.context ?? null, requester: { id: actor.id, role: actor.role } });
       const result = (await readDecisions(db, work!)).find(decision => decision.id === pending.id)!;
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
@@ -138,6 +139,8 @@ async function recordRequest(services: Services, caller: Principal, id: string, 
     // An approved one here is still inside the grace its approval has to apply it, or the lane's whose resumption faulted (GY-1300).
     demand(!pending, pending?.state === 'approved'
       ? `Decision ${pending.id} (${data.action}) on ${work!.key} was approved by ${pending.approvedBy} at ${pending.approvedAt} and its application has recorded no outcome yet; a request after ${Math.round(approvalApplyGraceMs / 1000)}s resumes it, and { "action": "resume", "decision": "${pending.id}" } resumes it now`
+      // GY-1687: a held decision needs no second request; the control plane applies it when the attempt ends.
+      : pending?.state === 'held' ? `Decision ${pending.id} (${data.action}) on ${work!.key} was approved by ${pending.approvedBy} at ${pending.approvedAt} and is held (${pending.outcome}); the control plane applies it in the transaction that ends the attempt, so it need not be requested again`
       : `Decision ${pending?.id} (${data.action}) is already ${pending?.state} on ${work!.key}; wait for it before requesting another`, 409);
     const decisionId = randomUUID();
     await record(db, work!, actor.id, 'decision.requested', { id: decisionId, action: data.action, input, reason: data.reason, requester: { id: actor.id, role: actor.role }, capabilities: requiredDecisionCapabilities(data.action, input, work!),
@@ -163,16 +166,8 @@ async function recordStale(services: Services, stale: Stale) {
   await services.engine.store.transaction(db => staleEvent(db, stale));
 }
 
-/**
- * The decision as its approval judges and applies it (GY-1296): a release, an unblock or a
- * diagnostician's closure pinned to a revision that moved only in bookkeeping is rebased to the
- * current revision; anything else is returned as it is. A resumption applies the same (GY-1300).
- */
-export async function bookkeepingRebase(db: Db, decision: DecisionRecord, work: Work): Promise<DecisionRecord> {
-  const revisionPinned = decision.action === 'release' || decision.action === 'unblock' || (decision.action === 'close' && decision.input.triageAt === undefined && decision.input.expectedRevision !== undefined);
-  return revisionPinned && decision.input.expectedRevision !== work.revision && await onlyActionsMovedSince(db, work, decision.input.expectedRevision, sameBesideBookkeeping)
-    ? { ...decision, input: { ...decision.input, expectedRevision: work.revision } } : decision;
-}
+// GY-1296, GY-1463: the rebase of a revision-bound decision past changes that cannot affect its grounds lives in engine.ts.
+export const bookkeepingRebase = async (db: Db, decision: DecisionRecord, work: Work): Promise<DecisionRecord> => (await revisionRebase(db, decision, work)).judged;
 
 /**
  * Approve and apply a decision. The approval is recorded under the coordination lock after
@@ -193,7 +188,7 @@ export async function approveDecision(services: Services, caller: Principal, id:
       const actor = await authenticated(services, db, now, caller);
       const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
       const work = await findWork(db, id); demand(work, 'Work item not found', 404);
-      const decision = (await readDecisions(db, work!)).find(entry => entry.id === data.decision);
+      const history = await readDecisions(db, work!), decision = history.find(entry => entry.id === data.decision);
       demand(decision, `Decision ${data.decision} does not exist on ${work!.key}`, 404);
       // Separation of duties is judged before authority, so a conflicted identity is told the
       // conflict, whatever else it lacks.
@@ -218,14 +213,18 @@ export async function approveDecision(services: Services, caller: Principal, id:
       // accepted at once.
       if (decision!.action === 'resolve' && !resuming && samePin(resolvePin(work!), decision!.pin)
         && precondition?.startsWith('Task revision changed')) precondition = null;
-      // GY-1296: a revision the requesting loop moved only in bookkeeping (its approver session,
-      // gates, next action, queue) is judged and applied at the current revision; see bookkeepingRebase.
-      const judged = await bookkeepingRebase(db, decision!, work!);
-      if (!resuming) precondition = (judged !== decision ? decisionPrecondition(judged.action, judged.input, work!) : precondition) ?? await flakyEvidence(db, judged.action, judged.input);
+      // GY-1296, GY-1463: a revision that moved only in what cannot affect the decision's grounds (the
+      // loop's bookkeeping, lease renewals, observations, sessions) is judged and applied at the current revision; see revisionRebase.
+      const { judged, change } = await revisionRebase(db, decision!, work!);
+      if (!resuming) precondition = (judged !== decision ? decisionPrecondition(judged.action, judged.input, work!) : precondition) ?? await flakyEvidence(db, judged.action, judged.input)
+        ?? lapsedReauthorization(decision!, work!, history)?.reason ?? null;
+      // GY-1463: a revision that moved in its grounds says what moved them.
+      const moved = !!change && !!precondition?.startsWith('Task revision changed');
+      if (moved) precondition = `${change![0].toUpperCase()}${change!.slice(1)} since revision ${decision!.input.expectedRevision} moved the decision's grounds: ${precondition}`;
       if (precondition) {
         // A pin the item has moved past can never hold again, so the decision would stay
         // 'requested' forever and block every re-request; settle it as stale instead.
-        const race = decisionRace(decision!, work!);
+        const race = decisionRace(decision!, work!) ?? lapsedReauthorization(decision!, work!, history)?.race;
         if (race) stale.value = { actor, workId: work!.id, decision: decision!, reason: `${precondition}; the decision was not applied`, ...race };
         demand(false, `${precondition}; the decision was not applied`, 409);
       }
@@ -245,15 +244,9 @@ export async function approveDecision(services: Services, caller: Principal, id:
     throw error;
   }
   const { decision, work, approver } = approved!;
-  let outcome: { kind: string; details: object };
-  try { outcome = { kind: 'decision.applied', details: { outcome: await applyThroughEngine(services, decision, approver, data.reason) } }; }
-  catch (error) {
-    // A server fault is retried by repeating the approval; only a refusal settles the decision.
-    if (!(error instanceof Refusal) && !(error instanceof z.ZodError)) throw error;
-    outcome = { kind: 'decision.failed', details: { error: error.message } };
-  }
-  // The item is locked first, so a resumption racing this approval serializes with it (GY-1300).
-  return services.engine.store.transaction(async db => { await findWork(db, work.id); return finish(db, work, approver, decision.id, outcome.kind, outcome.details, key, fingerprint); });
+  // GY-1687: a requirements decision refused only by a live attempt is held under the item's lock and applied when the attempt ends (held-decisions.ts).
+  return applyApprovedDecision(services, work, decision, approver, data.reason, () => applyThroughEngine(services, decision, approver, data.reason),
+    (db, kind, details) => finish(db, work, approver, decision.id, kind, details, key, fingerprint));
 }
 
 async function finish(db: Db, work: Work, approver: Principal, decisionId: string, kind: string, details: object, key: string, fingerprint: string) {
@@ -287,8 +280,7 @@ async function resolveInTransaction(services: Services, db: Db, now: Date, work:
 
 export async function applyThroughEngine(services: Services, decision: DecisionRecord, approver: Principal, approvalReason: string) {
   // The requester acts, with the authority the two-party decision grants for this one input.
-  const actor: Principal = { id: decision.requestedBy, role: 'admin', sessionKind: 'ai', displayName: `${decision.requestedBy} (decision ${decision.id} approved by ${approver.id})` };
-  const reason = `${decision.reason} [decision ${decision.id}, requested by ${decision.requestedBy}, approved by ${approver.id}: ${approvalReason}]`.slice(0, 2000);
+  const { actor, reason } = applicationOf(decision, approver, approvalReason);
   const key = `decision:${decision.id}`, input = decision.input, engine = services.engine;
   switch (decision.action) {
     case 'release': await engine.execute(actor, 'ready', decision.workId, { expectedRevision: input.expectedRevision, reason }, key); return 'Released to ready';
@@ -308,9 +300,9 @@ export async function applyThroughEngine(services: Services, decision: DecisionR
     case 'close': {
       // A triage closure (its input carries the judgement's `triageAt`) applies through the triage
       // path; a diagnostician's closure (GY-439) closes the item directly, with the approval's own
-      // composed reason.
+      // composed reason, ending a worker's live lease (GY-1463).
       if (input.triageAt !== undefined) return applyTriageClosure(services, actor, decision.workId, input, decision.id, key);
-      const work = await closeWork(services, actor, decision.workId, { kind: input.kind, reason, ref: input.ref ?? null }, key);
+      const work = await closeWork(services, actor, decision.workId, { kind: input.kind, reason, ref: input.ref ?? null }, key, { decided: { expectedRevision: input.expectedRevision } });
       return `Closed ${work.key} as ${input.kind}${input.ref ? ` of ${input.ref}` : ''}`;
     }
     case 'grant': { const grant = await services.proofGrants.grant(actor, input.principal, { patterns: input.patterns, reason, ...(input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }) }, key); return `Granted ${input.patterns.join(', ')} to ${input.principal} (grant revision ${grant.revision})`; }

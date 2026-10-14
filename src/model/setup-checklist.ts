@@ -70,24 +70,45 @@ function roleReady(fleet: any, role: RequiredSetupRole) {
  * The checklist for STATUS (the control plane's `/api/status` answer, or null while it does not
  * answer). Items stay in the order a new installation completes them.
  */
-export function setupChecklist(status: any | null, options: { appSetupUrl?: string } = {}): SetupItem[] {
+/**
+ * SUPERVISED (GY-1501, `up --local`): the operator reviews and merges on GitHub, so the reviewer App
+ * and the reviewing agent account are not part of this installation and are never reported missing.
+ * `graphyard up` says so itself; the dashboard reads it from the status (`setup.supervision`, as the
+ * live loop names it).
+ */
+export const statusSupervised = (status: any | null) => status?.setup?.supervision === 'supervised';
+/**
+ * CONTROL-PLANE MERGER (GY-1553): while the control plane is the merge writer (`mergeWriter.merger`
+ * on `/api/status`, src/merger-mode.ts) no GitHub App opens pull requests, no reviewer App signs
+ * reviews and no branch protection gates main, so those three items pass as not required. `doctor`'s
+ * setup-from-zero checks (src/setup-from-zero.ts) say the same words for the same ids.
+ */
+export const mergerNotRequired = 'not required (merger: control-plane)';
+export const statusControlPlaneMerger = (status: any | null) => status?.mergeWriter?.merger === 'control-plane';
+export function setupChecklist(status: any | null, options: { appSetupUrl?: string; supervised?: boolean; merger?: 'github' | 'control-plane' } = {}): SetupItem[] {
+  const supervised = options.supervised ?? statusSupervised(status);
+  const controlPlane = options.merger ? options.merger === 'control-plane' : statusControlPlaneMerger(status);
+  const notRequired = (id: SetupItemId, title: string): SetupItem => ({ id, title, done: true, human: false, line: mergerNotRequired, action: null });
   const appUrl = options.appSetupUrl ?? defaultAppSetupUrl;
   const repository = status?.githubRepository?.fullName ?? status?.githubRepository ?? status?.repository ?? null;
   const missing: unknown[] = status?.appPermissions?.missing ?? [];
   const appBound = !!status?.github;
   const appDone = appBound && missing.length === 0;
   const items: SetupItem[] = [];
-  items.push({ id: 'github-app', title: 'GitHub App', done: appDone, human: true,
+  if (controlPlane) items.push(notRequired('github-app', 'GitHub App'));
+  else items.push({ id: 'github-app', title: 'GitHub App', done: appDone, human: true,
     line: appDone ? 'Graphyard can open pull requests and read checks in your repository.'
       : appBound ? 'The App needs a few more permissions before Graphyard can use it.'
       : 'Create the App that lets Graphyard work in your repository, then install it there.',
     action: appDone ? null : appBound && status?.appPermissions?.installationUrl ? { kind: 'link', label: 'Accept the new permissions', href: status.appPermissions.installationUrl }
       : { kind: 'link', label: 'Create the GitHub App', href: appUrl } });
   const reviewerDone = Array.isArray(status?.reviewerApps) && status.reviewerApps.length > 0;
-  items.push({ id: 'reviewer-app', title: 'Reviewer App', done: reviewerDone, human: true,
+  if (controlPlane && !supervised) items.push(notRequired('reviewer-app', 'Reviewer App'));
+  else if (!supervised) items.push({ id: 'reviewer-app', title: 'Reviewer App', done: reviewerDone, human: true,
     line: reviewerDone ? 'A second App signs the independent code reviews.' : 'Create a second App so every change is reviewed by someone other than its author.',
     action: reviewerDone ? null : appBound ? { kind: 'link', label: 'Create the reviewer App', href: appUrl } : { kind: 'wait', label: 'Waiting for the GitHub App' } });
   for (const role of requiredSetupRoles) {
+    if (supervised && role === 'reviewer') continue;
     const done = roleReady(status?.fleet, role);
     items.push({ id: `account:${role}`, title: roleTitle[role], done, human: true,
       line: done ? 'Connected and signed in.' : role === 'worker' ? 'Connect an AI coding account (an API key or a subscription sign-in) to write the code.' : 'Connect an AI coding account to review the code. It may be the same account.',
@@ -96,7 +117,8 @@ export function setupChecklist(status: any | null, options: { appSetupUrl?: stri
   // `checks` is protected enough to start: Graphyard requires its own merge check once the first change reports it.
   const protection = status?.setup?.protection;
   const protectedBranch = protection === 'complete' || protection === 'checks';
-  items.push({ id: 'branch-protection', title: 'Branch protection', done: protectedBranch, human: false,
+  if (controlPlane) items.push(notRequired('branch-protection', 'Branch protection'));
+  else items.push({ id: 'branch-protection', title: 'Branch protection', done: protectedBranch, human: false,
     line: protection === 'complete' ? 'Changes reach your main branch only after they pass review and tests.'
       : protectedBranch ? 'Your main branch requires its tests to pass; Graphyard adds its own check after the first change.' : appDone ? 'Graphyard turns this on by itself; if it stays off, open your repository\'s branch settings.' : 'Turned on by itself once the GitHub App is installed.',
     action: protectedBranch ? null : appDone && repository ? { kind: 'link', label: 'Open branch settings', href: `https://github.com/${repository}/settings/branches` } : { kind: 'wait', label: 'Waiting for the GitHub App' } });
@@ -105,6 +127,21 @@ export function setupChecklist(status: any | null, options: { appSetupUrl?: stri
     line: loop ? 'The coordinator is running and will hand out work.' : 'The setup command starts the coordinator on your machine; this turns green once it runs.',
     action: loop ? null : { kind: 'wait', label: 'Check again' } });
   return items;
+}
+
+/**
+ * The pane server that holds this install's agent sessions, as the master loop reports it (GY-1511):
+ * its own instance (a config home and a session name) when the host's default one serves another
+ * install, else the default (both null); the host the loop runs on, when recorded; and whether the
+ * loop last reached that server (null while unknown). A sibling module outside the model turns it into commands.
+ */
+export interface PaneServer { configHome: string | null; session: string | null; host: string | null; running: boolean | null }
+/** The value `status.setup.panes` carries, or the default instance on an unknown host when it carries none. */
+export function paneServer(status: any | null): PaneServer {
+  const reported = status?.setup?.panes;
+  const text = (value: unknown) => typeof value === 'string' && value.trim() ? value.trim() : null;
+  const configHome = text(reported?.configHome), session = text(reported?.session);
+  return { configHome: configHome && session ? configHome : null, session: configHome && session ? session : null, host: text(reported?.host), running: typeof reported?.running === 'boolean' ? reported.running : null };
 }
 
 export const checklistGreen = (items: readonly SetupItem[]) => items.every(item => item.done);

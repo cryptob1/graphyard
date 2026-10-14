@@ -1,8 +1,9 @@
-import { deliveryState, type Gate, type Work } from '../model.js';
+import { deliveryState, observationWindowHold, type Gate, type Work } from '../model.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
 import { assignment } from './assignment.js';
 import { ciCheckRefusalPattern } from './ci-refusal.js';
 import { formatAge, statusDuration, type StatusDuration } from './duration.js';
+import { blockerView, classifyBlocker, type BlockerClass } from './blocker-class.js';
 
 /**
  * Plain-English status for people who have never read the Graphyard docs. Every sentence is
@@ -32,10 +33,11 @@ const trigger: Record<string, string> = {
  * somebody has to decide or fix something. A reason nobody anticipated falls back to a
  * sentence about its gate, never to the raw internal text.
  */
-export function plainReason(reason: string, gate: string): { text: string; stuck: boolean; known: boolean } {
+export function plainReason(reason: string, gate: string, now = Date.now(), work?: Work): { text: string; stuck: boolean; known: boolean } {
   const rules: [RegExp, (m: RegExpMatchArray) => string, boolean?][] = [
     [/^Not released from backlog$/, () => 'Not released for work yet'],
     [/^Dependency (\S+) is unfinished$/, m => `Waiting for ${m[1]} to ship first`],
+    [/^Split into child items: (\S+) is not delivered$/, m => `Split into smaller items; waiting for ${m[1]} to ship first`],
     [/^Worker has not submitted implementation for this attempt$/, () => 'The work has not been handed in yet'],
     [/^Pull request has not been independently observed$/, () => 'Graphyard has not seen the pull request on GitHub yet'],
     [/^No workspace registered$/, () => 'The builder has not said where the code lives yet'],
@@ -59,10 +61,75 @@ export function plainReason(reason: string, gate: string): { text: string; stuck
     [/^Slice lead (\S+) ruled \S+ under rule \S+; delivery is blocked until the authorized recovery: (.*)$/s, m => `Held by team lead ${m[1]}: ${m[2]}`, true],
   ];
   for (const [pattern, text, stuck] of rules) { const m = reason.match(pattern); if (m) return { text: text(m), stuck: !!stuck, known: true }; }
-  // The ready gate's only free-text reason is a recorded blocker: a person wrote it, so it is shown as written.
-  if (gate === 'ready') return { text: reason, stuck: true, known: true };
+  // Every other ready reason has its rule above, so what is left is a recorded blocker, written for the next agent: it
+  // reads as its one-sentence summary, and the item page's technical details show it as written.
+  // Given the item, the summary reads its probe and window the way the row's own sentence does.
+  if (gate === 'ready') return { text: blockerSummary(reason, now, work).sentence, stuck: true, known: true };
   const fallback: Record<string, string> = { build: 'The work is not finished yet', review: 'Waiting for review', test: 'Waiting for automated checks', acceptance: 'Waiting for proof that it works', merge: 'Waiting to merge' };
   return { text: fallback[gate] ?? 'Waiting', stuck: false, known: false };
+}
+
+/**
+ * A recorded blocker as one plain sentence of at most 25 words (GY-1739): the kind of block and who
+ * clears it. The recorded text is written for the next agent — commands, file paths, SHAs — so it
+ * never reaches a Work page row; the item page shows it once, under Technical details. A blocker
+ * naming a future not-before instant waits for that instant: nothing is broken, yet the block stays
+ * recorded until the master agent lifts it (`master unblock`), so the sentence names that clearer.
+ */
+export type BlockerKind = 'waiting-until' | 'human' | 'item' | BlockerClass;
+const routineCause: Partial<Record<BlockerClass, string>> = {
+  'github-credential': 'GitHub sign-in failed for the builder', 'control-plane-error': 'The Graphyard server failed a command',
+  'sandbox-path': 'The builder could not write a file it needed', 'worktree-mismatch': 'The builder worked in the wrong copy of the code',
+  'outside-scope-test-failure': 'Tests failed outside the files this item changes', 'dispatch-failure': 'No builder could be launched for it',
+  'host-supervisor': "A host check failed inside the builder's sandbox", 'runtime-denial': "The builder's tools refused to push its work",
+  'runtime-exhaustion': "The builder's account ran out of usage", 'github-outage': 'GitHub is having an outage',
+};
+const instant = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})/g;
+const notBeforeWords = /not[- ]before|until|window|first exist|can(?:not|'t)? (?:yet )?exist|earliest|too early|wait/i;
+const itemWait = /\b(?:[Ww]ait(?:s|ing)?\s+(?:on|for)|[Dd]epends\s+on|[Bb]locked\s+(?:on|by)|[Uu]ntil|[Aa]fter)\s+(?:\w+\s+){0,2}?((?!AC-)[A-Z][A-Z0-9]*-\d+)\b/;
+/**
+ * The not-before instants a reason names: only an instant its own clause introduces with a wait word
+ * (`not before X`, `window opens … X`), never every timestamp in the text — a recorded retry or
+ * observation time is not the deadline. A reason naming several reads as its latest.
+ */
+export function notBeforeInstants(text: string): number[] {
+  let from = 0;
+  return [...text.matchAll(instant)].flatMap(m => {
+    // The words since the previous instant and the last clause break, at most 48 characters back.
+    const clause = text.slice(Math.max(from, m.index! - 48), m.index).split(/[;,!?]|\.\s/).pop()!;
+    from = m.index! + m[0].length;
+    return notBeforeWords.test(clause) ? [Date.parse(m[0])] : [];
+  });
+}
+/**
+ * A date and time with its zone, so the words identify the instant wherever they are read: the
+ * browser writes it in the reader's own zone; a server answer (`GET /api/board`) passes `UTC`.
+ */
+export const localInstant = (at: number, timeZone?: string) => new Date(at).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short', ...(timeZone ? { timeZone } : {}) });
+export function blockerSummary(text: string, now: number, work?: Pick<Work, 'key' | 'blocker' | 'humanRequest' | 'blockerProbe' | 'plannedFiles' | 'criteria' | 'observationWindow'>, timeZone?: string): { sentence: string; kind: BlockerKind; until?: string } {
+  const human = !!work?.humanRequest && !work.humanRequest.answer;
+  const classified = classifyBlocker(text, { humanRequest: human });
+  const named = (pattern: RegExp) => text.match(pattern)?.[1];
+  // A declined answer is the human's last word (server/waits.ts): what happens next is the master's unblock.
+  if (classified.class === 'human-only' && !human && /^A human declined /.test(text)) return { sentence: 'A human declined the request; the master agent decides the next step and clears the block.', kind: 'human-only' };
+  if (classified.class === 'human-only') { const on = named(/\b((?!AC-)[A-Z][A-Z0-9]*-\d+)\b/); return { sentence: `Waiting on a human answer${on && on !== work?.key ? ` to ${on}` : ''}; only you can clear it.`, kind: 'human' }; }
+  const window = work ? observationWindowHold(work as Work, new Date(now)) : null;
+  const future = [...notBeforeInstants(text), ...(window ? [Date.parse(window.notBefore)] : [])].filter(at => at > now);
+  if (future.length) { const until = Math.max(...future); return { sentence: `Waiting until ${localInstant(until, timeZone)}; nothing is broken, and the master agent lifts the hold once that time passes.`, kind: 'waiting-until', until: new Date(until).toISOString() }; }
+  const view = work?.blocker === text ? blockerView(work) : null;
+  const kind = view?.class ?? classified.class;
+  // Spent: the loop has cleared it `maxAutomaticClears` times (daemon/cycle-blockers.ts) and left it to the master.
+  const spent = view?.needsSomeone ?? false;
+  if (kind === 'needs-decision') return { sentence: spent ? 'Waiting on a decision that keeps coming back; the master agent decides it and clears the block.' : 'Waiting on an agent decision; an approver agent judges it, then Graphyard clears the block.', kind };
+  if (kind === 'planned-file-scope' && !spent) return { sentence: 'Needs files outside its plan; an approver agent decides whether to allow them.', kind };
+  const cause = routineCause[kind];
+  if (cause) return { sentence: spent ? `${cause}, again and again; the master agent must clear it.` : `${cause}; Graphyard re-checks it every cycle and clears it on its own.`, kind };
+  // Only a blocker no class explains reads as a wait on another item: a classified fault that merely mentions one
+  // (`… failed after GY-1234`) is that fault, cleared by whoever clears its class.
+  const other = named(itemWait);
+  if (other && other !== work?.key) return { sentence: `Waiting on ${other}; the master agent clears it once that item is done.`, kind: 'item' };
+  // Anything else is summarised, never echoed: even a short reason is the agent's words, kept for the item page.
+  return { sentence: 'A fault blocks it; the master agent clears it.', kind };
 }
 
 /**
@@ -134,10 +201,10 @@ export function plainStatus(work: Work, now: number): PlainStatus {
   }
   if (work.violations.length) return make(`Stuck: ${work.violations[0]}`, 'stuck', work.violations[0]);
   const gate = work.gates.find(g => !g.passed);
-  const reasons = (g: Gate | undefined) => (g?.reasons ?? []).map(r => ({ raw: r, ...plainReason(r, g!.name) }));
+  const reasons = (g: Gate | undefined) => (g?.reasons ?? []).map(r => ({ raw: r, ...plainReason(r, g!.name, now, work) }));
   const ready = work.gates.find(g => g.name === 'ready');
   const blocker = work.blocker ?? null;
-  if (blocker) return make(`Stuck: ${blocker}`, 'stuck', blocker, who.active ? who.name : null);
+  if (blocker) { const summary = blockerSummary(blocker, now, work).sentence; return make(`Stuck: ${summary}`, 'stuck', summary, who.active ? who.name : null); }
   // A step that keeps failing for the same reason is a stall, not a retry, and it outranks the
   // gate it was going to clear: the gate's own sentence would say the item is waiting for a
   // review or a builder, when in truth something is asking for one every minute and being
@@ -151,6 +218,9 @@ export function plainStatus(work: Work, now: number): PlainStatus {
   if (phase === 'needs-worker') {
     const dependency = reasons(ready).find(r => r.raw.startsWith('Dependency '));
     if (dependency) return make(dependency.text, 'waiting', dependency.text);
+    // GY-1698: a follow-up waiting for its observation window is not waiting for a worker.
+    const window = observationWindowHold(work, new Date(now));
+    if (window) return make(`Waiting for its observation window — the reading it owes can first exist at ${window.notBefore}`, 'waiting', `Nothing can be observed before ${window.notBefore}`);
     if (work.reworkRequested) return make('Sent back for changes — waiting for someone to pick it up', 'waiting', 'Nobody is working on it');
     return make(who.name ? `Waiting for someone to pick this up — ${who.name} stopped working on it` : 'Waiting for someone to pick this up', 'waiting', 'Nobody is working on it');
   }

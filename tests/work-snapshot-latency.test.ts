@@ -419,13 +419,22 @@ function observationWorker() {
 }
 const flowDrilldownRead = () => { invalidateFlowReports(hotStore); return hotRead('analytics/flow/drilldown?window=30&metric=throughput'); };
 
-test('integration:hot-paths-read-no-settled-documents — the observation claim, landability peers, /api/status, /api/board and lookups by id or key read no settled delivery\'s document; GET /api/work still answers whole documents', async () => {
+test('integration:hot-paths-read-no-settled-documents — the observation claim, landability peers, /api/status, /api/board and lookups by id or key read no settled delivery\'s document; GET /api/work serves the fleet, each settled delivery as its stored summary', async () => {
   await hotPaths();
   assert.equal(Number((await hotStore.pool.query('SELECT count(*) FROM work_index WHERE settled')).rows[0].count), HOT_SETTLED, 'every seeded delivery is settled');
-  // The control: the full list reads every settled document, and the scan sees each one.
+  // GET /api/work is the bounded fleet read (GY-1778): every item answered, each settled delivery
+  // as the work index's stored summary, and no settled document read whole.
   const full = await settledDocumentsRead(() => hotRead('work'));
-  assert.equal(full.value.length, HOT_SETTLED + HOT_OPEN); assert.equal(full.keys.size, HOT_SETTLED, 'GET /api/work keeps its full-document contract');
-  assert.ok(full.value.filter((item: Work) => item.stage === 'done').every((item: any) => item.pipeline.attempts.length === SETTLED_HISTORY));
+  assert.equal(full.value.length, HOT_SETTLED + HOT_OPEN);
+  assert.deepEqual([...full.keys], [], `GET /api/work read ${full.keys.size} settled documents whole (${full.bytes} bytes)`);
+  const summaries = full.value.filter((item: Work) => item.stage === 'done');
+  assert.equal(summaries.length, HOT_SETTLED);
+  assert.ok(summaries.every((item: any) => !('pipeline' in item) && (item.sessions ?? []).length === 0), 'each settled delivery is its stored summary: no pipeline history and no finished session');
+  // The control: one settled delivery's whole document, by key through GET /api/work/:key, carries
+  // the marker, and the scan sees exactly that one, so a silent read elsewhere could not hide.
+  const control = await settledDocumentsRead(() => hotRead(`work/${encodeURIComponent(summaries[0].key)}`));
+  assert.deepEqual([...control.keys], [summaries[0].key], 'the whole-document route reads its own document, which the scan sees');
+  assert.equal(control.value.pipeline.attempts.length, SETTLED_HISTORY, 'the whole document keeps its history');
   // The observation job: its claim order and the landability peers it publishes against.
   const worker = observationWorker();
   const job = await settledDocumentsRead(worker.run);

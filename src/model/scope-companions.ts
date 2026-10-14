@@ -1,18 +1,23 @@
 // Inevitable scope companions (GY-955), apart from model/scope.ts so that module keeps its budget.
 //
-// A change carries files no criterion names: the new test file its own unit proofs live in, the
-// existing tests that import a module it changes, the documentation-budget gate any documented
-// change must raise, and the test-duration baseline a new test file is recorded in (GY-1085). Each
-// was refused wholesale and approved minutes later by the approver as "the feature implementation,
-// not optional add-ons" (GY-945, GY-883). These rules ground them per path,
-// so the loop grants them with no approver, and `derivePlannedFiles` plans them at authoring time.
+// A change carries files no criterion names: the new test file its own unit proofs live in, the existing
+// tests that import a module it changes, the documentation-budget gate any documented change must raise,
+// the wall-clock gate a test change must keep passing (GY-1706), the test-duration baseline a new test
+// file is recorded in (GY-1085) and the verification map covering a planned file (GY-1783). Each was
+// refused wholesale and approved minutes later as "the feature implementation, not optional add-ons"
+// (GY-945, GY-883). These rules ground them per path, so the loop grants them with no approver, and
+// `derivePlannedFiles` plans them at authoring time.
 import { documentationGlobMatches } from './documentation-glob.js';
+import type { WorkOrigin } from './interventions.js';
 import { namedPaths, pathScope, pathScopeContains, testFile } from './scope.js';
 
 interface CompanionCriterion { id: string; text: string; proofs?: readonly string[] }
 
-/** The proofs a test file holds: unit and integration proofs. Manual, E2E and CI proofs live elsewhere. */
-export const testProof = (proof: string) => /^(?:unit|integration):[\w.-]+$/.test(proof);
+/**
+ * The proofs a test file holds: unit and integration proofs, and the fault-class manual proofs the
+ * loop's own filing writes (`manual:fault-class-*`, GY-1706). Other manual, E2E and CI proofs live elsewhere.
+ */
+export const testProof = (proof: string) => /^(?:unit|integration):[\w.-]+$/.test(proof) || /^manual:fault-class-[\w.-]+$/.test(proof);
 /** Each criterion's test proofs, for the criteria that have any. */
 export const criterionTestProofs = (criteria: readonly CompanionCriterion[]) =>
   criteria.flatMap(criterion => { const proofs = [...new Set((criterion.proofs ?? []).filter(testProof))]; return proofs.length ? [{ criterion: criterion.id, proofs }] : []; });
@@ -25,7 +30,32 @@ export const documentationBudgetGate = (path: string) => testFile(path) && /(?:^
  * gets its entry, so it is a companion of every test file a change plans or asks for (GY-1085).
  */
 export const timingBaseline = (path: string) => !pathScope(path).prefix && /(?:^|\/)(?:tests?|__tests__)\/(?:[\w.-]+\/)*timing[-_.]?baseline\.json$/i.test(path);
+/**
+ * The wall-clock gate (tests/no-wall-clock-time-bombs.test.ts): a change that adds or edits a test
+ * file must keep its allowance in step, so it is a companion of every test file a change plans or
+ * asks for (GY-1706).
+ */
+export const noWallClockGatePath = 'tests/no-wall-clock-time-bombs.test.ts';
+export const noWallClockGate = (path: string) => path === noWallClockGatePath;
 const testScope = (entry: string) => testFile(entry) || pathScope(entry).prefix && /(?:^|\/)(?:tests?|__tests__)\/$/.test(pathScope(entry).path);
+/** A test path's directory, stem and suffix, or null — used to match a shorter ask to a proof-named file. */
+const testStemParts = (path: string) => {
+  const match = /^((?:[^/]+\/)*)([^/]+?)(\.(?:test|spec)\.[cm]?[jt]sx?)$/.exec(pathScope(path).path);
+  return match && testFile(path) ? { directory: match[1], stem: match[2], suffix: match[3] } : null;
+};
+/**
+ * True when `path` is the proof-named test, or a same-suffix stem that lengthens or shortens it by
+ * a hyphenated suffix (GY-1700's webhook-soft-accept beside unit:webhook-soft-accept-no-5xx). The
+ * shorter stem must itself be hyphenated so a single token (fleet vs fleet-panel) is never a match
+ * (GY-945's new-file path must still reach newProofTestGround).
+ */
+const proofTestStemMatch = (path: string, named: string) => {
+  if (path === named) return true;
+  const asked = testStemParts(path), proof = testStemParts(named);
+  if (!asked || !proof || asked.directory !== proof.directory || asked.suffix !== proof.suffix) return false;
+  const [shorter, longer] = asked.stem.length <= proof.stem.length ? [asked.stem, proof.stem] : [proof.stem, asked.stem];
+  return shorter.includes('-') && longer.startsWith(`${shorter}-`);
+};
 /** True when `path` is, or a scope that holds, documentation the item's repository configures. */
 export const documentationPath = (path: string, documentation: readonly string[]) =>
   documentation.some(scope => documentationGlobMatches(scope, path) || pathScope(path).prefix && pathScopeContains(path, pathScope(scope).path));
@@ -65,9 +95,6 @@ export function proofTestFiles(criteria: readonly CompanionCriterion[], layout =
 }
 /** A criterion that describes a change in the web UI: what makes a single file under `web/` the feature it describes. */
 const webUi = /\b(?:web (?:UI|app|page|dashboard)|dashboard)\b/i;
-
-import type { WorkOrigin } from './interventions.js';
-
 /** The fields of an item that make it a review follow-up and say what it names (GY-1116). */
 export type FollowUpSource = { origin?: WorkOrigin | null; description?: string | null };
 
@@ -95,24 +122,13 @@ export async function peerModuleGround(path: string, text: string | null, planne
   // 1. A planned file imports path (peer dependency / implementation delegate):
   for (const scope of planned) {
     const source = await read(scope);
-    if (!source) continue;
-    const imports = relativeImports(scope, source);
-    if (imports.includes(targetStem)) {
-      return `${path} is imported by ${scope}, a planned file whose behaviour the item changes`;
-    }
+    if (source && relativeImports(scope, source).includes(targetStem)) return `${path} is imported by ${scope}, a planned file whose behaviour the item changes`;
   }
-
   // 2. path imports a planned file (peer consumer):
   if (text) {
     const stems = new Map(planned.map(scope => [moduleStem(scope), scope]));
-    const imports = relativeImports(path, text);
-    for (const stem of imports) {
-      if (stems.has(stem)) {
-        return `${path} imports ${stems.get(stem)}, a planned file whose behaviour the item changes`;
-      }
-    }
+    for (const stem of relativeImports(path, text)) if (stems.has(stem)) return `${path} imports ${stems.get(stem)}, a planned file whose behaviour the item changes`;
   }
-
   return null;
 }
 
@@ -131,14 +147,18 @@ export function companionGround(path: string, item: { plannedFiles?: readonly st
     if (documented) return `${path} is the documentation-budget gate a change to ${documented} must keep passing`;
   }
   if (timingBaseline(path)) {
-    const tested = [...ask, ...(item.plannedFiles ?? [])].find(entry => entry !== path && testScope(entry) && !timingBaseline(entry));
+    const tested = [...ask, ...(item.plannedFiles ?? [])].find(entry => entry !== path && testScope(entry) && !timingBaseline(entry) && !noWallClockGate(entry));
     if (tested) return `${path} is the test-duration baseline a change to ${tested} must keep covering`;
+  }
+  if (noWallClockGate(path)) {
+    const tested = [...ask, ...(item.plannedFiles ?? [])].find(entry => entry !== path && testScope(entry) && !timingBaseline(entry) && !noWallClockGate(entry));
+    if (tested) return `${path} is the wall-clock gate a change to ${tested} must keep passing`;
   }
   if (testFile(path)) {
     const directory = path.slice(0, path.lastIndexOf('/') + 1), extension = /\.(?:test|spec)\.[cm]?[jt]sx?$/.exec(path)?.[0];
     const layout = { directory, extension: extension ?? '' };
     if (extension) for (const entry of [...proofTestFiles(item.criteria, layout), ...criterionTestProofs(item.criteria).map(each => ({ ...each, path: proofTestFile(each.proofs, layout) }))])
-      if (entry.path === path) return `${path} is the test file ${entry.criterion}'s proofs (${entry.proofs.join(', ')}) live in`;
+      if (entry.path && proofTestStemMatch(path, entry.path)) return `${path} is the test file ${entry.criterion}'s proofs (${entry.proofs.join(', ')}) live in`;
   }
   // The feature a criterion describes in the web UI is a page, component or stylesheet under web/: one file, never the tree.
   const described = path.startsWith('web/') && !testFile(path) ? item.criteria.find(criterion => webUi.test(criterion.text)) : undefined;
@@ -153,10 +173,19 @@ export function companionGround(path: string, item: { plannedFiles?: readonly st
  */
 export async function newProofTestGround(path: string, criteria: readonly CompanionCriterion[], held: (proof: string) => Promise<number>): Promise<string | null> {
   if (!testFile(path)) return null;
+  const directory = path.slice(0, path.lastIndexOf('/') + 1), extension = /\.(?:test|spec)\.[cm]?[jt]sx?$/.exec(path)?.[0];
   for (const entry of criterionTestProofs(criteria)) {
     const unheld: string[] = [];
     for (const proof of entry.proofs) if (await held(proof) === 0) unheld.push(proof);
-    if (unheld.length) return `${path} is the new test file ${entry.criterion}'s proofs (${unheld.join(', ')}) live in; no file on the base holds them`;
+    if (!unheld.length) continue;
+    // Fault-class manual proofs live in the proof-named file (or its hyphenated stem); an unrelated
+    // test path is not "whatever it is called" the way unit proofs are (GY-1287 / GY-1701).
+    if (unheld.some(proof => /^manual:fault-class-/.test(proof))) {
+      if (!extension) continue;
+      const named = proofTestFile(entry.proofs, { directory, extension });
+      if (!named || !proofTestStemMatch(path, named)) continue;
+    }
+    return `${path} is the new test file ${entry.criterion}'s proofs (${unheld.join(', ')}) live in; no file on the base holds them`;
   }
   return null;
 }
@@ -209,11 +238,57 @@ export async function importingTestGround(path: string, text: string | null, pla
   return null;
 }
 
+/** A per-area verification map (verification/AREA.md, GY-1495): a file, never the tree; the supported `./` spelling is the same file. */
+export const verificationMapFile = (path: string) => !pathScope(path).prefix && /^verification\/[^/]+\.md$/.test(pathScope(path).path);
+/**
+ * A test-side gate the engine grants as the companion of a test in the raw ask or the plan (the
+ * wall-clock gate, the timing baseline, the docs-budget gate): its ground is the ask's, so it is no
+ * independent ground for anything else.
+ */
+export const testCompanionGate = (path: string) => noWallClockGate(path) || timingBaseline(path) || documentationBudgetGate(path);
+/** The globs a map's opening `Paths:` line names, as parseVerificationMap reads them, or null when the text opens with no such line. */
+const verificationMapPaths = (text: string) => {
+  const opening = text.replace(/\r\n/g, '\n').split('\n').find(line => line.trim())?.match(/^Paths:\s*(.*)$/);
+  const paths = opening?.[1].split(/[\s,]+/).filter(Boolean) ?? [];
+  return paths.length ? paths : null;
+};
+/**
+ * GY-1783: the ground a verification map is granted on. A map opens with a `Paths:` line naming the
+ * globs it covers and holds the `## Tests` list an area's test files are named in, so an item that
+ * changes a file under those paths, or creates a test for one, must edit the map — granted the way
+ * the test importing a planned file is (importingTestGround). The ground names the line and the
+ * planned file it covers, or the test file under those paths a criterion names or this request has
+ * already granted on a ground of its own: `granted` holds the paths the rules grounded before the
+ * map, never the raw ask (a map covering only an unrelated test asked beside it is not granted on
+ * that test) and never a gate (`testCompanionGate`) granted as the companion of a test in the raw
+ * ask, so an ungrounded test cannot reach the map through the gate it drags in (review of d8e550a6).
+ * `text` is the map on the base: a map the base does not hold, one opening with no Paths line, or
+ * one covering none of those files stays refused and routed as before; the loop asks only for a map
+ * parseVerificationMap reads whole, so a malformed file under verification/ is routed, never granted.
+ */
+export function verificationMapGround(path: string, text: string | null, item: { plannedFiles?: readonly string[]; criteria: readonly CompanionCriterion[] }, granted: readonly string[] = []): string | null {
+  if (!text || !verificationMapFile(path)) return null;
+  const paths = verificationMapPaths(text);
+  if (!paths) return null;
+  const line = `Paths: ${paths.join(', ')}`;
+  // As verificationGlobCovers reads a glob (verification-maps.ts, not imported: it reaches scope.ts back through documentation.ts), a
+  // leading `./` is stripped, so `Paths: ./src/master/**` covers a planned `src/` as documentationGlobMatches covers a file under it (review of 8aac4bbf).
+  const covered = (entry: string) => entry !== path && paths.some(glob => documentationGlobMatches(glob, entry) || pathScope(entry).prefix && glob.replace(/^\.\//, '').startsWith(pathScope(entry).path));
+  const planned = (item.plannedFiles ?? []).find(covered);
+  if (planned) return `${path} is the verification map whose ${line} covers ${planned}, a planned file whose behaviour the item changes`;
+  const created = item.criteria.flatMap(criterion => namedPaths(criterion.text)).find(entry => testFile(entry) && covered(entry));
+  if (created) return `${path} is the verification map whose ${line} covers ${created}, a test file the item creates`;
+  const companion = granted.find(entry => testFile(entry) && !testCompanionGate(entry) && covered(entry));
+  if (companion) return `${path} is the verification map whose ${line} covers ${companion}, a test file this request grants`;
+  return null;
+}
+
 /**
  * GY-955 AC-2: the companions plannedFiles carries at authoring time, beside what the criteria name.
  * The test file each criterion's proofs will live in, when the plan holds no test file for them —
- * the one already named for the proofs on the base, or the new one `proofTestFile` names — and the
- * documentation-budget gate the tree holds, when the plan holds documentation.
+ * the one already named for the proofs on the base, or the new one `proofTestFile` names — the
+ * wall-clock gate and timing baseline the tree holds when the plan holds a test, and the
+ * documentation-budget gate when the plan holds documentation.
  */
 export function plannedCompanions(item: { plannedFiles: readonly string[]; criteria: readonly CompanionCriterion[]; origin?: WorkOrigin | null; description?: string | null }, tree: ReadonlySet<string>, documentation: readonly string[]) {
   const added: { path: string; criterion: string | null; why: string }[] = [];
@@ -222,8 +297,11 @@ export function plannedCompanions(item: { plannedFiles: readonly string[]; crite
   if (!item.plannedFiles.some(testScope))
     for (const entry of proofTestFiles(item.criteria, layout))
       if (!covered(entry.path)) added.push({ path: entry.path, criterion: entry.criterion.split(', ')[0], why: `the test file ${entry.criterion}'s proofs live in` });
-  if ([...item.plannedFiles, ...added.map(entry => entry.path)].some(entry => testScope(entry) && !timingBaseline(entry)))
+  const holdsTest = [...item.plannedFiles, ...added.map(entry => entry.path)].some(entry => testScope(entry) && !timingBaseline(entry) && !noWallClockGate(entry));
+  if (holdsTest)
     for (const file of tree) if (timingBaseline(file) && !covered(file)) added.push({ path: file, criterion: null, why: 'the test-duration baseline a new test file must be recorded in' });
+  if (holdsTest)
+    for (const file of tree) if (noWallClockGate(file) && !covered(file)) added.push({ path: file, criterion: null, why: 'the wall-clock gate a test change must keep passing' });
   if (item.plannedFiles.some(entry => documentationPath(entry, documentation)))
     for (const file of tree) if (documentationBudgetGate(file) && !covered(file)) added.push({ path: file, criterion: null, why: 'the documentation-budget gate a documented change must keep passing' });
   if (item.origin?.reviewFollowUps)

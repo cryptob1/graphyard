@@ -11,6 +11,7 @@ import { assessContainment, masterConfigSchema, type ContainmentAssessment, type
 import { containmentSettleWaitBoundMs, cycleFaults, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { workFaults } from '../src/model/fault-classes.js';
 import { containmentPhase } from '../src/model/containment.js';
+// Time-bomb allowance (GY-1694): the 2026-10-03/05 instance stamps are replayed ledger fixtures judged on Date.parse(entry.observedAt); the Date.now() case builds its own lapsed fence relative to the real clock and judges it there.
 
 // GY-1151 names this file for its proof: manual:fault-class-containment. The master loop filed 7 containment
 // faults in 24 hours on 3 October 2026. Every one was a completed or interrupted attempt whose containment

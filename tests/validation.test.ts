@@ -14,6 +14,7 @@ import { server } from '../src/server.js';
 import { proofPreview } from '../src/coordination.js';
 import type { Definition } from '../src/validation.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2000-01-01 expiresAt/deadline/expires_at writes are past and only force an already-lapsed expiry; Date.now() sets deadlines and stamps observations relative to the wall clock.
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
 const runner: Principal = { id: 'runner', role: 'worker' };

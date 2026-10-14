@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { Run, RunEvent, RunOptions, RunResult, Runner } from '../../src/runner/types.js';
 import { RerunPending, landingCheck, scopeLookupBudget, type GitHub, type LandingGitHub } from '../../src/github.js';
 import type { HerdrAgent } from '../../src/master.js';
+import type { HerdrPane } from '../../src/master/herdr.js';
 import type { Observation, Work } from '../../src/model.js';
 import type { AgentReview, ReviewRequest } from '../../src/model/review.js';
 import { landableCheckCurrent, landableCheckRun, type LandableCheckRun } from '../../src/landable-check.js';
@@ -27,6 +28,8 @@ export const statusContext = 'ci/legacy';
 /** How long GitHub reports a `blockedMerge` item BLOCKED after its required check passed: past master status's ten-minute bound (GY-430). */
 export const blockedMergeMs = 14 * minute;
 export const sha = (...seed: (string | number)[]) => createHash('sha1').update(seed.join('\0')).digest('hex');
+/** GY-1501: the earlier head a stale approval names in place of HEAD: never the head itself. */
+export const staleSha = (head: string) => sha('stale-approval', head);
 /**
  * The test the briefly broken base branch fails (GY-793): CI names it in the failed-tests
  * annotation of the candidate pushed against the broken commit, of that commit's own run, and of
@@ -122,6 +125,14 @@ export class SimulatedGitHub {
   landedReports: string[] = [];
   /** Reviewers' plans per item: the verdict each successive review of it gives. */
   verdicts = new Map<string, ('APPROVED' | 'CHANGES_REQUESTED')[]>();
+  /** The GitHub login that posts each review: `reviewer`, or a supervised day's operator (GY-1501). */
+  reviewer = 'reviewer';
+  /**
+   * GY-1501. Items the reviewer never reviews (a supervised operator who has not approved them), and
+   * items whose reviewer approves an earlier head (`staleSha`) until the time given, approving the
+   * exact head only from then on.
+   */
+  withheld = new Set<string>(); staleUntil = new Map<string, number>();
   /** Reviewer profiles that are out of quota: a request dispatched to one is answered with a usage-limit verdict. */
   exhaustedProfiles = new Set<string>();
   /** Items whose GitHub merge state settles as UNSTABLE (a failing optional check), and those GitHub is slow to recompute after their required check passes. */
@@ -275,6 +286,14 @@ export class SimulatedGitHub {
    */
   /** An approval's mechanical-nit count as the real adapter observes it (src/github.ts), when the day writes review bodies. */
   /** A change request's body and BLOCKING: findings as the real adapter observes them (GY-1118), when the day writes one. */
+  /** Every review a reviewer App dismissed (GY-1575): GitHub reports it DISMISSED from then on, and the reviewer judges its head again. */
+  dismissals: { key: string; reviewId: number; sha: string; message: string; at: number }[] = [];
+  dismiss(work: Pick<Work, 'submission' | 'candidate'>, reviewId: number, message: string) {
+    const pr = this.pr(work), review = pr.reviews.find(entry => entry.id === reviewId);
+    if (!review || review.state === 'DISMISSED') throw new Error(`GitHub refused to dismiss review ${reviewId} (422)`);
+    review.state = 'DISMISSED';
+    this.dismissals.push({ key: pr.key, reviewId, sha: review.sha, message, at: clock.now() });
+  }
   changeRequest(key: string, review: { id: number; sha: string; state: string; reviewer: string }): { body?: string; blocking?: string[] } {
     const body = review.state === 'CHANGES_REQUESTED' ? this.changeRequestBody?.(key, review) : null;
     return body ? { body, blocking: blockingFindings(body) } : {};
@@ -543,11 +562,14 @@ export class SimulatedGitHub {
       // The reviewer judges a head once CI reported on it; an item in `carriedOnly` is not asked
       // again for a Graphyard-authored base refresh, whose approval carries.
       const graphyardHead = this.carriedOnly.has(pr.key) && /^Graphyard /.test(this.commits.get(pr.head)?.message ?? '');
-      if (ciDone && !graphyardHead && now - pushedAt >= this.options.ciMs + this.options.reviewMs && !pr.reviews.some(review => review.sha === pr.head)) {
+      const reviewDue = ciDone && !graphyardHead && !this.withheld.has(pr.key) && now - pushedAt >= this.options.ciMs + this.options.reviewMs && !pr.reviews.some(review => review.sha === pr.head && review.state !== 'DISMISSED');
+      if (reviewDue && now < (this.staleUntil.get(pr.key) ?? 0)) {
+        if (!pr.reviews.some(review => review.sha === staleSha(pr.head))) pr.reviews.push({ reviewer: this.reviewer, sha: staleSha(pr.head), state: 'APPROVED', id: ++this.serial, submittedAt: new Date(now).toISOString() });
+      } else if (reviewDue) {
         const plan = this.verdicts.get(pr.key) ?? [];
         const state = plan.shift() ?? 'APPROVED';
         this.verdicts.set(pr.key, plan);
-        pr.reviews.push({ reviewer: 'reviewer', sha: pr.head, state, id: ++this.serial, submittedAt: new Date(now).toISOString() });
+        pr.reviews.push({ reviewer: this.reviewer, sha: pr.head, state, id: ++this.serial, submittedAt: new Date(now).toISOString() });
       }
       // A reviewer App answers the request it was dispatched: an exhausted profile with its usage-limit verdict.
       const request = pr.agentRequests.at(-1);
@@ -698,7 +720,7 @@ export class SimulatedGitHub {
           candidate: { sha: pr.head, baseSha: pr.base, pr: pr.number, branch: pr.branch, author: pr.author, createdAt: new Date(pr.createdAt).toISOString() },
           checks,
           // GitHub's latest verdict per reviewer, and the id of every review, as the real adapter reports them.
-          reviews: [...new Map(pr.reviews.map(review => [review.reviewer, { ...review, ...world.mechanicalNits(pr.key, review), ...world.changeRequest(pr.key, review) }])).values()], reviewIds: pr.reviews.map(review => review.id),
+          reviews: [...new Map(pr.reviews.map(review => [review.reviewer, { ...review, ...world.mechanicalNits(pr.key, review), ...world.changeRequest(pr.key, review) }])).values()], reviewIds: pr.reviews.map(review => review.id), dismissedReviewIds: pr.reviews.filter(review => review.state === 'DISMISSED').map(review => review.id),
           // A reviewer App's verdict is read for the request the item is bound to, never for another.
           ...(pr.agentReview && work.reviewRequest?.commentId === pr.agentReview.requestId ? { agentReview: { ...pr.agentReview } } : {}),
           merged: !!pr.merged, mergeSha: pr.merged?.sha ?? null, mergedAt: pr.merged ? new Date(pr.merged.at).toISOString() : null,
@@ -861,14 +883,15 @@ export class SimulatedHerdr {
     if (!this.agents.has(pane) && !this.shells.has(pane)) throw Object.assign(new Error(`Herdr refused the operation: pane_not_found`), { herdrCode: 'pane_not_found' });
     this.agents.delete(pane); this.shells.delete(pane); this.closed.push(pane); this.closedAt.set(pane, this.now());
   }
-  /** The agent inventory: every session with its agent, and every bare shell with none. */
-  list(): HerdrAgent[] {
-    const named = [...this.agents.values()].map(agent => ({ ...agent }));
-    const bare = [...this.shells.keys()].map(pane => ({ pane_id: pane, agent: null as string | null, agent_status: 'unknown', cwd: this.shells.get(pane) }));
-    return [...named, ...bare];
+  /** The agent inventory (`herdr agent list`): every session with its agent, and never a bare shell (GY-1533). */
+  list(): HerdrAgent[] { return [...this.agents.values()].map(agent => ({ ...agent })); }
+  /** The pane inventory (`herdr pane list`): every pane with its cwd and agent; a bare shell has no agent and status unknown. */
+  paneList(): HerdrPane[] {
+    return [...new Set([...this.agents.keys(), ...this.shells.keys()])].map(pane_id => {
+      const agent = this.agents.get(pane_id);
+      return agent ? { pane_id, cwd: agent.cwd, agent: agent.agent, agent_status: agent.agent_status } : { pane_id, cwd: this.shells.get(pane_id), agent_status: 'unknown' };
+    });
   }
-  /** The pane inventory (`herdr pane list`): every pane, with or without an agent in it. */
-  paneList(): { pane_id: string }[] { return [...new Set([...this.agents.keys(), ...this.shells.keys()])].map(pane_id => ({ pane_id })); }
   byName(name: string) { return [...this.agents.values()].find(agent => agent.name === name); }
 }
 

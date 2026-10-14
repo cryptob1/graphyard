@@ -8,6 +8,7 @@ import { routineDecision, withheldDecision } from '../src/master-daemon.js';
 import { foldInterventions, readInterventionLedger } from '../src/interventions.js';
 import { endedLeaseLoss, leaseLossReason, leaseLossSettleMs, settleableLeaseLoss, standingEscalations, type Escalation, type Principal, type Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-04..06 lease-loss escalations are judged at after5(escalation.at), a clock the test passes; the Postgres half backdates escalations relative to Date.now() only.
 
 // GY-1393 names this file for its proof: manual:intervention-pattern-escalation-ready. Between
 // 2026-09-30 and 2026-10-07 the intervention report counted 28 escalation interventions at the

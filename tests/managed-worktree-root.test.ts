@@ -27,6 +27,7 @@ import { launchProducer, producerPrompt, readProducerLedger, reclaimCheckouts, r
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile } from '../src/reviewer.js';
 import { allocateSessionCheckout, dataDirectory, defaultWorktreeRoot, inspectWorktreeRoot, orphanGraceMs, probeFilesystem, reclaimCommand, reclaimSessionCheckouts, removeSessionCheckout, sessionCheckout, sweepAbandonedRoots, verifyWorktreeRoot, worktreeRoot, worktreeRootBudgetBytes, worktreeRootMinFreeBytes, type FilesystemProbe } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-26 `at` is the explicit clock of the AC-2 memory-hold cycles (snapshot now iso(at), () => at); the earlier tests derive every grace/expiry instant from Date.now() itself.
 
 // Each test is named for the proof it produces: integration:managed-worktree-root,
 // integration:ephemeral-checkout-reclaim, integration:worktree-root-preflight and
@@ -115,7 +116,7 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     assert.ok(existsSync(produced.checkout));
     assert.equal((await readProducerLedger(root)).producers[0].checkout, produced.checkout, 'the session record owns the checkout');
     const produceStart = launchOf(produceCalls).args;
-    assert.deepEqual(produceStart.slice(produceStart.indexOf('--add-dir'), -1), ['--add-dir', produced.checkout, '--add-dir', await sharedGitDirectory(root), '--add-dir', join(managed, '.verification-slots')]);
+    assert.deepEqual(produceStart.slice(produceStart.indexOf('--add-dir'), -1), ['--add-dir', produced.checkout, '--add-dir', join(await sharedGitDirectory(root) ?? '', 'objects'), '--add-dir', join(await sharedGitDirectory(root) ?? '', 'worktrees'), '--add-dir', join(managed, '.verification-slots')], 'the narrow Git paths, never the common Git directory itself (GY-1507)');
     assert.equal(launchOf(produceCalls).stem, join(produced.checkout, '.graphyard/launch/produce-a'), 'the request file lives in the session\'s own checkout');
     const producerText = promptOf(produceCalls);
     assert.ok(producerText.includes(`git worktree add --detach ${join(produced.checkout, 'checkout')} ${H}`));
@@ -130,7 +131,7 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     assert.match(reviewed.checkout, /\/graphyard-review-gy-89-aaaaaaa-[0-9a-f]{8}$/);
     assert.equal((await readReviewLedger(root)).reviews[0].checkout, reviewed.checkout);
     const reviewStart = launchOf(reviewCalls).args;
-    assert.deepEqual(reviewStart.slice(reviewStart.indexOf('--add-dir'), -1), ['--add-dir', reviewed.checkout, '--add-dir', await sharedGitDirectory(root), '--add-dir', join(managed, '.verification-slots')]);
+    assert.deepEqual(reviewStart.slice(reviewStart.indexOf('--add-dir'), -1), ['--add-dir', reviewed.checkout, '--add-dir', join(await sharedGitDirectory(root) ?? '', 'objects'), '--add-dir', join(await sharedGitDirectory(root) ?? '', 'worktrees'), '--add-dir', join(managed, '.verification-slots')], 'the narrow Git paths, never the common Git directory itself (GY-1507)');
     assert.ok(promptOf(reviewCalls).includes(`git worktree add --detach ${join(reviewed.checkout, 'checkout')} ${H}`));
     const plan = sessionHarnessPlan({ role: 'reviewer', kind: 'claude', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', credentialHome: scratch, credentialDirectories: [], pr: 88, checkout: join(reviewed.checkout, 'checkout') });
     assert.ok(plan.allow.some(entry => entry.rule === `Bash(git worktree add --detach ${join(reviewed.checkout, 'checkout')}:*)`), 'a reviewer may add a worktree at its allocated path and nowhere else');
@@ -141,10 +142,10 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     // or inside a session's own registered checkout is refused before anything is created there.
     // GY-866: each session directory points at the repository's Git directory so the git fetch
     // and git worktree add its request runs from where it starts reach the repository; it is still
-    // outside every worktree, the coordinator checkout included, with nothing checked out.
+    // outside every worktree, the coordinator checkout included, with nothing checked out (a codex session's own empty .agents and .codex aside, GY-1717).
     for (const own of [produced.checkout, reviewed.checkout]) {
       await assertOutsideWorktrees(root, own, 'An ephemeral checkout');
-      assert.deepEqual(await readdir(own).then(entries => entries.filter(entry => entry !== '.git' && entry !== '.graphyard')), [], `${own} has nothing checked out`);
+      assert.deepEqual(await readdir(own).then(entries => entries.filter(entry => !['.git', '.graphyard', '.agents', '.codex'].includes(entry))), [], `${own} has nothing checked out`);
     }
     const assignment = join(root, '.graphyard/worktrees/GY-88-1');
     git('worktree', 'add', '-q', '-b', 'graphyard/gy-88-1', assignment, 'HEAD');
@@ -169,11 +170,16 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     assert.equal(worktreeRoot(root, { repository: 'owner/project', run: {} }, { GRAPHYARD_DATA_HOME: '/srv/graphyard' }), fallback);
 
     // No generated prompt and no code path hardcodes /tmp: a prompt for a root elsewhere never
-    // mentions it, and the sources that place checkouts hold no such literal.
+    // mentions it, and the sources that place checkouts hold no such literal. This checkout's own
+    // path is an input, not something generated: the launcher and the runner's default data root
+    // (GRAPHYARD_DATA_HOME, tests/helpers/run-tests.ts) sit under it, and a shadow trial checks the
+    // merge out under /var/tmp/gy-c* (GY-1639), so it is read out of the prompt before the check.
+    const checkoutRoot = dirname(dirname(launcher));
+    const generated = (text: string) => text.split(checkoutRoot).join('<checkout>');
     const binding: ProducerBinding = { key: 'GY-88', id: 'id', pr: 88, sha: H, baseSha: B, policyRevision: 2, group: 'integration', proofs: ['integration:managed-worktree-root'], requestId: 'request-1', branch: 'graphyard/gy-88-1' };
     const elsewhere = sessionCheckout('/srv/graphyard/worktrees/project-0123456789ab', 'proof', 'GY-88', H, randomUUID());
     for (const text of [producerPrompt(config, binding, { principal: 'proof-runner' }, elsewhere), producerPrompt({ repository: 'owner/project', cliPath: launcher }, binding, { principal: 'proof-runner' }),
-      reviewPrompt(config, binding, elsewhere), reviewPrompt(config, binding)]) assert.equal(text.includes('/tmp'), false, 'a generated prompt never names /tmp');
+      reviewPrompt(config, binding, elsewhere), reviewPrompt(config, binding)]) assert.equal(generated(text).includes('/tmp'), false, 'a generated prompt never names /tmp');
     assert.ok(producerPrompt({ repository: 'owner/project', cliPath: launcher }, binding, { principal: 'proof-runner' }).includes(join(dataDirectory(process.env), 'worktrees')), 'a previewed prompt names the default root the environment configures');
     const sources = fileURLToPath(new URL('../src/', import.meta.url));
     // master.ts and master-daemon.ts re-export their modules under master/ and daemon/ (GY-177).
@@ -687,9 +693,18 @@ test('unit:dispatch-defers-on-host-memory — below the memory floor the loop de
   assert.ok(tick.waiting.length > 0 && tick.waiting.every(wait => /below its 6\.2 GB floor, so new session launches on it are deferred/.test(wait.reason)));
   // The executor claims no launching row meanwhile: the rows wait in the queue without failing.
   const claims: NextActionKind[][] = [];
-  const idle = await runExecutorTick({ id: 'executor-a', host: 'machine-a' }, { claim: async request => { claims.push(request.kinds); return { action: null }; }, settle: async () => {},
+  const presences: NextActionKind[][] = [];
+  const serves: NextActionKind[][] = [];
+  const idle = await runExecutorTick({ id: 'executor-a', host: 'machine-a' }, { claim: async request => { claims.push(request.kinds); serves.push(request.serves ?? []); return { action: null }; }, settle: async () => {},
+    present: async request => { presences.push(request.kinds); },
     handlers: { dispatch: async () => 'launched', 'request-review': async () => 'launched', resync: async () => 'resynced' }, launchHold: () => hostMemoryHold('machine-a', async () => memory, () => at) });
   assert.deepEqual(claims, [['resync']]);
+  // GY-1538: the hold defers launches, it does not stop the executor serving them, so presence
+  // still names every kind it runs; otherwise the control plane reports dispatch and request-review
+  // unserved and files a configuration fault for a deferral (GY-1515, GY-1537, GY-1530). The claim
+  // carries that set itself, so no presence-only request follows it.
+  assert.deepEqual(serves, [['dispatch', 'request-review', 'resync']]);
+  assert.deepEqual(presences, []);
   assert.ok(claims[0].every(kind => !launchingKinds.includes(kind)));
   assert.match(idle.reason, /launches none: host machine-a has 2\.0 GB/);
 

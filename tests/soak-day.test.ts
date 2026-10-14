@@ -73,15 +73,26 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no worker lost its lease: a dead worker lapses, it is not refused');
   assert.deepEqual([...observed].sort(), [...systemInvariants].sort(), 'every invariant was observed, not merely left unread');
-  // GY-1302: the loop drove promotion all day over a moving main: at most one dispatch per
-  // promoteEveryMinutes window, none while a candidate was in validation, and its fetches and run
+  // GY-1302, GY-1488: the loop drove promotion all day over a moving main: continuously, spaced by
+  // the minimum gap, none while a candidate was in validation, no tip cut twice, and its fetches and run
   // reads bounded by their read windows, not by the cycle count.
   const { promotion } = day;
   if (process.env.SOAK_TRACE) console.error(`promotion: ${JSON.stringify({ ...promotion, dispatches: promotion.dispatches.map(at => Math.round((at - dayStart) / minute)) })}`);
   // Main moves through the merges of the day's first hours and production catches it at the second
-  // deploy, so the loop promotes on that cadence and then has nothing to promote.
-  assert.ok(promotion.dispatches.length >= 2 && promotion.dispatches.length <= Math.ceil(hours / 2), `the loop promoted every two hours while main moved: ${promotion.dispatches.length} over ${hours} h`);
-  assert.deepEqual(promotion.violations, [], 'never twice in a window, never while a candidate is in validation, never when production runs main');
+  // deploy, so the loop cuts the next candidate as each ninety-minute validation concludes, and then has nothing to promote.
+  assert.ok(promotion.dispatches.length >= 2 && promotion.dispatches.length <= Math.ceil(hours * hour / (90 * minute)), `the loop promoted as each candidate concluded while main moved: ${promotion.dispatches.length} over ${hours} h`);
+  assert.deepEqual(promotion.violations, [], 'never inside the minimum gap, never while a candidate is in validation, never a tip cut twice, never when production runs main');
+  // GY-1491: the 23-merge backlog of hour eight went out ten at a time, one dispatch per capped
+  // candidate's conclusion with main idle; the run that cut nothing chained no dispatch, so the
+  // rest waited for hour sixteen's merge and then went out as 10 and 4, leaving nothing queued.
+  const backlog = promotion.candidates.filter(candidate => Date.parse(candidate.cutAt) + promotion.runnerSkewMs >= dayStart + promotion.landings[0].at);
+  // The backlog joins the day's own merges not yet cut, so the first candidate leaves at least 13 queued; hour sixteen adds one.
+  const waiting = backlog[0]?.queued ?? 0;
+  assert.ok(waiting >= 13, `the backlog was cut at the 10th merge: ${JSON.stringify(backlog)}`);
+  assert.deepEqual(backlog.map(candidate => [candidate.prs, candidate.queued]), [[10, waiting], [10, waiting + 1 - 10], [waiting + 1 - 10, 0]], `the backlog was cut into capped candidates: ${JSON.stringify(backlog)}`);
+  assert.equal(promotion.emptyRuns.length, 1);
+  assert.equal(promotion.backlogDispatches.filter(at => at > promotion.emptyRuns[0] && at < dayStart + promotion.landings[1].at).length, 0, 'a run that cut nothing is not re-dispatched while main stays put');
+  assert.equal(promotion.backlogDispatches.length, 4, `one dispatch per concluded capped candidate: ${promotion.backlogDispatches.map(at => Math.round((at - dayStart) / minute))}`);
   assert.ok(promotion.ledgerReads <= Math.ceil(hours * hour / (5 * minute)) + 2 * basePlan.loopRestarts.length + 2, `fetches once per five-minute read window (${promotion.ledgerReads} over ${cycles} cycles)`);
   assert.ok(promotion.runReads <= Math.ceil(hours * hour / minute) + 2 * basePlan.loopRestarts.length + 2 && promotion.runReads < cycles, `run reads at most once a minute (${promotion.runReads} over ${cycles} cycles)`);
   // A refused dispatch counts as an attempt: one per interval, not one per cycle, and the failed
@@ -475,7 +486,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(!existsSync(tmp.deadOwned) && !existsSync(`${tmp.deadOwned}.owner`), 'a dead run\'s directory goes at once, marker and all');
   assert.ok(existsSync(tmp.heldDirectory), 'a directory a live process holds open is kept all day');
   assert.ok(existsSync(tmp.liveOwned), 'a directory whose owner still runs is kept all day');
-  if (hours > 7) assert.ok(!existsSync(tmp.cache), 'a tsx cache left unwritten for six hours goes');
+  if (hours > 7) assert.ok(!existsSync(join(tmp.cache, 'data')) && existsSync(tmp.cache), 'a tsx cache\'s file left unwritten for six hours goes, and the cache directory stays (GY-1512)');
   const aged = tmp.hourly.filter(entry => entry.at <= (hours - 7) * hour), young = tmp.hourly.filter(entry => entry.at >= (hours - 5) * hour);
   assert.deepEqual(aged.filter(entry => existsSync(entry.directory)).map(entry => entry.directory), [], 'each leftover goes once it is past six hours old');
   assert.deepEqual(young.filter(entry => !existsSync(entry.directory)).map(entry => entry.directory), [], 'no leftover goes before it is six hours old');
@@ -675,6 +686,26 @@ test('unit:soak-invariants-hold — a system-driven docs conflict whose docs-syn
     // No stalled-step attention stands for the item once its round is requested (or was never owed).
     assert.ok(!state.faults.instances.some(instance => instance.kind === 'stalled-step' && instance.subject === conflicted), 'no stalled step is left on the item');
   }
+});
+
+test('unit:soak-invariants-hold — a docs conflict whose GitHub readings are late past the loop-owned rework bound is still reworked once inside the bound, with no stalled-step fault and every invariant holding', { timeout: 600_000 }, async () => {
+  // GY-1537. The docs-sync is stopped at its cutoff and the conflicted item's observation job is held (and its wakes answered with nothing)
+  // until well past the bound: before the change the rework waited on that reading and the loop missed its own bound (stalled-step).
+  const day = await simulateDay({ hours: 4, lateReading: true, plan: { docsConflict: { ...basePlan.docsConflict, syncMs: 30 * minute } } });
+  assertLaunchesConfined(day, coordinatorRoot!);
+  const { violations, failures, state, docsSyncRuns, decideCalls, items, lateReading, final } = day;
+  assert.deepEqual(violations, [], 'every system invariant holds');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.ok(lateReading.skipped > 0, 'the readings were late: the loop asked for one and none came');
+  const conflicted = items[basePlan.docsConflict.item - 1].key, head = docsSyncRuns[0].plan.head;
+  assert.deepEqual(docsSyncRuns.map(run => [run.plan.key, run.outcome]), [[conflicted, 'stopped']], 'one docs-sync session, stopped at its cutoff');
+  const round = decideCalls.filter(call => call.key === conflicted && call.action === 'rework' && (call.input as { binding?: string } | undefined)?.binding === `${head}:conflict`);
+  assert.equal(round.length, 1, `one rework per head: ${JSON.stringify(round)}`);
+  const since = Date.parse(state.conflicts.find(entry => entry.work === conflicted)!.at), requested = Object.entries(state.actions).find(([key]) => key.startsWith('decision:rework:') && key.includes(`:${head}:conflict:`))?.[1];
+  assert.ok(requested && Date.parse(requested.at) - since <= conflictReworkBoundMs + minute, `requested within a cycle of the bound without a fresh reading: ${requested ? (Date.parse(requested.at) - since) / minute : 'never'} minutes`);
+  assert.ok(!state.faults.instances.some(instance => instance.kind === 'stalled-step' && instance.subject === conflicted), 'no stalled-step fault, repeated or not');
+  assert.ok(Object.values(state.docsSyncs).every(watch => watch.settledAt), 'its session record is settled');
+  assert.equal(final.find(entry => entry.key === conflicted)!.stage, 'done', 'and the item is delivered');
 });
 
 test('unit:soak-invariants-hold — broad items are split before dispatch with bounded decomposition concurrency, child items merge, parents are delivered, and every system invariant holds', { timeout: 360_000 }, async () => {

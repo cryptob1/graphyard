@@ -16,6 +16,7 @@ import { awaitScopeOutcome } from '../src/cli/session-commands.js';
 import { approveScopeRequest } from '../src/cli/master-status.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2031-03-01 instants are judged only by the pure scopeRoutineDecision against its explicit `now` of the same minute; Date.now() clocks the DB-backed items the engine stamped itself.
 
 // GY-176: an additive scope request the implication rule refuses and no review finding grounds
 // used to wait for a master to run `master scope`. The loop now requests a `requirements`
@@ -80,7 +81,7 @@ function harness() {
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'no deployment endpoint in this test', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},
-    decideScope: work => ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }) as Promise<Work>,
+    decideScope: work => ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, treeRead: true }) as Promise<Work>,
     // No review finding names anything, so the finding rule judges and grounds nothing.
     reviewFindings: async () => [],
     basePaths: async () => new Set<string>(),
@@ -203,7 +204,7 @@ test('unit:scope-approver-routine — a blocker the worker reports while its req
   assert.equal(work.scopeRequest, null);
 });
 
-test('unit:scope-approver-routine — an approval is refused once the asking attempt no longer holds the lease, with the policy revision unchanged', async () => {
+test('unit:scope-approver-routine — an approval that lands after the asking attempt ended still applies, and the next attempt inherits the answered ask (GY-1484)', async () => {
   let work = await claimed('stale approval');
   const asked = await ask(work, [helper], 'The layout measures through the helper');
   const loop = harness(), state = emptyDaemonState(loopConfig());
@@ -211,17 +212,19 @@ test('unit:scope-approver-routine — an approval is refused once the asking att
   const [requested] = await standing(work);
   // The asking attempt ends and a new one claims the item while the approver is still deciding.
   await engine.execute(implementer, 'release', work.id, { epoch: asked.epoch }, randomUUID());
-  // The refusal belonged to the attempt that ended, so the release closed it (GY-597): no unblock is needed.
+  // The release closed the attempt's request (GY-597) and lifted its refusal; the ask still with the approver is carried (GY-1484).
   const released = await reload(work.id);
   assert.equal(released.scopeRequest, null);
   assert.equal(released.blocker, null);
+  assert.deepEqual(released.carriedScopeRequest?.paths, [helper]);
   work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
   assert.equal(work.policyRevision, asked.policyRevision, 'nothing moved the policy revision');
+  assert.equal(work.scopeRequest?.epoch, asked.epoch + 1, 'the new attempt inherits the ask');
   const late = await call(approver.token, 'POST', `work/${work.id}/approve`, { decision: requested.id, reason: 'The helper is AC-1 spelled out' });
-  assert.equal(late.body.state, 'failed', JSON.stringify(late.body));
-  assert.match(JSON.stringify(late.body), /no longer open|no longer holds the lease/);
+  assert.equal(late.body.state, 'applied', JSON.stringify(late.body));
   work = await reload(work.id);
-  assert.deepEqual(work.plannedFiles, [layout], 'the new attempt, which never asked, is not widened');
+  assert.deepEqual(work.plannedFiles, [layout, helper], 'the approved widening applies to the item');
+  assert.equal(work.scopeRequest, null, 'and answers the inherited ask');
   assert.equal(work.lease!.epoch, asked.epoch + 1);
 });
 
@@ -315,7 +318,7 @@ test('unit:scope-approver-routine — a root-level directory scope is requested 
 test('unit:scope-approver-routine — only a live, additive, rule-refused request the findings did not ground is routed', () => {
   const now = Date.parse('2031-03-01T10:00:00Z');
   const lease = { epoch: 2, owner: 'implementer', expiresAt: '2031-03-01T10:05:00Z' };
-  const refused = { state: 'refused' as const, reason: 'outside', at: '2031-03-01T09:59:00Z', decidedBy: 'graphyard', waitedMs: 1, paths: [helper], requestedBy: 'implementer', requestedAt: '2031-03-01T09:58:00Z' };
+  const refused = { state: 'refused' as const, reason: 'outside', at: '2031-03-01T09:59:00Z', decidedBy: 'graphyard', treeRead: true, waitedMs: 1, paths: [helper], requestedBy: 'implementer', requestedAt: '2031-03-01T09:58:00Z' };
   const base = { key: 'GY-9', stage: 'build', plannedFiles: [layout], criteria, lease, scopeRequest: { epoch: 2, paths: [helper], reason: 'needed', requestedBy: 'implementer', at: '2031-03-01T09:58:00Z', decision: refused } } as unknown as Work;
   assert.equal(scopeRoutineDecision(base, now, true)?.action, 'requirements');
   assert.equal(scopeRoutineDecision(base, now, false), null, 'the review-finding rule is judged first');

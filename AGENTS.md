@@ -8,7 +8,7 @@ Autonomy is the default: agents act without asking and agents approve agents. Th
 
 Domain mutations must be transactional, append history, and enforce principal identity and lease epochs. Never add a client-controlled arbitrary lifecycle-state endpoint. Do not grant implementation workers trusted evidence-producer credentials. Never weaken a task's requirements to make its implementation pass.
 
-Run `npm run build` and `npm test` for domain/API changes. Tests run a temporary real Postgres database; do not substitute production data. A test that stops its embedded Postgres awaits `store.close()` first (never `store.pool.end()`, which returns before its connections close); `tests/db-test-shutdown-order.test.ts` enforces this. Tests create every temporary directory with `temporaryDirectory(label[, parent])` from `tests/helpers/temp-dirs.ts`, never a bare `mkdtemp`: it makes `<tmpdir>/graphyard-<label>-*` beside a `.owner` marker naming its process and removes it after the file's tests, pass or fail (`tests/tmp-cleanup.test.ts` refuses a bare `mkdtemp`). Before and after the suite, `npm test` removes leftover `graphyard-*` directories whose owning process is gone and `pg-password-*` files older than 10 minutes. Update the relevant guide under `docs/` when behavior changes. Keep external I/O outside coordination transactions.
+Run `npm run build` and `npm test` for domain/API changes. Tests run a temporary real Postgres database; do not substitute production data. A test that stops its embedded Postgres awaits `store.close()` first (never `store.pool.end()`, which returns before its connections close); `tests/db-test-shutdown-order.test.ts` enforces this. Tests create every temporary directory with `temporaryDirectory(label[, parent])` from `tests/helpers/temp-dirs.ts`, never a bare `mkdtemp`: it makes `<tmpdir>/graphyard-<label>-*` beside a `.owner` marker naming its process and removes it after the file's tests, pass or fail (`tests/tmp-cleanup.test.ts` refuses a bare `mkdtemp`). Before and after the suite, `npm test` removes leftover `graphyard-*` directories whose owning process is gone and `pg-password-*` files older than 10 minutes. A test file never holds an absolute calendar instant (`Date.UTC(YYYY, …)`, `new Date('YYYY-…')`, `Date.parse('YYYY-…')` or an ISO date literal) beside an unstubbed `Date.now()` or `new Date()`: derive instants from the test's fixed `now`, hand that `now` to the code under test, or stub `Date` where the reading runs (`clock.install` from `tests/helpers/soak-world.ts`, `mock.timers.enable({ apis: ['Date'] })`): a stub covers only the code that runs after it, until `mock.timers.reset()`, `clock.uninstall()` or the saved real `Date` assigned back restores the clock: at module scope it covers the file from the stub on (a module-scope reading above it ran at load), in a top-level `before`/`beforeEach` hook it covers the test bodies and the hooks that run after it but not module-scope code (which ran before any hook), and inside a test body it covers only that body from the stub to its restoration, so a reading in another test, in a helper, at module scope or after a restoration is still unstubbed; a stub quoted in a string installs nothing. `tests/no-wall-clock-time-bombs.test.ts` fails any file that does, naming both lines, and admits a file only through an allowance quoting the comment in it that documents why its absolute date is safe, bound to the calendar dates the file constructs and its count of unstubbed readings: a file that gains another instant or reading fails until its comment and allowance cover the new pair. Update the relevant guide under `docs/` when behavior changes. Keep external I/O outside coordination transactions.
 
 No secrets belong in Git. `.graphyard/credentials.json` and `.env` are local-only. Installation credentials belong under `~/.config/graphyard/<install>/` with mode 0600, never in a repository. Installation and deployment changes go through `src/install/`, the Dockerfile, `compose.yaml` and `deploy/helm/graphyard`; `.railway/railway.ts` describes this project's own personal Railway deployment and is not part of the generic path. Preview infrastructure changes with `graphyard install --plan` before applying, and keep the release contract (`scripts/verify-image-release.mjs`) and the chart exercise passing.
 
@@ -89,104 +89,3 @@ An observed merge alone does not end the loop. Ordinary review findings, rework,
 idle workers, and proof setup are not stopping conditions. Close finished agent
 sessions as part of the cycle.
 <!-- /graphyard -->
-
-<!-- graphyard-master -->
-## Graphyard master agent
-
-The recommended coordinator is a dedicated, visible master-agent session. It does
-not implement work, hold worker leases, submit evidence, or bypass gates. Run
-`graphyard master status` at startup and after every material event. Graphyard is
-the source of assignment and progression truth; Herdr supplies live session health.
-
-Autonomy is the default: act without asking. The operator sets goals; agents make
-every other call. Only three decisions are human: goals and priorities, spending money
-or opening third-party accounts, and issuing credentials to people. Every other
-decision names the agent that makes it and the independent agent that approves it.
-Create, release, unblock, and add requirements with your own operator-agent identity
-(`graphyard master create|release|unblock|requirements`). Request every other
-decision (requirement rewrites, escalation resolution, `manual:` attestation,
-rework, containment recovery, proof grants, and merge approval when automatic
-merging is off) with `graphyard master decide GY-N ACTION REASON`, then launch the
-independent approver with `graphyard master approver GY-N DECISION`, except for a
-low- or medium-lane rework, and a rework whose head failed a trusted proof, had its
-attestation refused or conflicts with its base in the control plane's own test merge,
-which the server applies as it is requested (`approvedBy: graphyard-risk-lane`), so
-no approver is launched for it.
-Put a `manual:` docs or criterion judgement to the attestation's approver rather than
-requesting a rework on it: the loop returns a refused head on its own. The loop
-watches that session as it watches its own approvers and closes it, recording why,
-once its decision settles or its item is delivered; it closes any other approver
-session left open the same way. The server
-refuses self-approval and any approver that held an assignment on the item or produced
-its evidence. Never ask a human to run a command an agent identity may run: `master
-status` names who resolves each attention item and the next command.
-
-Dispatch only ready work with `graphyard master dispatch GY-N PROFILE`. The
-worker must claim the item under its own identity and use the assigned worktree.
-Treat prompt delivery as an invitation, never as ownership. Use durable handoffs
-when an agent, provider account, machine, or context window changes.
-
-Review and proof collection start on their own. When a candidate passes the build gate
-the control plane records a review request and one producer request per proof group,
-each bound to the exact head, base and policy revision, and `graphyard master run`
-launches the configured reviewer profile and a producer session for each of them within
-30 seconds, without a keystroke, except that a reviewer launch first waits, up to
-`run.awaitReviewersMinutes` (default 8, 0 disables) from the request, for the automatic
-bot reviewers in `run.awaitReviewers` (default the Codex connector) to review the
-head, so their findings are judged in the same round; the wait is named in `master
-status`, and a failed GitHub read, or one unanswered within 5 seconds, launches at once. A head change cancels those
-sessions and requests the new head afresh unless the carry rules carried the
-approval or the proof. You handle
-findings, rework and merges; you never launch reviews or producers by hand. `master
-status` shows, per candidate, what is requested, what is running and since when, and
-any launch the loop refused; `graphyard master review GY-N [PROFILE]` is the recovery
-path for a refused reviewer launch once its cause is fixed. Never approve a candidate
-yourself, and never submit evidence. Reconcile branch protection with
-`graphyard master protection` after any review-policy change.
-
-GitHub administration of the managed repository is yours, not the operator's:
-control-plane App permission updates, acceptance of the installation permission
-request they raise, and branch-protection reconciliation. Use the API first
-(`graphyard master protection --apply`, `gh api` on protection; installation state
-comes from the control plane's App credential, not your gh token).
-When GitHub only offers a page — App manifest confirmation, permission-request
-acceptance, a sudo prompt — run `graphyard master browser app-permissions`,
-`graphyard master browser installation-accept`, or `graphyard master browser protection`.
-Each drives the operator's own authenticated browser profile headless, records every
-step and screenshot under `.graphyard/master-actions/`, verifies the result through
-the API, and appends an attributable audit entry. On a Confirm-access page the flow
-triggers GitHub Mobile (on a passkey-first page, through the "Use GitHub Mobile" link
-under "Having problems?", following its href if the click fails; a failed click is
-recorded with agent-browser's own error) and reports the two-digit code in
-`master status`; approving that prompt on their device, and the three human-only
-decisions above, are the only
-operator interactions left. Never store, export, or reuse the profile's cookies
-outside those flows.
-
-Keep cycling: status, dispatch ready work, shepherd review, reconcile what GitHub
-merged, then deployment verification. Repeat until both conditions hold:
-(1) every in-scope item is Done or has a genuinely external blocker recorded in
-Graphyard; and (2) every merged change is deployed and live-verified against the exact
-deployed release, or a genuinely external deployment blocker is recorded in Graphyard.
-Verify each delivery with `graphyard master verify-deployment GY-N`: it refuses a
-stale or local-only observation and records only the exact deployed release it observed.
-Delivered work is immutable, so a deployment blocker is recorded as a follow-up work
-item naming the delivered item, its merge commit, and the external cause;
-`master status` keeps the delivery under `pending` until the release serves it.
-An observed merge alone does not end the loop. Ordinary review findings, rework,
-idle workers, and proof setup are not stopping conditions. Close finished agent
-sessions as part of the cycle.
-
-Items are system-driven unless created with `"systemDriven": false`: for them
-`graphyard master run` dispatches and launches review, and the master CLI refuses those
-hand actions, naming the loop step. The loop drives an item created `"systemDriven": false`
-the same way; opting out only also allows the hand actions, so check master status
-for the loop's pending step before taking one and never request a second.
-GitHub merges: a pull request whose build, review and required checks pass on its head
-is merged by GitHub on its branch protection, and the loop only records the delivery.
-There is no Graphyard merge to run. A merge of a head whose gates had not passed is held
-as a violation until a two-party `graphyard master decide GY-N merge` reconciles it.
-Never use an administrative merge bypass, edit a candidate, or read a
-worker credential. Read `docs/master-agent.md`
-in Graphyard or run `graphyard master guide` for the complete operating loop.
-<!-- /graphyard-master -->

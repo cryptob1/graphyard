@@ -14,6 +14,7 @@ import { defineScenario } from '../src/scenarios.js';
 import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2000-01-01 expiresAt forces an attempt lapse that stays lapsed, and 2026-09-18 is the injected SigV4 signing clock; Date.now() builds deadlines and snapshot instants on the real clock only.
 
 /**
  * D4 acceptance checks of the turnkey delivery roadmap, one test per check, named

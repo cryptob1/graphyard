@@ -4,7 +4,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { z } from 'zod';
 import type { ChildRun } from '../child-runner.js';
-import { planeUnavailable } from '../model/refusal.js';
 
 /**
  * The external calls a cycle or a status build makes, by who answers them: the Graphyard server's
@@ -29,7 +28,10 @@ export const timingsSchema = z.object({
   steps: z.array(stepTimingSchema).max(recordedStepLimit),
   calls: z.array(callTimingSchema).max(recordedCallLimit),
   slowCalls: z.number().int().min(0),
-  /** Wall time at least one server request was in flight that the control plane then did not answer (GY-1344); absent when none. */
+  /**
+   * Wall time at least one server request was in flight on the control plane, answered or not, overlaps counted once:
+   * the plane's time, not the loop's (GY-1344 for unanswered requests, GY-1562 for slow answers). Absent when none.
+   */
   planeWaitMs: z.number().int().min(0).optional(),
 }).strict();
 export type StepTiming = z.infer<typeof stepTimingSchema>;
@@ -67,11 +69,11 @@ export class Timings {
     this.calls.sort((a, b) => b.ms - a.ms);
     if (this.calls.length > recordedCallLimit) this.calls.length = recordedCallLimit;
   }
-  /** The recorder's own clock, which the requests the plane did not answer are placed on. */
+  /** The recorder's own clock, which the server requests' in-flight windows are placed on. */
   clock() { return this.now(); }
-  /** Records a server request the control plane did not answer (`planeUnavailable`), from its start to its end. */
+  /** Records a server request's in-flight window on the control plane, from its start to its end, answered or not. */
   planeWait(from: number, to: number) { if (to > from) this.unanswered.push([from, to]); }
-  /** The wall time covered by the requests the plane did not answer, overlaps counted once. */
+  /** The wall time covered by server requests in flight, overlaps counted once. */
   planeWaitMs() {
     let total = 0, reach = -Infinity;
     for (const [from, to] of [...this.unanswered].sort((a, b) => a[0] - b[0])) { if (to > reach) { total += to - Math.max(from, reach); reach = to; } }
@@ -96,15 +98,13 @@ export async function timedCall<T>(kind: ExternalCallKind, name: string, body: (
   const timings = currentTimings();
   if (!timings) return body();
   const at = now(), from = timings.clock();
-  try {
-    const result = await body();
-    // A proxy's 502-504 in place of the server's answer is the plane not answering, as a refused or timed-out request is.
-    if (kind === 'server' && result instanceof Response && result.status >= 502 && result.status <= 504) timings.planeWait(from, timings.clock());
-    return result;
-  } catch (error) {
-    if (kind === 'server' && planeUnavailable(error)) timings.planeWait(from, timings.clock());
-    throw error;
-  } finally { timings.call(kind, name, now() - at); }
+  // Every server request's in-flight window is the plane's time, answered or not (GY-1562): a plane answering in 15 s is
+  // a slow plane, not a slow loop. A hung or refusing plane keeps its own alarm (planeUnavailable → plane-unavailable).
+  try { return await body(); }
+  finally {
+    if (kind === 'server') timings.planeWait(from, timings.clock());
+    timings.call(kind, name, now() - at);
+  }
 }
 
 /**

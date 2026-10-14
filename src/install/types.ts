@@ -1,8 +1,9 @@
 /**
  * `host` is the self-contained target (GY-717): one existing Linux machine, reached over SSH, that
- * runs the server, Postgres, the master loop, executors, Herdr and the agent runtimes.
+ * runs the server, Postgres, the master loop, executors, Herdr and the agent runtimes. `local`
+ * (GY-1500) runs the server on this machine against an embedded Postgres cluster, with no Docker.
  */
-export const providers = ['railway', 'hetzner', 'docker-host', 'compose', 'host'] as const;
+export const providers = ['railway', 'hetzner', 'docker-host', 'compose', 'host', 'local'] as const;
 export type Provider = (typeof providers)[number];
 export type Role = 'admin' | 'coordinator' | 'worker' | 'reader' | 'producer';
 /** The session kind a principal declares, as the server's principal schema accepts it. */

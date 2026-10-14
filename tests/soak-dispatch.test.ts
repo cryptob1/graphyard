@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import type { FleetClient } from '../src/fleet.js';
+import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { readAccountStartFailures, readProfileLaunchRecords } from '../src/master/dispatch.js';
 import { dispatchFailureBlockAfter } from '../src/daemon/dispatch-failures.js';
 import { fleetIdleCause, maxAutomaticClears } from '../src/model/blocker-class.js';
@@ -52,7 +54,7 @@ test('unit:soak-invariants-hold — an item whose worktree the host cannot build
   assert.ok(!failedRecord || /workspace could not be prepared/.test(failedRecord[1].detail), 'a kept failure record names the workspace, not the profile');
 });
 
-test('unit:soak-invariants-hold — start failures on the real dispatch path fall forward across the day: three consecutive failures of one account across items raise one attention item, a later start on the account clears it, and every failed pane is closed at its bound', { timeout: 300_000 }, async () => {
+test('unit:soak-dispatch-start-failures — every invariant holds as start failures on the real dispatch path fall forward across the day, each item launched once per dispatch: three consecutive failures of one account across items raise one attention item, a later start on the account clears it, and every failed pane is closed at its bound', { timeout: 300_000 }, async () => {
   // GY-417: account failover and the failure ledger repeat per dispatch, so the real loop runs a
   // day whose every dispatch goes through `dispatchWork` on a master root whose OpenCode account's
   // runtime never comes up: each launch falls forward to the Claude account, is recorded, and is
@@ -108,6 +110,124 @@ test('unit:soak-invariants-hold — start failures on the real dispatch path fal
   assert.equal(record.runtime, 'opencode');
   assert.deepEqual(record.failedAccounts, []);
   assert.deepEqual(await readAccountStartFailures(master), {}, 'the healthy start cleared the account\'s run of failures');
+});
+
+test('unit:soak-dispatch-pi-fallback — every invariant holds as the registry sends each item to a Pi account first: Pi launches that never start fall forward to the strong account in the same dispatch, a healthy Pi account starts again and clears its run', { timeout: 300_000 }, async () => {
+  // GY-1746: the worker role lists the strong account ahead of two Pi accounts, and the dispatch
+  // path (`dispatchWork` -> the registry's choice) puts Pi first for a low or medium risk item. The
+  // first three dispatches find Pi's runtime never coming up: each Pi account is recorded as
+  // failed and the strong account takes the same dispatch. The fourth finds Pi healthy.
+  const { root, master } = await failoverInstalled();
+  const host = master.hostId ?? 'unknown-host', at = new Date().toISOString();
+  let registry: AgentRegistry = applyRegistryMutation(emptyRegistry(), 'apply', { runtimes: proposedRuntimes.filter(runtime => ['pi', 'claude'].includes(runtime.name)),
+    models: [{ name: 'glm', id: 'zai/glm-5.3' }, { name: 'opus', id: 'claude-opus-5' }],
+    accounts: [{ name: 'claude-b', runtime: 'claude', model: 'opus', credential: { host, home: null } }, { name: 'pi-a', runtime: 'pi', model: 'glm', credential: { host, home: null } }],
+    roles: [{ name: 'worker', accounts: ['claude-b', 'pi-a'], concurrency: 10 }], reason: 'fixture' }, { actor: 'operator', at }).registry;
+  const client: FleetClient = {
+    document: async () => structuredClone(registry),
+    select: async request => {
+      const choice = chooseSession(registry, request, Date.now());
+      if (!choice.account) return { selected: false, reason: choice.reason, skipped: choice.skipped, session: null, account: null, runtime: null, model: null, revision: registry.revision };
+      const session: FleetSession = { id: `session-${registry.sessions.length + 1}`, role: request.role, account: choice.account.name, runtime: choice.runtime.name, model: choice.model.name, host: request.host, work: request.work, principal: request.principal, group: request.group,
+        selectedAt: at, selectedBy: 'master', reason: choice.reason, skipped: choice.skipped, endedAt: null, endReason: null };
+      registry = { ...registry, sessions: [...registry.sessions, session] };
+      return { selected: true, reason: choice.reason, skipped: choice.skipped, session, account: choice.account, runtime: choice.runtime, model: choice.model, policy: choice.policy, revision: registry.revision };
+    },
+    end: async (id, reason) => { registry = { ...registry, sessions: registry.sessions.map(session => session.id === id ? { ...session, endedAt: at, endReason: reason } : session) }; },
+  };
+  const world = new FailoverWorld(new Set(['pi']));
+  const { final, violations, failures, lost, failover } = await simulateDay({
+    hours: 3, failover: { root, master, world, dispatches: [], samples: [], probe: { registry: client, quota: false, cacheMs: 0 } as never, lane: 'low' },
+    plan: { items: 5, releaseEveryMs: 5 * minute, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 5, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 5 } },
+  });
+  assert.ok(failover, 'the day ran the registry-backed scenario');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all five items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds across the Pi launches and their fallbacks');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  assert.deepEqual(world.kinds, ['pi', 'claude', 'pi', 'claude', 'pi', 'claude', 'pi', 'pi'], `Pi is tried first for every item; three fell forward to the strong account and the last two started on Pi: ${world.kinds.join(', ')}`);
+  assert.equal(world.closedBrokenPanes, 3, 'each Pi runtime that never started had its pane closed at the start bound');
+  assert.deepEqual(failover.samples.map(sample => sample.failures['pi-a']?.failures ?? 0), [1, 2, 3, 0, 0], 'the account records one failure per launch and the healthy start clears them');
+  assert.deepEqual(failover.dispatches.map(dispatched => dispatched.account!.environment), ['claude-b', 'claude-b', 'claude-b', 'pi-a', 'pi-a']);
+  assert.deepEqual(await readAccountStartFailures(master), {}, 'the healthy start cleared the account\'s run of failures');
+});
+
+test('unit:soak-dispatch-preference-by-risk — every invariant holds as the registry sends each item by the risk class of its planned change and never by its lane: a sensitive planned path rides the strong account although the Pi account is eligible and healthy all day, and a normal plan rides Pi even from a high lane', { timeout: 300_000 }, async () => {
+  // GY-1772: the preference the dispatch path computes (`workerPreference` in `dispatchWork`, the
+  // registry's `workerOrder` on its answer) reads the item's `plannedFiles` against the risk class's
+  // sensitive rules and never the lane, per item and per cycle. Every item here plans its change
+  // before any launch and Pi stays healthy and eligible throughout, so the account each dispatch
+  // starts is the preference's own answer: items 1, 2 and 5 plan a sensitive path (persistence,
+  // migrations, deployment) and ride the strong account although Pi could have taken them; items 3
+  // and 4 plan normal files and start on Pi — item 3 with its dispatch call overridden to the high
+  // lane (the override shapes what `dispatchWork` is handed, not the lane the day's stamping stores,
+  // which the assertions below read), item 4 as the day's unknown-change observations stamp one
+  // anyway. An item that plans no files is judged the same worst case by the unit suite; a day
+  // cannot deliver one, since nothing outside an empty plan may change, so the sensitive plans
+  // stand for the class here.
+  const { root, master } = await failoverInstalled();
+  const host = master.hostId ?? 'unknown-host', at = new Date().toISOString();
+  let registry: AgentRegistry = applyRegistryMutation(emptyRegistry(), 'apply', { runtimes: proposedRuntimes.filter(runtime => ['pi', 'claude'].includes(runtime.name)),
+    models: [{ name: 'glm', id: 'zai/glm-5.3' }, { name: 'opus', id: 'claude-opus-5' }],
+    accounts: [{ name: 'claude-b', runtime: 'claude', model: 'opus', credential: { host, home: null } }, { name: 'pi-a', runtime: 'pi', model: 'glm', credential: { host, home: null } }],
+    roles: [{ name: 'worker', accounts: ['claude-b', 'pi-a'], concurrency: 10 }], reason: 'fixture' }, { actor: 'operator', at }).registry;
+  const asked: { work: string | null; prefer: 'fast' | 'strong' | undefined; account: string | null }[] = [];
+  const client: FleetClient = {
+    document: async () => structuredClone(registry),
+    select: async request => {
+      const choice = chooseSession(registry, request, Date.now());
+      asked.push({ work: request.work, prefer: request.prefer, account: choice.account?.name ?? null });
+      if (!choice.account) return { selected: false, reason: choice.reason, skipped: choice.skipped, session: null, account: null, runtime: null, model: null, revision: registry.revision };
+      const session: FleetSession = { id: `session-${registry.sessions.length + 1}`, role: request.role, account: choice.account.name, runtime: choice.runtime.name, model: choice.model.name, host: request.host, work: request.work, principal: request.principal, group: request.group,
+        selectedAt: at, selectedBy: 'master', reason: choice.reason, skipped: choice.skipped, endedAt: null, endReason: null };
+      registry = { ...registry, sessions: [...registry.sessions, session] };
+      return { selected: true, reason: choice.reason, skipped: choice.skipped, session, account: choice.account, runtime: choice.runtime, model: choice.model, policy: choice.policy, revision: registry.revision };
+    },
+    end: async (id, reason) => { registry = { ...registry, sessions: registry.sessions.map(session => session.id === id ? { ...session, endedAt: at, endReason: reason } : session) }; },
+  };
+  const world = new FailoverWorld(new Set());
+  const { items, final, violations, failures, lost, failover } = await simulateDay({
+    hours: 3, failover: { root, master, world, dispatches: [], samples: [], probe: { registry: client, quota: false, cacheMs: 0 } as never,
+      plannedFiles: { 1: ['src/store/soak-item-1.ts'], 2: ['src/soak/item-2.ts', 'migrations/schema/0042_soak.sql'], 5: ['deploy/soak-item-5.env'] }, lanes: { 3: 'high', 4: 'high' } },
+    plan: { items: 5, releaseEveryMs: 5 * minute, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 5, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 5 } },
+  });
+  assert.ok(failover, 'the day ran the registry-backed scenario');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all five items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds across the risk-class selections');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  assert.deepEqual(new Set(failover.dispatches.map(dispatched => dispatched.work)), new Set(items.map(item => item.key)), 'each item was dispatched exactly once');
+  assert.equal(world.closedBrokenPanes, 0, 'no pane was closed for a failed start: every ordered account started');
+  // One launch per dispatch, on the runtime the preference ordered: a strong plan's account is the
+  // strong runtime, a fast plan's is Pi. The strong items queue on the strong account while it is
+  // busy, so the day dispatches them in whatever order the account frees; the selection is what
+  // must not vary.
+  assert.equal(world.kinds.length, failover.dispatches.length, 'each dispatch launched exactly one session');
+  for (const [index, dispatched] of failover.dispatches.entries()) {
+    assert.equal(dispatched.account!.prefer, dispatched.work === items[0].key || dispatched.work === items[1].key || dispatched.work === items[4].key ? 'strong' : 'fast', `${dispatched.work} was sent by its planned change's class`);
+    assert.equal(dispatched.account!.environment, dispatched.account!.prefer === 'strong' ? 'claude-b' : 'pi-a', `${dispatched.work} started on the account the preference ordered`);
+    assert.equal(world.kinds[index], dispatched.account!.prefer === 'strong' ? 'claude' : 'pi', `${dispatched.work} launched the ${world.kinds[index]} runtime the preference ordered`);
+    assert.equal(dispatched.fallback, null, `${dispatched.work} fell forward to no second account`);
+  }
+  // The registry was asked once per item with exactly the preference the plan's class gives, and
+  // the strong asks found Pi eligible all the same: the same healthy account takes the fast items
+  // the same day, so strong was a choice, never a shortage.
+  for (const [n, prefer] of [[1, 'strong'], [2, 'strong'], [3, 'fast'], [4, 'fast'], [5, 'strong']] as const) {
+    const request = asked.find(entry => entry.work === items[n - 1].key);
+    assert.ok(request, `the registry was asked for ${items[n - 1].key}`);
+    assert.equal(request!.prefer, prefer, `${items[n - 1].key} was asked with preference ${prefer}`);
+  }
+  // The lane never decided: both fast items rode a high lane on a normal plan and still took Pi. The
+  // stored lane read here is the day's stamping for both; item 3's `lanes` override only shaped the
+  // item handed to `dispatchWork`, which is where the preference would have read it had it read lanes.
+  for (const n of [3, 4]) assert.equal(final.find(item => item.key === items[n - 1].key)!.lane, 'high', `${items[n - 1].key} rode a high lane and still started on Pi`);
+  // The last dispatch record names the preference that ordered its accounts, beside the account it chose.
+  const last = failover.dispatches.at(-1)!;
+  const record = (await readProfileLaunchRecords(root, [{ name: 'soak-failover' }]))['soak-failover'];
+  assert.equal(record.key, last.work);
+  assert.equal(record.prefer, last.account!.prefer, 'the launch record keeps the preference the dispatch judged');
+  assert.equal(record.account, last.account!.environment);
+  assert.deepEqual(record.failedAccounts, []);
 });
 
 test('unit:soak-invariants-hold — launches that keep failing for one cause are blocked after three with git\'s error named, a refused block is asked for again only after its backoff, the item is dispatched again once unblocked, an item failing for changing causes is never blocked, and every invariant holds', { timeout: 300_000 }, async () => {

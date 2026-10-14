@@ -38,7 +38,7 @@ export interface SessionHandle {
   /** The slot this session occupies — its kind, plus the proof group for a proof session — so two sessions claiming one slot are recognisable as such. */
   role: string | null;
   /** The exact commit this session is bound to, when it is bound to one; a session for a head the item has moved past is superseded. */
-  head: string | null;
+  head: string | null; /** When `head` was last recorded as a different commit (GY-1460): a push, which a rewrite of the same head never moves. */ headAt?: string;
   /** The command or link the launcher says attaches to this session while it runs. */
   attach: string | null;
   /** Where the session writes its transcript, so a finished session is still readable. */
@@ -117,11 +117,11 @@ export function attachCommand(handle: Pick<SessionHandle, 'state' | 'attach' | '
   if (handle.transcript) return `${handle.host}:${handle.transcript}`;
   return 'no attach command and no transcript were recorded for this session';
 }
-
 const observation = (input: SessionHandleInput, existing: SessionHandle | undefined) => {
   const observed = input.observed ?? existing?.observed, observedAt = input.observedAt ?? existing?.observedAt, missed = input.missedReports ?? existing?.missedReports;
   return { ...(observed ? { observed } : {}), ...(observedAt ? { observedAt } : {}), ...(missed ? { missedReports: missed } : {}) };
 };
+const headMoved = (input: SessionHandleInput, existing: SessionHandle | undefined, at: string) => (headAt => headAt ? { headAt } : {})(input.head && input.head !== existing?.head ? at : existing?.head ? existing.headAt : undefined);
 /** Record or update one handle on the item, newest last, bounded. */
 export function recordSession(work: Work, input: SessionHandleInput, principal: string, now: Date): SessionHandle {
   work.sessions ??= [];
@@ -154,7 +154,7 @@ export function recordSession(work: Work, input: SessionHandleInput, principal: 
     // The observation is the loop's to write; a launcher or the session itself updating its
     // coordinates keeps the last one, and a reopened handle starts without the previous session's.
     // So does the attempt holding the handle: a write without a token (the report, the session) keeps it.
-    ...observation(input, reopened ? undefined : existing),
+    ...observation(input, reopened ? undefined : existing), ...headMoved(input, existing, at),
     ...((input.launch ?? existing?.launch) ? { launch: input.launch ?? existing?.launch } : {}),
   };
   work.sessions = bounded([...work.sessions.filter(entry => entry.id !== input.id), handle], handle);

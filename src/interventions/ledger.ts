@@ -3,6 +3,7 @@ import type pg from 'pg';
 import type { Work } from '../model.js';
 import type { ReworkGroundsWork } from '../rework-grounds.js';
 import { applyWorkDelta, type DeltaOp } from '../store/snapshot-delta.js';
+import { detoasted } from '../store/coordination-sql.js';
 import { extendedGrounds, interventionLedgerSince, reworkGroundsSql, windowOutcomes, withDecisionsBeyondReach } from '../intervention-exemptions.js';
 
 /** The event kinds the fold reads. Every other row of the ledger is left unread. */
@@ -15,6 +16,20 @@ export const interventionLedgerKinds = [
 ] as const;
 /** The newest rows of those kinds a reading folds; older signals are outside the report's reach and the report says so. */
 export const interventionLedgerLimit = 20_000;
+/**
+ * Ledger rows a periodic reader has already projected (GY-1749), by seq. A row of the ledger is never
+ * rewritten, so a reader that reads the same window every minute (the server's pattern scan) keeps
+ * what it projected and asks the database for the rows written since, not for the window again: each
+ * projection decompresses a stored document, and a window of twenty thousand rows decompressed them
+ * all, twice a minute. A cached row is trusted only while the cheap columns read beside it (kind,
+ * work item, insertion instant) still match, so a ledger replaced under the same seqs reads afresh.
+ * Bounded by the window: what a read no longer picks is dropped.
+ */
+export class LedgerRowCache {
+  readonly rows = new Map<string, { stamp: string; row: any }>();
+  readonly bases = new Map<number, { workId: string | null; work: Record<string, any> | null; grounds: Record<string, any> | null; groundsRead: boolean }>();
+  static readonly baseLimit = 5_000;
+}
 /** One ledger row as the fold reads it: the typed details, and the few document paths the row embeds. */
 export interface InterventionLedgerRow {
   seq: number; workId: string | null; actor: string; kind: string; at: string;
@@ -24,8 +39,17 @@ export interface InterventionLedgerRow {
   /** On a `rework` row only: the document fields its grounds are read from (`routineReworkGround`, GY-1386). */
   grounds?: ReworkGroundsWork | null;
   work?: { key?: string | null; stage?: string | null; title?: string | null; epoch?: number | null; blocker?: string | null; plannedFiles?: string[] | null; quarantine?: unknown; escalations?: { trigger: string; at: string; reason: string; actor: string }[] | null; candidate?: { sha: string; pr: number } | null; submission?: { epoch: number; pr: number } | null } | null;
+  /** On a `requirements` row only: the plan every item closed as a duplicate of this one held just before the row (`readAbsorbedPlans`, GY-1719). */
+  absorbed?: string[];
 }
 type Db = { query: pg.Pool['query'] };
+/**
+ * The events a condition selects, each with its payload read from storage once. A stored payload is a
+ * TOAST pointer and every `payload->` in a projection decompresses the whole document again;
+ * concatenating an empty object materialises it once, and `OFFSET 0` keeps the planner from inlining
+ * that back into each reference (`detoasted`, store/coordination-sql.ts). Select it as `events`.
+ */
+const readPayloadOnce = (condition: string) => `(SELECT seq, work_id, actor, kind, created_at, ${detoasted('payload')} AS payload FROM events WHERE ${condition} OFFSET 0) events`;
 /** A provider or ledger instant in the one form the report compares: ISO with milliseconds. */
 export const instant = (value: unknown, fallback: string) => { const parsed = typeof value === 'string' ? Date.parse(value) : Number.NaN; return Number.isFinite(parsed) ? new Date(parsed).toISOString() : fallback; };
 /** The document fields the fold reads (`InterventionLedgerRow['work']`), with the document field each comes from. */
@@ -56,8 +80,21 @@ const workOf = (document: Record<string, any> | null): InterventionLedgerRow['wo
  * whole or as a delta. A delta is only ever written on the item's newest whole row and only when
  * the stage is unchanged (`appendSave`, under the coordination lock every ledger write takes), so
  * that stage is the stage of the item's newest earlier whole row — read from the timeline.
+ *
+ * `retainedFrom` is where the record the rows hold is whole (GY-1682): the insertion instant of the
+ * oldest row the read retained, whatever its kind — the oldest of the `limit` newest rows, or of
+ * the window when nothing was cut from it. Every row inserted from it on is among `rows`; the rows
+ * the read adds beside the window — the requests of decisions the window settles
+ * (`withDecisionsBeyondReach`) — precede it and are not it, nor are the pre-window decision rows
+ * the window drops (`windowOutcomes`). A retained decision row written inside the window is as
+ * much the window's as any other, so the kind of a row never decides it. The instant is the
+ * insertion's, never a retained row's own earlier `updatedAt`: the rows the cut omitted were
+ * inserted before the cutoff, so an earlier instant would hold omitted rows and the record would
+ * not be whole from it. When the newest omitted row shares the cutoff's instant — rows one
+ * transaction wrote together, cut between — the reach steps to the first retained row inserted
+ * after that instant, or `null` when none is. `null` also when the read retained no row at all.
  */
-export async function readInterventionLedger(db: Db, options: { limit?: number; workId?: string | null; since?: string | null } = {}): Promise<{ rows: InterventionLedgerRow[]; truncated: boolean }> {
+export async function readInterventionLedger(db: Db, options: { limit?: number; workId?: string | null; since?: string | null; cache?: LedgerRowCache } = {}): Promise<{ rows: InterventionLedgerRow[]; truncated: boolean; retainedFrom: string | null }> {
   const limit = options.limit ?? interventionLedgerLimit;
   const columns = `seq, work_id, actor, kind, created_at, payload->'details' AS details,
       CASE WHEN kind LIKE 'decision.%' OR kind IN ('intervention.recorded','judgement.recorded') THEN payload ELSE NULL END AS top,
@@ -69,14 +106,40 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
   // week's heartbeats — to find the few it reads. The bounds are written as row comparisons on
   // (kind, created_at), which only that index serves, and `OFFSET 0` keeps each kind's read a
   // subquery of its own so it is not flattened back into that walk.
-  const result = options.since
-    ? await db.query(`SELECT windowed.* FROM unnest($1::text[], $4::timestamptz[]) AS wanted(kind, since)
-        CROSS JOIN LATERAL (SELECT ${columns} FROM events
+  // The newest `limit + 1` of them are picked by `seq` alone, and only those rows are projected, and
+  // each from its payload read once (`readPayloadOnce`, GY-1749): the projection used to run for every
+  // row of the window, before the ordering cut it, and every `payload->` in it decompressed the whole
+  // stored document again — a quarter of a million document reads for a minute's scan.
+  const cache = options.since ? options.cache : undefined;
+  const windowed = `SELECT windowed.seq, windowed.kind, windowed.work_id, windowed.created_at::text AS stamp FROM unnest($1::text[], $4::timestamptz[]) AS wanted(kind, since)
+        CROSS JOIN LATERAL (SELECT seq, kind, work_id, created_at FROM events
           WHERE (kind, created_at) >= (wanted.kind, wanted.since) AND (kind, created_at) <= (wanted.kind, 'infinity'::timestamptz) AND ($3::uuid IS NULL OR work_id=$3) OFFSET 0) windowed
-        ORDER BY seq DESC LIMIT $2`, [[...interventionLedgerKinds], limit + 1, options.workId ?? null, interventionLedgerKinds.map(kind => interventionLedgerSince(kind, options.since!))])
-    : await db.query(`SELECT ${columns} FROM events WHERE kind = ANY($1) AND ($3::uuid IS NULL OR work_id=$3) ORDER BY seq DESC LIMIT $2`, [[...interventionLedgerKinds], limit + 1, options.workId ?? null]);
+        ORDER BY windowed.seq DESC LIMIT $2`;
+  const sinceValues = (since: string) => [[...interventionLedgerKinds], limit + 1, options.workId ?? null, interventionLedgerKinds.map(kind => interventionLedgerSince(kind, since))];
+  let result: { rows: any[] };
+  if (cache && options.since) {
+    // Pick the newest rows by seq alone, then project only those the cache does not hold.
+    const picked = (await db.query(windowed, sinceValues(options.since))).rows;
+    const missing = picked.filter(row => cache.rows.get(String(row.seq))?.stamp !== `${row.kind}|${row.work_id}|${row.stamp}`).map(row => String(row.seq));
+    if (missing.length) for (const row of (await db.query(`SELECT ${columns}, created_at::text AS stamp FROM ${readPayloadOnce('seq = ANY($1::bigint[])')}`, [missing])).rows)
+      cache.rows.set(String(row.seq), { stamp: `${row.kind}|${row.work_id}|${row.stamp}`, row });
+    const kept = new Set(picked.map(row => String(row.seq)));
+    for (const seq of cache.rows.keys()) if (!kept.has(seq)) cache.rows.delete(seq);
+    result = { rows: picked.map(row => cache.rows.get(String(row.seq))?.row).filter(row => row !== undefined) };
+  } else result = options.since
+    ? await db.query(`SELECT ${columns} FROM ${readPayloadOnce(`seq IN (${windowed.replace('SELECT windowed.seq, windowed.kind, windowed.work_id, windowed.created_at::text AS stamp', 'SELECT windowed.seq')})`)} ORDER BY seq DESC`, sinceValues(options.since))
+    : await db.query(`SELECT ${columns} FROM (SELECT seq, work_id, actor, kind, created_at, payload || '{}'::jsonb AS payload FROM events WHERE kind = ANY($1) AND ($3::uuid IS NULL OR work_id=$3) ORDER BY seq DESC LIMIT $2) events ORDER BY seq DESC`, [[...interventionLedgerKinds], limit + 1, options.workId ?? null]);
   const truncated = result.rows.length > limit;
   let window = result.rows.slice(0, limit).reverse();
+  // The oldest row the read retained, before the window drops or adds any row: the record is whole
+  // from its insertion instant on, unless the newest row the cut omitted was inserted in that same
+  // instant — then from the first retained row inserted after it.
+  const inserted = (row: { created_at: string | Date }) => new Date(row.created_at).toISOString();
+  let retainedFrom = window[0] ? inserted(window[0]) : null;
+  if (retainedFrom !== null && truncated && inserted(result.rows[limit]) >= retainedFrom) {
+    const shared = retainedFrom, next = window.find(row => inserted(row) > shared);
+    retainedFrom = next ? inserted(next) : null;
+  }
   if (options.since) window = await withDecisionsBeyondReach(db, windowOutcomes(window, options.since), columns);
 
   // The full snapshots the window's deltas extend, once each.
@@ -84,8 +147,17 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
   const baseSeqs = [...new Set(window.flatMap(row => row.work_id && isObject(row.delta) && Number.isSafeInteger(Number(row.delta.base)) ? [Number(row.delta.base)] : []))];
   // A rework delta's base also yields its grounds fields (GY-1386), extended by the delta's ops on them.
   const groundBases = new Set(window.flatMap(row => row.kind === 'rework' && isObject(row.delta) ? [Number(row.delta.base)] : []));
-  if (baseSeqs.length) for (const row of (await db.query(`SELECT seq, work_id, ${projectedWork("payload->'work'")} AS work, CASE WHEN seq = ANY($2::bigint[]) THEN ${reworkGroundsSql("payload->'work'")} END AS grounds FROM events WHERE seq = ANY($1::bigint[])`, [baseSeqs, [...groundBases]])).rows)
-    bases.set(Number(row.seq), { workId: row.work_id, work: row.work, grounds: row.grounds ?? null });
+  // A base is a stored document too, and as immutable as the row that extends it: a cached read keeps it (grounds only once asked for).
+  const needed = baseSeqs.filter(seq => { const held = cache?.bases.get(seq); return !held || (groundBases.has(seq) && !held.groundsRead); });
+  if (needed.length) for (const row of (await db.query(`SELECT seq, work_id, ${projectedWork("payload->'work'")} AS work, CASE WHEN seq = ANY($2::bigint[]) THEN ${reworkGroundsSql("payload->'work'")} END AS grounds FROM ${readPayloadOnce('seq = ANY($1::bigint[])')}`, [needed, [...groundBases]])).rows) {
+    const base = { workId: row.work_id, work: row.work, grounds: row.grounds ?? null, groundsRead: groundBases.has(Number(row.seq)) };
+    if (cache) cache.bases.set(Number(row.seq), base);
+    bases.set(Number(row.seq), base);
+  }
+  if (cache) {
+    for (const seq of baseSeqs) if (!bases.has(seq) && cache.bases.has(seq)) bases.set(seq, cache.bases.get(seq)!);
+    while (cache.bases.size > LedgerRowCache.baseLimit) cache.bases.delete(cache.bases.keys().next().value!);
+  }
 
   // Each item's stage timeline over its span of the window, and the whole row before that span.
   const spans = new Map<string, { from: number; to: number }>();
@@ -131,5 +203,26 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
     return { seq, workId: row.work_id, actor: row.actor, kind: row.kind, at: instant(updatedAt, new Date(row.created_at).toISOString()), details: row.details, payload: row.top ?? undefined,
       work: row.whole || document ? workOf(document) : null, stageBefore, ...(row.kind === 'rework' ? { grounds: grounds as ReworkGroundsWork | null } : {}) };
   });
-  return { rows, truncated };
+  return { rows, truncated, retainedFrom };
+}
+
+/**
+ * GY-1719: sets each `requirements` row's `absorbed` — the plan of every item the record closes as a
+ * duplicate of the row's item, as that duplicate's own newest document before the row held it. One
+ * set read reaching past the window and every kind, so a plan set at create or before the window is
+ * found; a plan the duplicate gained after the row, or a duplicate created after it, is not. Every
+ * reader that folds the ledger calls it after `readInterventionLedger`, whose own reads stay three.
+ */
+export async function readAbsorbedPlans(db: Db, rows: InterventionLedgerRow[]) {
+  const revisions = rows.filter(row => row.kind === 'requirements' && row.workId && row.work?.key);
+  if (!revisions.length) return;
+  const result = await db.query(`WITH duplicates AS (SELECT id, document->'closure'->>'ref' AS ref FROM work_items
+      WHERE document->'closure'->>'kind' = 'duplicate' AND document->'closure'->>'ref' = ANY($2::text[]))
+    SELECT r.seq, plan.planned FROM unnest($1::bigint[], $2::text[]) AS r(seq, key) JOIN duplicates d ON d.ref = r.key
+      CROSS JOIN LATERAL (SELECT graphyard_event_work(e.work_id, e.payload)->'plannedFiles' AS planned FROM events e
+        WHERE e.work_id = d.id AND e.seq < r.seq AND (e.payload ? 'work' OR e.payload ? 'delta') ORDER BY e.seq DESC LIMIT 1) plan`,
+  [revisions.map(row => row.seq), revisions.map(row => row.work!.key!)]);
+  const plans = new Map<number, string[]>();
+  for (const row of result.rows) if (Array.isArray(row.planned)) plans.set(Number(row.seq), [...plans.get(Number(row.seq)) ?? [], ...row.planned.filter((path: unknown): path is string => typeof path === 'string')]);
+  for (const row of revisions) row.absorbed = plans.get(row.seq) ?? [];
 }

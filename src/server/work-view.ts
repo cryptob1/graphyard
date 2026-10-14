@@ -44,7 +44,7 @@ export const coordinationRecordLimit = 3, coordinationSessionLimit = 5;
 export const coordinationViewHeader = 'X-Graphyard-View';
 
 /** The rework-round count the coordination view keeps of an open item's dropped pipeline timeline (GY-1389). */
-export type CoordinationRounds = { reworkRounds?: number };
+export type CoordinationRounds = { reworkRounds?: number; attemptCount?: number };
 
 export interface CoordinationOmissions { evidence: number; dispatchHistory: number; queueHistory: number; actionHistory: number; sessions: number }
 
@@ -96,6 +96,8 @@ export function coordinationWork(work: Work, omitted: CoordinationOmissions): Wo
   return {
     ...decisions, evidence, observation,
     ...(!settled && pipeline && typeof pipeline === 'object' && 'reworkRounds' in pipeline ? { reworkRounds: pipeline.reworkRounds } : {}),
+    // The attempts already made (GY-1746): worker dispatch counts every ended epoch, not only rework rounds.
+    ...(!settled && pipeline && typeof pipeline === 'object' && Array.isArray((pipeline as any).attempts) ? { attemptCount: (pipeline as any).attempts.length } : {}),
     ...(dispatch ? { autoDispatch: { ...dispatch, history: recentHistory } } : {}),
     ...(queueHistory ? { queueHistory } : {}),
     ...(actions ? { actionQueue: { ...actions, history: actionHistory! } } : {}),

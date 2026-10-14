@@ -1,14 +1,17 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { createServer } from 'node:http';
+import { readFile, realpath, stat } from 'node:fs/promises';
+import { extname, join, resolve, sep } from 'node:path';
 
 /**
  * Release candidates: one moving main, a frozen candidate, UAT, then that exact SHA in production.
  *
- * A candidate is cut from main's tip on a schedule or on demand and recorded as an annotated tag
- * `rc/ID` on that exact commit, whose message is the candidate record: its SHA, when and why it
- * was cut, and the delivered items promoting it would bring to production. Cutting writes a tag
+ * A candidate is cut from main on a schedule or on demand and recorded as an annotated tag `rc/ID`
+ * on that exact commit, whose message is the candidate record: its SHA, when and why it was cut,
+ * and the delivered items promoting it would bring to production. It carries at most `maxPrs`
+ * merges after the previous candidate (GY-1491): main's tip, or the commit of that many merges. Cutting writes a tag
  * and nothing else, so merges to main never pause while a candidate is under test.
  *
  * UAT and production are Railway environments whose service tracks a branch of its own
@@ -17,7 +20,7 @@ import { join } from 'node:path';
  * `rc-uat/ID` and only a passing record whose deployment served the candidate SHA lets
  * `release/production` move to it, recorded as `rc-production/ID`. A failed candidate files one
  * follow-up item naming the failing suite and the SHA, changes nothing about the deliveries it
- * contains, and the next cut proceeds from main's tip (fix forward). A failure the release contract
+ * contains, and the next cut starts after it (fix forward). A failure the release contract
  * attributes to a customer outcome is a release hold instead (src/release-holds.ts, GY-1378).
  */
 
@@ -26,8 +29,44 @@ export const productionBranch = 'release/production';
 export const candidateTagPrefix = 'rc/';
 export const uatTagPrefix = 'rc-uat/';
 export const productionTagPrefix = 'rc-production/';
+/** GY-1513: the advisory soak's verdict, recorded on the candidate's SHA by release-candidate-soak.yml once its run concludes. */
+export const soakTagPrefix = 'rc-soak/';
 /** The request id that makes filing a failed candidate's follow-up idempotent across retries. */
 export const followUpRequestId = (id: string) => `release-candidate-follow-up:${id}`;
+/**
+ * GY-1614. The identity a release environment files follow-ups and holds as: an operator agent
+ * holding only `intent:create` over this repository with wildcard work scope, which the create path
+ * admits (src/engine.ts `authorizeOperatorCommand`) and which can claim, complete, record evidence
+ * for and approve nothing. Its token is the uat environment's `GRAPHYARD_RELEASE_TOKEN`.
+ */
+export const releaseFilingIdentity = { id: 'graphyard-release-follow-up', capabilities: ['intent:create'] as const };
+/** The reason an operator-agent filing must carry; the create path refuses one without it. */
+export const filingReason = 'A failed release candidate files its follow-up';
+/**
+ * Pure: why the control plane would refuse to create work as `actor`, the principal a release
+ * environment's filing credential names (its `/api/status` actor), or null when it is admitted.
+ */
+export function followUpFilingRefusal(actor: { id?: string; role?: string; capabilities?: string[]; scope?: { repositories?: string[]; workItems?: string[] } } | null | undefined, repository: string | null | undefined) {
+  if (!actor?.role) return 'the filing credential names no principal';
+  if (actor.role === 'admin') return null;
+  if (actor.role !== 'operator-agent') return `${actor.id} has role ${actor.role}, which cannot create work (Operator permission required)`;
+  if (!actor.capabilities?.includes('intent:create')) return `operator agent ${actor.id} lacks intent:create`;
+  if (!repository || !actor.scope?.repositories?.includes(repository)) return `operator agent ${actor.id}'s scope does not include ${repository ?? 'the repository'}`;
+  if (!actor.scope?.workItems?.includes('*')) return `operator agent ${actor.id} lacks wildcard work scope, which creating work requires`;
+  return null;
+}
+/**
+ * Pure: what `actor` holds beyond the filing identity, or null when it holds only `intent:create`
+ * over `repository` alone.
+ * The credential sits in CI, so an admin or a broader operator agent is reported, not tolerated.
+ */
+export function followUpFilingExcess(actor: { id?: string; role?: string; capabilities?: string[]; scope?: { repositories?: string[] } }, repository?: string | null) {
+  if (actor.role === 'admin') return `${actor.id} is an admin, which can claim, approve and administer far beyond filing`;
+  const extra = (actor.capabilities ?? []).filter(capability => !(releaseFilingIdentity.capabilities as readonly string[]).includes(capability));
+  if (extra.length) return `operator agent ${actor.id} also holds ${extra.join(', ')}; the filing credential holds only intent:create`;
+  const otherRepositories = repository ? (actor.scope?.repositories ?? []).filter(other => other !== repository) : [];
+  return otherRepositories.length ? `operator agent ${actor.id} can also create work in ${otherRepositories.join(', ')}; the filing credential is scoped to ${repository} alone` : null;
+}
 
 export type CutTrigger = 'schedule' | 'manual';
 export interface CandidateItem { key: string; mergeSha: string; pr: number | null }
@@ -35,6 +74,14 @@ export interface ReleaseCandidate {
   id: string; sha: string; cutAt: string; trigger: CutTrigger;
   /** The newest candidate already promoted to production, which the item list is measured from. */
   since: { id: string; sha: string } | null;
+  /**
+   * GY-1491: the candidate this one starts after (the newest cut, promoted or not), which its merges
+   * are counted from; null for the first candidate. Absent on records cut before GY-1491.
+   */
+  from?: { id: string; sha: string } | null;
+  /** First-parent merges this candidate carries beyond `from`, and those left on main behind it at the cut. */
+  prs?: number;
+  queued?: number;
   items: CandidateItem[];
 }
 export interface SuiteResult { name: string; passed: boolean; detail: string }
@@ -56,6 +103,12 @@ export interface UatRecord {
 /** An applied evidence decision (GY-1378): one flaky case of one run accepted at one exact SHA. */
 export interface FlakyAcceptance { case: string; runId: string; sha: string; decision: string }
 export interface ProductionRecord { id: string; sha: string; at: string }
+/**
+ * GY-1513: the advisory soak and timing-budget suites' verdict for a candidate (`rc-soak/ID`): the
+ * result of the soak run that soaked its exact SHA, that run's URL and the name of the timing report
+ * it uploaded there. It decides nothing — promotion never reads it (GY-1440).
+ */
+export interface SoakRecord { id: string; sha: string; result: 'passed' | 'failed' | 'cancelled'; at: string; run: string | null; report: string | null }
 export interface CommitSummary { sha: string; subject: string; body: string }
 
 const fullSha = /^[0-9a-f]{40}$/;
@@ -67,17 +120,22 @@ export const candidateId = (now: Date) => now.toISOString().replace(/[-:]/g, '')
 /**
  * The delivered items a range of main's first-parent commits carries. A Graphyard branch merge
  * names its item in the branch (`graphyard/gy-1094-1`); a squash or a hand-written subject names
- * it as `GY-N:`. A commit naming no item (a docs touch, a direct fix) is not a delivery.
+ * it as `GY-N:`. A commit naming no item (a docs touch, a direct fix) is not a delivery, and neither
+ * is a revert of an item's merge or the merge it reverted (GY-1526).
  */
 export function itemsFromCommits(commits: readonly CommitSummary[]): CandidateItem[] {
   const items: CandidateItem[] = [];
-  const seen = new Set<string>();
+  const seen = new Set<string>(), reverted = new Set<string>();
   for (const commit of commits) {
     // The subject names the merged branch; a body may mention other items' branches in passing.
     const branchIn = (text: string) => /\bgraphyard\/([a-z][a-z0-9]*-\d+)-\d+\b/i.exec(text)?.[1];
     const namedIn = (text: string) => /^([A-Z][A-Z0-9]*-\d+):/m.exec(text)?.[1];
     const key = (branchIn(commit.subject) ?? namedIn(commit.subject) ?? branchIn(commit.body) ?? namedIn(commit.body))?.toUpperCase();
-    if (!key || seen.has(key)) continue;
+    // GY-1526: a revert of an item's merge (`Revert "Merge pull request #N from …/graphyard/gy-N-E"`, as the
+    // loop's candidate revert or the main guard writes it) delivers nothing, and the older merge it undoes
+    // is no delivery either: the item is reopened, and its next merge names it afresh.
+    if (key && /^Revert "/.test(commit.subject)) { reverted.add(key); continue; }
+    if (!key || seen.has(key) || reverted.has(key)) continue;
     seen.add(key);
     const pr = /#(\d+)\b/.exec(commit.subject);
     items.push({ key, mergeSha: commit.sha, pr: pr ? Number(pr[1]) : null });
@@ -86,18 +144,45 @@ export function itemsFromCommits(commits: readonly CommitSummary[]): CandidateIt
 }
 
 /**
- * Pure: the candidate a cut records, or why there is nothing to cut. The previous candidate's
- * outcome never matters — a failed candidate leaves main moving and the next cut proceeds — but a
- * tip that is already a candidate is not cut twice.
+ * GY-1491: the most merged pull requests one candidate carries, so a failed candidate implicates at
+ * most this many changes. `GRAPHYARD_RC_MAX_PRS` (or `release cut --max-prs N`) sets another.
  */
-export function cutCandidate(input: { tip: string; now: Date; trigger: CutTrigger; latest: ReleaseCandidate | null; promoted: ReleaseCandidate | null; commits: readonly CommitSummary[] }):
+export const defaultMaxPrs = 10;
+export function maxPrsFrom(value: string | number | undefined | null) {
+  if (value === undefined || value === null || value === '') return defaultMaxPrs;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) throw new Error(`The release candidate PR cap must be a positive integer, got ${JSON.stringify(value)}`);
+  return parsed;
+}
+
+/**
+ * Pure: the candidate a cut records, or why there is nothing to cut. A candidate starts after the
+ * newest one cut (`latest`), whatever its outcome — a failed candidate leaves main moving and its
+ * successor starts after it (fix forward) — and carries at most `maxPrs` first-parent merges in
+ * merge order: with more waiting, it is cut at the `maxPrs`th merge and the rest stay queued for the
+ * next candidate, cut once this one concludes. `commits` are main's first-parent commits after the
+ * promoted candidate (the newest ones when none is promoted), newest first, as `git log
+ * --first-parent` lists them; the item list keeps measuring from the promoted candidate, since
+ * promoting this one brings a failed predecessor's deliveries too. The first candidate ever has
+ * nothing to start after, so it takes main's tip. A tip that is already a candidate is not cut twice.
+ */
+export function cutCandidate(input: { tip: string; now: Date; trigger: CutTrigger; latest: ReleaseCandidate | null; promoted: ReleaseCandidate | null; commits: readonly CommitSummary[]; maxPrs?: number }):
   { cut: true; candidate: ReleaseCandidate } | { cut: false; reason: string } {
   assertSha(input.tip, 'main tip');
-  if (input.latest?.sha === input.tip) return { cut: false, reason: `main tip ${input.tip} is already candidate ${input.latest.id}` };
+  const { latest } = input;
+  if (latest?.sha === input.tip) return { cut: false, reason: `main tip ${input.tip} is already candidate ${latest.id}` };
+  const maxPrs = maxPrsFrom(input.maxPrs);
+  const start = latest ? input.commits.findIndex(commit => commit.sha === latest.sha) : -1;
+  const merges = (start >= 0 ? input.commits.slice(0, start) : input.commits).slice().reverse();
+  if (latest && !merges.length) return { cut: false, reason: `main has no merge after candidate ${latest.id} (${latest.sha})` };
+  const capped = !!latest && merges.length > maxPrs;
+  const sha = capped ? merges[maxPrs - 1].sha : input.tip;
   return { cut: true, candidate: {
-    id: candidateId(input.now), sha: input.tip, cutAt: input.now.toISOString(), trigger: input.trigger,
+    id: candidateId(input.now), sha, cutAt: input.now.toISOString(), trigger: input.trigger,
     since: input.promoted ? { id: input.promoted.id, sha: input.promoted.sha } : null,
-    items: itemsFromCommits(input.commits),
+    from: latest ? { id: latest.id, sha: latest.sha } : null,
+    prs: capped ? maxPrs : merges.length, queued: capped ? merges.length - maxPrs : 0,
+    items: itemsFromCommits(input.commits.slice(Math.max(0, input.commits.findIndex(commit => commit.sha === sha)))),
   } };
 }
 
@@ -162,7 +247,7 @@ export function followUpItem(candidate: ReleaseCandidate, uat: UatRecord, except
     title: `Release candidate ${candidate.id} failed UAT suite ${first.name} at ${candidate.sha.slice(0, 12)}`,
     description: `Release candidate ${candidate.id} at ${candidate.sha} failed UAT. Failing suite${failing.length > 1 ? 's' : ''}: ${failing.map(suite => `${suite.name} — ${suite.detail}`).join('; ')}. `
       + `It carried ${carried}; those deliveries stay delivered and are not reworked. Fix forward on main; the next candidate cut after the fix carries it to UAT.`,
-    type: 'bug', priority: 1,
+    type: 'bug', priority: 1, reason: filingReason,
     criteria: [{ id: 'AC-1', text: `The ${first.name} suite that failed on candidate ${candidate.id} (${candidate.sha}) passes against the UAT deployment of a later candidate`, proofs: ['manual:release-candidate-uat-pass'] }],
     policy: { checks: ['test', 'typecheck'], review: true },
   };
@@ -193,22 +278,43 @@ export const servedRevision = (health: any): string | null => {
 // ——— Effects: the candidate ledger is the repository's own tags and branches. ———
 
 export type Git = (args: string[]) => string;
+/** Async git the loop's local release ports use (GY-1526): every child goes through child-runner, never execFileSync. */
+export type AsyncGit = (args: string[]) => Promise<string>;
+/** Either flavour: `validateAndRecord` and the release holds run under the CLI's sync git and the loop's async one alike (GY-1535). */
+export type AnyGit = Git | AsyncGit;
+const awaited = (git: AnyGit): AsyncGit => async args => await git(args);
 export const gitIn = (cwd: string): Git => args => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
 
+/** The read of every record under one tag prefix (GY-1535: a caller can answer it ahead of a sync reader). */
+export const recordsArguments = (prefix: string) => ['for-each-ref', '--sort=-refname', '--format=%(refname:strip=2)%00%(contents)%00%00', `refs/tags/${prefix}`];
 /** Every record under one tag prefix, newest first, read from annotated tag messages. */
 export function readRecords<T>(git: Git, prefix: string): T[] {
-  const out = git(['for-each-ref', '--sort=-refname', '--format=%(refname:strip=2)%00%(contents)%00%00', `refs/tags/${prefix}`]);
+  const out = git(recordsArguments(prefix));
+  return out.split('\0\0').map(entry => entry.replace(/^\n/, '')).filter(Boolean).flatMap(entry => {
+    const [, body] = entry.split('\0');
+    try { return [JSON.parse(body.trim()) as T]; } catch { return []; }
+  });
+}
+async function readRecordsAsync<T>(git: AsyncGit, prefix: string): Promise<T[]> {
+  const out = await git(recordsArguments(prefix));
   return out.split('\0\0').map(entry => entry.replace(/^\n/, '')).filter(Boolean).flatMap(entry => {
     const [, body] = entry.split('\0');
     try { return [JSON.parse(body.trim()) as T]; } catch { return []; }
   });
 }
 
-export interface Ledger { candidates: ReleaseCandidate[]; uat: UatRecord[]; production: ProductionRecord[] }
+export interface Ledger { candidates: ReleaseCandidate[]; uat: UatRecord[]; production: ProductionRecord[]; soak: SoakRecord[] }
 export const readLedger = (git: Git): Ledger => ({
   candidates: readRecords<ReleaseCandidate>(git, candidateTagPrefix),
   uat: readRecords<UatRecord>(git, uatTagPrefix),
   production: readRecords<ProductionRecord>(git, productionTagPrefix),
+  soak: readRecords<SoakRecord>(git, soakTagPrefix),
+});
+export const readLedgerAsync = async (git: AsyncGit): Promise<Ledger> => ({
+  candidates: await readRecordsAsync<ReleaseCandidate>(git, candidateTagPrefix),
+  uat: await readRecordsAsync<UatRecord>(git, uatTagPrefix),
+  production: await readRecordsAsync<ProductionRecord>(git, productionTagPrefix),
+  soak: await readRecordsAsync<SoakRecord>(git, soakTagPrefix),
 });
 export const findCandidate = (ledger: Ledger, id: string) => {
   const candidate = id === 'latest' ? ledger.candidates[0] : ledger.candidates.find(entry => entry.id === id);
@@ -225,6 +331,10 @@ export function writeRecord(git: Git, tag: string, sha: string, record: unknown,
   git(['-c', 'user.name=graphyard-release', '-c', 'user.email=release@graphyard.invalid', 'tag', '-a', tag, sha, '-m', JSON.stringify(record, null, 2)]);
   if (push) git(['push', 'origin', `refs/tags/${tag}`]);
 }
+export async function writeRecordAsync(git: AsyncGit, tag: string, sha: string, record: unknown, push: boolean) {
+  await git(['-c', 'user.name=graphyard-release', '-c', 'user.email=release@graphyard.invalid', 'tag', '-a', tag, sha, '-m', JSON.stringify(record, null, 2)]);
+  if (push) await git(['push', 'origin', `refs/tags/${tag}`]);
+}
 
 /**
  * Point an environment branch at the exact candidate SHA; the environment deploys that commit.
@@ -239,24 +349,53 @@ export const deployBranch = (git: Git, branch: string, sha: string, expected?: s
   const lease = expected === undefined ? '--force' : `--force-with-lease=refs/heads/${branch}:${expected ?? ''}`;
   git(['push', lease, 'origin', `${sha}:refs/heads/${branch}`]);
 };
+export const deployBranchAsync = async (git: AsyncGit, branch: string, sha: string, expected?: string | null) => {
+  assertSha(sha, 'candidate');
+  if (expected) assertSha(expected, 'expected branch tip');
+  const lease = expected === undefined ? '--force' : `--force-with-lease=refs/heads/${branch}:${expected ?? ''}`;
+  await git(['push', lease, 'origin', `${sha}:refs/heads/${branch}`]);
+};
 
 export function firstParentCommits(git: Git, tip: string, since: string | null): CommitSummary[] {
   const range = since ? [`${since}..${tip}`] : ['--max-count=200', tip];
   const out = git(['log', '--first-parent', '--format=%H%x00%s%x00%b%x1e', ...range]);
   return out.split('\x1e').map(entry => entry.trim()).filter(Boolean).map(entry => { const [sha, subject, body] = entry.split('\0'); return { sha, subject, body: body ?? '' }; });
 }
+async function firstParentCommitsAsync(git: AsyncGit, tip: string, since: string | null): Promise<CommitSummary[]> {
+  const range = since ? [`${since}..${tip}`] : ['--max-count=200', tip];
+  const out = await git(['log', '--first-parent', '--format=%H%x00%s%x00%b%x1e', ...range]);
+  return out.split('\x1e').map(entry => entry.trim()).filter(Boolean).map(entry => { const [sha, subject, body] = entry.split('\0'); return { sha, subject, body: body ?? '' }; });
+}
 
 /** Bring the base branch and every ledger tag up to date with the remote. */
 export const syncLedger = (git: Git, base: string) => git(['fetch', '--quiet', '--force', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`, '+refs/tags/*:refs/tags/*']);
+export const syncLedgerAsync = (git: AsyncGit, base: string) => git(['fetch', '--quiet', '--force', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`, '+refs/tags/*:refs/tags/*']);
 
 /** Cut a candidate from the remote base branch's tip, as recorded in the remote's tags. */
-export function cut(git: Git, options: { base: string; trigger: CutTrigger; now: Date; push: boolean }) {
+export function cut(git: Git, options: { base: string; trigger: CutTrigger; now: Date; push: boolean; maxPrs?: number }) {
   syncLedger(git, options.base);
   const tip = git(['rev-parse', `refs/remotes/origin/${options.base}`]).trim();
   const ledger = readLedger(git);
-  const promoted = latestPromoted(ledger);
-  const result = cutCandidate({ tip, now: options.now, trigger: options.trigger, latest: ledger.candidates[0] ?? null, promoted, commits: firstParentCommits(git, tip, promoted?.sha ?? null) });
-  if (result.cut) writeRecord(git, `${candidateTagPrefix}${result.candidate.id}`, tip, result.candidate, options.push);
+  const promoted = latestPromoted(ledger), latest = ledger.candidates[0] ?? null;
+  const maxPrs = options.maxPrs ?? maxPrsFrom(process.env.GRAPHYARD_RC_MAX_PRS);
+  let commits = firstParentCommits(git, tip, promoted?.sha ?? null);
+  // Never promoted, the read is bounded to the newest 200: a latest candidate older than that is read up to, so the cap counts from it rather than from the window's edge.
+  if (!promoted && latest && !commits.some(commit => commit.sha === latest.sha)) commits = [...firstParentCommits(git, tip, latest.sha), ...firstParentCommits(git, latest.sha, null)];
+  const result = cutCandidate({ tip, now: options.now, trigger: options.trigger, latest, promoted, maxPrs, commits });
+  if (result.cut) writeRecord(git, `${candidateTagPrefix}${result.candidate.id}`, result.candidate.sha, result.candidate, options.push);
+  return result;
+}
+/** Async cut for the loop's local ports (GY-1526): same ledger rules as `cut`, through AsyncGit. */
+export async function cutAsync(git: AsyncGit, options: { base: string; trigger: CutTrigger; now: Date; push: boolean; maxPrs?: number }) {
+  await syncLedgerAsync(git, options.base);
+  const tip = (await git(['rev-parse', `refs/remotes/origin/${options.base}`])).trim();
+  const ledger = await readLedgerAsync(git);
+  const promoted = latestPromoted(ledger), latest = ledger.candidates[0] ?? null;
+  const maxPrs = options.maxPrs ?? maxPrsFrom(process.env.GRAPHYARD_RC_MAX_PRS);
+  let commits = await firstParentCommitsAsync(git, tip, promoted?.sha ?? null);
+  if (!promoted && latest && !commits.some(commit => commit.sha === latest.sha)) commits = [...await firstParentCommitsAsync(git, tip, latest.sha), ...await firstParentCommitsAsync(git, latest.sha, null)];
+  const result = cutCandidate({ tip, now: options.now, trigger: options.trigger, latest, promoted, maxPrs, commits });
+  if (result.cut) await writeRecordAsync(git, `${candidateTagPrefix}${result.candidate.id}`, result.candidate.sha, result.candidate, options.push);
   return result;
 }
 
@@ -389,6 +528,27 @@ export async function runBrowserSuite(env: NodeJS.ProcessEnv = process.env) {
   return result;
 }
 
+/** GY-1481: the zero-touch onboarding scenario, a required suite of every candidate's UAT validation. */
+export const zeroTouchScenario = 'tests/zero-touch-onboarding.test.ts';
+/**
+ * The `zero-touch` suite: the scenario on this checkout of the candidate's SHA, which drives
+ * `graphyard up --agent --goal FILE` against an in-process GitHub to a merged first planned item and
+ * fails naming any step that needed a person but GitHub's one App approval. That step, or the run's
+ * exit, becomes the suite's detail (GRAPHYARD_SUITE_DETAIL), so the candidate's follow-up names it.
+ */
+export function runZeroTouchSuite(env: NodeJS.ProcessEnv = process.env, run: typeof spawnSync = spawnSync) {
+  const child = run(process.execPath, ['--import', 'tsx', 'tests/helpers/run-tests.ts', zeroTouchScenario], { encoding: 'utf8', env, timeout: 15 * 60_000, maxBuffer: 64 * 1024 * 1024 });
+  const output = `${child.stdout ?? ''}${child.stderr ?? ''}`;
+  process.stdout.write(output);
+  const passed = child.status === 0;
+  const failure = output.slice(output.indexOf('failing tests')).match(/^\s*((?:AssertionError|Error|TypeError)[^\n]*)/m)?.[1]?.trim();
+  const detail = passed ? `${zeroTouchScenario} passed: graphyard up reached a merged first planned item with no human step but GitHub's App approval`
+    : `${zeroTouchScenario} failed: ${failure ?? `the run exited ${child.status ?? child.signal}`}`.slice(0, 4000);
+  if (env.GRAPHYARD_SUITE_DETAIL) writeFileSync(env.GRAPHYARD_SUITE_DETAIL, `${detail}\n`);
+  if (!passed) process.exitCode = 1;
+  return { name: 'zero-touch', passed, detail };
+}
+
 export async function readServed(url: string, fetcher: typeof fetch = fetch) {
   try { const response = await fetcher(new URL('/healthz', url)); return response.ok ? servedRevision(await response.json()) : null; } catch { return null; }
 }
@@ -486,6 +646,7 @@ export function assessUatDeploy(candidate: ReleaseCandidate, ledger: Ledger, uat
  * still refuses to overwrite a branch that moved; with one deployer (the workflow) the gap is moot.
  */
 const remoteTip = (git: Git, branch: string) => git(['ls-remote', 'origin', `refs/heads/${branch}`]).split(/\s/)[0] || null;
+const remoteTipAsync = async (git: AsyncGit, branch: string) => (await git(['ls-remote', 'origin', `refs/heads/${branch}`])).split(/\s/)[0] || null;
 
 /**
  * Deploy a candidate to UAT: `release/uat` moves to its exact SHA, unless another candidate's
@@ -500,13 +661,23 @@ export function deployToUat(git: Git, id: string, base: string, now = new Date()
   deployBranch(git, uatBranch, candidate.sha, assessment.expected);
   return { candidate: candidate.id, sha: candidate.sha, branch: uatBranch };
 }
+/** Async UAT deploy for the loop's local ports (GY-1526). */
+export async function deployToUatAsync(git: AsyncGit, id: string, base: string, now = new Date()) {
+  await syncLedgerAsync(git, base);
+  const ledger = await readLedgerAsync(git);
+  const candidate = findCandidate(ledger, id);
+  const assessment = assessUatDeploy(candidate, ledger, await remoteTipAsync(git, uatBranch), now);
+  if (!assessment.deploy) throw new Error(assessment.refusal);
+  await deployBranchAsync(git, uatBranch, candidate.sha, assessment.expected);
+  return { candidate: candidate.id, sha: candidate.sha, branch: uatBranch };
+}
 
 /**
  * What a validation's release holds did (src/release-holds.ts, GY-1378): `e2e` is the case verdicts
  * to keep on the record, `covered` the suites whose failure the holds answer (no follow-up names
  * them), and `write` records the hold entries once the UAT record is written.
  */
-export interface HoldOutcome { e2e: E2eRecord | null; holds: NonNullable<UatRecord['holds']>; covered: string[]; filingError: string | null; write: () => void }
+export interface HoldOutcome { e2e: E2eRecord | null; holds: NonNullable<UatRecord['holds']>; covered: string[]; filingError: string | null; write: () => void | Promise<void> }
 
 /**
  * Validate a candidate on UAT and record the verdict once. A failure the release holds attribute to
@@ -514,11 +685,12 @@ export interface HoldOutcome { e2e: E2eRecord | null; holds: NonNullable<UatReco
  * follow-up, keyed by the candidate so a retry never files twice. Both are filed before the record
  * is written; a filing that fails still records the verdict, and `release follow-up` files it later.
  */
-export async function validateAndRecord(git: Git, id: string, url: string, suites: readonly Suite[], options: { base: string; push: boolean; timeoutMs: number;
+export async function validateAndRecord(sourceGit: AnyGit, id: string, url: string, suites: readonly Suite[], options: { base: string; push: boolean; timeoutMs: number;
   file?: (item: ReturnType<typeof followUpItem>, requestId: string) => Promise<string>; now?: () => Date; fetcher?: typeof fetch; sleep?: (ms: number) => Promise<void>;
   holds?: (candidate: ReleaseCandidate, record: UatRecord) => Promise<HoldOutcome> }) {
-  syncLedger(git, options.base);
-  const ledger = readLedger(git);
+  const git = awaited(sourceGit);
+  await syncLedgerAsync(git, options.base);
+  const ledger = await readLedgerAsync(git);
   const candidate = findCandidate(ledger, id);
   const existing = ledger.uat.find(record => record.id === candidate.id);
   if (existing) throw new Error(`Candidate ${candidate.id} was already validated on UAT (${existing.result} at ${existing.at}); cut a new candidate to validate again`);
@@ -530,8 +702,8 @@ export async function validateAndRecord(git: Git, id: string, url: string, suite
     try { record.followUp = await options.file(followUpItem(candidate, record, holds?.covered), followUpRequestId(candidate.id)); }
     catch (error) { filingError = error instanceof Error ? error.message : String(error); }
   }
-  writeRecord(git, `${uatTagPrefix}${candidate.id}`, candidate.sha, record, options.push);
-  holds?.write();
+  await writeRecordAsync(git, `${uatTagPrefix}${candidate.id}`, candidate.sha, record, options.push);
+  await holds?.write();
   return { record, followUp: record.result === 'failed' ? record.followUp ?? null : null, filingError };
 }
 
@@ -546,12 +718,86 @@ export function promote(git: Git, id: string, options: { base: string; push: boo
   if (!ledger.production.some(record => record.id === candidate.id)) writeRecord(git, `${productionTagPrefix}${candidate.id}`, candidate.sha, { id: candidate.id, sha: candidate.sha, at: options.now.toISOString() } satisfies ProductionRecord, options.push);
   return { promoted: true as const, candidate: candidate.id, sha: candidate.sha, branch: productionBranch };
 }
+/** Async promote for the loop's local ports (GY-1526). */
+export async function promoteAsync(git: AsyncGit, id: string, options: { base: string; push: boolean; now: Date; acceptances?: readonly FlakyAcceptance[] }) {
+  await syncLedgerAsync(git, options.base);
+  const ledger = await readLedgerAsync(git);
+  const candidate = findCandidate(ledger, id);
+  const assessment = assessPromotion(candidate, ledger.uat.find(record => record.id === candidate.id) ?? null, ledger.production[0] ?? null, options.acceptances);
+  if (!assessment.promotable) return { promoted: false as const, candidate: candidate.id, refusals: assessment.refusals };
+  await deployBranchAsync(git, productionBranch, candidate.sha, ledger.production[0]?.sha);
+  if (!ledger.production.some(record => record.id === candidate.id)) await writeRecordAsync(git, `${productionTagPrefix}${candidate.id}`, candidate.sha, { id: candidate.id, sha: candidate.sha, at: options.now.toISOString() } satisfies ProductionRecord, options.push);
+  return { promoted: true as const, candidate: candidate.id, sha: candidate.sha, branch: productionBranch };
+}
 
-/** Every candidate with its UAT and production state, newest first. */
+/**
+ * GY-1513: record the advisory soak's verdict on a candidate as `rc-soak/ID` on its exact SHA: the
+ * result, the soak run that produced it and the timing report it uploaded. A candidate's first record
+ * stands — a second soak of the same SHA (a re-run) records nothing — and a SHA that is not the
+ * candidate's is refused: the verdict belongs to the commit the suites ran against.
+ */
+export function recordSoak(git: Git, id: string, input: { sha: string; result: SoakRecord['result']; run: string | null; report: string | null; base: string; now: Date; push: boolean }) {
+  assertSha(input.sha, 'soaked');
+  syncLedger(git, input.base);
+  const ledger = readLedger(git);
+  const candidate = findCandidate(ledger, id);
+  if (candidate.sha !== input.sha) throw new Error(`Candidate ${candidate.id} is ${candidate.sha}, not the soaked ${input.sha}; the verdict is recorded on the candidate it soaked`);
+  const existing = ledger.soak.find(record => record.id === candidate.id);
+  if (existing) return { recorded: false as const, record: existing };
+  const record: SoakRecord = { id: candidate.id, sha: candidate.sha, result: input.result, at: input.now.toISOString(), run: input.run, report: input.report };
+  writeRecord(git, `${soakTagPrefix}${candidate.id}`, candidate.sha, record, input.push);
+  return { recorded: true as const, record };
+}
+
+/** Every candidate with its UAT, advisory soak and production state, newest first. */
 export const ledgerStatus = (ledger: Ledger) => ledger.candidates.map(candidate => {
-  const uat = ledger.uat.find(record => record.id === candidate.id) ?? null;
-  return { id: candidate.id, sha: candidate.sha, cutAt: candidate.cutAt, trigger: candidate.trigger, items: candidate.items.map(item => item.key),
+  const uat = ledger.uat.find(record => record.id === candidate.id) ?? null, soak = ledger.soak.find(record => record.id === candidate.id) ?? null;
+  return { id: candidate.id, sha: candidate.sha, cutAt: candidate.cutAt, trigger: candidate.trigger, prs: candidate.prs ?? null, queued: candidate.queued ?? null, items: candidate.items.map(item => item.key),
     uat: uat ? { result: uat.result, at: uat.at, failing: failingSuites(uat).map(suite => suite.name), followUp: uat.followUp,
       ...(uat.e2e ? { blocking: uat.e2e.blocking, unrun: uat.e2e.cases.filter(entry => entry.verdict === 'unrun').map(entry => entry.case) } : {}), ...(uat.holds?.length ? { holds: uat.holds } : {}) } : null,
+    soak: soak ? { result: soak.result, at: soak.at, run: soak.run, report: soak.report } : null,
     production: ledger.production.find(record => record.id === candidate.id)?.at ?? null };
 });
+
+// ——— GY-1535: a managed repository's own E2E cases on every candidate. ———
+
+/** What the loopback static UAT serves each extension as; anything else is application/octet-stream. */
+const staticTypes: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.map': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.ico': 'image/x-icon', '.txt': 'text/plain; charset=utf-8', '.wasm': 'application/wasm',
+  '.woff': 'font/woff', '.woff2': 'font/woff2', '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.wav': 'audio/wav',
+};
+export interface StaticUat { url: string; close(): Promise<void> }
+
+/**
+ * GY-1535: the UAT deployment of a static site (a GitHub Pages game, say) — the candidate's build
+ * output `directory` served on loopback, so its cases drive it in a browser like any deployment.
+ * `/healthz` answers the candidate's SHA as `commit`, so `validate` binds every verdict to it; a
+ * directory serves its `index.html`; nothing outside `directory` is ever read, and a missing build
+ * output answers 404 rather than failing the server. Only GET and HEAD are answered.
+ */
+export async function serveStaticSite(directory: string, sha: string): Promise<StaticUat> {
+  assertSha(sha, 'static UAT');
+  const root = resolve(directory);
+  const inside = (path: string) => path === root || path.startsWith(`${root}${sep}`);
+  const server = createServer(async (request, response) => {
+    const send = (status: number, type: string, body: string | Buffer) => { response.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' }); response.end(request.method === 'HEAD' ? undefined : body); };
+    if (request.method !== 'GET' && request.method !== 'HEAD') return send(405, 'text/plain; charset=utf-8', 'Method not allowed\n');
+    let pathname: string;
+    try { pathname = decodeURIComponent(new URL(request.url ?? '/', 'http://uat.invalid').pathname); } catch { return send(400, 'text/plain; charset=utf-8', 'Bad path\n'); }
+    if (pathname === '/healthz') return send(200, 'application/json', JSON.stringify({ ok: true, commit: sha }));
+    let path = resolve(root, `.${pathname}`);
+    if (!inside(path)) return send(404, 'text/plain; charset=utf-8', 'Not found\n');
+    try {
+      if ((await stat(path)).isDirectory()) path = resolve(path, 'index.html');
+      // A symbolic link out of the build output is not served.
+      const real = await realpath(path), realRoot = await realpath(root);
+      if (real !== realRoot && !real.startsWith(`${realRoot}${sep}`)) return send(404, 'text/plain; charset=utf-8', 'Not found\n');
+      return send(200, staticTypes[extname(path).toLowerCase()] ?? 'application/octet-stream', await readFile(path));
+    } catch { return send(404, 'text/plain; charset=utf-8', 'Not found\n'); }
+  });
+  await new Promise<void>((accept, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', () => accept()); });
+  const { port } = server.address() as { port: number };
+  return { url: `http://127.0.0.1:${port}`, close: () => new Promise<void>(accept => { server.closeAllConnections?.(); server.close(() => accept()); }) };
+}

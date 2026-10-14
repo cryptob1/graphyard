@@ -6,7 +6,7 @@ import { type Work } from '../src/model.js';
 import * as deploymentStep from '../src/daemon/deployment.js';
 import { type MasterConfig, approverSessionName, masterConfigSchema } from '../src/master.js';
 import { type DaemonEffects, daemonEffects, emptyDaemonState, runCycle } from '../src/master-daemon.js';
-import { decisionReadDeadlineMs, decisionRefreshMs } from '../src/daemon/decision-reads.js';
+import { decisionEventKinds, decisionReadDeadlineMs, decisionRefreshMs } from '../src/daemon/decision-reads.js';
 import * as faultsStep from '../src/daemon/faults.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { hour, minute } from './helpers/soak-world.js';
@@ -60,6 +60,30 @@ test('unit:soak-invariants-hold — a slow control plane carries the decisions s
   const attested = items[2].key;
   assert.ok(!decideCalls.some(call => call.key === attested && call.action === 'attest'), `${attested} asked for no attestation: ${JSON.stringify(decideCalls.filter(call => call.key === attested).map(call => call.action))}`);
   assert.ok(!final.find(item => item.key === attested)!.evidence.some(entry => entry.proof === MANUAL), `${attested} was delivered with its manual proof unproduced`);
+});
+
+test('unit:soak-invariants-hold — a control plane that answers every snapshot read 200 but only after 75 s for an hour and a half: every cycle in the window crawls past the interval on the plane, yet each records that wait as planeWaitMs and the slow server call, its own work stays under the cycle-p90 bound, cycle-p90 holds and is observed, no loop-cost fault opens, every item is delivered, and every invariant holds', { timeout: 600_000 }, async () => {
+  // GY-1562: cycle 13964's shape, held for a simulated day. Before it, timedCall left a 2xx answer's
+  // in-flight time in workMs, so each of these cycles read as 75 s of the loop's own work: cycle-p90
+  // violated and loop-cost filed for a plane that was only slow.
+  const slow = { from: 60 * minute, to: 150 * minute, ms: 75_000 };
+  const { final, violations, failures, lost, observed, slowPlaneDay, state } = await simulateDay({
+    hours: 4, slowAnswers: slow,
+    plan: { items: 4, leftovers: 0, slowRecompute: 0, releaseEveryMs: 1_000, workMs: 50 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, attested: 0, exhaustedReviewer: 0, unstable: 0, lowLane: 0, outOfQueue: { item: 4, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 4 } },
+  });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all four items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds while the plane answers slowly and once it is fast');
+  assert.ok(observed.has('cycle-p90'), 'cycle-p90 is judged on measured cycles, not vacuously');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  const intervalMs = soakConfig.run.intervalSeconds * 1000, bound = 30_000;
+  const crawling = slowPlaneDay.cycles.filter(entry => entry.planeWaitMs >= slow.ms);
+  assert.ok(slowPlaneDay.slowReads >= 30 && crawling.length >= 30, `the window ran across many cycles (${slowPlaneDay.slowReads} slow reads, ${crawling.length} crawling cycles)`);
+  assert.deepEqual(crawling.filter(entry => entry.durationMs <= intervalMs).map(entry => `cycle ${entry.cycle}: ${entry.durationMs}ms`), [], 'each crawling cycle took longer than the interval in all');
+  assert.deepEqual(crawling.filter(entry => entry.slowCalls < 1).map(entry => `cycle ${entry.cycle}`), [], 'each slow answer is a recorded slow server call');
+  assert.deepEqual(crawling.filter(entry => entry.workMs >= bound).map(entry => `cycle ${entry.cycle} +${Math.round(entry.elapsed / minute)} min: ${entry.workMs}ms of ${entry.durationMs}ms, ${entry.planeWaitMs}ms in flight`), [], 'the loop\'s own work stays under the cycle-p90 bound');
+  assert.deepEqual(slowPlaneDay.cycles.filter(entry => entry.elapsed >= slow.to + 2 * minute && entry.planeWaitMs >= slow.ms).map(entry => `cycle ${entry.cycle}`), [], 'once the plane is fast, no cycle waits on it');
+  assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'loop-cost').map(entry => entry.text), [], 'no loop-cost instance opens for a slow-answering plane');
 });
 
 test('unit:soak-invariants-hold — a control plane too slow to observe within the faults step\'s budget for an hour and a quarter: the step is cut while the attention read is in flight, never more than one such read is in flight however many cycles run, every cycle stays within the interval, the read in flight is taken once it lands, no loop-cost fault opens, and every invariant holds', { timeout: 600_000 }, async () => {
@@ -219,7 +243,10 @@ test('unit:decisions-step-bounded — at the 2026-10-03 load (90 open items, 360
     assert.deepEqual(await live.decisionChanges!(null), { seq: '1200', work: [items[0].id], complete: false }, 'the first read keeps nothing: it only finds where the ledger stands');
     assert.deepEqual(await live.decisionChanges!('1200'), { seq: '1209', work: [items[1].id, items[2].id], complete: true });
     assert.deepEqual(asked.map(url => [url.pathname, url.searchParams.get('order'), url.searchParams.get('cursor'), url.searchParams.get('payload')]), [['/api/events', 'desc', null, 'none'], ['/api/events', 'asc', '1200', 'none']]);
-    assert.deepEqual(asked[1].searchParams.get('kind')!.split(','), ['requested', 'concurred', 'refused', 'declined', 'approved', 'applied', 'failed', 'stale', 'withdrawn', 'superseded'].map(kind => `decision.${kind}`));
+    // GY-1697: the kind query is exactly the loop's own decision event kinds, so a kind the fold
+    // learns (decision.held, GY-1687) is read without this assertion drifting from it.
+    assert.deepEqual(asked[1].searchParams.get('kind')!.split(','), decisionEventKinds);
+    assert.equal(decisionEventKinds.length, 11, 'every decision event kind the fold knows, decision.held among them, is read');
     assert.equal(daemonEffects(root, { ...config, credentialFile: coordinator } as MasterConfig, { snapshot: async () => ({ work: items, now: iso(0) }), mutate: async () => ({}), fetcher }).decisionChanges,
       undefined, 'without the operator-agent identity there are no decision reads to keep');
   } finally { await Promise.all([rm(root, { recursive: true, force: true }), rm(secrets, { recursive: true, force: true })]); }

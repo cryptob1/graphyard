@@ -2,10 +2,10 @@ import { z } from 'zod';
 import { demand, type Work } from '../../model.js';
 import type { IntegrationJob } from '../../coordination.js';
 import { parseEventHistoryQuery, readEventHistory } from '../../events-history.js';
-import { catchUpPipelineTimelines, pipelineBackfillState } from '../../pipeline-backfill.js';
+import { catchUpPipelineTimelines, pipelineBackfillState, readPipelineTimelines } from '../../pipeline-backfill.js';
 import { delegationSnapshot } from '../../delegation.js';
-import { describeUnserved, durablePresence, executorRegistry, executorReport, loopPresenceHeader, loopPresenceInterval, loopRegistry, presenceQuery, reportedLoopMerger } from '../../model/executor-presence.js';
-import { installationSettingsUrl, mainGuardStatus } from '../../github.js';
+import { describeUnserved, durablePresence, executorRegistry, executorReport, loopPresenceHeader, loopPresenceInterval, loopPanes, loopPanesHeader, loopPanesRegistry, loopRegistry, loopSupervision, loopSupervisionHeader, presenceQuery, reportedLoopMerger } from '../../model/executor-presence.js';
+import { installationSettingsUrl, mainGuardStatus, webhookCorroboration, webhookState } from '../../github.js';
 import { controlPlanePermissions, requiredPermissions } from '../../github-permissions.js';
 import { releaseInfo, schemaVersion } from '../../release.js';
 import { openHumanOnly } from '../../model/human-request.js';
@@ -14,6 +14,7 @@ import { defineRoutes, parseJson } from '../routes.js';
 import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
 import { executorHost } from './agent-registry.js';
 import { directMergeStatus } from '../../direct-merge.js';
+import { mergeWriterStatus } from '../../merger-mode.js';
 import { rerunFailedChecksEvent } from '../../merge-queue.js';
 import { maxRerunFailedChecks } from '../../master/profiles.js';
 import { eventStats } from '../../store/snapshot-delta.js';
@@ -66,8 +67,13 @@ export const statusRoutes = defineRoutes('status', [
       // left, how fast it goes, the pause in force, what each observation cost; and whether the
       // webhook is delivering at all, against the pull requests that are open to be woken.
       const githubBudget = github?.budget?.(observedAt.getTime()) ?? null;
-      const webhooks = { ...await engine.store.webhookLiveness(), configured: !!process.env.GITHUB_WEBHOOK_SECRET, settingsUrl: github?.webhookSettingsUrl?.() ?? null,
-        openPullRequests: work.filter(item => item.stage !== 'done' && !!item.submission && !!item.observation && !item.observation.merged && item.observation.prState !== 'closed').length };
+      // GitHub's own delivery log corroborates a receipts gap (GY-1649): the last attempt it logged and
+      // the attempts after the last receipt that failed, from one cached app-level read, never per call.
+      const liveness = await engine.store.webhookLiveness();
+      const corroboration = github?.webhookDeliveries ? webhookCorroboration(await github.webhookDeliveries(observedAt.getTime()), liveness.lastDeliveryAt, observedAt.getTime(), { installationId: github.config.installationId, repositoryId: githubRepository?.id ?? null }) : null;
+      const webhooks = { ...liveness, configured: !!process.env.GITHUB_WEBHOOK_SECRET, settingsUrl: github?.webhookSettingsUrl?.() ?? null, ...corroboration,
+        openPullRequests: work.filter(item => item.stage !== 'done' && !!item.submission && !!item.observation && !item.observation.merged && item.observation.prState !== 'closed').length,
+        state: webhookState({ ...liveness, ...corroboration }, observedAt.getTime()) };
       // The fleet as the dashboard needs it (GY-105): how many executors are alive, and each kind
       // of pending action none of them serves, with its wait and what to start.
       // A pending merge row waits on a loop that merges, never on an executor (GY-916).
@@ -98,14 +104,19 @@ export const statusRoutes = defineRoutes('status', [
         doctor: actor.role === 'operator-agent' ? null : (await engine.store.pool.query('SELECT payload FROM events WHERE kind=$1 ORDER BY seq DESC LIMIT 20', [doctorRunEvent])).rows.map((row: any) => row.payload),
         // Direct-merge mode (direct-merge.ts): the open windows and the one line master status shows while any is.
         directMerge: await directMergeStatus(engine.store.pool, engine.directMergeEnvironment, observedAt),
+        // The merger setting (merger-mode.ts): which writer lands heads, and one line while it is the control plane.
+        mergeWriter: await mergeWriterStatus(engine.store.pool),
         // Heartbeat latency and the renewals refused or failed server-side, this process, last 10 minutes (GY-558).
         leaseHealth: engine.leaseHealth.report(),
         // The first-run facts the Setup page and `graphyard up` read beside the App and the fleet (GY-1419):
         // the base branch's protection from the shared read (at most every five minutes) — `complete`
         // once it requires Graphyard / merge, `checks` while it requires only the repository's own
         // checks (the merge check is added after the first pull request reports it), else `off` — and
-        // whether a master loop is live.
-        setup: { protection: await setupProtection(github), loop: !!executors.loop?.live },
+        // whether a master loop is live, and who reviews and merges as the live loop names it (GY-1501):
+        // `supervised` drops the reviewer App and reviewing account from the Setup checklist.
+        setup: { protection: await setupProtection(github), loop: !!executors.loop?.live, supervision: loopRegistry(engine).live(observedAt)?.supervision ?? null,
+          // and the pane server its agents run in as that loop last named it (GY-1511).
+          panes: loopRegistry(engine).live(observedAt) ? loopPanesRegistry(engine).latest : null },
         now: observedAt.toISOString(), release: releaseInfo(), schema: schemaVersion };
     },
   },
@@ -193,7 +204,8 @@ export const statusRoutes = defineRoutes('status', [
       const view = z.enum(['bounded', 'full', 'coordination']).parse(Array.isArray(requested) ? requested[0] : requested ?? 'bounded');
       // The loop's own read is its presence (GY-916): it merges while it lives, however long nothing is mergeable.
       const loopInterval = actor.role === 'coordinator' ? loopPresenceInterval(req.headers[loopPresenceHeader.toLowerCase()]) : null;
-      if (loopInterval !== null) loopRegistry(services.engine).observe({ principal: actor.id, intervalSeconds: loopInterval }, new Date());
+      if (loopInterval !== null) loopRegistry(services.engine).observe({ principal: actor.id, intervalSeconds: loopInterval, supervision: loopSupervision(req.headers[loopSupervisionHeader.toLowerCase()]) }, new Date());
+      if (loopInterval !== null) loopPanesRegistry(services.engine).observe(loopPanes(req.headers[loopPanesHeader.toLowerCase()]));
       // Bounded catch-up: items that predate the per-item timeline gain one from their own
       // ledger before the snapshot every speed report is derived from is read. The ledger is read
       // outside the coordination lock, one run at a time; it converges and then costs one small
@@ -242,7 +254,29 @@ export const statusRoutes = defineRoutes('status', [
       return trimmedView;
     },
   },
-  { method: 'GET', path: '/api/work', handle: async ({ services, operatorVisible }) => operatorVisible(await services.engine.store.list()) },
+  {
+    // Every item's timeline alone (GY-1489): `master status` reads the coordination view, which
+    // drops them, and attaches these to measure speed. The same bounded catch-up runs first.
+    method: 'GET', path: '/api/pipeline-timelines',
+    async handle({ services, operatorVisible }) {
+      await catchUpPipelineTimelines(services.engine.store);
+      return { timelines: operatorVisible(await readPipelineTimelines(services.engine.store)) };
+    },
+  },
+  {
+    // The work list is the bounded fleet read (GY-1778): every open item whole and each settled
+    // delivery as the work index's stored summary (store.fleet, GY-1376). `?pr=N` narrows it to
+    // the item whose candidate or submission names pull request N, which is all the CI plan step
+    // (scripts/enumerate-ci-proofs.mjs) needs. store.list() served every document whole here:
+    // 134 MB on a 1,777-item ledger, past the plan's abort on every acceptance run.
+    method: 'GET', path: '/api/work',
+    async handle({ url, services, operatorVisible }) {
+      const requested = url.searchParams.get('pr');
+      if (requested === null) return operatorVisible(await services.engine.store.fleet());
+      demand(/^[1-9]\d{0,14}$/.test(requested), 'pr must be a pull request number', 400);
+      return operatorVisible(await services.engine.store.workForPullRequest(Number(requested)));
+    },
+  },
   {
     // One item's whole document, history included, by id or display key (GY-422): what a reader
     // asks for when the snapshot's summary of a settled delivery is not enough.

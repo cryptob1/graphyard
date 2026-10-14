@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { defaultPromoteEveryMinutes, promotionCycle, promotionLedgerReadMs, promotionRunsReadMs, promotionReads, promotionStatus, promotionWorkflow, type PromotionLedger, type PromotionReads, type PromotionRun } from '../src/daemon/deployment.js';
+import { defaultPromoteEveryMinutes, promotionCycle, promotionLedgerReadMs, promotionRunsReadMs, promotionReads, promotionStatus, promotionUnlistedMs, promotionWorkflow, type PromotionLedger, type PromotionReads, type PromotionRun } from '../src/daemon/deployment.js';
 import { promotionStateSchema, type PromotionState } from '../src/daemon/state.js';
 import type { MasterConfig } from '../src/master.js';
 
@@ -25,8 +25,9 @@ function stubReads(ledger: PromotionLedger, runs: PromotionRun[]) {
 }
 
 test('unit:loop-dispatches-promotion — over three cycles (a candidate still in validation, main moved with nothing in flight, the interval not yet elapsed) the loop dispatches the release-candidate workflow with promote=true exactly once', async () => {
-  const every = defaultPromoteEveryMinutes;
-  assert.equal(every, 120);
+  // GY-1488: the default is a 10-minute minimum gap; a configured 120-minute gap still spaces dispatches.
+  assert.equal(defaultPromoteEveryMinutes, 10);
+  const every = 120;
   // A scheduled candidate cut three hours ago is still in UAT.
   const { reads, api } = stubReads({ mainSha: MAIN, promotedSha: PROMOTED, promotedAt: new Date(T0 - minutes(600)).toISOString(), behind: 3 },
     [{ status: 'in_progress', createdAt: new Date(T0 - minutes(180)).toISOString(), event: 'schedule' },
@@ -53,7 +54,7 @@ test('unit:loop-dispatches-promotion — over three cycles (a candidate still in
   reads.ledger = { ...reads.ledger, mainSha: LATER, behind: 4 };
   ({ state, dispatched } = await promotionCycle(promotionStateSchema.parse(state), api, { now: T0 + minutes(30), everyMinutes: every }));
   assert.equal(dispatched, false);
-  assert.match(state.reason ?? '', /next is due 120 minute/);
+  assert.match(state.reason ?? '', /next is due no sooner than 120 minute/);
 
   assert.equal(reads.dispatches, 1, 'exactly one dispatch across the three cycles');
 });
@@ -71,7 +72,7 @@ test('unit:loop-dispatches-promotion — nothing is dispatched when production r
   assert.equal(current.reads.dispatches + off.reads.dispatches + fired.reads.dispatches, 0);
 });
 
-test('unit:loop-dispatches-promotion — the ledger read fetches from the remote, so cycles every 20 seconds for six hours fetch once per read window, GitHub runs are read once a minute at most, and promotion that is off reads nothing', async () => {
+test('unit:loop-dispatches-promotion — the ledger read fetches from the remote, so cycles every 20 seconds for six hours fetch once per read window, GitHub runs are read once a cycle while a candidate is in validation (GY-1513) and once a minute at most otherwise, and promotion that is off reads nothing', async () => {
   const { reads, api } = stubReads({ mainSha: MAIN, promotedSha: PROMOTED, promotedAt: null, behind: 1 },
     [{ status: 'in_progress', createdAt: new Date(T0 - minutes(10)).toISOString(), event: 'workflow_dispatch' }]);
   const span = minutes(360), step = 20_000;
@@ -80,12 +81,15 @@ test('unit:loop-dispatches-promotion — the ledger read fetches from the remote
     // Main moves every 40 minutes; the candidate concludes after three hours.
     reads.ledger = { ...reads.ledger, mainSha: sha(String(Math.floor((now - T0) / minutes(40)) % 10)), behind: 1 + Math.floor((now - T0) / minutes(40)) };
     if (now - T0 >= minutes(180)) reads.runs = reads.runs.map(run => ({ ...run, status: 'completed' }));
-    state = promotionStateSchema.parse((await promotionCycle(state, api, { now, everyMinutes: 120 })).state);
+    state = promotionStateSchema.parse((await promotionCycle(state, api, { now, everyMinutes: 120, intervalMs: step })).state);
   }
   const cycles = span / step;
   assert.ok(reads.ledgerReads <= Math.ceil(span / promotionLedgerReadMs) + 1, `${reads.ledgerReads} fetches over ${cycles} cycles`);
   assert.ok(reads.ledgerReads >= span / promotionLedgerReadMs - 1, 'the ledger is still refreshed every read window, so behind stays current');
-  assert.ok(reads.runReads <= Math.ceil(span / promotionRunsReadMs) + 1, `${reads.runReads} run reads`);
+  // In validation for three hours, then the loop's own dispatch unlisted for its window: read once a cycle there, once a minute in the rest.
+  const inFlightMs = minutes(180) + promotionUnlistedMs;
+  assert.ok(reads.runReads <= Math.ceil(inFlightMs / step) + Math.ceil((span - inFlightMs) / promotionRunsReadMs) + 2, `${reads.runReads} run reads`);
+  assert.ok(reads.runReads >= minutes(180) / step - 1, `in validation, the runs are read every cycle (${reads.runReads} run reads over ${cycles} cycles)`);
   assert.ok(reads.dispatches >= 1 && reads.dispatches <= Math.ceil(span / minutes(120)), `${reads.dispatches} dispatches`);
   const off = stubReads({ mainSha: MAIN, promotedSha: PROMOTED, promotedAt: null, behind: 1 }, []);
   let offState: PromotionState | null = null;
@@ -133,10 +137,10 @@ test('unit:loop-dispatches-promotion — a failing fetch, run read or dispatch n
   await run(T0 + minutes(480), T0 + minutes(510));
   assert.ok(reads.runReads - runsBefore <= Math.ceil(minutes(30) / promotionRunsReadMs) + 1, `${reads.runReads - runsBefore} failed run reads in half an hour`);
 
-  // Everything recovers: the next promotion is dispatched.
-  failing.runs = false;
+  // Everything recovers and main moves past the candidate cut at 360 minutes: the next promotion is dispatched.
+  failing.runs = false; reads.ledger = { ...reads.ledger, mainSha: LATER, behind: 3 };
   const dispatchesBefore = reads.dispatches;
-  await run(T0 + minutes(510), T0 + minutes(515));
+  await run(T0 + minutes(510), T0 + minutes(520));
   assert.equal(reads.dispatches - dispatchesBefore, 1);
   assert.equal(state!.inFlight, true);
 });
@@ -154,7 +158,7 @@ test('unit:loop-dispatches-promotion — the dispatch asks GitHub to run the rel
   const config = { repository: 'owner/repo', baseBranch: 'main' } as MasterConfig;
   assert.equal(promotionReads(config, '/repo', run, false), null, 'a repository without the workflow has nothing to dispatch');
   const reads = promotionReads(config, '/repo', run, true)!;
-  assert.deepEqual(await reads.ledger(), { mainSha: MAIN, promotedSha: PROMOTED, promotedAt: '2026-10-05T03:40:00.000Z', behind: 7 });
+  assert.deepEqual(await reads.ledger(), { mainSha: MAIN, promotedSha: PROMOTED, promotedAt: '2026-10-05T03:40:00.000Z', behind: 7, candidates: [] });
   assert.ok(calls.some(call => call.includes('rev-list') && call.includes(`${PROMOTED}..${MAIN}`) && call.includes('--first-parent')));
   assert.equal((await reads.runs()).length, 1);
   await reads.dispatch();

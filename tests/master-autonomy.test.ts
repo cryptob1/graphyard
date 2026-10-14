@@ -14,6 +14,7 @@ import {
   agentOwner, approvedMerge, buildMasterStatus, humanOnlyDecisions, installWorkerHarness, loadMasterConfig, managedMasterInstructions, masterHarness,
   previewPrincipalRotation, restartMasterLoop, runAutonomyCommand, setupAutonomy, setupMaster, workAttentionOwner, workerHarnessPlan, type AttentionItem, type AutonomyDependencies,
 } from '../src/master.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01 lease expiry and quarantine instants are judged by buildMasterStatus at the explicit now 2030-01-01T03:00; new Date() only stamps daemon-lock heartbeats the restart checks.
 
 // GY-70: onboarding gives the master its own operator-agent identity and a separate approver
 // identity, role-scoped harness rules, and the commands that keep routine operation free of a

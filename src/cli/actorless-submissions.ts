@@ -2,6 +2,7 @@ import { agentOwner, type AttentionItem } from '../master.js';
 import { reviewNeed, type ReviewState } from '../model/dispatch.js';
 import { pendingBaseRefresh } from '../merge-queue.js';
 import { standingEscalations } from '../model/escalation.js';
+import { baseHoldSightedAt } from '../model/behind-base.js';
 import type { Work } from '../model/work.js';
 
 /**
@@ -22,6 +23,13 @@ import type { Work } from '../model/work.js';
  * spans observations and loop cycles, so its line carries `inMotionUntil` for the bound the base
  * conflict keeps (`baseConflictWaitBoundMs`) and counts as a fault only past it. GY-1357 (6 October
  * 2026) and GY-1292 (7 October) were each counted at 5 minutes and returned 25s and 21s later.
+ *
+ * GY-1557. The bound runs from the hold's first sighting on the head (`baseHoldSightedAt`), the
+ * first observation of the head, or the item's last actor, whichever is newest — never from a
+ * submission alone. A base that moves hours after the submission opens a hold the loop has not had
+ * its turn on, and a submission made after the stage was entered is newer than the stage entry:
+ * on 8 October 2026 GY-1522 counted 71s after its base tip moved under a head submitted two
+ * hours earlier, and GY-1526 25m after its base tip moved, five minutes after it was submitted.
  */
 export const actorlessBoundMs = 5 * 60_000;
 /** How long a confirmed base conflict may stand on a head before it counts as a merge fault (GY-1129), and an `actorless` head behind the base before it counts (GY-1403). */
@@ -68,6 +76,14 @@ function namedWait(work: Work, state: ReviewState, now: Date): string | null {
   return null;
 }
 
+/** Where the base-conflict bound runs from (GY-1557): the newest of the last actor, the first observation of the current head and the hold's first sighting on it, plus the bound. */
+function holdInMotionUntil(work: Work, lastActor: number): string {
+  const head = work.headObserved, candidate = work.candidate;
+  const headSeen = head && candidate && head.sha === candidate.sha ? Date.parse(head.at) : Number.NaN;
+  const from = Math.max(...[lastActor, headSeen, Date.parse(baseHoldSightedAt(work) ?? '')].filter(Number.isFinite));
+  return new Date(from + baseConflictWaitBoundMs).toISOString();
+}
+
 /** When the item last had someone acting for it: its stage entry, or the newest dispatch request on it. */
 function lastActorAt(work: Work): number {
   const dispatch = work.autoDispatch;
@@ -92,7 +108,7 @@ export function actorlessSubmissions(work: Work[], now: Date, reworkDecisions: R
     if (!(idleMs > boundMs)) return [];
     const missing = missingActor[need.state];
     return [{ subject: item.key, text: `${item.key} candidate ${item.candidate.sha.slice(0, 12)} has been submitted for ${Math.round(idleMs / 60_000)}m with no review request, no producer request, no rework request and no named wait; missing ${missing.actor} (${need.reason})`,
-      ...agentOwner('master', missing.next(item.key)), ...(need.state === 'base-not-contained' ? { inMotionUntil: new Date(now.getTime() - idleMs + baseConflictWaitBoundMs).toISOString() } : {}) }];
+      ...agentOwner('master', missing.next(item.key)), ...(need.state === 'base-not-contained' ? { inMotionUntil: holdInMotionUntil(item, now.getTime() - idleMs) } : {}) }];
   });
 }
 

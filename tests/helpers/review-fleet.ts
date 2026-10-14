@@ -9,6 +9,7 @@ import { setupMaster, type HerdrAgent, type MasterConfig } from '../../src/maste
 import { bindReviewer, launchReview, reconcileReviews, saveReviewerProfile } from '../../src/reviewer.js';
 import type { DispatchEffects } from '../../src/auto-dispatch.js';
 import { temporaryDirectory } from './temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-01T10:00Z at stamps createdAt, stageEnteredAt and evidence of fixture items; new Date() is the clock handed to reconcileAutoDispatch and stamps snapshots and token expiries nothing ages.
 
 // The automatic-review fleet (GY-1072): a master bound to a reviewer App over a stubbed Herdr, and
 // review requests for it, shared by tests/automatic-review-concurrency.test.ts and the soak.

@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { managedMasterInstructions } from '../master.js';
+import { withoutMasterInstructions } from '../master.js';
 import { managedInstructions } from '../repository-setup.js';
 import { parseGeneratedManifest, type GeneratedManifest } from '../sync.js';
 
@@ -27,9 +27,10 @@ export function regenerateGenerated(cwd: string, manifest: GeneratedManifest) {
 }
 
 /**
- * Graphyard's own repository renders the AGENTS.md blocks with the templates the merged tree
- * carries, so the result matches what its drift test expects; any other repository, and a tree
- * whose sources will not load, use the templates this CLI ships.
+ * Graphyard's own repository renders the AGENTS.md worker block with the templates the merged
+ * tree carries, so the result matches what its drift test expects; any other repository, and a
+ * tree whose sources will not load, use the templates this CLI ships. A graphyard-master block an
+ * earlier master init wrote is dropped, not rendered: the master reads it from master guide.
  */
 export const agentsTemplateSources = ['src/repository-setup.ts', 'src/master.ts'];
 
@@ -37,7 +38,7 @@ export async function agentsRenderers(cwd: string) {
   const [setupFile, masterFile] = agentsTemplateSources.map(file => resolve(cwd, file));
   if (existsSync(setupFile) && existsSync(masterFile)) try {
     const [setup, master] = await Promise.all([import(pathToFileURL(setupFile).href), import(pathToFileURL(masterFile).href)]);
-    if (typeof setup.managedInstructions === 'function' && typeof master.managedMasterInstructions === 'function') return { managedInstructions: setup.managedInstructions as typeof managedInstructions, managedMasterInstructions: master.managedMasterInstructions as typeof managedMasterInstructions, source: 'worktree' };
+    if (typeof setup.managedInstructions === 'function' && typeof master.withoutMasterInstructions === 'function') return { managedInstructions: setup.managedInstructions as typeof managedInstructions, withoutMasterInstructions: master.withoutMasterInstructions as typeof withoutMasterInstructions, source: 'worktree' };
   } catch {}
-  return { managedInstructions, managedMasterInstructions, source: 'cli' };
+  return { managedInstructions, withoutMasterInstructions, source: 'cli' };
 }

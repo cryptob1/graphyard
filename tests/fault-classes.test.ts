@@ -80,7 +80,7 @@ test('unit:fault-classes — every existing attention kind maps to exactly one c
     ['escalation triggers', escalationTriggers.map(escalationFaultKind)],
     ['failed loop actions', daemonActionKinds.map(daemonActionFaultKind)],
     ['loop attention', ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures']],
-    ['master status builders', ['disk-pressure', 'resource-bound', 'ledger-refusal', 'scope-request', 'consent-hold', 'review-conflict', 'unobtainable-review', 'decision-refused', 'decision-stale', 'decision-unanswered',
+    ['master status builders', ['disk-pressure', 'resource-bound', 'docs-headroom', 'ledger-refusal', 'scope-request', 'consent-hold', 'review-conflict', 'unobtainable-review', 'decision-refused', 'decision-stale', 'decision-unanswered',
       'approver-launch', 'request-remedy', 'stalled-action', 'stalled-item', 'unanswered-request', 'stuck-request', 'overlong-session', 'context-overflow', 'timing-failure', 'agent-request', 'owed-decision', 'generated-files',
       'github-budget', 'intervention-pattern', 'throughput', 'executor', 'setup', 'installation', 'sudo', 'unrunnable-remedy', 'role-capacity', 'concurrency-starved', 'fleet', 'fleet-capacity', 'actorless',
       'nonexercising-proof', 'retry-stopped', 'review-settlement', 'launch-review']],
@@ -268,6 +268,23 @@ test('unit:fault-catalogue-action-kinds — a failed fault or diagnosis action i
   assert.deepEqual(posting.faults.instances.map(entry => [entry.kind, entry.faultClass]), [['action:fault', 'unclassified'], ['plane-unavailable', 'deployment']]);
 });
 
+test('unit:fault-classes-catalogue-total — after GY-1530 every source\'s kind is still listed exactly once, the step kinds action:fault/action:diagnosis stay parked under unclassified for emitters that pass no cause, and the causes the doctor and the diagnosis step now pass are catalogued under their classes', async () => {
+  const { noDiagnosisKind } = await import('../src/daemon/diagnosis.js'); // dynamic: the exercise runs this case on the base tree, where the symbol is absent
+  const listed = faultClasses.flatMap(faultClass => faultCatalogue[faultClass].map(kind => ({ kind, faultClass })));
+  for (const { kind } of listed) assert.equal(listed.filter(entry => entry.kind === kind).length, 1, `${kind} is listed under exactly one class`);
+  assert.equal(new Set(faultKinds).size, faultKinds.length, 'no kind is listed twice');
+  assert.deepEqual(new Set(faultKinds), new Set(listed.map(entry => entry.kind)));
+  for (const kind of [...workAttentionCauses, ...installationSources, ...escalationTriggers.map(escalationFaultKind), ...daemonActionKinds.map(daemonActionFaultKind)]) assert.ok(isFaultKind(kind), `${kind} is catalogued`);
+  // The step kinds name no cause (GY-1338): an emitter that still passes none lands here, never in loop or elsewhere.
+  assert.deepEqual([...faultCatalogue.unclassified], ['unclassified', 'action:fault', 'action:diagnosis']);
+  for (const kind of ['action:fault', 'action:diagnosis']) assert.equal(storeAction(emptyDaemonState(config()), kind, { kind: kind.slice(7) as 'fault' | 'diagnosis', work: null, principal: null, state: 'failed', detail: 'no cause passed', attempts: 1, epoch: null, cycle: 1, at: iso(0) }).faultClass, 'unclassified');
+  // GY-1530's causes: a filing or fix item create refuses is the proof class's fix-item; a diagnostician whose runs were stopped at their bound is session-liveness's overlong-session.
+  assert.equal(faultClassOf('fix-item'), 'proof');
+  assert.equal(faultClassOf('overlong-session'), 'session-liveness');
+  assert.equal(faultClassOf(noDiagnosisKind([{ runtime: 'pi', result: 'timeout' }, { runtime: 'pi', result: 'timeout' }])!), 'session-liveness');
+  assert.equal(faultClassOf('plane-unavailable'), 'deployment');
+});
+
 test('unit:fault-classes — the fix-item kind a diagnosis\'s refused fix item carries is listed exactly once, under proof', () => {
   assert.equal(faultClasses.filter(name => (faultCatalogue[name] as readonly string[]).includes('fix-item')).join(), 'proof');
   assert.equal(faultKinds.filter(kind => kind === 'fix-item').length, 1);
@@ -354,7 +371,15 @@ test('unit:recurring-class-item — a class past the threshold files one item as
 test('unit:recurring-class-item — the loop files through the master operator-agent identity', async () => {
   const root = await temporaryDirectory('fault-root'), secrets = await temporaryDirectory('fault-secrets');
   try {
-    execFileSync('git', ['init', '-q', root]);
+    execFileSync('git', ['init', '-q', '-b', 'main', root]);
+    for (const [key, value] of [['user.email', 'fault@example.invalid'], ['user.name', 'Fault Test'], ['commit.gpgsign', 'false']] as const)
+      execFileSync('git', ['config', key, value], { cwd: root });
+    await mkdir(join(root, 'tests/helpers'), { recursive: true });
+    await writeFile(join(root, 'tests/fault-class-scope.test.ts'), 'test("manual:fault-class-scope", () => {});\n');
+    await writeFile(join(root, 'tests/helpers/timing-baseline.json'), '{}\n');
+    await writeFile(join(root, 'tests/no-wall-clock-time-bombs.test.ts'), 'test("wall", () => {});\n');
+    execFileSync('git', ['add', '-A'], { cwd: root });
+    execFileSync('git', ['commit', '-qm', 'base'], { cwd: root });
     const token = join(secrets, 'operator.token');
     await writeFile(token, 'operator-token-'.padEnd(48, 'x'), { mode: 0o600 });
     const posted: { url: string; auth: string | null; key: string | null; body: any }[] = [];
@@ -375,6 +400,10 @@ test('unit:recurring-class-item — the loop files through the master operator-a
     assert.equal(posted[0].key, 'fault-class:scope:abc');
     assert.equal(posted[0].body.origin.faultClass.class, 'scope');
     assert.ok(posted[0].body.reason.length > 0, 'operator-agent mutations carry a reason');
+    // GY-1706: filing derives plannedFiles the way master create does — the proof test and its companions, not [].
+    assert.deepEqual([...posted[0].body.plannedFiles].sort(), [
+      'tests/fault-class-scope.test.ts', 'tests/helpers/timing-baseline.json', 'tests/no-wall-clock-time-bombs.test.ts',
+    ].sort());
   } finally {
     await rm(root, { recursive: true, force: true }); await rm(secrets, { recursive: true, force: true });
   }

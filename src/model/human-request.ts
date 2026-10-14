@@ -95,43 +95,8 @@ export function recommendedChoice(request: { kind: HumanDecisionKind; choices?: 
   const advice = request.recommendation ? key(request.recommendation) : null;
   return advice ? requestChoices(request).find(choice => key(choice.id) === advice || key(choice.label) === advice)?.id ?? null : null;
 }
-/**
- * Why a park is refused before it reaches the human, or null when it may park (GY-1395): a scope
- * widening (GY-1113) is `scope-request`'s, and NEEDED names every human step, never deferring one.
- * GY-1416: work an agent identity on the host can do is never the human's (`hostDoableAsk`) — a
- * repository the host's gh login creates or administers (GY-1384), a deployment variable derived
- * from saved credentials (GY-1365) or a credential the host already holds. Goals and priorities,
- * money or paid accounts, and credentials issued to people still park.
- */
-const scopeWideningAsk = /\bplanned ?files\b|\bscope[- ]request\b|\bmaster scope\b|\bwiden(?:s|ed|ing)?\b[^.]{0,60}\bscope\b/i;
-const deferredAsk = /\bone at a time\b|\bpark (?:once )?(?:again|more)\b|\bpark (?:it )?later\b/i;
-export interface HostDoableAsk { class: 'repository' | 'deployment-variable' | 'host-credential'; what: string; route: string; command: string }
-const hostDoable: (HostDoableAsk & { test: RegExp })[] = [
-  { class: 'deployment-variable', what: 'a deployment variable derived from credentials saved on this host', test: /\b(?:GRAPHYARD_REVERT_APPROVER_[A-Z_]+|GITHUB_(?:APP_ID|INSTALLATION_ID|PRIVATE_KEY(?:_FILE)?|WEBHOOK_SECRET|CI_APP_IDS)|GRAPHYARD_(?:PRINCIPALS|REVIEWER_APPS))\b|\bprovision-railway\b|\b[Ss]et\b[^.;]{0,80}\b(?:[Dd]eployment|[Ee]nvironment|[Rr]ailway|[Cc]ontrol[- ]plane) variables?\b/,
-    route: 'the master derives it from the saved App registrations and sets it through the provider adapter, secrets piped and never printed', command: 'graphyard master setup --apply' },
-  { class: 'repository', what: 'a repository the host\'s gh login can create or administer', test: /\b(?:create|make|configure|administer|set up)\b[^.;]{0,80}\brepositor(?:y|ies)\b|\brepositor(?:y|ies)\b[^.;]{0,60}\b(?:reachable|admin)|\bgh login\b[^.;]{0,60}\badmin/i,
-    route: 'the master does it under the host\'s own gh login, outside the worker sandbox', command: 'gh repo create OWNER/NAME (or gh api repos/OWNER/NAME) as the host\'s gh login, then graphyard master unblock GY-N REASON' },
-  { class: 'host-credential', what: 'a credential the host already holds for this purpose', test: /\b(?:paste|provide|give|send|share|supply)\b[^.;]{0,80}\b(?:github|gh|admin|app|railway)\b[^.;]{0,40}\b(?:token|private key|pem|credential)s?\b/i,
-    route: 'the master supplies it from the host: the gh login (gh auth token), the App registration saved under the install directory, or the provider CLI\'s own login', command: 'gh auth token (or the saved App registration) in the master\'s session, then graphyard master unblock GY-N REASON' },
-];
-/** Who a credential is issued to, when it is a person: that stays the human's (`credentials-for-people`). */
-const personRecipient = /\b(?:teammate|contractor|colleague|employee|engineer|person|people|developer|new hire)s?\b/i;
-/** A credential asked under `credentials-for-people` is the host's only when an agent's work is its stated purpose. */
-const agentPurpose = /\b(?:pilot|worker|agent|master|loop|host|install(?:er|ation)?|deployment|control plane|CI|webhooks?)\b/i;
-/** A step only the human takes, which a host-doable step beside it never hides: money, opening any third-party account (free or paid), a goal. */
-const humanStep = /\b(?:paid|pay|purchase|buy|billing|subscription|budget|spend|invoice|goals?|priorit(?:y|ies|ize))\b|\b(?:open|create|register|sign(?:ing)? up for)\b[^.;]{0,40}\baccounts?\b|\bsign(?:ing)?[- ]?up\b|[€$]\s?\d|\b\d+(?:\.\d+)?\s?(?:EUR|USD)\b|\/month\b|\ba month\b/i;
-export function hostDoableAsk(needed: string, kind?: string): HostDoableAsk | null {
-  if (humanStep.test(needed)) return null;
-  const found = hostDoable.find(entry => entry.test.test(needed) && !(entry.class === 'host-credential' && (personRecipient.test(needed) || (kind === 'credentials-for-people' && !agentPurpose.test(needed)))));
-  return found ? { class: found.class, what: found.what, route: found.route, command: found.command } : null;
-}
-export const hostDoableRefusal = (ask: HostDoableAsk) => `Not a human-only decision: NEEDED asks for ${ask.what}, which an agent identity on the host can do; it is the master's owed action, not the human's. Agent route: ${ask.route} — ${ask.command}`;
-export function parkRefusal(data: { needed: string; kind?: string }): string | null {
-  if (scopeWideningAsk.test(data.needed)) return 'A scope widening is not a human-only decision: ask for it with graphyard scope-request GY-N EPOCH PATH… -- REASON, which an approver decides';
-  if (deferredAsk.test(data.needed)) return 'Ask for every human step the item still needs in this one request: NEEDED may not leave steps to later parks';
-  const doable = hostDoableAsk(data.needed, data.kind);
-  return doable ? hostDoableRefusal(doable) : null;
-}
+// The park-refusal classifier (GY-1395, GY-1416, GY-1692) lives in park-refusal.ts; its surface stays importable from here.
+export { hostDoableAsk, hostDoableRefusal, parkRefusal, type HostDoableAsk } from './park-refusal.js';
 
 /**
  * The fields every request only a human may answer carries, whatever raised it: the exact thing
@@ -157,6 +122,8 @@ export const retainedHumanRequests = 20;
 
 /** The blocker a parked item carries, and the prefix the answer clears it by. */
 export const humanRequestBlocker = 'Waiting on a human-only decision';
+/** How dispatch's refusal of an item parked on a human opens (assertDispatchable): a designed wait whose text names the answer that resumes it. */
+export const dispatchHumanWait = 'Dispatch waits on a human-only decision';
 export const describeHumanRequest = (request: Pick<HumanRequest, 'kind' | 'needed'>) => `${humanRequestBlocker} (${humanDecisionLabel[request.kind]}): ${request.needed}`;
 export const parkedOnHuman = (work: { humanRequest?: HumanRequest | null }) => !!work.humanRequest && !work.humanRequest.answer;
 

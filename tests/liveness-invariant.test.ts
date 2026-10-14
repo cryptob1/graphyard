@@ -19,6 +19,7 @@ import { masterStatusReport } from '../src/cli/master-status.js';
 import { emptyDaemonState, writeDaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): t0 (2026-09-20) drives a virtual clock (now = () => new Date(clock)) handed to settleDelivered and the retry rows; the Postgres half stamps and judges everything with the real clock.
 
 /**
  * GY-201: every open item always has exactly one owned next step with a deadline, and the server
@@ -80,7 +81,7 @@ async function candidate(evidence: 'pass' | 'fail' | null, extra: Partial<Observ
 async function refusedScope() {
   const w = await claimed();
   await engine.execute(worker, 'scope', w.id, { epoch: w.epoch, paths: ['web/unrelated.tsx'], reason: 'The page is easier to change here too' }, id());
-  const decided = await engine.execute(coordinator, 'autoscope', w.id, { epoch: w.epoch }, id());
+  const decided = await engine.execute(coordinator, 'autoscope', w.id, { epoch: w.epoch, treeRead: true }, id());
   assert.equal(decided.scopeRequest?.decision?.state, 'refused', 'the rule refused a path the item does not imply');
   return decided;
 }

@@ -110,7 +110,8 @@ test('the installer verifies /healthz, authenticated /api/status, and webhook de
     runHerdr: args => { herdrCommands.push(args); return args[1] === 'config-dir' ? join(configHome, 'herdr-plugin') : ''; },
   };
 
-  const session = await prepareInstall(root, { repository: 'owner/project', provider: 'compose', workers: 2 }, dependencies);
+  // A hosted provider: a local Compose install registers no webhook and skips delivery (GY-1474).
+  const session = await prepareInstall(root, { repository: 'owner/project', provider: 'railway', workers: 2 }, dependencies);
   const summary = await applyInstall(session, await buildPlan(session));
 
   assert.equal(summary.health, true, 'GET /healthz did not report a healthy database');
@@ -142,7 +143,7 @@ test('the installer verifies /healthz, authenticated /api/status, and webhook de
 
   const instructions = await readFile(join(root, 'AGENTS.md'), 'utf8');
   assert.match(instructions, /## Graphyard coordination/);
-  assert.match(instructions, /## Graphyard master agent/);
+  assert.doesNotMatch(instructions, /## Graphyard master agent|graphyard-master -->/, 'the master reads its rules from master guide, not AGENTS.md');
   for (const token of tokens.values()) assert.ok(!instructions.includes(token));
 
   // Each registered credential authenticates as exactly its own role on the live server.

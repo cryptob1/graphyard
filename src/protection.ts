@@ -125,6 +125,34 @@ export function mergeQueueRuleset(config: { baseBranch: string; githubAppId: num
     ],
   };
 }
+// ---- Merge-writer-only base branch (GY-1715) ---------------------------------------------------
+// Under the control-plane merger Graphyard's merge writer is the only executor, so setup protects the
+// base branch with a ruleset that refuses every creation, push, force push and deletion of it from every actor —
+// administrators included, which classic protection cannot promise — and lets deploy keys alone
+// bypass it. Setup applies it only while the merge writer's key is the repository's one read-write deploy key.
+export const mainWriteRulesetName = 'Graphyard merge writer only';
+/** GitHub's deploy-key bypass names no single key (its actor_id must be null); it covers every deploy key on the repository. */
+export const deployKeyBypassActor = { actor_id: null, actor_type: 'DeployKey' as const, bypass_mode: 'always' as const };
+export function mainWriteRuleset(baseBranch: string) {
+  return {
+    name: mainWriteRulesetName, target: 'branch', enforcement: 'active',
+    bypass_actors: [deployKeyBypassActor],
+    conditions: { ref_name: { include: [`refs/heads/${baseBranch}`], exclude: [] } },
+    rules: [{ type: 'creation' }, { type: 'update', parameters: { update_allows_fetch_and_merge: false } }, { type: 'non_fast_forward' }, { type: 'deletion' }],
+  };
+}
+/** Whether a ruleset document (GET repos/OWNER/REPO/rulesets/ID) already enforces exactly `mainWriteRuleset(BASE)`, so applying it again would change nothing. */
+export function mainWriteRulesetCurrent(ruleset: any, baseBranch: string): boolean {
+  if (!ruleset || typeof ruleset !== 'object') return false;
+  const desired = mainWriteRuleset(baseBranch);
+  const actors = (list: any) => (Array.isArray(list) ? list : []).map((actor: any) => `${actor?.actor_type}:${actor?.actor_id ?? null}:${actor?.bypass_mode}`).sort();
+  const rules = (list: any) => (Array.isArray(list) ? list : []).map((rule: any) => `${rule?.type}:${JSON.stringify(rule?.type === 'update' ? { update_allows_fetch_and_merge: Boolean(rule?.parameters?.update_allows_fetch_and_merge) } : {})}`).sort();
+  const refs = (conditions: any) => [...(conditions?.ref_name?.include ?? [])].sort().join(',') + '|' + [...(conditions?.ref_name?.exclude ?? [])].sort().join(',');
+  return ruleset.target === desired.target && ruleset.enforcement === desired.enforcement
+    && JSON.stringify(actors(ruleset.bypass_actors)) === JSON.stringify(actors(desired.bypass_actors))
+    && JSON.stringify(rules(ruleset.rules)) === JSON.stringify(rules(desired.rules))
+    && refs(ruleset.conditions) === refs(desired.conditions);
+}
 /**
  * Whether the base branch's active rules (GET /rules/branches/BRANCH) carry a merge queue and
  * require every Graphyard check (`Graphyard / merge` and `graphyard/landable`) from the App; null

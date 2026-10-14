@@ -1,8 +1,11 @@
 // Concern: cycle steps 1–1d and 1g — close finished sessions, fail over exhausted ones, answer blocked prompts, recover dead workers and exited sessions; the resume waits they hand to live in cycle-resume.ts.
 import type { Work } from '../model.js';
-import { detectRetryingExhaustion, type CapacityRole, type ExhaustionSignal } from '../model/capacity.js';
+import { detectRetryingExhaustion, silentPaneExhaustion, type CapacityRole, type ExhaustionSignal } from '../model/capacity.js';
 import { detectRuntimeExhaustion } from '../master/environments.js';
-import { classifyRuntimePrompt, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, isProfileSession, ownLoginAccounts, profileAccount, type RuntimePrompt } from '../master.js';
+import { launchStartMs } from '../master/launch.js';
+import { screenMotion, stallScreenLines } from '../master/approver-stall.js';
+import { classifyRuntimePrompt, containmentQuarantines, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, isProfileSession, ownLoginAccounts, profileAccount, type RuntimePrompt, type SessionIdentity, type WorkerProfile } from '../master.js';
+import { containmentPhase } from '../model/containment.js';
 import { standingEscalations } from '../model/escalation.js';
 import { capacityRecheckMs } from '../auto-dispatch.js';
 import { message, orphanObservationSchema } from './state.js';
@@ -12,7 +15,7 @@ import { paneAlreadyGone } from '../request-settlement.js';
 import { blockedPromptAnswers, blockedPromptFailMs, blockedPromptSettleMs, failoverKey, handlerSettleMs, launchAppearanceMs, launcherRetry, promptDigest, type LaunchedSession, preserveInterruptedAttempt, record, stoppedStates } from './effects.js';
 import { checkPaneStillBelongs, endWorkerAttempt, resumeStep, workerHandle } from './cycle-resume.js';
 import type { Cycle } from './cycle.js';
-import { settleEndedAttemptFence } from './cycle-reclaim.js';
+import { settleEndedAttemptFence, supervisorStillRunning } from './cycle-reclaim.js';
 
 export { idleLeaseMs, idleReclaimMs, idleRepromptGraceMs, resumeWaitKey, idleLeaseKey, resumePromptText, idlePromptText } from './cycle-resume.js';
 
@@ -136,8 +139,9 @@ export async function closeStep(cycle: Cycle) {
     /** The runtime a launched role's profile names, for the notice the loop reads off its pane. */
     const profileRuntime = (role: string, profile: string) =>
       (role === 'reviewer' ? config.reviewers : role === 'producer' ? config.producers : []).find(entry => entry.name === profile)?.kind;
-    const held = async (role: CapacityRole, profile: string, item: Work, signal: { reason: string; resetsAt: string | null }) => {
-      const selected = await effects.selectedAccount?.(role, profile) ?? null;
+    // A session is charged to the account it launched on, read by its own identity, not the profile's latest (GY-1582).
+    const held = async (role: CapacityRole, profile: string, item: Work, signal: { reason: string; resetsAt: string | null }, session: SessionIdentity) => {
+      const selected = await effects.selectedAccount?.(role, profile, session) ?? null;
       const account = selected?.environment ?? null;
       // A session on no named account spent its runtime's own login, which other roles launch on too.
       const own = (role === 'worker' ? config.workers : role === 'reviewer' ? config.reviewers : role === 'producer' ? config.producers : []).find(entry => entry.name === profile) ?? { name: profile };
@@ -158,7 +162,7 @@ export async function closeStep(cycle: Cycle) {
       await record(state, key, { kind: 'failover', work: item.key, principal: profile.principal, epoch, state: 'started', detail: `${profile.agentName} on ${item.key} (epoch ${epoch}) ${onNotice(agent)} its provider's limit notice: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
       try {
         const partialWork = await effects.preserveWork?.(item, epoch) ?? { state: 'not-applicable' as const, detail: 'this loop has no access to the attempt worktree' };
-        const { account, runtime } = await held('worker', profile.name, item, signal);
+        const { account, runtime } = await held('worker', profile.name, item, signal, { work: item.key, epoch });
         await effects.reportCapacity!(item, { event: 'exhausted', role: 'worker', epoch, profile: profile.name, account, runtime: runtime ?? profile.kind ?? null, reason: signal.reason, resetsAt: signal.resetsAt, partialWork });
         // The lease is over on the record; the supervisor is stopped through the containment scope
         // it recorded, and the fence it leaves is settled in this action once the host verifies it
@@ -177,18 +181,61 @@ export async function closeStep(cycle: Cycle) {
         performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: profile.principal, epoch, state: 'failed', detail: `${item.key} epoch ${epoch} exhausted its account (${signal.reason}) but could not be failed over: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
       }
     });
-    for (const session of await effects.launchedSessions?.().catch(() => [] as LaunchedSession[]) ?? []) await isolate('failover', open.find(candidate => candidate.key === session.work) ?? null, session.agentName, async () => {
+    // GY-1705: `done` reviewer/producer screens past the start bound share one pause (cycle-p90).
+    // Marker is the work key (in every launch prompt), never the request id.
+    const launched = await effects.launchedSessions?.().catch(() => [] as LaunchedSession[]) ?? [];
+    const doneMotions = new Map<string, Promise<'still' | 'started' | 'moving' | 'unreadable'>>();
+    if (effects.sessionOutput) {
+      for (const session of launched) {
+        const agent = listed(session.agentName), item = open.find(candidate => candidate.key === session.work);
+        if (!agent || !item) continue;
+        const key = failoverKey(session.role, item, session.record), previous = state.actions[key];
+        if (cycle.launcher.busy(key) || previous?.state === 'done' || !readyToRetry(previous, state.cycle)) continue;
+        const running = item.sessions?.filter(entry => entry.state === 'running' && (entry.kind === 'review' || entry.kind === 'proof')) ?? [];
+        const handle = session.requestId ? running.find(entry => entry.id === session.requestId)
+          : running.find(entry => entry.agentName === session.agentName || (!!session.pane && entry.pane === session.pane));
+        const startedAt = handle?.startedAt ? Date.parse(handle.startedAt) : Number.NaN;
+        const pastStart = Number.isFinite(startedAt) && clock - startedAt >= launchStartMs(config);
+        if ((agent.agent_status ?? '') === 'done' && pastStart && !doneMotions.has(session.record)) {
+          doneMotions.set(session.record, screenMotion(() => effects.sessionOutput!(agent, stallScreenLines), session.work, effects.idleScreenPauseMs));
+        }
+      }
+    }
+    for (const session of launched) await isolate('failover', open.find(candidate => candidate.key === session.work) ?? null, session.agentName, async () => {
       const agent = listed(session.agentName), item = open.find(candidate => candidate.key === session.work);
       if (!agent || !item) return;
       const key = failoverKey(session.role, item, session.record), previous = state.actions[key];
       // Its relaunch is still on the launcher: the failover is in flight, not due again.
       if (cycle.launcher.busy(key) || previous?.state === 'done' || !readyToRetry(previous, state.cycle)) return;
-      const signal = await notice(agent, profileRuntime(session.role, session.profile));
+      const noticeSignal = await notice(agent, profileRuntime(session.role, session.profile));
+      const running = item.sessions?.filter(entry => entry.state === 'running' && (entry.kind === 'review' || entry.kind === 'proof')) ?? [];
+      const handle = session.requestId ? running.find(entry => entry.id === session.requestId)
+        : running.find(entry => entry.agentName === session.agentName || (!!session.pane && entry.pane === session.pane));
+      const startedAt = handle?.startedAt ? Date.parse(handle.startedAt) : Number.NaN;
+      const pastStart = Number.isFinite(startedAt) && clock - startedAt >= launchStartMs(config);
+      const status = agent.agent_status ?? '';
+      // Silent spend is Herdr `done` past the start bound with a still untouched screen (GY-1705).
+      // Idle stays on the stall path — Herdr reports long commands as idle. A finished-between-ticks
+      // session may never have been observed working; its screen still shows the work-key marker.
+      let ended = false;
+      if (!noticeSignal && pastStart && status === 'done') {
+        ended = effects.sessionOutput
+          ? (await (doneMotions.get(session.record) ?? screenMotion(() => effects.sessionOutput!(agent, stallScreenLines), session.work, effects.idleScreenPauseMs))) === 'still'
+          : true;
+      }
+      const signal = noticeSignal ?? silentPaneExhaustion({
+        listed: true,
+        everWorking: status === 'working' || handle?.observed === 'working',
+        hasOutcome: !!handle?.outcome,
+        notice: null,
+        pastStartBound: pastStart,
+        ended,
+      });
       if (!signal) return;
       const attempts = (previous?.attempts ?? 0) + 1, resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
-      await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'started', detail: `${session.role} session ${session.agentName} for ${item.key} ${onNotice(agent)} its provider's limit notice: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
+      await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'started', detail: `${session.role} session ${session.agentName} for ${item.key} ${noticeSignal ? `${onNotice(agent)} its provider's limit notice` : 'ended without working'}: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
       try {
-        const { account, runtime } = await held(session.role, session.profile, item, signal);
+        const { account, runtime } = await held(session.role, session.profile, item, signal, { work: item.key, group: session.group });
         await effects.reportCapacity!(item, { event: 'exhausted', role: session.role, ...(session.requestId ? { requestId: session.requestId } : {}), profile: session.profile, account, runtime, reason: signal.reason, resetsAt: signal.resetsAt,
           partialWork: { state: 'not-applicable', detail: `a ${session.role} session edits nothing: it reads the exact head and leaves no work to keep` } });
         await effects.endSession?.(session, `provider quota exhausted on ${account ?? `${session.profile}'s own account`} mid-session (${signal.reason}; ${resets}); launched again on another account`);
@@ -496,6 +543,8 @@ export async function closeStep(cycle: Cycle) {
       const baseline = Date.parse(tracked.stoppedLeaseExpiresAt ?? tracked.leaseExpiresAt);
       state.orphans[orphan.id] = { ...tracked, leaseExpiresAt: orphan.leaseExpiresAt };
       if (!(Date.parse(orphan.leaseExpiresAt) > baseline)) { await effects.persist(state); return; }
+      // Established from here on, in the observation itself, so a stop that fails keeps it so (GY-1617).
+      state.orphans[orphan.id].establishedAt ??= new Date(clock).toISOString();
       const stops = tracked.stops + 1, signal: NodeJS.Signals = stops === 1 ? 'SIGTERM' : 'SIGKILL';
       const key = `incident:orphan-supervisor:${orphan.id}:${orphan.epoch}:${orphan.scope.pid}`;
       const incident = `${orphan.key} epoch ${orphan.epoch} renewed its lease to ${orphan.leaseExpiresAt} while Herdr no longer reports session ${orphan.agentName}: its watch supervisor (pid ${orphan.scope.pid}, containment scope ${orphan.scope.unit}) has outlived the agent`;
@@ -570,7 +619,17 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
     const leased = !!item.lease && item.lease.owner === handle.principal && Date.parse(item.lease.expiresAt) > clock;
     const seenKey = `exited:implementation:${item.id}:${handle.id}:${handle.startedAt}`;
     let reason: string | null = null;
+    // GY-1633: a submitted attempt's supervisor that left its fence standing past the grace window
+    // holds nothing the record still authorizes; its session is over. A lapsed lease proves no
+    // process gone, so the supervisor is stopped through its recorded scope and verified gone on the
+    // host before its pane is closed (stopLingeringSupervisor), and the close settles the fence below.
+    // A loop that cannot stop or inspect it — no fenced workspace registered on this host to probe —
+    // leaves the pane to the steps that read Herdr.
+    const fence = item.containmentQuarantine, owner = fence && config.workers.find(profile => profile.principal === fence.owner);
+    const lingering = !leased && !!fence?.scope && !!owner && !!effects.stopSupervisor && !!effects.containment && handle.id === `${fence.owner}:${fence.epoch}`
+      && item.submission?.epoch === fence.epoch && containmentPhase(item, clock)?.state === 'lapsed' && inspectable(item, config.hostId);
     if (item.stage !== 'build' && !leased) reason = `${item.key} has left build, the stage this implementation session was launched for, and is now in ${item.stage}`;
+    else if (lingering) reason = `${item.key} epoch ${fence!.epoch} submitted pull request #${item.submission!.pr} and holds no lease, yet its containment fence still stands past the grace window`;
     else if (runtime?.available && handle.pane && !(clock - Date.parse(handle.startedAt) < launchAppearanceMs)) {
       const listed = runtime.agents.find(agent => agent.pane_id === handle.pane);
       if (!leased && listed && ['idle', 'done', 'blocked'].includes(listed.agent_status ?? '')) {
@@ -600,9 +659,10 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
         // The pane goes first, so the record never says finished beside a pane still standing. A
         // close that fails leaves the handle running: the step is retried whole on a later cycle.
         let closed = '';
+        if (lingering) closed = `; ${await stopLingeringSupervisor(cycle, item, owner!)}`;
         if (handle.pane) {
-          try { await effects.closeSession(handle.pane); closed = `; pane ${handle.pane} closed`; }
-          catch (error) { if (!paneAlreadyGone(error)) throw error; closed = `; pane ${handle.pane} was already gone`; }
+          try { await effects.closeSession(handle.pane); closed += `; pane ${handle.pane} closed`; }
+          catch (error) { if (!paneAlreadyGone(error)) throw error; closed += `; pane ${handle.pane} was already gone`; }
         }
         const outcome = `closed by the loop: ${found}${closed}`.slice(0, 500);
         await effects.recordSession!(item, { id: handle.id, kind: 'implementation', runtime: handle.runtime, host: handle.host, subject: handle.subject, state: 'finished', outcome });
@@ -624,3 +684,28 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
   for (const key of lapsed) delete state.actions[key];
   if (lapsed.length) await effects.persist(state);
 }
+
+/**
+ * GY-1633. Stops a submitted attempt's lingering supervisor through the scope it recorded — the
+ * guarded stop endWorkerAttempt takes, which signals the pid only while it still runs this
+ * assignment — and returns how, once the host verifies it gone. Until then it throws, so the close
+ * is recorded failed and retried on a later cycle with the pane still standing: a pane that may
+ * hold a running supervisor is never closed under it.
+ */
+async function stopLingeringSupervisor(cycle: Cycle, item: Work, profile: WorkerProfile) {
+  const fence = item.containmentQuarantine!, scope = fence.scope!;
+  // supervisorStillRunning answers null without probing a fence it cannot inspect, so only an
+  // inspectable fence lets that null stand as the host's word that the supervisor is gone.
+  if (!inspectable(item, cycle.config.hostId)) throw new Error(`its fenced workspace for epoch ${fence.epoch} is not registered on ${cycle.config.hostId}, so its supervisor cannot be verified gone and its pane is left standing`);
+  let stop: string;
+  try {
+    await cycle.effects.stopSupervisor!({ id: item.id, key: item.key, epoch: fence.epoch, owner: fence.owner, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: fence.leaseExpiresAt ?? new Date(cycle.clock).toISOString() }, 'SIGTERM');
+    stop = `its supervisor (pid ${scope.pid}) was stopped through ${scope.unit}`;
+  } catch (error) { stop = `its supervisor could not be signalled (${message(error)})`; }
+  const running = await supervisorStillRunning(cycle, item, { epoch: fence.epoch, owner: fence.owner });
+  if (running) throw new Error(`${stop}, but it is not yet verified gone, so its pane is left standing: ${running}`);
+  return `${stop} and verified gone`;
+}
+
+/** Whether this host can probe `item`'s fence: its fenced epoch's workspace is registered here (GY-1633). */
+const inspectable = (item: Work, hostId: string) => containmentQuarantines([item], hostId).length > 0;

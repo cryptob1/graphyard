@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { BaseRefresh, BaseRefreshRequest, LandingCheck, MergeRefusal, RevertedDelivery } from '../merge-queue.js';
-import { criterionSchema, policySchema, resourcesSchema, type Criterion, type Lane } from './policy.js';
+import { criteriaSchema, policySchema, resourcesSchema, type Criterion, type Lane } from './policy.js';
 import type { Evidence } from './evidence.js';
 import type { AgentReview, ReviewFailover, ReviewRequest } from './review.js';
 import type { Delivery, ReleaseDelivery } from './delivery.js';
@@ -10,7 +10,7 @@ import type { NextAction } from './next-action.js';
 import type { ActionQueue } from './actions.js';
 import type { AgentRequest } from './agent-requests.js';
 import type { SessionHandle } from './sessions.js';
-import { companionGround, itemDocumentationPaths, namedPaths, pathScope, pathScopeContains, plannedCompanions, plannedFilesMax, type ItemDocumentation, type ScopeDecision, type ScopeRequestState } from './scope.js';
+import { companionGround, itemDocumentationPaths, namedPaths, pathScopeContains, plannedFilesMax, type ItemDocumentation, type ScopeDecision, type ScopeRequestState } from './scope.js';
 import type { CapacityState } from './capacity.js';
 import type { HumanRequest } from './human-request.js';
 import type { ResearchRecord } from '../research.js';
@@ -25,18 +25,37 @@ import { demand } from './refusal.js';
 export const CHECK_NAME = 'Graphyard / merge', LANDABLE_CHECK = 'graphyard/landable'; // GY-887: both are Graphyard's own, never CI inputs to the verdict
 export const stages = ['backlog', 'ready', 'build', 'review', 'test', 'acceptance', 'merge', 'done'] as const;
 export type Stage = typeof stages[number];
-export const sliceIds = ['product', 'infrastructure', 'docs-experience'] as const;
-export type SliceId = typeof sliceIds[number];
+export const sliceIds = ['product', 'infrastructure', 'docs-experience'] as const; export type SliceId = typeof sliceIds[number];
 export const escalationTriggers = ['lease-loss', 'evidence-policy-conflict', 'security-concern', 'requirement-weakening'] as const;
 export type EscalationTrigger = typeof escalationTriggers[number];
 /** The shipped setting: every new item is system-driven unless its intent says `"systemDriven": false`. */
 export const systemDrivenDefault = true;
+export { declaredPostDeploy, liveObservationPhrase, postDeployCriterionRefusal, postDeployOnlyRefusal, postDeployProof, postDeployProofPrefix, postDeployProofs } from './post-merge-proofs.js';
+/**
+ * GY-1698: a post-deploy follow-up whose criterion is a rolling-window reading — an intervention
+ * rate below a threshold per N days, a hold for N consecutive days — can produce nothing before
+ * the window has run: GY-1689, filed at 03:36Z for a 03:11Z merge, was released at 06:39Z and
+ * spent two worker attempts, a review and two approver sessions on a reading the intervention
+ * report itself projected no earlier than 2026-10-17T14:31Z. The product computes that instant
+ * already; the follow-up now carries it, as one fact in one place: `notBefore` is the earliest
+ * instant the reading can exist, taken from the report's projection for the pattern
+ * (`intervention-report`) or from the delivered item's merge time plus the window the criterion
+ * states (`criterion-window`), whichever is later. A master release before it stays operator
+ * intent — the item may be released — but `nextAction` holds the dispatch on the instant and the
+ * loop dispatches it once the instant passes, without a master session.
+ */
+export const observationWindowSchema = z.object({
+  notBefore: z.string().datetime({ offset: true }),
+  basis: z.enum(['intervention-report', 'criterion-window', 'worker-reading', 'operator-hold']),
+  detail: z.string().max(2000),
+}).strict();
+export type ObservationWindow = z.infer<typeof observationWindowSchema>;
 export const createSchema = z.object({
   title: z.string().min(1).max(200), description: z.string().max(20000).default(''),
   type: z.enum(['feature', 'bug', 'chore']).default('feature'),
   priority: z.number().int().min(0).max(4).default(2),
   dependencies: z.array(z.string().uuid()).max(50).default([]),
-  criteria: z.array(criterionSchema).min(1).max(50),
+  criteria: criteriaSchema(50),
   policy: policySchema.default({ checks: ['test', 'typecheck'], review: true }),
   plannedFiles: z.array(z.string().min(1).max(500)).max(plannedFilesMax).default([]),
   exclusiveResources: resourcesSchema.optional(),
@@ -59,12 +78,30 @@ export const createSchema = z.object({
   systemDriven: z.preprocess(value => value === undefined ? systemDrivenDefault : value, z.boolean().optional()),
   // `research` (GY-259, src/research.ts): false skips a feature's research, true researches any item. `split` (GY-1126, src/decomposition.ts): false never splits it before first dispatch, true splits it even within the size bounds.
   research: z.boolean().optional(), split: z.boolean().optional(),
+  // The earliest instant the observation this item owes can exist (GY-1698): a post-deploy
+  // follow-up for a windowed reading carries it; released, the item is not dispatched before it.
+  observationWindow: observationWindowSchema.optional(),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
+/**
+ * GY-1726: a post-deploy follow-up's proof (`manual:…-on-serving-release`, master-verification.ts
+ * files it so): the one kind of criterion whose reading can lie in the future. A worker that finds
+ * the reading cannot exist yet defers the item to that instant (`defer`) instead of escalating.
+ */
+export const servingReleaseProof = (proof: string) => /^manual:.+-on-serving-release$/.test(proof);
+/** The longest a worker may defer an item: past it the reading is a requirements question, not a wait. */
+export const deferBoundMs = 30 * 24 * 3_600_000;
+/** The item's observation window while it still holds: `notBefore` is after `now`. Null for an item without one, or past it. */
+export function observationWindowHold(work: { observationWindow?: ObservationWindow | null }, now: Date): ObservationWindow | null {
+  const window = work.observationWindow;
+  return window && Date.parse(window.notBefore) > now.getTime() ? window : null;
+}
+export { loopObservationProofs, loopObservation } from './loop-observation.js';
 // The `decision:*` capabilities request a two-party decision (see model/approval.ts); an agent
 // holding one still needs a second, independent agent holding `decision:approve` to apply it.
+// `e2e:record` (GY-1614) admits only the scenario registry and its run route: a candidate's UAT case runs.
 export const operatorCapabilities = ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements', 'policy:review-provider', 'policy:bootstrap',
-  'decision:resolve', 'decision:attest', 'decision:merge', 'decision:rework', 'decision:grant', 'decision:approve'] as const;
+  'decision:resolve', 'decision:attest', 'decision:merge', 'decision:rework', 'decision:grant', 'decision:approve', 'e2e:record'] as const;
 export type OperatorCapability = typeof operatorCapabilities[number];
 export const operatorCredentialHash = Symbol('operatorCredentialHash');
 export interface Principal {
@@ -105,7 +142,7 @@ export interface Observation {
   agentReview?: AgentReview;
   prState?: 'open' | 'closed'; draft?: boolean; prCreatedAt?: string;
   candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number; source?: 'status' }[]; // `status`: a required context's commit status, app 0 (GY-1060)
-  reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string; body?: string; blocking?: string[]; mechanical?: number }[]; // body: a change request's text, read past the review-round cap; blocking: its BLOCKING: findings, read from the whole body (GY-1118); mechanical: an approval's nits classified mechanical, which hold the review gate for their bot round (GY-971)
+  reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string; body?: string; blocking?: string[]; mechanical?: number; source?: string }[]; // body: a change request's text, read past the review-round cap; blocking: its BLOCKING: findings, read from the whole body (GY-1118); mechanical: an approval's nits classified mechanical, which hold the review gate for their bot round (GY-971)
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean; mergeableState?: string; // GitHub's `mergeable_state` as last read (clean, unstable, blocked, behind, dirty, unknown, ...); unset before GY-1231
   // GitHub computed a merge conflict with the base (`pr.mergeable === false`), not merely still computing it;
   // a conflicting head is withheld and sent back (GY-191). `disproved` keeps GitHub's raw reading a test merge disproved (GY-390).
@@ -137,6 +174,8 @@ export interface Work extends Create {
   criteria: Criterion[];
   retiredCriterionIds?: string[];
   formalReviewResetRequired?: boolean;
+  /** The planned mechanical-fix round the review ledger holds for the current candidate (GY-1764): the only ground that holds an approved head for its bot round. `at` is the instant the control plane accepted the loop's last report of it, so a hold never outlives a ledger the loop can still confirm. */
+  mechanicalPlan?: { reviewId: number; head: string; at: string } | null;
   formalReviewBaseline?: { pr: number; policyRevision: number; reviewIds: number[] };
   // Append-only identities that have held an assignment. Trusted proof producers
   // must stay independent of every one of them, not only the latest assignment.
@@ -156,6 +195,15 @@ export interface Work extends Create {
    * override for what the item does not already imply (see model/scope.ts).
    */
   scopeRequest?: ScopeRequestState | null;
+  /** An ask still with the approver when its attempt ended (GY-1484): the next claim adopts it; a widening covering it clears it. */
+  carriedScopeRequest?: ScopeRequestState | null;
+  /**
+   * GY-1726: each live widening a held requirements decision grounded (`autoscope` deciding the ask on
+   * its criteria), by decision: the policy revision it was approved against (`from`), the one the
+   * widening moved the item to (`to`) and the planned entries it added. The widening does not make
+   * that decision stale, and the decision applies when the attempt ends with those entries kept.
+   */
+  heldGroundings?: { decision: string; from: number; to: number; paths: string[] }[] | null;
   /**
    * The last scope decision the control plane took for this item, applied or refused, with the
    * request it answered and how long that request waited. An approved request is applied and
@@ -241,57 +289,7 @@ export function activeLease(work: Work, actor: Principal, epoch: number, now: Da
   demand(work.lease && work.lease.owner === actor.id && work.lease.epoch === epoch && Date.parse(work.lease.expiresAt) > now.getTime(), 'Lease missing, expired, or superseded; claim the task again');
 }
 
-// ---- plannedFiles derived from the criteria (GY-140) ---------------------------------------------
-
-interface CriterionText { id: string; text: string; proofs?: readonly string[] }
-const creationWords = /\b(new|creat\w*|add(?:s|ed|ing)?|introduc\w*)\b/i, testPath = /(^|\/)tests?\/|\.test\.[A-Za-z]+$/, sentences = (text: string) => text.split(/(?<=[.!?;])\s+/);
-/** True when the tree holds the planned scope: the file itself, or any file under a directory scope. */
-export function scopeExists(path: string, tree: ReadonlySet<string>) {
-  const scope = pathScope(path);
-  if (!scope.prefix && tree.has(scope.path)) return true;
-  const directory = scope.path.endsWith('/') ? scope.path : `${scope.path}/`;
-  for (const file of tree) if (file.startsWith(directory)) return true;
-  return false;
-}
-/**
- * The criterion that describes creating `path`, or null: a sentence naming the path beside a
- * creation word (new, create, add, introduce), or — for a test file — a criterion that requires a
- * test, since "a test asserts …" is a criterion describing the test it will be written in.
- */
-export function describedAsNew(path: string, criteria: readonly CriterionText[]) {
-  return criteria.find(c => sentences(c.text).some(s => creationWords.test(s) && namedPaths(s).some(n => pathScopeContains(n, path))) || testPath.test(path) && /\btests?\b/i.test(c.text))?.id ?? null;
-}
-export interface PlannedFilesDerivation {
-  plannedFiles: string[];
-  /** Files a criterion names that resolve in the tree and were not planned, with the criterion that named each. */
-  added: { path: string; criterion: string }[];
-  /** Planned paths the tree does not hold and no criterion describes creating: the item is refused naming them. */
-  missing: string[];
-}
-/**
- * plannedFiles as `master create` and `master requirements` record it: every planned path is
- * resolved against the tree of the base branch the item will be worked on, and every file a
- * criterion names that the tree holds is carried in. Only criteria are read — a path the
- * description mentions in prose is not a requirement and adds nothing — and only exact files
- * are carried: a criterion naming a directory widens nothing on its own. So are a change's inevitable companions (GY-955, model/scope-companions.ts).
- */
-export function derivePlannedFiles(
-  item: { plannedFiles?: readonly string[]; criteria: readonly CriterionText[]; documentation?: ItemDocumentation | null; origin?: WorkOrigin | null; description?: string | null },
-  tree: ReadonlySet<string>,
-): PlannedFilesDerivation {
-  const planned = [...new Set(item.plannedFiles ?? [])], added: PlannedFilesDerivation['added'] = [];
-  const missing = planned.filter(path => !scopeExists(path, tree) && !describedAsNew(path, item.criteria));
-  for (const criterion of item.criteria) for (const path of namedPaths(criterion.text)) {
-    if (tree.has(path) && !planned.some(entry => pathScopeContains(entry, path)) && !added.some(entry => entry.path === path)) added.push({ path, criterion: criterion.id });
-  }
-  for (const entry of plannedCompanions({ plannedFiles: [...planned, ...added.map(entry => entry.path)], criteria: item.criteria, origin: item.origin, description: item.description }, tree, itemDocumentationPaths(item))) {
-    if (!added.some(entry2 => entry2.path === entry.path) && !planned.some(entry2 => pathScopeContains(entry2, entry.path))) added.push({ path: entry.path, criterion: entry.criterion ?? 'DOCS' });
-  }
-  return { plannedFiles: [...planned, ...added.map(entry => entry.path)], added, missing };
-}
-export function plannedFilesRefusal(missing: readonly string[], base: string) {
-  return `plannedFiles names ${missing.length === 1 ? 'a path' : 'paths'} that ${base} does not hold and no criterion describes creating: ${missing.join(', ')}. Correct the path, or state in a criterion that the item creates it`;
-}
+export { derivePlannedFiles, describedAsNew, plannedFilesRefusal, scopeExists, type PlannedFilesDerivation } from './planned-files.js';
 
 /**
  * GY-140 AC-3: per open item, every scope request — open, or the last one decided — whose paths a

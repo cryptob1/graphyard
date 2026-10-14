@@ -128,6 +128,16 @@ export const leaseCommands = defineCommands([
       return context.print(await workMutation(context, work)('blocked', { epoch, reason, ...(partialWork ? { partialWork } : {}) }));
     },
   },
+  {
+    name: 'defer',
+    scope: 'work',
+    help: ['  defer GY-N EPOCH NOT-BEFORE REASON  End this attempt of a post-deploy follow-up whose reading',
+      '                                cannot exist yet; dispatch waits for NOT-BEFORE, no blocker'],
+    run: async (context, work) => {
+      const [epoch, notBefore, ...reason] = context.args;
+      return context.print(await workMutation(context, work)('defer', { epoch: Number(epoch), notBefore, reason: reason.join(' ') }));
+    },
+  },
   verifyCommand,
   completeCommand,
   {

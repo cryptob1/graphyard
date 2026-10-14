@@ -10,15 +10,17 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { createSchema, type Evidence, type Observation, type Principal, type Work } from '../src/model.js';
 import { automatableProof, dispatchIneligibility, dispatchRequestsFor, reconcileAutoDispatch, reviewNeed, type DispatchRequest } from '../src/model/dispatch.js';
-import { buildMasterStatus, loadMasterConfig, managedMasterInstructions, masterConfigSchema, observedExhaustions, paneLastLine, producerProfileSchema, readEnvironmentLog, saveProducerProfile, SessionStartError, setupMaster, type MasterConfig, type MasterRun } from '../src/master.js';
+import { buildMasterStatus, loadMasterConfig, masterInstructions, masterConfigSchema, observedExhaustions, paneLastLine, producerProfileSchema, readEnvironmentLog, saveProducerProfile, SessionStartError, setupMaster, type MasterConfig, type MasterRun } from '../src/master.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, saveReviewLedger, staleReviewReason, summarizeReviews } from '../src/reviewer.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { GhPausedError } from '../src/gh-pause.js';
 import { readProducerLedger } from '../src/producer.js';
 import { attributePersistFailure, bounded, capacityReasonLimit, cursorTextLimit, dispatchCursorPath, dispatchCursorSchema, dispatchEffects, dispatchFailureAttention, dispatchFailureLimit, dispatchFailureReasonLimit, dispatchRetryMinMs, dispatchSummary, emptyDispatchCursor, InstantExitError, readDispatchCursor, repairDispatchCursor, runAutoDispatch, runDispatchTick, selectReviewerProfile, watchInstantExit, writeDispatchCursor, type CursorRepair, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
 import { exhaustionReportSchema } from '../src/model/capacity.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-19 `at`/clock stamps fixture items and dispatch cursors judged at that clock; Date.now()/new Date() stamp live observations and measure launch latency only.
 
 // Each test is named for the proof it produces, so acceptance evidence maps to one executed
 // case per required proof: unit:auto-dispatch-binding, integration:auto-dispatch-review,
@@ -253,7 +255,7 @@ test('integration:auto-dispatch-review — a pending reviewer session for a repl
     // GY-93: the request is the last argument of the runtime's command line, its positional
     // prompt, which the shell reads from the request file the typed line references (GY-121).
     assert.deepEqual(calls[1].slice(0, 3), ['pane', 'run', 'pane-review']);
-    assert.match(expandTypedCommand(calls[1][3]).args.at(-1)!, /repeat it every 5 seconds until mergeable is no longer UNKNOWN/, 'the reviewer polls mergeability before posting');
+    assert.match(expandTypedCommand(calls[1][3]).args.at(-1)!, / review post --event APPROVE/, 'the reviewer posts through review post, which polls mergeability before posting (GY-1492)');
     const ledger = await readReviewLedger(root);
     assert.equal(ledger.reviews[0].requestId, request.id); assert.equal(ledger.reviews[0].state, 'pending');
     const sessionDirectory = ledger.reviews[0].sessionDirectory;
@@ -343,6 +345,21 @@ test('integration:auto-dispatch-producers — one tick launches exactly one revi
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test('integration:auto-dispatch-producers — a review launch deferred by the gh rate-limit pause waits and counts no failure', async () => {
+  const directory = await temporaryDirectory('dispatch-loop');
+  try {
+    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const config = masterConfig(token);
+    const cursor = emptyDispatchCursor(config);
+    const effects = stubEffects(() => [requestedWork()], [], { launchReview: async () => { throw new GhPausedError(clock + 600_000); } });
+    for (let tick = 0; tick < 3; tick++) {
+      const result = await runDispatchTick(config, cursor, effects, () => clock + tick * 1000);
+      assert.deepEqual(result.refused, []); assert.match(result.waiting.find(entry => entry.kind === 'review')!.reason, /gh reads are paused/);
+    }
+    assert.deepEqual(cursor.failures, {});
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test('integration:auto-dispatch-producers — a missing reviewer profile waits with its remedy, a refused launch backs off and is reported, and Herdr being unreadable launches nothing', async () => {
   const directory = await temporaryDirectory('dispatch-loop');
   try {
@@ -393,7 +410,7 @@ test('manual:auto-dispatch-status — the master guide, the generated instructio
   const read = async (name: string) => readFile(new URL(`../${name}`, import.meta.url), 'utf8');
   const [masterAgent, coordination, workCommands, webhook, readEndpoints, help] = await Promise.all([readMasterGuide(), read('docs/coordination.md'), read('docs/protocol/work-commands.md'), read('docs/protocol/github-webhook.md'), read('docs/protocol/read-endpoints.md'), read('src/cli/master.ts')]);
   for (const fragment of ['## Automatic dispatch at submit', 'master producer add', 'within 30 seconds', 'never launches reviews or producers by hand', 'producerProofs', '.graphyard/producers.json', 'run.reviewerProfile', 'dispatchIntervalSeconds', 'one producer session per proof group', 'examples/master/claude-producer.json', 'autoDispatch']) assert.ok(masterAgent.includes(fragment), `docs/master-agent.md must document: ${fragment}`);
-  const instructions = managedMasterInstructions('');
+  const instructions = masterInstructions;
   for (const fragment of ['within\n30 seconds', 'never launch reviews or producers by hand', 'what is requested, what is running and since when', 'Keep cycling: status, dispatch ready work, shepherd review, reconcile what GitHub\nmerged']) assert.ok(instructions.includes(fragment), `the generated instructions must state: ${fragment}`);
   assert.ok(coordination.includes('producerProofs') && coordination.includes('producer-runnable'), 'the coordination guide explains how an item marks a manual proof producer-runnable');
   assert.ok(workCommands.includes('producerProofs'), 'the work-commands page documents producerProofs');

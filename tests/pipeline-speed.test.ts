@@ -28,6 +28,7 @@ import { readMasterGuide } from './helpers/master-guide.js';
 // A namespace import, so a proof run against code without the stage breakdown fails in its test case, not at load.
 import * as flowAnalytics from '../src/flow-analytics.js';
 import type { DeliveryStage, DeliveryStageMove } from '../src/flow-analytics.js';
+// Time-bomb allowance (GY-1694): the 2026-09-20/21 instants are past claim/merge fixtures judged against an explicit `now` of the same day; Date.now()/new Date() only stamp and judge the DB-backed items the engine creates.
 
 // GY-54: pipeline speed. Each test is named for the proof it produces — integration:speed-regression-guard
 // and unit:speed-scope-diff (AC-1), integration:speed-auto-dispatch and integration:speed-reconcile-latency

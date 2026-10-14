@@ -6,6 +6,7 @@ import { handoff } from '../repository-setup.js';
 import { eventHistoryLimits, parseEventHistoryFlags } from '../events-history.js';
 import { defineCommands } from './registry.js';
 import { classifyGateRefusals } from '../model/retro-synthesis.js';
+import { withRisk } from '../model/risk-class.js';
 
 /**
  * The item with the retro registries in force beside it, when any artefact has been applied: the
@@ -34,8 +35,9 @@ export const workCommands = defineCommands([
     scope: 'work',
     help: ['  status [GY-N]                Control-plane or work status'],
     unscoped: async ({ api, print }) => print(await api('status')),
-    // The applied retro requirements and checks (GY-970) travel with the item a session reads first.
-    run: async ({ api, print }, work) => print(await withRetroStanding(work, api)),
+    // The applied retro requirements and checks (GY-970) travel with the item a session reads first,
+    // and the risk class of the merge delta reads beside the lane (GY-1521), computed here, never stored.
+    run: async ({ api, print }, work) => print(withRisk(await withRetroStanding(work, api))),
   },
   {
     name: 'diagnose',

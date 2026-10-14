@@ -12,6 +12,7 @@ import { boundedLaunch, launchBoundMs, LaunchBoundError } from '../src/master/la
 import { planeWideFailure } from '../src/model/blocker-class.js';
 import { planeUnavailableText } from '../src/model/refusal.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): 2026-10-06T13:41 is the tick's explicit clock (now: () => clock, snapshot now: at); Date.now() only measures how long the bounded tick took.
 
 // GY-1373: on 6 October 2026 the claude runtime on vishrog dropped every session it was given. A
 // launch on it was never acknowledged, and the dispatcher's tick waited on its launches, so no

@@ -2,11 +2,13 @@
 import { createHash } from 'node:crypto';
 import type { Engine } from '../engine.js';
 import type { Principal, Work } from '../model.js';
+import { postDeployProofPrefix } from '../model/post-merge-proofs.js';
 import { interventionKindLabel, type InterventionPattern, type InterventionPolicy } from '../model/interventions.js';
 import { boundedSnapshot } from '../store/bounded-snapshot.js';
-import { readInterventionLedger } from './ledger.js';
+import { LedgerRowCache, readAbsorbedPlans, readInterventionLedger } from './ledger.js';
+import type { Store } from '../store.js';
 import { foldInterventions } from './fold.js';
-import { detectPatterns, windowStart } from './report.js';
+import { detectPatterns, readLoopRoutes, windowStart } from './report.js';
 
 /**
  * Whether the server runs the pattern scan (GY-1372). On by default (GY-1381): the scan reads the
@@ -39,6 +41,22 @@ export function startPatternScan(scan: () => Promise<void>, options: { intervalM
   return { stop: async () => { stopped = true; clearInterval(timer); await running; }, run, get running() { return running !== null; } };
 }
 
+/**
+ * The policy window of the ledger and the board it folds against, read once for a scan (GY-1749). The
+ * pattern scan and the retro synthesis beside it fold the same window; each read it for itself, twice a
+ * minute, and every read decompressed the stored document of each of its rows. A scan reads it once,
+ * hands it to both, and keeps the rows it projected (`cache`) for the next scan: what it reads again is
+ * the rows written since.
+ */
+export async function readScanWindow(store: Store, policy: InterventionPolicy, options: { now?: string; limit?: number; cache?: LedgerRowCache } = {}) {
+  const snapshot = await boundedSnapshot(store.reportPool);
+  const now = options.now ?? snapshot.now;
+  const { rows, truncated } = await readInterventionLedger(store.reportPool, { limit: options.limit, since: windowStart(now, policy.windowDays), cache: options.cache });
+  await readAbsorbedPlans(store.reportPool, rows);
+  return { snapshot, now, rows, truncated, routes: await readLoopRoutes(store.reportPool) };
+}
+export type ScanWindow = Awaited<ReturnType<typeof readScanWindow>>;
+
 /** The control plane acting as itself when it opens work from feedback; the ledger names it as every other control-plane write is named. */
 export const controlPlaneActor: Principal = { id: 'graphyard', role: 'admin', sessionKind: 'ai' };
 const minutes = (value: number) => `${Math.round(value / 60_000)} min`;
@@ -50,12 +68,10 @@ const minutes = (value: number) => `${Math.round(value / 60_000)} min`;
  * that item is open nothing is opened again for the pattern; instances an item already links
  * never count towards a second one.
  */
-export async function openPatternItems(engine: Engine, policy: InterventionPolicy, options: { now?: string; actor?: Principal; limit?: number } = {}) {
-  const snapshot = await boundedSnapshot(engine.store.reportPool);
-  const now = options.now ?? snapshot.now;
+export async function openPatternItems(engine: Engine, policy: InterventionPolicy, options: { now?: string; actor?: Principal; limit?: number; window?: ScanWindow } = {}) {
   // Detection reads the policy window of the ledger and nothing older (GY-422).
-  const { rows, truncated } = await readInterventionLedger(engine.store.reportPool, { limit: options.limit, since: windowStart(now, policy.windowDays) });
-  const folded = foldInterventions(rows, snapshot.work, now);
+  const { snapshot, now, rows, truncated, routes } = options.window ?? await readScanWindow(engine.store, policy, options);
+  const folded = foldInterventions(rows, snapshot.work, now, { routes });
   const opened: Work[] = [];
   for (const pattern of detectPatterns(folded.interventions, snapshot.work, policy, now)) {
     if (pattern.item || pattern.unlinked.length < policy.threshold) continue;
@@ -77,7 +93,13 @@ export async function openPatternItems(engine: Engine, policy: InterventionPolic
     const key = `intervention-pattern:${pattern.kind}:${stageSlug}:${createHash('sha256').update(instances.map(entry => entry.id).sort().join(',')).digest('hex').slice(0, 32)}`;
     const work = await engine.execute(options.actor ?? controlPlaneActor, 'create', null, {
       title: `Recurring ${label} interventions at ${where}: ${instances.length} in ${policy.windowDays} days`.slice(0, 200), description: description.slice(0, 20000), type: 'bug', priority: 1,
-      criteria: [{ id: 'AC-1', text: `The cause of the recurring ${label} interventions at ${where} is found and removed: the intervention report shows the ${pattern.kind} rate at ${where} below ${policy.threshold} per ${policy.windowDays} days after the change ships, and the linked instances could not recur`, proofs: [`manual:intervention-pattern-${pattern.kind}-${stageSlug}`] }],
+      // The post-ship rate is an observation only the serving release can make, so it is declared a
+      // post-deploy verification (GY-1660): judged on the head's evidence, checked after deploy, and
+      // owned by a follow-up when unobserved. What the head can show before merge is AC-2's regression test.
+      criteria: [
+        { id: 'AC-1', text: `The cause of the recurring ${label} interventions at ${where} is found and removed: the intervention report shows the ${pattern.kind} rate at ${where} below ${policy.threshold} per ${policy.windowDays} days after the change ships, and the linked instances could not recur`, proofs: [`${postDeployProofPrefix}intervention-pattern-${pattern.kind}-${stageSlug}`] },
+        { id: 'AC-2', text: `Each linked instance is reproduced against the base and shown not to recur against the candidate, by a test the change adds`, proofs: [`manual:intervention-pattern-${pattern.kind}-${stageSlug}`] },
+      ],
       origin: { pattern: origin }, reason: `Recurring ${label} interventions at ${where} crossed the threshold (${instances.length} ≥ ${policy.threshold} in ${policy.windowDays} days)`,
     }, key);
     opened.push(work);

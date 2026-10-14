@@ -1,8 +1,10 @@
-import { test } from 'node:test';
+import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
-import path from 'node:path';
+import path, { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import type { WorkOrigin } from '../src/model/interventions.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
@@ -10,10 +12,12 @@ import { cycleFaults, emptyDaemonState, runCycle, type DaemonEffects } from '../
 import { workFaults } from '../src/model/fault-classes.js';
 import { scopeRequestAttention } from '../src/cli/owed-report.js';
 import { decideScopeRequest, followUpPaths, impliedScopes, namedPaths, plannedCompanions, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
-import { peerModuleGround, importingTestGround } from '../src/model/scope-companions.js';
+import { peerModuleGround, importingTestGround, noWallClockGatePath } from '../src/model/scope-companions.js';
 import { automaticScopeGrounds } from '../src/daemon/cycle-scope.js';
 import { derivePlannedFiles } from '../src/model/work.js';
 import { RefusedResponse } from '../src/model/refusal.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-01..06 scope-request stamps are ledger fixtures judged on Date.parse(observedAt) handed to cycleFaults, runCycle and workFaults; the one new Date() stamps a request judged by paths alone. GY-1706's 11 October instances are derived as offsets from those stamps, never written as calendar literals.
 
 // GY-1085 names this file for its proof: manual:fault-class-scope. The master loop filed 9 scope
 // faults in 24 hours on 1 October 2026. Every one was a live attempt's scope request that the
@@ -123,7 +127,7 @@ function standing(entry: Instance, observedAt = entry.observedAt): Work {
   const owner = `worker-${entry.subject}`;
   const reason = 'outside what this item\'s own criteria and the repository\'s documentation rule imply';
   const request: ScopeRequestState = { epoch: entry.epoch, paths: entry.paths, reason: entry.reason ?? 'the change needs these files', requestedBy: owner, at: entry.requestedAt,
-    ...(entry.refusedAt ? { decision: { state: 'refused' as const, reason, at: entry.refusedAt, decidedBy: 'graphyard', waitedMs: Date.parse(entry.refusedAt) - Date.parse(entry.requestedAt), paths: entry.paths, requestedBy: owner, requestedAt: entry.requestedAt, epoch: entry.epoch } } : {}) };
+    ...(entry.refusedAt ? { decision: { state: 'refused' as const, reason, at: entry.refusedAt, decidedBy: 'graphyard', treeRead: true, waitedMs: Date.parse(entry.refusedAt) - Date.parse(entry.requestedAt), paths: entry.paths, requestedBy: owner, requestedAt: entry.requestedAt, epoch: entry.epoch } } : {}) };
   return {
     id: `work-${entry.subject}`, key: entry.subject, title: entry.subject, description: entry.description ?? '', type: 'feature', priority: 2, dependencies: [],
     criteria: entry.criteria ?? [{ id: 'AC-1', text: 'The behaviour changes as described', proofs: ['unit:behaviour-changes'] }],
@@ -166,10 +170,18 @@ test('manual:fault-class-scope — a request the product does not settle still s
   // Past the fifteen-minute bound the loop promises, a request still open is a fault whatever is deciding it.
   const late = new Date(Date.parse(first.requestedAt) + 16 * minute).toISOString();
   assert.deepEqual(scopeFaults(standing(first, late), late).map(fault => fault.kind), ['scope-request']);
-  // A refusal nothing will judge again — the independent approver's own — is a fault at once.
+  // GY-1757: the independent approver's refusal of an additive ask is the live attempt's to act on inside the bound, whatever its wording.
   const refused = standing(instances[8]);
   refused.scopeRequest!.decision = { ...refused.scopeRequest!.decision!, decidedBy: 'graphyard-approver-graphyard' };
-  assert.deepEqual(scopeFaults(refused, instances[8].observedAt).map(fault => fault.kind), ['scope-request']);
+  refused.scopeRequest!.paths = ['src/x.ts', 'src/y.ts'];
+  assert.deepEqual(scopeFaults(refused, instances[8].observedAt).map(fault => fault.kind), []);
+  // An ask of one path has nothing narrower to re-ask, so the approver's refusal stands at once, whatever it says.
+  for (const reason of ['Do not re-request narrower; this file is unrelated.', 'Refused as filed; re-request narrower.']) {
+    const single = standing(instances[8]);
+    single.scopeRequest!.paths = ['src/x.ts'];
+    single.scopeRequest!.decision = { ...single.scopeRequest!.decision!, decidedBy: 'graphyard-approver-graphyard', reason };
+    assert.deepEqual(scopeFaults(single, instances[8].observedAt).map(fault => fault.kind), ['scope-request']);
+  }
   // So is a rule refusal of an ask that is not purely additive: it is never routed to the approver.
   const narrowing = standing(instances[8]);
   narrowing.scopeRequest!.remove = ['docs/'];
@@ -327,4 +339,123 @@ test('manual:fault-class-scope — escalation:requirement-weakening|GY-1335|2026
   // The candidate resolves it in the application of the approved decision (tests/decision-lifecycle.test.ts,
   // unit:decision-requirements-approval-resolves-weakening): nothing stands, so nothing is counted.
   assert.deepEqual(workFaults({ ...work, escalations: [] } as Work, Date.parse('2026-10-06T02:10:48.978Z')), []);
+});
+
+// GY-1706 — three scope-request instances five days after the 2026-10-06 stamps already in this
+// file. Shared cause: authoring-time planning left companions and fault-class proof tests out of
+// plannedFiles, so each ask was inevitable. Each subtest loads the base (HEAD before this change)
+// and shows the instance reproduces there, then shows the candidate plans or grants the same paths
+// so the ask does not recur. Title timestamps are offsets from those stamps (never calendar literals).
+const day = 86_400_000;
+const gy1706From = Date.parse('2026-10-06T00:00:00.000Z') + 5 * day;
+const gy1706At = (hours: number, minutes: number, seconds: number, ms: number) =>
+  new Date(gy1706From + ((hours * 60 + minutes) * 60 + seconds) * 1000 + ms).toISOString();
+const gy1700At = gy1706At(15, 4, 39, 171), gy1701At = gy1706At(15, 39, 59, 856), gy1705At = gy1706At(19, 59, 46, 909);
+const gy1706Docs = { paths: ['docs/', 'AGENTS.md', 'README.md'] as const };
+/** Main's tip when GY-1706 was claimed: still omits fault-class proof companions and the wall-clock gate. */
+const gy1706BaseSha = 'cbc499997948d5ab4069c39fa96ce0d4df9204e6';
+const gy1706NodeModules = (() => {
+  for (let at = process.cwd(); ; at = dirname(at)) {
+    if (existsSync(join(at, 'node_modules'))) return join(at, 'node_modules');
+    if (dirname(at) === at) throw new Error(`no node_modules above ${process.cwd()}`);
+  }
+})();
+type Gy1706Base = { derivePlannedFiles: typeof derivePlannedFiles; decideScopeRequest: typeof decideScopeRequest; plannedCompanions: typeof plannedCompanions };
+let gy1706Base: Gy1706Base;
+before(async () => {
+  try { execFileSync('git', ['cat-file', '-e', `${gy1706BaseSha}^{commit}`], { cwd: process.cwd(), stdio: 'ignore' }); }
+  catch { execFileSync('git', ['fetch', '--no-tags', '--depth=1', '--quiet', 'origin', gy1706BaseSha], { cwd: process.cwd() }); }
+  const directory = await temporaryDirectory('gy1706-base');
+  execFileSync('tar', ['-x', '-C', directory], { input: execFileSync('git', ['archive', '--format=tar', gy1706BaseSha, 'src'], { cwd: process.cwd(), maxBuffer: 256 * 1024 * 1024 }), maxBuffer: 256 * 1024 * 1024 });
+  await fs.symlink(gy1706NodeModules, join(directory, 'node_modules'), 'dir');
+  const [planned, scope, companions] = await Promise.all([
+    import(join(directory, 'src/model/planned-files.ts')),
+    import(join(directory, 'src/model/scope.ts')),
+    import(join(directory, 'src/model/scope-companions.ts')),
+  ]);
+  gy1706Base = { derivePlannedFiles: planned.derivePlannedFiles, decideScopeRequest: scope.decideScopeRequest, plannedCompanions: companions.plannedCompanions };
+});
+
+test(`manual:fault-class-scope — scope-request|GY-1700|${gy1700At}: a unit-proof test stem that shortens the proof name is a companion`, () => {
+  const planned = ['src/server/routes/github.ts', 'src/server/main.ts', 'docs/protocol/github-webhook.md'];
+  const criteria = [{ id: 'AC-0', text: 'A verified webhook delivery soft-accepts with HTTP 202.', proofs: ['unit:webhook-soft-accept-no-5xx'] }];
+  const asked = 'tests/webhook-soft-accept.test.ts';
+  const item = { plannedFiles: planned, criteria, documentation: gy1706Docs };
+  assert.equal(gy1706Base.decideScopeRequest(item, { paths: [asked] }).state, 'refused', 'base refuses the historical short stem');
+  assert.equal(decideScopeRequest(item, { paths: [asked] }).state, 'approved', 'candidate grants the short stem as the proof\'s test file');
+});
+
+test(`manual:fault-class-scope — scope-request|GY-1701|${gy1701At}: fault-class filing plans its manual:fault-class-* proof test`, () => {
+  // Criteria as faultClassItem writes them for the decision class (no paths; one manual:fault-class-* proof).
+  const criteria = [{ id: 'AC-1', text: 'The shared cause of the recurring decision faults is found and removed at the candidate: each instance listed on this item is reproduced against the base and shown not to recur against the candidate, by a test the change adds', proofs: ['manual:fault-class-decision'] }];
+  const tree = new Set([
+    'tests/fault-class-decision.test.ts', 'tests/fault-class-decision-scope-slot.test.ts', baseline, noWallClockGatePath,
+    'src/daemon/cycle-decisions.ts', 'src/daemon/metrics.ts', 'src/daemon/decisions.ts',
+    'docs/master-agent-reference.md', 'docs/coordination.md',
+  ]);
+  const ask = ['tests/fault-class-decision-scope-slot.test.ts', 'docs/master-agent-reference.md', 'docs/coordination.md'];
+  assert.deepEqual(gy1706Base.derivePlannedFiles({ plannedFiles: [], criteria }, tree).plannedFiles, [], 'base filing derives nothing');
+  assert.equal(gy1706Base.decideScopeRequest({ plannedFiles: [], criteria, documentation: gy1706Docs }, { paths: ask }).state, 'refused');
+  const derived = derivePlannedFiles({ plannedFiles: [], criteria }, tree);
+  assert.ok(derived.plannedFiles.includes('tests/fault-class-decision.test.ts'));
+  assert.ok(derived.plannedFiles.includes(baseline));
+  assert.ok(derived.plannedFiles.includes(noWallClockGatePath));
+  assert.equal(decideScopeRequest({ plannedFiles: derived.plannedFiles, criteria, documentation: gy1706Docs }, { paths: ask }).state, 'approved');
+});
+
+test(`manual:fault-class-scope — scope-request|GY-1705|${gy1705At}: the wall-clock gate rides beside a planned test so docs+gate asks approve`, () => {
+  const planned = [
+    'src/model/capacity.ts', 'src/daemon/cycle-sessions.ts', 'src/daemon/cycle-approvers.ts',
+    'src/daemon/diagnosis.ts', 'src/daemon/doctor.ts', 'src/master/launch-account.ts',
+    'tests/capacity-silent-exhaustion.test.ts', 'src/daemon/effects.ts', 'src/daemon/cycle-dispatch.ts',
+  ];
+  const criteria = [{ id: 'AC-1', text: 'A silent pane exhaustion is held and the role fails over.', proofs: ['unit:silent-pane-exhaustion-signal'] }];
+  const ask = ['docs/master-agent.md', 'docs/master-agent-sessions.md', 'docs/onboarding.md', noWallClockGatePath];
+  const tree = new Set([...planned, ...ask, baseline, 'tests/docs-budget.test.ts', 'tests/silent-pane-exhaustion-signal.test.ts']);
+  const item = { plannedFiles: planned, criteria, documentation: gy1706Docs };
+  assert.equal(gy1706Base.decideScopeRequest(item, { paths: ask }).state, 'refused', 'base refuses the mixed docs+gate ask');
+  assert.ok(!gy1706Base.plannedCompanions({ plannedFiles: planned, criteria }, tree, [...gy1706Docs.paths]).some((entry: { path: string }) => entry.path === noWallClockGatePath));
+  assert.ok(plannedCompanions({ plannedFiles: planned, criteria }, tree, [...gy1706Docs.paths]).some(entry => entry.path === noWallClockGatePath));
+  assert.ok(derivePlannedFiles({ plannedFiles: planned, criteria }, tree).plannedFiles.includes(noWallClockGatePath));
+  assert.equal(decideScopeRequest(item, { paths: ask }).state, 'approved');
+  assert.ok(!derivePlannedFiles({ plannedFiles: planned, criteria }, tree).plannedFiles.includes('docs/'), 'documentation.paths stay widen-time implications');
+});
+
+const narrowerReason = 'Refused as filed; re-request narrower. The ask names files the criteria do not need.';
+function approverRefused(reason: string) {
+  const work = standing(instances[8]);
+  work.scopeRequest!.decision = { ...work.scopeRequest!.decision!, decidedBy: 'graphyard-approver-graphyard', reason };
+  work.scopeRequest!.paths = ['src/x.ts', 'src/y.ts']; // a narrower ask exists only when the ask names several paths
+  return work;
+}
+
+test('unit:standing-re-requestable-settling — GY-1757: an approver refusal of an additive multi-path ask on a live lease inside the bound is not standing, whatever its wording', () => {
+  const entry = instances[8];
+  for (const wording of [narrowerReason, 'Please ask again for fewer files', 'Refused as filed; ask only for src/x.ts', 'Do not re-request narrower; this file is unrelated'])
+    assert.deepEqual(scopeFaults(approverRefused(wording), entry.observedAt).map(fault => fault.kind), [], wording);
+});
+
+test('unit:standing-re-requestable-bound-stands — GY-1757: the same refusal stands once the bound passes, and not when the lease has ended', () => {
+  const entry = instances[8];
+  const late = new Date(Date.parse(entry.requestedAt) + 16 * minute).toISOString();
+  const work = approverRefused(narrowerReason);
+  work.lease = { ...work.lease!, expiresAt: new Date(Date.parse(late) + 10 * minute).toISOString() };
+  assert.deepEqual(scopeFaults(work, late).map(fault => fault.kind), ['scope-request']);
+  assert.deepEqual(workFaults(approverRefused(narrowerReason), Date.parse(entry.observedAt) + 20 * minute).filter(fault => fault.subject === entry.subject && fault.text.includes('plannedFiles')).length, 0, 'an expired lease is moot, as today');
+});
+
+test('unit:standing-dead-ends-stand — GY-1757: no approver route, a non-additive ask and a one-path ask still stand at once', () => {
+  const entry = instances[8];
+  const narrowing = approverRefused(narrowerReason);
+  narrowing.scopeRequest!.remove = ['docs/'];
+  assert.deepEqual(scopeFaults(narrowing, entry.observedAt).map(fault => fault.kind), ['scope-request'], 'a non-additive ask cannot be narrowed by re-asking');
+  for (const wording of ['Do not re-request narrower; this file is unrelated', narrowerReason]) {
+    const single = approverRefused(wording);
+    single.scopeRequest!.paths = ['src/x.ts'];
+    assert.deepEqual(scopeFaults(single, entry.observedAt).map(fault => fault.kind), ['scope-request'], `a one-path ask has nothing narrower to re-ask: ${wording}`);
+  }
+  const ruleRefused = standing(entry);
+  ruleRefused.scopeRequest!.remove = ['docs/'];
+  assert.deepEqual(scopeFaults(ruleRefused, entry.observedAt).map(fault => fault.kind), ['scope-request']);
+  assert.equal(workFaults(standing(entry), Date.parse(entry.observedAt), false).filter(fault => fault.subject === entry.subject).length, 1, 'with no approver route');
 });

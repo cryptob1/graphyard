@@ -9,6 +9,7 @@ import { GitHub, processJob } from '../src/github.js';
 import { diagnose } from '../src/coordination.js';
 import { buildMasterStatus } from '../src/master/status.js';
 import { CHECK_NAME, Refusal, ReconciliationRetry, type Principal, type Work } from '../src/model.js';
+// Time-bomb allowance (GY-1694): the 2026-09-22 created_at is a past, fixed field of the stub GitHub pull payload; Date.now() only measures how long a retry streak takes and new Date() stamps stub reviews' submitted_at.
 
 // GY-506: the merge-queue deadlock. Every test is named for the proof it produces.
 

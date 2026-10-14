@@ -12,6 +12,7 @@ import { mergeAuthorized, mergeQueueAction } from '../src/merge-queue.js';
 import { reviewNeed } from '../src/model/dispatch.js';
 import { operationsCommand } from '../src/cli/master/operations.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-04T12:30Z now is handed to evaluate, mergeQueueAction and reviewNeed with observations stamped from it; the engine case stamps its observation with new Date() and reads the database clock.
 
 // GitHub delivery is the only delivery (GY-1235): a candidate whose build, review and required
 // checks pass on its head is GitHub's to merge, and GitHub's merge of that head is the delivery.

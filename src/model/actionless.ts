@@ -1,4 +1,4 @@
-import type { Work } from '../model.js';
+import { observationWindowHold, type Work } from '../model.js';
 import { plainReason } from './plain-status.js';
 
 /**
@@ -47,8 +47,10 @@ export function actionlessCards(work: Work[], now: number): ActionlessCard[] {
       // The same order the control plane decides in: a gate refusing without saying why is
       // nobody's to move, then the session already doing what the build gate waits for, then the
       // item a deferred refusal points at. Anything else has nothing moving it.
+      const window = observationWindowHold(item, new Date(now));
       const movedBy = refusal === undefined ? (!failing && item.candidate ? 'the next reading of its pull request' : null)
         : live && failing!.name === 'build' ? item.lease!.owner
+          : window ? `its observation window, which closes at ${window.notBefore}`
           : deferredRefusal(refusal) ? refusal.match(/^Dependency (\S+)|: (\S+) is ahead$|^Waiting for (\S+)/)?.slice(1).find(Boolean) ?? 'another item'
             : null;
       return { item, gate: failing?.name ?? null, heldSince: item.stageEnteredAt, movedBy,

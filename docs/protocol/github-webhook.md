@@ -1,19 +1,19 @@
 <!-- page: Agent protocol | 5 | webhook, dispatch. -->
 # GitHub webhook
 
-`POST /api/github/webhook` verifies HMAC, deduplicates deliveries, wakes durable jobs for [observation](#reads-that-are-not-repeated); payloads never pass gates.
+`POST /api/github/webhook` verifies HMAC, deduplicates deliveries, wakes durable jobs for [observation](#reads-that-are-not-repeated); payloads never pass gates. Verified deliveries never 5xx: those waking nothing return 202, logging `ignored`, delivery ID, event: `startup validation`/`wake failed` (unreceipted; polling covers), `own check`, `duplicate delivery`, `no subject`, `no open job`. Auth/repository refusals: 4xx/503.
 
-`POST /api/work/:id/reviewpolicy` (`admin`; operator agents with `policy:review-provider`): `{"provider":"codex"|"github"|"agent","expectedPolicyRevision":1,"reason":…}`, bumping policy revision; `agent` needs ordered `reviewerProfiles` (`name`, `runtime`, `reviewerApp`; optional `mention`, `timeoutSeconds`).
+`POST /api/work/:id/reviewpolicy` (`admin`; `policy:review-provider`): `{"provider":"codex"|"github"|"agent","expectedPolicyRevision":1,"reason":…}`; `agent` needs ordered `reviewerProfiles` (`name`, `runtime`, `reviewerApp`; optional `mention`, `timeoutSeconds`).
 
 ## Reads that are not repeated
 
-Commits and exact-SHA compares cache once (`github_cache`); a SHA pair's questions (ancestry, commits, landing diff, changed files) read one first page (`?per_page=100&page=1`): base move: one compare per open candidate. Base ref: once per 15 s per replica; protection, rulesets: 5-minutely or on events. `pull_request`, `pull_request_review`, `check_run`, `check_suite`, `push` webhooks claim items first; polls they cover skip (`poll skipped: a webhook refreshed this item`). A base push wakes only open items overlapping its files or with last `mergeable_state` not `CLEAN`/`UNSTABLE` (all, if payload names no files; `unit:merge-burst-request-budget`).
+Commits and exact-SHA compares cache once (`github_cache`); SHA-pair questions (ancestry, commits, landing diff, files) read one first page; base move: one compare per open candidate. Base ref: once/15 s/replica; protection, rulesets: 5-minutely or on events. `pull_request`, `pull_request_review`, `check_run`, `check_suite`, `push` claim first; covered polls skip (`poll skipped: a webhook refreshed this item`). Base push wakes open items overlapping its files or with last `mergeable_state` not `CLEAN`/`UNSTABLE` (all if no files; `unit:merge-burst-request-budget`).
 
 ## Prioritized wakes
 
-`POST /api/work/:id/resync` with `prioritized: true` is claimed like webhook wake; loop wakes add `wait: false`, answering without a reconcile tick. A rework decision on a stale observation sends one, deciding from its result (any age; candidate head; no GitHub pause); meanwhile-saved bookkeeping (sessions, next action, gates, escalations) doesn't refuse it; decisions the candidate moved past are withdrawn. A rework dispatch refused with `Submitted PR branch changed` releases its claim via one, restarting from new head.
+`POST /api/work/:id/resync` with `prioritized: true` is claimed like webhook wake; loop wakes add `wait: false`. Rework on a stale observation sends one (any age; candidate head; no GitHub pause); decisions the candidate moved past are withdrawn. A rework dispatch refused with `Submitted PR branch changed` releases its claim via one, restarting from new head.
 
-Decisions step budget: two fifths of `run.intervalSeconds`, ≥30 s; unreached items keep standing decisions, request nothing, show in `decisions:deferred`; both passes (rework; routine decisions, then attestations) resume them next cycle, always reaching first item even past budget.
+Decisions step budget: two fifths of `run.intervalSeconds`, ≥30s; unreached items keep standing decisions, show in `decisions:deferred`; passes (rework; routine, then attestations) resume next cycle, always reaching first item past budget.
 
 ## Automatic dispatch records
 

@@ -4,7 +4,7 @@ import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
 import { cycleMetricsSchema, type CycleStepName, type DaemonAction, type DaemonActionKind, type DaemonState, emptyCycleSteps, message, pruneDaemonState } from './state.js';
 import { reconcilePendingActions } from './reconcile.js';
 import { type ExhaustedProof, setAsideFollowUpThreads } from './decisions.js';
-import { emptyHeldDecisions, type HeldDecisions } from './decision-reads.js';
+import { decisionFailureKind, emptyHeldDecisions, type HeldDecisions } from './decision-reads.js';
 import { actionableSubjects, latencyBudget, observeItemClock, stageMetrics, trackSilence } from './metrics.js';
 import { profileHealth } from './sessions.js';
 import { boundedPersist } from './liveness.js';
@@ -18,15 +18,20 @@ import { hostSupervisionStep } from './cycle-host.js';
 import { dispatchStep } from './cycle-dispatch.js';
 import { decisionStep } from './cycle-decisions.js';
 import { baseFailureStep } from './cycle-base-failures.js';
+import { flakeStep } from './cycle-flakes.js';
 import { reviewCapStep } from './cycle-review-cap.js';
 import { deploymentStep, mergeStep, shepherdStep } from './cycle-delivery.js';
 import { faultStep } from './faults.js';
 import { doctorStep } from './doctor.js';
 import { triageBacklogStep } from './cycle-triage.js';
 import { remedyStep } from './cycle-remedies.js';
+import { mainWatchStep } from './main-watch.js';
+import { shadowStep } from './cycle-shadow.js';
+import { mergeWriterStep } from './cycle-merge-writer.js';
 import { Timings, withTimings, withoutTimings } from '../master/timings.js';
 import { syncProjectMemory } from '../project-memory.js';
 import { planeUnavailable } from '../model/refusal.js';
+import { planeWideRefusal } from '../model/blocker-class.js';
 
 /** How many session launches the launcher runs at once when master.json sets no `run.launchConcurrency` (GY-616). */
 export const defaultLaunchConcurrency = 3;
@@ -138,7 +143,8 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
     catch (error) {
       const key = `isolated:${kind}:${item?.id ?? name}`;
       // GY-1344: a control plane that did not answer judged nothing; it is retried next cycle and is no fault of the step's.
-      const unanswered = planeUnavailable(error);
+      // GY-1541: nor did one that answered "Startup validation has not completed" (a deploy's 503, GY-1375) or any other plane-wide failure.
+      const unanswered = planeUnavailable(error) || planeWideRefusal(error);
       performed.push(await record(state, key, { kind, work: item?.key ?? null, principal: null, state: 'failed', epoch: item?.epoch ?? null,
         detail: unanswered ? `Handling ${name} in the ${kind} step met a control plane that did not answer, so it is retried next cycle: ${message(error)}`
           : `Handling ${name} in the ${kind} step threw, so only its own action failed and the cycle went on with every other item: ${message(error)}`,
@@ -178,10 +184,13 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
     catch (error) {
       const failed = `isolated:${kind}:${item?.id ?? key}`;
       const why = `The ${kind} launch for ${item?.key ?? key} threw, so only that launch failed: ${message(error)}`;
+      // GY-1505: an approver launch that met a silent control plane or lost the folder-trust race is
+      // made again next cycle; the first at its key is no decision fault, a second in a row is.
+      const faultKind = kind === 'decision' && item ? decisionFailureKind(state, item.key, why, state.actions[failed]) : undefined;
       try {
         sink.push(await record(state, failed, { kind, work: item?.key ?? null, principal: null, state: 'failed', epoch: item?.epoch ?? null,
           detail: why,
-          attempts: (state.actions[failed]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+          attempts: (state.actions[failed]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist, faultKind));
       } catch { /* a cursor that cannot be written is the next cycle's failure */ }
       // The launch's own `started` entry is what holds the cycle off the same work until it settles,
       // and a body that threw after recording it, before settling it itself, left it started until a
@@ -192,7 +201,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
         try {
           sink.push(await record(state, key, { kind: started.kind, work: started.work, principal: started.principal, epoch: started.epoch, state: 'failed',
             detail: `${why} Its own started entry is settled failed for that throw, so no restart is needed to reconcile it`,
-            attempts: started.attempts, cycle: state.cycle }, now(), effects.persist));
+            attempts: started.attempts, cycle: state.cycle }, now(), effects.persist, faultKind));
         } catch { /* a cursor that cannot be written is the next cycle's failure */ }
       }
     }
@@ -231,6 +240,8 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // 3a. A required check that fails on the base head too is set aside before anything decides on
   //     the item (GY-528): the decisions and the approver capacity dispatch counts read it.
   cycle.baseFailed = await timings.step('base failures', () => baseFailureStep(cycle));
+  // 3b. Pass-on-rerun outcomes go to the flake ledger, and a repeatedly flaky test gets one fix item (GY-1498); no gate reads it.
+  await timings.step('flakes', () => cycle.isolate('fault', null, 'flake ledger', () => flakeStep(cycle)));
   spent('decisions');
 
   const capacity = await timings.step('dispatch', () => dispatchStep(cycle, health, assessments));
@@ -253,9 +264,18 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   spent('decisions');
 
   await timings.step('merges', () => mergeStep(cycle));
+  // 6b'. The control-plane merge executor (GY-1524): open intents reconciled, then one head trial-merged,
+  //      tested and pushed with the deploy key beside the cycle; active only under the control-plane merger.
+  await timings.step('merge writer', () => cycle.isolate('merge', null, 'merge writer', () => mergeWriterStep(cycle)));
+  // 6c. The shadow merge gate (GY-1522): one head trial-merged and fast-tested beside GitHub's gate; it writes nothing.
+  await timings.step('shadow gate', () => cycle.isolate('merge', null, 'shadow gate', () => shadowStep(cycle)));
   spent('merge');
 
   await timings.step('deployment verification', () => deploymentStep(cycle));
+  // 7a''''. The main watch (GY-1519): main's first-parent history since the last promotion, read from
+  //         the coordinator checkout, classified against the merge ledger, deliveries, reverts and
+  //         direct-merge windows; an unknown commit is reported once, and freezes promotion when asked.
+  await timings.step('main watch', () => cycle.isolate('deployment', null, 'main watch', () => mainWatchStep(cycle)));
   // 7b. Classify what is wrong and file one item per recurring class (GY-173). It shares the
   //     deployment step's clock: it reads the same snapshot and makes at most one call per class.
   await timings.step('faults', () => faultStep(cycle, assessments));

@@ -86,7 +86,7 @@ test('unit:item-page-sections — below the summary the item page shows What is 
   assert.deepEqual(groups.map(group => [group.label, group.who, group.current]), [['Review', 'Reviewer agent', true], ['Prove', 'Prover agent', false], ['Merge', 'Builder agent', false]]);
   for (const group of groups) {
     const gate = item.gates.find(entry => ({ Review: 'review', Prove: 'acceptance', Merge: 'merge' } as Record<string, string>)[group.label] === entry.name)!;
-    assert.deepEqual(group.lines, plainLines(gate), `${group.label}: every line is the gate reason's plain translation`);
+    assert.deepEqual(group.lines, plainLines(gate, item, NOW), `${group.label}: every line is the gate reason's plain translation`);
   }
   assert.deepEqual(groups.flatMap(group => group.lines), ['Waiting for someone else to approve the latest code', 'The proof unit:item-page-sections has not passed yet', 'The proof unit:item-page-technical-collapsed has not passed yet', 'Graphyard is re-checking GitHub', 'The pull request conflicts with the main branch']);
   const left = html.slice(html.indexOf('aria-label="What is left"'), html.indexOf('aria-label="Requirements"'));
@@ -178,8 +178,8 @@ test('unit:item-page-technical-collapsed — gate internals, sessions with attac
 test('the Activity section reads the kinds the ledger records — command names and the control plane\'s own facts — and never calls a page of history the full history', () => {
   // Every command is recorded under its own name (src/engine.ts save(db, work, actor, command, …)); each reads as what happened.
   // Typed over every command: a command added to the engine without a plain label fails typecheck here.
-  const commands: Record<Command, true> = { create: true, ready: true, requirements: true, reviewpolicy: true, unblock: true, rework: true, resolve: true, recover: true, claim: true, rereview: true,
-    heartbeat: true, quarantine: true, launch: true, settle: true, autosettle: true, release: true, workspace: true, submit: true, blocked: true, dispatchblock: true, scope: true, autoscope: true, evidence: true,
+  const commands: Record<Command, true> = { create: true, ready: true, requirements: true, reviewpolicy: true, unblock: true, rework: true, resolve: true, recover: true, claim: true, rereview: true, mechanicalplan: true,
+    heartbeat: true, quarantine: true, launch: true, settle: true, autosettle: true, release: true, workspace: true, submit: true, blocked: true, defer: true, window: true, dispatchblock: true, scope: true, autoscope: true, evidence: true,
     deployment: true, revoke: true, session: true, request: true, refresh: true };
   for (const command of Object.keys(commands)) assert.notEqual(activityLabel(command), 'Updated', `command ${command} has a plain label`);
   assert.deepEqual(['create', 'ready', 'claim', 'submit', 'rework', 'review.requested', 'merge.execution.committed', 'delivery.verified', 'human.requested', 'github.observed'].map(activityLabel),
@@ -235,7 +235,8 @@ test('What is left names who clears each step from the refusal itself: exhausted
   const blockedAll = [...all, blocked];
   const [held] = whatIsLeft(blocked, NOW);
   assert.deepEqual([held.label, held.who], ['Build', 'Master agent']);
-  assert.ok(held.lines.some(line => line.includes(blocker)), 'the blocker is shown as written');
+  // Its one plain sentence, never its recorded text, which only Technical details carries (GY-1739).
+  assert.ok(held.lines.includes('A fault blocks it; the master agent clears it.') && !held.lines.some(line => line.includes(blocker)), 'the blocker reads as its summary');
   assert.equal(nextActor(blocked, groupWithin(blocked, blockedAll, NOW), NOW).who, 'Master agent');
   assert.match(page(blocked, blockedAll), /<h3>Build <small>· cleared by Master agent<\/small><\/h3>/);
   // A parked human-only decision is also a ready-gate blocker, but it is yours: the panel agrees
@@ -255,4 +256,11 @@ test('What is left names who clears each step from the refusal itself: exhausted
   const unreleasedAll = [...all, unreleased];
   assert.deepEqual(whatIsLeft(unreleased, NOW).map(group => [group.label, group.who])[0], ['Build', 'Master agent']);
   assert.equal(nextActor(unreleased, groupWithin(unreleased, unreleasedAll, NOW), NOW).who, 'Master agent');
+  // A split parent with an undelivered child (GY-1739 review): its ready reason is no recorded
+  // blocker, so it reads as the wait for that child, never as a fault the master agent clears.
+  const split = { ...blocked, blocker: null, children: ['GY-99'], lease: null,
+    gates: [gate('ready', ['Split into child items: GY-99 is not delivered']), ...blocked.gates.filter(entry => entry.name !== 'ready')] } as unknown as Work;
+  const [splitHeld] = whatIsLeft(split, NOW);
+  assert.deepEqual([splitHeld.label, splitHeld.who, splitHeld.lines[0]], ['Build', 'Nobody yet', 'Split into smaller items; waiting for GY-99 to ship first']);
+  assert.ok(!splitHeld.lines.some(line => /fault|master agent/i.test(line)), 'a split-child wait is not summarised as a recorded blocker');
 });

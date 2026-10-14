@@ -7,15 +7,18 @@ import { researchWorkerSection } from '../research.js';
 import { appliedMechanicalRework, mechanicalWorkerSection, readMechanicalFixRequests, type MechanicalFixRequest } from '../mechanical-findings.js';
 import { discover, assertRepository } from '../onboarding.js';
 import { concurrentOverlap, resourceConflicts } from '../coordination.js';
-import { type SandboxExec, verifyWorkerSandbox, workerPaths, writablePaths, grantWorkerPaths } from '../worker-sandbox.js';
+import { type SandboxExec, WorkerSandboxError, verifyWorkerSandbox, workerPaths, writablePaths, grantWorkerPaths } from '../worker-sandbox.js';
 import { sweepExpiredWorkerCredentials, withdrawWorkerCredential, workerCredentialDirectory, workerCredentialEnvironment, workerCredentialRoot } from '../worker-credential.js';
 import { assertNoApprovalOptOut } from '../harness.js';
-import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
+import { parkedOnHuman, humanDecisionLabel, answerCommand, dispatchHumanWait } from '../model/human-request.js';
+import { loopOwnedRefusal } from '../model/loop-owned.js';
 import { documentationWorkerSection } from '../model/documentation.js';
-import type { Work } from '../model.js';
+import { workerPreference } from '../model/worker-preference.js';
+import { loopObservation, loopObservationProofs, observationWindowHold, servingReleaseProof, type Work } from '../model.js';
 import { type ConsentAnswer, type ConsentHold, consentHoldAttention, consentHoldMs, writeConsentHold } from '../consent-prompt.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { atomicPrivateWrite, loadMasterConfig, readCredentialFile, readWorkerCredential } from './config.js';
+import type { MergerMode } from '../merger-mode.js';
 import { accountLaunch, agentLaunchPlan, type EnvironmentProbe, NoHealthyAccountError, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
 import { closeFailedLaunch, launcherCoordinatorRoot, launchStartMs, prepareConfinedGitPaths, sessionConfinement, type PromptDelivery, PromptNotAcceptedError, type RequestDelivery, SessionStartError, startAgentSession, type StartBounds, withLaunchClose } from './launch.js';
 import { closeHerdrPane, createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
@@ -24,9 +27,12 @@ import { containmentHold, stopLaunchSupervisor } from './containment.js';
 import { dependencyDirectories, failureText, type SharedDependencies, shareDependencies } from './worktrees.js';
 import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sessionSlotsGrant, submissionPolicyRule } from './harness.js';
 import { withVerificationPath } from './verification-slots.js';
+import { holdRepeatedLimitAccount, repeatedLimitAccount } from './launch-account.js';
 import { currentAgents, dispatchedFile, DispatchReservedError, launchedSinceSnapshot, profileLaunchedFile, reclaimableAgent, reserveDispatch, watchSupervisorRunning } from './dispatch-reservation.js';
 import { projectMemoryDigest, type ProjectMemory } from '../model/project-memory.js';
 import { readProjectMemory } from '../project-memory.js';
+import { readVerificationMaps, verificationMapDigest, type VerificationMap } from '../verification-maps.js';
+import { appliedReworkBrief, readReworkDecisions, reworkBriefSection, type AppliedRework, type ReworkDecisionRow } from './rework-brief.js';
 
 /** The launcher's own runner: the CLI as a child, and git. `stdio` is honoured for the streams a child may inherit; the rest is captured. */
 type WorkerCommand = (command: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv; stdio?: ('ignore' | 'pipe' | 'inherit')[] }) => string | Buffer | Promise<string | Buffer>;
@@ -65,6 +71,20 @@ export interface DispatchOptions {
    * preparer supplies gets one only when a minter is given.
    */
   credential?: CredentialMinter;
+  /**
+   * Which writer lands heads on the base branch (GY-1523), read from `/api/status` `mergeWriter` for
+   * the worktree prepareWorkerLaunch creates (readMergeWriter) and taken as `github` for a worktree
+   * an injected preparer supplies unless given here. A `control-plane` launch mints no push
+   * credential, sets no GH_CONFIG_DIR and binds no keyring proxy: the worker's commit is read from
+   * the shared object store by `complete --head`, so the session has nowhere to push.
+   */
+  mergeWriter?: MergerMode;
+  /**
+   * Reads the merger when `mergeWriter` is not given (GY-1523): the control plane's `/api/status`
+   * (readMergeWriter) for the worktree prepareWorkerLaunch creates, and `github` for one an injected
+   * preparer supplies. Given by the soak day, whose real launches count and answer the reads.
+   */
+  readMergeWriter?: (config: MasterConfig) => Promise<MergerMode>;
   /** The coordinator checkout the worker's session is confined against, for a launcher embedded outside the CLI (startAgentSession's `coordinatorRoot`). */
   coordinatorRoot?: string;
   /**
@@ -75,6 +95,10 @@ export interface DispatchOptions {
   renew?: LeaseRenewer;
   /** How often the launch renews the lease until its supervisor takes over (launchRenewalMs). */
   renewIntervalMs?: number;
+  /** Reads the base's verification maps (GY-1495); readVerificationMaps from the coordinator checkout by default. */
+  verificationMaps?: (root: string, baseBranch: string) => Promise<VerificationMap[]>;
+  /** Reads a rework round's decisions before anything is claimed (GY-1569); readReworkDecisions by default, which refuses the launch when the read fails. */
+  readDecisions?: (config: MasterConfig, work: Work) => Promise<ReworkDecisionRow[]>;
 }
 /** Renews `key` epoch `epoch` under `profileName`'s credential, as the worker's own heartbeat does. */
 export type LeaseRenewer = (root: string, key: string, epoch: number, profileName: string) => Promise<unknown>;
@@ -102,6 +126,46 @@ export function launchLeaseKeepAlive(renew: (() => Promise<unknown>) | null, int
   // Stopping waits out a renewal in flight, so none lands after the release that follows.
   return { stop: async () => { stopped = true; clearInterval(timer); await pending; } };
 }
+/**
+ * A launch refused because the merger could not be read (GY-1523). The cause keeps the server's own
+ * words (an HTTP status, `fetch failed`, the timeout's text), so the loop classifies a plane-wide
+ * outage as one (model/blocker-class.ts planeWideFailure): it cools no profile, counts toward no
+ * dispatch-failure blocker, and the item is dispatched again once the plane answers.
+ */
+export class MergeWriterUnreadError extends Error {
+  constructor(readonly url: string, readonly cause: string) {
+    super(`the merge writer could not be read from ${url} (${cause}), so the launch is refused before anything is claimed rather than minting a push credential the control plane may have retired; it is dispatched again once the status read succeeds`);
+    this.name = 'MergeWriterUnreadError';
+  }
+}
+/**
+ * The recorded merger (GY-1523), read from the control plane with the master's credential. A status
+ * without the `mergeWriter` field is an older server's, which has only GitHub as its writer; a read
+ * that fails, times out, is refused or carries a merger this launcher does not know refuses the
+ * launch (MergeWriterUnreadError), never defaults: under a recorded `control-plane` merger a launch
+ * that guessed `github` would hand the worker a push credential the mode retired.
+ */
+export async function readMergeWriter(config: Pick<MasterConfig, 'url' | 'credentialFile'>, fetcher: typeof fetch = fetch): Promise<MergerMode> {
+  const url = `${config.url}/api/status`;
+  let response: Response, status: { mergeWriter?: { merger?: unknown } };
+  try {
+    response = await fetcher(url, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(5_000) });
+    if (!response.ok) throw new MergeWriterUnreadError(url, `HTTP ${response.status}`);
+    status = await response.json() as { mergeWriter?: { merger?: unknown } };
+  } catch (error) { throw error instanceof MergeWriterUnreadError ? error : new MergeWriterUnreadError(url, error instanceof Error ? error.message : String(error)); }
+  const merger = status.mergeWriter?.merger;
+  if (merger === undefined) return 'github';
+  if (merger === 'github' || merger === 'control-plane') return merger;
+  throw new MergeWriterUnreadError(url, `mergeWriter.merger is ${JSON.stringify(merger)}, which this launcher does not know`);
+}
+/**
+ * How a worker session's confinement treats GitHub credentials (GY-1523): with GitHub as the merge
+ * writer the session pushes with the credential minted for it, so it carries its own
+ * (`ownGitHubCredential: true`, which keeps the keyring proxy unbound); with the control plane as
+ * the writer it has none and must still reach no keyring, said as `secretsBus: null`.
+ */
+export const workerConfinementCredential = (mergeWriter: MergerMode): { ownGitHubCredential: boolean; secretsBus?: null } =>
+  mergeWriter === 'control-plane' ? { ownGitHubCredential: false, secretsBus: null } : { ownGitHubCredential: true };
 /** Mints the push credential of `key` epoch `epoch` for `profile` into `directory`. */
 export type CredentialMinter = (root: string, input: { key: string; epoch: number; profile: WorkerProfile; directory: string }) => Promise<unknown>;
 /** Refuses a hand launch past its `claimBy`: the item's backed-off dispatch action is the executor's again, so the launch claims nothing. */
@@ -113,8 +177,13 @@ export const describeOverlap = (overlap: ReturnType<typeof concurrentOverlap>) =
 export function assertDispatchable(work: Work, allWork: Work[], observedAt: string) {
   const now = Date.parse(observedAt);
   if (!Number.isFinite(now)) throw new Error('Dispatch requires a valid Graphyard snapshot clock');
-  if (parkedOnHuman(work)) throw new Error(`Dispatch waits on a human-only decision (${humanDecisionLabel[work.humanRequest!.kind]}); ${answerCommand(work.key, work.humanRequest!)} resumes it`);
+  if (parkedOnHuman(work)) throw new Error(`${dispatchHumanWait} (${humanDecisionLabel[work.humanRequest!.kind]}); ${answerCommand(work.key, work.humanRequest!)} resumes it`);
   if (!work.ready || work.blocker) throw new Error('Dispatch requires released work without a blocker');
+  // GY-1760: an item only the master side can satisfy is never handed to a worker — not by the
+  // loop's dispatch step, not by a hand launch — whoever released it, so its master-only steps
+  // never reach a worker that must block on them.
+  const loopOwned = loopOwnedRefusal(work);
+  if (loopOwned) throw new Error(loopOwned);
   if (work.children?.length) throw new Error(`${work.key} was split into ${work.children.join(', ')} before dispatch; it is delivered when they are and is never dispatched itself`);
   const fenced = containmentHold(work, now);
   if (fenced) throw new Error(fenced);
@@ -124,6 +193,14 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   if (work.submission && !work.reworkRequested) throw new Error('Dispatch requires operator-authorized rework for a submitted item');
   const conflicts = resourceConflicts(work, allWork, now);
   if (conflicts.length) throw new Error(`Dispatch blocked by exclusive resources: ${conflicts.map(conflict => `${conflict.resource} held by ${conflict.key}`).join(', ')}`);
+  // GY-1698: the durable loop offers claimable work through this gate, not only through the action
+  // queue's nextAction wait — a released follow-up whose reading cannot exist yet must not be claimed.
+  const window = observationWindowHold(work, new Date(now));
+  if (window) throw new Error(`Dispatch waits for its observation window: the reading it owes can first exist at ${window.notBefore} (${window.detail})`);
+  // GY-1762: an item whose only work is the loop's own live reading has nothing a code worker can do.
+  const observing = loopObservation(work, new Date(now), allWork);
+  if (observing) throw new Error(`Dispatch waits for the loop's observation: ${observing.waitingFor}`);
+  if (loopObservationProofs(work)) throw new Error('Dispatch refused: the loop records this item\'s reading itself and no code worker can finish it');
   // Planned-file overlap holds nothing: dispatch is optimistic, and the merge queue and a sync
   // round integrate whichever of two overlapping items lands second.
 }
@@ -131,12 +208,22 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
 export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: ChildRun, allWork: Work[] = [work], prepare: WorkerPreparer = prepareWorkerLaunch, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void> = releaseWorkerLaunch, agentTimeoutMs?: number, observedAt = new Date().toISOString(), options: DispatchOptions = {}) {
   assertDispatchable(work, allWork, observedAt);
   const config = await loadMasterConfig(root);
+  // GY-1523: a control-plane worker is launched with no push credential and no keyring proxy. The
+  // merger is read once per launch, after the refusals that launch nothing (an existing-mode
+  // profile, a missing credential file, a name already visible in Herdr, an approval opt-out) and
+  // before anything is reserved, claimed or minted; a read that fails refuses the launch
+  // (readMergeWriter): the mode is never guessed.
+  let mergeWriter: MergerMode, credentialMint: CredentialMinter | null, round: ReworkRound;
   let target = agents.find(agent => agent.name === profile.agentName);
   let selected: Awaited<ReturnType<typeof selectAccount>> | undefined, launched: ReturnType<typeof accountLaunch> | undefined, relaunched = 0;
+  // GY-1772: which runtimes the worker is tried on first, judged from the change the item plans
+  // (`plannedFiles`), never from its path lane; recorded with the selection it ordered.
+  let prefer: 'fast' | 'strong' | null = null;
   let harness: Awaited<ReturnType<typeof installWorkerHarness>> | null = null;
   let dependencies: PreparedWorker['dependencies'] | null = null, reclaimed: string[] = [];
   let delivery: RequestDelivery | null = null, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null;
   let started: 'started' | 'awaiting consent' = 'started', consent: { answered: ConsentAnswer[]; awaiting: ConsentHold | null } = { answered: [], awaiting: null };
+  let pushCredential: 'minted' | 'none' = 'none';
   const startFailures: AccountStartFailure[] = [];
   let closedAgent: string | null = null;
   if (profile.mode === 'existing') {
@@ -148,6 +235,10 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     if (target && !reclaimableAgent(profile, target, allWork, now)) throw new DispatchReservedError('profile', profile.name, 'Launch profile agent name is already visible in Herdr');
     // A profile that cannot launch without a human at its prompts is refused before any account is chosen.
     assertNoApprovalOptOut(profile.kind ?? 'unnamed', profile.approvals);
+    mergeWriter = options.mergeWriter ?? await (options.readMergeWriter ?? (prepare === prepareWorkerLaunch ? readMergeWriter : async () => 'github' as const))(config);
+    credentialMint = mergeWriter === 'control-plane' ? null : options.credential ?? (prepare === prepareWorkerLaunch ? mintWorkerCredential : null);
+    // A rework round's grounds are read before anything is claimed, too (GY-1569).
+    round = await reworkRound(root, config, work, options.readDecisions ?? readReworkDecisions);
     // The profile and the item are reserved before anything is claimed, and Herdr's agents are read
     // again under the reservation: the snapshot this dispatcher chose from may already be stale (GY-273).
     const unreserve = await reserveDispatch(root, work, profile, observedAt);
@@ -167,13 +258,23 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       // or out of quota claims nothing, and the refusal names every account it skipped and why. An
       // account whose runtime already failed to start under this dispatch is passed over, so the
       // fallback lands on the next account rather than the same one again (GY-417).
+      // An account this item's last launches each ended on with its limit notice is held before the
+      // choice, so the attempt is routed to an eligible account rather than onto it a third time (GY-1582).
+      // A hold that cannot be read or written refuses the dispatch before anything is claimed: launching
+      // without it could hand the same spent account back, and the loop's retry takes it from there.
+      // On the snapshot's clock, as dispatchability is judged, and the choice reads holds at the same instant.
+      const holdAt = options.probe?.now?.() ?? Date.parse(observedAt), clock = { now: () => holdAt };
+      await holdRepeatedLimitAccount(config, work, holdAt, {}).catch((error: unknown) => {
+        throw new Error(`${work.key}'s last worker launches each ended on ${repeatedLimitAccount(work, holdAt)?.account ?? 'one account'}'s limit notice, and the hold that keeps the next launch off it could not be placed: ${failureText(error).slice(0, 300)}; nothing was claimed`, { cause: error });
+      });
       let startError: unknown = null;
       for (;;) {
         const accounts = profile.accounts?.length ? profile.accounts.filter(name => !startFailures.some(failure => failure.account === name)) : undefined;
         if (accounts && !accounts.length)
           throw new Error(`${describeStartFailures(startFailures, null)}; no further account of profile ${profile.name} to fall back to`, { cause: startError });
         try {
-          selected = await selectAccount(config, 'worker', accounts && accounts.length < (profile.accounts?.length ?? 0) ? { ...profile, accounts } : profile, { ...options.probe, work: work.key });
+          prefer = workerPreference(work, startFailures.length);
+          selected = await selectAccount(config, 'worker', accounts && accounts.length < (profile.accounts?.length ?? 0) ? { ...profile, accounts } : profile, { ...clock, ...options.probe, work: work.key, prefer, exclude: startFailures.map(failure => failure.account) });
         } catch (error) {
           if (!startFailures.length || !(error instanceof NoHealthyAccountError)) throw error;
           throw new Error(`${describeStartFailures(startFailures, null)}; no further account of profile ${profile.name} could be launched: ${failureText(error).slice(0, 300)}`, { cause: error });
@@ -199,15 +300,16 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
             try {
               assertClaimDeadline(work.key, options.claimBy);
               let epoch: number;
-              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.supervisor, options.stopSupervisor, options.credential ?? (prepare === prepareWorkerLaunch ? mintWorkerCredential : null), options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs));
+              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed, pushCredential } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.supervisor, options.stopSupervisor, credentialMint, options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps, mergeWriter, round));
               // The epoch this launch claimed outlives the reservation, so a dispatcher still holding the older snapshot is refused cleanly.
               const at = new Date().toISOString();
               await writeFile(dispatchedFile(root, work.key), JSON.stringify({ epoch, at }), { mode: 0o600 }).catch(() => {});
-              // The dispatch record names the runtime and account the session runs on, and every
-              // account whose runtime failed to start first, so a slot running one runtime under a
-              // profile named for another is on the record, not a surprise (GY-417).
+              // The dispatch record names the runtime and account the session runs on, the preference
+              // that ordered the accounts (GY-1772), and every account whose runtime failed to start
+              // first, so a slot running one runtime under a profile named for another is on the
+              // record, not a surprise (GY-417).
               await writeFile(profileLaunchedFile(root, profile.name), JSON.stringify({ key: work.key, epoch, agentName: profile.agentName, at,
-                runtime: launch.kind ?? null, account: chosen.account?.name ?? null, ...(startFailures.length ? { failedAccounts: startFailures } : {}) }), { mode: 0o600 }).catch(() => {});
+                runtime: launch.kind ?? null, account: chosen.account?.name ?? null, prefer, ...(startFailures.length ? { failedAccounts: startFailures } : {}) }), { mode: 0o600 }).catch(() => {});
               // A start on the account clears its own run of consecutive start failures.
               if (chosen.account) await clearAccountStartFailures(config, chosen.account.name).catch(() => {});
               break;
@@ -222,7 +324,9 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
           // The chosen account's runtime never came up — refused at the bound as never started, or
           // still starting at the ceiling: its pane is closed and its claim released, so the
           // profile's next account takes the launch rather than the dispatch dying silently (GY-417).
-          if (!(error instanceof SessionStartError) || !chosen.account || !['never started', 'still starting'].includes(error.startCase)) throw error;
+          // GY-1746: a Pi launch refused before its session started — the sandbox probe failing, or the host unable to confine it — likewise moves the same dispatch to the next account.
+          const piRefused = launch.kind === 'pi' && (error instanceof WorkerSandboxError || /never starts a session unconfined|cannot be launched/.test(failureText(error)));
+          if (!chosen.account || !(piRefused || error instanceof SessionStartError && ['never started', 'still starting', ...launch.kind === 'pi' ? ['exited'] : []].includes(error.startCase))) throw error;
           startError = error;
           const failure: AccountStartFailure = { account: chosen.account.name, kind: launch.kind ?? 'unknown', reason: failureText(error).slice(0, 500), at: new Date().toISOString() };
           await recordAccountStartFailure(config, failure.account, failure.kind, failure.reason).catch(() => {});
@@ -235,10 +339,11 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   }
   const concurrent = concurrentOverlap(work, allWork, Date.parse(observedAt));
   return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
-    launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery, sandbox, ...(reclaimed.length ? { reclaimed } : {}), ...(closedAgent ? { closedAgent } : {}),
+    launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery, sandbox, mergeWriter, pushCredential, ...(reclaimed.length ? { reclaimed } : {}), ...(closedAgent ? { closedAgent } : {}),
     // `awaiting consent` is not a started session: the runtime has not read its request (GY-130).
     started, consent: { answered: consent.answered, awaiting: consent.awaiting ? { prompt: consent.awaiting.prompt, kind: consent.awaiting.kind, pane: consent.awaiting.pane, attach: consent.awaiting.attach, releaseAt: consent.awaiting.releaseAt, attention: consentHoldAttention(consent.awaiting) } : null },
-    account: selected?.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null, relaunched,
+    // The selection names the preference that ordered the accounts it chose from (GY-1772).
+    account: selected?.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped, prefer } : null, relaunched,
     // A dispatch whose preferred account's runtime never started names what happened and where the
     // session runs instead, so the fallback is on the record rather than silent (GY-417).
     fallback: selected && startFailures.length ? { failed: startFailures, note: describeStartFailures(startFailures, selected.account?.name ?? null) } : null,
@@ -250,18 +355,18 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
 /**
  * GY-971. Whether this attempt is a mechanical-fix round: only a rework of a submitted candidate can
  * be, and only when the item's most recently applied rework decision was that round's; the review
- * ledger's plans are read only then. The decisions are read with the master's credential; one that
- * cannot be read makes the attempt an ordinary rework, whose head the fresh read then refuses as a
- * bot commit and whose findings it hands back to the reviewer.
+ * ledger's plans are read only then. Any other rework round carries the applied decision's reason as
+ * its brief (GY-1569). The decisions are read with the master's credential before anything is
+ * claimed; a read that fails refuses the launch (ReworkDecisionsUnreadError), so no round starts
+ * without what sent it back, and the item is dispatched again once the read succeeds.
  */
-async function mechanicalRound(root: string, config: MasterConfig, work: Work, fetcher: typeof fetch = fetch) {
-  if (!work.submission || !work.candidate) return null;
-  try {
-    const response = await fetcher(`${config.url}/api/work/${encodeURIComponent(work.id)}/decisions`, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(5_000) });
-    if (!response.ok) return null;
-    const reviewId = appliedMechanicalRework(work, ((await response.json()) as { decisions?: Parameters<typeof appliedMechanicalRework>[1] }).decisions ?? []);
-    return reviewId === null ? null : { requests: await readMechanicalFixRequests(root), reviewId };
-  } catch { return null; }
+export type ReworkRound = { mechanical: { requests: MechanicalFixRequest[]; reviewId: number } | null; rework: AppliedRework | null };
+async function reworkRound(root: string, config: MasterConfig, work: Work, read: NonNullable<DispatchOptions['readDecisions']>): Promise<ReworkRound> {
+  if (!work.submission) return { mechanical: null, rework: null };
+  const decisions = await read(config, work);
+  const reviewId = work.candidate ? appliedMechanicalRework(work, decisions) : null;
+  if (reviewId !== null) return { mechanical: { requests: await readMechanicalFixRequests(root), reviewId }, rework: null };
+  return { mechanical: null, rework: appliedReworkBrief(work, decisions) };
 }
 
 export const herdrAttach = (pane: string, workspace?: string | null) => `herdr pane attach ${pane}${workspace ? ` --workspace ${workspace}` : ''}`;
@@ -328,10 +433,10 @@ export function accountStartFailureAttention(failures: AccountStartFailures, cli
     ...agentOwner('master', `Re-check the account with node ${cliPath} master environments --apply and log its runtime in, or drop it from the profiles' account order with node ${cliPath} master config accounts:PROFILE=… until it starts`) }));
 }
 /** What a profile's last worker dispatch recorded, as master status reads it (GY-417). */
-export interface ProfileLaunchRecord { key: string; epoch: number; agentName: string; at: string; runtime: string | null; account: string | null; failedAccounts: AccountStartFailure[] }
+export interface ProfileLaunchRecord { key: string; epoch: number; agentName: string; at: string; runtime: string | null; account: string | null; /** Which runtimes the dispatch tried first (GY-1772); null on a record written before the preference was recorded. */ prefer: 'fast' | 'strong' | null; failedAccounts: AccountStartFailure[] }
 const profileLaunchRecordSchema = z.object({
   key: z.string().min(1), epoch: z.number().int().min(1), agentName: z.string().min(1), at: z.string().min(1),
-  runtime: z.string().nullable().default(null), account: z.string().nullable().default(null),
+  runtime: z.string().nullable().default(null), account: z.string().nullable().default(null), prefer: z.enum(['fast', 'strong']).nullable().default(null),
   failedAccounts: z.array(z.object({ account: z.string().min(1), kind: z.string().min(1), reason: z.string().min(1), at: z.string().min(1) }).strict()).default([]),
 }).strict();
 /** The last dispatch record of each launch profile; a profile never dispatched reads as absent. */
@@ -353,7 +458,7 @@ export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: s
   return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };
 }
 
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, supervisor: NonNullable<DispatchOptions['supervisor']> = watchSupervisorRunning, stopSupervisor: NonNullable<DispatchOptions['stopSupervisor']> = stopLaunchSupervisor, credentialMint: CredentialMinter | null = null, coordinatorRoot?: string, renew: LeaseRenewer | null = null, renewIntervalMs?: number) {
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, supervisor: NonNullable<DispatchOptions['supervisor']> = watchSupervisorRunning, stopSupervisor: NonNullable<DispatchOptions['stopSupervisor']> = stopLaunchSupervisor, credentialMint: CredentialMinter | null = null, coordinatorRoot?: string, renew: LeaseRenewer | null = null, renewIntervalMs?: number, verificationMaps: NonNullable<DispatchOptions['verificationMaps']> = readVerificationMaps, mergeWriter: MergerMode = 'github', round: ReworkRound = { mechanical: null, rework: null }) {
   // The lease is the launch's to keep alive until the supervisor's first heartbeat (GY-1287), from
   // the claim itself (GY-1373): building the worktree of a large repository on a loaded host took
   // longer than the 120 s lease, which lapsed before the credential was minted ("Lease missing,
@@ -367,8 +472,11 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
   keep(prepared.epoch);
   try { return await launchPrepared(); } finally { await keepAlive?.stop(); }
   async function launchPrepared() {
-    // The session pushes with its own short-lived credential, never the host's login (GY-999).
+    // The session pushes with its own short-lived credential, never the host's login (GY-999); with
+    // the control plane as merge writer (GY-1523) the minter is null, so none is minted and
+    // workerCredentialEnvironment sets no GH_CONFIG_DIR.
     const credential = credentialMint && profile.credentialFile ? workerCredentialDirectory(profile.credentialFile, work.key, prepared.epoch) : null;
+    const confinementCredential = workerConfinementCredential(mergeWriter);
     // The worker writes its worktree, the worktree's own Git admin directory and the shared Git
     // paths the coordinator confinement re-exposes — never the common Git directory itself (GY-1321);
     // each is granted to the runtime's sandbox, and the grant is proved below before anything starts.
@@ -380,13 +488,16 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     const args = grantWorkerPaths(launch.kind, launch.args, writable, prepared.path);
     // The worker's own rules go into its worktree before the session starts, so pushing its
     // branch and opening its pull request never wait on a keypress. A failure is reported, not fatal.
-    const harness = await installWorkerHarness(config, { ...profile, kind: launch.kind as WorkerProfile['kind'] }, work.key, prepared).catch(error => ({ applied: false, reason: error instanceof Error ? error.message : 'Worker rules could not be written' }));
+    const harness = await installWorkerHarness(config, { ...profile, kind: launch.kind as WorkerProfile['kind'] }, work.key, prepared, mergeWriter).catch(error => ({ applied: false, reason: error instanceof Error ? error.message : 'Worker rules could not be written' }));
     const memory = await readProjectMemory(root).catch(() => null);
-    // A mechanical-fix round (GY-971) is told exactly which findings its one commit fixes.
-    const mechanical = await mechanicalRound(root, config, work);
-    const prompt = workerPrompt(config, work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base, mechanical);
+    // A mechanical-fix round (GY-971) is told exactly which findings its one commit fixes; any other
+    // rework round, the reason of the decision that sent it back (GY-1569), read before the claim.
+    const { mechanical, rework } = round;
+    // The area maps the plan touches (GY-1495), read from the base before the session starts.
+    const maps = await verificationMaps(root, config.baseBranch).catch(() => []);
+    const prompt = workerPrompt(config, work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base, mechanical, maps, rework);
     // The worker loads its own role rules, never the master's: it may push its assigned branch.
-    const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, credentialFiles: [profile.credentialFile!] });
+    const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, key: work.key, epoch: prepared.epoch, mergeWriter, credentialFiles: [profile.credentialFile!] });
     let pane: string | undefined, tabId: string | undefined, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null, ran = false;
     try {
       // Minted before anything starts: a launch that cannot get one is refused and its claim
@@ -398,10 +509,10 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
       // The probe runs behind the same coordinator confinement the session will (GY-1321): a sandbox
       // that cannot start inside that read-only mount fails the launch naming the path it refused on.
       if (sandboxProbe) {
-        const confinement = await sessionConfinement(launch.kind!, [...args, ...sessionHarness.args], { directory: prepared.path, cwd: prepared.path, ownGitHubCredential: true }, coordinatorRoot);
+        const confinement = await sessionConfinement(launch.kind!, [...args, ...sessionHarness.args], { directory: prepared.path, cwd: prepared.path, ...confinementCredential }, coordinatorRoot);
         sandbox = verifyWorkerSandbox({ ...launch, args, ...(confinement?.wrapper.length ? { confinement: confinement.wrapper } : {}) }, prepared.path, writable, sandboxProbe === 'host' ? undefined : sandboxProbe);
       }
-      const tabArgs = ['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, '--env', `GRAPHYARD_HERDR_AGENT_KIND=${launch.kind}`, ...Object.entries(withVerificationPath(sessionHarness.environment, { ...launch.environment, ...credentialEnvironment })).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
+      const tabArgs = ['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, '--env', `GRAPHYARD_HERDR_AGENT_KIND=${launch.kind}`, ...(process.env.XDG_RUNTIME_DIR ? ['--env', `XDG_RUNTIME_DIR=${process.env.XDG_RUNTIME_DIR}`] : []), ...(process.env.DBUS_SESSION_BUS_ADDRESS ? ['--env', `DBUS_SESSION_BUS_ADDRESS=${process.env.DBUS_SESSION_BUS_ADDRESS}`] : []), ...Object.entries(withVerificationPath(sessionHarness.environment, { ...launch.environment, ...credentialEnvironment })).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
       const created = createdHerdrTab(await herdrJson(tabArgs, run)); pane = created.pane; tabId = created.tab;
       // The instruction is the session's own first request, on the runtime's command line under
       // the supervisor, read from the request file in the worktree (GY-121); only a runtime without
@@ -409,14 +520,14 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
       // A worker never reaches the operator's keyring, minted credential or not (GY-999, GY-1039): one
       // launched without a minter has no GitHub credential at all, never the host's login.
       const started = await startAgentSession(profile.agentName, launch.kind!, pane, [...args, ...sessionHarness.args], prompt, run,
-        { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs ?? launchStartMs(config), directory: prepared.path, cwd: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: launch.environment, ownGitHubCredential: true, ...(coordinatorRoot ? { coordinatorRoot } : {}), onRun: () => { ran = true; } });
+        { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs ?? launchStartMs(config), directory: prepared.path, cwd: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: launch.environment, ...confinementCredential, ...(coordinatorRoot ? { coordinatorRoot } : {}), onRun: () => { ran = true; } });
       // A worker stopped on a prompt the launcher does not answer is held for a human rather than
       // closed: its record beside the launch files is what master status raises and what the watch
       // supervisor bounds, releasing the slot once `consentHoldMs` passes with the prompt unanswered.
       const hold = started.awaiting ? consentHold(config, work.key, prepared.epoch, profile.agentName, pane, started.awaiting) : null;
       if (hold) writeConsentHold(started.files.stem, hold);
       return { target: { name: profile.agentName, pane_id: pane, agent_status: hold ? 'blocked' : 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null, delivery: started.delivery, sandbox,
-        started: started.started.state, consent: { answered: started.consent, awaiting: hold }, epoch: prepared.epoch, reclaimed: prepared.reclaimed ?? [] };
+        started: started.started.state, consent: { answered: started.consent, awaiting: hold }, epoch: prepared.epoch, reclaimed: prepared.reclaimed ?? [], mergeWriter, pushCredential: credential ? 'minted' as const : 'none' as const };
     } catch (error) {
       const malformedTab = (error as any)?.herdrTab as string | undefined;
       const failed = error instanceof Error ? error.message : 'Worker launch failed';
@@ -471,15 +582,22 @@ export function autonomousSession(outcome: string, blocker: string) {
  * on one waits for a person (GY-197). Worker and producer requests say how to never trigger it.
  */
 export const destructivePromptGuidance = 'Avoid any command that triggers your runtime\'s destructive-operation prompt, which waits for a person and no person will answer it: never give rm or mv a glob or a variable as its target (such as DIR/* or "$DIR") outside a directory you created yourself with mktemp -d. Name explicit paths inside your worktree instead, and for scratch files create a directory with mktemp -d and remove only that directory by its exact path. ';
+/**
+ * A worker that asked for a force-push once it had pushed a wrong commit waited on the master to say
+ * "fix forward" (GY-1477, GY-1567): rewriting a pushed branch is never granted, so the request says so.
+ */
+export const branchRewriteGuidance = 'Never force-push or rewrite a branch you have pushed: your runtime refuses it, so fix a pushed commit forward with a new commit and push normally. ';
 export function workerPrompt(
   config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository'>>,
-  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'documentation' | 'description' | 'criteria' | 'researchBrief' | 'candidate'>>,
+  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'documentation' | 'description' | 'criteria' | 'researchBrief' | 'candidate' | 'plannedFiles' | 'submission' | 'pipeline'>>,
   profile: Pick<WorkerProfile, 'principal'>,
   epoch: number,
   dependencies?: Pick<SharedDependencies, 'shared'> | null,
   memoryOrMechanical?: ProjectMemory | { requests: readonly MechanicalFixRequest[]; reviewId: number } | null,
   baseShaOrMechanical?: string | { requests: readonly MechanicalFixRequest[]; reviewId: number } | null,
   mechanicalOpt?: { requests: readonly MechanicalFixRequest[]; reviewId: number } | null,
+  verificationMaps?: readonly VerificationMap[] | null,
+  rework?: AppliedRework | null,
 ) {
   let memory: ProjectMemory | null = null;
   let baseSha: string | undefined = undefined;
@@ -507,14 +625,20 @@ export function workerPrompt(
   return `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them. `
     + installed
     + (memoryDigest || '')
+    + verificationMapDigest(verificationMaps, work.plannedFiles, 'worker')
     // The research brief recorded before build, with the product decisions it asked for (GY-259).
     + (work.researchBrief && work.criteria ? researchWorkerSection({ ...work, criteria: work.criteria, description: work.description ?? '' }, config.cliPath) : '')
     // The standard documentation criterion the control plane stamped at create time (GY-215).
     + (work.documentation ? documentationWorkerSection(work.documentation, work.key, epoch, config.cliPath) : '')
     + submissionPolicyRule
     + destructivePromptGuidance
+    + branchRewriteGuidance
     + (config.repository && mechanical ? mechanicalWorkerSection(config.repository, config.cliPath, { key: work.key, candidate: work.candidate ?? null }, epoch, mechanical.requests, mechanical.reviewId) : '')
+    // The reason the applied rework decision gave, so the round answers it rather than resubmitting (GY-1569).
+    + (mechanical ? '' : reworkBriefSection(work, rework))
     + resumedAttempt(work)
+    // GY-1726: a follow-up whose reading cannot exist yet waits for it rather than escalating.
+    + (work.criteria?.some(criterion => criterion.proofs.some(servingReleaseProof)) ? `If the observation this item owes cannot exist yet (its window has not elapsed on the serving release), do not record a blocker: defer it with node ${config.cliPath} defer ${work.key} ${epoch} NOT-BEFORE REASON (NOT-BEFORE is the ISO instant the reading can first exist, at most 30 days away), which ends your lease and holds dispatch until then, then stop. ` : '')
     + `If the item cannot continue without a decision only a human may make — ${humanOnlyDecisions.join('; ')} — do not wait and do not write it as a blocker: record it with node ${config.cliPath} park ${work.key} ${epoch} KIND NEEDED --ask ASK --recommend TEXT --why SENTENCE -- REASON (KIND is goals-and-priorities, money-or-accounts or credentials-for-people; NEEDED is the exact thing the human must provide: every human step the item still needs, in this one request; ASK is one plain sentence naming the human's action; TEXT is the choice you recommend, or the safest way to obtain a value, such as a fine-grained token scoped to one repository with a short expiry and only the permissions needed, and SENTENCE is one plain sentence of why; a scope widening is never a park, ask for it with scope-request), which ends your lease and parks the item for the human, then stop. `
     + autonomousSession('implement the item, open the pull request and submit it with complete', `record a blocker with node ${config.cliPath} blocked ${work.key} ${epoch} REASON`);
 }

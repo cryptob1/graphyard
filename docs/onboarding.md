@@ -13,7 +13,7 @@ Per concurrent session: worker identity, host ID (`install --workers`) or:
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
 ```
 
-Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, workflows ([candidates](delivery.md#managed-repositories)), never `.graphyard/`; masterless: `graphyard watch GY-1 EPOCH -- COMMAND` ([worker](protocol/leases.md#watch)).
+Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, workflows ([candidates](delivery.md#managed-repositories); with no workflow on `pull_request`, `graphyard-delivery.yml`: build, test, `graphyard-gate`, the only required check; edits are kept as drift), never `.graphyard/`; masterless: `graphyard watch GY-1 EPOCH -- COMMAND` ([worker](protocol/leases.md#watch)).
 
 ### Documentation policy
 
@@ -80,13 +80,17 @@ Adding workers: worker count `W` and `G` proof groups need `⌈W/2⌉` review an
 
 ### The loop must be supervised
 
-`master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master-OWNER-NAME.service`, runs `systemctl --user enable --now`, `loginctl enable-linger` (restart on crash, reboot, hang); never a side effect (worker checkouts, temp directories refused). Move: `master init --token-stdin --replace-supervisor` from new checkout. `master status`: `setup.supervisor`.
+`master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master-OWNER-NAME.service`, runs `systemctl --user enable --now`, `loginctl enable-linger` (restart on crash, reboot, hang); never a side effect (worker checkouts, temp directories refused). Move: `master init --token-stdin --replace-supervisor` from new checkout. `master status`: `setup.supervisor`. The loop refuses a dirty CLI checkout; so does `graphyard up` preflight (exit 2, naming its paths). The loop's research scratch is a worktree of the managed repository, never of the CLI checkout.
 
-Installs share hosts: units named per repository (`graphyard-executor-OWNER-NAME@N.service` too; short-hashed where names collide) in `.graphyard/units.json` (fails closed unreadable); a host whose `graphyard-master.service` runs this checkout keeps legacy names as recorded alias. With no record, legacy unit running another checkout makes every unit-name read refuse, naming unit and checkout, until `master init` records this install's own. Setup refuses, naming checkout, to overwrite or restart another checkout's unit; master harness restarts only its loop unit. Each install needs its own `--herdr-workspace`: sweeps (idle-pane close, reclaim, liveness, tab cleanup) act only on its panes.
+Installs share hosts: units named per repository (`graphyard-executor-OWNER-NAME@N.service` too) in `.graphyard/units.json` (legacy `graphyard-master.service` kept as recorded alias); setup never touches another checkout's unit. Each install needs its own `--herdr-workspace`.
 
 ### The pipeline doctor (on by default)
 
-Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck, overdue work via `master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release` (never merging, dispatching or evidencing); posts findings, summary (`master status` `doctor`); escalates the rest or files fault items, deduplicated against open ones at settle (proof IDs normalised; create refusals escalate, control-plane ones retry). Reportless (models died, loop stopped) or restart-lost runs record failed, no `loop` fault; the next re-covers. Loop settles submitted lapsed fences, clears covered blockers, relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck work: `master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`, `checkout-restore` (never merging, dispatching, evidencing); it runs a `master-role` refusal's command, then unblocks; posts findings (`master status` `doctor`), escalates or files faults (deduped — standing/diagnosed or GY-1632 cover/threshold; unregistered `e2e:` escalate; `create` 409/400 skips; diagnosis adopts or holds standing close 409s (GY-1713); GY-1705 holds). Off: `run.doctor.enabled=false`.
+
+### Supervised mode (up --local)
+
+`graphyard up --local` writes `"supervision": "supervised"` and your login (`operatorLogin`) to `master.json`; absent is autonomous. No reviewer App, no `master autonomy`; Setup omits reviewing account. Items keep `review: true`: your GitHub approval of the exact head passes review and auto-merge lands it. The loop launches no reviewer, approver or escalation session. `master status` prints `supervision` and flags PRs your login authored. Promote: `master reviewer setup`, `master reviewer add`, then `master promote --admin-token-stdin` ([promotion](master-agent-reference.md#promotion-to-autonomy)).
 
 ## 4. Prove the first PR
 

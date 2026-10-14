@@ -8,11 +8,14 @@ import { runRecordSchema } from '../runner/types.js';
 import { diagnosisRecordSchema, diagnosisSettled, retainedDiagnoses } from '../runner/payloads.js';
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
 import { boundDetail } from './decisions.js';
+import { waitReason } from '../model/action-kinds.js'; import { timingsSchema } from '../master/timings.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
-import { timingsSchema } from '../master/timings.js';
-import { docsSyncWatchSchema, routedConflictSchema } from '../model/docs-sync.js';
+import { docsSyncWatchSchema, routedConflictSchema } from '../model/docs-sync.js'; import { unansweredStands } from '../model/fault-record.js';
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
+import { itemClockSchema, latencySampleSchema } from './latency-clock.js';
+import { mainWatchStateSchema } from './main-watch.js';
+import { shadowKeptVerdicts, shadowStateSchema } from './cycle-shadow.js'; import { emptyMergeWriterState, mergeWriterStateSchema } from './cycle-merge-writer.js'; // both lazy: they import this module
 
 export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis', 'wake', 'blocker'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
@@ -81,7 +84,7 @@ export const cycleMetricsSchema = z.object({
    */
   childWaitMs: z.number().int().min(0).optional(),
   workMs: z.number().int().min(0).optional(),
-  /** Of `durationMs`, the time spent on requests the control plane did not answer (GY-1344), left out of `workMs`. Absent when none. */
+  /** Of `durationMs`, the time at least one request was in flight on the control plane, answered or not (GY-1344, GY-1562), left out of `workMs`. Absent when none. */
   planeWaitMs: z.number().int().min(0).optional(),
   /** Where `durationMs` went, step by step. Absent on a cycle recorded before the loop measured its steps. */
   steps: cycleStepsSchema.optional(),
@@ -147,11 +150,11 @@ export const deploymentObservationSchema = z.object({
 export type DeploymentObservation = z.infer<typeof deploymentObservationSchema>;
 
 /**
- * GY-1302: the loop's promotion drive. GitHub's scheduled release-candidate runs are best-effort and
- * on 2026-10-05 four in a row never fired, so the loop dispatches the release-candidate workflow
- * itself (`promotionCycle`). `dispatchedAt` is the loop's own last dispatch, kept so a run GitHub
- * has not listed yet is never dispatched twice; `lastDispatchAt` is the later of it and the newest
- * cut run GitHub lists, from which `run.promoteEveryMinutes` is counted.
+ * GY-1302: the loop's promotion drive (`promotionCycle`), as GitHub's scheduled runs are best-effort.
+ * `dispatchedAt` is the loop's own last dispatch, so a run GitHub has not listed is never dispatched
+ * twice; `lastDispatchAt`, the later of it and the newest listed cut, starts the `promoteEveryMinutes`
+ * gap. GY-1488: `cutSha` is the tip the newest candidate cut; one concluded unpromoted is not re-cut.
+ * GY-1491: `candidates`, the newest (merges each carries, merges on main behind it); `candidateAtDispatch`, the newest at the last dispatch.
  */
 export const promotionStateSchema = z.object({
   checkedAt: z.string(),
@@ -166,6 +169,26 @@ export const promotionStateSchema = z.object({
   runsReadAt: z.string().nullable(),
   dispatchedAt: z.string().nullable(),
   lastDispatchAt: z.string().nullable(),
+  cutSha: z.string().nullable().optional(),
+  candidateAtDispatch: z.string().max(100).nullable().optional(),
+  candidates: z.array(z.object({
+    id: z.string().max(100),
+    sha: z.string().max(64),
+    cutAt: z.string().max(64),
+    prs: z.number().int().min(0).nullable(),
+    queued: z.number().int().min(0).nullable(),
+    /** GY-1513: the advisory soak's verdict as the candidate's record (rc-soak/ID) keeps it, once its run recorded one. */
+    soak: z.object({ result: z.string().max(32), at: z.string().max(64), run: z.string().max(500).nullable() }).strict().nullable().optional(),
+  }).strict()).max(5).optional(),
+  /** GY-1513: the newest advisory soak runs (release-candidate-soak.yml), by the SHA each soaks; never holds promotion back. */
+  soaks: z.array(z.object({
+    sha: z.string().max(64),
+    status: z.string().max(32),
+    conclusion: z.string().max(32).nullable(),
+    createdAt: z.string().max(64),
+    url: z.string().max(500).nullable(),
+  }).strict()).max(10).optional(),
+  soaksReadAt: z.string().nullable().optional(),
   nextDueAt: z.string().nullable(),
   reason: z.string().max(500).nullable(),
 }).strict();
@@ -198,34 +221,7 @@ export const scopeMeasurementSchema = z.object({
 }).strict();
 export type ScopeMeasurement = z.infer<typeof scopeMeasurementSchema>;
 
-/**
- * What the loop itself observed about one item's passage, so latency is measured against what the
- * loop acted on rather than reconstructed from a ledger afterwards. One entry per open item,
- * dropped once its delivery has been sampled.
- */
-export const itemClockSchema = z.object({
-  key: z.string().max(40), epoch: z.number().int().min(0),
-  /** First cycle that saw the item claimable — released, unclaimed, and not already submitted. */
-  readyAt: z.string().nullable().default(null),
-  claimedAt: z.string().nullable().default(null),
-  /** First candidate head of the current attempt: the worker's first push. */
-  pushedAt: z.string().nullable().default(null),
-  approvedAt: z.string().nullable().default(null),
-  /** First cycle that saw every gate green: when the candidate became mergeable. */
-  mergeableAt: z.string().nullable().default(null),
-}).strict();
-export type ItemClock = z.infer<typeof itemClockSchema>;
-
-/** One measured passage. A delivery fills the merge figures; a rework request fills its own. */
-export const latencySampleSchema = z.object({
-  work: z.string().max(40), at: z.string(),
-  readyToClaimMs: z.number().int().min(0).nullable().default(null),
-  readyToPushMs: z.number().int().min(0).nullable().default(null),
-  approvalToMergeMs: z.number().int().min(0).nullable().default(null),
-  mergeableToMergeMs: z.number().int().min(0).nullable().default(null),
-  verdictToReworkMs: z.number().int().min(0).nullable().default(null),
-}).strict();
-export type LatencySample = z.infer<typeof latencySampleSchema>;
+export { itemClockSchema, latencySampleSchema, type ItemClock, type LatencySample } from './latency-clock.js';
 
 /** Everything the loop could act on but has not, keyed by kind and item; `since` resets on every action. */
 export const silenceSchema = z.object({
@@ -246,6 +242,8 @@ export const orphanObservationSchema = z.object({
   /** How many times this supervisor has been stopped, and the expiry it was last stopped at. */
   stops: z.number().int().min(0).default(0),
   stoppedLeaseExpiresAt: z.string().nullable().default(null),
+  /** When both observations first held, whatever the stop then did; status names only established orphans (GY-1617). */
+  establishedAt: z.string().nullable().default(null),
 }).strict();
 export type OrphanObservation = z.infer<typeof orphanObservationSchema>;
 
@@ -278,10 +276,11 @@ export const approvalWatchSchema = z.object({
   observation: z.object({ at: z.string(), sha: z.string() }).strict().nullable().default(null),
   /** The account and runtime the current session was launched on, so its exhaustion holds the right account (GY-182). */
   account: z.string().max(200).nullable().default(null), runtime: z.string().max(40).nullable().default(null),
-  /** The worker scope request a `requirements` decision answers (GY-176): whose, and for what. */
-  scope: z.object({ epoch: z.number().int().min(1), at: z.string(), requestedBy: z.string().max(200), paths: z.array(z.string().max(500)).max(50) }).strict().nullable().default(null),
-  /** The agent-registry session the current approver runs on (GY-190), ended once the decision is judged,
-   * or as soon as its quota is spent so the replacement has the slot (GY-182). */
+  /** The worker scope request a `requirements` decision answers (GY-176); GY-1701 `coveringAdopt` marks a foreign covering adopt (ask end must not withdraw it). */
+  scope: z.object({ epoch: z.number().int().min(1), at: z.string(), requestedBy: z.string().max(200), paths: z.array(z.string().max(500)).max(50) }).strict().nullable().default(null), coveringAdopt: z.boolean().default(false),
+  /** The failed decision whose request was given back because only its scope request closed (GY-1484): once per decision, never per cycle. */
+  givenBack: z.string().max(100).nullable().default(null),
+  /** The agent-registry session the current approver runs on (GY-190), ended once the decision is judged or its quota is spent (GY-182). */
   session: z.string().max(200).nullable().default(null),
   /** Why the last launch waits for a slot: the registry refused it only because the role was full (GY-190). */
   capacity: z.string().max(500).nullable().default(null),
@@ -291,16 +290,15 @@ export const approvalWatchSchema = z.object({
   reportedExhaustion: z.string().max(200).nullable().default(null),
   /** The decision and launch whose spent-account hold alone is written (GY-489): a capacity report that failed after it is retried without writing the hold again. */
   heldExhaustion: z.string().max(200).nullable().default(null),
+  /** GY-1612. A replacement pane first seen while its predecessor's registry end was refused, and when: its rebind dates from that sight. */
+  movedPane: z.object({ pane: z.string().max(200), at: z.string() }).strict().nullable().default(null),
   /** GY-1394. An attest decision's refusal and the head it bound: the loop returns that head to a worker on it, with no approver. */
   refusal: z.object({ approver: z.string().max(200), reason: z.string().max(1200), at: z.string(), proof: z.string().max(200), sha: z.string().max(64), baseSha: z.string().max(64), policyRevision: z.number().int().min(0) }).strict().nullable().default(null),
 }).strict();
 export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
-/**
- * What a re-keyed watch takes over from the one it retires: the session goes on, and so does what
- * it runs on, so a retained session's exhaustion holds the account it spent (GY-182).
- */
+/** What a re-keyed watch takes over from the one it retires: the session and what it runs on, so its exhaustion holds the account it spent (GY-182). */
 export const carriedSession = (prior: ApprovalWatch) => ({ launches: prior.launches, lostRuns: prior.lostRuns, agentName: prior.agentName, pane: prior.pane, launchedAt: prior.launchedAt,
-  exhaustedAt: prior.exhaustedAt, account: prior.account, runtime: prior.runtime, session: prior.session });
+  exhaustedAt: prior.exhaustedAt, account: prior.account, runtime: prior.runtime, session: prior.session, movedPane: prior.movedPane });
 
 /**
  * The loop's own failures (GY-119). A cycle that throws — a control-plane read that timed out, a
@@ -392,8 +390,8 @@ export type DoctorPendingFile = z.infer<typeof doctorPendingFileSchema>;
 export const loopReleaseSchema = z.object({ commit: z.string().regex(/^[0-9a-f]{40}$/).nullable(), dirty: z.boolean().nullable() }).strict();
 export type LoopRelease = z.infer<typeof loopReleaseSchema>;
 
-/** The causes an owed self-upgrade restart stalls on (GY-1445). */
-export const upgradeStallCauses = ['executors-refused', 'executors-unavailable', 'supervisor-unreachable', 'checkout-dirty', 'checkout-not-detached', 'fetch-failed', 'checkout-failed'] as const;
+/** The causes an owed self-upgrade restart stalls on (GY-1445); `release-lagged` (GY-1585) is a held restart, not a fault. */
+export const upgradeStallCauses = ['executors-refused', 'executors-unavailable', 'supervisor-unreachable', 'checkout-dirty', 'checkout-not-detached', 'fetch-failed', 'checkout-failed', 'release-lagged'] as const;
 export type UpgradeStallCause = typeof upgradeStallCauses[number];
 export const upgradeStallSchema = z.object({ cause: z.enum(upgradeStallCauses), reason: z.string().max(500), since: z.string(), at: z.string() }).strict();
 export type UpgradeStall = z.infer<typeof upgradeStallSchema>;
@@ -472,8 +470,7 @@ export function masterSummary(master: MasterSessionState, now: number) {
     rotations: master.rotations, lastEnd: master.lastEnd, lastWake: master.lastWake, launching: master.launching };
 }
 
-export const dispatchFailureRunSchema = z.object({ key: z.string().max(100), cause: z.string().max(2000), count: z.number().int().min(1), epoch: z.number().int().min(0).default(0), firstAt: z.string(), lastAt: z.string() }).strict();
-export type DispatchFailureRun = z.infer<typeof dispatchFailureRunSchema>;
+export const dispatchFailureRunSchema = z.object({ key: z.string().max(100), cause: z.string().max(2000), count: z.number().int().min(1), epoch: z.number().int().min(0).default(0), firstAt: z.string(), lastAt: z.string() }).strict(); export type DispatchFailureRun = z.infer<typeof dispatchFailureRunSchema>;
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   /** `pidNamespace` (GY-1370): the PID namespace the pid was taken in, absent on a lock written before it was recorded. */
@@ -484,20 +481,19 @@ export const daemonStateSchema = z.object({
   profiles: z.record(z.string(), z.object({ failures: z.number().int().min(0), reason: z.string().max(500).nullable(), cooldownUntil: z.string().nullable() }).strict()).default({}),
   metrics: z.array(cycleMetricsSchema).default([]),
   deployment: deploymentObservationSchema.nullable().default(null),
-  /** The loop's promotion drive (GY-1302). */
-  promotion: promotionStateSchema.nullable().default(null),
+  promotion: promotionStateSchema.nullable().default(null), // the loop's promotion drive (GY-1302)
+  mainWatch: z.lazy(() => mainWatchStateSchema).nullable().default(null), // GY-1519: unknown main commits and the promotion freeze; lazy as main-watch.ts imports this module
+  shadow: z.lazy(() => shadowStateSchema).default([]), // GY-1522: the shadow merge gate's last 200 verdicts; lazy as cycle-shadow.ts imports this module
+  mergeWriter: z.lazy(() => mergeWriterStateSchema).default(() => emptyMergeWriterState()), // GY-1524: the control-plane merge executor's queue, flight, last delivery and refusals
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),
-  /** The between-cycles self-upgrade's progress (GY-437). */
-  upgrade: upgradeStateSchema,
+  upgrade: upgradeStateSchema, // the between-cycles self-upgrade's progress (GY-437)
   /** The last reload of .graphyard/master.json: what the running loop adopted, or why it refused. */
   config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),
-  /** The last worktree reclamation: what it removed and how much room the host has. */
-  reclaim: reclaimSummarySchema.nullable().default(null),
+  reclaim: reclaimSummarySchema.nullable().default(null), // the last worktree reclamation: what it removed and how much room the host has
   /** The host's memory as the last cycle read it, and whether launches are deferred on it. */
   memory: hostMemoryStateSchema.nullable().default(null),
-  /** Per-item passage clocks and the samples they produced; the loop's own latency measurement. */
-  clocks: z.record(z.string(), itemClockSchema).default({}),
+  clocks: z.record(z.string(), itemClockSchema).default({}), // per-item passage clocks and the samples they produced: the loop's own latency measurement
   latency: z.array(latencySampleSchema).default([]),
   /** What is actionable and how long it has gone without an action (see `silenceReport`). */
   silence: silenceSchema.default({ subjects: {}, lastActionAt: null }),
@@ -518,11 +514,11 @@ export const daemonStateSchema = z.object({
   /**
    * Every fault instance the loop recorded, each with its class (GY-173), and per standing fault
    * (`kind|subject`) the instance it is, and per action key in a run of failures the instance that run
-   * is. A class that recurs files one item; later instances link to it. `observedAt` is when (loop time) the loop last
-   * read the sources standing faults are observed from, which it reads on a slower cadence than it cycles.
+   * is. A class that recurs files one item; later instances link to it, and `linked` keeps per item key the newest first-seen time of an instance linked
+   * to it while open, past the instance's own retention (GY-1632). `observedAt` is when (loop time) the loop last read the sources standing faults are observed from, which it reads on a slower cadence than it cycles.
    * The default is a factory: zod 4 hands a literal default out by reference, which would share one record between states.
    */
-  faults: z.object({ instances: z.array(faultInstanceSchema).default([]), open: z.record(z.string(), z.string()).default({}), failing: z.record(z.string(), z.string()).default({}), observedAt: z.string().optional() }).strict()
+  faults: z.object({ instances: z.array(faultInstanceSchema).default([]), open: z.record(z.string(), z.string()).default({}), failing: z.record(z.string(), z.string()).default({}), linked: z.record(z.string(), z.string()).optional(), observedAt: z.string().optional() }).strict()
     .default(() => ({ instances: [], open: {}, failing: {} })),
   /**
    * Per failing test and base head (`baseFailureKey`), a required check that fails on the base
@@ -540,9 +536,11 @@ export const daemonStateSchema = z.object({
     unposted: z.array(z.string().max(40)).max(40).default([]),
     /** Filings the control plane did not accept when their run applied: filed again on later cycles, under the same key, until one is. */
     pendingFiles: z.array(doctorPendingFileSchema).max(40).default([]),
+    /** GY-1530: digests of filings the create route refused as written, with when the doctor last reported each: a later run reporting the same content is not filed again. A digest is kept for good (only its last-reported time is renewed): neither other refusals nor the time since the doctor last reported it evict it. */
+    refusedFilings: z.array(z.object({ digest: z.string().max(80), at: z.number() }).strict()).default([]),
     /** When the approver remedy last read each open item's decision history, by item id. */
     decisionsCheckedAt: z.record(z.string(), z.string()).default({}),
-  }).strict().default(() => ({ runs: [], unposted: [], pendingFiles: [], decisionsCheckedAt: {} })),
+  }).strict().default(() => ({ runs: [], unposted: [], pendingFiles: [], refusedFilings: [], decisionsCheckedAt: {} })),
   /**
    * Per recurring-fault item key or invariant-violation instance id, the diagnostician run the loop
    * launched for it and what became of the diagnosis (GY-439, src/daemon/diagnosis.ts).
@@ -569,6 +567,7 @@ export const daemonStateSchema = z.object({
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
+export const standingTmpKey = 'reclaim:tmp:standing'; // GY-1600: the one row of a run of /tmp passes removing 0 under the standing inode bound
 export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3, retainedScopeDecisions = 200;
 export const retainedSamples = 200, retainedClocks = 500, retainedBaseFailures = 200;
 /** How many items' dispatch-failure runs (GY-1078) are kept; a run is retired when its item dispatches or is blocked, so this only catches items the loop stopped seeing. */
@@ -593,7 +592,10 @@ export async function readDaemonState(root: string, config: MasterConfig): Promi
   let raw: string;
   try { raw = await readFile(file, 'utf8'); }
   catch (error: any) { if (error.code === 'ENOENT') return emptyDaemonState(config); throw error; }
-  const state = daemonStateSchema.parse(JSON.parse(raw));
+  const stored = JSON.parse(raw), dropped = stored && typeof stored === 'object' ? Object.keys(stored).filter(key => !Object.hasOwn(daemonStateSchema.shape, key)) : [];
+  for (const key of dropped) delete stored[key]; // GY-1542: keys from newer, since reverted code are dropped and named once; declared fields stay strict
+  if (dropped.length) console.error(`Master daemon cursor: ignored top-level keys this version does not declare: ${dropped.join(', ')}`);
+  const state = daemonStateSchema.parse(stored);
   if (state.url !== config.url || state.repository.toLowerCase() !== config.repository.toLowerCase()) throw new Error('Master daemon state belongs to another Graphyard server or repository; remove it before running the loop');
   return state;
 }
@@ -612,11 +614,10 @@ export async function writeDaemonState(config: MasterConfig, state: DaemonState)
 /** Keep the cursor bounded without ever discarding an unresolved action. */
 export function pruneDaemonState(state: DaemonState) {
   const entries = Object.entries(state.actions);
-  // A row holding a standing failing run is that fault's only record (GY-1086): a refusal written
-  // once while it stands (upgrade:refused, a dirty checkout) went oldest, was retired by this bound
-  // within the hour, and its next refusal opened a new instance — six in a day for one cause. It is
-  // kept while its run stands; endFailingRuns ends a run the window no longer sees attempted.
-  const resolved = entries.filter(([key, action]) => (action.state === 'done' || action.state === 'failed') && !state.faults.failing[key]);
+  // A row holding a standing failing run is that fault's only record (GY-1086): retired oldest, its next refusal
+  // opened a new instance — six in a day for one cause — so it is kept while its run stands (endFailingRuns ends it).
+  // The standing /tmp pass row (GY-1600) is likewise its run's only count and exists only while the inode bound stands.
+  const resolved = entries.filter(([key, action]) => (action.state === 'done' || action.state === 'failed') && !state.faults.failing[key] && key !== standingTmpKey);
   if (resolved.length > retainedActions) {
     for (const [key] of resolved.sort((a, b) => Date.parse(a[1].at) - Date.parse(b[1].at)).slice(0, resolved.length - retainedActions)) delete state.actions[key];
   }
@@ -629,6 +630,7 @@ export function pruneDaemonState(state: DaemonState) {
   const clocks = Object.keys(state.clocks);
   if (clocks.length > retainedClocks) for (const id of clocks.slice(0, clocks.length - retainedClocks)) delete state.clocks[id];
   if (state.scope.length > retainedScopeDecisions) state.scope = state.scope.slice(-retainedScopeDecisions);
+  if (state.shadow.length > shadowKeptVerdicts) state.shadow = state.shadow.slice(-shadowKeptVerdicts); // GY-1522: the step evicts by openness; this is the bound on a read state
   // A watch is retired when its item moves on; this bound only catches items the loop stopped seeing.
   const watches = Object.entries(state.approvals).sort((a, b) => Date.parse(a[1].requestedAt) - Date.parse(b[1].requestedAt));
   if (watches.length > retainedClocks) for (const [key] of watches.slice(0, watches.length - retainedClocks)) delete state.approvals[key];
@@ -676,7 +678,7 @@ export const clampCount = (value: number, max: number) => Math.min(max, Math.max
 export function storeAction(state: DaemonState, key: string, action: Omit<DaemonAction, 'faultClass'> & { faultClass?: unknown }, faultKind: FaultKind | null = daemonActionFaultKind(action.kind)): DaemonAction {
   const { faultClass: _, ...rest } = action;
   const failed = faultKind !== null && (rest.state === 'failed' || rest.state === 'indeterminate');
-  const fault = faultKind === null ? null : classified(faultKind);
+  const fault = faultKind === null || unansweredStands(state.faults, key) || (faultKind.startsWith('action:') && waitReason(rest.detail)) ? null : classified(faultKind);
   const entry = daemonActionSchema.parse({ ...rest, detail: boundDetail(rest.detail), attempts: clampCount(rest.attempts, 1000), ...(failed && fault ? { faultClass: fault.faultClass } : {}) });
   if (fault) { dispatchRun(state.faults.failing, key, entry.state); noteActionOutcome(state.faults, key, entry.state, { ...fault, subject: entry.work ?? key, text: entry.detail }, entry.at); }
   state.actions[key] = entry;

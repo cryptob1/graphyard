@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
+import { storeAction } from '../src/daemon/state.js';
+import { trackFaults } from '../src/model/fault-record.js';
 import { containmentInMotion, containmentSettleWaitBoundMs, cycleFaults, emptyDaemonState, reworkDecisionInMotion, reworkDecisionWaitBoundMs } from '../src/master-daemon.js';
 // GY-1337's own exports are read through namespaces, so the base exercise runs these replays and each fails on its assertion.
 import * as daemon from '../src/master-daemon.js';
@@ -366,4 +368,479 @@ test('manual:fault-class-decision — a carried escalation past the master\'s tu
   carried[0].trigger = 'containment';
   const line = "GY-1373 carries a standing containment escalation while it is worked — no executor may run it; resolving GY-1373's containment escalation has been owed for 25s";
   assert.equal(daemon.owedEscalationInMotion(fenced, line, Date.parse('2026-10-06T14:03:39.561Z')), false, 'a containment concern is counted as its fence is');
+});
+
+// GY-1751, three instances in 24 hours. (1) action:decision on GOAL-1, 2026-10-12T23:43:05.011Z: the acceptance land step met the
+// plane's startup-readiness 503 and recorded a decision fault though it asks again in five minutes. (2) decision-unanswered and
+// action:escalation on GY-1710, ten seconds apart: one stuck close decision, counted as two instances.
+const goalAccepted = (id: string) => ({ id, key: 'GOAL-1', stage: 'accepted', revision: 3, acceptance: { pr: 1153, outcomes: [] } }) as never;
+async function landFailure(failure: Error, id: string) {
+  const { acceptanceStep } = await import('../src/daemon/acceptance.js');
+  const state = emptyDaemonState(config());
+  const effects = { settings: { enabled: true }, goals: async () => [goalAccepted(id)], land: async () => { throw failure; } };
+  const clock = Date.parse('2026-10-12T23:43:05.011Z');
+  await acceptanceStep({ config: config(), state, effects: { acceptance: effects, persist: async () => {} }, now: () => clock, clock, performed: [],
+    isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() } as never);
+  return state;
+}
+
+test('manual:fault-class-decision — action:decision|GOAL-1|2026-10-12T23:43:05.011Z: a land step that met the plane\'s startup-readiness 503 is no decision fault', async () => {
+  const state = await landFailure(new Error('Graphyard refused goals/GOAL-1/land (503): Startup validation has not completed; retry shortly'), 'goal-503');
+  assert.equal(state.actions['acceptance:goal-503']?.state, 'failed', 'the step still records that it will ask again');
+  assert.deepEqual(state.faults.instances, []);
+  assert.deepEqual(state.faults.failing, {});
+});
+
+test('manual:fault-class-decision — a land step the goal itself was refused still counts as a decision fault', async () => {
+  const state = await landFailure(new Error('Graphyard refused goals/GOAL-1/land (409): the approved head moved'), 'goal-409');
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:decision']);
+});
+
+test('manual:fault-class-decision — decision-unanswered|GY-1710 and action:escalation|GY-1710 are one stuck decision, one instance', () => {
+  const id = '65bf0fef-d9c1-4cd2-8467-9f1866b0fd41', state = emptyDaemonState(config());
+  const unanswered = `Decision ${id} (close) is unanswered after 41m: approver session gy-approver-gy-1710-65bf0fef is not running and recorded no outcome — a stall, not a refusal`;
+  trackFaults(state.faults, [{ kind: 'decision-unanswered', faultClass: 'decision', subject: 'GY-1710', text: unanswered }], '2026-10-12T02:16:40.081Z');
+  storeAction(state, `escalation:decision-unjudged:${id}`, { kind: 'escalation', work: 'GY-1710', principal: null, state: 'failed', detail: `close decision ${id} on GY-1710: approver session has not judged it for 10 minutes`, attempts: 1, cycle: 1, at: '2026-10-12T02:16:50.965Z', epoch: null }, undefined);
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['decision-unanswered'], 'the exhaustion escalation restates the stall');
+  // Recorded first, in the other observation order, it is the same one instance.
+  const fresh = emptyDaemonState(config());
+  storeAction(fresh, `escalation:decision-unjudged:${id}`, { kind: 'escalation', work: 'GY-1710', principal: null, state: 'failed', detail: 'x', attempts: 1, cycle: 1, at: '2026-10-12T02:16:30.000Z', epoch: null }, undefined);
+  trackFaults(fresh.faults, [{ kind: 'decision-unanswered', faultClass: 'decision', subject: 'GY-1710', text: unanswered }], '2026-10-12T02:16:40.081Z');
+  assert.deepEqual(fresh.faults.instances.map(entry => entry.kind), ['decision-unanswered']);
+});
+
+test('manual:fault-class-decision — an exhaustion escalation whose decision was never observed unanswered stays an instance', () => {
+  const id = '11111111-d9c1-4cd2-8467-9f1866b0fd41', state = emptyDaemonState(config());
+  storeAction(state, `escalation:decision-unjudged:${id}`, { kind: 'escalation', work: 'GY-1710', principal: null, state: 'failed', detail: 'close decision: not judged', attempts: 1, cycle: 1, at: '2026-10-12T02:16:50.965Z', epoch: null }, undefined);
+  // The decision settles before any successful observation: no unanswered line ever stands.
+  trackFaults(state.faults, [], '2026-10-12T02:17:40.000Z');
+  trackFaults(state.faults, [], '2026-10-12T02:17:50.000Z');
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:escalation'], 'the real exhausted run is not dropped');
+});
+
+test('manual:fault-class-decision — an acceptance failure from a GitHub child process is a decision fault even when it quotes a 502', async () => {
+  const { ChildProcessError } = await import('../src/child-runner.js');
+  const failure = new ChildProcessError('gh', ['pr', 'close', '1153'], { stdout: '', stderr: 'HTTP 502 Bad Gateway', status: 1, signal: null, timedOut: false });
+  const state = await landFailure(failure, 'goal-gh');
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:decision']);
+});
+
+test('manual:fault-class-decision — a goal wait past its bound that quotes an HTTP 503 still counts; only the caught plane-wide error is exempt', async () => {
+  const { acceptanceStep } = await import('../src/daemon/acceptance.js');
+  const state = emptyDaemonState(config());
+  const approved = '2026-10-10T00:00:00.000Z', clock = Date.parse(approved) + 3 * 86_400_000;
+  const goal = { id: 'goal-wait', key: 'GOAL-2', stage: 'accepted', revision: 3, approval: { at: approved }, acceptance: { pr: 1153, outcomes: [] } } as never;
+  const effects = { settings: { enabled: true }, goals: async () => [goal], land: async () => ({ goal, landing: { state: 'waiting', detail: 'GitHub has not merged: HTTP 503 Startup validation has not completed' } }) };
+  await acceptanceStep({ config: config(), state, effects: { acceptance: effects, persist: async () => {} }, now: () => clock, clock, performed: [],
+    isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() } as never);
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:decision']);
+});
+
+// GY-1751 review: the real acceptance step and fault record over cycles of two simulated days.
+test('manual:fault-class-decision — over two simulated days a plane-wide land failure files none, and a goal refusal that follows files one', async () => {
+  const { RefusedResponse } = await import('../src/model/refusal.js');
+  const { acceptanceStep } = await import('../src/daemon/acceptance.js');
+  const state = emptyDaemonState(config()), day = 86_400_000, start = Date.parse('2026-10-12T00:00:00.000Z');
+  let failure: Error = new RefusedResponse('Graphyard refused goals/G/land (503): Startup validation has not completed; retry shortly', 503, { error: 'Startup validation has not completed; retry shortly' });
+  const goal = { id: 'g', key: 'GOAL-1', stage: 'accepted', revision: 1, acceptance: { pr: 1, outcomes: [] } };
+  const effects = { settings: { enabled: true }, goals: async () => [goal], land: async () => { throw failure; } };
+  for (let at = 0; at < 2 * day; at += 300_000) {
+    const clock = start + at;
+    await acceptanceStep({ config: config(), state, effects: { acceptance: effects, persist: async () => {} }, now: () => clock, clock, performed: [],
+      isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() } as never);
+    if (at === day) { assert.deepEqual(state.faults.instances, [], 'a day of plane-wide failures files none'); failure = new RefusedResponse('Graphyard refused goals/G/land (409): the approved head moved while the base was unavailable', 409, { error: 'the approved head moved' }); }
+  }
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:decision']);
+});
+
+// GY-1751 review round 5: three paths by which the restated stall still counted twice.
+const stall = (id: string) => `Decision ${id} (close) is unanswered after 41m: approver session gy-approver-gy-1710-${id.slice(0, 8)} is not running and recorded no outcome — a stall, not a refusal`;
+const exhaust = (state: ReturnType<typeof emptyDaemonState>, id: string, at: string) => storeAction(state, `escalation:decision-unjudged:${id}`, { kind: 'escalation', work: 'GY-1710', principal: null, state: 'failed', detail: `close decision ${id}: not judged`, attempts: 1, cycle: 1, at, epoch: null }, undefined);
+
+test('manual:fault-class-decision — an escalation recorded before its unanswered line is observed is not an instance of its own', () => {
+  const id = '22222222-d9c1-4cd2-8467-9f1866b0fd41', state = emptyDaemonState(config());
+  exhaust(state, id, '2026-10-12T02:16:50.000Z');
+  assert.equal(state.faults.instances.length, 0, 'nothing counts before an observation has looked for the unanswered line');
+  trackFaults(state.faults, [{ kind: 'decision-unanswered', faultClass: 'decision', subject: 'GY-1710', text: stall(id) }], '2026-10-12T02:16:55.000Z');
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['decision-unanswered']);
+});
+
+test('manual:fault-class-decision — a standing unanswered line that names another decision absorbs that decision\'s escalation', () => {
+  const first = '33333333-d9c1-4cd2-8467-9f1866b0fd41', second = '44444444-d9c1-4cd2-8467-9f1866b0fd41', state = emptyDaemonState(config());
+  trackFaults(state.faults, [{ kind: 'decision-unanswered', faultClass: 'decision', subject: 'GY-1710', text: stall(first) }], '2026-10-12T02:00:00.000Z');
+  exhaust(state, second, '2026-10-12T02:10:00.000Z');
+  trackFaults(state.faults, [{ kind: 'decision-unanswered', faultClass: 'decision', subject: 'GY-1710', text: stall(second) }], '2026-10-12T02:11:00.000Z');
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['decision-unanswered']);
+});
+
+test('manual:fault-class-decision — an exhausted run whose decision was never unanswered is an instance once, however often it settles', () => {
+  const id = '55555555-d9c1-4cd2-8467-9f1866b0fd41', state = emptyDaemonState(config());
+  exhaust(state, id, '2026-10-12T02:16:50.000Z');
+  trackFaults(state.faults, [], '2026-10-12T02:16:55.000Z'); trackFaults(state.faults, [], '2026-10-12T02:17:55.000Z');
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:escalation']);
+});
+
+test('manual:fault-class-decision — a merge-writer status read that met the plane\'s 502 while opening a draft is no decision fault', async () => {
+  const { acceptanceStep, clearDrafts, draftsSettled } = await import('../src/daemon/acceptance.js');
+  const { MergeWriterUnreadError } = await import('../src/master/dispatch.js');
+  clearDrafts();
+  const state = emptyDaemonState(config()), goal = { id: 'goal-draft', key: 'GOAL-3', stage: 'acceptance-drafting', revision: 1, drafts: 0 };
+  const draft = { goal: 'GOAL-3', outcomes: [{ id: 'greeting', title: 'A customer is greeted', criteria: ['The greeting names the customer'], case: { id: 'greeting', title: 'greeting answers', tags: ['api'], target: 'uat', required: true, steps: [{ kind: 'http', name: 'read', method: 'GET', path: '/', status: 200 }] } }] };
+  const runner = { name: 'stub', start: (_p: string, options: { tool: string; validate: (value: unknown) => unknown }) => { const payload = options.validate(draft); return { id: 'r', events: [], onEvent: () => () => {}, cancel() {}, result: async () => ({ ok: true, tool: options.tool, payload, payloads: [payload] }) }; } };
+  const effects = { settings: { enabled: true, model: 'm', fallbackModel: 'f', timeoutMinutes: 1 }, cwd: '/nonexistent', goals: async () => [goal], runner: async () => ({ runner, runtime: 'stub', model: 'm' }),
+    commit: async () => ({ branch: 'b', head: 'h' }), writer: {}, merger: async () => { throw new MergeWriterUnreadError('https://x/api/status', 'HTTP 502'); }, open: async () => ({ pr: 1, branch: 'b', head: 'h' }) };
+  let clock = Date.parse('2026-10-12T23:43:05.011Z');
+  for (let tick = 0; tick < 2; tick++) {
+    clock += 6 * 60_000;
+    await acceptanceStep({ config: config(), state, effects: { acceptance: effects, persist: async () => {} }, now: () => clock, clock, performed: [],
+      isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() } as never);
+    await draftsSettled();
+  }
+  assert.match(state.actions['acceptance:goal-draft']?.detail ?? '', /could not be opened: the merge writer could not be read/);
+  assert.equal(state.actions['acceptance:goal-draft']?.state, 'failed');
+  assert.deepEqual(state.faults.instances, []);
+  clearDrafts();
+});
+
+test('manual:fault-class-decision — a partial observation settles no held escalation; the next full one does', () => {
+  const id = '66666666-d9c1-4cd2-8467-9f1866b0fd41', state = emptyDaemonState(config());
+  exhaust(state, id, '2026-10-12T02:16:50.000Z');
+  trackFaults(state.faults, [], '2026-10-12T02:16:55.000Z', true);
+  trackFaults(state.faults, [], '2026-10-12T02:17:55.000Z', new Set(['decision-unanswered']));
+  assert.equal(state.faults.instances.length, 0);
+  trackFaults(state.faults, [], '2026-10-12T02:18:55.000Z');
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:escalation']);
+});
+
+// GY-1764 names this file for GY-1763's two instances (decision class, subjects GY-1696 and GY-1761): decision formation had no
+// evidence gate. Each is replayed as the item stood; the candidate forms no decision the evidence refutes.
+test('integration:fault-class-decision-gy-1763-replay — GY-1696\'s two ask shapes produce no approver decision and no decision-refused fault', async () => {
+  const { nonRepositoryPaths } = await import('../src/model/scope-repository.js');
+  const { decideScopeRequest } = await import('../src/model/scope.js');
+  const tree = new Set(['src/model/scope.ts', 'src/daemon/cycle-scope.ts', 'README.md']);
+  const at = '2026-10-13T05:26:00.000Z', now = Date.parse('2026-10-13T05:26:30.000Z');
+  const criteria = [{ id: 'AC-1', text: 'The live observation is recorded by a master session', proofs: ['manual:checkout-restore'] }];
+  for (const paths of [['daemon.relea', 'upgrade.align'], ['.graphyard/master.json']]) {
+    const request = { epoch: 1, paths, reason: 'AC-1 needs the live fields', requestedBy: 'graphyard-opencode-1', at };
+    const standing = (decision: ReturnType<typeof decideScopeRequest> & { decidedBy?: string }) => ({
+      key: 'GY-1696', stage: 'build', plannedFiles: [] as string[], criteria, lease: { epoch: 1, expiresAt: '2026-10-13T06:26:00.000Z' },
+      scopeRequest: { ...request, decision: { state: decision.state, reason: decision.reason, paths, at, decidedBy: 'graphyard', waitedMs: 0, requestedBy: request.requestedBy, requestedAt: at, epoch: 1, ...(decision.nonRepository ? { nonRepository: true } : {}), treeRead: true } },
+    } as unknown as Work);
+    // Base: the rule judges implication alone, refuses the ask, and the loop routes it to the approver, who refuses it (decision-refused).
+    const base = standing(decideScopeRequest({ plannedFiles: [], criteria }, request));
+    assert.ok(decisions.scopeRoutineDecision(base, now, true), `${paths.join(', ')}: the base routes the ask to the approver`);
+    // A refusal the tree was never read for (a failed read, a typed ask) is never routed: it waits for the evidence.
+    const unread = standing(decideScopeRequest({ plannedFiles: [], criteria }, request));
+    delete (unread.scopeRequest!.decision as { treeRead?: boolean }).treeRead;
+    assert.equal(decisions.scopeRoutineDecision(unread, now, true), null, `${paths.join(', ')}: an unevidenced refusal is not routed`);
+    // Candidate: the evidence gate refuses it in-process, with the offending path named, and nothing is routed.
+    const gated = decideScopeRequest({ plannedFiles: [], criteria }, request, { nonRepository: nonRepositoryPaths(paths, tree) });
+    assert.equal(gated.state, 'refused');
+    assert.ok(paths.some(path => gated.reason.includes(path)), gated.reason);
+    assert.equal(decisions.scopeRoutineDecision(standing(gated), now, true), null, `${paths.join(', ')}: no approver decision is formed`);
+  }
+});
+
+test('integration:owed-decision-gy-1761-replay — approval 5499583025 of 632185dd with no ledger plan holds nothing and owes no decision past reworkDecisionWaitBoundMs', async () => {
+  const { mechanicalReviewHold } = await import('../src/mechanical-findings.js');
+  const head = '632185dd17dd'.padEnd(40, '0'), submittedAt = '2026-10-13T06:25:00.000Z';
+  const review = { reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'APPROVED', id: 5499583025, submittedAt, mechanical: 2 };
+  const candidate = { sha: head, baseSha: '1'.repeat(40), pr: 1169, branch: 'graphyard/gy-1761-1', author: 'implementer' };
+  const gy1761 = { id: 'work-1761', key: 'GY-1761', stage: 'review', epoch: 1, criteria: [{ id: 'AC-1', text: 'It works', proofs: ['unit:works'] }], evidence: [], gates: [], dependencies: [], workspaces: [], lastAssignment: { owner: 'implementer', epoch: 1 }, implementers: ['implementer'], reworkRequested: false, policy: { checks: ['test'], review: true, reviewProvider: 'github' }, candidate, submission: { epoch: 1, pr: 1169 },
+    observation: { candidate, reviews: [review], checks: [], merged: false, prState: 'open', draft: false, at: submittedAt } } as unknown as Work;
+  const sevenOhOne = Date.parse('2026-10-13T07:00:34.946Z');
+  // Base: the gate held from the observation's review entry alone, until 07:25:00Z, while the ledger planned nothing (mechanicalFix null, follow-ups filed 06:24:59.869Z).
+  // Candidate: the ledger reports no plan, so there is no hold and no owed request-rework to outlast the bound.
+  assert.equal(mechanicalReviewHold(gy1761, sevenOhOne), null, 'no plan, no hold');
+  assert.equal(decisions.neededDecision(gy1761, { autoMerge: true } as never, undefined, [], []), null, 'and no mechanical rework is owed');
+  assert.ok(sevenOhOne - Date.parse('2026-10-13T06:25:05.685Z') > reworkDecisionWaitBoundMs, 'the instance stood past the bound at 07:00:34Z');
+  // The same approval with a planned fix the loop confirmed this cycle is held, as GY-971 intends, and owes its round;
+  // one whose confirmation the loop can no longer renew — the sync write refused, the ledger read failing — holds nothing,
+  // so the gate cannot retain a hold the ledger stopped backing (GY-1764 rework, AC-2).
+  const held = mechanicalReviewHold({ ...gy1761, mechanicalPlan: { reviewId: 5499583025, head, at: '2026-10-13T07:00:00.000Z' } }, sevenOhOne);
+  assert.match(held ?? '', /Approval 5499583025 of 632185dd17dd names 2 findings classified mechanical/);
+  const { mechanicalPlanFreshMs } = await import('../src/mechanical-findings.js');
+  assert.equal(mechanicalReviewHold({ ...gy1761, mechanicalPlan: { reviewId: 5499583025, head, at: new Date(sevenOhOne - mechanicalPlanFreshMs - 1).toISOString() } }, sevenOhOne), null, 'a stale confirmation holds nothing');
+  // Two approvals on the head both name mechanical findings and the ledger planned the later one: the hold is for that one.
+  const earlier = { ...review, id: 5499583024, submittedAt: '2026-10-13T06:20:00.000Z' };
+  const twoApprovals = { ...gy1761, observation: { ...gy1761.observation!, reviews: [earlier, review] }, mechanicalPlan: { reviewId: 5499583025, head, at: '2026-10-13T07:00:00.000Z' } } as unknown as Work;
+  assert.match(mechanicalReviewHold(twoApprovals, sevenOhOne) ?? '', /Approval 5499583025 of 632185dd17dd/, 'the planned later approval holds the head');
+});
+
+// GY-1764 rework, AC-2: the loop's report of the review ledger's mechanical plan is the one write the
+// review gate's hold stands on, so a report that cannot be written is a visible, retried failure — and
+// a hold whose confirmation the loop cannot renew is dropped, never retained past its evidence.
+test('integration:mechanical-plan-report-surfaced — a refused plan report is a failed action row that retries, and the hold drops while the report stands unconfirmed', async () => {
+  const { mechanicalReviewHold } = await import('../src/mechanical-findings.js');
+  const minute = 60_000, start = Date.parse('2026-10-13T08:00:00.000Z');
+  const iso = (at: number) => new Date(at).toISOString();
+  const head = '632185dd17dd'.padEnd(40, '0');
+  const review = { reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'APPROVED', id: 5499583025, submittedAt: iso(start - 35 * minute), mechanical: 2 };
+  const candidate = { sha: head, baseSha: '1'.repeat(40), pr: 1169, branch: 'graphyard/gy-1761-1', author: 'implementer' };
+  const state = emptyDaemonState(config());
+  // The plane as the loop reports to it: the item, its accepted plan report, and the ledger's standing plan.
+  // `reworkRequested` keeps the round's own rework decision out of the way: this step is the plan report.
+  let confirmedAt = iso(start - 11 * minute);
+  const attempts: ({ reviewId: number; head: string } | null)[] = [];
+  const work = (): Work => ({
+    id: 'work-1761', key: 'GY-1761', title: 'GY-1761', description: '', type: 'bug', priority: 2, dependencies: [], plannedFiles: ['src/'],
+    criteria: [{ id: 'AC-1', text: 'It works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 3, policyRevision: 1,
+    createdAt: iso(start - hour(2)), updatedAt: iso(start), stageEnteredAt: iso(start - hour(1)), ready: true, epoch: 1, lease: null, workspaces: [],
+    candidate, submission: { epoch: 1, pr: 1169 }, reworkRequested: true, scenarioRequirements: [], evidence: [], blocker: null, violations: [], scopeRequest: null, gates: [],
+    observation: { candidate, reviews: [review], checks: [], merged: false, prState: 'open', draft: false, at: iso(start - 30 * minute) },
+    mechanicalPlan: { reviewId: 5499583025, head, at: confirmedAt },
+  } as unknown as Work);
+  const effects = {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: [work()], now: iso(now) }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    persist: async () => {},
+    mechanicalFixes: async () => ({ requests: [{ key: 'GY-1761', pr: 1169, head, reviewId: 5499583025, epoch: 1, at: iso(start - 35 * minute), mechanical: [], substantive: [], paths: ['src/widget.ts'] }] }),
+    recordMechanicalPlan: async (item: Work, plan: { reviewId: number; head: string } | null) => {
+      attempts.push(plan);
+      if (attempts.length <= 2) throw new Error('the control plane refused work/work-1761/mechanicalplan (503): plane-wide outage');
+      confirmedAt = iso(now);
+      return { ...item, mechanicalPlan: plan ? { ...plan, at: confirmedAt } : null };
+    },
+  } as unknown as Parameters<typeof daemon.runCycle>[2];
+  let now = start;
+  const faultsBefore = state.faults.instances.length;
+  for (let step = 0; step < 4; step++, now += 2 * minute) await daemon.runCycle(config(), state, effects, () => now);
+  assert.deepEqual(attempts.slice(0, 3), [{ reviewId: 5499583025, head }, { reviewId: 5499583025, head }, { reviewId: 5499583025, head }], 'the stale report is retried until the plane accepts it');
+  const row = Object.entries(state.actions).find(([key]) => key.startsWith('mechanical-plan:'));
+  assert.ok(row, 'the refused report is on the record');
+  assert.equal(row![1].state, 'failed');
+  assert.match(row![1].detail, /mechanical plan \(review 5499583025/);
+  assert.match(row![1].detail, /503\): plane-wide outage/);
+  assert.deepEqual(state.faults.instances.slice(faultsBefore).map(entry => entry.kind).filter(kind => /decision|escalation/.test(kind)), [], 'a refused plan report is not a decision fault');
+  assert.deepEqual(attempts.slice(3), [], 'a confirmed report is not re-reported while it stays fresh');
+  // The gate reads the same projection: held while the confirmation stands, dropped once it cannot be renewed.
+  assert.match(mechanicalReviewHold(work(), start) ?? '', /names 2 findings classified mechanical/);
+  assert.equal(mechanicalReviewHold({ ...work(), mechanicalPlan: { reviewId: 5499583025, head, at: iso(start - 6 * minute) } } as Work, start), null, 'a stale confirmation holds nothing');
+});
+test('integration:mechanical-plan-report-blocks-decision — an item whose planned round cannot be reported forms no decision from the ledger until the report lands', async () => {
+  const { mechanicalReviewHold } = await import('../src/mechanical-findings.js');
+  const minute = 60_000, start = Date.parse('2026-10-13T08:00:00.000Z');
+  const iso = (at: number) => new Date(at).toISOString();
+  const head = '632185dd17dd'.padEnd(40, '0');
+  const review = { reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'APPROVED', id: 5499583025, submittedAt: iso(start - 35 * minute), mechanical: 2 };
+  const candidate = { sha: head, baseSha: '1'.repeat(40), pr: 1169, branch: 'graphyard/gy-1761-1', author: 'implementer' };
+  const state = emptyDaemonState(config());
+  // The plane as the loop reports to it: the item, its accepted plan report, and the ledger's standing plan.
+  // `reworkRequested` keeps the round's own rework decision out of the way: this step is the plan report.
+  let confirmedAt = iso(start - 11 * minute);
+  const attempts: ({ reviewId: number; head: string } | null)[] = [];
+  const work = (): Work => ({
+    id: 'work-1761', key: 'GY-1761', title: 'GY-1761', description: '', type: 'bug', priority: 2, dependencies: [], plannedFiles: ['src/'],
+    criteria: [{ id: 'AC-1', text: 'It works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 3, policyRevision: 1,
+    createdAt: iso(start - hour(2)), updatedAt: iso(start), stageEnteredAt: iso(start - hour(1)), ready: true, epoch: 1, lease: null, workspaces: [],
+    candidate, submission: { epoch: 1, pr: 1169 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [], scopeRequest: null, gates: [],
+    observation: { candidate, reviews: [review], checks: [], merged: false, prState: 'open', draft: false, at: iso(start - 30 * minute) },
+    mechanicalPlan: { reviewId: 5499583025, head, at: confirmedAt },
+  } as unknown as Work);
+  const effects = {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: [work()], now: iso(now) }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    persist: async () => {},
+    mechanicalFixes: async () => ({ requests: [{ key: 'GY-1761', pr: 1169, head, reviewId: 5499583025, epoch: 1, at: iso(start - 35 * minute), mechanical: [], substantive: [], paths: ['src/widget.ts'] }] }),
+    recordMechanicalPlan: async (item: Work, plan: { reviewId: number; head: string } | null) => {
+      attempts.push(plan);
+      if (attempts.length <= 4) throw new Error('the control plane refused work/work-1761/mechanicalplan (503): plane-wide outage');
+      confirmedAt = iso(now);
+      return { ...item, mechanicalPlan: plan ? { ...plan, at: confirmedAt } : null };
+    },
+  } as unknown as Parameters<typeof daemon.runCycle>[2];
+  let now = start;
+  const faultsBefore = state.faults.instances.length;
+  for (let step = 0; step < 2; step++, now += 2 * minute) await daemon.runCycle(config(), state, effects, () => now);
+  const decisions = () => Object.keys(state.actions).filter(key => /^escalation:decision:/.test(key) || /rework/.test(key) && key.includes('work-1761'));
+  assert.ok(attempts.length >= 4, 'the report is retried within the cycle and again the next');
+  assert.equal(state.actions['mechanical-plan:work-1761']?.state, 'failed', 'the failed report is on the record');
+  assert.deepEqual(decisions(), [], 'no decision forms while the plan report fails');
+  assert.deepEqual(Object.values(state.approvals).map(watch => watch.work), [], 'no approval is requested for it');
+  const before = decisions().length;
+  for (let step = 0; step < 3; step++, now += 2 * minute) await daemon.runCycle(config(), state, effects, () => now);
+  assert.ok(decisions().length > before, 'once the report lands the round forms its decision');
+});
+test('integration:mechanical-plan-report-clear-blocks-decision — a held plan the ledger no longer carries, whose clearing cannot be reported, owes no decision and does not hold its decisions', async () => {
+  const { mechanicalReviewHold } = await import('../src/mechanical-findings.js');
+  const minute = 60_000, start = Date.parse('2026-10-13T08:00:00.000Z');
+  const iso = (at: number) => new Date(at).toISOString();
+  const head = '632185dd17dd'.padEnd(40, '0');
+  const review = { reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'APPROVED', id: 5499583025, submittedAt: iso(start - 35 * minute), mechanical: 2 };
+  const candidate = { sha: head, baseSha: '1'.repeat(40), pr: 1169, branch: 'graphyard/gy-1761-1', author: 'implementer' };
+  const state = emptyDaemonState(config());
+  // The plane as the loop reports to it: the item, its accepted plan report, and the ledger's standing plan.
+  // `reworkRequested` keeps the round's own rework decision out of the way: this step is the plan report.
+  let confirmedAt = iso(start - 11 * minute);
+  const attempts: ({ reviewId: number; head: string } | null)[] = [];
+  const work = (): Work => ({
+    id: 'work-1761', key: 'GY-1761', title: 'GY-1761', description: '', type: 'bug', priority: 2, dependencies: [], plannedFiles: ['src/'],
+    criteria: [{ id: 'AC-1', text: 'It works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 3, policyRevision: 1,
+    createdAt: iso(start - hour(2)), updatedAt: iso(start), stageEnteredAt: iso(start - hour(1)), ready: true, epoch: 1, lease: null, workspaces: [],
+    candidate, submission: { epoch: 1, pr: 1169 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [], scopeRequest: null, gates: [],
+    observation: { candidate, reviews: [review], checks: [], merged: false, prState: 'open', draft: false, at: iso(start - 30 * minute) },
+    mechanicalPlan: { reviewId: 5499583025, head, at: confirmedAt },
+  } as unknown as Work);
+  const effects = {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: [work()], now: iso(now) }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    persist: async () => {},
+    mechanicalFixes: async () => ({ requests: [] }),
+    recordMechanicalPlan: async (item: Work, plan: { reviewId: number; head: string } | null) => {
+      attempts.push(plan);
+      if (attempts.length <= 4) throw new Error('the control plane refused work/work-1761/mechanicalplan (503): plane-wide outage');
+      confirmedAt = iso(now);
+      return { ...item, mechanicalPlan: plan ? { ...plan, at: confirmedAt } : null };
+    },
+  } as unknown as Parameters<typeof daemon.runCycle>[2];
+  let now = start;
+  const faultsBefore = state.faults.instances.length;
+  for (let step = 0; step < 2; step++, now += 2 * minute) await daemon.runCycle(config(), state, effects, () => now);
+  const decisions = () => Object.keys(state.actions).filter(key => /^escalation:decision:/.test(key) || /rework/.test(key) && key.includes('work-1761'));
+  assert.ok(attempts.length >= 4, 'the report is retried within the cycle and again the next');
+  assert.equal(state.actions['mechanical-plan:work-1761']?.state, 'failed', 'the failed report is on the record');
+  assert.deepEqual(decisions(), [], 'no decision forms while the plan report fails');
+  assert.deepEqual(Object.values(state.approvals).map(watch => watch.work), [], 'no approval is requested for it');
+  assert.ok(attempts.every(plan => plan === null), 'only the plan\'s absence is reported');
+});
+test('integration:scope-evidence-gate-failed-read — a failed tree read decides nothing and routes nothing; the ask waits for a read', async () => {
+  const minute = 60_000, start = Date.parse('2026-10-13T08:20:00.000Z');
+  const iso = (at: number) => new Date(at).toISOString();
+  const work = {
+    id: 'work-GY-1696', key: 'GY-1696', title: 'GY-1696', description: '', type: 'feature', priority: 1, dependencies: [], plannedFiles: ['src/widget.ts'],
+    criteria: [{ id: 'AC-1', text: 'The live observation is recorded by a master session', proofs: ['unit:x'] }], policy: { checks: ['test'], review: true }, stage: 'build', ready: true,
+    epoch: 1, revision: 10, policyRevision: 2, createdAt: iso(start - 2 * hour(1)), updatedAt: iso(start), stageEnteredAt: iso(start - hour(1)),
+    lease: { owner: 'worker', epoch: 1, expiresAt: iso(start + 30 * minute) }, workspaces: [], submission: null, candidate: null,
+    scenarioRequirements: [], blocker: null, violations: [], evidence: [], observation: null, gates: [],
+    scopeRequest: { epoch: 1, at: iso(start - 5 * minute), paths: ['daemon.relea'], reason: 'the round needs these', requestedBy: 'worker' },
+  } as unknown as Work;
+  let reads = 0; const decided: boolean[] = [];
+  const effects = {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: [work], now: iso(now) }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    persist: async () => {}, reviewFindings: async () => [], basePaths: async (paths: string[]) => new Set(paths),
+    repositoryFiles: async () => { reads++; throw new Error('git is unavailable'); },
+    decideScope: async (item: Work) => { decided.push(true); return item; },
+  } as unknown as Parameters<typeof daemon.runCycle>[2];
+  let now = start;
+  const state = emptyDaemonState(config());
+  for (let step = 0; step < 3; step++, now += 2 * minute) await daemon.runCycle(config(), state, effects, () => now);
+  assert.equal(reads, 3, 'each cycle retries the read');
+  assert.deepEqual(decided, [], 'the rules alone never decide an ask whose tree could not be read');
+  assert.deepEqual(Object.values(state.approvals).map(watch => watch.work), [], 'and no approver is asked');
+});
+function hour(count: number) { return count * 60 * 60_000; }
+
+// GY-1764 rework, AC-1/AC-3: the replay above injects the classifier's verdict; this one runs the real
+// loop's scope step over repeated cycles, heads and items — the loop reads the tree once per cycle, the
+// plane decides from what the loop posted, and no approver decision is ever formed for what the tree refutes.
+test('integration:scope-evidence-gate-repeated-cycles — the loop reads the tree once per cycle, refuses non-repository asks in-process, approves decidable new files, and routes nothing', async () => {
+  const { decideScopeRequest } = await import('../src/model/scope.js');
+  const minute = 60_000, start = Date.parse('2026-10-13T08:20:00.000Z');
+  const iso = (at: number) => new Date(at).toISOString();
+  const tree = ['src/widget.ts', 'docs/guide.md', 'README.md', 'package.json'];
+  const asked = iso(start - 5 * minute);
+  const item = (key: string, paths: string[], criterion: string): Work => ({
+    id: `work-${key}`, key, title: key, description: '', type: 'feature', priority: 1, dependencies: [], plannedFiles: ['src/widget.ts'],
+    criteria: [{ id: 'AC-1', text: criterion, proofs: ['unit:x'] }], policy: { checks: ['test'], review: true }, stage: 'build', ready: true,
+    epoch: 1, revision: 10, policyRevision: 2, createdAt: iso(start - 2 * hour(1)), updatedAt: iso(start), stageEnteredAt: iso(start - hour(1)),
+    lease: { owner: 'worker', epoch: 1, expiresAt: iso(start + 30 * minute) }, workspaces: [], submission: null, candidate: null,
+    scenarioRequirements: [], blocker: null, violations: [], evidence: [], observation: null, gates: [],
+    scopeRequest: { epoch: 1, at: asked, paths, reason: 'the round needs these', requestedBy: 'worker' },
+  } as unknown as Work);
+  // The plane as the loop's `autoscope` leaves it: the verdict recomputed here from the item and the evidence posted.
+  const plane = new Map<string, Work>([
+    ['GY-1696', item('GY-1696', ['daemon.relea', 'upgrade.align'], 'The live observation is recorded by a master session')],
+    ['GY-1697', item('GY-1697', ['.graphyard/master.json'], 'The credential the master reads exists')],
+    ['GY-1698', item('GY-1698', ['src/soak/new-check.ts'], 'src/soak/new-check.ts behaves for the item')],
+  ]);
+  const posted: [string, string[]][] = [];
+  let treeReads = 0;
+  const widened: string[] = [];
+  const effects = {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: [...plane.values()], now: iso(now) }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    persist: async () => {}, basePaths: async (paths: string[]) => new Set(paths),
+    // A finding naming each offender would ground an automatic widening; a terminal non-repository refusal must never reach it.
+    reviewFindings: async () => [{ ground: 'review finding', text: 'daemon.relea upgrade.align and .graphyard/master.json need changes' }],
+    widenScope: async (work: Work) => { widened.push(work.key); return work; },
+    repositoryFiles: async () => { treeReads++; return new Set(tree); },
+    decideScope: async (work: Work, nonRepository?: readonly { path: string; nearMiss: string | null; why: 'install-local' | 'untracked' }[], treeRead?: boolean) => {
+      posted.push([work.key, (nonRepository ?? []).map(entry => entry.path)]);
+      const request = work.scopeRequest!;
+      const verdict = decideScopeRequest(work, request, { nonRepository });
+      const decision = { state: verdict.state, reason: verdict.reason, at: iso(now), decidedBy: 'graphyard', waitedMs: 0, paths: verdict.paths, requestedBy: request.requestedBy, requestedAt: request.at, epoch: request.epoch, ...(verdict.nonRepository ? { nonRepository: true } : {}), ...(treeRead ? { treeRead: true } : {}) };
+      const decided: Work = { ...work, scopeDecision: decision, ...(verdict.state === 'approved'
+        ? { scopeRequest: null, plannedFiles: [...(work.plannedFiles ?? []), ...verdict.paths] }
+        : { scopeRequest: { ...request, decision } }) };
+      plane.set(work.key, decided);
+      return decided;
+    },
+  } as unknown as Parameters<typeof daemon.runCycle>[2];
+  let now = start;
+  const state = emptyDaemonState(config());
+  const violations: string[] = [];
+  for (let step = 0; step < 5; step++, now += 2 * minute) {
+    await daemon.runCycle(config(), state, effects, () => now);
+    for (const check of state.invariants.report as { holds: boolean; line: string }[]) if (!check.holds) violations.push(`cycle ${step}: ${check.line}`);
+  }
+  assert.equal(treeReads, 1, 'the tree is read once for the cycle with open asks, not once per item');
+  assert.deepEqual(posted.map(([key, paths]) => [key, paths]), [
+    ['GY-1696', ['daemon.relea', 'upgrade.align']],
+    ['GY-1697', ['.graphyard/master.json']],
+    ['GY-1698', []],
+  ], 'the loop posts the offenders it read, and nothing for the decidable new file');
+  const a = plane.get('GY-1696')!, b = plane.get('GY-1697')!, c = plane.get('GY-1698')!;
+  assert.equal(a.scopeRequest!.decision!.nonRepository, true, 'A: refused as its own verdict');
+  assert.match(a.scopeRequest!.decision!.reason, /daemon\.release is a master-status field, not a file/);
+  assert.equal(b.scopeRequest!.decision!.nonRepository, true, 'B: the install-local credential is refused as its own verdict');
+  assert.match(b.scopeRequest!.decision!.reason, /install-local \.graphyard\/ directory/);
+  assert.equal(c.scopeRequest, null, 'C: a new file inside a tracked directory is approved across the same read');
+  assert.ok(c.plannedFiles!.includes('src/soak/new-check.ts'));
+  assert.deepEqual(Object.values(state.approvals).filter(watch => watch.action === 'requirements').map(watch => watch.work), [], 'no requirements decision is requested for what the tree refutes');
+  assert.ok(!widened.includes('GY-1696') && !widened.includes('GY-1697'), 'a standing non-repository refusal is never widened on a finding');
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  // The decision class this item removes is silent here: no requirements decision is requested, so no
+  // approver session, no escalation and no decision fault forms — the standing scope-request faults are
+  // the refused asks themselves, which the worker re-asks or finishes without, as the refusal says.
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind).filter(kind => /decision|escalation/.test(kind)), [], 'no decision fault opens for any of them');
+});
+
+// GY-1764: a refusal the repository tree supplied the evidence for is no pending widening; a later attempt asks afresh.
+test('unit:non-repository-refusal-not-carried', async () => {
+  const { carriedScopeRequest } = await import('../src/engine.js');
+  const decision = { state: 'refused', reason: 'daemon.release is a master-status field, not a file', at: '2026-10-13T08:00:00.000Z', decidedBy: 'graphyard', waitedMs: 0, paths: ['daemon.release'], requestedBy: 'w', requestedAt: '2026-10-13T07:59:00.000Z', epoch: 1 };
+  const ask = { epoch: 1, at: decision.requestedAt, paths: ['daemon.release'], reason: 'r', requestedBy: 'w', decision: { ...decision, treeRead: true } };
+  assert.equal(carriedScopeRequest({ plannedFiles: ['src/a.ts'] }, { ...ask, decision: { ...decision, nonRepository: true } } as any), null, 'an evidence-gated refusal ends with its attempt');
+  assert.deepEqual(carriedScopeRequest({ plannedFiles: ['src/a.ts'] }, ask as any)?.paths, ['daemon.release'], 'an ordinary graphyard refusal the tree was read for still carries');
+  assert.equal(carriedScopeRequest({ plannedFiles: ['src/a.ts'] }, { ...ask, decision } as any), null, 'a refusal the tree was never read for is not carried to the approver');
+});
+
+// GY-1764 rework, AC-2: a ledger read that fails reads as no plan, so a held projection is cleared on that very cycle, retried
+// until the clear lands; the failure of the clear is a visible failed action, never a quiet hold.
+test('unit:mechanical-plan-cleared-on-failed-read', async () => {
+  const { reportMechanicalPlans } = await import('../src/daemon/mechanical-plan-report.js');
+  const at = '2026-10-13T08:00:00.000Z', clock = Date.parse(at) + 30_000;
+  const item = { id: 'w', key: 'GY-1', stage: 'review', epoch: 1, candidate: { sha: 'abc', pr: 1 }, mechanicalPlan: { reviewId: 7, head: 'abc', at } } as unknown as Work;
+  const sent: unknown[] = [], failures: string[] = [] as string[];
+  let refuse = 1;
+  const effects = { mechanicalFixes: () => {}, recordMechanicalPlan: async (_: Work, plan: unknown) => { sent.push(plan); if (refuse-- > 0) throw new Error('503'); } };
+  const unreported = await reportMechanicalPlans([item], [], effects, clock, async (_, detail) => { failures.push(detail); });
+  assert.deepEqual(sent, [null, null], 'the clear is retried within the cycle until it lands');
+  assert.equal(unreported.size, 0, 'a cleared plan owes no round');
+  assert.deepEqual(failures, [], 'a landed clear is no failure');
+  refuse = 9; sent.length = 0;
+  const later: string[] = [];
+  await reportMechanicalPlans([item], [], effects, clock, async (_, detail) => { later.push(detail); });
+  assert.equal(later.length, 1, 'a clear that cannot land is a visible failure');
 });

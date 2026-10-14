@@ -56,9 +56,10 @@ export async function closePool(pool: pg.Pool, name: string, boundMs = poolClose
 
 /**
  * The lease pool (GY-558): the connections the commands that keep or take a worker's lease —
- * renewal (`heartbeat`), `claim`, `complete` (`submit`) and `blocked` — run on, and nothing else.
+ * renewal (`heartbeat`), `claim`, `complete` (`submit`), `blocked` and `defer` (GY-1726: it ends a
+ * live lease as `blocked` does, so a saturated request pool must not turn it into a lease loss) — run on, and nothing else.
  * No report, observation, reconciliation or status read ever takes one, so a lease command still
  * gets a connection while every other pool is exhausted behind slow queries.
  */
 export const leasePoolConnections = 4;
-export const leaseCommands: ReadonlySet<string> = new Set(['heartbeat', 'claim', 'submit', 'blocked']);
+export const leaseCommands: ReadonlySet<string> = new Set(['heartbeat', 'claim', 'submit', 'blocked', 'defer']);

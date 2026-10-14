@@ -47,12 +47,12 @@ export const actionRoutes = defineRoutes('actions', [
   {
     method: 'POST', path: '/api/actions/claim',
     async handle(context) {
-      const body = await parseJson(context, undefined, '{}') as { executor?: string; host?: string; kinds?: string[] };
+      const body = await parseJson(context, undefined, '{}') as { executor?: string; host?: string; kinds?: string[]; serves?: string[] };
       const result = await context.services.engine.claimNextAction(context.actor, body, context.idempotencyKey()) as { action: ActionRow | null; at?: string };
       // The poll itself is the presence signal, whether or not it claimed: the engine validated
       // the body, so what is recorded here is exactly what an executor can run. It is recorded in
       // memory and as the executor's one durable presence row — never an event row (GY-1289).
-      const poll = { executor: body.executor ?? context.actor.id, host: body.host!, principal: context.actor.id, kinds: (body.kinds ?? nextActionKinds) as typeof nextActionKinds[number][] };
+      const poll = { executor: body.executor ?? context.actor.id, host: body.host!, principal: context.actor.id, kinds: (body.serves ?? body.kinds ?? nextActionKinds) as typeof nextActionKinds[number][] };
       const at = new Date(result.at ?? Date.now());
       executorRegistry(context.services.engine).observe(poll, at, !!result.action);
       await recordPresence(presenceQuery(context.services.engine), poll, at, { claimed: !!result.action });
@@ -68,7 +68,7 @@ export const actionRoutes = defineRoutes('actions', [
       demand(context.actor.role === 'coordinator' || context.actor.role === 'admin', 'Coordinator permission required', 403);
       const body = executorPresenceSchema.parse(await parseJson(context, undefined, '{}'));
       const at = new Date();
-      const poll = { executor: body.executor ?? context.actor.id, host: body.host, principal: context.actor.id, kinds: body.kinds ?? [...nextActionKinds] };
+      const poll = { executor: body.executor ?? context.actor.id, host: body.host, principal: context.actor.id, kinds: body.serves ?? body.kinds ?? [...nextActionKinds] };
       executorRegistry(context.services.engine).observe(poll, at);
       await recordPresence(presenceQuery(context.services.engine), poll, at);
       return { observed: true, at: at.toISOString() };

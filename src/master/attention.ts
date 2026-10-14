@@ -12,6 +12,7 @@ import { roleAtCapacity } from '../fleet.js';
 import { classified, type FaultClass, type FaultKind } from '../model/fault-classes.js';
 import { humanOnlyDecisions } from './harness.js';
 import { conflictReworkBoundMs, conflictReworkDue } from '../model/approval.js';
+import { containmentInMotion, containmentSettleWaitBoundMs } from '../model/containment.js';
 
 /** The control-plane facts `GET /api/status` reports that are not about any one work item. */
 export interface ControlPlaneStatus {
@@ -107,6 +108,10 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause, now = 
       : agentOwner('control plane', `Nothing to run by hand: the loop's decisions step requests ${key}'s rework itself${bound}; past that bound master status names the step as stalled`);
   }
   if (cause === 'base-conflict') return agentOwner('master', `graphyard master decide ${key} rework REASON, then graphyard master approver ${key} DECISION`, 'approver');
+  // GY-1633: a lapsed fence inside its settle bound is the loop's reclaim step's to verify and settle; a hand settlement
+  // of it is a second executor for one fence, so the owner names the step and the bound, never the command.
+  if ((cause === 'containment-settleable' || cause === 'containment-grace') && containmentInMotion(work, now))
+    return agentOwner('control plane', `Nothing to run by hand: the loop's reclaim step verifies the host and settles ${key}'s fence itself within ${containmentSettleWaitBoundMs / 60_000} minutes of its grace window ending; past that bound graphyard master settle-containment ${key} REASON settles it`);
   if (cause === 'containment-settleable') return agentOwner('master', `graphyard master settle-containment ${key} REASON`);
   if (cause === 'containment-grace') return agentOwner('master', `Wait out the grace window, then graphyard master status verifies the host and graphyard master settle-containment ${key} REASON once settleable`);
   if (cause === 'containment') return agentOwner('master', `Stop the recorded supervisor on its host, then graphyard master decide ${key} ${work.stage === 'done' ? 'recover' : 'rework'} REASON and graphyard master approver ${key} DECISION`, 'approver');
@@ -134,6 +139,9 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause, now = 
   if (manual) return agentOwner('master', `graphyard master decide ${key} attest '{"proof":"${manual}"}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
   if (first?.name === 'review') return agentOwner('reviewer', driven ? `The reviewer session judges it; ${reviewNext}` : `The reviewer session judges it; graphyard master review ${key} relaunches a refused review`);
   if (first?.name === 'merge' && work.stage === 'merge') return agentOwner('master', `Nothing to run by hand: GitHub merges ${key} once its merge gate passes`);
+  // A master-role refusal is not a cause anyone clears (GY-1761): the token's role is by design, so the
+  // step itself is what a master-role identity takes — this session, or a doctor run — then the unblock.
+  if (blocker?.class === 'master-role') return agentOwner('master', `The blocker names a step only the master role can take: run that master command from a master-role identity — this session, or a doctor run, in the coordinator checkout where .graphyard/master.json and the master role live — then graphyard master unblock ${key} REASON`);
   if (work.blocker) return agentOwner('master', `Clear the cause, then graphyard master unblock ${key} REASON; a cause that needs money, a third-party account or a person's credential goes to the human`);
   return agentOwner('master', `graphyard diagnose ${key}`);
 }

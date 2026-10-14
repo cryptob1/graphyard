@@ -10,9 +10,9 @@ import { serverOrigin, loadConnection, managedInstructions } from '../repository
 import { launchPlan } from '../harness.js';
 import { type LoopSupervisorHost, type LoopSupervisorInstallation, installLoopSupervisor, loopUnitOf, unsupervisedInstruction, loopSupervisionAttention } from '../supervisor.js';
 import { type FilesystemProbe, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes } from '../install/worktree-root.js';
-import { APP_PENDING, type AgentEnvironment, type MasterBrowser, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withReviewerDefaults, withRoleDefaults } from './profiles.js';
-import { managedMasterInstructions } from './instructions.js';
-import { scopeHerdr } from './herdr.js';
+import { APP_PENDING, type AgentEnvironment, type Supervision, type MasterBrowser, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withReviewerDefaults, withRoleDefaults } from './profiles.js';
+import { withoutMasterInstructions } from './instructions.js';
+import { scopeHerdr, targetHerdr, type HerdrInstance } from './herdr.js';
 import { agentEnvironmentRoot, agentLaunchPlan, checkAgentEnvironment, discoverAgentEnvironments, type EnvironmentProbe, inspectProfileAccounts, type LaunchRole } from './environments.js';
 import { controlPlaneAttention } from './attention.js';
 import { writeFailure } from './worktrees.js';
@@ -27,6 +27,14 @@ export async function readCredentialFile(file: string) {
   const value = (await readFile(file, 'utf8')).trim();
   if (value.length < 32 || value.length > 10_000) throw new Error('Worker credential file must contain one valid token');
   return value;
+}
+/**
+ * GY-1641: the server origin .graphyard/master.json records (install --apply writes it at the port its
+ * adapter bound), or null when none is recorded or it does not parse: what `master init` targets when
+ * neither --url, GRAPHYARD_URL nor a connection file names a server, instead of the default port.
+ */
+export async function recordedMasterUrl(root: string): Promise<string | null> {
+  try { const url = JSON.parse(await readFile(resolve(root, '.graphyard/master.json'), 'utf8'))?.url; return typeof url === 'string' && url ? serverOrigin(url) : null; } catch { return null; }
 }
 async function readMasterConfig(root: string): Promise<MasterConfig> {
   const file = resolve(root, '.graphyard/master.json');
@@ -85,8 +93,9 @@ export async function loadStoredMasterConfig(root: string): Promise<MasterConfig
   await externalCredential(root, config.credentialFile, 'Master');
   if (!isAbsolute(config.cliPath)) throw new Error('Master CLI path must be absolute');
   try { if (!(await lstat(config.cliPath)).isFile()) throw new Error(); } catch { throw new Error('Configured Graphyard CLI launcher is unavailable'); }
-  // Every Herdr sweep this process runs acts only within the install's own workspace (GY-1441).
-  scopeHerdr(config.herdrWorkspace);
+  // Every Herdr sweep this process runs acts only within the install's own workspace (GY-1441), and
+  // every herdr call reaches the install's own instance when it records one (GY-1511).
+  applyHerdrConfig(config);
   return config;
 }
 /**
@@ -169,7 +178,10 @@ export async function setupMaster(root: string, input: { url: string; token: str
   if (status.actor?.role !== 'coordinator') throw new Error('Master setup requires a coordinator credential; worker, operator, producer, and reader credentials are not suitable');
   if (typeof status.repository !== 'string' || !status.repository) throw new Error('Master setup requires the control plane to be bound to a GitHub repository');
   if (typeof status.baseBranch !== 'string' || !status.baseBranch) throw new Error('Master setup requires the control plane to identify its managed base branch');
-  const appPending = input.allowPendingApp === true && (status.githubAppId === null || status.githubAppId === undefined);
+  // GY-1553: control-plane merger installs correctly have no GitHub App; treat that as app-pending
+  // so master init can write the worker block before any App exists (same as install --apply's allowPendingApp).
+  const controlPlaneMerger = status.mergeWriter?.merger === 'control-plane';
+  const appPending = (input.allowPendingApp === true || controlPlaneMerger) && (status.githubAppId == null || status.githubAppId <= 0);
   if (!appPending && (!Number.isSafeInteger(status.githubAppId) || status.githubAppId <= 0)) throw new Error('Master setup requires the control plane to identify its GitHub App');
   assertRepository(detected.repository, status.repository);
   if (!detected.repository) throw new Error('Master setup requires a recognized GitHub origin');
@@ -191,12 +203,13 @@ export async function setupMaster(root: string, input: { url: string; token: str
   await assertOutsideWorktrees(root, credentialDirectory, 'Coordinator credential directory');
   const identity = createHash('sha256').update(`${url}\0${detected.repository}`).digest('hex').slice(0, 20);
   const credentialFile = resolve(credentialDirectory, `${identity}.token`);
-  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: appPending ? APP_PENDING : status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? sessionName('graphyard-master', repositoryName), autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], ...(previous?.reviewer ? { reviewer: previous.reviewer } : {}), reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run }, ...(previous?.mergeQueue ? { mergeQueue: previous.mergeQueue } : {}), ...(input.browser ?? previous?.browser ? { browser: input.browser ?? previous?.browser } : {}) });
+  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: appPending ? APP_PENDING : status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, ...(previous?.herdrInstance ? { herdrInstance: previous.herdrInstance } : {}), masterAgentName: previous?.masterAgentName ?? sessionName('graphyard-master', repositoryName), ...(previous?.supervision ? { supervision: previous.supervision } : {}), ...(previous?.operatorLogin ? { operatorLogin: previous.operatorLogin } : {}), autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], ...(previous?.reviewer ? { reviewer: previous.reviewer } : {}), reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run }, ...(previous?.mergeQueue ? { mergeQueue: previous.mergeQueue } : {}), ...(input.browser ?? previous?.browser ? { browser: input.browser ?? previous?.browser } : {}) });
   const instructionsFile = resolve(root, 'AGENTS.md');
   let existing = ''; let mode = 0o644;
   try { const info = await lstat(instructionsFile); if (!info.isFile()) throw new Error('Refusing to replace a non-regular AGENTS.md'); mode = info.mode & 0o777; existing = await readFile(instructionsFile, 'utf8'); }
   catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  const instructions = managedMasterInstructions(managedInstructions(existing, url));
+  // GY-1553: the worker block's submission form follows the install's recorded merger (control-plane: `complete GY-N EPOCH --head SHA`).
+  const instructions = managedInstructions(withoutMasterInstructions(existing), url, { merger: status.mergeWriter?.merger ?? null });
   const directory = await localDirectory(root);
   await atomicPrivateText(credentialFile, token);
   await atomicPrivateWrite(resolve(directory, 'master.json'), config);
@@ -361,6 +374,17 @@ export async function saveMasterSettings(root: string, changes: MasterOwnedSetti
 }
 
 /**
+ * Record who reviews and merges (GY-1501): `up --local` writes `supervised` with the operator's
+ * GitHub login (a name, never a credential) once master init wrote master.json. Idempotent.
+ */
+export async function recordSupervision(root: string, supervision: Supervision, operatorLogin?: string | null) {
+  const config = await loadStoredMasterConfig(root);
+  const next = masterConfigSchema.parse({ ...config, supervision, ...(operatorLogin ? { operatorLogin } : {}) });
+  if (next.supervision !== config.supervision || next.operatorLogin !== config.operatorLogin) await atomicPrivateWrite(resolve(await localDirectory(root), 'master.json'), next);
+  return { supervision: next.supervision, operatorLogin: next.operatorLogin ?? null };
+}
+
+/**
  * Replace a producer profile in place, under the same name, with the checks `add` makes: the new
  * credential authenticates exactly the new principal as a producer, and no other profile shares
  * its agent name or principal. A running `master run` adopts it on its next tick.
@@ -418,6 +442,22 @@ export function masterConfigChanges(current: MasterConfig, next: MasterConfig) {
   const changed = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(key => JSON.stringify(before[key]) !== JSON.stringify(after[key])).sort();
   return { changed, bound: changed.filter(key => (masterBoundSettings as readonly string[]).includes(key)) };
 }
+/** The Herdr workspace and instance CONFIG names, applied to this process's herdr calls. */
+export function applyHerdrConfig(config: Pick<MasterConfig, 'herdrWorkspace' | 'herdrInstance'>) {
+  scopeHerdr(config.herdrWorkspace);
+  targetHerdr(config.herdrInstance);
+}
+/**
+ * Records this install's own Herdr instance and its workspace in .graphyard/master.json (GY-1511),
+ * changing nothing else; true when the file changed.
+ */
+export async function recordHerdrInstance(root: string, instance: HerdrInstance, workspace: string | null) {
+  const stored = await readMasterConfig(root);
+  const next = masterConfigSchema.parse({ ...stored, herdrInstance: instance, ...(workspace ? { herdrWorkspace: workspace } : {}) });
+  if (JSON.stringify(next) === JSON.stringify(stored)) return false;
+  await atomicPrivateWrite(resolve(await localDirectory(root), 'master.json'), next);
+  return true;
+}
 export interface ConfigReload { config: MasterConfig; changed: string[]; refused: string | null; at: string }
 export function liveMasterConfig(root: string, initial: MasterConfig, load: (root: string) => Promise<MasterConfig> = loadMasterConfig, clock: () => number = Date.now) {
   const live = {
@@ -426,14 +466,14 @@ export function liveMasterConfig(root: string, initial: MasterConfig, load: (roo
       const at = new Date(clock()).toISOString();
       // A refused reload keeps every loaded setting, the Herdr scope included: loading applies the
       // file's workspace, so the scope the loop runs under is put back whenever the reload is refused (GY-1441).
-      const keep = (refused: string): ConfigReload => { scopeHerdr(live.current.herdrWorkspace); return { config: live.current, changed: [], at, refused }; };
+      const keep = (refused: string): ConfigReload => { applyHerdrConfig(live.current); return { config: live.current, changed: [], at, refused }; };
       let next: MasterConfig;
       try { next = await load(root); }
       catch (error) { return keep(`.graphyard/master.json could not be reloaded (${error instanceof Error ? error.message : String(error)}); the loop keeps the settings it last loaded`); }
       const { changed, bound } = masterConfigChanges(live.current, next);
       if (bound.length) return keep(`.graphyard/master.json changes ${bound.join(', ')}, which a running master loop is bound to; restart master run to adopt ${bound.length === 1 ? 'it' : 'them'}. Until then the loop keeps its loaded settings, including every other change`);
       live.current = next;
-      scopeHerdr(next.herdrWorkspace);
+      applyHerdrConfig(next);
       return { config: next, changed, refused: null, at };
     },
   };

@@ -59,12 +59,26 @@ export class OperatorAgents {
     demand(actor.role === 'admin', 'Administrator permission required', 403);
     const data = setupSchema.parse(input); this.validateRepository(data.scope.repositories);
     return this.mutate(actor, 'operator-agent.setup', data.id, key, data, async (db, now) => {
-      demand(!(await db.query('SELECT 1 FROM operator_agents WHERE id=$1', [data.id])).rowCount, 'Operator agent already exists');
+      const existing = (await db.query('SELECT document FROM operator_agents WHERE id=$1 FOR UPDATE', [data.id])).rows[0]?.document ?? null;
+      demand(!existing || existing.revokedAt, 'Operator agent already exists');
       demand(!this.configuredPrincipals.some(principal => principal.id === data.id), 'Principal ID is already configured');
       demand(!this.configuredPrincipals.some(principal => principal.tokenHash === digest(data.token)), 'Credential is already assigned to a configured principal');
-      const document = { id: data.id, displayName: data.displayName, role: 'operator-agent', capabilities: data.capabilities, scope: data.scope, revision: 1, createdAt: now.toISOString(), updatedAt: now.toISOString(), revokedAt: null, lastMutation: { kind: 'setup', actor: actor.id, at: now.toISOString(), reason: data.reason }, fingerprints: [fingerprint(data.token)] };
+      const fp = fingerprint(data.token);
+      // credentialIssuedAt (GY-1692): when the newest credential was issued, set here and by rotate and kept by
+      // configure, so a secret elsewhere can be judged against the credential's own issue, not the last mutation.
+      if (existing) {
+        // Setup of a revoked identity reinstates it (GY-1692) under a fresh credential: every credential it held stays
+        // revoked, its fingerprints are kept so none is issued twice, and the revocation stays in its history.
+        demand(!existing.fingerprints.includes(fp), 'Credential was already used');
+        const document = { ...existing, displayName: data.displayName, capabilities: data.capabilities, scope: data.scope, revision: existing.revision + 1, updatedAt: now.toISOString(), revokedAt: null,
+          lastMutation: { kind: 'setup', actor: actor.id, at: now.toISOString(), reason: data.reason, reinstatedAfter: existing.revokedAt }, fingerprints: [...existing.fingerprints, fp], credentialIssuedAt: now.toISOString() };
+        await db.query('UPDATE operator_agents SET document=$2 WHERE id=$1', [data.id, JSON.stringify(document)]);
+        await db.query('INSERT INTO operator_credentials(agent_id,fingerprint,token_hash,valid_from) VALUES($1,$2,$3,$4)', [data.id, fp, digest(data.token), now]);
+        return publicDocument(document);
+      }
+      const document = { id: data.id, displayName: data.displayName, role: 'operator-agent', capabilities: data.capabilities, scope: data.scope, revision: 1, createdAt: now.toISOString(), updatedAt: now.toISOString(), revokedAt: null, lastMutation: { kind: 'setup', actor: actor.id, at: now.toISOString(), reason: data.reason }, fingerprints: [fp], credentialIssuedAt: now.toISOString() };
       await db.query('INSERT INTO operator_agents(id,document) VALUES($1,$2)', [data.id, JSON.stringify(document)]);
-      await db.query('INSERT INTO operator_credentials(agent_id,fingerprint,token_hash,valid_from) VALUES($1,$2,$3,$4)', [data.id, fingerprint(data.token), digest(data.token), now]);
+      await db.query('INSERT INTO operator_credentials(agent_id,fingerprint,token_hash,valid_from) VALUES($1,$2,$3,$4)', [data.id, fp, digest(data.token), now]);
       return publicDocument(document);
     });
   }
@@ -91,7 +105,7 @@ export class OperatorAgents {
       const until = new Date(now.getTime() + data.transitionSeconds * 1000);
       await db.query('UPDATE operator_credentials SET valid_until=LEAST(COALESCE(valid_until,$2),$2) WHERE agent_id=$1 AND revoked_at IS NULL', [agentId, until]);
       await db.query('INSERT INTO operator_credentials(agent_id,fingerprint,token_hash,valid_from) VALUES($1,$2,$3,$4)', [agentId, fp, digest(data.token), now]);
-      document.fingerprints.push(fp); document.revision++; document.updatedAt = now.toISOString(); document.lastMutation = { kind: 'rotate', actor: actor.id, at: now.toISOString(), reason: data.reason, transitionEndsAt: until.toISOString() };
+      document.fingerprints.push(fp); document.revision++; document.updatedAt = now.toISOString(); document.credentialIssuedAt = now.toISOString(); document.lastMutation = { kind: 'rotate', actor: actor.id, at: now.toISOString(), reason: data.reason, transitionEndsAt: until.toISOString() };
       await db.query('UPDATE operator_agents SET document=$2 WHERE id=$1', [agentId, JSON.stringify(document)]); return publicDocument(document);
     });
   }

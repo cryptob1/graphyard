@@ -157,6 +157,14 @@ export function reconcileAutoDispatch(work: Work, all: Work[], now: Date): Dispa
     // answered: nothing reviewed it. (A request raised before GY-115 is the only way to hold one.)
     if (state.review && !need.needed) { resolve(state.review, need.state === 'proofs-pending' || need.state === 'proof-failed' ? 'cancelled' : 'satisfied', need.reason); state.review = null; }
     if (!state.review && need.needed) state.review = open({ kind: 'review', provider: 'github', sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: work.policyRevision, pr: candidate.pr, reason: need.reason });
+    // GY-1528: a control-plane candidate's proofs are judged by the merge writer's trial, so no
+    // producer is asked for it and a request standing from before is withdrawn.
+    if (work.observation?.source === 'control-plane') {
+      for (const request of state.producers) resolve(request, 'cancelled', 'the control plane is the merge writer: its trial judges the proofs, so no producer is asked');
+      state.producers = [];
+      work.autoDispatch = state;
+      return transitions;
+    }
     // Producers: one live request per proof group with something left to prove. A head whose
     // trusted evidence already failed is not asked for again; the master routes that finding.
     const outcomes = automatableOutcomes(work, all, now);

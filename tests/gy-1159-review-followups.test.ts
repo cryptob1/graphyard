@@ -11,6 +11,7 @@ import type { HerdrAgent } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import type { ResourceInputs } from '../src/master-resources.js';
 import type { ProducerRecord } from '../src/producer.js';
+// Time-bomb allowance (GY-1694): the 2026-10-03T12:00Z now is the fixed clock handed to the worker-pane cases; the readResources case takes Date.now() as its own now with inputs built relative to it.
 
 interface TriageEntry {
   id: number;

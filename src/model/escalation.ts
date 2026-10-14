@@ -1,5 +1,6 @@
 import type { ExhaustionRecord } from './capacity.js';
 import type { Escalation, EscalationTrigger, Lease, Work } from './work.js';
+import { lapsedAtNoSubmissionBound, workerNoSubmissionRefusalMs } from './attempt-bound.js';
 
 // The one sentence every path that discards an assignment writes, so the epoch a
 // standing lease-loss belongs to can be read back from the record itself.
@@ -19,6 +20,16 @@ export function leaseLossEpoch(escalation: Escalation): number | null {
 export function lapsedBeforeStart(work: Pick<Work, 'sessions'>, escalation: Escalation): boolean {
   const epoch = leaseLossEpoch(escalation), owner = /^Worker (.+) lost lease epoch \d+$/.exec(escalation.reason)?.[1];
   const session = epoch === null ? undefined : (work.sessions ?? []).find(entry => entry.kind === 'implementation' && entry.id === `${owner}:${epoch}`);
+  return launchFailedBeforeStart(session);
+}
+/**
+ * Whether a session record is a launch that failed before its runtime started (registeredLaunch
+ * ends it with that outcome and no pane). Its failure is the dispatch step's to record and classify,
+ * so neither its lapse (GY-1375) nor the minute its attempt's lease outlives it (GY-1561: GY-1525's
+ * one blocked launch counted once as its dispatch failure and twice as an ended session) is a
+ * session-liveness instance of its own.
+ */
+export function launchFailedBeforeStart(session: { state?: string; pane?: string | null; outcome?: string | null } | null | undefined): boolean {
   return !!session && session.state === 'finished' && !session.pane && !!session.outcome?.startsWith('the launch failed before the session started');
 }
 // An implementation lease ends at `submit`: the candidate is bound and the worker's job is
@@ -30,9 +41,10 @@ export function lapsedBeforeStart(work: Pick<Work, 'sessions'>, escalation: Esca
 // recorded that the attempt's provider account ran out of quota mid-session. Only an epoch
 // with no bound submission, no carried blocked report, no attestation and no exhaustion record
 // was lost while its work was unfinished — a worker that silently vanished — and only that
-// raises the concern.
+// raises the concern. An epoch whose lease ran to the worker no-submission renewal refusal unsubmitted
+// was ended by the control plane's own refusal to renew it (GY-1462), which explains it too.
 export type LeaseLapse = 'expired' | 'lost';
-export type LeaseLapseCause = 'submitted' | 'blocked-awaiting-operator' | 'stopped-by-attestation' | 'exhausted-capacity';
+export type LeaseLapseCause = 'submitted' | 'blocked-awaiting-operator' | 'stopped-by-attestation' | 'exhausted-capacity' | 'no-submission-bound';
 export const attestationKinds = ['blocked', 'stopped-worker'] as const;
 export type AttestationKind = typeof attestationKinds[number];
 /**
@@ -78,7 +90,7 @@ export function workerExhaustion(work: Pick<Work, 'capacity'>, epoch: number): E
   return (work.capacity?.exhaustions ?? []).find(entry => entry.role === 'worker' && entry.epoch === epoch) ?? null;
 }
 /** Why a lapse of `lease` is expected lifecycle, or null when the worker silently vanished. */
-export function leaseLapseCause(work: Pick<Work, 'submission' | 'capacity'>, lease: Pick<Lease, 'epoch'>, attestations: Attestation[] = []): { cause: LeaseLapseCause; attestation: Attestation | null; exhaustion?: ExhaustionRecord } | null {
+export function leaseLapseCause(work: Pick<Work, 'submission' | 'capacity'> & Partial<Work>, lease: Pick<Lease, 'epoch'> & Partial<Pick<Lease, 'expiresAt' | 'owner'>>, attestations: Attestation[] = []): { cause: LeaseLapseCause; attestation: Attestation | null; exhaustion?: ExhaustionRecord } | null {
   if (submittedEpoch(work, lease.epoch)) return { cause: 'submitted', attestation: null };
   const blocked = attestationFor(attestations, lease.epoch, 'blocked');
   if (blocked) return { cause: 'blocked-awaiting-operator', attestation: blocked };
@@ -86,9 +98,10 @@ export function leaseLapseCause(work: Pick<Work, 'submission' | 'capacity'>, lea
   if (stopped) return { cause: 'stopped-by-attestation', attestation: stopped };
   const exhausted = workerExhaustion(work, lease.epoch);
   if (exhausted) return { cause: 'exhausted-capacity', attestation: null, exhaustion: exhausted };
+  if (lapsedAtNoSubmissionBound(work, lease)) return { cause: 'no-submission-bound', attestation: null };
   return null;
 }
-export function classifyLeaseLapse(work: Pick<Work, 'submission' | 'capacity'>, lease: Pick<Lease, 'epoch'>, attestations: Attestation[] = []): LeaseLapse { return leaseLapseCause(work, lease, attestations) ? 'expired' : 'lost'; }
+export function classifyLeaseLapse(work: Parameters<typeof leaseLapseCause>[0], lease: Parameters<typeof leaseLapseCause>[1], attestations: Attestation[] = []): LeaseLapse { return leaseLapseCause(work, lease, attestations) ? 'expired' : 'lost'; }
 // A standing lease-loss raised for an epoch that already had its candidate bound was
 // recorded before post-submission expiry stopped being treated as an incident, and one
 // raised by the control plane (actor `graphyard`) for an epoch whose lapse a blocked report, a
@@ -99,6 +112,7 @@ export function classifyLeaseLapse(work: Pick<Work, 'submission' | 'capacity'>, 
 export const leaseLossAutoSettlement = 'auto-settled: submitted before expiry';
 export function leaseLossSettlementNote(cause: LeaseLapseCause, attestation: Attestation | null, exhaustion: ExhaustionRecord | null = null) {
   if (cause === 'submitted') return leaseLossAutoSettlement;
+  if (cause === 'no-submission-bound') return `auto-settled: the server refused renewal ${workerNoSubmissionRefusalMs / 60_000} minutes unsubmitted, past the worker no-submission bound, which is why the attempt ended`;
   if (cause === 'exhausted-capacity') return `auto-settled: the ${exhaustion?.profile ?? 'worker'} account ${exhaustion?.account ?? 'it ran on'} reported no quota left for epoch ${exhaustion?.epoch} (recorded by ${exhaustion?.recordedBy ?? 'the loop'} at ${exhaustion?.at}; ${exhaustion?.resetsAt ? `resets ${exhaustion.resetsAt}` : 'no reset time given'}), which is why the attempt ended`;
   const source = attestation ? ` (${attestation.source} by ${attestation.actor} at ${attestation.at})` : '';
   return cause === 'blocked-awaiting-operator' ? `auto-settled: blocked report for epoch ${attestation?.epoch} explains the lapse${source}`

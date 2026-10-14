@@ -14,6 +14,7 @@ import { sessionReconcileIntervalMs } from '../src/model/sessions.js';
 import { stuckRequestReport, withStuckRequests } from '../src/cli/stuck-requests.js';
 import type { Observation, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-23 request instants are past and judged only against the explicit now Date.parse('2026-09-23T07:36:30.000Z') in stuckRequests; Date.now()/new Date() mint tokens and stamp DB records.
 
 // Each test is named for the proof it produces (GY-137): integration:absent-pane-resolves-request,
 // integration:expired-request-never-blocks and unit:stuck-request-surfaced. A session whose pane is

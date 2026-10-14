@@ -9,6 +9,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { Work } from '../src/model.js';
 import { openHumanOnly } from '../src/model/human-request.js';
 import { scopeRefusalBlocker } from '../src/model/scope.js';
+import { maxAutomaticClears } from '../src/model/blocker-class.js';
 import { actorRole, groups, roleOf, type Board, type OpenGroup } from '../src/model/board.js';
 import { statusRoutes } from '../src/server/routes/status.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
@@ -16,6 +17,10 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { classify } from '../web/groups.js';
 import { releaseView } from '../src/model/release.js';
 import OverviewPage from '../web/pages/overview.js';
+import WorkDetails from '../web/pages/work-details.js';
+import { whatIsLeft } from '../web/item-page.js';
+// A namespace import, so the proofs fail as test cases, not as a missing export, on a tree without GY-1739.
+import * as plain from '../src/model/plain-status.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { NOW, boardStatus, boardWork } from '../browser-tests/ui-board.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -58,7 +63,7 @@ function scenario(): Work[] {
     plannedFiles: Array.from({ length: 100 }, (_, index) => `tests/bulk/case-${index}.ts`),
     lease: { owner: 'worker-a', epoch: 2, expiresAt: at(20 * minute) },
     scopeRequest: { epoch: 2, paths: ['src/other/next.ts'], reason: 'The new path moves onto the shared helper too', requestedBy: 'worker-a', at: at(-80 * minute),
-      decision: { state: 'refused', reason: 'no fold represents the ask within the 100 entries plannedFiles holds (101 after folding)', at: at(-79 * minute), decidedBy: 'graphyard', waitedMs: minute, paths: ['src/other/next.ts'], requestedBy: 'worker-a', requestedAt: at(-80 * minute), epoch: 2 } },
+      decision: { state: 'refused', reason: 'no fold represents the ask within the 100 entries plannedFiles holds (101 after folding)', at: at(-79 * minute), decidedBy: 'graphyard', treeRead: true, waitedMs: minute, paths: ['src/other/next.ts'], requestedBy: 'worker-a', requestedAt: at(-80 * minute), epoch: 2 } },
     gates: refusing({ ready: [overCap], build: ['Worker has not submitted implementation for this attempt'] }) });
   const held = make('GY-174', 'Held item', { stage: 'merge', stageEnteredAt: at(-45 * minute), submission: { epoch: 1, pr: 74 } as Work['submission'],
     candidate: { sha: sha('h'), baseSha: sha('b'), pr: 74, branch: 'graphyard/gy-174-1', author: 'worker', createdAt: at(-2 * 60 * minute) } as Work['candidate'],
@@ -90,7 +95,7 @@ test('unit:board-api-matches-dashboard — GET /api/board gives each open item i
   // GY-1388: refused by the rule alone, the ask is the approver's while its routed decision is
   // pending in the ledger, so the card names that decision, never `master scope`, which the engine
   // refuses. Once that decision ends, or none came within the bound, the ask is the master's again.
-  const routed = work.map(item => item.key === 'GY-172' ? { ...item, scopeRequest: { ...item.scopeRequest!, decision: { ...item.scopeRequest!.decision!, decidedBy: 'graphyard' } } } : item);
+  const routed = work.map(item => item.key === 'GY-172' ? { ...item, scopeRequest: { ...item.scopeRequest!, decision: { ...item.scopeRequest!.decision!, decidedBy: 'graphyard', treeRead: true } } } : item);
   const ask = routed.find(item => item.key === 'GY-172')!;
   const ledger = (ended: boolean) => [{ work_id: ask.id, id: 'd-172', at: ask.scopeRequest!.at, epoch: 2, ended }];
   assert.equal(entry(await served(routed, ledger(false)), 'GY-172').command, 'graphyard master decisions GY-172');
@@ -228,6 +233,166 @@ test('unit:dashboard-uses-board-api — the Work page renders the groups GET /ap
   assert.match(main, /api\('board'\)/, 'the refresh after an action fetches it too');
   assert.doesNotMatch(overview, /\bclassify\(|\bgroupOf\(|humanOnlyIds\(/, 'the Work page derives no group itself');
   assert.match(docs, /GET \/api\/board/, 'docs/dashboard.md documents the endpoint');
+});
+
+/**
+ * GY-1739: the operator's Work page showed each blocked row's recorded reason verbatim twice — under
+ * the title and again in the step column — 200 words of commands, paths and SHAs written for the
+ * next agent. A blocked row now reads one plain sentence; the recorded text is on the item page once.
+ */
+const agentReason = 'Blocked at src/master-verification.ts:447: `node bin/graphyard.mjs master verify-deployment GY-1459 --json` exits 3 because '
+  + "document.querySelector('[data-row=GY-1459] .row-steps') still renders the old label on 3b7de1dc18aa1f2e; see https://api.github.com/repos/cryptob1/graphyard/pulls/1152 at 0acd3d4d0a19e2f7c4b5a6d8e9f01234567890ab "
+  + 'and tests/post-deploy-follow-ups.test.ts:212, then rebase onto 0acd3d4d0a and rerun npm test -- tests/board-api.test.ts before resubmitting; the JSON was {"state":"pending","sha":"14fb7da508"}.';
+function blockedScenario(blocker: string, key = 'GY-176') {
+  const work = scenario();
+  const template = work.find(item => item.key === 'GY-13')!;
+  const item = { ...template, id: '00000000-0000-4000-8000-000000000176', key, title: 'Blocked handed-in item', stage: 'build', stageEnteredAt: at(-30 * minute), blocker,
+    submission: { epoch: 1, pr: 76 }, candidate: { sha: sha('c'), baseSha: sha('b'), pr: 76, branch: 'graphyard/gy-176-1', author: 'worker', createdAt: at(-60 * minute) },
+    gates: refusing({ ready: [blocker] }) } as unknown as Work;
+  return { work: [...work, item], item };
+}
+const rowOf = (html: string, key: string) => { const start = html.indexOf(`data-row="${key}"`); return html.slice(start, html.indexOf('data-row="', start + 1) > 0 ? html.indexOf('data-row="', start + 1) : undefined); };
+const visible = (html: string) => html.replace(/<[^>]+>/g, ' ').replace(/&#x27;|&quot;|&amp;|&lt;|&gt;/g, ' ').replace(/\s+/g, ' ').trim();
+function details(work: Work[], item: Work) {
+  const noop = () => {};
+  const dashboard = { token: 'fixture', work, status: boardStatus('admin'), error: '', connected: true, lastUpdated: null, view: 'work', setView: noop, filter: null, setFilter: noop,
+    selected: item.id, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop, operatorAgents: [], operatorAgentsError: null,
+    features: {}, events: [], editingRequirements: false, setEditingRequirements: noop, codexAvailable: false, queue: [], sessionEpoch: { current: 0 }, api: async () => ({}),
+    refresh: async () => {}, action: async () => {}, setError: noop, signOut: noop, item } as unknown as Dashboard & { item: Work };
+  return renderToStaticMarkup(createElement(WorkDetails, dashboard));
+}
+const fragments = ['0acd3d4d0a19e2f7c4b5a6d8e9f01234567890ab', 'src/master-verification.ts:447', 'verify-deployment GY-1459', 'tests/post-deploy-follow-ups.test.ts:212', 'api.github.com', 'querySelector'];
+
+test('unit:board-blocked-row-plain-summary — a blocked row shows one plain sentence of at most 25 words naming the kind of block and who clears it; the recorded reason is on no Work page row and once on the item page', async () => {
+  const { work, item } = blockedScenario(agentReason);
+  const board = await served(work);
+  const row = entry(board, item.key);
+  assert.equal(row.group, 'blocked');
+  const summary = row.blocker!.summary;
+  assert.ok(summary.split(/\s+/).length <= 25, `at most 25 words: ${summary}`);
+  assert.match(summary, /master agent clears it/, 'it names who clears it');
+  assert.doesNotMatch(summary, /\.ts:|GY-1459|3b7de1|https?:|`/, 'none of the agent-facing detail');
+  const html = page(work, board);
+  const line = visible(rowOf(html, item.key));
+  assert.ok(line.includes(summary), `the row reads the summary: ${line}`);
+  for (const fragment of fragments) assert.ok(!html.includes(fragment), `no Work page row carries ${fragment}`);
+  // The other kinds read their own block and who clears it.
+  assert.match(plain.blockerSummary('Waiting on GY-1689 to merge first: its migration renames the table', NOW).sentence, /^Waiting on GY-1689; the master agent clears it/);
+  assert.match(plain.blockerSummary('Waiting on a human-only decision (money or accounts): approve a cap for GY-1700', NOW).sentence, /^Waiting on a human answer to GY-1700; only you can clear it/);
+  // The item page carries the recorded text exactly once, under Technical details.
+  const view = details(work, item);
+  for (const fragment of fragments) assert.equal(view.split(fragment).length - 1, 1, `${fragment} once on the item page`);
+  assert.match(view, /Blocker as recorded/);
+  const unescaped = view.replace(/<[^>]+>/g, '').replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+  assert.equal(unescaped.split(agentReason).length - 1, 1, 'the recorded reason once, whole and as written');
+  // A short reason in plain words is still the agent's own: the row summarises it and never echoes it.
+  const short = blockedScenario('Waiting for the coordinator to refresh');
+  const shortBoard = await served(short.work);
+  const shortRow = visible(rowOf(page(short.work, shortBoard), short.item.key));
+  assert.doesNotMatch(shortRow, /coordinator to refresh/, shortRow);
+  assert.ok(shortRow.includes(entry(shortBoard, short.item.key).blocker!.summary), shortRow);
+});
+
+test('unit:board-blocked-declined-human-names-master — a declined human answer reads as the master agent clearing the block, never as waiting on you', () => {
+  const declined = 'A human declined spending money or opening third-party accounts for this item: not this quarter';
+  const { item } = blockedScenario(declined);
+  const summary = plain.blockerSummary(declined, NOW, { ...item, humanRequest: null });
+  assert.match(summary.sentence, /master agent/);
+  assert.doesNotMatch(summary.sentence, /only you|Waiting on a human/);
+});
+
+test('unit:board-blocked-classified-before-item-wait — a classified fault that mentions another item reads as that fault, not as a wait on the item', () => {
+  const failure = 'npm test failed outside plannedFiles in tests/ui-dashboard.test.ts after GY-1234 landed on main';
+  assert.equal(plain.blockerSummary(failure, NOW).kind, 'outside-scope-test-failure');
+  assert.doesNotMatch(plain.blockerSummary(failure, NOW).sentence, /GY-1234/);
+  assert.equal(plain.blockerSummary('Waiting on GY-1689 to merge first', NOW).kind, 'item');
+});
+
+test('unit:board-blocked-spent-decision-names-master — a needs-decision blocker cleared maxAutomaticClears times names the master agent, not the approver', () => {
+  const decision = 'Waiting on the approver decision for this scope';
+  const { item } = blockedScenario(decision);
+  const fresh = plain.blockerSummary(decision, NOW, { ...item, blocker: decision, blockerProbe: null });
+  assert.equal(fresh.kind, 'needs-decision');
+  assert.match(fresh.sentence, /approver agent/);
+  const spent = plain.blockerSummary(decision, NOW, { ...item, blocker: decision, blockerProbe: { clears: maxAutomaticClears } as Work['blockerProbe'] });
+  assert.match(spent.sentence, /master agent/);
+  assert.doesNotMatch(spent.sentence, /approver|Graphyard clears/);
+});
+
+test('unit:board-blocked-next-action-no-echo — the item page Next-action paragraph points at the recorded blocker instead of repeating it', () => {
+  const { work, item } = blockedScenario(agentReason);
+  const escalated = { ...item, nextAction: { kind: 'escalate', work: item.id, key: item.key, gate: 'ready', refusal: agentReason, reason: `${item.key} has waited past ${at(-minute)} on nobody named: ${agentReason}`,
+    inputs: { kind: 'escalate', trigger: 'stale-wait', detail: agentReason }, llmRole: 'decide', binding: 'liveness:stale-wait' } } as unknown as Work;
+  const view = details(work.map(entry => entry.id === item.id ? escalated : entry), escalated);
+  for (const fragment of fragments) assert.equal(view.split(fragment).length - 1, 1, `${fragment} once on the item page`);
+  assert.match(view, /the recorded blocker, above/);
+});
+
+test('unit:board-blocked-row-no-duplicate-reason — a blocked row never says the same reason in two places', async () => {
+  for (const blocker of [agentReason, 'Waiting on GY-1689 to merge first', 'git push failed: could not read Username for https://github.com: terminal prompts disabled']) {
+    const { work, item } = blockedScenario(blocker);
+    const board = await served(work);
+    const html = page(work, board);
+    const line = visible(rowOf(html, item.key));
+    const summary = entry(board, item.key).blocker!.summary;
+    assert.equal(line.split(summary).length - 1, 1, `the summary once in the row: ${line}`);
+    // No clause of eight or more words appears twice in the row.
+    const clauses = line.split(/\s*[·;—]\s*|(?<=\.)\s+/).filter(clause => clause.split(/\s+/).length >= 8);
+    assert.equal(new Set(clauses).size, clauses.length, `no repeated clause: ${line}`);
+    assert.doesNotMatch(line, /blocked: /, 'the step column names the block, never restates it');
+  }
+});
+
+test('unit:board-blocked-row-waiting-until — a blocker naming a future not-before instant reads as waiting until that instant, not as a fault', async () => {
+  const notBefore = at(6 * 60 * minute);
+  const blocker = `The 24h observation for GY-1724 cannot exist yet: its window opens at deploy+24h, not before ${notBefore}; deferring per src/master-verification.ts:261.`;
+  const { work, item } = blockedScenario(blocker);
+  const board = await served(work);
+  const summary = entry(board, item.key).blocker!.summary;
+  // The server writes the time in UTC, naming the zone, and serves the instant itself for a reader in another zone.
+  assert.equal(summary, `Waiting until ${plain.localInstant(Date.parse(notBefore), 'UTC')}; nothing is broken, and the master agent lifts the hold once that time passes.`);
+  assert.match(summary, /UTC/);
+  assert.equal(entry(board, item.key).blocker!.until, notBefore);
+  assert.ok(summary.split(/\s+/).length <= 25, summary);
+  assert.doesNotMatch(summary, /fault|problem|fix/i);
+  // The recorded blocker stays until the master lifts it, so the sentence names the same clearer the board's actor does.
+  assert.equal(entry(board, item.key).who, 'Master agent');
+  // The browser writes the same instant in the reader's own zone, with the zone named.
+  const local = `Waiting until ${plain.localInstant(Date.parse(notBefore))}; nothing is broken, and the master agent lifts the hold once that time passes.`;
+  assert.equal(plain.blockerSummary(blocker, NOW).sentence, local);
+  for (const timeZone of ['America/Los_Angeles', 'Asia/Kolkata']) assert.notEqual(plain.localInstant(Date.parse(notBefore), timeZone), plain.localInstant(Date.parse(notBefore), 'UTC'), timeZone);
+  assert.ok(visible(rowOf(page(work, board), item.key)).includes(local));
+  // With no next action the item is otherwise a stalled card: the wait still reads as the row's only sentence, never as a fault.
+  const idle = work.map(entry => entry.id === item.id ? { ...entry, nextAction: null } as Work : entry);
+  const idleBoard = await served(idle);
+  const line = visible(rowOf(page(idle, idleBoard), item.key));
+  assert.ok(line.includes(local), line);
+  assert.doesNotMatch(line, /Nothing is happening|stuck at|nothing to do next/, line);
+  // An instant already past is no wait: the block reads as the fault it is.
+  const past = plain.blockerSummary(blocker.replace(notBefore, at(-60 * minute)), NOW).sentence;
+  assert.doesNotMatch(past, /^Waiting until/);
+  // Only the instant a wait word introduces is the deadline: an earlier retry or observation time in the same reason is not.
+  const retry = at(30 * minute), observed = at(-30 * minute), later = at(9 * 60 * minute);
+  const noisy = `Waiting for the 24h window: last observed ${observed}, next retry at ${retry}; not before ${notBefore}. Rechecked ${later}.`;
+  assert.equal(plain.blockerSummary(noisy, NOW).until, notBefore, plain.blockerSummary(noisy, NOW).sentence);
+  assert.equal(plain.blockerSummary(`Retry at ${retry}; the build failed`, NOW).kind === 'waiting-until', false);
+  // The item's own observation window counts the same way.
+  assert.match(plain.blockerSummary('Deferred.', NOW, { ...item, blocker: 'Deferred.', observationWindow: { notBefore, detail: '24h after deploy' } as Work['observationWindow'] }).sentence, /^Waiting until /);
+});
+
+test('GY-1739: the item page\'s What is left names the same clearer as the status once automatic clears are spent', async () => {
+  const blocker = 'git push failed: could not read Username for https://github.com: terminal prompts disabled';
+  const { work, item } = blockedScenario(blocker);
+  const probe = (clears: number) => ({ blocker, class: 'github-credential', probe: 'gh auth status', result: 'fail', detail: '', at: at(-minute), nextAt: null, clears });
+  for (const [clears, clearer] of [[0, /Graphyard re-checks it every cycle/], [3, /the master agent must clear it/]] as const) {
+    const blocked = { ...item, blockerProbe: probe(clears) } as unknown as Work;
+    const board = await served(work.map(entry => entry.id === item.id ? blocked : entry));
+    const summary = entry(board, item.key).blocker!.summary;
+    assert.match(summary, clearer, summary);
+    const left = whatIsLeft(blocked, NOW).flatMap(group => group.lines);
+    assert.ok(left.includes(summary), `What is left reads the row's summary (${clears} clears): ${left.join(' | ')}`);
+    assert.ok(plain.plainStatus(blocked, NOW).sentence.endsWith(summary));
+  }
 });
 
 // Every way a module names another: `import … from`, `export … from`, a side-effect `import`, a

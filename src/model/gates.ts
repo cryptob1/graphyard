@@ -1,5 +1,6 @@
 import { conversationProtectionRefusal, failedCheckResults, requiredCheck, requiredCheckPassed, requiredCheckRun, requiredChecksOf, checkRerunStatus } from '../merge-queue.js';
 import type { Gate, Stage, Work } from './work.js';
+import type { MergeLedgerState } from './merge-ledger.js';
 import { escalationRefusals } from './escalation.js';
 import { ciCheckRefusal } from './ci-refusal.js';
 import { requiredCheckFailure } from './required-check-refusal.js';
@@ -10,6 +11,8 @@ import { mechanicalReviewHold } from '../mechanical-findings.js';
 import { evaluateLandability, landabilityAudit, landabilityRefusals } from './landability.js';
 import { itemLane, laneRequirements, laneSpeedTargets, type Lane } from './policy.js';
 import { isDelivered } from './closure.js';
+import { riskOf } from './risk-class.js';
+import { postMergeReviewMark, sensitiveReviewRefusal, type PostMergeReviewState } from './post-merge-review.js';
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
 declare module './work.js' {
@@ -18,7 +21,29 @@ declare module './work.js' {
     // the base moves. Unknown is neither mergeable nor conflicting; it is re-read on the next
     // observation rather than refused as not mergeable (GY-548). Recorded by github.ts `observe`.
     mergeabilityUnknown?: boolean;
+    /** `control-plane`: built from the coordinator's object store by the merge writer's observeHead (GY-1523); unset on an observation GitHub supplied. */
+    source?: 'control-plane';
   }
+}
+
+/** The control-plane test gate's refusal until the merge ledger holds a passing trial of exactly this head on exactly this base tip. */
+export const trialRefusal = (head: string, baseTip: string) => `merge writer has not trialled ${head.slice(0, 12)} on ${baseTip.slice(0, 12)}`;
+/** The control-plane merge gate's refusal until the merge ledger records this head pushed and the push reconciled. */
+export const pushRefusal = (head: string) => `merge writer has not pushed ${head.slice(0, 12)}`;
+/**
+ * The two control-plane refusals for `candidate` (GY-1523), read from the item's folded merge
+ * ledger (model/merge-ledger.ts, GY-1519) alone. The writer records `merge.intent` for a head only
+ * after its trial merge onto the base tip built and passed the fast tests, so a ledger state naming
+ * exactly this head on exactly this base tip and not refused is the passing trial. The merge gate
+ * wants both `merge.pushed` and `merge.reconciled`: a state is `reconciled` with `pushedAt` null
+ * when the fold met a reconciliation straight after the intent (an older writer, or a push the
+ * ledger never saw), so the pushed event's own instant is required beside the reconciled state. An
+ * absent ledger is no trial and no push.
+ */
+export function mergeLedgerRefusals(ledger: MergeLedgerState | null | undefined, candidate: { sha: string; baseSha: string }) {
+  const trialled = !!ledger && ledger.head === candidate.sha && ledger.baseTip === candidate.baseSha && ledger.state !== 'refused';
+  const pushed = trialled && ledger!.state === 'reconciled' && typeof ledger!.pushedAt === 'string' && Number.isFinite(Date.parse(ledger!.pushedAt));
+  return { test: trialled ? [] : [trialRefusal(candidate.sha, candidate.baseSha)], merge: pushed ? [] : [pushRefusal(candidate.sha)] };
 }
 
 /** The merge gate's refusal until GitHub has been read at exactly the current candidate. */
@@ -36,7 +61,7 @@ export { laneRequirements };
  * The item's stage, gates and lane, judged from the record alone. GitHub merges each candidate
  * whose gates pass (docs/delivery.md); nothing here places it in a queue of Graphyard's own.
  */
-export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[]): { stage: Stage; gates: Gate[]; violations: string[]; lane: Lane; speedTarget: number } {
+export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[]): { stage: Stage; gates: Gate[]; violations: string[]; lane: Lane; speedTarget: number; postMergeReview?: PostMergeReviewState | null } {
   const gates: Gate[] = [];
   const add = (name: string, reasons: string[]) => gates.push({ name, passed: reasons.length === 0, reasons });
   // The lane rides the one landability verdict, not beside it (GY-883 AC-3): the verdict
@@ -79,14 +104,29 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
     : work.formalReviewResetRequired ? 'A new independent GitHub approval after the requirement-review baseline is required' : 'Independent approval of the current commit is required';
   // An approval naming mechanical nits waits for its worker-bot round before GitHub may merge (GY-971).
   const mechanicalHold = reviewPassed ? mechanicalReviewHold(work, now.getTime()) : null;
+  // Review by risk (GY-1525): a head the control plane observed itself is judged by the class of its
+  // merge delta (model/risk-class.ts), not by the path lane. A sensitive delta needs the exact-head
+  // approval before it merges; a normal one passes here and owes one post-merge review
+  // (model/post-merge-review.ts), which the evaluation marks on the item. GitHub mode is untouched.
+  const byRisk = current && obs!.source === 'control-plane' && work.policy.review ? riskOf(work) : null;
+  const riskRefusal = byRisk ? byRisk.risk === 'sensitive' && !reviewPassed ? [sensitiveReviewRefusal(byRisk.reasons)] : [] : !reviewPassed ? [reviewRefusal] : [];
+  const postMerge = byRisk ? postMergeReviewMark(work, byRisk.risk, reviewPassed) : {};
+  // A change request holds only when this mode still requires a pre-merge review: github mode, or a
+  // sensitive control-plane delta. A normal-risk control-plane change request is attention for the
+  // post-merge pass, never a merge gate (GY-1525).
+  const changeRequestHold = changesRequested && byRisk?.risk !== 'normal'
+    ? ['Outstanding change requests must be resolved through a new review'] : [];
   add('review', work.policy.review ? [
-    ...(!reviewPassed ? [reviewRefusal] : []),
-    ...(changesRequested ? ['Outstanding change requests must be resolved through a new review'] : []),
+    ...riskRefusal,
+    ...changeRequestHold,
     ...(mechanicalHold ? [mechanicalHold] : []),
   ] : []);
   // The policy's checks and every other check the base branch's protection requires (GY-430):
   // GitHub refuses the merge while any of them has not passed, so none is left for it to find.
-  const checkReasons = requiredChecksOf(work).flatMap(check => {
+  // A head the control plane observed itself (GY-1523) has no GitHub checks and no GitHub
+  // mergeability: the merge writer's ledger stands in for both, and only for that source.
+  const ledger = obs?.source === 'control-plane' ? mergeLedgerRefusals(work.mergeLedger, obs!.candidate) : null;
+  const checkReasons = ledger ? ledger.test : requiredChecksOf(work).flatMap(check => {
     const run = check.policy ? requiredCheck(work, check.name, ciAppIds) : current ? requiredCheckRun(check, obs!.checks, ciAppIds) : undefined;
     if (requiredCheckPassed(check, run)) return [];
     return [!check.policy && run && failedCheckResults.includes(run.result)
@@ -110,11 +150,12 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   const mergeability = obs?.mergeable || obs?.merged ? null
     : obs?.mergeabilityUnknown ? mergeabilityComputingRefusal
       : 'Pull request is not mergeable against the current base';
-  add('merge', [...(!current ? [githubUnobservedRefusal] : []), ...(mergeability ? [mergeability] : []), ...(threads ? [threads] : []), ...delivery]);
+  add('merge', ledger ? [...(!current ? [githubUnobservedRefusal] : []), ...ledger.merge, ...delivery]
+    : [...(!current ? [githubUnobservedRefusal] : []), ...(mergeability ? [mergeability] : []), ...(threads ? [threads] : []), ...delivery]);
   const first = gates.find(g => !g.passed);
   const violations = [...work.violations];
   let stage: Stage = !work.ready ? 'backlog' : !work.submission ? (work.lease && Date.parse(work.lease.expiresAt) > now.getTime() ? 'build' : 'ready') : (first?.name === 'ready' ? 'build' : first?.name as Stage ?? 'merge');
   // Delivery history stays complete; later observations cannot rewrite it.
   if (work.stage === 'done') stage = 'done';
-  return { stage, gates, violations, lane, speedTarget };
+  return { stage, gates, violations, lane, speedTarget, ...postMerge };
 }

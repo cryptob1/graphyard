@@ -29,6 +29,7 @@ const worker: Principal = { id: 'agent-a', role: 'worker', displayName: 'Atlas',
 const other: Principal = { id: 'agent-b', role: 'worker' };
 const coordinator: Principal = { id: 'master', role: 'coordinator' };
 const otherCoordinator: Principal = { id: 'other-master', role: 'coordinator' };
+// Every 2000-01-01 expiry is written to force a lease, evidence or observation lapse that stays lapsed on any later day; the 2099 Date proxy serves one test's clock-skew check; new Date()/Date.now() stamp live records and build relative expiries on the real clock.
 const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['integration:claim-safety'] };
 const otherProducer: Principal = { id: 'other-ci-runner', role: 'producer', proofs: ['integration:unrelated'] };
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
@@ -228,7 +229,7 @@ async function quarantinedByDeadSupervisor(hostId = 'coordinator-host') {
   // The supervisor dies without settling: every authority lapses beyond the grace window.
   // The lease deadline lapses on the quarantine too, exactly as an unrenewed lease does:
   // reconciliation then clears the lease record without shortening the window.
-  const lapsed = new Date(Date.now() - containmentGraceMs - 600_000).toISOString();
+  const lapsed = new Date(Date.now() - containmentGraceMs - 900_000).toISOString();
   await store.pool.query(`UPDATE work_items SET document=jsonb_set(jsonb_set(jsonb_set(document,'{lease,expiresAt}',to_jsonb($2::text)),
     '{containmentQuarantine,launchExpiresAt}',to_jsonb($2::text)),'{containmentQuarantine,leaseExpiresAt}',to_jsonb($2::text)) WHERE id=$1`, [w.id, lapsed]);
   await engine.reconcile();
@@ -693,6 +694,7 @@ test('scoped operator-agent credentials are deny-by-default, auditable, rotation
   assert.equal((await post('operator-agents', { ...setup, id: `collision-${randomUUID()}`, token: 'w'.repeat(32) }, 'o'.repeat(32))).status, 409, 'dynamic credential cannot inherit a configured principal role');
   const configured: any = await (await post('operator-agents', setup, 'o'.repeat(32), setupKey)).json();
   assert.equal(configured.role, 'operator-agent'); assert.deepEqual(configured.fingerprints, [createHash('sha256').update(firstToken).digest('hex').slice(0, 16)]); assert.equal(JSON.stringify(configured).includes(firstToken), false);
+  assert.equal(configured.credentialIssuedAt, configured.createdAt, 'the document records when its credential was issued (GY-1692)');
   const inferredEngine = new Engine(store, [15368], 120, '');
   server(inferredEngine, [{ ...operator, token: 'o'.repeat(32) }], { config: { repository: 'owner/project' } } as GitHub);
   assert.equal(inferredEngine.repository, 'owner/project', 'the GitHub-inferred repository also binds engine mutation authorization');
@@ -739,13 +741,30 @@ test('scoped operator-agent credentials are deny-by-default, auditable, rotation
   const weakened = { expectedPolicyRevision: created.policyRevision, reason: 'Remove the requirement', criteria: [{ id: 'AC-2', text: 'Less', proofs: ['unit:less'] }], dependencies: [], plannedFiles: [], exclusiveResources: [] };
   assert.equal((await post(`work/${created.id}/requirements`, weakened, firstToken)).status, 409);
   const unchanged = (await store.list()).find(w => w.id === created.id)!; assert.deepEqual(unchanged.criteria, created.criteria); assert.equal(unchanged.policyRevision, created.policyRevision);
+  // GY-1692: a configure moves lastMutation but never the credential's issue; a rotation moves both.
+  const reconfigured: any = await (await post(`operator-agents/${setup.id}/configure`, { expectedRevision: priorDocument.revision, capabilities: setup.capabilities, scope: setup.scope, reason: 'Restated unchanged' })).json();
+  assert.equal(reconfigured.lastMutation.kind, 'configure'); assert.equal(reconfigured.credentialIssuedAt, configured.credentialIssuedAt, 'configure keeps the credential issue time');
   const rotated: any = await (await post(`operator-agents/${setup.id}/rotate`, { token: secondToken, transitionSeconds: 0, reason: 'Scheduled rotation' })).json();
-  assert.equal(rotated.lastMutation.kind, 'rotate'); assert.equal((await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${firstToken}` } })).status, 401); assert.equal((await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${secondToken}` } })).status, 200);
+  assert.equal(rotated.lastMutation.kind, 'rotate'); assert.equal(rotated.credentialIssuedAt, rotated.lastMutation.at, 'rotate moves the credential issue time to the rotation');
+  assert.ok(Date.parse(rotated.credentialIssuedAt) >= Date.parse(configured.credentialIssuedAt)); assert.equal((await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${firstToken}` } })).status, 401); assert.equal((await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${secondToken}` } })).status, 200);
   const capturedActor = await new OperatorAgents(store, 'owner/project').authenticate(secondToken); assert.ok(capturedActor);
+  assert.equal((await post('operator-agents', { ...setup, token: `operator-third-${'z'.repeat(32)}` })).status, 409, 'a live identity is never set up twice');
   assert.equal((await post(`operator-agents/${setup.id}/revoke`, { reason: 'Automation disabled by human' })).status, 200);
   assert.equal((await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${secondToken}` } })).status, 401);
   await assert.rejects(engine.execute(capturedActor, 'ready', created.id, { expectedRevision: created.revision + 1, reason: 'Delayed request' }, randomUUID()), /revoked or expired/, 'credential is revalidated inside the mutation transaction');
+  // GY-1692: setup of a revoked identity reinstates it under a fresh credential; every credential it held stays revoked, none is issued twice.
+  assert.equal((await post('operator-agents', { ...setup, token: secondToken, reason: 'Reinstated with the leaked token' })).status, 409, 'a revoked credential is never reissued');
+  const thirdToken = `operator-third-${'z'.repeat(32)}`;
+  const reinstateResponse = await post('operator-agents', { ...setup, token: thirdToken, reason: 'Reinstated after the leak was contained' });
+  assert.equal(reinstateResponse.status, 200, 'setup reinstates a revoked identity');
+  const reinstated: any = await reinstateResponse.json();
+  assert.deepEqual([reinstated.revokedAt, reinstated.revision, reinstated.lastMutation.kind, reinstated.lastMutation.reinstatedAfter, reinstated.credentialIssuedAt], [null, rotated.revision + 2, 'setup', (await (await fetch(`${url}/api/operator-agents`, { headers: adminHeaders })).json() as any[]).find(entry => entry.id === setup.id).lastMutation.reinstatedAfter, reinstated.lastMutation.at]);
+  assert.deepEqual(reinstated.fingerprints, [firstToken, secondToken, thirdToken].map(value => createHash('sha256').update(value).digest('hex').slice(0, 16)), 'the revoked credentials stay in its history');
+  assert.equal(reinstated.createdAt, configured.createdAt, 'the identity is the same one, not a new document');
+  for (const [token, status] of [[firstToken, 401], [secondToken, 401], [thirdToken, 200]] as const) assert.equal((await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${token}` } })).status, status, `after reinstatement a token of this identity reads ${status}`);
+  assert.equal((await post('operator-agents', { ...setup, token: `operator-fourth-${'q'.repeat(32)}` })).status, 409, 'the reinstated identity is live: never set up twice');
   const history = await store.events(); assert.ok(history.some(event => event.kind === 'operator-agent.setup' && event.actor === operator.id)); assert.ok(history.some(event => event.kind === 'operator-agent.revoke'));
+  assert.equal(history.filter(event => event.kind === 'operator-agent.setup' && event.payload.target === setup.id).length, 2, 'the reinstatement is its own setup event, after the revocation');
   const createEvent = history.find(event => event.kind === 'create' && event.actor === setup.id);
   assert.equal(createEvent.payload.details.reason, 'Create bounded implementation intent'); assert.equal(createEvent.payload.work.policy.review, true);
 });

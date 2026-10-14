@@ -165,12 +165,15 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
       if (!observedSince(seen, watch.goneAt) && observe) seen = await observe(item) ?? item;
       const cutoffWait = { held: true as const, watch, deadline: due!.dueAt, wait: `${item.key}: docs-sync session ${watch.agentName ?? 'for it'} on head ${head.slice(0, 12)} against base ${watch.base.slice(0, 12)} was stopped at ${watch.goneAt}, its cutoff; the rework due at ${due!.dueAt} waits for an observation since showing the head unmoved` };
       if (seen.candidate?.sha !== head || (seen.observation && seen.observation.candidate.sha !== head)) return cutoffWait;
-      if (!observedSince(seen, watch.goneAt)) return cutoffWait;
-      watch.failed = `docs-sync session ${watch.agentName ?? 'for it'} was stopped at ${watch.goneAt} without having moved ${head.slice(0, 12)}, as an observation at ${seen.observation!.at} shows: ${boundReason}`.slice(0, 1000);
+      // GY-1537: past the bound itself the rework is owed whether or not a reading landed; the head check above still holds it for a moved head.
+      const pastBound = due!.overdueMs > 0;
+      if (!observedSince(seen, watch.goneAt) && !pastBound) return cutoffWait;
+      watch.failed = `docs-sync session ${watch.agentName ?? 'for it'} was stopped at ${watch.goneAt} without having moved ${head.slice(0, 12)}${seen.observation && observedSince(seen, watch.goneAt) ? `, as an observation at ${seen.observation.at} shows` : ', and no observation since landed inside the loop-owned bound'}: ${boundReason}`.slice(0, 1000);
       watch.settledAt = stamp;
       await settle(item, watch, watch.failed);
       markRework(item.key, head);
-      await note(`docs-sync:${key}`, item, 'decision', 'failed', `${item.key}: ${watch.failed}, so the conflict returns to a worker`);
+      // GY-1541: the cutoff stop is the loop's own designed route (GY-1434), as the own-accord stop below is: no decision fault.
+      await note(`docs-sync:${key}`, item, 'decision', 'failed', `${item.key}: ${watch.failed}, so the conflict returns to a worker`, undefined, null);
       return { held: false };
     }
     // A hold the loop found ended stays ended (GY-1436): a session Herdr lists working again before

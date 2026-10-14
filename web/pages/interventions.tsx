@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { interventionKindLabel, interventionWindows, judgementVerdictLabel, judgementVerdicts, type Intervention, type InterventionReport, type InterventionWindow, type Judgement, type JudgementVerdict } from '../../src/model/interventions';
+import { Fragment, useEffect, useState } from 'react';
+import { interventionKindLabel, interventionWindows, judgementVerdictLabel, judgementVerdicts, patternCauseLabel, type Intervention, type InterventionReport, type InterventionWindow, type Judgement, type JudgementVerdict, type PatternCause, type PatternRow } from '../../src/model/interventions';
 import { formatDuration } from '../../src/model/duration';
 import type { Dashboard } from './dashboard';
 
@@ -53,11 +53,9 @@ export default function InterventionsPage({ api, status, busy, setBusy, setError
         <span className="muted">{item.count} intervention{item.count === 1 ? '' : 's'} · {wait(item.waitedMs)} · {Object.entries(item.kinds).map(([kind, count]) => `${count} ${interventionKindLabel[kind as keyof typeof interventionKindLabel]}`).join(', ')}</span>
       </li>)}</ul></section>}
       <section className="work-list" aria-label="Patterns"><h2>Patterns that became work</h2>
-        {report.patterns.filter(pattern => pattern.crossed).length === 0 ? <p className="muted">No kind of intervention has crossed {report.policy.threshold} at one stage in the last {report.policy.windowDays} days.</p>
-          : <ul className="shipped-list">{report.patterns.filter(pattern => pattern.crossed).map(pattern => <li key={`${pattern.kind}:${pattern.stage}`}>
-            <span>{pattern.count} × {interventionKindLabel[pattern.kind]} at {stageLabel(pattern.stage)}</span>
-            {pattern.work ? <button className="text-button" onClick={() => setSelected(pattern.work!.id)}>{pattern.work.key}</button> : <span className="muted">an item opens within a minute</span>}
-          </li>)}</ul>}
+        <p className="muted">Each kind at one stage over the last {report.policy.windowDays} days: the instances no item links are judged against the threshold of {report.policy.threshold}; the items that own the rest, the open item that stands for the pair, and the counted instances themselves are named, so a count past the threshold with no crossing reads as owned, not unfiled.</p>
+        {report.patterns.length === 0 ? <p className="muted">No kind of intervention recurred at one stage in the last {report.policy.windowDays} days.</p>
+          : <ul className="shipped-list">{report.patterns.map(pattern => <PatternFold key={`${pattern.kind}:${pattern.stage}`} pattern={pattern} to={report.window.to} open={setSelected}/>)}</ul>}
       </section>
       <section className="work-list" aria-label="Judgement about delivered work"><h2>Your judgement about what shipped <span className="count">{report.judgements.length}</span></h2>
         <p className="muted">Something confusing, wrong for its user, or not good enough: record it against the item or page it concerns. It enters the backlog with the same standing as a failed gate, not as a message in a chat.</p>
@@ -79,6 +77,33 @@ function Trend({ report }: { report: Report }) {
     <ol className="sr-only" aria-label="Interventions per period">{report.trend.map(bucket => <li key={bucket.from}>{new Date(bucket.from).toLocaleDateString()}: {bucket.interventions} interventions, {bucket.deliveries} deliveries, {wait(bucket.waitedMs)} waited</li>)}</ol>
     <div className="bar-labels"><span>{new Date(report.trend[0].from).toLocaleDateString()}</span><span>{new Date(report.trend.at(-1)!.from).toLocaleDateString()}</span></div>
   </>;
+}
+
+/**
+ * One pattern row as the report folds it (GY-1682): the count, the unlinked count the threshold
+ * judges, the item standing for the pair (the scan's or one filed by hand for its fault), every item
+ * that owns counted instances with its share, the causes its instances show and the rework rounds
+ * their items carried, the whole pattern's causes and rounds against the standing item, how long
+ * every rolling window has held under the threshold over every counted instance (from the instant
+ * the ledger's reach establishes a whole window, or that no window is whole yet), and the counted
+ * instances themselves — their item, trigger, instant, owner, cause and rounds — so the board shows
+ * the fold the row was judged on, not a bare count.
+ */
+function PatternFold({ pattern, to, open }: { pattern: PatternRow; to: string; open(id: string | null): void }) {
+  const accounted = pattern.accounted ?? [], instances = pattern.instances ?? [], under = pattern.underThreshold;
+  const causes = (tally: Partial<Record<PatternCause, number>> | undefined) => Object.entries(tally ?? {}).map(([cause, count]) => `${count} ${patternCauseLabel[cause as PatternCause]}`).join(', ');
+  const rounds = (count: number | null | undefined) => count == null ? '' : ` · ${count} rework round${count === 1 ? '' : 's'}`;
+  return <li className={pattern.crossed && !pattern.work ? 'tone-stuck' : ''}>
+    <span>{pattern.count} × {interventionKindLabel[pattern.kind]} at {stageLabel(pattern.stage)} <span className="muted">· {pattern.unlinked} of {pattern.threshold} unlinked</span></span>
+    {pattern.work ? <button className="text-button" onClick={() => open(pattern.work!.id)}>{pattern.work.key}</button> : pattern.crossed ? <span className="muted">an item opens within a minute</span> : null}
+    {(Object.keys(pattern.causes ?? {}).length > 0 || (pattern.reworkRounds ?? 0) > 0) && <span className="muted">counted: {causes(pattern.causes) || 'no typed cause'}{rounds(pattern.reworkRounds)}</span>}
+    {under && <span className="muted">{under.since ? `under the threshold in every rolling window for ${under.days} of ${under.holdDays} days (since ${new Date(under.since).toLocaleString()}, peak ${under.peak}, established from ${new Date(under.established).toLocaleDateString()})`
+      : under.established > to ? `no whole window on the record yet (read from ${new Date(under.reach).toLocaleDateString()}; the reading is established from ${new Date(under.established).toLocaleString()}${under.projected ? `, and the streak begins ${new Date(under.projected).toLocaleString()} if nothing further is recorded` : ''})`
+      : `at or past the threshold now (peak ${under.peak} since ${new Date(under.established).toLocaleDateString()}${under.projected ? `; under it from ${new Date(under.projected).toLocaleString()} if nothing further is recorded` : ''})`}</span>}
+    {accounted.length > 0 && <span className="muted">owned by {accounted.map((owner, index) => <Fragment key={owner.id}>{index > 0 ? '; ' : ''}<button className="text-button" onClick={() => open(owner.id)}>{owner.key}</button> ({owner.count}{owner.stage === 'done' ? ', delivered' : ''}{causes(owner.causes) ? `: ${causes(owner.causes)}` : ''}{rounds(owner.reworkRounds)})</Fragment>)}</span>}
+    {instances.length > 0 && <details><summary>{instances.length < pattern.count ? `Newest ${instances.length} of ${pattern.count} counted instances` : `Counted instance${pattern.count === 1 ? '' : 's'}`}</summary>
+      <ul>{instances.map(instance => <li key={instance.id}>{instance.work ? <button className="text-button" onClick={() => open(instance.work!.id)}>{instance.work.key}</button> : 'no item'} · {instance.trigger ?? interventionKindLabel[pattern.kind]}{instance.cause ? ` (${patternCauseLabel[instance.cause]})` : ''} · {new Date(instance.requestedAt).toLocaleString()}{instance.resolvedAt ? '' : ' · still open'} · {instance.owner ? `owned by ${instance.owner}` : 'no owner'}{rounds(instance.reworkRounds)}</li>)}</ul></details>}
+  </li>;
 }
 
 function InterventionRow({ intervention, open }: { intervention: Intervention; open(id: string | null): void }) {

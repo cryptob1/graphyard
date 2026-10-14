@@ -41,8 +41,8 @@ function engineOn(store: Store, leaseSeconds = 120) {
   engine.submissionObserver = null;
   return engine;
 }
-async function ready(engine: Engine, title: string) {
-  const work = await engine.execute(operator, 'create', null, { title, plannedFiles: [`src/${title}.ts`], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
+async function ready(engine: Engine, title: string, criteria = [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }]) {
+  const work = await engine.execute(operator, 'create', null, { title, plannedFiles: [`src/${title}.ts`], criteria }, randomUUID());
   return engine.execute(operator, 'ready', work.id, {}, randomUUID());
 }
 async function claimed(engine: Engine, title: string, actor = engineer) {
@@ -75,9 +75,9 @@ async function exhaust(pool: pg.Pool) {
 const wait = (at: number) => delay(Math.max(0, at - Date.now()));
 const timed = async <T>(run: () => Promise<T>) => { const started = performance.now(); const value = await run(); return { value, ms: performance.now() - started }; };
 
-test('unit:lease-pool-isolated — renewal, claim, complete and blocked obtain a connection within 2 s while every other pool is exhausted', async () => {
+test('unit:lease-pool-isolated — renewal, claim, complete, blocked and defer obtain a connection within 2 s while every other pool is exhausted', async () => {
   assert.ok(leasePoolConnections >= 2, 'the product default gives lease commands more than one connection');
-  assert.deepEqual([...leaseCommands].sort(), ['blocked', 'claim', 'heartbeat', 'submit'], 'renewal, claim, complete (submit) and blocked are the lease commands');
+  assert.deepEqual([...leaseCommands].sort(), ['blocked', 'claim', 'defer', 'heartbeat', 'submit'], 'renewal, claim, complete (submit), blocked and defer are the lease commands');
   const store = new Store(connection, { max: 2 });
   assert.equal((store.leasePool as unknown as { options: { max: number } }).options.max, leasePoolConnections, 'the lease pool is sized by the product default in store/pools.ts');
   const engine = engineOn(store);
@@ -85,6 +85,8 @@ test('unit:lease-pool-isolated — renewal, claim, complete and blocked obtain a
   try {
     const work = await claimed(engine, 'isolated-renewal');
     const open = await ready(engine, 'isolated-claim');
+    // GY-1726: a post-deploy follow-up whose reading cannot exist yet, deferred by its worker under the same exhaustion.
+    const followUp = await engine.execute(engineer, 'claim', (await ready(engine, 'isolated-defer', [{ id: 'AC-1', text: 'The serving release reads clean', proofs: ['manual:lease-pool-on-serving-release'] }])).id, {}, randomUUID());
     // Every pool but the lease pool — the general pool, and the report pool where the store has one —
     // is held to its last connection, as slow report and observation queries held it in production.
     const others = Object.entries(store).filter((entry): entry is [string, pg.Pool] => entry[1] instanceof pg.Pool && entry[1] !== store.leasePool);
@@ -98,6 +100,9 @@ test('unit:lease-pool-isolated — renewal, claim, complete and blocked obtain a
       // a leased worker sends: the same command on the same pool, and the attempt goes on to submit.
       const blocked = await timed(() => http.post(engineer, `work/${work.id}/blocked`, { epoch: work.epoch, reason: null }));
       assert.equal(blocked.value.status, 200, JSON.stringify(blocked.value.body)); assert.ok(blocked.ms < 2000, `blocked completed in ${Math.round(blocked.ms)} ms`);
+      const deferred = await timed(() => http.post(engineer, `work/${followUp.id}/defer`, { epoch: followUp.epoch, notBefore: new Date(Date.now() + 86_400_000).toISOString(), reason: 'the window has not elapsed' }));
+      assert.equal(deferred.value.status, 200, JSON.stringify(deferred.value.body)); assert.ok(deferred.ms < 2000, `defer completed in ${Math.round(deferred.ms)} ms`);
+      assert.deepEqual([deferred.value.body.lease, deferred.value.body.blocker, deferred.value.body.observationWindow?.basis], [null, null, 'worker-reading'], 'defer ended the attempt and holds the window');
       const claim = await timed(() => http.post(rival, `work/${open.id}/claim`, {}));
       assert.equal(claim.value.status, 200, JSON.stringify(claim.value.body)); assert.ok(claim.ms < 2000, `claim completed in ${Math.round(claim.ms)} ms`);
       const complete = await timed(() => http.post(engineer, `work/${work.id}/submit`, { epoch: work.epoch, pr: 558 }));

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { caseDirectory, caseId, contractFile } from '../e2e/case.js';
-import { criterionSchema } from './policy.js';
+import { criteriaSchema } from './policy.js';
 import { demand } from './refusal.js';
 import { pathScopesOverlap } from './scope.js';
 import { deliveryState } from './delivery.js';
@@ -32,7 +32,7 @@ export const planItemSchema = z.object({
   priority: z.number().int().min(0).max(4).default(2),
   outcomes: z.array(caseId).min(1).max(30),
   cases: z.array(caseId).min(1).max(30),
-  criteria: z.array(criterionSchema).min(1).max(20),
+  criteria: criteriaSchema(20),
   plannedFiles: z.array(line(500)).min(1).max(100),
   dependsOn: z.array(planRef).max(20).default([]),
 }).strict();

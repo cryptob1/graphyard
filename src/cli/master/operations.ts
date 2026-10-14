@@ -1,20 +1,61 @@
-// Concern: `graphyard master` operations subcommands — status, settle-containment, dispatch, merge, verify-deployment.
+// Concern: `graphyard master` operations subcommands — status, settle-containment, checkout-restore and the confined master's loop requests, dispatch, merge, verify-deployment, main-watch.
 import { parseArgs } from 'node:util';
 import { resourceConflicts } from '../../coordination.js';
-import { dispatchWork, listHerdrAgents, readWorkerCredential, snapshotWithClock, verifyContainmentDeath, withReviewerDefaults, withRoleDefaults } from '../../master.js';
+import { handSettlementRefusal } from '../../model/containment.js';
+import { agentToken, dispatchWork, listHerdrAgents, readWorkerCredential, snapshotWithClock, verifyContainmentDeath, withReviewerDefaults, withRoleDefaults } from '../../master.js';
 import { readDaemonState } from '../../master-daemon.js';
-import { verificationEffects, verifyDeployment } from '../../master-verification.js';
+import { localPostDeployChecks, verificationEffects, verifyDeployment, type PostDeployChecksInput } from '../../master-verification.js';
 import { cycleBudget, masterStatusReport } from '../master-status.js';
 import { masterHeartbeatMinutes, masterSessionMinutes } from '../../master/master-session.js';
 import { assertHandDispatch } from '../hand-actions.js';
 import { unhandled, type MasterSession } from './session.js';
 import { masterHarnessDrift } from './fleet.js';
+import { readSecretFromStdin } from '../context.js';
+import { acknowledgeCommand, mainWatchAttention } from '../../daemon/main-watch.js';
+import { shadowGateSummary } from '../../daemon/cycle-shadow.js';
+import { shadowGateAttention } from '../../merge-writer/shadow.js';
+import { mergeWriterSummary } from '../../daemon/cycle-merge-writer.js';
+import { defaultChildRun } from '../../child-runner.js';
+import { installDirectory } from '../../install/secrets.js';
+import { installIdFor } from '../../install/types.js';
+import { knownGoodState, pinKnownGood } from '../../master/known-good.js';
+import { alignLoopUnit, loopUnitOf, type LoopSupervisorHost } from '../../supervisor.js';
+import type { ChildRun } from '../../child-runner.js';
+import { readLockRefusal, supervisingUnit, unsupervisedHolderAttention } from '../../master/loop-restart.js';
+import { checkoutRestoreCommand } from '../master-checkout-restore.js';
+import { masterConfinementVariable } from '../../master/launch.js';
+
+/** Whether this command runs inside the master session's confinement (GY-1658): its wrapper sets the variable. */
+export const confinedMaster = (env: NodeJS.ProcessEnv = process.env) => env[masterConfinementVariable] === 'master';
+
+/** `master main-watch`: the watch's state and policy, or an admin's acknowledgement of one commit (GY-1519). */
+export const mainWatchUsage = 'Use master main-watch acknowledge SHA --reason TEXT --admin-token-stdin (the admin credential on stdin), or master main-watch status';
+
+/** `master recover`: repin the known-good coordinator (GY-1529). */
+export const recoverUsage = 'Use master recover [--to SHA] [--reason TEXT] --admin-token-stdin (the admin credential on stdin; the pin returns to the previous known-good SHA without --to)';
 
 /** What `graphyard master merge` answers: Graphyard runs no merge of its own. */
 export const githubMergesAnswer = 'GitHub merges: a pull request whose build, review and required checks pass on its head is merged by GitHub on its branch protection, and Graphyard records the delivery from the merged observation. There is no Graphyard merge to run.';
 
+/** What `master recover` does outside this process; a test hands in its own so no real unit is touched. */
+export interface RecoverEffects { run: ChildRun; host: LoopSupervisorHost; restart: (unit: string) => Promise<unknown> }
+const recoverEffects: RecoverEffects = { run: defaultChildRun, host: {}, restart: unit => defaultChildRun('systemctl', ['--user', 'restart', unit], { timeoutMs: 60_000 }) };
+
+/**
+ * `master post-deploy-checks` (GY-1732): this checkout's decision of a delivered item's post-deploy
+ * checks and the follow-ups they file, printed as JSON from a `PostDeployChecksInput` on stdin.
+ * verify-deployment runs it from the observed release's isolated checkout, so a follow-up's text and
+ * observation window are the serving release's, not those of a coordinator checkout behind it.
+ */
+export async function postDeployChecksCommand(stdin: AsyncIterable<string | Buffer> = process.stdin, write: (text: string) => void = text => process.stdout.write(text)) {
+  let raw = ''; for await (const chunk of stdin) { raw += chunk; if (raw.length > 4_000_000) throw new Error('post-deploy-checks input is too large'); }
+  const input = JSON.parse(raw) as PostDeployChecksInput;
+  if (!input?.work?.id || typeof input.release !== 'string' || typeof input.now !== 'string') throw new Error('Use master post-deploy-checks with {"work","release","now","projections","servedAt"} as JSON on stdin');
+  write(`${JSON.stringify(await localPostDeployChecks(input))}\n`);
+}
+
 /** Reading status and acting on one item: settle a quarantine, dispatch, merge, verify a deployment. */
-export async function operationsCommand(session: MasterSession): Promise<unknown> {
+export async function operationsCommand(session: MasterSession, effects: RecoverEffects = recoverEffects): Promise<unknown> {
   const { id, args, print, root, master, masterApi, masterMutation, coordinator, cli } = session;
   if (id === 'status') {
     // Sessions are counted as the reviewer and producer launchers count them: automatic profile defaults included (GY-1072, GY-1113).
@@ -25,15 +66,51 @@ export async function operationsCommand(session: MasterSession): Promise<unknown
     const master2 = summary.master ? { ...summary.master, budgetMinutes: masterSessionMinutes(master), heartbeatMinutes: masterHeartbeatMinutes(master) } : null;
     // An installed harness that differs from the current plan is drift the master repairs (GY-1217).
     const harness = await masterHarnessDrift(root, master);
-    const attention = harness ? { attentionItems: [...report.attentionItems, harness], counts: { ...report.counts, attention: report.counts.attention + 1 } } : {};
-    return print({ ...report, ...attention, harnessDrift: harness?.drift ?? null, daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null, ...(master2 ? { master: master2 } : {}) } });
+    // GY-1519: each commit on the base branch the main watch cannot explain is one attention line, report-only.
+    // GY-1522 / GY-1560: each unexplained shadow-only-fail or shadow-missed is one attention line until explained;
+    // the ledger's standing list covers pairs the cursor may have dropped, and a later head of the same item does not.
+    type Standing = { key: string; head: string; baseTip: string; outcome: 'shadow-only-fail' | 'shadow-missed'; mergeSha: string | null; build: 'pass' | 'fail'; tests: { passed: number; failed: string[]; files: number }; conflict?: string[]; at: string; explained: boolean; cause?: string | null };
+    const shadowStatus = await masterApi('shadow-disagreements').then(
+      (body: { explanations?: { key: string; head: string; baseTip: string }[]; disagreements?: Standing[] }) => body ?? {},
+      () => ({} as { explanations?: { key: string; head: string; baseTip: string }[]; disagreements?: Standing[] }),
+    );
+    const explanations = shadowStatus.explanations ?? [];
+    const standing = shadowStatus.disagreements ?? [];
+    const standingVerdicts = standing.map(entry => ({
+      key: entry.key, id: entry.key, head: entry.head, baseTip: entry.baseTip, mergeSha: entry.mergeSha, risk: 'normal' as const,
+      build: entry.build, tests: entry.tests, conflict: entry.conflict ?? [], durationMs: 0, at: entry.at, outcome: entry.outcome,
+      ...(entry.cause ? { cause: entry.cause } : {}),
+    }));
+    const shadowAttention = shadowGateAttention([...(state?.shadow ?? []), ...standingVerdicts], explanations, coordinator?.mergeWriter?.merger === 'control-plane' ? 'control-plane' : 'github');
+    // GY-1603: a loop holding the lock outside this install's unit, which the unit's own run is refused on.
+    const refusal = await readLockRefusal(root);
+    const holder = refusal && state?.lock ? unsupervisedHolderAttention({ refusal, lock: state.lock, hostId: master.hostId, unit: await supervisingUnit(root, master, { host: effects.host }).catch(() => null) }) : null;
+    const added = [...(harness ? [harness] : []), ...(holder ? [holder] : []), ...mainWatchAttention(state?.mainWatch ?? null, master.baseBranch), ...shadowAttention];
+    const attention = added.length ? { attentionItems: [...report.attentionItems, ...added], counts: { ...report.counts, attention: report.counts.attention + added.length } } : {};
+    // `shadowGate`: outcome counts and trial times from the cursor; unexplained/explained counts from the ledger so eviction cannot hide a standing pair.
+    // `mergeWriter` (GY-1524): the control-plane merge executor's queue (oldest first), the merge in flight, its last delivery and newest refusals.
+    const shadowGate = {
+      ...shadowGateSummary(state?.shadow ?? [], explanations),
+      unexplainedDisagreements: standing.filter(entry => !entry.explained).length,
+      explainedDisagreements: standing.filter(entry => entry.explained).length,
+    };
+    return print({ ...report, ...attention, harnessDrift: harness?.drift ?? null, shadowGate, mergeWriter: mergeWriterSummary(state?.mergeWriter), daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null, ...(master2 ? { master: master2 } : {}) } });
   }
+  // GY-1658: the loop restores a dirty coordinator checkout to a named ref and restarts itself; this files the request and reports the outcome.
+  if (id === 'checkout-restore') return print(await checkoutRestoreCommand(master, args, String(coordinator?.actor?.id ?? coordinator?.actor?.name ?? 'master')));
+  // The confined master session sees no host systemd (GY-1658), so its restart is a request the loop serves through its own unit.
+  if (id === 'restart' && confinedMaster()) return print(await checkoutRestoreCommand(master, args, String(coordinator?.actor?.id ?? coordinator?.actor?.name ?? 'master'), { act: 'restart' }));
+  // Likewise its `master executors [restart]`: the restart goes through the host's systemd and the executors' liveness is their host pids, which its PID namespace cannot see.
+  if (id === 'executors' && confinedMaster()) return print(await checkoutRestoreCommand(master, args, String(coordinator?.actor?.id ?? coordinator?.actor?.name ?? 'master'), { act: 'executors' }));
   if (id === 'settle-containment') {
     if (!args[0] || !args.slice(1).join(' ').trim()) throw new Error('Use master settle-containment GY-N REASON');
     const { snapshot, clockOffset } = await snapshotWithClock(() => masterApi('work-snapshot'));
     const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
     if (!work) throw new Error(`Unknown work item ${args[0]}`);
     if (!work.containmentQuarantine) throw new Error(`${work.key} has no containment quarantine to settle`);
+    // GY-1633: inside its settle bound a lapsed fence is the loop's reclaim step's to settle; a hand settlement is a second executor.
+    const loopOwned = handSettlementRefusal(work, Date.parse(snapshot.now));
+    if (loopOwned) throw new Error(loopOwned);
     const assessment = await verifyContainmentDeath(work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
     if (!assessment.settleable) {
       // Every process still holding the fence is printed with its command line and working
@@ -65,12 +142,43 @@ export async function operationsCommand(session: MasterSession): Promise<unknown
   }
   // GitHub merges (docs/delivery.md): there is no Graphyard merge to run, by hand or by the loop.
   if (id === 'merge') return print({ merged: false, result: githubMergesAnswer });
+  // GY-1519: an admin acknowledges a commit the main watch cannot explain, lifting the promotion freeze on it.
+  // The control plane records it with an admin credential only, so the command reads one from stdin
+  // (`--admin-token-stdin`, as `master promote` does) and never offers the master's coordinator credential.
+  if (id === 'main-watch') {
+    const { values, positionals } = parseArgs({ args, options: { reason: { type: 'string' }, 'admin-token-stdin': { type: 'boolean' } }, allowPositionals: true });
+    const [action, sha] = positionals;
+    if (action === 'status') return print({ mainWatch: (await readDaemonState(root, master).catch(() => null))?.mainWatch ?? null, policy: await masterApi('main-watch') });
+    if (action !== 'acknowledge' || !sha || !values.reason?.trim()) throw new Error(mainWatchUsage);
+    if (!values['admin-token-stdin']) throw new Error(`An acknowledgement is recorded with an admin credential, which the master does not hold: pipe one to ${acknowledgeCommand(sha)}`);
+    return print(await masterMutation('main-watch/acknowledge', { sha, reason: values.reason.trim() }, undefined, await readSecretFromStdin(10_000)));
+  }
+  // GY-1529: repin the coordinator the loop runs from (previous known-good, or --to SHA), restart its unit, record the move.
+  if (id === 'recover') {
+    const { values } = parseArgs({ args, options: { to: { type: 'string' }, reason: { type: 'string' }, 'admin-token-stdin': { type: 'boolean' } }, allowPositionals: false });
+    if (!values['admin-token-stdin']) throw new Error(recoverUsage);
+    const installDir = installDirectory(installIdFor(master.repository)), before = knownGoodState(installDir);
+    const wanted = values.to ?? before?.previous;
+    if (!wanted) throw new Error(`There is no previous known-good SHA to return to: pass --to SHA. ${recoverUsage}`);
+    const to = (await effects.run('git', ['-C', root, 'rev-parse', '--verify', `${wanted}^{commit}`])).trim().toLowerCase();
+    const token = await readSecretFromStdin(10_000);
+    const pinned = await pinKnownGood({ installDir, repository: root }, to, effects.run);
+    const unit = await alignLoopUnit({ root, cliPath: master.cliPath, repository: master.repository, intervalSeconds: master.run.intervalSeconds, installDir }, effects.host);
+    if (unit.wrote === 'refused') throw new Error(`The coordinator was repinned to ${to}, but its unit was not rewritten: ${unit.reason}`);
+    await effects.restart(loopUnitOf(root, undefined, effects.host.home));
+    const reason = values.reason?.trim() || (values.to ? `recovered to ${to}` : 'recovered to the previous known-good SHA');
+    const event = await masterMutation('coordinator/recovered', { from: before?.sha ?? null, to, reason }, undefined, token);
+    return print({ recovered: true, from: before?.sha ?? null, to, previous: pinned.previous, unit: loopUnitOf(root, undefined, effects.host.home), unitFile: unit.wrote, event });
+  }
   if (id === 'verify-deployment') {
     if (!args[0]) throw new Error('Use master verify-deployment GY-N');
     const snapshot = await masterApi('work-snapshot');
     const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
     if (!work) throw new Error(`Unknown work item ${args[0]}`);
-    const result = await verifyDeployment(work, verificationEffects(master, { root, snapshot: () => masterApi('work-snapshot'), mutate: masterMutation }));
+    // An owed post-deploy verification's follow-up is filed as the master's operator agent: the coordinator credential cannot create work (GY-1660).
+    const file = async (input: unknown, requestId: string) => masterMutation('work', input, requestId, await agentToken(root, master, 'operatorAgent'));
+    // GY-1698: the intervention report's projection gives a windowed follow-up its observation instant.
+    const result = await verifyDeployment(work, verificationEffects(master, { root, snapshot: () => masterApi('work-snapshot'), mutate: masterMutation, file, read: path => masterApi(path) }));
     if (result.result === 'refused') process.exitCode = 1;
     return print(result);
   }

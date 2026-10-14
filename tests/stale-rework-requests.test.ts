@@ -5,6 +5,7 @@ import { GitHub } from '../src/github.js';
 import { emptyDaemonState, githubPause, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Observation, Work } from '../src/model.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01 clock is the loop's injected now beside the snapshot's now iso(0); the Date.now()-based pause test derives its own at from the client's pausedUntil and passes that as the clock.
 
 /**
  * GY-144: on 2026-09-23, while the GitHub App was paused after a rate limit, the loop requested

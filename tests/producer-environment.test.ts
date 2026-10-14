@@ -15,6 +15,7 @@ import type { RunOptions, Runner } from '../src/runner/types.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-02 `clock` is the explicit tick clock handed to runDispatchTick and its snapshot; new Date() only stamps request/observation records that no clock compares to it.
 
 // GY-1071: the producer's .env secrets (GY-73) — which names leave .env, how a value is read, that
 // a Herdr session gets them without any command line carrying them, that a headless run gets them

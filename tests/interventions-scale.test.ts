@@ -368,7 +368,7 @@ test('integration:intervention-scan-bounded — openPatternItems reads only the 
   const main = await readFile(new URL('../src/server/main.ts', import.meta.url), 'utf8');
   const tick = main.slice(main.indexOf('startReconciliation(async step =>'), main.indexOf('}, 2000);'));
   assert.ok(tick.length > 0 && !/openPatternItems|synthesizeRetro/.test(tick), 'the reconciliation tick does not run the pattern scan');
-  assert.match(main, /startPatternScan\(async \(\) => \{\s*for \(const work of \(await openPatternItems\(/, 'the server starts the pattern scan beside the tick');
+  assert.match(main, /startPatternScan\(async \(\) => \{\s*const window = await readScanWindow\([^\n]*\n\s*for \(const work of \(await openPatternItems\(/, 'the server starts the pattern scan beside the tick, reading the window once for it and the retro synthesis');
 
   // The scan on its own timer, as the server runs it; the test triggers the due run instead of waiting a minute.
   let opened: Work[] = [], scanMs = 0;

@@ -6,6 +6,7 @@ import { decidePayloadSchema, graphyardTools } from '../src/runner/payloads.js';
 import { piArgs, piRunner, runEnvironment } from '../src/runner/pi.js';
 import { runRecord, runRecordSchema, type RunEvent } from '../src/runner/types.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01 strings only stamp a session line and a runRecord's startedAt/endedAt, which nothing compares with a clock; Date.now() measures how long the hung process took to stop.
 
 // GY-169 AC-1, proof unit:runner-pi-events. The Pi runner is driven against a fake Pi: a node
 // process that prints recorded Pi JSONL (the records `pi --mode json` emits) and then exits,

@@ -1,43 +1,26 @@
 import { z } from 'zod';
 
-// ---------------------------------------------------------------------------
-// Provider capacity as the control plane records it (GY-89).
-//
-// GY-68 checks an account's quota before a launch. A session that exhausts its account while it
-// works simply stops: the runtime prints its provider's limit notice and waits for a person. The
-// master loop reads that notice from the session's own output, ends the attempt on the record
-// with the account and the reset time, and launches the same action on another account or
-// runtime. When no account of a role is left, that is one capacity escalation on the item —
-// naming each account and when it resets — and the role is not launched again until the first
-// of them does. Neither case is a launch failure, and neither delays an item that needs a
-// different role.
-//
-// Every launched role is a capacity role (GY-182): an approver or an escalation handler that runs
-// out of credits stops on the same notice as a worker, and a decision nobody judges stalls the
-// item just as surely as an unreviewed head. An account is spent for the whole fleet, not for the
-// role that found out: every role's launch skips it until its reset.
-// ---------------------------------------------------------------------------
+// Provider capacity (GY-89/68/182): pre-launch quota checks, mid-session limit notices, fleet-wide
+// holds, and per-role escalations when every account is spent. Neither delays a different role.
 
-/** The roles launched into session slots: a worker's lease, a reviewer's or producer's ledger record. */
+/** Roles launched into session slots. */
 export const capacityRoles = ['worker', 'reviewer', 'producer'] as const;
-/** The roles that judge or request decisions; their sessions hold no slot, but spend quota the same way. */
+/** Roles that judge or request decisions (no slot; same quota). */
 export const decisionRoles = ['approver', 'escalation-handler'] as const;
-/** Every role whose session can run out of provider quota: each fails over, and each skips an account any of them saw spent. The master role rides the same holds (GY-898). */
-export const quotaRoles = [...capacityRoles, ...decisionRoles, 'master'] as const;
+/** Headless registry roles that spend the same accounts (GY-1705); no item waits on them. */
+export const headlessQuotaRoles = ['doctor', 'diagnostician'] as const;
+/** Every role that can exhaust provider quota (GY-898, GY-1705). */
+export const quotaRoles = [...capacityRoles, ...decisionRoles, 'master', ...headlessQuotaRoles] as const;
 export type CapacityRole = typeof quotaRoles[number];
 
 /** What a session's own output says about its provider quota. */
 export interface ExhaustionSignal {
-  /** The provider's notice, as the session printed it. */
   reason: string;
-  /** When the provider says the quota returns; null when the notice names no time Graphyard can read. */
+  /** Reset instant, or null when the notice names no time Graphyard can read. */
   resetsAt: string | null;
 }
 
-// The notices the supported runtimes print when an account has nothing left. They are matched
-// against single short lines of a session that has stopped working, or of one still working whose
-// runtime prints its retry marker beside the notice: a worker that discusses a usage limit in its
-// own prose is working, and a long paragraph is never a provider banner.
+// Short-line provider banners only — not agent prose about limits.
 const exhaustionNotices: readonly RegExp[] = [
   /\b(?:you(?:'|’)?ve|you have) (?:hit|reached) your (?:\w+[- ]){0,3}limit\b/i,
   /\b(?:usage|weekly|daily|monthly|hourly|5[- ]hour|session|spend(?:ing)?|rate|token|request|plan) limit (?:has been |was |is )?(?:reached|exceeded|hit|exhausted)\b/i,
@@ -48,32 +31,21 @@ const exhaustionNotices: readonly RegExp[] = [
   /\bexceeded your (?:current )?(?:quota|usage|plan)\b/i,
 ];
 export const exhaustionTailLines = 40, exhaustionNoticeMaxLength = 240;
-/**
- * How much may stand in front of the notice on its line. Every runtime prints its banner at the
- * start, behind at most a short label — `Error: Weekly usage limit reached`, `Claude AI usage
- * limit reached|…` — while an agent writing about a limit reaches the phrase through a sentence:
- * `Added a test for the rate limit reached path`, `Tests pass; the token limit reached branch is
- * covered.` Two words of label admits every banner the runtimes print and no sentence. Without it
- * the last summary line of a worker that had just finished this very item would end its lease,
- * commit its work as interrupted and hold its account for an hour.
- */
+/** Label words before a banner on its line (2 admits runtime labels, not agent sentences). */
 export const exhaustionNoticeLabelWords = 2;
 
 const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const unitMs: Record<string, number> = { d: 86_400_000, h: 3_600_000, m: 60_000, s: 1_000 };
 
-/**
- * The reset time a limit notice names, as an instant. Providers say it four ways: an absolute
- * timestamp, a Unix time after a separator, a wait ("try again in 3 days 4 hours"), or a wall
- * clock the account's own host reads ("resets 3pm", "resets Sep 26, 9am", "on 10/8"). A wall
- * clock is read in the host's zone, and a time of day already past means tomorrow's. Anything
- * else is unknown, and an unknown reset is recorded as unknown rather than guessed.
- */
+/** Reset instant from a notice (ISO, unix, wait, or wall clock; zone in parentheses — GY-1566). */
 export function parseResetTime(text: string, now: number): string | null {
   const iso = /\b(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)\s*(Z|UTC|[+-]\d{2}:?\d{2})?/i.exec(text);
   if (iso) {
     const zone = !iso[3] ? '' : /^(?:z|utc)$/i.test(iso[3]) ? 'Z' : iso[3];
-    const parsed = Date.parse(`${iso[1]}T${iso[2]}${zone}`);
+    // A zone-less timestamp beside a named zone (`2026-10-10 22:00 (America/Los_Angeles)`) is that zone's wall clock.
+    const named = zone ? null : namedZone(text);
+    const wall = Date.parse(`${iso[1]}T${iso[2]}${named ? 'Z' : zone}`);
+    const parsed = named ? wall - wallOffset(wall - wallOffset(wall, named), named) : wall;
     if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
   }
   const unix = /(?:\||reset[s_ ]*(?:at)?[=: ]+)\s*(\d{10})\b/i.exec(text);
@@ -86,7 +58,16 @@ export function parseResetTime(text: string, now: number): string | null {
   }
   const clause = /\b(?:resets?|renews?|available again|try again)(?:\s+(?:at|on|by))?[\s:]+(.{1,60})/i.exec(text)?.[1] ?? /\bon\s+((?:\d{1,2}\/\d{1,2}|[A-Za-z]{3,9}\.?\s+\d{1,2}).{0,20})/i.exec(text)?.[1];
   if (!clause) return null;
-  const today = new Date(now);
+  const zone = namedZone(clause);
+  // The wall clock of `zone` (or the host's) at `now`, and the instant a wall-clock time there names.
+  const shift = (instant: number) => zone ? wallOffset(instant, zone) : 0;
+  const today = new Date(now + shift(now));
+  const at = (year: number, month: number, day: number, hours: number, minutes: number) => {
+    if (!zone) return new Date(year, month, day, hours, minutes);
+    const wall = Date.UTC(year, month, day, hours, minutes);
+    return new Date(wall - shift(wall - shift(wall)));
+  };
+  const parts = zone ? { year: today.getUTCFullYear(), month: today.getUTCMonth(), date: today.getUTCDate() } : { year: today.getFullYear(), month: today.getMonth(), date: today.getDate() };
   const named = /\b([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2})\b/.exec(clause), slashed = /\b(\d{1,2})\/(\d{1,2})\b/.exec(clause);
   const month = named && months.includes(named[1].toLowerCase()) ? months.indexOf(named[1].toLowerCase()) : slashed ? Number(slashed[1]) - 1 : null;
   const day = named && month !== null && !slashed ? Number(named[2]) : slashed ? Number(slashed[2]) : null;
@@ -97,23 +78,29 @@ export function parseResetTime(text: string, now: number): string | null {
     minutes = Number(clock[2] ?? 0);
   }
   if (month !== null && day !== null && month >= 0 && month < 12 && day >= 1 && day <= 31) {
-    const candidate = new Date(today.getFullYear(), month, day, hours, minutes);
     // A date already behind the notice is next year's: a limit never resets in the past.
-    if (candidate.getTime() <= now) candidate.setFullYear(candidate.getFullYear() + 1);
-    return candidate.toISOString();
+    const candidate = at(parts.year, month, day, hours, minutes);
+    return (candidate.getTime() <= now ? at(parts.year + 1, month, day, hours, minutes) : candidate).toISOString();
   }
   if (!clock) return null;
-  const candidate = new Date(today.getFullYear(), today.getMonth(), today.getDate(), hours, minutes);
-  if (candidate.getTime() <= now) candidate.setDate(candidate.getDate() + 1);
-  return candidate.toISOString();
+  const candidate = at(parts.year, parts.month, parts.date, hours, minutes);
+  return (candidate.getTime() <= now ? at(parts.year, parts.month, parts.date + 1, hours, minutes) : candidate).toISOString();
 }
 
-/**
- * A runtime's own retry marker beside a limit notice (GY-973): OpenCode 1.18 does not stop on a
- * spent account, it prints `Weekly/Monthly Limit Exhausted. … [retrying in 4s attempt #5]` and
- * retries forever, so its host keeps reporting the session as working. The marker is the runtime
- * speaking, not the agent: an agent's prose never carries an attempt counter in brackets.
- */
+/** The IANA zone a notice names in parentheses, such as `(America/Los_Angeles)`, when the runtime knows it. */
+function namedZone(text: string): string | null {
+  const zone = /\(\s*([A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+|UTC)\s*\)/.exec(text)?.[1];
+  if (!zone) return null;
+  try { new Intl.DateTimeFormat('en-US', { timeZone: zone }); return zone; } catch { return null; }
+}
+/** How far `zone`'s wall clock runs ahead of UTC at `instant`, in milliseconds. */
+function wallOffset(instant: number, zone: string): number {
+  const fields = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: zone, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' })
+    .formatToParts(new Date(instant)).filter(part => part.type !== 'literal').map(part => [part.type, Number(part.value)]));
+  return Date.UTC(fields.year, fields.month - 1, fields.day, fields.hour, fields.minute, fields.second) - Math.floor(instant / 1000) * 1000;
+}
+
+/** Runtime retry marker beside a limit notice (GY-973); agent prose never carries this. */
 const retryMarker = /\[\s*retrying\b[^\]]*\]|\bretrying in \d+(?:\.\d+)?\s*(?:ms|s|m|h)?\b[^\n]*?\battempt\s*#?\d+/i;
 
 function findExhaustion(output: string, now: number, retrying: boolean): ExhaustionSignal | null {
@@ -133,46 +120,83 @@ function findExhaustion(output: string, now: number, retrying: boolean): Exhaust
   return null;
 }
 
-/**
- * Whether the tail of a stopped session's output is its provider saying the account is spent.
- * Only the last lines are read — a notice the session has long since worked past is history —
- * the notice must lead its line rather than sit inside a sentence the session wrote, and the
- * reset time is looked for on the notice and the two lines after it, where the runtimes that
- * split the sentence put it.
- */
+/** Tail of a stopped session: provider says the account is spent (lead-of-line, last lines only). */
 export function detectExhaustion(output: string, now: number): ExhaustionSignal | null {
   return findExhaustion(output, now, false);
 }
-
-/**
- * Whether a session its host still reports as working is in fact stuck on a spent account: its
- * screen tail carries a limit notice together with its runtime's retry marker. A working
- * session's notice without that marker is only text it printed, and is left alone. The notices are
- * the generic ones, not the session's runtime catalog (GY-1223 kept this deliberately): a profile's
- * `kind` need not be the runtime its selected account runs — a claude-kind profile may launch an
- * OpenCode account — so a per-runtime catalog would miss the very banner this path exists for. The
- * bracketed attempt counter, the tail, and the lead-of-line rule are the guards against agent prose.
- */
+/** Working session stuck on a spent account: limit notice plus runtime retry marker (GY-1223). */
 export function detectRetryingExhaustion(output: string, now: number): ExhaustionSignal | null {
   return findExhaustion(output, now, true);
 }
-
-/**
- * A 429 the provider answered with: leading the error (`429: {…}`, `429 Too Many Requests`, `API Error: 429 {…}`) or
- * named as its status (`HTTP 429`, `status 429`, `status code: 429`, `"code":429`). A 429 inside an
- * id or an echoed body is not the provider's answer, and a real failure must not become a wait (GY-1245).
- */
+/** Leading or status-named 429; not a 429 inside an id or echoed body (GY-1245). */
 const providerStatus429 = /^(?:(?:\w+\s+)?error:?\s*)?429\b(?![\d.])|\b(?:http(?:\/[\d.]+)?|status(?:\s*code)?|code)["']?\s*[:=]?\s*["']?429\b(?![\d.])/i;
-/**
- * Whether the error a headless run ended on is its provider refusing for quota or rate (GY-1092):
- * an HTTP 429, or any of the limit notices above. The text is the provider's own error — Pi's last
- * `errorMessage` or a runtime's stderr, never the agent's prose — so the notice may sit anywhere in
- * it (`429: {"message":"Weekly/Monthly Limit Exhausted. Your limit will reset at …"}`).
- */
+/** Provider quota/rate refusal in a headless error (GY-1092); never agent prose. */
 export function providerLimit(error: string, now: number): ExhaustionSignal | null {
   const text = error.replace(/\s+/g, ' ').trim();
   if (!text || !(providerStatus429.test(text) || /\btoo many requests\b/i.test(text) || exhaustionNotices.some(notice => notice.test(text)))) return null;
   return { reason: text.slice(0, 300), resetsAt: parseResetTime(text, now) };
+}
+
+/** GY-1705 silent `done` pane (still untouched / no reader): assumed-reset hold. Idle is not this. */
+export const silentPaneExhaustionReason =
+  'session ended without working, without an outcome and without a readable provider limit notice; account treated as spent until an assumed reset';
+export function silentPaneExhaustion(input: {
+  listed: boolean; everWorking: boolean; hasOutcome: boolean; notice: ExhaustionSignal | null;
+  pastStartBound: boolean; ended: boolean;
+}): ExhaustionSignal | null {
+  if (!input.listed || !input.ended || input.everWorking || input.hasOutcome || input.notice || !input.pastStartBound) return null;
+  return { reason: silentPaneExhaustionReason, resetsAt: null };
+}
+
+/** Headless run event for limit detection (GY-1705); only string errors are limit text. */
+export type LimitRunEvent = { kind: string; error?: string | boolean | null; text?: string };
+export function runTimeoutLimit(events: readonly LimitRunEvent[], detail: string, now: number): ExhaustionSignal | null {
+  const texts: string[] = [];
+  for (const event of events) {
+    if ((event.kind === 'retry' || event.kind === 'message') && typeof event.error === 'string') texts.push(event.error);
+    if (event.kind === 'stderr' && event.text) texts.push(event.text);
+  }
+  if (detail) texts.push(detail);
+  for (const text of texts) { const signal = providerLimit(text, now); if (signal) return signal; }
+  return null;
+}
+/**
+ * GY-1705: last reason + earliest reset for the round wait; hold every named account whose own
+ * attempt printed a limit (a later null-account Pi fallback must not clear a registry primary).
+ */
+export function headlessTimeoutLimitCharge(
+  attempts: readonly { result: string; detail: string; events?: readonly LimitRunEvent[] | readonly { kind: string; error?: string | null; text?: string }[]; account?: string | null }[],
+  now: number,
+): { limit: ExhaustionSignal; account: string | null; holds: { account: string; limit: ExhaustionSignal }[] } | null {
+  const started = attempts.filter(a => a.result !== 'spawn' && a.result !== 'cancelled');
+  if (!started.length || !started.every(a => a.result === 'timeout')) return null;
+  const holds: { account: string; limit: ExhaustionSignal }[] = [], signals: ExhaustionSignal[] = [];
+  for (const a of started) {
+    const signal = runTimeoutLimit(a.events ?? [], a.detail, now);
+    if (!signal) continue;
+    signals.push(signal);
+    if (a.account) holds.push({ account: a.account, limit: signal });
+  }
+  if (!signals.length) return null;
+  return {
+    limit: { reason: signals.at(-1)!.reason, resetsAt: signals.map(e => e.resetsAt).filter((at): at is string => !!at).sort()[0] ?? null },
+    account: holds.at(-1)?.account ?? null, holds,
+  };
+}
+/** All-timeout round with any readable limit (delegates to the charge helper). */
+export function headlessTimeoutLimit(
+  attempts: readonly { result: string; detail: string; events?: readonly LimitRunEvent[] | readonly { kind: string; error?: string | null; text?: string }[] }[],
+  now: number,
+): ExhaustionSignal | null {
+  return headlessTimeoutLimitCharge(attempts, now)?.limit ?? null;
+}
+export const doctorLimitUntilMarker = 'provider limit until ';
+export function doctorLimitRetryAt(runs: readonly { state: string; detail: string }[], clock: number): string | null {
+  const last = runs.at(-1);
+  if (!last || last.state === 'running') return null;
+  const until = last.detail.includes(doctorLimitUntilMarker)
+    ? last.detail.slice(last.detail.indexOf(doctorLimitUntilMarker) + doctorLimitUntilMarker.length).split(/[\s;]/)[0] : null;
+  return until && Date.parse(until) > clock ? until : null;
 }
 
 /** How an interrupted attempt's uncommitted work was kept, or that there was none to keep. */
@@ -190,11 +214,7 @@ export type PartialWork = z.infer<typeof partialWorkSchema>;
 export const blockedAttemptMarker = 'blocked on epoch ';
 
 const instant = z.iso.datetime();
-/**
- * Why an attempt ended early. `quota` (the default) is the provider limit notice the record was
- * made for; `interrupted` is a worker killed outright or gone without submitting (GY-105), which
- * keeps its partial work the same way and is written to history as `capacity.interrupted`.
- */
+/** Early end: `quota` (default) or `interrupted` (killed/gone without submit; GY-105). */
 export const attemptEndCauses = ['quota', 'interrupted'] as const;
 export const exhaustionReportSchema = z.object({
   event: z.literal('exhausted'),
@@ -261,4 +281,39 @@ export function describeCapacity(role: CapacityRole, accounts: readonly Capacity
 }
 export function standingCapacity(work: { capacity?: CapacityState | null }, role?: CapacityRole): CapacityEscalation[] {
   return (work.capacity?.escalations ?? []).filter(entry => !role || entry.role === role);
+}
+
+type AttemptWork = { capacity?: CapacityState | null; pipeline?: { attempts?: readonly { epoch: number; end: string | null }[] } | null };
+/** GY-1708: one epoch's exhaustion/attempt counts after mid-attempt limit (double-count shows as two rows). */
+export function workerAttemptLedger(work: AttemptWork, epoch: number) {
+  const exhaustions = (work.capacity?.exhaustions ?? []).filter(e => e.role === 'worker' && e.epoch === epoch);
+  const attempts = (work.pipeline?.attempts ?? []).filter(e => e.epoch === epoch);
+  return {
+    exhaustions: exhaustions.length, attempts: attempts.length,
+    released: attempts.filter(e => e.end === 'released').length,
+    open: attempts.filter(e => e.end === null).length,
+    preservedCommit: exhaustions.find(e => e.partialWork.state === 'committed')?.partialWork.commit ?? null,
+  };
+}
+/** GY-1708: spent epoch ended once with partial work kept for the redispatch's next epoch. */
+export function redispatchPreservesAttempt(work: AttemptWork, spentEpoch: number): { ok: boolean; detail: string } {
+  const ledger = workerAttemptLedger(work, spentEpoch);
+  if (ledger.exhaustions !== 1) return { ok: false, detail: `expected one exhaustion for epoch ${spentEpoch}, found ${ledger.exhaustions}` };
+  if (ledger.attempts !== 1) return { ok: false, detail: `expected one attempt row for epoch ${spentEpoch}, found ${ledger.attempts}` };
+  if (ledger.released !== 1 || ledger.open !== 0) return { ok: false, detail: `epoch ${spentEpoch} must be released once, not left open or double-ended` };
+  const exhaustion = (work.capacity?.exhaustions ?? []).find(e => e.role === 'worker' && e.epoch === spentEpoch)!;
+  if (exhaustion.partialWork.state === 'committed' && !exhaustion.partialWork.commit) return { ok: false, detail: 'committed partial work must name its commit' };
+  return {
+    ok: true,
+    detail: exhaustion.partialWork.state === 'committed'
+      ? `epoch ${spentEpoch} ended once; work kept at ${exhaustion.partialWork.commit}`
+      : `epoch ${spentEpoch} ended once; partial work ${exhaustion.partialWork.state}`,
+  };
+}
+/** GY-1708: held account is not selectable for the same role until reset (null reset = still held). */
+export function accountHeldForRole(held: Record<string, { until?: string; resetsAt?: string | null }>, account: string, now: number): boolean {
+  const entry = held[account];
+  if (!entry) return false;
+  const until = entry.until ?? entry.resetsAt;
+  return !until || Date.parse(until) > now;
 }

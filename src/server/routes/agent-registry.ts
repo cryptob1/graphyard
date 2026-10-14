@@ -27,6 +27,7 @@ export const agentRegistryRoutes = defineRoutes('agent-registry', [
   { method: 'GET', path: '/api/agent-registry/history', handle: ({ actor, url, services }) => services.agentRegistry.history(actor, Number(url.searchParams.get('limit') ?? 100)) },
   { method: 'POST', path: '/api/agent-registry/apply', handle: async context => context.services.agentRegistry.mutate(context.actor, 'apply', await parseJson(context), context.idempotencyKey()) },
   { method: 'POST', path: '/api/agent-registry/select', handle: async context => context.services.agentRegistry.select(context.actor, await parseJson(context), context.idempotencyKey()) },
+  { method: 'POST', path: '/api/agent-registry/observe', handle: async context => context.services.agentRegistry.observe(context.actor, await parseJson(context), context.idempotencyKey()) },
   {
     method: 'POST', path: /^\/api\/agent-registry\/sessions\/([0-9a-f-]{36})\/end$/,
     handle: async (context, [id]) => context.services.agentRegistry.endSession(context.actor, id, await parseJson(context), context.idempotencyKey()),
@@ -273,7 +274,7 @@ function connectAccountRoutes(): import('../routes.js').Route[] {
         // appended to its own research configuration, never a placement the fleet cannot launch.
         const result = resultSchema.parse(data);
         const provider = connectProvider(connect.provider)!;
-        const placement = connectDefaultRoles(provider.tier).filter(role => role !== 'research' || (provider.tier === 'fast' && result.research === true));
+        const placement = connectDefaultRoles(provider.tier, provider.runtime).filter(role => role !== 'research' || (provider.tier === 'fast' && result.research === true));
         demand(result.state !== 'healthy' || !!result.name && !!result.home, 'A healthy connect names the account and its login home', 400);
         await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, `${connectEventPrefix}result`, JSON.stringify({ connect: { id, at, state: result.state, name: result.name, home: result.home, error: result.error, placement } })]);
         if (result.state === 'failed') return { id, state: 'failed' as const, error: result.error };

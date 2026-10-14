@@ -15,6 +15,7 @@ import WorkDetails, { useOpenedWork } from './pages/work-details';
 import CreateWork from './pages/create-work';
 import { readsFlowAnalytics, useStepMoves } from './step-moves';
 import { initialView } from './pages/setup';
+import { idempotencyKey } from './idempotency-key';
 
 /**
  * The dashboard shell: session state, polling, the sidebar generated from the view
@@ -41,7 +42,7 @@ function App() {
   const [editingRequirements, setEditingRequirements] = useState(false);
   const [query, setQuery] = useState('');
   async function api(path: string, data?: unknown) {
-    const response = await fetch(`/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() }, body: data === undefined ? undefined : JSON.stringify(data) });
+    const response = await fetch(`/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey() }, body: data === undefined ? undefined : JSON.stringify(data) });
     const body = await response.json(); if (!response.ok) throw new Error(body.error + (body.issues ? `: ${body.issues.map((i: any) => i.message).join(', ')}` : '')); return body;
   }
   function signOut() { sessionEpoch.current++; setBusy(false); sessionStorage.removeItem('graphyard-token'); setToken(''); setDraftToken(''); setStatus(null); setBoard(null); setWork([]); setJobs([]); setView('work'); setEditingRequirements(false); setObservedAt(Number.NaN); setSelected(null); setEvents([]); setCreating(false); setConnected(false); setLastUpdated(null); setError(''); }

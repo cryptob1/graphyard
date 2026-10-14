@@ -1,7 +1,9 @@
 // Concern: cycle step 2 — decide open scope requests and measure the decision budget.
 import type { Work } from '../model.js';
 import { type ScopeRequestState, companionGround, decideScopeRequest, itemDocumentationPaths, pathScope, pathScopeContains, pinningTestGround, plannedFilesMax, redecidableScopeRefusal, routableScopeRequest, scopeDecisionBinding, testFile, unplannedPaths } from '../model/scope.js';
-import { importingTestGround, newProofTestGround, peerModuleGround } from '../model/scope-companions.js';
+import { importingTestGround, newProofTestGround, peerModuleGround, testCompanionGate, verificationMapFile, verificationMapGround } from '../model/scope-companions.js';
+import { parseVerificationMap } from '../model/verification-maps.js';
+import { type NonRepositoryPath, nonRepositoryPaths } from '../model/scope-repository.js';
 import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import { groundedWideningReason } from '../model/scope-provenance.js';
 import { barrelSuccessorGround, criterionSymbolGround, criterionSymbols, criterionTestGround, phraseCallees } from '../model/criterion-scope.js';
@@ -9,13 +11,15 @@ import { type Successor, successorGround, successorsOf } from '../model/successo
 import { findingScope, type ReviewFinding } from '../review-scope.js';
 import { guardBroadScope } from '../master.js';
 import { RefusedResponse } from '../model/refusal.js';
+import { ChildProcessError } from '../child-runner.js';
 import { message, scopeMeasurementSchema } from './state.js';
 import { scopeKey } from './reconcile.js';
-import { scopeBudget } from './metrics.js';
+import { discoverHeldScopeAskMarks, scopeBudget, syncHeldScopeAskMarks } from './metrics.js';
 import { readyToRetry } from './sessions.js';
 import { boundDetail, detailChanged, namePaths } from './decisions.js';
 import { findingRecheckMs, record } from './effects.js';
 import type { Cycle } from './cycle.js';
+import type { MergerMode } from '../merger-mode.js';
 
 /** A requested path the loop grants without an approver, and the audited ground it stands on; `companion` marks a GY-955 companion. */
 export interface ScopeGround { path: string; ground: string; companion?: boolean }
@@ -36,8 +40,13 @@ export interface ScopeGround { path: string; ground: string; companion?: boolean
  * engine's rule implies on its own (a criterion names it, documentation, a companion such as the
  * docs-budget gate beside a documentation path) is granted here too, and so are the companions only
  * the base can ground: a test importing a module a planned file is or re-exports
- * (importingTestGround), and a new test file the criteria's unit proofs need when no base file holds
- * them (newProofTestGround, searched by `held`).
+ * (importingTestGround), a new test file the criteria's unit proofs need when no base file holds
+ * them (newProofTestGround, searched by `held`), and the verification map whose Paths line covers a
+ * planned file or a test this same request grants (GY-1783, verificationMapGround: the maps are judged
+ * after every other path of the request, on what the rules granted on a ground of its own, never on
+ * the raw ask and never on a gate the engine grants as the companion of a test in the raw ask — a
+ * refused test cannot reach a map through the wall-clock gate it drags in — and only for a map the
+ * base holds whole, as parseVerificationMap reads it).
  */
 export async function automaticScopeGrounds(item: Work, request: ScopeRequestState, paths: readonly string[], findings: readonly ReviewFinding[], exists: (path: string) => boolean, read?: (path: string) => Promise<string | null>, successors?: () => Promise<readonly Successor[]>, mentions?: (identifier: string) => Promise<number>, held?: (proof: string) => Promise<number>): Promise<{ grounds: ScopeGround[] } | { grounds?: ScopeGround[]; refusal: string }> {
   const grounds: ScopeGround[] = [], refusals: string[] = [];
@@ -46,7 +55,9 @@ export async function automaticScopeGrounds(item: Work, request: ScopeRequestSta
   const symbols = criterionSymbols(item.criteria);
   const searched = new Map<string, number>();
   const documentation = itemDocumentationPaths(item);
-  for (const path of paths) {
+  // The verification maps last: their ground may be a test the rules grant earlier in this request.
+  const ordered = [...paths.filter(path => !verificationMapFile(path)), ...paths.filter(verificationMapFile)];
+  for (const path of ordered) {
     const named = findingScope([path], findings, exists);
     if ('grounds' in named) { grounds.push(...named.grounds); continue; }
     const implied = decideScopeRequest(item, { paths: [path] });
@@ -65,6 +76,8 @@ export async function automaticScopeGrounds(item: Work, request: ScopeRequestSta
     if (read && !pathScope(path).prefix && !path.includes('*') && exists(path)) {
       planned ??= await Promise.all((item.plannedFiles ?? []).filter(scope => !pathScope(scope).prefix && !scope.includes('*')).slice(0, 50).map(async scope => ({ path: scope, text: await read(scope) })));
       const text = await read(path);
+      const map = text !== null && parseVerificationMap(path, text) ? verificationMapGround(path, text, item, grounds.filter(entry => !testCompanionGate(entry.path)).map(entry => entry.path)) : null;
+      if (map) { grounds.push({ path, ground: map, companion: true }); continue; }
       const barrel = barrelSuccessorGround(path, planned);
       if (barrel) { grounds.push({ path, ground: barrel }); continue; }
       const pinning = testFile(path) ? pinningTestGround(path, request.reason, text, planned) ?? criterionTestGround(path, text, symbols) : null;
@@ -83,9 +96,30 @@ export async function automaticScopeGrounds(item: Work, request: ScopeRequestSta
   return grounds.length ? { grounds, refusal: refusals.join('; ') } : { refusal: refusals.join('; ') };
 }
 
+/** The merger each loop state last read, so a failed read keeps the known mode (GY-1528). */
+const knownMerger = new WeakMap<object, MergerMode>();
+/**
+ * GY-1528. Whether the scope actions are off this cycle: the recorded merger is `control-plane`,
+ * read as the merge writer step reads it. Nothing is refused on plannedFiles then, so the loop
+ * raises, decides and widens no scope request and re-plans nothing. No merge writer reads keeps
+ * GitHub's behaviour. A read that fails keeps the mode this loop last read; with none read yet it
+ * fails closed, and the scope actions wait for a cycle whose read succeeds, so a transient status
+ * error never raises a scope request under the control plane.
+ */
+export async function controlPlaneMerger(cycle: Pick<Cycle, 'effects' | 'state'>): Promise<boolean> {
+  const reads = cycle.effects.mergeWriter;
+  if (!reads) return false;
+  try {
+    const mode = await reads.merger();
+    knownMerger.set(cycle.state, mode);
+    return mode === 'control-plane';
+  } catch { return knownMerger.get(cycle.state) !== 'github'; }
+}
+
 /** Step 2: decide the open scope requests, and measure the decision budget over what is still waiting. */
 export async function scopeStep(cycle: Cycle) {
   const { state, effects, now, clock, performed, isolate, open } = cycle;
+  if (await controlPlaneMerger(cycle)) return { settled: new Map<string, Work>(), budget: scopeBudget([], state.scope, clock) };
   // 2. Decide the open scope requests. A worker that needs a file its own criteria — or this
   //    repository's documentation rule — already imply must not wait for a master session to run
   //    a command: the control plane recomputes the decision from the item itself, and the loop
@@ -109,7 +143,7 @@ export async function scopeStep(cycle: Cycle) {
   // What an automatic widening stood on, in the audit detail: the grounds it actually used.
   const widenedOn = (grounds: ScopeGround[], count: number): string => {
     const kinds = new Set(grounds.map(entry => entry.companion ? 'companion' : entry.ground.startsWith('successor of ') ? 'successor' : /^review /.test(entry.ground) ? 'finding' : 'criteria'));
-    if (kinds.size === 1 && kinds.has('companion')) return `the companions the change inevitably carries: what the item implies, a test importing a planned module, a peer module a planned file imports or that imports it, the test its proofs live in or the docs-budget gate`;
+    if (kinds.size === 1 && kinds.has('companion')) return `the companions the change inevitably carries: what the item implies, a test importing a planned module, a peer module a planned file imports or that imports it, the test its proofs live in, the verification map whose Paths cover a planned file or the docs-budget gate`;
     if (kinds.size === 1 && kinds.has('successor')) return `the base branch's split or rename of a planned file`;
     if (kinds.size === 1 && kinds.has('finding')) return `the review finding that names ${count === 1 ? 'it' : 'them'}`;
     if (kinds.size === 1) return `what the item's criteria name: a symbol a file defines or calls, or text a test pins`;
@@ -117,6 +151,8 @@ export async function scopeStep(cycle: Cycle) {
   };
   const widenOnFindings = async (item: Work, request: ScopeRequestState): Promise<string | null> => {
     if (!(effects.reviewFindings || effects.baseSuccessions || effects.baseText) || !effects.widenScope || request.remove?.length || request.criteria?.length) return null;
+    // GY-1764: a terminal non-repository refusal is never widened on a finding, a successor or a criterion.
+    if (request.decision?.nonRepository) return null;
     if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock) return null;
     const paths = (request.decision?.paths?.length ? request.decision.paths : request.paths).filter(path => !(item.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
     if (!paths.length) return null;
@@ -201,15 +237,30 @@ export async function scopeStep(cycle: Cycle) {
       return null;
     }
   };
+  // GY-1764: the evidence gate. The base branch's tracked files are read once per cycle, only when an
+  // ask is open, outside every transaction; a failed read leaves the ask to the rules as before.
+  // A failed read decides nothing: the ask waits for the next cycle's read, never for the rules alone, so a missing read cannot make it an approver decision.
+  let tree: Promise<ReadonlySet<string> | null> | null = null;
+  const offending = async (item: Work, request: ScopeRequestState): Promise<NonRepositoryPath[] | null> => {
+    if (!effects.repositoryFiles) return [];
+    tree ??= effects.repositoryFiles().catch(() => null);
+    const files = await tree;
+    return files ? nonRepositoryPaths(unplannedPaths(item.plannedFiles, request.paths), files) : null;
+  };
   for (const item of open) await isolate('scope', item, item.key, async () => {
     const request = item.scopeRequest;
+    // A refusal the rule gave without the tree, or a fresh ask, naming no repository file is refused for that (never routed).
+    const needsTree = !!request && !request.remove?.length && !request.criteria?.length && (!request.decision || request.decision.state === 'refused' && request.decision.decidedBy === 'graphyard' && !request.decision.treeRead);
+    const read = needsTree ? await offending(item, request!) : [];
+    if (read === null) return;
+    const gated = read;
     // A refusal is reconsidered only when the rules as they stand now would approve it — once per
     // policy revision of the item, backing off on failure — so a standing refusal never churns.
-    const redecide = !!request?.decision && redecidableScopeRefusal(item);
+    const redecide = !!request?.decision && (redecidableScopeRefusal(item) || needsTree && !!effects.repositoryFiles);
     if (request?.decision?.state === 'refused' && !redecide) { await widenOnFindings(item, request); return; }
     if (!effects.decideScope || !request || (request.decision && !redecide)) return;
     // A request whose attempt no longer holds the lease is moot: a fresh attempt asks afresh.
-    if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock) return;
+    if (!(needsTree && effects.repositoryFiles && request.decision) && (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock)) return;
     // One decider per request (GY-955): while an executor holds the control plane's approve-scope
     // row for it, that executor is the decider and the loop reads the outcome on a later cycle. A
     // row nobody has claimed is the loop's to answer, so a fleet serving no approve-scope never waits.
@@ -221,7 +272,7 @@ export async function scopeStep(cycle: Cycle) {
     await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'started',
       detail: `Deciding ${item.key}'s scope request for ${request.paths.length ? namePaths(request.paths) : 'no path'}`, attempts, cycle: state.cycle }, now(), effects.persist);
     try {
-      const decided = await effects.decideScope(item);
+      const decided = await effects.decideScope(item, gated, true);
       const decision = decided.scopeDecision;
       if (!decision) throw new Error('The control plane answered without a decision');
       settled.set(item.id, decided);
@@ -267,7 +318,13 @@ export async function scopeStep(cycle: Cycle) {
   // 2b. The promise that decision rests on: workers wait minutes, not a shift. A p90 above the
   //     budget, or any request left undecided past the blocked bound, is escalated with the
   //     numbers — the loop is the only thing that could have answered them.
-  const budget = scopeBudget(open.map(item => settled.get(item.id) ?? item), state.scope, clock, !!effects.decide && !!effects.approver);
+  // GY-1702: sync watches, then discover history-held matches before measuring (scope runs before
+  // decisions; a cold start has no approval watch yet for an already-held quarantined ask).
+  const waiting = open.map(item => settled.get(item.id) ?? item);
+  const routes = !!effects.decide && !!effects.approver;
+  syncHeldScopeAskMarks(state.scope, Object.values(state.approvals));
+  await discoverHeldScopeAskMarks(state.scope, waiting, clock, routes, effects.decisions);
+  const budget = scopeBudget(waiting, state.scope, clock, routes, state.approvals);
   for (const breach of budget.breaches) {
     const key = `escalation:scope-budget:${breach.id}`;
     if (!detailChanged(state.actions[key], breach.detail)) continue;
@@ -304,7 +361,7 @@ const baseSuccessors = (effects: Cycle['effects'], item: Work) => effects.baseSu
  */
 export async function successorStep(cycle: Cycle, settled: ReadonlyMap<string, Work> = new Map()) {
   const { state, effects, now, performed, isolate, open } = cycle;
-  if (!effects.baseSuccessions || !effects.replan) return;
+  if (!effects.baseSuccessions || !effects.replan || await controlPlaneMerger(cycle)) return;
   // An item the scope step revised this cycle is re-planned from that revision, never from the
   // snapshot it outdated: the stale revision would be refused, not applied (GY-1235, GY-1293).
   for (const read of open) await isolate('scope', read, read.key, async () => {
@@ -353,7 +410,20 @@ const transientScopeRetry = 'so it is retried next cycle on a fresh read';
 export function transientScopeRefusal(error: unknown): string | null {
   if (error instanceof RefusedResponse && error.status >= 500) return 'the control plane answered 5xx';
   if (/Policy revision changed; reload before revising/.test(message(error))) return 'the item moved past the revision the loop read';
+  if (!(error instanceof RefusedResponse) && transportFailure(error)) return 'the call failed in transport: a timeout, a network error or a gh rate limit';
   return null;
+}
+/**
+ * GY-1757. True for a failure of the call itself, which judged nothing about the item's scope: a
+ * control-plane fetch aborted on timeout, a network error, or a gh CLI call that failed (rate limit
+ * or network). A refusal the plane answered is never one.
+ */
+function transportFailure(error: unknown): boolean {
+  const name = error instanceof Error ? error.name : '';
+  const text = message(error);
+  if (name === 'TimeoutError' || name === 'AbortError' || (error instanceof ChildProcessError && error.timedOut && error.command === 'gh')) return true;
+  if (/The operation was aborted|operation timed out|fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(text)) return true;
+  return /^Command failed: gh /.test(text) && /rate limit|timeout|timed out|connection|network|could not resolve|HTTP 5\d\d|EOF/i.test(text);
 }
 /** What a widening refused for an ask no longer open says, so its record reads as the handled outcome it is (GY-1348). */
 export const supersededScopeNote = 'answered, withdrawn or re-asked meanwhile; the fresh ask is judged on its own';

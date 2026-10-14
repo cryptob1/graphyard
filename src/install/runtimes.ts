@@ -2,6 +2,7 @@ import { access, constants } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import type { Transport } from './transport.js';
+import { herdrViaEnv } from '../master/herdr.js';
 
 export interface RuntimeDescriptor { kind: string; program: string; credentials: string[]; environment?: Record<string, string> }
 
@@ -74,6 +75,7 @@ export interface HerdrState { available: boolean; version: string | null; reason
 export async function detectHerdr(transport: Transport): Promise<HerdrState> {
   const located = await locate(transport, 'herdr');
   if (located.code !== 0 || !located.stdout.trim()) return { available: false, version: null, reason: 'herdr is not on PATH; Graphyard runs without it and workers start from the CLI' };
-  const version = await transport.exec('herdr', ['--version'], { allowFailure: true, timeout: 30_000 }).catch(() => ({ stdout: '', stderr: '', code: 1 }));
+  const probe = herdrViaEnv(['--version'], null);
+  const version = await transport.exec(probe.command, probe.args, { allowFailure: true, timeout: 30_000 }).catch(() => ({ stdout: '', stderr: '', code: 1 }));
   return { available: true, version: version.code === 0 ? version.stdout.trim().split('\n')[0] ?? null : null, reason: 'herdr is available; repository setup links and enables the Graphyard plugin' };
 }

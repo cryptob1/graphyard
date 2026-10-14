@@ -3,16 +3,24 @@
 // item through the normal two-party decision.
 import { createHash } from 'node:crypto';
 import { createSchema, type Work } from '../model.js';
-import { providerLimit, type ExhaustionSignal } from '../model/capacity.js';
+import { headlessTimeoutLimitCharge, providerLimit, type ExhaustionSignal, type LimitRunEvent } from '../model/capacity.js';
 import { isClosed } from '../model/closure.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import { closesFaultClass, faultClassMeaning, openFaultClassItem, type FaultClass, type FaultInstance, type FaultKind } from '../model/fault-classes.js';
-import { guardBroadScope } from '../master/autonomy.js';
-import { diagnosisPayloadSchema, diagnosisSettled, graphyardTools, type DiagnosisPayload, type DiagnosisRecord, type DiagnosticianSettings } from '../runner/payloads.js';
+import { derivePlannedFiles, plannedFilesRefusal, scopeExists, type PlannedFilesDerivation } from '../model/planned-files.js';
+import { namedPaths } from '../model/scope.js';
+import { decisionInput, guardBroadScope } from '../master/autonomy.js';
+import type { MasterConfig } from '../master/profiles.js';
+import { recordEnvironmentLog, selectionKey } from '../master/environments.js';
+import { baseTree } from '../cli/planned-files-intent.js';
+import { diagnosisPayloadSchema, diagnosisSettled, diagnosticianSettings, graphyardTools, type DiagnosisPayload, type DiagnosisRecord, type DiagnosticianSettings } from '../runner/payloads.js';
+import { piRunner } from '../runner/pi.js';
+import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import type { Runner } from '../runner/types.js';
 import { type DaemonAction, type DaemonState, message } from './state.js';
-import { record } from './effects.js';
-import { maxDecisionRequests } from './decisions.js';
+import { record, selectDiagnosticianFleet } from './effects.js';
+import { createRefused } from './doctor.js';
+import { adoptedOnRefusal, maxDecisionRequests, standingNamedIn } from './decisions.js';
 import type { Cycle } from './cycle.js';
 
 // ---------------------------------------------------------------------------
@@ -75,12 +83,18 @@ export function standingFaultClassItem(work: readonly Work[], faultClass: FaultC
 export interface DiagnosisSubject { id: string; kind: 'recurring' | 'invariant'; faultClass: FaultClass; work: Work | null; instances: FaultInstance[] }
 /** What the diagnostician reads beside the repository: the excerpts, bounded, and the named pull requests' state. */
 export interface DiagnosisContext { journal: string[]; serverLog: string[]; pullRequests: { number: number; state: unknown }[] }
-/** The runner one attempt uses, what it runs on, and how its registry session (if any) is ended. */
-export interface DiagnosticianRun { runner: Runner; runtime: string; model: string; release?: (reason: string) => Promise<unknown> }
+/** The runner one attempt uses, what it runs on, the registry account it launched on (GY-1705), and how its registry session (if any) is ended. */
+export interface DiagnosticianRun { runner: Runner; runtime: string; model: string; account?: string | null; release?: (reason: string) => Promise<unknown> }
 export interface DiagnosticianEffects {
   settings: DiagnosticianSettings;
   /** The repository checkout the diagnostician reads: the loop's own. */
   cwd: string;
+  /**
+   * The base branch's tree the fix item's plannedFiles resolve against before filing (GY-1707).
+   * Absent, the loop reads `cwd` the way `master create` does (`baseTree`); an unreadable checkout
+   * fails the same way. Fix-producing fixtures supply this effect rather than inventing a tree.
+   */
+  tree?: (baseBranch: string) => Promise<{ ref: string; files: Set<string> }>;
   /** The primary run's runner (the registry's role, else Pi on `model`), or the fallback's (Pi on `fallbackModel`). */
   runner: (attempt: 'primary' | 'fallback', subject: DiagnosisSubject) => Promise<DiagnosticianRun>;
   /** The loop journal and server log excerpts and the GitHub state of the named pull requests. */
@@ -92,8 +106,45 @@ export interface DiagnosticianEffects {
 }
 export type FixInput = ReturnType<typeof createSchema.parse> & { reason: string };
 
-/** `limit`: every run ended on its provider's quota or rate limit — the earliest known reset among them. */
-interface Outcome { runs: DiagnosisRecord['runs']; diagnosis: DiagnosisPayload | null; limit?: ExhaustionSignal | null }
+/** One call as the master's operator-agent identity, as `daemonEffects` wires it. */
+export type DiagnosticianPost = (method: 'GET' | 'POST', path: string, body?: unknown, key?: string) => Promise<unknown>;
+/**
+ * The diagnostician's effects under the live configuration (GY-439, GY-1705). Its first run takes
+ * the registry's diagnostician role when an operator defines one, else Pi on `run.diagnostician.model`;
+ * the fallback run is Pi on the stronger `fallbackModel`. The registry account is returned with the
+ * runner so a limit hold charges the selection, never a nominal profile.
+ */
+export const diagnosticianEffects = (config: MasterConfig, root: string, post: DiagnosticianPost, run: (command: string, args: string[]) => string | Promise<unknown>): DiagnosticianEffects => {
+  const settings = diagnosticianSettings(config.run);
+  const lines = async (command: string[]) => String(await run(command[0], command.slice(1))).split('\n');
+  return {
+    settings, cwd: root,
+    runner: async (attempt, subject) => {
+      if (attempt === 'primary') {
+        const fleet = await selectDiagnosticianFleet(config, subject.work?.key);
+        if (fleet) {
+          const launch = registryHeadlessLaunch(fleet.account);
+          await recordEnvironmentLog(config, fleet.health ? [fleet.health] : [], fleet.skipped, { key: selectionKey('diagnostician', diagnosticianRole), environment: fleet.account.name, kind: fleet.account.kind, at: new Date().toISOString(), work: subject.work?.key ?? null }).catch(() => {});
+          return { runner: registryRunner(fleet.account), runtime: launch.command, model: launch.model, account: fleet.account.name, release: fleet.release };
+        }
+      }
+      const model = attempt === 'primary' ? settings.model : settings.fallbackModel;
+      return { runner: piRunner({ command: settings.command, model }), runtime: 'pi', model, account: null };
+    },
+    context: async (_subject, numbers) => ({
+      journal: await lines(settings.journalCommand).catch(error => [`(the loop journal could not be read with ${settings.journalCommand.join(' ')}: ${message(error)})`]),
+      serverLog: settings.serverLogCommand ? await lines(settings.serverLogCommand).catch(error => [`(the server log could not be read with ${settings.serverLogCommand!.join(' ')}: ${message(error)})`])
+        : ['(no run.diagnostician.serverLogCommand is configured, so no server log excerpt was read)'],
+      pullRequests: await Promise.all(numbers.map(async number => ({ number, state: await Promise.resolve(run('gh', ['pr', 'view', String(number), '--repo', config.repository, '--json', 'number,title,state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,reviewDecision,statusCheckRollup']))
+        .then(output => JSON.parse(String(output)), (error: unknown) => ({ error: message(error) })) }))),
+    }),
+    file: (input, key) => post('POST', 'work', input, key) as Promise<Work>,
+    decide: (work, action, reason, input) => post('POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }) as Promise<{ id: string }>,
+  };
+};
+
+/** `limit`: every run ended on its provider's quota or rate limit — the earliest known reset among them. `account`: the registry account the round spent (GY-1705). */
+interface Outcome { runs: DiagnosisRecord['runs']; diagnosis: DiagnosisPayload | null; limit?: ExhaustionSignal | null; account?: string | null; holds?: { account: string; limit: ExhaustionSignal }[] }
 /** How long a diagnosis refused by a provider naming no readable reset waits before it is run again. */
 export const diagnosisLimitHoldMs = 60 * 60_000;
 /** The least a provider-limited diagnosis waits, whatever reset the provider named: never a retry every cycle. */
@@ -137,10 +188,12 @@ export function probeSubject<T extends { id: string }>(state: Pick<DaemonState, 
 const retryDue = (entry: DiagnosisRecord | undefined, clock: number) => entry?.state === 'waiting' && (!entry.retryAt || Date.parse(entry.retryAt) <= clock);
 const live = new Map<string, Promise<void>>();
 const outcomes = new Map<string, Outcome>();
+/** GY-1713: mismatched standing-close 409s, held until the ledger changes (no re-POST every cycle). */
+const standingHolds = new Map<string, { id: string; work: string }>();
 /** Every diagnostician run this process has in flight, settled: a test's way to wait for them. */
 export async function diagnosesSettled() { await Promise.all([...live.values()]); }
-/** Test seam: forget every run and outcome. */
-export function clearDiagnoses() { live.clear(); outcomes.clear(); }
+/** Test seam: forget every run, outcome and mismatched-standing hold. */
+export function clearDiagnoses() { live.clear(); outcomes.clear(); standingHolds.clear(); }
 
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 /** The last lines of an excerpt that fit `budget` characters, each clipped. */
@@ -224,12 +277,15 @@ export const diagnosisEvidenceMax = 100_000;
 
 /** Run the primary attempt, and the fallback once when the primary returns no valid diagnosis. */
 async function runDiagnosis(diagnostician: DiagnosticianEffects, subject: DiagnosisSubject, prompt: string): Promise<Outcome> {
-  const runs: DiagnosisRecord['runs'] = [], limits: (ExhaustionSignal | null)[] = [], timeoutMs = diagnostician.settings.timeoutMinutes * 60_000;
+  const runs: DiagnosisRecord['runs'] = [], limits: (ExhaustionSignal | null)[] = [], timed: { result: string; detail: string; events: LimitRunEvent[]; account: string | null }[] = [];
+  let limitedAccount: string | null = null;
+  const timeoutMs = diagnostician.settings.timeoutMinutes * 60_000, now = () => Date.now();
   for (const attempt of ['primary', 'fallback'] as const) {
     const startedAt = new Date().toISOString();
     let chosen: DiagnosticianRun;
     try { chosen = await diagnostician.runner(attempt, subject); }
     catch (error) { runs.push({ runtime: 'none', model: attempt, startedAt, endedAt: new Date().toISOString(), result: 'spawn', detail: clip(`No ${attempt} runner: ${message(error)}`, 500) }); limits.push(null); continue; }
+    const attemptAccount = chosen.account ?? null;
     const run = chosen.runner.start(prompt, { cwd: diagnostician.cwd, env: { GRAPHYARD_PI_ROLE: diagnosticianRole }, tool: graphyardTools.diagnose, timeoutMs,
       validate: payload => {
         const parsed = diagnosisPayloadSchema.parse(payload);
@@ -238,28 +294,123 @@ async function runDiagnosis(diagnostician: DiagnosticianEffects, subject: Diagno
       } });
     const result = await run.result();
     await Promise.resolve(chosen.release?.(`the ${attempt} diagnosis of ${subject.id} ended`)).catch(() => {});
-    runs.push({ runtime: chosen.runtime, model: chosen.model, startedAt, endedAt: new Date().toISOString(), result: result.ok ? 'diagnosed' : result.failure.reason,
-      detail: clip(result.ok ? `Diagnosed as ${result.payload.faultClass}: ${result.payload.cause}` : result.failure.detail, 500) });
-    if (result.ok) return { runs, diagnosis: result.payload };
-    // Only the provider's own error is read — the last error a run that made no call ended on. An
-    // invalid payload's detail is the agent's submission, and an exit's carries stderr, which can
-    // mix in the agent's output: a limit phrase there must not turn a real failure into a wait.
-    const providerError = result.failure.reason === 'no-payload' ? /\(last error: ([\s\S]*)\)$/.exec(result.failure.detail)?.[1] : undefined;
-    limits.push(providerError ? providerLimit(providerError, Date.now()) : null);
+    const detail = clip(result.ok ? `Diagnosed as ${result.payload.faultClass}: ${result.payload.cause}` : result.failure.detail, 500);
+    const outcome = result.ok ? 'diagnosed' : result.failure.reason;
+    runs.push({ runtime: chosen.runtime, model: chosen.model, startedAt, endedAt: new Date().toISOString(), result: outcome, detail });
+    if (result.ok) return { runs, diagnosis: result.payload, account: attemptAccount };
+    // Only the provider's own error is read — the last error a run that made no call ended on, or
+    // (GY-1705) the retry/stream errors of a run stopped at its terminal-event bound. An invalid
+    // payload's detail is the agent's submission, and an exit's carries stderr, which can mix in
+    // the agent's output: a limit phrase there must not turn a real failure into a wait.
+    timed.push({ result: outcome, detail, events: [...run.events], account: attemptAccount });
+    if (result.failure.reason === 'timeout') limits.push(null); // resolved from `timed` below
+    else {
+      const providerError = result.failure.reason === 'no-payload' ? /\(last error: ([\s\S]*)\)$/.exec(result.failure.detail)?.[1] : undefined;
+      const signal = providerError ? providerLimit(providerError, now()) : null;
+      limits.push(signal);
+      if (signal && attemptAccount) limitedAccount = attemptAccount;
+    }
     if (result.failure.reason === 'cancelled') break;
   }
-  const limited = limits.length > 0 && limits.every(Boolean) ? limits as ExhaustionSignal[] : null;
-  const resets = limited?.map(entry => entry.resetsAt).filter((at): at is string => !!at).sort() ?? [];
-  return { runs, diagnosis: null, limit: limited ? { reason: limited.at(-1)!.reason, resetsAt: resets[0] ?? null } : null };
+  const fromTimeout = headlessTimeoutLimitCharge(timed, now());
+  const limited = fromTimeout ? null : (limits.length > 0 && limits.every(Boolean) ? limits as ExhaustionSignal[] : null);
+  const signal = fromTimeout?.limit ?? (limited ? { reason: limited.at(-1)!.reason, resetsAt: limited.map(entry => entry.resetsAt).filter((at): at is string => !!at).sort()[0] ?? null } : null);
+  const holds = fromTimeout?.holds ?? (limited && limitedAccount ? [{ account: limitedAccount, limit: signal! }] : []);
+  return { runs, diagnosis: null, limit: signal, account: fromTimeout?.account ?? (limited ? limitedAccount : null), holds };
 }
 
 const iso = (at: number) => new Date(at).toISOString();
+/**
+ * GY-1530: the cause of a diagnosis no run answered, by how its runs ended. Every run that started
+ * stopped at its bound (the runner's "no terminal event within Ns; the run was stopped", GY-1516's
+ * two 1200s runs on GY-1430) is a session that ran past its bound: session-liveness's
+ * `overlong-session`. Any other mix names no single cause and keeps the step's own kind.
+ */
+export function noDiagnosisKind(runs: readonly { runtime: string; result: string }[]): FaultKind | undefined {
+  const started = runs.filter(run => run.runtime !== 'none');
+  return started.length && started.every(run => run.result === 'timeout') ? 'overlong-session' : undefined;
+}
 const diagnosisKey = (subject: string) => `diagnosis:${createHash('sha256').update(subject).digest('hex').slice(0, 24)}`;
 /** How long past its bound a run recorded as running, with no run in this process, is waited for before it is recorded as lost. */
 export const diagnosisLostGraceMs = 5 * 60_000;
 
-/** The fix item as `master create` would file it: the create schema's checks and the broad-scope guard, unflagged. */
-export function fixItem(entry: Pick<DiagnosisRecord, 'subject' | 'kind' | 'work'>, diagnosis: DiagnosisPayload): FixInput {
+/**
+ * The base tree a fix filing resolves against (GY-1707): the diagnostician's `tree` effect when
+ * supplied, else a real `baseTree` read of `cwd` — the same read `master create` uses. An
+ * unreadable checkout throws; there is no synthetic tree from the diagnosis's own paths.
+ */
+async function filingTree(diagnostician: DiagnosticianEffects, baseBranch: string) {
+  if (diagnostician.tree) return diagnostician.tree(baseBranch);
+  return baseTree(diagnostician.cwd, baseBranch);
+}
+
+/** A test path's directory, stem and suffix, or null. */
+const testStemParts = (path: string) => {
+  const match = /^((?:[^/]+\/)*)([^/]+?)(\.(?:test|spec)\.[cm]?[jt]sx?)$/.exec(path);
+  return match ? { directory: match[1], stem: match[2], suffix: match[3] } : null;
+};
+/**
+ * The base-tree test whose stem is a hyphenated prefix of a proof-named companion (GY-1700's
+ * `tests/webhook-soft-accept.test.ts` beside `unit:webhook-soft-accept-no-5xx`), or null when the
+ * named path already resolves or no shorter vehicle exists on the base.
+ */
+function existingProofVehicle(named: string, tree: ReadonlySet<string>): string | null {
+  if (tree.has(named)) return null;
+  const parts = testStemParts(named);
+  if (!parts) return null;
+  let best: string | null = null;
+  for (const file of tree) {
+    const candidate = testStemParts(file);
+    if (!candidate || candidate.directory !== parts.directory || candidate.suffix !== parts.suffix) continue;
+    if (parts.stem.startsWith(`${candidate.stem}-`) && (!best || file < best)) best = file;
+  }
+  return best;
+}
+
+/**
+ * GY-1707: plannedFiles for a fix item the loop files from a diagnosis — the same derivation
+ * `master create` applies (base-tree resolution, criteria-named tree files, planned companions),
+ * plus the paths the diagnosis cause names that resolve in the tree when the subject is a
+ * recurring-fault item (the cause is that item's own requirement, not prose). When a proof
+ * companion invents a longer stem than a test the base already holds, that existing vehicle is
+ * planned instead (GY-1700) — except a path the diagnosis itself planned stays as filed, so a
+ * criterion that creates a longer new test is not rewritten to the shorter neighbour. Short-suffix
+ * proof companions that `derivePlannedFiles` would refuse as misnamed (e.g. `unit:orphan-supervisor-x`
+ * beside `tests/orphan-supervisor.test.ts`) are remapped to that vehicle before the refusal runs.
+ * A path the tree does not hold and no criterion describes creating is refused with
+ * `plannedFilesRefusal`.
+ */
+export function deriveDiagnosisFixPlannedFiles(
+  input: { plannedFiles?: readonly string[]; criteria: readonly { id: string; text: string; proofs?: readonly string[] }[]; cause?: string; kind?: 'recurring' | 'invariant' },
+  tree: ReadonlySet<string>,
+  base: string,
+): PlannedFilesDerivation {
+  const explicit = new Set(input.plannedFiles ?? []);
+  const causeNamed = input.kind === 'recurring' && input.cause
+    ? namedPaths(input.cause).filter(path => scopeExists(path, tree))
+    : [];
+  const derived = derivePlannedFiles({ plannedFiles: [...new Set([...explicit, ...causeNamed])], criteria: input.criteria }, tree);
+  const vehicleFor = (path: string) => (explicit.has(path) ? null : existingProofVehicle(path, tree));
+  // Remap before refusing: a short-suffix proof companion lands in `missing` as misnamed, and must
+  // become its existing vehicle rather than permanently failing the diagnosis (Codex PRRT on work.ts).
+  const rescued = new Map<string, string>();
+  for (const path of [...derived.plannedFiles, ...derived.missing]) {
+    const vehicle = vehicleFor(path);
+    if (vehicle) rescued.set(path, vehicle);
+  }
+  const missing = derived.missing.filter(path => !rescued.has(path));
+  const misnamed = derived.misnamed.filter(entry => missing.includes(entry.path));
+  if (missing.length) throw new Error(plannedFilesRefusal(missing, base, misnamed));
+  const plannedFiles = [...new Set([
+    ...derived.plannedFiles.map(path => rescued.get(path) ?? path),
+    ...[...rescued.values()],
+  ])];
+  return { ...derived, plannedFiles, missing, misnamed };
+}
+
+/** The fix item as `master create` would file it (GY-1707): schema, broad-scope guard, and plannedFiles derived against the base tree — never the diagnostician's list verbatim. */
+export function fixItem(entry: Pick<DiagnosisRecord, 'subject' | 'kind' | 'work'>, diagnosis: DiagnosisPayload,
+  tree: { ref: string; files: ReadonlySet<string> }): FixInput {
   const fix = diagnosis.fix!;
   const answers = entry.kind === 'recurring' ? `the recurring-fault item ${entry.work}` : `the invariant violation ${entry.subject}`;
   const description = clip([
@@ -267,7 +418,9 @@ export function fixItem(entry: Pick<DiagnosisRecord, 'subject' | 'kind' | 'work'
     `Filed by the master loop from the diagnostician's diagnosis of ${answers} (GY-439). Cause: ${diagnosis.cause}`,
     `Evidence:\n${[...diagnosis.evidence.logLines.map(line => `- log: ${line}`), ...diagnosis.evidence.commands.map(line => `- ran: ${line}`)].join('\n')}`,
   ].join('\n\n'), 20_000);
-  const input = createSchema.parse({ title: fix.title, description, type: fix.type, priority: fix.priority, criteria: fix.criteria, plannedFiles: fix.plannedFiles });
+  const derived = deriveDiagnosisFixPlannedFiles(
+    { plannedFiles: fix.plannedFiles, criteria: fix.criteria, cause: diagnosis.cause, kind: entry.kind }, tree.files, tree.ref);
+  const input = createSchema.parse({ title: fix.title, description, type: fix.type, priority: fix.priority, criteria: fix.criteria, plannedFiles: derived.plannedFiles });
   const reason = guardBroadScope(input, `The diagnostician found the root cause of ${answers}: ${clip(diagnosis.cause, 1500)}`, { allow: false, command: 'master create' });
   return { ...input, reason };
 }
@@ -328,6 +481,7 @@ type Note = (entry: DiagnosisRecord, outcome: DaemonAction['state'], detail: str
 
 async function launch(cycle: Cycle, diagnostician: DiagnosticianEffects, subject: DiagnosisSubject, note: Note) {
   const { config, state, snapshot, clock } = cycle;
+  standingHolds.delete(subject.id);
   const entry: DiagnosisRecord = { subject: subject.id, kind: subject.kind, faultClass: subject.faultClass, work: subject.work?.key ?? null, state: 'running',
     startedAt: iso(clock), updatedAt: iso(clock), runs: [], diagnosis: null, fix: null, decision: null, answeredBy: null, retryAt: null, refusedAt: null, detail: '' };
   state.diagnoses[subject.id] = entry;
@@ -341,7 +495,7 @@ async function launch(cycle: Cycle, diagnostician: DiagnosticianEffects, subject
 }
 
 async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, note: Note) {
-  const { state, effects, snapshot, clock } = cycle;
+  const { state, effects, snapshot, clock, now } = cycle;
   if (entry.state === 'running') {
     const outcome = outcomes.get(entry.subject);
     if (!outcome) {
@@ -356,15 +510,19 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
     entry.runs = outcome.runs.slice(-4);
     if (!outcome.diagnosis && outcome.limit) {
       const named = outcome.limit.resetsAt ? Date.parse(outcome.limit.resetsAt) : Number.NaN;
-      // A reset already past says nothing about when the provider recovers: the hour's hold, as for none.
+      // Settlement time, not the launch-cycle snapshot: two real timeouts can finish long after
+      // `clock` was snapped, and the assumed-hour hold must start when the limit is known (GY-1705).
+      const settledAt = now();
       entry.state = 'waiting';
-      entry.retryAt = iso(Number.isFinite(named) && named > clock ? Math.max(named, clock + diagnosisLimitMinimumMs) : clock + diagnosisLimitHoldMs);
-      entry.refusedAt = iso(clock);
+      entry.retryAt = iso(Number.isFinite(named) && named > settledAt ? Math.max(named, settledAt + diagnosisLimitMinimumMs) : settledAt + diagnosisLimitHoldMs);
+      entry.refusedAt = iso(settledAt);
+      // Hold every named account whose own attempt reported the limit (GY-1705), never a nominal profile.
+      for (const hold of outcome.holds ?? []) await effects.holdAccount?.(hold.account, { at: iso(settledAt), resetsAt: hold.limit.resetsAt, reason: hold.limit.reason, role: 'diagnostician', profile: diagnosticianRole, work: entry.work });
       // The provider's capacity, not the loop's failure: no fault kind, so no loop fault instance.
       await note(entry, 'waiting', `The diagnostician's provider refused the diagnosis of ${entry.subject} for its quota or rate limit (${outcome.limit.reason}); it is diagnosed again at ${entry.retryAt}, and no other diagnosis is launched before then`, null);
       return;
     }
-    if (!outcome.diagnosis) { entry.state = 'failed'; await note(entry, 'failed', `The diagnostician returned no diagnosis of ${entry.subject}: ${outcome.runs.map(run => `${run.model} ${run.result}: ${run.detail}`).join('; ')}`); return; }
+    if (!outcome.diagnosis) { entry.state = 'failed'; await note(entry, 'failed', `The diagnostician returned no diagnosis of ${entry.subject}: ${outcome.runs.map(run => `${run.model} ${run.result}: ${run.detail}`).join('; ')}`, noDiagnosisKind(outcome.runs)); return; }
     entry.diagnosis = outcome.diagnosis; entry.state = 'diagnosed';
     await note(entry, 'done', `Diagnosed ${entry.subject} as ${outcome.diagnosis.faultClass}: ${outcome.diagnosis.cause}`);
   }
@@ -397,9 +555,24 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
         `${entry.work} recurs from a cause ${covering.key} already covers, so it is closed as its duplicate. Diagnosis: ${diagnosis.cause}`, note);
     }
     let input: FixInput;
-    try { input = fixItem(entry, diagnosis); }
+    try {
+      const tree = await filingTree(diagnostician, cycle.config.baseBranch);
+      input = fixItem(entry, diagnosis, tree);
+    }
     catch (error) { entry.state = 'failed'; await note(entry, 'failed', `The diagnostician's fix item for ${entry.subject} fails the checks master create applies: ${message(error)}`, 'fix-item'); return; }
-    const fix = await diagnostician.file(input, `${diagnosisKey(entry.subject)}:fix`);
+    let fix: Work;
+    try { fix = await diagnostician.file(input, `${diagnosisKey(entry.subject)}:fix`); }
+    catch (error) {
+      // GY-1530 / GY-1713: the create route's own refusal (a 409: an e2e proof naming a scenario nothing
+      // registered; or a 400 zod "Invalid input" under schema skew) is the same malformed fix as one
+      // the local checks refuse, and settles the entry the same way, under the proof class's fix-item;
+      // thrown on, it reached cycle.isolate as an unclassified action:diagnosis. A plane-wide failure
+      // still throws to ridePlane, and the next cycle files again.
+      if (!createRefused(error)) throw error;
+      entry.state = 'failed';
+      await note(entry, 'failed', `The control plane refused the diagnostician's fix item for ${entry.subject} as written, so it is not filed again; the diagnosis stands for the master to file by hand: ${message(error)}`, 'fix-item');
+      return;
+    }
     entry.fix = fix.key;
     await note(entry, 'done', `Filed ${fix.key} (priority ${fix.priority}) for the root cause of ${entry.subject}: ${diagnosis.cause}`);
     return request(cycle, diagnostician, entry, fix, 'release', {}, `Release ${fix.key}, the root-cause fix the diagnostician found for ${entry.subject}, at priority ${fix.priority}. Cause: ${diagnosis.cause}`, note);
@@ -445,40 +618,87 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
 async function request(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, work: Work, action: 'release' | 'close', input: Record<string, unknown>, reason: string, note: Note) {
   const requested = await decideFresh(cycle, diagnostician, entry, work, action, input, clip(reason, 2000), note);
   if (!requested) return;
-  const { decision, target } = requested;
+  const { decision, target, adopted } = requested;
   entry.decision = { id: decision.id, action, work: target.key, approver: null };
   entry.state = action === 'release' ? 'releasing' : 'closing';
-  await note(entry, 'done', `Requested ${action} decision ${decision.id} on ${target.key} for the diagnosis of ${entry.subject}`);
-  return launchApprover(cycle, entry, target, note);
+  await note(entry, 'done', adopted
+    ? `Adopted ${action} decision ${decision.id}, already standing on ${target.key}, for the diagnosis of ${entry.subject}`
+    : `Requested ${action} decision ${decision.id} on ${target.key} for the diagnosis of ${entry.subject}`);
+  return launchApprover(cycle, entry, target, note, adopted);
 }
 const revisionRaced = (error: unknown) => /Task revision changed/.test(message(error));
 /** GY-1336: the item was delivered after the cycle's snapshot, so the server refuses any decision on it. */
 const deliveredMeanwhile = (error: unknown) => /Delivered work is immutable/.test(message(error));
+/** GY-1713: standing-close 409 id via standingNamedIn + adoptedOnRefusal (GY-1374 / GY-1710). */
+const standingAdopted = (error: unknown, action: 'release' | 'close') =>
+  action !== 'release' && adoptedOnRefusal.includes(action) ? standingNamedIn(error, action) : null;
+/** Same close kind+ref (ignore expectedRevision); else a concurrent close would corrupt the answer. */
+const closeInputMatches = (standing: unknown, requested: Record<string, unknown>) => {
+  const held = standing && typeof standing === 'object' ? standing as Record<string, unknown> : null;
+  return !!held && held.kind === requested.kind && (held.ref ?? null) === (requested.ref ?? null);
+};
+type StandingCloseRead = { status: 'unread' } | { status: 'absent' } | { status: 'row'; entry: { id: string; action: string; state: string; input: unknown } };
+/** Ledger read of a named close: unread (missing/rejected effect) vs absent vs row — never clear a hold on unread. */
+async function standingCloseOn(cycle: Cycle, work: Work, held: string): Promise<StandingCloseRead> {
+  if (!cycle.effects.decisions) return { status: 'unread' };
+  try {
+    const entry = (await cycle.effects.decisions(work)).decisions.find(candidate => candidate.id === held);
+    return entry ? { status: 'row', entry } : { status: 'absent' };
+  } catch { return { status: 'unread' }; }
+}
+/** Adopt only when ledger kind/ref match; mismatch → hold; unread → wait (no throw). */
+async function adoptStandingClose(cycle: Cycle, work: Work, input: Record<string, unknown>, held: string): Promise<'adopt' | 'hold' | 'unread'> {
+  const read = await standingCloseOn(cycle, work, held);
+  if (read.status !== 'row' || read.entry.action !== 'close' || read.entry.state !== 'requested') return 'unread';
+  return closeInputMatches(read.entry.input, input) ? 'adopt' : 'hold';
+}
 /**
- * GY-1318: the request names the item's revision from the cycle's snapshot, and the loop's own next
- * write can move the item before the request lands — the server refuses it "Task revision changed
- * (now N); reload and request again" (GY-1304's instance). That is the request-time leg of the race
- * GY-1296's rerequest answers after settlement, so it is answered the same way: the item is reloaded
- * and asked again once against its current revision, bounded like rerequest (maxDecisionRequests,
- * counted from the item's own decision history). A retry spent, raced again or no longer applicable
- * is no failure of the loop: it records no fault, the entry keeps its state, and the next cycle
- * decides afresh from the fresh snapshot. Any other refusal still throws.
- *
- * GY-1336: the other leg of the same race is the item delivered after the snapshot — the server
- * refuses "Delivered work is immutable" (GY-1333's instance). It is reloaded the same way, found
- * no longer applicable, and recorded with no fault; the next cycle's snapshot shows it done, and
- * the diagnosis is answered as for any item closed while it was diagnosed (GY-1266).
+ * GY-1318/GY-1336: revision race or delivered-meanwhile → reload once (bounded like rerequest) or settle
+ * with no fault. GY-1713: matching standing-close 409 is adopted; mismatched is held until the ledger
+ * changes (no re-POST); unread while held keeps the hold.
  */
-async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, work: Work, action: 'release' | 'close', input: Record<string, unknown>, reason: string, note: Note) {
+async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, work: Work, action: 'release' | 'close', input: Record<string, unknown>, reason: string, note: Note): Promise<{ decision: { id: string }; target: Work; adopted?: boolean } | null> {
+  const adoptHeld = async (held: string, target: Work) => {
+    if (action === 'close') {
+      const verdict = await adoptStandingClose(cycle, target, input, held);
+      if (verdict === 'hold') {
+        standingHolds.set(entry.subject, { id: held, work: target.key });
+        await note(entry, 'done', `Close decision ${held} already stands on ${target.key}, but its closure does not match the diagnosis of ${entry.subject} (asked ${input.kind}${input.ref ? ` of ${input.ref}` : ''}); holding ${held} until its ledger state changes rather than adopting or re-asking`, null);
+        return null;
+      }
+      if (verdict === 'unread') {
+        await note(entry, 'done', `Close decision ${held} already stands on ${target.key}, but its ledger input could not be read for the diagnosis of ${entry.subject}; waiting rather than adopting or rethrowing`, null);
+        return null;
+      }
+    }
+    standingHolds.delete(entry.subject);
+    return { decision: { id: held }, target, adopted: true as const };
+  };
+  const prior = action === 'close' ? standingHolds.get(entry.subject) : undefined;
+  if (prior) {
+    const read = await standingCloseOn(cycle, work, prior.id);
+    if (read.status === 'unread') return null;
+    if (read.status === 'row' && read.entry.state === 'requested' && read.entry.action === 'close') {
+      if (closeInputMatches(read.entry.input, input)) {
+        standingHolds.delete(entry.subject);
+        return { decision: { id: prior.id }, target: work, adopted: true as const };
+      }
+      return null;
+    }
+    standingHolds.delete(entry.subject);
+    await note(entry, 'done', `Standing close ${prior.id} on ${prior.work} no longer blocks the diagnosis of ${entry.subject} (${read.status === 'row' ? `now ${read.entry.state}` : 'gone from the ledger'}); requesting the diagnosis closure afresh`, null);
+  }
   try { return { decision: await diagnostician.decide(work, action, reason, input), target: work }; }
   catch (error) {
+    const held = standingAdopted(error, action);
+    if (held) return adoptHeld(held, work);
     if (!revisionRaced(error) && !deliveredMeanwhile(error)) throw error;
     const why = `The ${action} request on ${work.key} for the diagnosis of ${entry.subject} was refused: ${message(error)}`;
     const fresh = (await cycle.effects.snapshot()).work.find(candidate => candidate.id === work.id);
     const applicable = !!fresh && !isClosed(fresh) && fresh.stage !== 'done' && (action === 'close' || (fresh.stage === 'backlog' && !fresh.ready));
     if (!applicable) {
-      // GY-1371: an entry already releasing or closing settles here; left in its state, the next cycle
-      // read its decisions and asked again, refused again, for every such entry.
+      // GY-1371: releasing/closing settles here; else next cycle re-asks forever.
+      standingHolds.delete(entry.subject);
       if (entry.state === 'releasing' || entry.state === 'closing') { await settleNoLongerOpen(cycle.state, entry, fresh ?? null, `${why}; ${work.key} no longer needs the ${action}`, note, action); return null; }
       await note(entry, 'done', `${why}; ${work.key} no longer needs the ${action}, so it is not asked again and the next cycle decides afresh`, null); return null;
     }
@@ -487,6 +707,8 @@ async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, en
     if (spent >= maxDecisionRequests) { await note(entry, 'done', `${why}; ${spent} ${action} request(s) already settled without applying, so it is not asked again here and the next cycle decides afresh`, null); return null; }
     try { return { decision: await diagnostician.decide(fresh, action, reason, input), target: fresh }; }
     catch (again) {
+      const adopted = standingAdopted(again, action);
+      if (adopted) return adoptHeld(adopted, fresh);
       if (!revisionRaced(again) && !deliveredMeanwhile(again)) throw again;
       await note(entry, 'done', `${why}; asked again against revision ${fresh.revision} and refused again (${message(again)}), so the next cycle decides afresh`, null);
       return null;
@@ -534,20 +756,33 @@ async function settleNoLongerOpen(state: DaemonState, entry: DiagnosisRecord, ta
   await note(entry, 'done', `${why}, so the diagnosis of ${entry.subject} is answered as no longer open`, null);
 }
 
-/** The independent approver for the entry's decision; a launch that fails is tried again next cycle while the decision stands. */
-async function launchApprover(cycle: Cycle, entry: DiagnosisRecord, work: Work, note: Note) {
+/** Approver for the entry's decision; GY-1713 reuses an existing launch/watch on an adopted close. */
+async function launchApprover(cycle: Cycle, entry: DiagnosisRecord, work: Work, note: Note, adopted = false) {
   const decision = entry.decision!;
   if (!cycle.effects.approver) return;
   try {
+    if (adopted) {
+      const launches = await cycle.effects.approverLaunches?.().catch(() => []) ?? [];
+      const fromLaunch = [...launches].reverse().find(row => row.decision === decision.id)?.agentName ?? null;
+      const existing = fromLaunch ?? Object.values(cycle.state.approvals).find(watch => watch.decision === decision.id)?.agentName ?? null;
+      if (existing) {
+        decision.approver = existing;
+        await note(entry, 'done', `Adopted ${decision.action} decision ${decision.id}, already standing on ${work.key}, reusing approver ${existing}`);
+        return;
+      }
+    }
     const launched = await cycle.effects.approver(work, decision.id);
     decision.approver = launched.agentName;
-    await note(entry, 'done', `Launched approver ${launched.agentName} for ${decision.action} decision ${decision.id} on ${work.key}`);
+    await note(entry, 'done', adopted
+      ? `Adopted ${decision.action} decision ${decision.id}, already standing on ${work.key}, and launched approver ${launched.agentName}`
+      : `Launched approver ${launched.agentName} for ${decision.action} decision ${decision.id} on ${work.key}`);
   } catch (error) { await note(entry, 'failed', `Could not launch the approver for ${decision.action} decision ${decision.id} on ${work.key}: ${message(error)}; it is launched again next cycle`, planeWideRefusal(error) ? null : undefined); }
 }
 
 /** The subject is answered by `by`: an invariant violation's instance is linked to it; a recurring item's closure already names it. */
 async function answer(state: DaemonState, entry: DiagnosisRecord, by: string, note: Note, detail?: string) {
   if (entry.kind === 'invariant') { const instance = state.faults.instances.find(candidate => candidate.id === entry.subject); if (instance) instance.linkedTo = by; }
+  standingHolds.delete(entry.subject);
   entry.answeredBy = by; entry.state = 'answered';
   await note(entry, 'done', detail ?? `${entry.subject} is answered by ${by}`);
 }

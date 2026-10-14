@@ -1,8 +1,11 @@
 // Concern: the fold's rule for each ledger event kind — what one row opens, answers or settles in an item's state.
 import { pathScopeContains, type Stage } from '../model.js';
 import type { InterventionKind, Intervention } from '../model/interventions.js';
+import type { Work } from '../model/work.js';
 import { approvedRework, exemption, requestedRework, routedReason, type Ask, type ReworkDecision } from '../intervention-exemptions.js';
+import { routedWideningDecision } from '../model/scope-provenance.js';
 import { instant, type InterventionLedgerRow } from './ledger.js';
+import { impliedWidening } from './implied-widening.js';
 
 /**
  * One rule per ledger event kind (GY-1447): a fix to how the fold reads one kind edits that kind's
@@ -37,6 +40,8 @@ export interface FoldStep {
   source: { seq: number; kind: string };
   /** The planned scope and blocker as the previous row left them. */
   plannedBefore: string[] | null; blockerBefore: string | null | undefined;
+  /** The item as the current snapshot holds it (its documentation rule and review follow-up provenance), and the plan of every item closed as its duplicate (GY-1719). */
+  record?: { documentation?: Work['documentation']; origin?: Work['origin']; description?: Work['description'] } | null; absorbed?: () => string[];
   emit: Emit;
 }
 export type FoldRule = (step: FoldStep) => void;
@@ -52,19 +57,24 @@ const blocked: FoldRule = ({ row, entry, details, stage, source }) => {
 const scope: FoldRule = ({ row, entry, details, stage, source }) => {
   const asks = Array.isArray(details.paths) && details.paths.length || details.remove?.length || details.criteria?.length;
   entry.asks = entry.asks.filter(ask => ask.kind !== 'scope-request');
-  if (asks) entry.asks.push({ seq: row.seq, at: row.at, stage, kind: 'scope-request', blocked: details.paths?.length ? `files outside plannedFiles: ${details.paths.join(', ')}` : 'a requirements change', paths: Array.isArray(details.paths) ? details.paths : [], sources: [source] });
+  if (asks) entry.asks.push({ seq: row.seq, at: row.at, stage, kind: 'scope-request', blocked: details.paths?.length ? `files outside plannedFiles: ${details.paths.join(', ')}` : 'a requirements change', paths: Array.isArray(details.paths) ? details.paths : [], epoch: typeof details.epoch === 'number' ? details.epoch : null, sources: [source] });
 };
 
-/** The loop's decision on the open scope request: an exempt approval answers it, a refusal marks it refused by the loop. */
+/**
+ * The loop's decision on the open scope request: an exempt approval answers it, a refusal marks it
+ * refused by the loop. The refusal names the request's own instant (`decision.requestedAt`, the
+ * server's `scopeRequest.at`, engine applyScopeDecision): the ask keeps it as `askedAt`, the identity
+ * a routed decision answers by (GY-1682, decisionRequested).
+ */
 const autoscope: FoldRule = ({ entry, details, source }) => {
   const decision = details.decision ?? {};
   const ask = entry.asks.find(candidate => candidate.kind === 'scope-request');
   if (exemption({ at: 'autoscope', decision })) entry.asks = entry.asks.filter(candidate => candidate !== ask);
-  else if (ask) { ask.trigger = 'refused-by-loop'; ask.sources.push(source); }
+  else if (ask) { ask.trigger = 'refused-by-loop'; ask.askedAt = typeof decision.requestedAt === 'string' ? decision.requestedAt : null; ask.sources.push(source); }
 };
 
 /** A requirements revision: a widening answers the scope requests it covers, a cleared blocker the asks beside them. */
-const requirements: FoldRule = ({ row, entry, details, stage, source, plannedBefore, blockerBefore, emit }) => {
+const requirements: FoldRule = ({ row, entry, details, stage, source, plannedBefore, blockerBefore, record, absorbed, emit }) => {
   const after: string[] | null = Array.isArray(row.work?.plannedFiles) ? row.work!.plannedFiles! : Array.isArray(details.intent?.plannedFiles) ? details.intent.plannedFiles : Array.isArray(details.plannedFiles) ? details.plannedFiles : null;
   const before: string[] | null = Array.isArray(details.before?.plannedFiles) ? details.before.plannedFiles : plannedBefore;
   const covers = (path: string) => !!after && after.some(planned => pathScopeContains(planned, path));
@@ -74,7 +84,10 @@ const requirements: FoldRule = ({ row, entry, details, stage, source, plannedBef
   const reason = text(details.reason ?? details.intent?.reason, 'requirements revised');
   const cleared = row.work ? !row.work.blocker : true;
   // A widening the control plane settled on its own answers the asks it covers, and nothing is a signal.
-  const exempt = exemption({ at: 'requirements', details, reason, widened, asked: entry.asks.length > 0 && (widened || cleared), routed: entry.routed, stage, work: row.work ?? null, blockerBefore });
+  const added = after && before ? after.filter(path => !before.includes(path)) : [];
+  const documentation = details.before?.documentation ?? record?.documentation ?? null;
+  const implied = widened && !!before && impliedWidening({ added, before, criteria: details.intent?.criteria ?? details.criteria, documentation, origin: record?.origin ?? null, description: details.before?.description ?? record?.description ?? null, absorbed: absorbed?.() ?? [] });
+  const exempt = exemption({ at: 'requirements', details, reason, widened, implied, asked: entry.asks.length > 0 && (widened || cleared), routed: entry.routed, stage, work: row.work ?? null, blockerBefore });
   if (exempt) {
     entry.asks = entry.asks.filter(ask => !(ask.kind === 'scope-request' && ask.paths.length > 0 && ask.paths.every(covers)) && !(exempt === 'routed-scope-widening' && ask.kind === 'blocked-report'));
     return;
@@ -94,11 +107,25 @@ const unblock: FoldRule = ({ row, entry, details, stage, source, emit }) => {
   entry.asks = [];
 };
 
-/** A rework decision requested, and the reason of a requirements decision the loop routed to the approver. */
+/**
+ * A rework decision requested, and the reason of a requirements decision the loop routed to the
+ * approver. A routed widening names the ask it answers (`input.answers`, daemon/decisions.ts: the
+ * ask's epoch and instant, `askIdentity`); the open refused ask of that exact identity is marked as
+ * the approver's while the decision stands (GY-1682, approverHoldsScopeRequest). The instant is
+ * matched as the server matches it (engine `requirements`, `answers.at === scopeRequest.at`): a
+ * worker that adds paths to its refused ask in the same attempt gets a merged ask with a new instant
+ * (mergedScopeRequest), and a decision for the earlier one, landing after it, answers nothing on the
+ * record — the new ask is the loop's to route (scope-refusal-within-bound) and counted once it outlasts the loop's bound.
+ */
 const decisionRequested: FoldRule = ({ row, entry, stage }) => {
   entry.reworkDecision = requestedRework(row, stage) ?? entry.reworkDecision;
   const routed = routedReason(row.payload);
   if (routed) entry.routed = [...entry.routed.slice(-4), routed];
+  if (!routedWideningDecision(row.payload) || typeof row.payload?.id !== 'string') return;
+  const answers = row.payload.input?.answers;
+  if (!answers || typeof answers.at !== 'string') return;
+  const ask = entry.asks.find(candidate => candidate.kind === 'scope-request' && candidate.trigger === 'refused-by-loop' && candidate.epoch === answers.epoch && candidate.askedAt === answers.at);
+  if (ask) ask.routed = { seq: row.seq, at: row.at, decision: row.payload.id };
 };
 
 /** The approval of the open rework decision. */
@@ -106,9 +133,11 @@ const decisionApproved: FoldRule = ({ row, entry }) => {
   approvedRework(entry.reworkDecision, row);
 };
 
-/** A settled decision closes the open rework decision it names. */
+/** A settled decision closes the open rework decision it names; a routed widening settled without applying (declined, stale, withdrawn, failed, superseded) hands its ask back to the loop's bound (scope-refusal-within-bound). */
 const settledDecision: FoldRule = ({ row, entry }) => {
   if (entry.reworkDecision?.id === row.payload?.id) entry.reworkDecision = null;
+  if (row.kind === 'decision.applied') return;
+  for (const ask of entry.asks) if (ask.routed?.decision === row.payload?.id) ask.routed = null;
 };
 
 /** A rework: one intervention for the asks and decision it answers, unless exempt; a fence it discards is a settlement. */
@@ -166,13 +195,13 @@ const settledFence: FoldRule = ({ row, entry, details, stage, source, emit }) =>
   entry.quarantine = null;
 };
 
-/** A standing escalation resolved. */
+/** A standing escalation resolved: an escalation, unless exempt. */
 const escalationResolved: FoldRule = ({ row, entry, details, stage, source, emit }) => {
   const escalation = details.escalation ?? {};
   const key = `${details.trigger}@${escalation.at}`;
   const open = entry.escalations.get(key);
   if (details.trigger === 'lease-loss' && entry.quarantine) entry.quarantine.concernAt ??= text(escalation.at, row.at);
-  emit(row, 'escalation', { id: `escalation:${row.workId}:${key}`, requestedAt: text(escalation.at, open?.at ?? row.at), blocked: text(escalation.reason, open?.reason ?? String(details.trigger)), stage: open?.stage ?? stage, resolvedAt: row.at, resolvedBy: details.approvedBy ? `${text(details.resolvedBy, row.actor)} approved by ${details.approvedBy}` : text(details.resolvedBy, row.actor), resolution: text(details.reason, 'resolved'), trigger: String(details.trigger), sources: [...(open ? [{ seq: open.seq, kind: 'raised' }] : []), source] });
+  if (!exemption({ at: 'escalation-resolved', details })) emit(row, 'escalation', { id: `escalation:${row.workId}:${key}`, requestedAt: text(escalation.at, open?.at ?? row.at), blocked: text(escalation.reason, open?.reason ?? String(details.trigger)), stage: open?.stage ?? stage, resolvedAt: row.at, resolvedBy: details.approvedBy ? `${text(details.resolvedBy, row.actor)} approved by ${details.approvedBy}` : text(details.resolvedBy, row.actor), resolution: text(details.reason, 'resolved'), trigger: String(details.trigger), sources: [...(open ? [{ seq: open.seq, kind: 'raised' }] : []), source] });
   entry.escalations.delete(key);
 };
 

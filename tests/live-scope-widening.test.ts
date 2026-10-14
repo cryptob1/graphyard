@@ -1,3 +1,4 @@
+import { ChildProcessError } from '../src/child-runner.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
@@ -21,6 +22,7 @@ import { approveScopeRequest, scopeRequestAttention } from '../src/cli/master-st
 import { Store } from '../src/store.js';
 import { foldInterventions, readInterventionLedger } from '../src/interventions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2030-01-03 clock is handed to every runCycle (() => at) over a 2030 snapshot; the Postgres half judges real-clock-stamped rows with Date.now(), and the 2026-10-05 row is folded at its own at.
 
 // GY-76: a purely additive plannedFiles widening applies to an item under an active lease
 // without ending the attempt, a worker asks for it through a scope request the master approves
@@ -215,7 +217,7 @@ const config = () => masterConfigSchema.parse({ version: 1, url: 'http://127.0.0
 const lease = { epoch: 3, owner: 'worker', expiresAt: iso(600_000) };
 const asked = iso(-300_000);
 const refusedRequest = (paths: string[]) => ({ epoch: 3, paths, reason: 'The delivery change reaches these files', requestedBy: 'worker', at: asked,
-  decision: { state: 'refused', reason: 'outside what the criteria imply', at: iso(-200_000), decidedBy: 'graphyard', waitedMs: 100_000, paths, requestedBy: 'worker', requestedAt: asked, epoch: 3 } });
+  decision: { state: 'refused', reason: 'outside what the criteria imply', at: iso(-200_000), decidedBy: 'graphyard', treeRead: true, waitedMs: 100_000, paths, requestedBy: 'worker', requestedAt: asked, epoch: 3 } });
 
 function item(extra: Partial<Work> = {}): Work {
   return {
@@ -348,7 +350,7 @@ test('manual:fault-class-scope — GY-1287: a refused scope request reaches its 
   const paths = ['src/master/dispatch.ts', 'src/master.ts', 'src/model/session-state.ts', 'src/master/status.ts', 'src/daemon/state.ts', 'tests/session-liveness-launch-window.test.ts'];
   const asked1287 = iso(-150_000);
   const request = (epoch: number, at: string) => ({ epoch, paths, reason: 'AC-1 needs the launch window fixed', requestedBy: 'worker', at,
-    decision: { state: 'refused', reason: 'outside what the criteria imply', at: iso(-10_000), decidedBy: 'graphyard', waitedMs: 140_000, paths, requestedBy: 'worker', requestedAt: at, epoch } });
+    decision: { state: 'refused', reason: 'outside what the criteria imply', at: iso(-10_000), decidedBy: 'graphyard', treeRead: true, waitedMs: 140_000, paths, requestedBy: 'worker', requestedAt: at, epoch } });
   // The workers' supervisors renew their leases throughout, so each stays live past the scope budget.
   const criteria = [{ id: 'AC-1', text: 'The shared cause of the recurring faults is removed', proofs: ['manual:fault-class-session-liveness'] }];
   const renewed = (epoch: number) => ({ epoch, owner: 'worker', expiresAt: iso(3_600_000) });
@@ -514,7 +516,7 @@ test('integration:routed-scope-ask-not-pre-empted — GY-1388: a hand widening o
   let work = await claimed('routed ask');
   const path = 'src/elsewhere/Helper.ts';
   await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths: [path], reason: 'The change calls the helper there' });
-  work = await engine.execute(operator, 'autoscope', work.id, { epoch: work.epoch }, randomUUID());
+  work = await engine.execute(operator, 'autoscope', work.id, { epoch: work.epoch, treeRead: true }, randomUUID());
   assert.equal(work.scopeRequest?.decision?.state, 'refused');
   assert.equal(work.scopeRequest?.decision?.decidedBy, 'graphyard');
   const refusal = /scope request is the independent approver's to judge: the loop routes it as a requirements decision within 15 minutes of the rule's refusal.*graphyard master decisions/;
@@ -540,4 +542,75 @@ test('integration:routed-scope-ask-not-pre-empted — GY-1388: a hand widening o
   const applied = await approveScopeRequest(process.cwd(), masterScopeConfig(), [work.key], { coordinator: snapshotRead }) as Work;
   assert.ok(applied.plannedFiles.includes(path));
   assert.ok(applied.lease && applied.lease.epoch === work.epoch, 'the attempt keeps its lease');
+});
+
+// GY-1757: transport failures of the loop's own calls judge nothing about the ask.
+const abort = () => Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+const gh = () => new Error('Command failed: gh api --paginate --slurp repos/o/r/pulls/1/reviews?per_page=100\ngh: API rate limit exceeded for user ID 1.');
+
+test('unit:widen-transient-abort-stored — GY-1757: a widen whose control-plane call aborts on timeout is stored for retry, no instance', async () => {
+  assert.match(transientScopeRefusal(abort()) ?? '', /transport/);
+  const control = plane(item({ key: 'GY-1757', scopeRequest: refusedRequest(['docs/delivery.md']) } as Partial<Work>));
+  control.fail.push(abort());
+  const state = emptyDaemonState(config());
+  await cycle(state, effects(control, { baseSuccessions: undefined, replan: undefined, reviewFindings: async () => [], baseText: async () => null }));
+  const failed = Object.values(state.actions).find(action => action.work === 'GY-1757' && action.state === 'failed');
+  assert.match(failed?.detail ?? '', /so it is retried next cycle on a fresh read/);
+  assert.deepEqual(scopeFaults(state), []);
+});
+
+test('unit:widen-transient-gh-stored — GY-1757: a gh CLI failure reading the findings is stored for retry, no instance', async () => {
+  assert.match(transientScopeRefusal(gh()) ?? '', /transport/);
+  assert.equal(transientScopeRefusal(new Error('Command failed: gh pr view\nunknown flag')), null);
+  const control = plane(item({ key: 'GY-1757', scopeRequest: refusedRequest(['docs/delivery.md']) } as Partial<Work>));
+  const state = emptyDaemonState(config());
+  await cycle(state, effects(control, { baseSuccessions: undefined, replan: undefined, reviewFindings: async () => { throw gh(); }, baseText: async () => null }));
+  assert.deepEqual(scopeFaults(state), []);
+});
+
+test('integration:widen-transient-second-run-counts — GY-1757: the second consecutive failure of the same run is exactly one instance', async () => {
+  const control = plane(item({ key: 'GY-1757', scopeRequest: refusedRequest(['docs/delivery.md']) } as Partial<Work>));
+  const state = emptyDaemonState(config());
+  const failing = effects(control, { baseSuccessions: undefined, replan: undefined, reviewFindings: async () => { throw gh(); }, baseText: async () => null });
+  await cycle(state, failing);
+  assert.deepEqual(scopeFaults(state), []);
+  await cycle(state, failing, clock + 60_000);
+  assert.deepEqual(scopeFaults(state).map(instance => [instance.kind, instance.subject]), [['action:scope', 'GY-1757']]);
+});
+
+test('unit:replan-transient-stored — GY-1757: a successor re-plan failing in transport is stored for retry, no instance', async () => {
+  const control = plane(item({ key: 'GY-1757' } as Partial<Work>));
+  const state = emptyDaemonState(config());
+  await cycle(state, effects(control, { baseSuccessions: async () => { throw abort(); }, replan: async () => { throw abort(); } }));
+  assert.deepEqual(scopeFaults(state), []);
+});
+
+test('integration:scope-class-1756-instances-quiet — GY-1757: a widen timeout, a gh rate limit and a re-request-narrower refusal open no scope instance', async () => {
+  const timed = plane(item({ key: 'GY-1748', scopeRequest: refusedRequest(['docs/delivery.md']) } as Partial<Work>));
+  timed.fail.push(abort());
+  const limited = plane(item({ key: 'GY-1746', id: 'work-gy-1746', scopeRequest: refusedRequest(['docs/delivery.md']) } as Partial<Work>));
+  const state = emptyDaemonState(config());
+  await cycle(state, effects(timed, { baseSuccessions: undefined, replan: undefined, reviewFindings: async () => [], baseText: async () => null }));
+  await cycle(state, effects(limited, { baseSuccessions: undefined, replan: undefined, reviewFindings: async () => { throw gh(); }, baseText: async () => null }));
+  assert.deepEqual(scopeFaults(state), []);
+});
+
+test('unit:widen-transient-gh-timeout — GY-1757: the bounded gh runner\'s timeout is transient; another command\'s is not', () => {
+  const killed = (command: string) => new ChildProcessError(command, ['api'], { stdout: '', stderr: '', status: null, signal: 'SIGKILL', timedOut: true, timeoutMs: 90000 });
+  assert.match(transientScopeRefusal(killed('gh')) ?? '', /transport/);
+  assert.equal(transientScopeRefusal(killed('git')), null);
+});
+
+test('integration:widen-gh-timeout-first-quiet-second-counts — GY-1757: a bounded gh timeout opens an instance only on the second consecutive failure', async () => {
+  const killed = () => new ChildProcessError('gh', ['api', 'x'], { stdout: '', stderr: '', status: null, signal: 'SIGKILL', timedOut: true, timeoutMs: 90000 });
+  const control = plane(item({ key: 'GY-1757', scopeRequest: refusedRequest(['docs/delivery.md']) } as Partial<Work>));
+  const state = emptyDaemonState(config());
+  const failing = effects(control, { baseSuccessions: undefined, replan: undefined, reviewFindings: async () => { throw killed(); }, baseText: async () => null });
+  await cycle(state, failing);
+  assert.deepEqual(scopeFaults(state), []);
+  await cycle(state, failing, clock + 60_000);
+  assert.equal(scopeFaults(state).length, 1);
+  const replanState = emptyDaemonState(config());
+  await cycle(replanState, effects(plane(item({ key: 'GY-1757' } as Partial<Work>)), { baseSuccessions: async () => { throw killed(); }, replan: async () => { throw killed(); } }));
+  assert.deepEqual(scopeFaults(replanState), []);
 });

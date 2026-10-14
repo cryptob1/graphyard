@@ -6,13 +6,13 @@ import { type ScopeCriterion, type ScopeDecision, type ScopeRequestState, namedP
 // plannedFiles holds at most `plannedFilesMax` entries. A mechanical change that touches every test
 // file (GY-421: 158 of them) can never be scoped file by file: the list hits the cap and the item
 // stalls. So the widening the loop proposes folds the requested files into their deepest common
-// directory entries — `tests/` for the 158 — when a directory would otherwise be named more than
-// `collapseDirectoryFiles` times, or when the list would exceed the cap. A fold never reaches the
+// directory entries — `tests/` for the 158 — when the ask names more than `collapseDirectoryFiles`
+// files under one directory, or when the list would exceed the cap. A fold never reaches the
 // repository root and stays inside the item's own area: the top-level directories its criteria
 // name or its plannedFiles already carry. The decision names each directory and the files it covers.
 // ---------------------------------------------------------------------------
 
-/** More requested files than this under one directory are proposed as that directory. */
+/** More requested files than this under one directory are proposed as that directory; files already planned there do not count (GY-1676). */
 export const collapseDirectoryFiles = 20;
 /** A directory entry a widening proposes in place of the requested files it covers. */
 export interface CollapsedScope { scope: string; files: string[] }
@@ -45,8 +45,9 @@ export function collapseArea(item: { criteria?: readonly ScopeCriterion[]; plann
  * Entries already covered by another entry are normalized away first (GY-906): redundancy in the
  * item's own plannedFiles must never make a widening look unrepresentable — an item at the cap
  * holding `tests/` beside exact paths under it has room for the ask once the covered entries go.
- * Deepest directories first: one naming more than `collapseDirectoryFiles` entries becomes one
- * entry. Then, while the list is over `plannedFilesMax`, the directory that removes the most
+ * Deepest directories first: one the request names more than `collapseDirectoryFiles` new files
+ * under becomes one entry (the paths already planned there do not count: GY-1676). Then, while
+ * the list is over `plannedFilesMax`, the directory that removes the most
  * entries is folded (the deepest on a tie). Only directories inside `area` that hold a requested
  * path are considered, so a fold never widens past what the request and the item already name;
  * planned entries it contains are folded with it. Paths already planned are not asked for again.
@@ -59,7 +60,11 @@ export function collapsePlannedFiles(plannedFiles: readonly string[], paths: rea
     .sort((a, b) => depth(b) - depth(a) || a.localeCompare(b));
   const inside = (directory: string) => entries.filter(entry => pathScopeContains(directory, entry)).length;
   const fold = (directory: string) => { entries = [...entries.filter(entry => !pathScopeContains(directory, entry)), directory]; };
-  for (const directory of candidates) if (!entries.includes(directory) && inside(directory) > collapseDirectoryFiles) fold(directory);
+  // A directory folds for the width of the ask itself (GY-1676): one new file under a directory the
+  // item already plans 21 paths in is that exact path, never the directory; the cap below still folds.
+  // Only the entries the ask adds count, a deeper directory it already folded into as one.
+  const asked = (directory: string) => entries.filter(entry => pathScopeContains(directory, entry) && !plannedFiles.includes(entry)).length;
+  for (const directory of candidates) if (!entries.includes(directory) && asked(directory) > collapseDirectoryFiles) fold(directory);
   while (entries.length > plannedFilesMax) {
     const best = candidates.filter(directory => !entries.includes(directory)).map(directory => ({ directory, count: inside(directory) }))
       .filter(entry => entry.count > 1).sort((a, b) => b.count - a.count || depth(b.directory) - depth(a.directory))[0];
@@ -128,15 +133,42 @@ export function mergedScopeRequest(pending: ScopeRequestState | null | undefined
  * routed: the revision it would propose is refused by the schema on every attempt, so the refusal
  * stays standing for the operator instead of a doomed decision (GY-630).
  */
+/** GY-1764: a refusal reaches the approver only once the repository tree was read for it; asks that drop paths or rewrite criteria never need the tree. */
+export const evidenced = (request: ScopeRequestState) => !!request.decision?.treeRead || !!request.decision && request.decision.decidedBy !== 'graphyard' || !!request.remove?.length || !!request.criteria?.length;
 export function routableScopeRequest(item: { plannedFiles?: readonly string[]; criteria?: readonly ScopeCriterion[]; scopeRequest?: ScopeRequestState | null; lease?: { epoch: number; expiresAt: string } | null }, now: number) {
   const request = item.scopeRequest;
-  if (!request || request.decision?.state !== 'refused' || request.remove?.length || request.criteria?.length) return null;
+  if (!request || request.decision?.state !== 'refused' || request.decision.nonRepository || !evidenced(request) || request.remove?.length || request.criteria?.length) return null;
   // A request whose attempt no longer holds the lease is moot: a fresh attempt asks afresh.
   if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= now) return null;
+  return routableWidening(item, request);
+}
+const routableWidening = (item: { plannedFiles?: readonly string[]; criteria?: readonly ScopeCriterion[] }, request: ScopeRequestState) => {
   const paths = unplannedPaths(item.plannedFiles, request.paths);
   const folded = paths.length ? collapsePlannedFiles(item.plannedFiles ?? [], paths, collapseArea(item)) : null;
   return folded && folded.plannedFiles.length <= plannedFilesMax ? { request, paths, ...folded } : null;
+};
+
+/**
+ * The ask an ended attempt carried to the item while the approver judged it (GY-1484), still routed
+ * to that approver (GY-1568), or null. A worker that asks and then submits (or releases) ends its
+ * attempt seconds later; the ask is carried, so no live request remains for `routableScopeRequest`
+ * to read, and the loop used to withdraw the routed decision as one the item had moved past — the
+ * operator then widened by hand. The carried ask keeps its epoch and instant, so the decision it is
+ * routed as is the very one requested while the attempt lived, and its approval applies as the late
+ * answer the engine accepts. Only while no attempt holds an ask of its own: a claim inherits it.
+ */
+export function routableCarriedRequest(item: { plannedFiles?: readonly string[]; criteria?: readonly ScopeCriterion[]; scopeRequest?: ScopeRequestState | null; carriedScopeRequest?: ScopeRequestState | null }) {
+  const request = item.carriedScopeRequest;
+  if (!request || item.scopeRequest || request.decision?.state !== 'refused' || request.decision.nonRepository || request.decision.decidedBy !== 'graphyard' || !evidenced(request) || request.remove?.length || request.criteria?.length) return null;
+  return routableWidening(item, request);
 }
+
+/** The epoch and instant that identify an ask: a claim that inherits it keeps the epoch that asked (GY-1568), so its routed decision still answers it. */
+export const askIdentity = (request: Pick<ScopeRequestState, 'epoch' | 'at' | 'askedEpoch'>) => ({ epoch: request.askedEpoch ?? request.epoch, at: request.at });
+
+/** The ask the independent approver judges for the item: its live attempt's routed request, or the one an ended attempt carried. */
+export const routedScopeRequest = (item: Parameters<typeof routableScopeRequest>[0] & Parameters<typeof routableCarriedRequest>[0], now: number) =>
+  routableScopeRequest(item, now) ?? routableCarriedRequest(item);
 
 /**
  * True when the item's standing refusal is the terminal over-cap one (GY-906): a purely additive
@@ -203,3 +235,22 @@ export function scopeRequestOutcome(item: { key: string; plannedFiles?: readonly
   if (!own) return { state: 'ended', text: `Graphyard: your scope request on ${item.key} (epoch ${ask.epoch}) is no longer open — withdrawn or re-asked — and nothing widened plannedFiles for it` };
   return { state: 'pending', text: `Graphyard: your scope request on ${item.key} (epoch ${ask.epoch}) for ${ask.paths.join(', ')} is ${own.decision ? 'with the independent approver: the widening rule could not ground it' : 'waiting for the widening rule'}; you keep your lease` };
 }
+/**
+ * The scopes a worker's open ask grounds (GY-1676): the paths the live attempt's request names,
+ * else the ones an ended attempt carried to the approver, and every directory entry the ask's own
+ * fold (`collapsePlannedFiles` against the item's current plannedFiles and area) produces for it.
+ * A file the worker asked for is one it creates, so a widening that answers the ask plans it
+ * although the base branch does not hold it yet; requiring a criterion to say so instead makes
+ * the revision more than a planned-files widening, which a live lease or containment quarantine
+ * refuses. A directory the fold produces — for the ask's width or to stay under the cap — is
+ * grounded the same way, since that fold is the very widening the loop proposes; a directory that
+ * merely contains an asked file is not, so asking for `newdir/a.ts` never plans the rest of `newdir/`.
+ */
+export function askedScopes(item: { plannedFiles?: readonly string[]; criteria?: readonly ScopeCriterion[]; scopeRequest?: ScopeRequestState | null; carriedScopeRequest?: ScopeRequestState | null }): string[] {
+  const asked = (item.scopeRequest ?? item.carriedScopeRequest)?.paths ?? [];
+  const paths = unplannedPaths(item.plannedFiles, asked);
+  const folded = paths.length ? collapsePlannedFiles(item.plannedFiles ?? [], paths, collapseArea(item)).collapsed.map(entry => entry.scope) : [];
+  return [...new Set([...asked, ...folded])];
+}
+/** Whether an open ask grounds a planned path the base lacks: it lies within one of the scopes `askedScopes` returns. */
+export const askGrounds = (path: string, asked: readonly string[]) => asked.some(entry => pathScopeContains(entry, path));

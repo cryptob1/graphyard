@@ -10,7 +10,7 @@ import { shellQuote } from './master/dispatch.js';
 import { sessionName } from './session-name.js';
 import { smokeRegistryAccount } from './runner/roles.js';
 import type { SmokeResult } from './runner/pi.js';
-import { accountIneligibility, deriveAccountPlan, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, smokeFailureDue, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
+import { accountIneligibility, deriveAccountPlan, exhaustedTwin, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, smokeFailureDue, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
 
 /**
  * The executor's side of the agent registry (GY-91).
@@ -24,7 +24,7 @@ import { accountIneligibility, deriveAccountPlan, fleetRoles, liveSessions, prop
  * role at a time.
  */
 export type FleetConfig = Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId' | 'run'>>;
-export interface FleetProbe extends EnvironmentProbe { work?: string; principal?: string; /** The proof group a producer launch answers; one live session per group, not per item. */ group?: string; /** Replaces the HTTP client, for executors embedded beside the control plane and for tests. */ registry?: FleetClient;
+export interface FleetProbe extends EnvironmentProbe { work?: string; /** Which runtimes a worker is tried on first (GY-1746). */ prefer?: 'fast' | 'strong'; /** Accounts this dispatch already failed to start a session on. */ exclude?: string[]; principal?: string; /** The proof group a producer launch answers; one live session per group, not per item. */ group?: string; /** Replaces the HTTP client, for executors embedded beside the control plane and for tests. */ registry?: FleetClient;
   /** The runtime sessions Herdr lists on this host right now: a registry session whose runtime session is gone does not count toward its role (GY-190). */
   runtime?: RuntimeInventory;
   /** Runs the one-prompt smoke test of an account (GY-446); replaced by tests. */
@@ -35,9 +35,11 @@ export interface RuntimeInventory { agents: { name?: string | null }[]; availabl
 /** The three calls an executor makes. */
 export interface FleetClient {
   document(): Promise<AgentRegistry>;
-  select(request: { role: FleetRoleName; host: string; work: string | null; group: string | null; principal: string | null; observations: { account: string; quota: QuotaObservation; smoke?: SmokeObservation }[] }): Promise<FleetSelection>;
+  select(request: { role: FleetRoleName; host: string; work: string | null; group: string | null; principal: string | null; prefer?: 'fast' | 'strong'; exclude?: string[]; observations: { account: string; quota: QuotaObservation; smoke?: SmokeObservation }[] }): Promise<FleetSelection>;
   /** `outcome` is how a headless run on the session ended: with a result or without one (GY-446). */
   end(session: string, reason: string, outcome?: RunOutcome): Promise<void>;
+  /** Report what the executor observed of its own host's accounts without asking for a session, as a hold is seen (GY-1573). */
+  observe?(request: { host: string; observations: { account: string; quota: QuotaObservation }[] }): Promise<unknown>;
 }
 export interface FleetSelection { selected: boolean; reason: string; skipped: SessionSkip[]; session: FleetSession | null; account: FleetAccount | null; runtime: FleetRuntime | null; model: FleetModel | null;
   /** The role's launch policy the choice was made under (GY-170); a server that predates it sends none, and the document's is used. */
@@ -52,6 +54,13 @@ export interface FleetLaunchAccount { name: string; kind: string; home: string |
   role?: FleetRoleName; policy?: RolePolicy; revision?: number } }
 
 export class FleetUnreachableError extends Error {}
+/**
+ * Whether `error` is the registry's definitive answer that it does not know a session (GY-1504): it
+ * keeps only its last `sessionHistoryLimit` ended sessions, so one that aged out answers 404 Unknown
+ * session forever. Such a session holds no role slot in the registry's own accounting, so the caller
+ * takes it as ended; a refusal the plane's outage or restart caused is no such answer and is retried.
+ */
+export const unknownRegistrySession = (error: unknown) => error instanceof FleetUnreachableError && /^The agent registry at \S+ answered 404: Unknown session$/.test(error.message);
 /**
  * A launch the registry refused only because its role is at its concurrency limit (GY-190). It is
  * not a fault of any account and not a decision to give up on: the launch waits for a slot, and the
@@ -130,7 +139,13 @@ export async function fleetRequest(config: Required<Pick<FleetConfig, 'url'>> & 
 
 export function httpFleetClient(config: Required<Pick<FleetConfig, 'url'>> & Pick<FleetConfig, 'credentialFile'>, fetcher: typeof fetch = fetch, timeoutMs = fleetRequestTimeoutMs): FleetClient {
   const call = (path: string, body?: unknown) => fleetRequest(config, path, { body, fetch: fetcher, timeoutMs });
-  return { document: () => call('agent-registry/document'), select: request => call('agent-registry/select', request), end: async (session, reason, outcome) => { await call(`agent-registry/sessions/${session}/end`, { reason, ...(outcome ? { outcome } : {}) }); } };
+  return { document: () => call('agent-registry/document'), select: request => call('agent-registry/select', request).catch(error => {
+    // A control plane served before this coordinator rejects the fields it does not know (GY-1746); the selection is asked again in the older form.
+    if (!(request.prefer || request.exclude?.length) || !/answered 400/.test(error instanceof Error ? error.message : '')) throw error;
+    const { prefer: _prefer, exclude: _exclude, ...older } = request;
+    return call('agent-registry/select', older);
+  }), end: async (session, reason, outcome) => { await call(`agent-registry/sessions/${session}/end`, { reason, ...(outcome ? { outcome } : {}) }); },
+    observe: request => call('agent-registry/observe', request) };
 }
 
 // The registry as this executor last read it, kept beside the coordinator's other private state.
@@ -190,7 +205,7 @@ export async function observeAccount(account: FleetAccount, runtime: FleetRuntim
     // so the smoke test it gets before first selection decides, with Pi's own error (GY-515, GY-1158).
     if (runtime.launch.kind === 'pi' && !health.loggedIn) return { health, quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null } };
     return { health, quota: { loggedIn: health.loggedIn, state: health.loggedIn ? health.quota : 'unknown', usage: health.usage.map(entry => ({ window: entry.window, percent: entry.percent, resetsAt: entry.resetsAt })),
-      resetsAt: health.quota === 'exhausted' ? resets.at(-1) ?? null : null, reason: health.reason ? health.reason.slice(0, 500) : null } };
+      resetsAt: health.quota === 'exhausted' ? resets.at(-1) ?? null : null, reason: health.reason ? health.reason.slice(0, 500) : null, identity: health.identity } };
   }
   if (!runtime.launch.loginFile) return { quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null };
   const loggedIn = await access(resolve(home, runtime.launch.loginFile)).then(() => true, () => false);
@@ -259,7 +274,7 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
     const gone = runtimeSessionGone(session, probe.runtime, host, now);
     if (gone) await client.end(session.id, gone).catch(() => {});
   }
-  const chosen = await client.select({ role, host, work: probe.work ?? null, group: probe.group ?? null, principal: probe.principal ?? profile.principal ?? null, observations: observations.map(({ account, quota, smoke }) => ({ account, quota, ...(smoke ? { smoke } : {}) })) });
+  const chosen = await client.select({ role, host, work: probe.work ?? null, group: probe.group ?? null, principal: probe.principal ?? profile.principal ?? null, ...probe.prefer ? { prefer: probe.prefer } : {}, ...probe.exclude?.length ? { exclude: probe.exclude } : {}, observations: observations.map(({ account, quota, smoke }) => ({ account, quota, ...(smoke ? { smoke } : {}) })) });
   const at = new Date(now).toISOString();
   const skipped: AccountSkip[] = chosen.skipped.map(entry => ({ at, role: role as AccountSkip['role'], profile: profile.name, environment: entry.account, reason: entry.reason, work: probe.work ?? null, cause: skipCause(entry.reason) }));
   if (!chosen.selected || !chosen.account || !chosen.runtime || !chosen.model || !chosen.session)
@@ -289,7 +304,9 @@ export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, 
   const accounts = definition.accounts.map(name => {
     const account = fleet.registry.accounts.find(entry => entry.name === name);
     const reason = account ? accountIneligibility(fleet.registry, account, now, host, { expiredSmokeRetestable: true }) : `${name} is not a registered account`;
-    return { environment: name, healthy: !reason, reason, quota: account?.quota.state ?? 'unknown', resetsAt: account?.quota.resetsAt ?? null };
+    // A twin on a spent login (GY-1573) waits for that login's reset, which is the twin's, not its own last read.
+    const twin = account && reason ? [exhaustedTwin(fleet.registry, account, now)].find(other => other && reason.includes(`same provider login as ${other.name},`)) ?? null : null;
+    return { environment: name, healthy: !reason, reason, quota: twin ? 'exhausted' : account?.quota.state ?? 'unknown', resetsAt: twin ? twin.quota.resetsAt : account?.quota.resetsAt ?? null };
   });
   const running = liveSessions(fleet.registry).filter(session => session.role === role && !runtimeSessionGone(session, probe.runtime, host, now)).length;
   const full = running >= definition.concurrency ? `role ${role} is at its concurrency limit (${running} of ${definition.concurrency} live)` : null;
@@ -558,8 +575,9 @@ export const connectProvider = (id: string): ConnectProvider | null => connectPr
  * command, and the host's result is what reports it — the card never claims a placement the
  * fleet cannot launch.
  */
-export function connectDefaultRoles(tier: ConnectProvider['tier']): readonly string[] {
-  return tier === 'fast' ? ['research', 'approver', 'producer'] : ['worker', 'reviewer'];
+export function connectDefaultRoles(tier: ConnectProvider['tier'], runtime?: string): readonly string[] {
+  // Only a Pi account joins the worker role among the cheap ones: worker dispatch treats every other runtime as strong (GY-1746).
+  return tier === 'fast' ? ['research', ...(runtime === 'pi' ? ['worker'] : []), 'approver', 'producer'] : ['worker', 'reviewer'];
 }
 
 /**

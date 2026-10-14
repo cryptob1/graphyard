@@ -16,6 +16,7 @@ import { cappedRework } from '../src/server/lane-rework.js';
 import { cappedEscalation } from '../src/daemon/cycle-review-cap.js';
 import { routedScopeStatus } from '../src/cli/owed-report.js';
 import { coordinationWork } from '../src/server/work-view.js';
+// Time-bomb allowance (GY-1694): the 2026-09-24 instants stamp settled prior rounds and the reviewer binding, which the round logic orders by head rather than by clock; new Date() stamps the live item and the launch observedAt.
 
 // GY-167, 2026-09-24: every review round re-read the whole change and found new edge cases, and
 // nothing bounded the rounds. From the second review of a pull request the reviewer judges only
@@ -47,8 +48,8 @@ test('unit:review-delta-prompt — a pull request with a completed review of an 
   const prompt = reviewPrompt({ repository: 'owner/project' }, binding, undefined, undefined, criteria, history);
   assert.ok(prompt.includes(`You already reviewed an earlier head of this pull request, ${H2}.`), 'the prompt names the head last reviewed');
   assert.ok(prompt.includes(deltaInstruction), 'the prompt gives the delta to review');
-  assert.ok(prompt.includes(`git fetch origin ${H2} ${H}`), 'both heads are fetched so the delta can be read');
-  assert.ok(prompt.includes(`reviews only what changed since then: git fetch origin ${H2} ${H} && ${deltaInstruction}, plus the still-unresolved review threads`));
+  assert.ok(prompt.includes(`git fetch --no-write-fetch-head origin ${H2} ${H}`), 'both heads are fetched so the delta can be read');
+  assert.ok(prompt.includes(`reviews only what changed since then: git fetch --no-write-fetch-head origin ${H2} ${H} && ${deltaInstruction}, plus the still-unresolved review threads`));
   assert.ok(prompt.includes('Do not raise findings on code that is unchanged since that head unless an acceptance criterion is unmet'));
   // The criteria-only rule still stands beside it.
   assert.ok(prompt.includes('[AC-1] The widget counts every frob.'));

@@ -9,6 +9,7 @@ import { temporaryDirectories, underTestRunner } from '../supervisor.js';
 import { decompositionSettingsSchema, diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { researchSettingsSchema } from '../research.js';
 import { doctorSettingsSchema } from './doctor-settings.js';
+import { candidateSettingsSchema, mergeWriterSettingsSchema, shadowGateSettingsSchema } from './merge-writer-settings.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
 import { invariantThresholdsSchema } from '../model/invariants.js';
 import { runtimeSandboxes } from '../worker-sandbox.js';
@@ -224,9 +225,9 @@ export const masterRunSchema = z.object({
   // (`graphyard / production`); unset, GRAPHYARD_PRODUCTION_ENVIRONMENT or `production` applies.
   productionEnvironment: z.string().trim().min(1).max(100).optional(),
   smokeWorkflow: z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'Name the trusted post-deployment smoke workflow file, such as deploy-smoke.yml').optional(),
-  // GY-1302: how often, at most, the loop dispatches .github/workflows/release-candidate.yml with
-  // promote=true when the base branch has moved past the last promoted SHA and no candidate is in
-  // validation. Unset: 120 (`defaultPromoteEveryMinutes`); 0 turns the loop's promotion off.
+  // GY-1302, GY-1488: the minimum gap between the loop's dispatches of .github/workflows/release-candidate.yml
+  // with promote=true, made as soon as the base branch has moved past the last promoted SHA and the
+  // last cut and no candidate is in validation. Unset: 10 (`defaultPromoteEveryMinutes`); 0 turns it off.
   promoteEveryMinutes: z.number().int().min(0).max(10080).optional(),
   // GY-1398: how long the deployment step reuses its last verified release observation while every
   // delivery is already served and none is pending, instead of reading GitHub every cycle. Unset: 15
@@ -299,6 +300,9 @@ export const masterRunSchema = z.object({
   // The diagnostician (GY-439): headless Pi session turning each recurring-fault item into its root
   // cause and fix item — its model, fallback, time limit, bound and log-reading commands.
   diagnostician: diagnosticianSettingsSchema.optional(),
+  shadowGate: shadowGateSettingsSchema.optional(),
+  mergeWriter: mergeWriterSettingsSchema.optional(), // the control-plane merge executor's deploy key and re-trial bound (GY-1524)
+  candidates: candidateSettingsSchema.optional(), // when the loop cuts release candidates itself in control-plane mode (GY-1526): every N merges or M idle minutes
 }).strict();
 export type MasterRun = z.infer<typeof masterRunSchema>;
 
@@ -315,8 +319,22 @@ export const agentIdentitySchema = z.object({ id: z.string().regex(/^[a-zA-Z0-9]
 export const defaultRerunFailedChecks = 1;
 // The most reruns per sha and check master config and the control plane accept.
 export const maxRerunFailedChecks = 3;
+/**
+ * Who reviews and merges (GY-1501). `autonomous`, the default every existing install keeps: the
+ * reviewer App reviews and the master's operator-agent and approver identities decide. `supervised`,
+ * where `up --local` starts: the operator reviews each pull request on GitHub (a non-author approval of
+ * the exact head) and GitHub auto-merge merges it; the loop launches no reviewer, approver or
+ * escalation session and the master claims no autonomy. `master promote` promotes it (GY-1502).
+ */
+export const supervisionModes = ['autonomous', 'supervised'] as const;
+export type Supervision = typeof supervisionModes[number];
+export const promotionCommand = 'graphyard master promote --admin-token-stdin (after graphyard master reviewer setup and master reviewer add)';
 export const masterConfigSchema = z.object({
   version: z.literal(1),
+  // Absent is autonomous, so every existing master.json loads and is written back unchanged.
+  supervision: z.enum(supervisionModes).optional(),
+  // The operator's own GitHub login (supervised mode): a candidate it authored cannot be independently approved by it.
+  operatorLogin: z.string().trim().min(1).max(100).optional(),
   url: z.string(),
   credentialFile: z.string(),
   cliPath: z.string(),
@@ -326,6 +344,9 @@ export const masterConfigSchema = z.object({
   githubAppId: z.number().int().nonnegative(),
   hostId: z.string().trim().min(1).max(200),
   herdrWorkspace: z.string().trim().min(1).max(200).optional(),
+  // This install's own Herdr instance (GY-1511), when the host's default one serves another install:
+  // every herdr call the install makes carries its XDG_CONFIG_HOME and --session (master/herdr.ts).
+  herdrInstance: z.object({ configHome: z.string().trim().min(1).max(500).refine(isAbsolute, 'must be absolute'), session: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/) }).strict().optional(),
   masterAgentName: sessionNameField,
   autoMerge: z.boolean().default(true),
   // Review rounds before only a blocking finding stands against it (GY-1118; default 3).
@@ -383,7 +404,17 @@ export function withProducerDefaults<T extends Pick<MasterConfig, 'producers'>>(
   if (!config.producers.some(profile => profile.concurrency === undefined)) return config;
   return { ...config, producers: config.producers.map(profile => profile.concurrency === undefined ? { ...profile, concurrency: automaticProducerConcurrency } : profile) };
 }
-export const withRoleDefaults = <T extends Pick<MasterConfig, 'reviewers' | 'producers' | 'run'>>(config: T): T => withProducerDefaults(withReviewerDefaults(config));
+/**
+ * The config as a supervised install runs it (GY-1501): no reviewer App, operator-agent or approver
+ * identity, whatever master.json still records, so the loop launches no reviewer, approver or
+ * escalation session and the master requests no two-party decision. Autonomous configs pass unchanged.
+ */
+export function withSupervision<T extends { supervision?: Supervision; reviewer?: unknown; operatorAgent?: unknown; approver?: unknown }>(config: T): T {
+  if (config.supervision !== 'supervised') return config;
+  const { reviewer: _reviewer, operatorAgent: _operatorAgent, approver: _approver, ...kept } = config;
+  return kept as T;
+}
+export const withRoleDefaults = <T extends Pick<MasterConfig, 'reviewers' | 'producers' | 'run'> & { supervision?: Supervision; reviewer?: unknown; operatorAgent?: unknown; approver?: unknown }>(config: T): T => withSupervision(withProducerDefaults(withReviewerDefaults(config)));
 /** Reruns of a failed required check per sha under this master config: `mergeQueue.rerunFailedChecks`, or the product default of 1. */
 export function rerunFailedChecks(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
   return config?.mergeQueue?.rerunFailedChecks ?? defaultRerunFailedChecks;
@@ -510,9 +541,9 @@ export const dirtyCheckoutEscalation = (refusal: string, leases: DirtyCheckoutLe
 //
 // A launch that cannot apply the confinement is refused with the reason named, never started
 // unconfined, exactly like a contained install (GY-174): install bubblewrap, or let the runtime
-// carry a workspace-write sandbox. The master session is not among the confined roles — it runs
-// the loop's own configuration and administration commands from the coordinator root, and is
-// bound by its own harness rules instead.
+// carry a workspace-write sandbox. The master session is confined too (GY-1658): the same read-only
+// mount, PID namespace and hidden process-launch channels, with its managed `.graphyard` state
+// writable; the host acts its admin commands need (a loop restart) are requests the loop serves.
 
 /** How a launch keeps the coordinator checkout unwritable for the session it starts. */
 export interface CoordinatorConfinement {
@@ -540,6 +571,8 @@ export interface ConfinementInput {
   mountNamespaceWorks?: boolean;
   /** The session pushes and calls GitHub with a short-lived credential of its own (a worker's, GY-999; a reviewer's), so its session bus stays `/dev/null` instead of the keyring-only proxy that reaches the operator's login (GY-1039). */
   ownGitHubCredential?: boolean;
+  /** An explicit null binds no keyring proxy whether or not the session carries a credential of its own: a worker launched while the control plane is the merge writer (GY-1523) has no GitHub credential and pushes nothing, so it reaches no keyring either. */
+  secretsBus?: null;
 }
 const withinCheckout = (path: string, root: string) => { const from = relative(root, path); return from !== '' && from !== '..' && !from.startsWith(`..${sep}`) && !isAbsolute(from); };
 /** Whether `path` is a directory (or nothing); symlinks to directories count, as bwrap binds resolve them. */
@@ -677,7 +710,7 @@ export const hostProcessLaunchTargets = (uid: number | undefined = process.getui
  * namespace; a session keeps the network and its own process tree. The wrapper ends with `--`, so
  * the runtime command follows it.
  */
-export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null; ownGitHubCredential?: boolean }): readonly string[] {
+export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null; ownGitHubCredential?: boolean; secretsBus?: null; writable?: readonly string[] }): readonly string[] {
   const root = resolve(input.coordinatorRoot), directory = resolve(input.sessionDirectory);
   const gitDir = checkoutGitDirectory(root);
   const adminDirectory = sessionGitAdminDirectory(directory, root);
@@ -689,7 +722,7 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const shared = [...sharedDirectories, ...(existsSync(fetchHead) && !isDirectoryPath(fetchHead) ? [fetchHead] : [])];
   const own = withinCheckout(directory, root) ? [directory] : [];
   const bwrap = input.bwrap ?? 'bwrap';
-  const masks = processLaunchMaskWords({ ...hostProcessLaunchTargets(), ...(input.ownGitHubCredential ? { secretsBus: null } : {}) }, [root, directory]);
+  const masks = processLaunchMaskWords({ ...hostProcessLaunchTargets(), ...(input.ownGitHubCredential || input.secretsBus === null ? { secretsBus: null } : {}) }, [root, directory]);
   const externalGitDir = gitDir !== root && !withinCheckout(gitDir, root) && isDirectoryPath(gitDir) ? [gitDir] : [];
   // A session with no admin of its own re-exposes the whole worktrees area; when the coordinator is
   // itself a linked worktree its own admin (HEAD, index) lies there, so it is bound read-only again
@@ -698,7 +731,7 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const protectAdmin = !adminDirectory && coordinatorAdmin && sharedDirectories.some(path => withinCheckout(coordinatorAdmin, path)) ? [coordinatorAdmin] : [];
   return [bwrap, '--unshare-pid', '--dev-bind', '/', '/', ...masks, '--proc', '/proc', '--ro-bind', root, root,
     ...externalGitDir.flatMap(path => ['--ro-bind', path, path]),
-    ...[...sharedDirectories, ...own].flatMap(path => ['--bind', path, path]),
+    ...[...sharedDirectories, ...own, ...(input.writable ?? []).filter(isDirectoryPath)].flatMap(path => ['--bind', path, path]),
     ...protectAdmin.flatMap(path => ['--ro-bind', path, path]),
     ...shared.filter(path => !sharedDirectories.includes(path)).flatMap(path => ['--bind', path, path]), '--'];
 }
@@ -756,7 +789,7 @@ export async function coordinatorConfinement(input: ConfinementInput): Promise<C
   const refusal = await coordinatorConfinementRefusal(input);
   if (refusal) throw new Error(refusal);
   const root = resolve(input.coordinatorRoot), directory = resolve(input.allocatedDirectory ?? input.sessionDirectory);
-  const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: directory, bwrap: input.bwrap ?? undefined, ownGitHubCredential: input.ownGitHubCredential });
+  const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: directory, bwrap: input.bwrap ?? undefined, ownGitHubCredential: input.ownGitHubCredential, ...(input.secretsBus === null ? { secretsBus: null } : {}) });
   const reexposed = wrapper.filter((word, index) => index > 0 && wrapper[index - 1] === '--bind');
   return { mechanism: 'read-only-mount', wrapper,
     detail: `the coordinator checkout at ${root} is bind-mounted read-only for the session in a bubblewrap namespace whose /proc shows only the session's own processes; only ${reexposed.join(', ') || 'nothing'} are re-exposed writable, so no shell command can write, commit in or switch the checkout` };

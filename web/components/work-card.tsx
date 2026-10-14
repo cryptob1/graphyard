@@ -2,7 +2,7 @@ import type { Work } from '../../src/model';
 import { CandidatePr } from '../candidate';
 import { formatDuration } from '../../src/model/duration';
 import { groupOf, nextActor, timedGroups, type Group } from '../groups';
-import { phaseLabel, phaseOf, plainStatus } from '../../src/model/plain-status';
+import { blockerSummary, phaseLabel, phaseOf, plainStatus } from '../../src/model/plain-status';
 import { prSteps, stepHeld } from '../../src/model/pr-steps';
 import type { StepTransition } from '../flow-replay';
 import type { ActionlessCard } from '../../src/model/actionless';
@@ -30,7 +30,10 @@ export default function WorkCard({ item, all, repository, now, onOpen, group: gi
   const steps = group === 'moving' || group === 'blocked' ? prSteps(item, now, release) : null;
   const actor = nextActor(item, group, now, release, all);
   const pr = item.candidate && <CandidatePr repository={repository} candidate={item.candidate} workKey={item.key}/>;
+  // A blocker waiting for a future instant is no stall: its wait is the row's one sentence (GY-1739).
+  const waits = group === 'blocked' && item.blocker ? blockerSummary(item.blocker, now, item) : null;
   const why = group === 'needs-you' ? actor.does
+    : waits?.kind === 'waiting-until' ? waits.sentence
     : stall ? `Nothing is happening: ${stall.missing} — stuck at “${phaseLabel[phaseOf(item, now)]}” for ${formatDuration((now - Date.parse(stall.heldSince)) / 60000)} with nothing to do next`
       // Merged work held at Deploy is blocked by the release, never "Shipped": say what the release lacks.
       : group === 'blocked' ? (steps?.current === 'deploy' ? unprefixed(`${steps.detail}.`) : unprefixed(status.blocking ?? status.sentence))
@@ -38,14 +41,14 @@ export default function WorkCard({ item, all, repository, now, onOpen, group: gi
   const waited = item.humanRequest ? Math.max(0, now - Date.parse(item.humanRequest.at)) : null;
   // A blocked row names its blocker's class and the loop's last and next probe of it (GY-1008).
   const blocker = group === 'blocked' ? blockerView(item) : null;
-  // A blocker needing someone says so through its actor (Master agent); a routine one shows its probe.
+  // A blocker needing someone says so through its summary and actor (Master agent); a routine one shows its class and probe.
   const probe = blocker && (blocker.needsSomeone ? null : [blocker.lastProbe ? `last probe ${blocker.lastProbe.result} ${formatDuration(Math.max(0, now - Date.parse(blocker.lastProbe.at)) / 60000)} ago` : 'not probed yet',
     blocker.nextProbeAt ? `next in ${formatDuration(Math.max(0, Date.parse(blocker.nextProbeAt) - now) / 60000)}` : null].filter(Boolean).join(' · '));
   return <div className={`work-row group-${group} tone-${status.tone}${timed && held.overdue ? ' overdue' : ''}`} data-row={item.key} data-group={group} onClick={() => onOpen(item.id)}>
     <span className="row-key mono">{item.key}</span>
     <span className="row-main">
       <h3><button type="button" className="card-open" data-title aria-label={`${item.title} — open ${item.key}`} onClick={e => { e.stopPropagation(); onOpen(item.id); }}>{item.title}</button></h3>
-      <span className="row-sub status-line">{pr && <span className="card-pr" onClick={e => e.stopPropagation()}>{pr}</span>}{pr && why && ' · '}{why && <Explained sentence={why}/>}{!pr && !why && (steps ? 'No pull request yet' : '')}{blocker && <span className="blocker-class" data-blocker-class={blocker.class} data-needs-someone={blocker.needsSomeone} title={blocker.lastProbe ? `${blocker.lastProbe.probe}: ${blocker.lastProbe.detail}` : undefined}> · <span className="mono">{blocker.class}</span>{probe && ` · ${probe}`}</span>}</span>
+      <span className="row-sub status-line">{pr && <span className="card-pr" onClick={e => e.stopPropagation()}>{pr}</span>}{pr && why && ' · '}{why && <Explained sentence={why}/>}{!pr && !why && (steps ? 'No pull request yet' : '')}{blocker && <span className="blocker-class" data-blocker-class={blocker.class} data-needs-someone={blocker.needsSomeone} title={blocker.lastProbe ? `${blocker.lastProbe.probe}: ${blocker.lastProbe.detail}` : undefined}>{probe && <> · <span className="mono">{blocker.class}</span> · {probe}</>}</span>}</span>
     </span>
     {steps ? <span className="row-steps"><StepsBar steps={steps}/></span> : <span className="row-steps"/>}
     <span className="row-who" title="Who acts next">{actor.who}</span>

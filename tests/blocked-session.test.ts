@@ -19,6 +19,7 @@ import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01 clock is handed to runCycle as `() => clock` and the 2026-10-05 now is startAgentSession's explicit clock; Date.now() builds relative expiries for the account tests.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const clock = Date.parse('2030-01-01T00:00:00Z');

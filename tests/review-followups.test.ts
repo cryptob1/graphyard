@@ -15,6 +15,7 @@ import { overdueTriage } from '../src/model/machine-backlog.js';
 import { routineDecision, setAsideFollowUpThreads, threadResolutionGraceMs } from '../src/master-daemon.js';
 import type { Observation, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): 2026-09-24 verdict/thread instants are ordered only against each other; 2026-09-30 stamps pendingFollowUps on items that are not machine-filed, so overdueTriage never ages them; Date.now() stamps the rest.
 
 // GY-166, 2026-09-24: GY-164 took 19 attempts and five hours; its reviewer confirmed both criteria
 // met around round 16 and kept requesting changes for new edge cases. The reviewer now judges the

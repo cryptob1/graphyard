@@ -92,7 +92,9 @@ export function exactApproval(work: Work): ApprovalIdentity | null {
   if (provider === 'github') {
     const baseline = work.formalReviewBaseline;
     const review = (obs.reviews ?? []).find(r => r.sha === candidate.sha && r.state === 'APPROVED' && r.reviewer !== candidate.author
-      && (!work.formalReviewResetRequired || baseline?.pr === candidate.pr && baseline.policyRevision === work.policyRevision && Number.isSafeInteger(r.id) && r.id! > 0 && !baseline.reviewIds.includes(r.id!)));
+      && (!work.formalReviewResetRequired
+        || (r.source === 'control-plane' && (!baseline || !baseline.reviewIds.includes(r.id!)))
+        || (baseline?.pr === candidate.pr && baseline.policyRevision === work.policyRevision && Number.isSafeInteger(r.id) && r.id! > 0 && !baseline.reviewIds.includes(r.id!))));
     return review ? { provider, reviewer: review.reviewer, sha: candidate.sha, ...(review.id !== undefined ? { reviewId: review.id } : {}) } : null;
   }
   const verdict = obs.agentReview, request = work.reviewRequest;

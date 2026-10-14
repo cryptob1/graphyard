@@ -13,6 +13,7 @@ import { addsTestFile, timingBaselineCompanion, timingBaselinePath } from '../sr
 import { regressionRefusals } from '../src/regression-guard.js';
 import { localScopeFindings } from '../src/sync.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-30 and 2026-10-04 scope-request ats are past refusal fixtures judged on plannedFiles, not the clock; the live ask and lease come from Date.now() and are judged with new Date().
 
 // GY-1023: a change that adds a test file records that file's line in the timing baseline CI
 // balances its shards by. The baseline is an implied scope companion of the test: sync, complete and

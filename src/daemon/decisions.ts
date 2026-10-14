@@ -1,20 +1,22 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, RefusedResponse } from '../model.js';
-import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason, scopeRefusalBlocker } from '../model/scope.js';
-import { widenedPlannedFiles } from '../model/scope-collapse.js';
+import { scopeDecisionBinding, scopeDecisionReason, scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
+import { askIdentity, routedScopeRequest, widenedPlannedFiles } from '../model/scope-collapse.js';
 import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../model/blocker-class.js';
 import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { extractProducerAccountsOrRuntimes, unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
-import { decisionBindingMax, type DecisionSituation } from '../model/approval.js'; import { unsettledApproval } from './decision-reads.js';
+import { conflictReworkDue, decisionBindingMax, type DecisionSituation } from '../model/approval.js'; import { unsettledApproval } from './decision-reads.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
+import { containmentInMotion } from '../model/containment.js';
 import { researchRework } from '../research.js'; import { baseBreakHold } from '../master/base-break-refresh.js';
 import { unproducedManualProofs } from '../model/unproduced-attestation.js';
 import { mechanicalRework, type MechanicalFixRequest } from '../mechanical-findings.js';
 import { triageClosure } from '../model/machine-backlog.js'; import { refusedAttestationRework, type RefusedAttestation } from '../model/rework-ground.js';
-import { actionDetailMax, type ApprovalWatch, message } from './state.js';
+import { actionDetailMax, approvalWatchSchema, type ApprovalWatch, message } from './state.js';
 import { blockingFindings, followUpFindingsOf, pastReviewCap, reviewRound, reviewRoundCapOf, reworkRoundsOf } from '../review-cap.js';
 import { sessionName } from '../session-name.js';
+import type { ScreenMotion } from '../master/approver-stall.js';
 
 /** What the routine decisions read of the master configuration: automatic merging, and the review-round cap (GY-1118). */
 export type ReviewCapConfig = Pick<MasterConfig, 'autoMerge'> & Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>;
@@ -72,9 +74,17 @@ export function standingVerdict(work: Work): StandingVerdict | null {
  * (`cappedReworkBinding`), which puts the finding to that approver. So is any other — an agent
  * provider's verdict, or a person's review — since Graphyard cannot withdraw it as the reviewer App.
  */
-export interface CappedReview { kind: 'follow-up' | 'escalate'; round: number; cap: number; reviewer: string; reviewId: number | null; sha: string; blocking: string[]; findings: string[]; reason: string }
+export interface CappedReview { kind: 'follow-up' | 'escalate'; round: number; cap: number; reviewer: string; reviewId: number | null; sha: string; blocking: string[]; findings: string[]; reason: string; submittedAt?: string }
 /** The binding of the loop's rework request for a capped change request (GY-1389): an approver's to judge, never the risk lane's. */
 export const cappedReworkBinding = (head: string, reviewer: string) => `${head}:capped:${reviewer}`;
+/** Whether a rework decision's binding is the loop's capped review-grounds request (`cappedReworkBinding`): the review-cap step answers its refusal. */
+export const cappedReworkBound = (binding: unknown) => typeof binding === 'string' && /^[0-9a-f]{40}:capped:/.test(binding);
+/**
+ * The mark a capped rework request opens its reason with (GY-1575): the policy revision it was requested
+ * under. A decision record keeps no revision, and a requirements or review-policy revision can leave the
+ * head unchanged, so the mark is what binds the approver's judgement to that revision's change request.
+ */
+export const cappedRevisionMark = (policyRevision: number) => `[Capped review under policy revision ${policyRevision}.]`;
 export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>): CappedReview | null {
   const cap = reviewRoundCapOf(config);
   if (work.stage === 'done' || !pastReviewCap(work, cap)) return null;
@@ -87,7 +97,7 @@ export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'rev
   const blocking = review?.blocking?.length ? review.blocking : blockingFindings(body), round = reviewRound(work);
   const own = !!review && !!config.reviewer && review.reviewer.toLowerCase() === `${config.reviewer.slug}[bot]`.toLowerCase();
   const findings = followUpFindingsOf(body);
-  const base = { round, cap, reviewer: verdict.reviewer, reviewId, sha: candidate.sha, blocking, findings: findings.length ? findings : [verdict.reason] };
+  const base = { round, cap, reviewer: verdict.reviewer, reviewId, sha: candidate.sha, blocking, findings: findings.length ? findings : [verdict.reason], ...(review?.submittedAt ? { submittedAt: review.submittedAt } : {}) };
   const past = `${work.key} is in review round ${round}, past its cap of ${cap}`;
   if (blocking.length) return { kind: 'escalate', ...base, reason: `${past}, and ${verdict.reviewer} names ${blocking.length === 1 ? 'a blocking finding' : `${blocking.length} blocking findings`} on ${candidate.sha.slice(0, 12)}: ${blocking.join('; ')}` };
   if (!own || reviewId === null) return { kind: 'escalate', ...base, reason: `${past}, and ${verdict.reviewer} requested changes on ${candidate.sha.slice(0, 12)} naming no BLOCKING: finding, but Graphyard cannot withdraw a verdict it did not obtain through its reviewer App` };
@@ -142,6 +152,14 @@ export function reworkObservationWait(work: Work, now: number, pause: GitHubPaus
 }
 
 /**
+ * GY-1537. A conflict rework past the loop-owned bound (GY-1434) is requested whether or not a fresh reading landed: the reading
+ * is slow exactly when the loop is, and the bound is missed for it. The request binds the head it names, so an approver judging a head the
+ * branch has moved past refuses it; waiting on the reading only added a stall.
+ */
+export const conflictReworkOverdue = (work: Work, decision: Pick<RoutineDecision, 'action' | 'binding'>, now: number) =>
+  decision.action === 'rework' && decision.binding === `${work.candidate?.sha}:conflict` && (conflictReworkDue(work, now)?.overdueMs ?? 0) > 0;
+
+/**
  * GY-710. A step refused for want of a fresh observation wakes the item's observation job at once and waits for that
  * observation to land, not the job's cadence. One wake stands until a newer observation lands; a wake that brought none
  * within this bound (the job failed, or the server lost it) is sent again. During a GitHub pause no wake is sent.
@@ -189,13 +207,14 @@ export const situatedInput = (decision: Pick<RoutineDecision, 'action' | 'bindin
  */
 export function scopeRoutineDecision(work: Work, now: number, judged: boolean): RoutineDecision | null {
   if (!judged || work.stage === 'done') return null;
-  const routable = routableScopeRequest(work, now);
+  // GY-1568: an ask carried past its attempt's end stays the approver's; its binding is unchanged, so the decision stands.
+  const routable = routedScopeRequest(work, now);
   if (!routable) return null;
   const { request, paths, plannedFiles, collapsed } = routable;
   let broad: string | null = null;
   try { guardBroadScope({ ...work, plannedFiles }, request.reason, { allow: false, command: 'the loop', existing: work.plannedFiles }); }
   catch (error) { broad = `${guardBroadScope({ ...work, plannedFiles }, 'the approver grants it only with a stated reason', { allow: true, command: 'the loop', existing: work.plannedFiles })} (${message(error)})`; }
-  return { action: 'requirements', binding: scopeDecisionBinding(request), input: { plannedFiles, answers: { epoch: request.epoch, at: request.at } }, reason: scopeDecisionReason(work.key, request, work.criteria, paths, broad, undefined, collapsed),
+  return { action: 'requirements', binding: scopeDecisionBinding(request), input: { plannedFiles, answers: askIdentity(request) }, reason: scopeDecisionReason(work.key, request, work.criteria, paths, broad, undefined, collapsed),
     scope: { epoch: request.epoch, at: request.at, requestedBy: request.requestedBy, paths: paths.slice(0, 50).map(path => path.slice(0, 500)) } };
 }
 /**
@@ -237,6 +256,9 @@ export function routineDecision(work: Work, config: ReviewCapConfig, now: number
   // None attests anything about a worker: a merge is of a mergeable candidate, a triage closure of an unreleased backlog item,
   // and an attestation's approver judges the proof.
   if (needed.action === 'merge' || needed.action === 'close' || needed.action === 'attest') return needed;
+  // GY-1633: a delivered item's lapsed fence is the reclaim step's to settle within its bound; only one
+  // still standing past it (the loop could not settle it) is put to the approver as a recovery.
+  if (needed.action === 'recover' && containmentInMotion(work, now)) return null;
   const stopped = workerStopped(work, now, assessment);
   // The grounds travel with the request: the approver cannot verify this host, so it is told
   // exactly what the requester verified and judges the attestation on that. A situated request
@@ -296,7 +318,7 @@ export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?:
   // mandatory grounds above: an approver's refusal of it must never hide a failed proof or required check.
   const escalated = capped && !work.reworkRequested ? cappedReview(work, config) : null;
   if (escalated?.kind === 'escalate') return { action: 'rework', binding: cappedReworkBinding(work.candidate!.sha, escalated.reviewer),
-    reason: `${escalated.reason.replace(/\.$/, '')}. Past the review-round cap only an independent approver sends the head back: approve for one more round fixing exactly that finding, or refuse it as non-blocking: the loop then requests it no more and escalates the refusal for the master to answer.`.slice(0, 2000) };
+    reason: `${cappedRevisionMark(work.policyRevision)} ${escalated.reason.replace(/\.$/, '')}. Past the review-round cap only an independent approver sends the head back: approve for one more round fixing exactly that finding, or refuse it as non-blocking: the loop then requests it no more, withdraws the change request and has the reviewer re-review the head, listing the findings as FOLLOW-UP.`.slice(0, 2000) };
   // The operator answered a product question the head was built on provisionally, and the answer
   // differs from that recommendation (GY-259): the head no longer builds what was asked.
   const research = researchRework(work);
@@ -682,6 +704,21 @@ export const approverJudgeBoundMs = 600_000, approverSettleMs = 60_000, maxAppro
  * product hands it over, and counts as a decision fault only once it outlasts it.
  */
 export const masterTurnWaitBoundMs = 30 * 60_000;
+/** What the control plane answers a widening whose scope request closed before it applied (engine `requirements`). */
+export const closedScopeAnswerFailure = /The scope request this widening answers is no longer open|which asked for this scope, no longer holds the lease/;
+/**
+ * GY-1484. A requirements decision that settled failed only because the scope request it answered
+ * closed — its wait window ran out or its attempt ended before the application — judged nothing
+ * against the widening: the approver's judgement stood, the request around it did not. While the
+ * paths it asked for are still outside plannedFiles, the planned-file blocker it answers still
+ * stands, so the failure is not counted toward `maxDecisionRequests`: the loop keeps asking until an
+ * approval lands or the operator resolves the scope, rather than stopping at three such races.
+ */
+export function uncountedScopeFailure(watch: Pick<ApprovalWatch, 'action' | 'scope'>, judged: { state: string; outcome?: string | null } | null | undefined, work: Pick<Work, 'plannedFiles'>): boolean {
+  if (watch.action !== 'requirements' || judged?.state !== 'failed' || !closedScopeAnswerFailure.test(judged.outcome ?? '')) return false;
+  const asked = watch.scope?.paths ?? [];
+  return asked.length > 0 && unplannedPaths(work.plannedFiles, asked).length > 0;
+}
 /**
  * A headless approver run lost to something outside the loop (GY-453: killed, recording no exit)
  * judged nothing, so its launch is given back — but only this many times per decision. Past it, a
@@ -702,12 +739,18 @@ export type ApprovalStep =
   | { step: 'exhausted'; detail: string }
   | { step: 'apply'; detail: string };
 export function approvalStep(watch: ApprovalWatch, decision: { id?: string; action?: string; state: string; outcome?: string | null; refusal?: { approver: string; reason: string } | null; approvedBy?: string | null; approvedAt?: string | null; situation?: DecisionSituation | null } | null | undefined,
-  sessions: { agents: HerdrAgent[]; available: boolean }, now: number): ApprovalStep {
+  sessions: { agents: HerdrAgent[]; available: boolean }, now: number, stall: { startMs?: number; screen?: ScreenMotion } = {}): ApprovalStep {
   const label = `${watch.action} decision ${watch.decision} on ${watch.work}`;
   // `undefined`: the history could not be read this cycle. Nothing is concluded from that.
   if (decision === undefined) return { step: 'wait', detail: `The decision history of ${watch.work} could not be read; ${label} is looked at again next cycle` };
   if (decision === null) return { step: 'rerequest', detail: `The control plane no longer holds ${label}` };
   if (decision.state === 'applied') return { step: 'settled', detail: `The approver applied ${label}` };
+  // GY-1687: held is approved; the control plane applies it when the attempt ends. GY-1701: a covering adopt stays watched
+  // while held so status does not advertise `master scope` and the ask waits for that apply (not a settled foreign watch).
+  if (decision.state === 'held') {
+    if (watch.coveringAdopt) return { step: 'wait', detail: `${label} is approved and held (${decision.outcome ?? 'the item holds a live attempt'}); the covering ask waits until the control plane applies it` };
+    return { step: 'settled', detail: `${label} is approved and held (${decision.outcome ?? 'the item holds a live attempt'}); the control plane applies it when the attempt ends` };
+  }
   // A refusal is the approver's considered judgement (GY-141), not a session to replace or a request to repeat: the server refuses the same request unchanged, and answering it is the master's.
   if (decision.state === 'refused') return { step: 'refused', detail: `${label} was refused by ${decision.refusal?.approver ?? 'its approver'}: ${decision.refusal?.reason ?? decision.outcome ?? 'no reason recorded'}` };
   // An approved decision is already judged (GY-1300): no approver session is waited on, relaunched or spent for it. A session
@@ -724,8 +767,13 @@ export function approvalStep(watch: ApprovalWatch, decision: { id?: string; acti
   if (!sessions.available) return { step: 'wait', detail: `Herdr could not be read, so the approver session of ${label} is unknown this cycle` };
   const session = watch.agentName ? sessions.agents.find(agent => agent.name === watch.agentName) : undefined;
   const launchedAt = watch.launchedAt ? Date.parse(watch.launchedAt) : Number.NaN, age = Number.isFinite(launchedAt) ? now - launchedAt : 0;
+  // GY-1598: a stopped session is ended only past its start bound too, and an idle one only on a still screen with no trace of its
+  // decision (`judgeApproverStall`): Herdr reports a long or silent command as idle, so a moving, started or unread screen waits for
+  // the judge bound instead.
+  const stopped = ['idle', 'done', 'blocked'].includes(session?.agent_status ?? '') && age >= Math.max(approverSettleMs, stall.startMs ?? 0)
+    && !(session?.agent_status === 'idle' && stall.screen && stall.screen !== 'still');
   const ended = !session ? `approver session ${watch.agentName ?? '(never launched)'} is gone without judging it`
-    : ['idle', 'done', 'blocked'].includes(session.agent_status ?? '') && age >= approverSettleMs ? `approver session ${watch.agentName} ended ${session.agent_status} without approving it — declined, or its prompt was dropped`
+    : stopped ? `approver session ${watch.agentName} ended ${session.agent_status} without approving it — declined, or its prompt was dropped`
       : age > approverJudgeBoundMs ? `approver session ${watch.agentName} has not judged it for ${Math.round(age / 60_000)} minutes, past the ${Math.round(approverJudgeBoundMs / 60_000)}-minute bound`
         : null;
   if (!ended) return { step: 'wait', detail: `${label} is with approver session ${watch.agentName} (launch ${watch.launches} of ${maxApproverLaunches})` };

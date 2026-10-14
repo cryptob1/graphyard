@@ -17,6 +17,7 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-03 start is handed to cycleOf as the explicit now and stepped by blockerEscalateMs; Date.now()/new Date() serve separate cycles and stamp sessions and exhaustions.
 
 // GY-1055: the follow-ups from the approved review of GY-1008 (PR #529), each pinned where it was fixed.
 

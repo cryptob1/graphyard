@@ -21,6 +21,7 @@ import type { Cycle } from '../src/daemon/cycle.js';
 import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import * as pi from '../integrations/pi/index.js';
+// Time-bomb allowance (GY-1694): the 2026-10-07 clock is handed to plannerStep as its now; the goals it plans are stamped with new Date() by recordGoal and applyGoalCommand, stamps the planner records but never ages.
 
 /** The planner's modules, loaded inside each test so a tree without them fails as a test case, not as a file that cannot load. */
 const planner = async () => ({ ...await import('../src/model/goal-plan.js'), ...await import('../src/daemon/planner.js'), ...await import('../src/model/goal.js') });

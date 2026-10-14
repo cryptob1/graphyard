@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { observeAgentReview } from '../src/agent-review.js';
 import { assertReviewerProfiles, evaluate, exhaustedReviewerProfiles, nativeReviewRequired, parseReviewerApps, policySchema, reviewerProfileFor, type ReviewerApp, type ReviewerProfile, type Work } from '../src/model.js';
+// Time-bomb allowance (GY-1694): the 2026-01-01 request/verdict instants are judged against `now = 2026-01-01T00:06Z` handed explicitly to observeAgentReview; new Date() only stamps work() items and clocks their gate evaluation.
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40), other = 'c'.repeat(40);
 const GRAPHYARD_APP = 1234, CLAUDE_APP = 55_001, CLAUDE_BOT = 55_002, CURSOR_APP = 66_001, CURSOR_BOT = 66_002;

@@ -4,7 +4,6 @@ import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { productionEnvironmentFromEnv } from '../flow-analytics.js';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import type { DecisionSituation } from '../model/approval.js';
@@ -16,6 +15,23 @@ import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import { type HostMemoryReading, type ResourceReclaimReport, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
 import { healUserSupervision, type UserSupervisionAllowance, type UserSupervisionHeal } from '../user-manager.js';
 import { RefusedResponse } from '../model/refusal.js';
+
+/** GY-1713: body `error` + zod `issues` so attention names the refused field; else stringify. */
+export function refusedBodyDetail(result: unknown): string {
+  if (!result || typeof result !== 'object') return JSON.stringify(result);
+  const body = result as { error?: unknown; issues?: unknown };
+  if (typeof body.error !== 'string') return JSON.stringify(result);
+  const issues = Array.isArray(body.issues) ? body.issues : [];
+  if (!issues.length) return body.error;
+  const named = issues.map((issue: unknown) => {
+    if (!issue || typeof issue !== 'object') return String(issue);
+    const row = issue as { path?: unknown; message?: unknown };
+    const path = Array.isArray(row.path) ? row.path.map(String).join('.') : '';
+    const text = typeof row.message === 'string' ? row.message : String(issue);
+    return path ? `${path}: ${text}` : text;
+  }).join('; ');
+  return `${body.error}: ${named}`;
+}
 import { rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, launchProducer, reclaimCheckouts } from '../producer.js';
@@ -25,23 +41,33 @@ import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
 import { readApproverLaunches } from '../master/autonomy.js';
 import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
-import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson, readCredentialFile, withRoleDefaults, type ControlPlaneStatus } from '../master.js';
+import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, holdRepeatedLimitAccount, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson, readCredentialFile, withRoleDefaults, heldAwareProbe, type ControlPlaneStatus, type SessionIdentity } from '../master.js';
 import { readControlPlaneClock, type ContainmentObservation, type ControlPlaneClock } from '../master/containment.js';
 import { annotatePaneShell } from '../quarantine.js';
-import { listHerdrPanes } from '../master/herdr.js';
+import { herdrCall, listHerdrPanes, type HerdrPane } from '../master/herdr.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
 import { httpFleetClient, reconcileFleetSessions, selectFleetSession, settledRecordSessions } from '../fleet.js';
 import { type ContainmentRetention, type DaemonAction, type DaemonState, type LoopRelease, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
+import { flakeLedgerEffects, type FlakeLedgerEffects } from '../flake-ledger.js';
 import { answeringWidening } from './reconcile.js';
-import { type OrphanSupervisor, readyToRetry, stopWatchSupervisor } from './sessions.js';
+import { type OrphanSupervisor, stopWatchSupervisor } from './sessions.js';
 import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
 import { decisionEventKinds } from './decision-reads.js';
 import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
+import { derivePlannedFiles, plannedFilesRefusal } from '../model/planned-files.js';
+import { baseTree } from '../cli/planned-files-intent.js'; import { currentBaseTree } from '../executor.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
-import { observeDeployment, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
+import { observeDeployment, deploymentEnvironmentName, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
+import { mainWatchFreezeFromEnv, mainWatchReads, type MainWatchReads } from './main-watch.js';
+import { shadowReads, shadowVerdictBody, shadowVerdictKey, type ShadowReads } from './cycle-shadow.js';
+import { mergeRecordKey, mergeWriterReads, type MergeWriterReads } from './cycle-merge-writer.js';
+import { localReleasePorts } from './release-ports.js';
+import { revertRecordKey } from '../release-revert.js';
+import { readMergeWriter } from '../master/dispatch.js';
+import { worktreeRoot } from '../install/worktree-root.js';
 import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
 import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, recoverMovedHead, type SelfUpgradeDeps, type SelfUpgradeOutcome } from './upgrade.js';
 import { readRelease, restartExecutors } from '../executor-fleet.js';
@@ -52,50 +78,46 @@ import type { ResearchEvent } from '../research.js';
 import type { DecompositionEvent } from '../decomposition.js';
 import { doctorEffects, doctorSettings, type DoctorEffects } from './doctor.js';
 import { docsSyncEffects, type DocsSyncEffects } from '../docs-sync.js';
-import { diagnosticianRole, type DiagnosticianEffects } from './diagnosis.js';
+import { diagnosticianEffects, diagnosticianRole, type DiagnosticianEffects } from './diagnosis.js';
 import { acceptanceEffects, type AcceptanceEffects } from './acceptance.js';
 import { plannerEffects, type PlannerEffects } from './planner.js';
 import { diagnosticianSettings } from '../runner/payloads.js';
-import { piRunner } from '../runner/pi.js';
-import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
 import type { FlowResult, RemedyFlow, RemedyRecord } from '../stall-remedies.js';
 import { browserFlowChild } from './cycle-remedies.js';
 import { readMechanicalFixState, type MechanicalFixState } from '../mechanical-findings.js';
 export { snapshotRetryDelayMs, retriedSnapshot } from './snapshot-retry.js';
 
+/** GY-1574 / GY-1705. Diagnostician registry selection through heldAwareProbe — kept here so unit:role-selection-honours-held-twin sees it. */
+export async function selectDiagnosticianFleet(config: MasterConfig, work?: string | null) {
+  return selectFleetSession(config, diagnosticianRole, { name: diagnosticianRole, principal: config.operatorAgent!.id }, await heldAwareProbe(config, { work: work ?? undefined }));
+}
+
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
-export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
+export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null; /** A producer's proof group: with the item, the session its account was selected for (GY-1582). */ group?: string }
 /** A session only says its account is spent once it has stopped; while it works, its output is its own prose. */
 export const stoppedStates = ['idle', 'done', 'blocked'];
 /** The wait an escalation launch refused for spent capacity already computed: the earliest reset among every account it skipped. */
 export const launcherRetry = (error: unknown) => { const retryAt = (error as { retryAt?: unknown } | null)?.retryAt; return typeof retryAt === 'string' ? retryAt : null; };
 export const failoverKey = (role: CapacityRole, work: Work, attempt: string | number) => `failover:${role}:${work.id}:${attempt}`;
 export const capacityKey = (role: CapacityRole) => `capacity:${role}`;
-/**
- * The address a paste to a session is delivered to (GY-852): the pane, which is the session's own
- * stable coordinate, and only for a session the runtime lists without one — a session the loop
- * cannot see in any pane — its name. Profiles reuse agent names across sessions, so a paste
- * resolved by name first lands on whichever session holds the name now, which is how one item's
- * re-prompt reached another item's pane (2026-09-26).
- */
+/** GY-852: paste by pane_id, else name (profiles reuse names across sessions). */
 export const promptTarget = (agent: Pick<HerdrAgent, 'name' | 'pane_id'>) => agent.pane_id ?? agent.name ?? '';
 
 /** An item the loop files as the operator-agent: a fault-class item, or the docs trim item (GY-574), which names no class. */
 export type LoopFiledItem = Omit<ReturnType<typeof faultClassItem>, 'origin'> & Partial<Pick<ReturnType<typeof faultClassItem>, 'origin'>>;
-export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffects>, ThroughputEffects {
+export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffects>, ThroughputEffects, FlakeLedgerEffects {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
   requestProof: (work: Work) => void | Promise<void>;
+  /** The throughput owner as the control plane holds it now, read before its needs-decision is keyed by its requirements revision (GY-1609). */
+  readThroughputOwner?: (owner: Work) => Promise<Work>;
   /** Asks the control plane to decide the item's open scope request and returns the decided document. */
-  decideScope?: (work: Work) => Promise<Work>;
+  decideScope?: (work: Work, nonRepository?: readonly { path: string; nearMiss: string | null; why: 'install-local' | 'untracked' }[], treeRead?: boolean) => Promise<Work>; repositoryFiles?: () => Promise<ReadonlySet<string>>;
   wakeObservation?: (work: Work) => Promise<unknown>; // GY-710: a prioritized `resync` now (GY-1266) that waits on no tick (GY-1286), for a step refused on a stale observation
   /** Wake the item's own observation; the item once a newer reading is saved, else null (GY-793). */
   observe?: (work: Work, waitMs: number) => Promise<Work | null>;
-  /**
-   * The review findings standing against the item's head — its unresolved threads and its
-   * reviewer's latest change request (review-scope.ts) — read outside every transaction.
-   */
+  /** The review findings standing against the item's head (unresolved threads, latest change request; review-scope.ts), read outside every transaction. */
   reviewFindings?: (work: Work) => Promise<ReviewFinding[]>;
   /** Which of the paths exist on the base branch, read from one fetch of it per decision. */
   basePaths?: (paths: readonly string[]) => Promise<Set<string>>;
@@ -124,8 +146,7 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * shown to contain (see `observeDeployment`).
    */
   observeDeployment: (delivered: Work[], retained?: ContainmentRetention | null) => Promise<DeploymentObservation>;
-  /** Records the coordinator's own deployment observation on the delivered item. */
-  recordDeployment: (work: Work, observation: { sha: string; source: 'endpoint' | 'github-deployment'; observedAt: string }) => Promise<unknown>;
+  recordDeployment: (work: Work, observation: { sha: string; source: 'endpoint' | 'github-deployment'; observedAt: string }) => Promise<unknown>; // the coordinator's own deployment observation on the delivered item
   /**
    * Publishes the production environment this loop verifies deployments under
    * (`config.run.productionEnvironment`, else GRAPHYARD_PRODUCTION_ENVIRONMENT, else `production`)
@@ -137,6 +158,12 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * when the repository has no such workflow, absent on a loop wired without it.
    */
   promotion?: PromotionReads | null;
+  /** The main watch's reads (GY-1519, main-watch.ts): the checkout's history and the control plane's acknowledgements; absent, the watch does not run. */
+  mainWatch?: MainWatchReads | null;
+  /** The shadow merge gate's reads (GY-1522, cycle-shadow.ts): the coordinator checkout's trial merge, build and tests, and the verdict post; absent, the gate does not run. */
+  shadow?: ShadowReads | null;
+  /** The control-plane merge executor's reads (GY-1524, cycle-merge-writer.ts): git in the coordinator checkout, the leased deploy-key push, the merge-record post and the recorded merger; absent, the executor does not run. */
+  mergeWriter?: MergeWriterReads | null;
   /** Publishes `mergeQueue.rerunFailedChecks` to the control plane, which reruns a failed required check by it (GY-516); sent only on a change, and read at the start of every cycle so a reconfiguration applies before the next observation. */
   publishMergeSettings?: () => Promise<unknown>;
   /** GY-1416: the loop's setup step, `master setup --apply` beside the cycle at most hourly; it sets derived deployment variables only where the provider adapter applies them in place. */
@@ -148,7 +175,7 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * escalates each and, a cycle later, requests the rework. Absent, nothing is escalated.
    */
   exhaustedProofs?: () => Promise<ExhaustedProof[]>;
-  /** The review ledger's planned mechanical fixes (GY-971), one bot round each: each asks for its round's rework decision. */ mechanicalFixes?: () => Promise<MechanicalFixState>;
+  /** The review ledger's planned mechanical fixes (GY-971), one bot round each: each asks for its round's rework decision. */ mechanicalFixes?: () => Promise<MechanicalFixState>; /** GY-1764: reports the planned fix (or none) the review gate's hold reads. */ recordMechanicalPlan?: (work: Work, plan: { reviewId: number; head: string } | null) => Promise<unknown>;
   /** GY-1118: withdraws a capped change request as the reviewer App that posted it (GitHub's review dismissal); absent, it is escalated instead. */
   withdrawReview?: (work: Work, reviewId: number, message: string) => Promise<void>;
   /**
@@ -183,6 +210,7 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   /** GY-1428: revive this host's silent user manager and start its declared slots found down, as the step allows (user-manager.ts). */
   healHostSupervision?: (allow: UserSupervisionAllowance) => Promise<UserSupervisionHeal>;
   /** GY-1008: probe a blocker's cause as the next attempt meets it (blocker-probes.ts), and record it as the coordinator; a pass clears it. */ probeBlocker?: (work: Work, classification: BlockerClassification) => Promise<BlockerProbeResult | null>; recordBlockerProbe?: (work: Work, body: BlockerProbeRecord) => Promise<Work>;
+  /** GY-1740: hold an unleased post-deploy follow-up on the instant its blocker names, clearing it (`window`). */ deferWindow?: (work: Work, body: { expectedRevision: number; notBefore: string; reason: string }) => Promise<Work>;
   /**
    * Requests one routine decision with the master's own operator-agent identity and returns it.
    * A loop configured without these three keeps cycling: each routine decision is then recorded as
@@ -195,9 +223,9 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * `approverSessionName` gives it, and reports the session so later cycles can supervise it.
    * Never the requester.
    */
-  approver?: (work: Work, decision: string) => Promise<{ agentName: string; pane: string | null; account?: string | null; runtime?: string | null; session?: string | null; run?: RunRecord | null; settled?: Promise<RunRecord> }>;
+  approver?: (work: Work, decision: string) => Promise<{ agentName: string; pane: string | null; account?: string | null; runtime?: string | null; session?: string | null; run?: RunRecord | null; settled?: Promise<RunRecord>; /** GY-1598: why a same-named session that never ran its request was closed first. */ replaced?: string }>;
   /** The account and runtime a listed approver session was launched on, so an adopted session's exhaustion holds the account it spent. */
-  approverLaunch?: (agentName: string) => Promise<{ account: string | null; runtime: string | null; session?: string | null } | null>;
+  approverLaunch?: (agentName: string) => Promise<{ account: string | null; runtime: string | null; session?: string | null; pane?: string | null } | null>;
   /** Every approver launch recorded on this host, with the item and decision each judges (GY-403). */
   approverLaunches?: () => Promise<{ agentName: string; account: string | null; runtime: string | null; session: string | null; launchedAt: string; work: string | null; decision: string | null }[]>;
   /**
@@ -250,7 +278,7 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * records what the loop observed on the item. A loop wired without the two never fails a
    * session over and never escalates capacity: it cycles exactly as it did before.
    */
-  sessionOutput?: (agent: HerdrAgent) => string | null | Promise<string | null>;
+  sessionOutput?: (agent: HerdrAgent, lines?: number) => string | null | Promise<string | null>; /** GY-1598: how long the loop watches an idle approver's screen before ending it. */ idleScreenPauseMs?: number;
   /**
    * A blocked session's runtime prompt (GY-197). `answerSession` sends the keys that choose the prompt's
    * non-destructive answer into the session's pane; `promptSession` then gives it the one instruction to carry on
@@ -270,15 +298,15 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * A loop wired without it, or whose config has no `run.research`, researches nothing and dispatches as before.
    */
   recordResearch?: (work: Work, event: ResearchEvent) => Promise<unknown>;
-  research?: { cwd: string; runner?: Runner };
+  research?: { cwd: string; runner?: Runner }; harness?: { servingUnit?: string | null; unitDirectory?: string }; // GY-1662: the unit serving this loop, checked against the checkout the harness contract is applied to
   recordDecomposition?: (work: Work, event: DecompositionEvent) => Promise<unknown>; // GY-1126: a split run's start, decision or failure, as the coordinator; runs in `research`'s checkout and runner
   adoptRuns?: () => Promise<AdoptedRun[]>; // the headless runs a restart left running (GY-453, run-adoption.ts); unwired adopts nothing
-  /** Records a triage judgement on a machine-filed item as the coordinator (GY-402, POST work/ID/triage). */
-  recordTriage?: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>;
+  recordTriage?: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>; // records a triage judgement on a machine-filed item as the coordinator (GY-402, POST work/ID/triage)
+  withdrawTriage?: (work: Work, body: { triageAt: string; reason: string }) => Promise<unknown>; // withdraws the closure proposed at `triageAt` (GY-1632, POST work/ID/triage `withdraw`)
   /** The reviewer and producer sessions the launch ledgers hold as pending. */
   launchedSessions?: () => Promise<LaunchedSession[]>;
-  /** The account the profile's current session was launched on, as its launcher recorded it. */
-  selectedAccount?: (role: CapacityRole, profile: string) => Promise<{ environment: string | null; kind: string | null } | null>;
+  /** The account a session was launched on, as its launcher recorded it: a worker attempt's own launch record, a reviewer's or producer's own selection, by the `session` named (GY-1582). */
+  selectedAccount?: (role: CapacityRole, profile: string, session?: SessionIdentity) => Promise<{ environment: string | null; kind: string | null } | null>;
   /**
    * Commits (or cleanly discards) what the interrupted attempt left uncommitted in its worktree.
    * `cause` is the WIP commit's subject after the key and attempt; the provider-quota wording is
@@ -306,11 +334,11 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   /** Herdr's agent inventory, read asynchronously: an empty list when Herdr cannot be read. */
   agents: () => HerdrAgent[] | Promise<HerdrAgent[]>;
   /**
-   * The host's pane inventory (`herdr pane list`, GY-842): every pane this host's runtime holds,
-   * with or without an agent in it, for the pane count the agent inventory cannot give. A loop
-   * wired without it reports no pane count; the sweep judges presence from the agent inventory.
+   * The host's pane inventory (`herdr pane list`, GY-842): every pane, with its cwd and agent. The
+   * agent inventory never carries a bare shell (GY-1533), so the sweep's agentless candidates and
+   * the pane count come from here; a loop without it, or an unreadable runtime, sweeps none.
    */
-  panes?: () => Promise<{ panes: { pane_id?: string }[]; available: boolean }>;
+  panes?: () => Promise<{ panes: HerdrPane[]; available: boolean }>;
   /**
    * The same session inventory with whether it could be read at all. A Herdr that cannot be
    * reached reports no sessions, and stopping a supervisor on that would kill live work, so the
@@ -346,8 +374,7 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    */
   followUpThreads?: (work: Work[], now: number) => Promise<Map<string, Set<string>>>;
   persist: (state: DaemonState) => Promise<void>;
-  /** Files the one backlog item a recurring fault class gets (GY-173), as the operator-agent identity, keyed by the class and its instances. */
-  // Absent while no such identity is provisioned: the classes are still recorded and reported.
+  /** Files the one backlog item a recurring fault class (GY-173) or a flaky test (GY-1498) gets, as the operator-agent, under the key; absent without that identity, they are still recorded and reported. */
   fileFaultClass?: (input: LoopFiledItem, key: string) => Promise<Work>;
   /** The pipeline doctor (GY-711, src/daemon/doctor.ts): absent while `run.doctor.enabled` is false or the operator-agent identity is missing, the loop then running only the deterministic remedies. */
   doctor?: DoctorEffects;
@@ -376,15 +403,6 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   masterSession?: MasterSessionEffects; // the loop's own master session (GY-898); absent, none is launched, woken or rotated
 }
 
-/** Put an action on the cursor, through storeAction, which bounds it and notes it against the fault record (GY-173). */
-export async function record(state: DaemonState, key: string, action: Omit<DaemonAction, 'at' | 'epoch' | 'faultClass'> & { at?: string; epoch?: number | null }, now: number, persist: DaemonEffects['persist'], faultKind?: FaultKind | null) {
-  const entry = storeAction(state, key, { epoch: null, ...action, at: action.at ?? new Date(now).toISOString() }, faultKind);
-  await persist(state);
-  return entry;
-}
-
-/** One preservation per attempt: the record an interrupted attempt leaves for the next one. */
-export const preserveKey = (work: Pick<Work, 'id'>, epoch: number) => `preserve:${work.id}:${epoch}`;
 /** How long a refusal on the review findings stands before the loop reads the findings again. */
 export const findingRecheckMs = 120_000;
 /** How long after its claim a launched session is given to appear in Herdr before its absence means anything. */
@@ -401,34 +419,7 @@ export const handlerSettleMs = 180_000;
 export const blockedPromptFailMs = 5 * 60_000, blockedPromptAnswers = 2, blockedPromptSettleMs = 15_000;
 export { relaunchSession };
 export const promptDigest = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 12);
-/**
- * Keep what a worker that died left behind, the same way an exhausted one's is kept (GY-105).
- *
- * A worker killed outright — the agent process OOM-killed, the supervisor's tree stopped, the host
- * rebooted — never reaches `complete`, and its worktree holds whatever it had not committed. Before
- * the item can be dispatched again, that is committed on the attempt's own branch (or the record
- * says it was discarded) and written onto the item through the same capacity record the quota path
- * uses, with the cause it was observed for; the next attempt's request then names the commit,
- * branch and worktree. For an attempt whose lease is still live the record ends it, so the item
- * becomes claimable only once its partial work is on the record. Nothing is preserved for an
- * attempt that submitted — its work is on the pull request — or one the quota path already kept.
- */
-export async function preserveInterruptedAttempt(state: DaemonState, effects: DaemonEffects, item: Work, epoch: number, profile: WorkerProfile | undefined, observed: string, now: () => number, performed: DaemonAction[], options: { endsBlocker?: true } = {}) {
-  if (!effects.reportCapacity) return null;
-  const key = preserveKey(item, epoch), previous = state.actions[key];
-  if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return previous;
-  if (item.submission?.epoch === epoch || item.capacity?.exhaustions.some(entry => entry.role === 'worker' && entry.epoch === epoch)) return null;
-  const principal = profile?.principal ?? item.lastAssignment?.owner ?? null, attempts = (previous?.attempts ?? 0) + 1;
-  await record(state, key, { kind: 'preserve', work: item.key, principal, epoch, state: 'started', detail: `Keeping what attempt ${epoch} of ${item.key} left in its worktree: ${observed}`, attempts, cycle: state.cycle }, now(), effects.persist);
-  try {
-    const partialWork = await effects.preserveWork?.(item, epoch, 'interrupted before it could submit') ?? { state: 'not-applicable' as const, detail: 'this loop has no access to the attempt worktree' };
-    await effects.reportCapacity(item, { event: 'exhausted', cause: 'interrupted', role: 'worker', epoch, profile: profile?.name ?? principal ?? 'unknown', account: null, runtime: profile?.kind ?? null, reason: observed.slice(0, 500), resetsAt: null, partialWork, ...options });
-    const where = partialWork.commit ? ` at ${partialWork.commit.slice(0, 12)}${partialWork.branch ? ` on ${partialWork.branch}` : ''}${partialWork.path ? ` (${partialWork.path})` : ''}` : '';
-    return performed[performed.push(await record(state, key, { kind: 'preserve', work: item.key, principal, epoch, state: 'done', detail: `${item.key} attempt ${epoch} ${observed}. Partial work ${partialWork.state}${where}${partialWork.detail ? `: ${partialWork.detail}` : ''}; the attempt ended on the record and the next attempt's request names the commit`, attempts, cycle: state.cycle }, now(), effects.persist)) - 1];
-  } catch (error) {
-    return performed[performed.push(await record(state, key, { kind: 'preserve', work: item.key, principal, epoch, state: 'failed', detail: `${item.key} attempt ${epoch} ${observed}, but its partial work could not be put on the record: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist)) - 1];
-  }
-}
+export { record, preserveKey, preserveInterruptedAttempt } from './preserve.js';
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
 export function daemonEffects(root: string, source: MasterConfig | (() => MasterConfig), deps: {
@@ -449,7 +440,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   // of a second or more is recorded with its step, and the slowest is named on the cycle's line.
   const run = timedRun(deps.run ?? childRunner({ timeoutMs: 90_000, ledger }));
   const fetcher = timedFetch(deps.fetcher ?? fetch, () => current().url);
-  const snapshot = () => timedCall('server', 'GET work-snapshot', deps.snapshot);
+  const snapshot = async () => { await (await import('../master/environments.js')).reportPendingExhaustions(current(), { fetch: fetcher }).catch(() => {}); return timedCall('server', 'GET work-snapshot', deps.snapshot); }; // resending first any account hold the agent registry has not heard of (GY-1573)
   const mutate = (path: string, data: unknown, requestId?: string) => timedCall('server', serverCallName('POST', path), () => deps.mutate(path, data, requestId));
   /**
    * One call as the master's own operator-agent identity — the identity that requests decisions.
@@ -461,9 +452,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     if (!config.operatorAgent) throw new Error('No master operator-agent identity is provisioned; run graphyard master autonomy --admin-token-stdin --apply so the loop can request routine decisions');
     const token = await agentToken(root, config, 'operatorAgent');
     const response = await fetcher(`${config.url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30_000) });
-    const result = await response.json();
+    const text = await response.text(); // GY-1751: a proxy's empty or HTML 502-504 keeps its status
+    let result: any; try { result = JSON.parse(text); } catch { result = response.ok ? undefined : { text: text.slice(0, 200) }; }
     // The body is kept on the error: a decision refusal names the standing refused decision as a field (GY-265).
-    if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`, response.status, result);
+    // GY-1713: the message carries error and zod issues so diagnosis/doctor attention names the field.
+    if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${refusedBodyDetail(result)}`, response.status, result);
     return result;
   };
   /**
@@ -503,7 +496,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   // The approver's runtime and account come from the registry's approver role; naming a kind here
   // would be a runtime read out of code, and the role would decide nothing.
   // The inventory says whether Herdr could be read (GY-205): one it could not judges no approver session gone.
-  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, await observeHerdrAgents(run), run, {}, handle => mutate(`work/${work.id}/session`, handle)); return { agentName: launched.agentName, pane: launched.pane, account: launched.account?.environment ?? null, runtime: launched.runtime, session: launched.session, run: launched.run, settled: launched.settled }; };
+  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, await observeHerdrAgents(run), run, {}, handle => mutate(`work/${work.id}/session`, handle)); return { agentName: launched.agentName, pane: launched.pane, account: launched.account?.environment ?? null, runtime: launched.runtime, session: launched.session, run: launched.run, settled: launched.settled, ...(launched.replaced ? { replaced: launched.replaced } : {}) }; };
   const docsSyncing = docsSyncEffects(root, run, work => handle => mutate(`work/${work.id}/session`, handle));
   const endRegistrySession: DaemonEffects['endRegistrySession'] = async (session, reason) => {
     const config = current();
@@ -520,37 +513,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     const read = await asCoordinator(`events?${query}`) as { events: { seq: string; work_id: string }[]; page: { hasMore: boolean } };
     return { seq: (after ? read.events.at(-1)?.seq : read.events[0]?.seq) ?? after ?? '0', work: [...new Set(read.events.map(event => event.work_id))], complete: !!after && !read.page.hasMore };
   };
-  /**
-   * The diagnostician's effects under the live configuration (GY-439). Its first run takes the
-   * registry's diagnostician role when an operator defines one, else Pi on `run.diagnostician.model`;
-   * the fallback run is Pi on the stronger `fallbackModel`. The excerpts are the loop journal, the
-   * server log when a command for it is configured, and `gh pr view` of each named pull request.
-   */
-  const diagnostician = (config: MasterConfig): DiagnosticianEffects => {
-    const settings = diagnosticianSettings(config.run);
-    const lines = async (command: string[]) => String(await run(command[0], command.slice(1))).split('\n');
-    return {
-      settings, cwd: root,
-      runner: async (attempt, subject) => {
-        if (attempt === 'primary') {
-          const fleet = await selectFleetSession(config, diagnosticianRole, { name: diagnosticianRole, principal: config.operatorAgent!.id }, { work: subject.work?.key });
-          if (fleet) { const launch = registryHeadlessLaunch(fleet.account); return { runner: registryRunner(fleet.account), runtime: launch.command, model: launch.model, release: fleet.release }; }
-        }
-        const model = attempt === 'primary' ? settings.model : settings.fallbackModel;
-        return { runner: piRunner({ command: settings.command, model }), runtime: 'pi', model };
-      },
-      context: async (_subject, numbers) => ({
-        journal: await lines(settings.journalCommand).catch(error => [`(the loop journal could not be read with ${settings.journalCommand.join(' ')}: ${message(error)})`]),
-        serverLog: settings.serverLogCommand ? await lines(settings.serverLogCommand).catch(error => [`(the server log could not be read with ${settings.serverLogCommand!.join(' ')}: ${message(error)})`])
-          : ['(no run.diagnostician.serverLogCommand is configured, so no server log excerpt was read)'],
-        pullRequests: await Promise.all(numbers.map(async number => ({ number, state: await Promise.resolve(run('gh', ['pr', 'view', String(number), '--repo', config.repository, '--json', 'number,title,state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,reviewDecision,statusCheckRollup']))
-          .then(output => JSON.parse(String(output)), (error: unknown) => ({ error: message(error) })) }))),
-      }),
-      file: (input, key) => asOperatorAgent('POST', 'work', input, key) as Promise<Work>,
-      decide: (work, action, reason, input) => asOperatorAgent('POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }),
-    };
-  };
   let publishedEnvironment: string | null = null, publishedMergeQueue: string | null = null;
+  /** GY-1524: the recorded merger, read from /api/status afresh for every merge decision (AC-6), never cached: a switch to `github` stops the next merge, not the one after a window. */
+  const recordedMerger = () => readMergeWriter(current(), deps.fetcher);
   // The shared project memory (GY-1125) is mirrored to its own file only when it changed.
   let writtenMemory: string | null = null;
   const persistLoop = async (state: DaemonState) => {
@@ -581,29 +546,30 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     },
     childWaits: () => ledger.drain(),
     // The tail of the session's own terminal, unwrapped so a notice the pane folded reads as one line.
-    sessionOutput: async agent => { const target = agent.name ?? agent.pane_id; return target ? run('herdr', ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', '60', '--format', 'text']) : null; },
+    sessionOutput: async (agent, lines = 60) => { const target = agent.name ?? agent.pane_id; return target ? herdrCall(run, ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', String(lines), '--format', 'text']) : null; },
     // The decline is typed into the pane and given a moment to close the dialog, so the instruction
     // that follows lands in the runtime's input rather than in the closing menu.
-    answerSession: async (agent, keys) => { await run('herdr', ['pane', 'send-keys', agent.pane_id!, ...keys]); await delay(2_000); },
+    answerSession: async (agent, keys) => { await herdrCall(run, ['pane', 'send-keys', agent.pane_id!, ...keys]); await delay(2_000); },
     promptSession: async (agent, text) => { await deliverPrompt(promptTarget(agent), text, run); },
     reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event), blockDispatch: (work, reason) => mutate(`work/${work.id}/dispatchblock`, { reason }),
     browserFlow: flow => browserFlowChild(run, root, flow),
     recordRemedy: (row, attempt) => mutate(`actions/${row}/remedy`, attempt),
     recordResearch: (work, event) => mutate(`work/${work.id}/research`, event), recordDecomposition: (work, event) => mutate(`work/${work.id}/decomposition`, event),
-    research: { cwd: root },
+    research: { cwd: root }, harness: { servingUnit: detectLoopSupervisorUnit() },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),
     recordTriage: (work, body) => mutate(`work/${work.id}/triage`, body),
+    withdrawTriage: (work, body) => mutate(`work/${work.id}/triage`, { withdraw: body }),
     launchedSessions: async () => [
       ...(await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending' && !entry.launching).map(entry => ({ role: 'reviewer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId ?? null })),
-      ...(await readProducerLedger(root)).producers.filter(entry => entry.state === 'pending').map(entry => ({ role: 'producer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId })),
+      ...(await readProducerLedger(root)).producers.filter(entry => entry.state === 'pending').map(entry => ({ role: 'producer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId, group: entry.group })),
     ],
-    selectedAccount: async (role, profile) => (await readEnvironmentLog(current())).selected?.[selectionKey(role, profile)] ?? null,
+    selectedAccount: (role, profile, session) => sessionAccount(root, current(), role, profile, session), // by the session's own identity (GY-1582)
     preserveWork: async (work, epoch, cause = 'interrupted by provider quota exhaustion') => {
       const workspace = work.workspaces.find(entry => entry.epoch === epoch);
       if (!workspace || workspace.host !== current().hostId) return { state: 'not-applicable', detail: workspace ? `the attempt worktree is on ${workspace.host}, not this host; its commits stay on ${workspace.branch}` : 'the attempt registered no workspace' };
       return preservePartialWork(workspace.path, `${work.key} attempt ${epoch} ${cause}`, run);
     },
-    holdAccount: (account, observed) => recordObservedExhaustion(current(), account, observed),
+    holdAccount: (account, observed) => recordObservedExhaustion(current(), account, observed, undefined, { fetch: fetcher }),
     endSession: async (session, resolution) => {
       // A pane that is already gone is closed (GY-137): the record still settles, and says so.
       let paneGone = false;
@@ -612,11 +578,19 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       if (session.role === 'reviewer') await updateReviewLedger(root, ledger => { ledger.reviews = ledger.reviews.map(entry => entry.id === session.record && entry.state === 'pending' ? { ...entry, ...ended } : entry); });
       else { const ledger = await readProducerLedger(root); await saveProducerLedger(root, { ...ledger, producers: ledger.producers.map(entry => entry.id === session.record && entry.state === 'pending' ? { ...entry, ...ended } : entry) }); }
     },
-    relaunch: async (session, work, snapshot) => relaunchSession(current(), session, work, await listHerdrAgents(run), {
-      review: (profile, request, agents) => launchReview(root, work, profile.name, agents, snapshot.now, { run, requestId: request.id }),
-      producer: (profile, request, agents) => launchProducer(root, work, request, profile, agents, snapshot.now, { run }),
-      record: handle => mutate(`work/${work.id}/session`, handle),
-    }),
+    relaunch: async (session, work, snapshot) => {
+      // launchReview/launchProducer also re-hold before selectAccount (GY-1705); this call keeps the
+      // failover path refusing early when the durable hold cannot be written, before a pane starts.
+      const holdAt = Date.now();
+      await holdRepeatedLimitAccount(current(), work, holdAt, { fetch: fetcher }, session.role).catch((error: unknown) => {
+        throw new Error(`${work.key}'s last ${session.role} sessions each ended on one account's limit notice, and the hold that keeps the next launch off it could not be placed: ${message(error).slice(0, 300)}; nothing was relaunched`, { cause: error });
+      });
+      return relaunchSession(current(), session, work, await listHerdrAgents(run), {
+        review: (profile, request, agents) => launchReview(root, work, profile.name, agents, snapshot.now, { run, requestId: request.id }),
+        producer: (profile, request, agents) => launchProducer(root, work, request, profile, agents, snapshot.now, { run }),
+        record: handle => mutate(`work/${work.id}/session`, handle),
+      });
+    },
     escalationSessions: () => readEscalationSessions(root),
     approverLaunch: agentName => readApproverLaunch(root, agentName),
     approverLaunches: () => readApproverLaunches(root),
@@ -660,9 +634,10 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     planeHealth: () => dispatchRefusal(current().url, fetcher),
     hostMemory: readHostMemory, healHostSupervision: allow => healUserSupervision(root, {}, allow),
     probeBlocker: (work, classification) => loopBlockerProbe(current(), root, run, () => dispatchRefusal(current().url, fetcher))(work, classification), recordBlockerProbe: (work, body) => mutate(`work/${work.id}/blocker-probe`, body) as Promise<Work>,
+    deferWindow: (work, body) => mutate(`work/${work.id}/window`, body) as Promise<Work>,
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
-    decideScope: work => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }), wakeObservation: work => mutate(`work/${work.id}/resync`, { prioritized: true, wait: false }),
+    decideScope: (work, nonRepository, treeRead) => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, ...(treeRead ? { treeRead } : {}), ...(nonRepository?.length ? { nonRepository } : {}) }), repositoryFiles: async () => (await currentBaseTree(root, current().baseBranch, run)).files, wakeObservation: work => mutate(`work/${work.id}/resync`, { prioritized: true, wait: false }),
     observe: (work, waitMs) => wakeOwnObservation(body => mutate(`work/${work.id}/resync`, { ...body, prioritized: true }, randomUUID()), ms => delay(ms), { waitMs }),
     // No pull request yet means no review finding: the first attempt's scope is the criteria's alone.
     // Only the configured reviewer's and the awaited bot reviewers' words are findings the loop acts on.
@@ -698,9 +673,28 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     },
     // `root` is this checkout: containment is derived from its object store, never from the forge.
     observeDeployment: (delivered, retained) => observeDeployment(current(), delivered, run, fetcher, () => Date.now(), { root, retained }),
-    get promotion() { return promotionReads(current(), root, run, existsSync(join(root, '.github', 'workflows', promotionWorkflow))); },
+    // GY-1526: under a control-plane merger (read afresh each cycle, as the merge step reads it) the drive runs candidates through the local ports — the release functions in this checkout, pushes through the deploy key, the revert recorded as the coordinator — and dispatches no workflow; the ports are null while the environment names no UAT.
+    get promotion() { const config = current(); return promotionReads(config, root, run, existsSync(join(root, '.github', 'workflows', promotionWorkflow)), undefined, { merger: recordedMerger, local: localReleasePorts(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, revertRecordKey(work, event)),
+      file: async (item, requestId) => ((await mutate('work', item, requestId)) as Work).key }) }); },
+    // GY-1519: the watch reads history from this checkout and its policy from the control plane; the freeze is the environment's ask.
+    get mainWatch() { return mainWatchReads(current(), root, run, { policy: () => asCoordinator('main-watch'), freeze: mainWatchFreezeFromEnv() }); },
+    // GY-1522 / GY-1560: the gate trial-merges in this checkout's object store under the managed worktree root, records each verdict as the coordinator (one idempotency key per (head, tip)), and reads disagreement explanations so explaining clears the cursor's standing action.
+    get shadow() {
+      const config = current();
+      return shadowReads(config, root, run, {
+        base: worktreeRoot(root, config),
+        record: (work, verdict) => mutate(`work/${work.id}/shadow-verdict`, shadowVerdictBody(verdict), shadowVerdictKey(work, verdict)),
+        explanations: async pairs => {
+          const query = pairs.map(pair => `pair=${encodeURIComponent(`${pair.key}:${pair.head}:${pair.baseTip}`)}`).join('&');
+          const body = await asCoordinator(`shadow-explanations?${query}`) as { explanations?: { key: string; head: string; baseTip: string }[] };
+          return body?.explanations ?? [];
+        },
+      });
+    },
+    // GY-1524: the executor merges in this checkout's object store, pushes with the install's deploy key alone, records each step as the coordinator under one key per (step, commits), and acts only while the recorded merger is control-plane (read before every merge decision).
+    get mergeWriter() { const config = current(); return mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger }); },
     publishProductionEnvironment: async () => {
-      const environment = current().run.productionEnvironment ?? productionEnvironmentFromEnv();
+      const environment = deploymentEnvironmentName(current(), root);
       if (environment === publishedEnvironment) return;
       await mutate('production-environment', { environment });
       publishedEnvironment = environment;
@@ -713,11 +707,12 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await mutate('merge-queue', config);
       publishedMergeQueue = published;
     },
-    ...throughputEffects(root, current, run, asCoordinator, asOperatorAgent),
+    ...throughputEffects(root, current, run, asCoordinator, asOperatorAgent), ...flakeLedgerEffects(root),
+    readThroughputOwner: async owner => await asCoordinator(`work/${encodeURIComponent(owner.id)}`) as Work,
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
       .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),
-    mechanicalFixes: () => readMechanicalFixState(root),
+    mechanicalFixes: () => readMechanicalFixState(root), recordMechanicalPlan: (work, plan) => mutate(`work/${work.id}/mechanicalplan`, plan ? { ...plan, planned: true } : { reviewId: work.mechanicalPlan?.reviewId ?? 1, head: work.mechanicalPlan?.head ?? work.candidate!.sha, planned: false }),
     requestSmoke: async work => {
       const config = current();
       await run('gh', ['workflow', 'run', config.run.smokeWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,
@@ -766,10 +761,25 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       // A required check red on the clock is named as master status names it, after buildMasterStatus.
       return { ...reported, items: [...reported.items, ...await timingFaultAttention(work, current().repository, annotations)] };
     },
-    get diagnostician() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? diagnostician(config) : undefined; },
-    get acceptance() { const config = current(); return config.operatorAgent && config.approver ? acceptanceEffects(config, root, { run, fetcher, asCoordinator, asOperatorAgent }) : undefined; },
+    get diagnostician() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? diagnosticianEffects(config, root, asOperatorAgent, run) : undefined; },
+    // GY-1535: under a control-plane merger (read afresh before each draft) the draft is committed here and landed by the merge writer's reads, with no pull request.
+    get acceptance() { const config = current(); return config.operatorAgent && config.approver ? acceptanceEffects(config, root, { run, fetcher, asCoordinator, asOperatorAgent, merger: recordedMerger,
+      writer: mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger }) }) : undefined; },
     get planner() { const config = current(); return config.operatorAgent && config.approver ? plannerEffects(config, root, { fetcher, asCoordinator, asOperatorAgent }) : undefined; },
-    get fileFaultClass() { return current().operatorAgent ? (input: LoopFiledItem, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
+    // GY-1706: fault-class filing derives plannedFiles like master create; chores with their own plans are left alone.
+    get fileFaultClass() {
+      return current().operatorAgent ? async (input: LoopFiledItem, key: string) => {
+        const filing = input as LoopFiledItem & { plannedFiles?: readonly string[] };
+        if (!filing.origin?.faultClass) return asOperatorAgent('POST', 'work', input, key) as Promise<Work>;
+        const tree = await baseTree(root, current().baseBranch, run);
+        const derived = derivePlannedFiles(
+          { plannedFiles: filing.plannedFiles ?? [], criteria: filing.criteria, origin: filing.origin, description: filing.description },
+          tree.files,
+        );
+        if (derived.missing.length) throw new Error(plannedFilesRefusal(derived.missing, tree.ref, derived.misnamed));
+        return asOperatorAgent('POST', 'work', { ...filing, plannedFiles: derived.plannedFiles }, key) as Promise<Work>;
+      } : undefined;
+    },
     get unblock() { return current().operatorAgent ? (work: Work, reason: string) => asOperatorAgent('POST', `work/${work.id}/unblock`, { reason, expectedRevision: work.revision }) as Promise<Work> : undefined; },
     get doctor() { const config = current(); return config.operatorAgent && doctorSettings(config.run).enabled ? doctorEffects(config, root, asOperatorAgent) : undefined; },
     controlPlaneClock: () => readControlPlaneClock(current().url, { fetcher }),
@@ -778,17 +788,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       () => herdrJson(['status', 'server', '--json'], run)) }),
     settleContainment: (work, assessment) => mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
       reason: `The master loop verified on ${assessment.host ?? current().hostId} that the supervisor of epoch ${assessment.epoch} is gone; the item is released for a fresh attempt`, verification: assessment.verification, origin: 'loop' }),
-    // systemd's own keep-alive channel. `systemd-notify` is part of systemd, so it is present wherever NOTIFY_SOCKET is, and the loop
-    // only speaks to it when the supervisor set one. Node has no unix datagram socket, so the message goes through that short-lived
-    // child, which the unit admits with NotifyAccess=all. Since systemd 246 the tool waits on a barrier until the manager has processed
-    // the message, so it cannot exit before it is attributed; on an older systemd a keep-alive can be lost to that race, which is why
-    // the packaged window is 180s against a cycle of at most 30s: a healthy loop would have to lose six in a row. The keep-alive is a
-    // child too: it runs through the same runner, awaited on the event loop and bounded like every other child, and a keep-alive that fails is logged by the loop.
-    // GY-437: the loop upgrades its own checkout between cycles. The executors come first,
-    // through the shipped restart command — a refusal (a claim in flight, another restart's
-    // fence) leaves the owed restarts on the cursor for the next cycle — and the loop
-    // re-executes itself only through the supervisor unit it actually runs under, detected from
-    // its own cgroup like an executor's.
+    // systemd-notify keep-alive (NOTIFY_SOCKET; NotifyAccess=all; bounded child via `run`). GY-437: upgrade between cycles — executors first, then re-exec under the cgroup unit.
     loadedRelease: readRelease(root),
     selfUpgrade: (state, keepAlive) => performSelfUpgrade(current(), state, upgradeDeps(keepAlive)),
     recoverHead: (state, from, to, keepAlive) => recoverMovedHead(current(), state, from, to, upgradeDeps(keepAlive)),

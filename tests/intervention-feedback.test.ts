@@ -20,6 +20,7 @@ import InterventionsPage from '../web/pages/interventions.js';
 import { views } from '../web/pages/index.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-01, 2026-10-06 and 2026-10-07 instants are ledger rows and the now handed to foldInterventions, detectPatterns and loopSettledInBound; Date.now() builds the database cases' fences relatively.
 
 // GY-98: every operator intervention is product feedback. Each test is named for the proof it
 // produces and runs the real engine and HTTP server on a disposable Postgres: the interventions

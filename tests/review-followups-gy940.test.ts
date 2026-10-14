@@ -76,7 +76,7 @@ function held(id: string, key: string, principal: string, epoch: number, overrid
     policy: { checks: ['test'], review: true }, plannedFiles: ['src/a.ts'], stage: 'build', revision: 3, policyRevision: 1,
     createdAt: iso(-minutes(600)), updatedAt: iso(0), stageEnteredAt: iso(-minutes(300)), ready: true, epoch,
     lease: { owner: principal, epoch, expiresAt: iso(minutes(600)) },
-    lastAssignment: { owner: principal, epoch, claimedAt: iso(-minutes(300)) },
+    lastAssignment: { owner: principal, epoch, claimedAt: iso(-minutes(20)) },
     workspaces: [{ host: 'machine-a', path: `/srv/worktrees/${key}-${epoch}`, epoch, owner: principal, branch: `graphyard/${key.toLowerCase()}-${epoch}` }],
     candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
     gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }], violations: [],

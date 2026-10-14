@@ -15,6 +15,7 @@ import { emptyDispatchCursor, runDispatchTick, verdictIngestGraceMs, type Dispat
 import { controlPlaneHandlers } from '../src/executor.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-01 verdict timestamps are the recorded GY-1083 instances and only order replayed verdicts; observedAt, closedAt, requestedAt and expiry are built relative to Date.now().
 
 // GY-1083: eleven review-convergence faults in 24 hours, every one a review-conflict: the reviewer
 // App posted two verdicts on one head for one review request. Each had the same cause. The first

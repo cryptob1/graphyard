@@ -6,11 +6,12 @@ import { execFile, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { assertDispatchable, assertMasterBinding, assessContainment, snapshotWithClock, verifyContainmentDeath, buildMasterStatus, dispatchWork, inspectWorkerCredentials, loadMasterConfig, managedMasterInstructions, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
+import { assertDispatchable, assertMasterBinding, assessContainment, snapshotWithClock, verifyContainmentDeath, buildMasterStatus, dispatchWork, inspectWorkerCredentials, loadMasterConfig, masterInstructions, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { autonomyContract } from '../src/autonomy.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): every 2030-01-01 instant is judged at a 2030 `now`/observedAt the test passes (localNow pinned where the probe runs); the lone new Date() status call carries no fixture instant.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
@@ -27,19 +28,16 @@ function work(overrides: Partial<Work> = {}) {
   return { id: 'work-id', key: 'GY-42', title: 'Prove the master flow', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:master'] }], policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'merge', revision: 9, policyRevision: 2, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 42 }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'merge', passed: true, reasons: [] }], violations: [], mergeAuthorization: { sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 2, at: new Date().toISOString() }, ...overrides } as Work;
 }
 
-test('master instructions are managed idempotently without replacing repository rules', () => {
-  const bootstrap = "The initial MVP is a single-agent bootstrap under the operator's supervision. Do not launch other agents for bootstrap work.";
-  const original = `# Local rules\n${bootstrap}\nKeep this text.\n`; const first = managedMasterInstructions(original);
-  assert.ok(first.startsWith(original)); assert.match(first, /dedicated, visible master-agent session/);
+test('master instructions carry the operating loop the master guide prints first', () => {
+  const first = masterInstructions;
+  assert.match(first, /dedicated, visible master-agent session/);
   assert.match(first, /Keep cycling: status, dispatch ready work, shepherd review, reconcile what GitHub\nmerged, then deployment verification/);
   assert.match(first, /both conditions hold:\n\(1\) every in-scope item is Done or has a genuinely external blocker recorded in\nGraphyard; and \(2\) every merged change is deployed and live-verified against the exact\ndeployed release, or a genuinely external deployment blocker is recorded in Graphyard/);
   assert.match(first, /Delivered work is immutable, so a deployment blocker is recorded as a follow-up work\nitem naming the delivered item, its merge commit, and the external cause/);
   assert.match(first, /An observed merge alone does not end the loop/);
   assert.match(first, /Verify each delivery with `graphyard master verify-deployment GY-N`: it refuses a\nstale or local-only observation and records only the exact deployed release it observed/);
   for (const condition of ['Ordinary review', 'rework', 'idle workers', 'proof setup', 'Close finished agent\\s+sessions']) assert.match(first, new RegExp(condition));
-  assert.equal(first.split(bootstrap).length - 1, 1, 'master setup preserves the protected bootstrap rule byte-for-byte');
-  assert.equal(managedMasterInstructions(first), first);
-  assert.throws(() => managedMasterInstructions(first + first), /markers/);
+  assert.ok(!first.includes('graphyard-master -->'), 'the instructions are no AGENTS.md block');
 });
 
 test('master init verifies a coordinator and repository before writing private local configuration', async () => {
@@ -56,7 +54,8 @@ test('master init verifies a coordinator and repository before writing private l
     assert.match(announced.next, /github-setup --update-permissions/);
     assert.equal((await stat(join(root, '.graphyard/master.json'))).mode & 0o777, 0o600);
     assert.equal(execFileSync('git', ['check-ignore', '.graphyard/master.json'], { cwd: root, encoding: 'utf8' }).trim(), '.graphyard/master.json');
-    assert.match(await readFile(join(root, 'AGENTS.md'), 'utf8'), /Graphyard master agent/);
+    const agents = await readFile(join(root, 'AGENTS.md'), 'utf8');
+    assert.match(agents, /## Graphyard coordination/); assert.doesNotMatch(agents, /Graphyard master agent|graphyard-master -->/, 'master init writes the worker block only');
     const master = await loadMasterConfig(root); assert.equal(await readFile(master.credentialFile, 'utf8'), coordinatorToken); assert.equal(master.baseBranch, 'main'); assert.equal(master.herdrWorkspace, 'workspace-graphyard'); assert.equal(master.credentialFile.startsWith(`${root}/`), false);
     assert.equal((await readFile(join(root, '.graphyard/master.json'), 'utf8')).includes(coordinatorToken), false);
     const workerConnection = JSON.stringify({ url: 'https://graphyard.example', token: workerToken, cliPath: launcher, hostId: 'machine-a' });
@@ -191,15 +190,21 @@ test('dispatch launches through watch, with the instruction on the supervised co
     let blockedProbes = 0, blockedRelease = 0; const blockedStarted = performance.now();
     await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
       if (args[0] === 'agent' && args[1] === 'get') { blockedProbes++; return JSON.stringify({ result: { agent: { pane_id: 'blocked-pane', agent: 'codex', agent_status: 'blocked' } } }); }
-      if (args[0] === 'pane' && args[1] === 'read') return '❯ No, exit\n  Yes, I trust this folder\n';
+      if (args[0] === 'pane' && args[1] === 'read') return '❯ No, keep this model\n  Yes, switch models\n';
       return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'blocked-pane' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
     }, undefined, async () => ({ epoch: 9, path: join(root, 'blocked'), base: '2'.repeat(40) }), async (_root, _key, epoch) => { blockedRelease = epoch; }, 5_000), /blocked before it is ready/);
     assert.equal(blockedProbes, 1); assert.equal(blockedRelease, 9); assert.ok(performance.now() - blockedStarted < 1_000, 'blocked state must bypass lookup retries');
     await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
       if (args[0] === 'agent' && args[1] === 'get') return JSON.stringify({ result: { agent: { pane_id: 'blocked-pane', agent: 'codex', agent_status: 'blocked' } } });
+      if (args[0] === 'pane' && args[1] === 'read') return '❯ No, keep this model\n  Yes, switch models\n';
+      return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'blocked-pane' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
+    }, undefined, async () => ({ epoch: 9, path: join(root, 'blocked'), base: '2'.repeat(40) }), async () => {}, 5_000), /blocked on a dialog the launcher does not recognise: "❯ No, keep this model \/ Yes, switch models"\); the pane last showed: "Yes, switch models"/, 'GY-121, GY-1561: the refusal shows the dialog the runtime is blocked on');
+    // Claude Code's folder-trust menu with its question scrolled out of view is named by its options (GY-1561).
+    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
+      if (args[0] === 'agent' && args[1] === 'get') return JSON.stringify({ result: { agent: { pane_id: 'blocked-pane', agent: 'codex', agent_status: 'blocked' } } });
       if (args[0] === 'pane' && args[1] === 'read') return '❯ No, exit\n  Yes, I trust this folder\n';
       return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'blocked-pane' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
-    }, undefined, async () => ({ epoch: 9, path: join(root, 'blocked'), base: '2'.repeat(40) }), async () => {}, 5_000), /the pane last showed: "Yes, I trust this folder"/, 'GY-121: the refusal shows the dialog the runtime is blocked on');
+    }, undefined, async () => ({ epoch: 9, path: join(root, 'blocked'), base: '2'.repeat(40) }), async () => {}, 5_000), /stopped at a workspace-trust prompt in pane blocked-pane .*"❯ No, exit \/ Yes, I trust this folder"/);
     const existing = { name: 'existing', principal: 'worker-a', agentName: 'existing-a', mode: 'existing' as const, agentArgs: [], approvals: 'auto' as const, environment: {} };
     await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), existing, [{ name: 'existing-a', agent_status: 'idle', cwd: root }]), /cannot be safely adopted/);
     const dependency = work({ id: 'dependency', key: 'GY-41', stage: 'build' });
@@ -453,7 +458,8 @@ test('master status reports each containment quarantine and only claims verifica
   const row = buildMasterStatus({ work: [stranded], now: observedAt }, [], [], {}, verified).work[0];
   assert.deepEqual({ settleable: row.containment?.settleable, refusals: row.containment?.refusals, host: row.containment?.host, verifiedAt: row.containment?.verifiedAt, attestation: row.containment?.attestation },
     { settleable: true, refusals: [], host: 'coordinator-host', verifiedAt: observedAt, attestation: null });
-  assert.match(row.attention!, /verified settleable; run master settle-containment GY-42/);
+  // Ten minutes past its lease, inside the settle bound: the loop's to settle (GY-1633).
+  assert.match(row.attention!, /verified settleable; the loop settles it within its settle bound/);
 
   // Another machine's quarantine is not this coordinator's to verify, and a probe that
   // cannot run is a refusal rather than a silent absence.

@@ -1,14 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, writeFileSync } from 'node:fs';
 import { chmod, mkdir, readdir, readFile, stat, utimes, writeFile } from 'node:fs/promises';
+import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describeTmpReclaim, readTempOwner, reclaimTmpDirectories, tempOwnerMarker, writeTempOwner } from '../src/tmp-reclaim.js';
-import { describeReclaim, readReclaimReports, reclaimResources, settleTmpReclaim, takeTmpReclaim } from '../src/master-resources.js';
+// A namespace import: on a base without GY-1597's census the case fails, not the file's load.
+import * as tmpReclaim from '../src/tmp-reclaim.js';
+import { describeReclaim, describeStandingTmpPass, readReclaimReports, readResources, readTmpInodes, reclaimResources, resourceAttention, settleTmpReclaim, takeTmpReclaim, type ResourceInputs } from '../src/master-resources.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { loadMasterConfig, setupMaster } from '../src/master.js';
+import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { standingTmpKey } from '../src/daemon/cycle-reclaim.js';
 
 // GY-421: test runs used to leak their temporary directories — by 25 September 2026 the host held
 // 11,511 /tmp/graphyard-* embedded-Postgres data dirs a run had left behind on failing or being
@@ -164,10 +170,10 @@ test('unit:tmp-reclaim: the loop\'s reclaim pass removes an old, unheld director
   // Old with a live owner: the marker names this process, so the age never applies.
   const mine = join(root, 'graphyard-live-owner');
   await mkdir(mine); await writeTempOwner(mine); await backdate(mine, 8);
-  // The tsx cache, stale: the same pass takes it.
+  // The tsx cache, stale: the same pass ages its old file, and the directory stays (GY-1512).
   const tsx = join(root, 'tsx-1000');
   await mkdir(tsx); await writeFile(join(tsx, 'chunk.js'), 'export {};\n'); await backdate(join(tsx, 'chunk.js'), 8); await backdate(tsx, 8);
-  // A tsx cache in use: its directory's own mtime is old, but tsx rewrote an entry a minute ago.
+  // A tsx cache in use: its directory's own mtime is old, tsx rewrote one entry a minute ago, and its stale entry goes.
   const busy = join(root, 'tsx-1001');
   await mkdir(busy); await writeFile(join(busy, 'stale.js'), 'export {};\n'); await backdate(join(busy, 'stale.js'), 8);
   await writeFile(join(busy, 'fresh.js'), 'export {};\n'); await backdate(busy, 8);
@@ -179,14 +185,15 @@ test('unit:tmp-reclaim: the loop\'s reclaim pass removes an old, unheld director
   await backdate(unverified, 9);
 
   const report = await reclaimTmpDirectories({ now: Date.now(), tmpRoot: root });
-  assert.deepEqual(report.removed.map(entry => entry.path), [unverified, old, tsx], 'the old unheld directories and the stale tsx cache go, oldest first');
-  assert.equal(existsSync(busy), true, 'a tsx cache with a freshly written entry stays, however old its directory');
+  assert.deepEqual(report.removed.map(entry => entry.path), [unverified, old, join(tsx, 'chunk.js'), join(busy, 'stale.js')], 'the old unheld directories go oldest first, then the tsx caches\' stale files');
+  assert.equal(existsSync(tsx), true, 'a stale tsx cache directory is never taken whole');
+  assert.equal(existsSync(join(busy, 'fresh.js')), true, 'a tsx cache\'s freshly written entry stays, however old its directory');
   assert.deepEqual(report.errors, []);
   assert.equal(existsSync(held), true, 'a directory a live process holds open stays');
   assert.equal(existsSync(young), true, 'a directory younger than the age bound stays');
   assert.equal(existsSync(mine), true, 'a directory whose owning process still runs stays, however old');
   assert.ok(report.bytes >= 4096 + 'export {};\n'.length, `the report carries the bytes freed (${report.bytes})`);
-  assert.match(describeTmpReclaim(report.removed.length, report.bytes) ?? '', /^freed .+ from 3 stale \/tmp entries$/);
+  assert.match(describeTmpReclaim(report.removed.length, report.bytes) ?? '', /^freed .+ from 4 stale \/tmp entries$/);
 
   // The holder alone kept it: once the process that held it exits, the next pass takes it.
   holder.kill('SIGKILL'); await once(holder, 'exit');
@@ -283,4 +290,180 @@ test('unit:tmp-reclaim-error-isolated — one entry\'s removal failure leaves th
   assert.deepEqual(second.removed.map(removed => removed.path), [stuck]);
   assert.equal(existsSync(stuck), false);
   assert.equal(unfinished.size, 0, 'nothing is left carried once it is removed');
+});
+
+// GY-1597: a pass that removes 0 entries while /tmp stays below its inode headroom must neither
+// repeat silently nor leave the leaker unnamed.
+const leakingRoot = async (name: string) => {
+  const tmp = await temporaryDirectory(name);
+  // One large leaker directory, a family of same-stem siblings, and a cache of fresh files: nothing the pass may take.
+  const leaker = join(tmp, 'chrome-cache');
+  await mkdir(join(leaker, 'deep'), { recursive: true });
+  for (let index = 0; index < 40; index++) await writeFile(join(leaker, 'deep', `blob-${index}`), 'x');
+  for (let index = 0; index < 12; index++) await writeFile(join(tmp, `core-dump-${index}a7f`), 'x');
+  const uid = process.getuid?.();
+  if (uid !== undefined) { await mkdir(join(tmp, `tsx-${uid}`)); for (let index = 0; index < 5; index++) await writeFile(join(tmp, `tsx-${uid}`, `fresh-${index}`), 'x'); }
+  return { tmp, leaker };
+};
+const lowVolume = async () => ({ files: 4000, ffree: 100 });
+
+test('unit:tmp-leaks — a pass below the inode headroom that removes 0 entries escalates through every step in the same run and names the top /tmp consumers by path, entry count and owner', async () => {
+  const { tmp, leaker } = await leakingRoot('zero-pass-escalates');
+  const report = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set(), limit: 100, workMs: 150, volume: lowVolume });
+  assert.deepEqual(report.errors, []);
+  assert.deepEqual(report.removed, [], 'nothing here is the pass\'s to take');
+  assert.deepEqual(report.escalated?.map(step => step.limit), [2_000, 20_000], 'the cap rose at each step, in the same run');
+  assert.deepEqual(report.escalated?.map(step => step.cacheAgeMs), [3_600_000, 600_000], 'the cache age fell at each step');
+  assert.equal(report.boundStands, true);
+  const owner = userInfo().username;
+  assert.deepEqual(report.consumers?.slice(0, 2), [
+    { path: leaker, entries: 1 + 1 + 40, owner },
+    { path: `${join(tmp, 'core-dump')}* (12 top-level)`, entries: 12, owner },
+  ], 'the largest consumers lead, siblings of one stem counted as one family');
+  assert.equal(existsSync(leaker), true, 'naming a consumer removes nothing');
+  // A census is bounded: past its entry budget it names what it reached as capped.
+  const capped = await tmpReclaim.tmpConsumers([tmp], 10);
+  assert.ok(capped.some(consumer => consumer.capped), 'a census past its bound says so');
+  // Top-level entries count against the same budget: a root of flat files stops at the bound, and every family it names is capped.
+  const flat = await temporaryDirectory('zero-pass-flat');
+  for (let index = 0; index < 12; index++) await writeFile(join(flat, `leak-${index}x`), 'x');
+  const stopped = await tmpReclaim.tmpConsumers([flat], 5);
+  assert.equal(stopped.reduce((total, consumer) => total + consumer.entries, 0), 5, 'the census counted no more top-level entries than its bound');
+  assert.ok(stopped.length > 0 && stopped.every(consumer => consumer.capped), 'a census stopped among top-level entries marks what it names as capped');
+});
+
+test('unit:tmp-cleanup — the loop records the escalated pass and the consumers it named, and the tmp-inodes attention carries them', async () => {
+  const root = await temporaryDirectory('zero-pass-attention');
+  await mkdir(join(root, '.graphyard'));
+  const { tmp, leaker } = await leakingRoot('zero-pass-attention-tmp');
+  const options = { tmpRoot: tmp, tmpPass: (pass: Parameters<typeof reclaimTmpDirectories>[0]) => reclaimTmpDirectories({ ...pass, held: new Set(), volume: lowVolume }) };
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  await settleTmpReclaim();
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  await settleTmpReclaim();
+  const inodes = await readTmpInodes(root, tmp, lowVolume);
+  assert.deepEqual(inodes?.latest?.escalated?.map(step => step.removed), [0, 0]);
+  assert.equal(inodes?.latest?.consumers?.[0]?.path, leaker);
+  const input: ResourceInputs = { now: Date.now(), reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, revision: null, disk: null, tmp: inodes, profiles: { workers: [], reviewers: [], producers: [] } };
+  const reading = readResources(input).find(entry => entry.id === 'tmp-inodes')!;
+  assert.equal(reading.state, 'low');
+  const [line] = resourceAttention([reading]);
+  assert.match(line?.text ?? '', /below the inode headroom it escalated to 20000 per cycle and tsx cache files older than 10 minutes \(0 \+ 0 removed by the escalated steps\)/);
+  assert.match(line?.text ?? '', new RegExp(`the top /tmp consumers are ${leaker} \\(42 entries, owner ${userInfo().username}\\)`));
+  assert.match(reading.reclaim, /escalates .* names the top \/tmp consumers/, 'the registry describes the escalation');
+});
+
+test('unit:tmp-cleanup — a zero-removal pass that leaves /tmp between a tenth and a quarter free still raises the tmp-inodes attention naming the consumers', async () => {
+  const root = await temporaryDirectory('zero-pass-gap');
+  await mkdir(join(root, '.graphyard'));
+  const { tmp, leaker } = await leakingRoot('zero-pass-gap-tmp');
+  // 209,715 of 1,048,576 free: above a tenth, below the 262,144 quarter-free headroom.
+  const gapVolume = async () => ({ files: 1_048_576, ffree: 209_715 });
+  const options = { tmpRoot: tmp, tmpPass: (pass: Parameters<typeof reclaimTmpDirectories>[0]) => reclaimTmpDirectories({ ...pass, held: new Set(), volume: gapVolume }) };
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  await settleTmpReclaim();
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  await settleTmpReclaim();
+  const inodes = await readTmpInodes(root, tmp, gapVolume);
+  assert.equal(inodes?.latest?.removed, 0);
+  assert.equal(inodes?.measuredScanned, true, 'the pass is current over the measured directory');
+  const input: ResourceInputs = { now: Date.now(), reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, revision: null, disk: null, tmp: inodes, profiles: { workers: [], reviewers: [], producers: [] } };
+  const reading = readResources(input).find(entry => entry.id === 'tmp-inodes')!;
+  assert.equal(reading.state, 'low');
+  assert.ok(!reading.answered, 'a pass that removed 0 and named consumers answers nothing');
+  const [line] = resourceAttention([reading]);
+  assert.equal(line?.subject, 'resource:tmp-inodes');
+  assert.match(line?.text ?? '', new RegExp(`the top /tmp consumers are ${leaker} \\(42 entries`));
+  // A pass that took entries back but still left /tmp below the headroom answers nothing either (GY-1602).
+  const progressed: ResourceInputs = { ...input, tmp: { ...inodes!, latest: { ...inodes!.latest!, removed: 3 } } };
+  assert.equal(resourceAttention(readResources(progressed).filter(entry => entry.id === 'tmp-inodes')).length, 1);
+});
+
+// GY-1600: on 9 October 2026 the loop's /tmp pass removed 0 entries at 19:34Z while /tmp stood at
+// 98,830 of 1,048,576 inodes free, and the cycle recorded nothing: describeReclaim has nothing to
+// say about a pass that took nothing, so the ledger fell silent exactly while the bound stood.
+test('unit:tmp-reclaim-zero-escalates — a /tmp pass that removes 0 entries while the inode bound stands is recorded in the cycle\'s action ledger with what it scanned and why nothing was eligible; one with the bound clear records nothing', async () => {
+  const root = await temporaryDirectory('zero-pass-ledger');
+  const credentials = await temporaryDirectory('zero-pass-ledger-credentials');
+  execFileSync('git', ['init', '-q', root]);
+  execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
+  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)), credentialDirectory: credentials },
+    (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch);
+  const config = await loadMasterConfig(root);
+  const { tmp, leaker } = await leakingRoot('zero-pass-ledger-tmp');
+  // A test temp this pass scans and keeps: younger than its age bound.
+  await mkdir(join(tmp, 'graphyard-young'));
+  const pass = (volume: typeof lowVolume) => async () => {
+    const options = { tmpRoot: tmp, tmpPass: (each: Parameters<typeof reclaimTmpDirectories>[0]) => reclaimTmpDirectories({ ...each, held: new Set(), volume }) };
+    await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+    await settleTmpReclaim();
+    return reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  };
+  const cycle = async (reclaim: () => ReturnType<typeof reclaimResources>) => {
+    const state = emptyDaemonState(config), clock = Date.now();
+    const effects = {
+      agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: new Date(clock).toISOString() }), closeSession: () => {},
+      dispatch: async () => {}, requestProof: () => {}, recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+      observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(clock).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
+      reclaimResources: reclaim,
+    } as unknown as DaemonEffects;
+    await runCycle(config, state, effects, () => clock);
+    return Object.entries(state.actions).filter(([key]) => key.startsWith('reclaim:tmp:')).map(([, action]) => action);
+  };
+
+  // Below the headroom: the pass escalates, removes 0 and names the consumers, and the cycle records it.
+  const recorded = await cycle(pass(lowVolume));
+  await settleTmpReclaim();
+  assert.equal(recorded.length, 1, 'the zero-removal pass under the standing bound is in the ledger');
+  const [action] = recorded;
+  assert.equal(action.kind, 'reclaim');
+  assert.equal(action.state, 'done');
+  assert.match(action.detail, /^\/tmp reclaim removed 0 entries while the inode bound stands/);
+  assert.match(action.detail, new RegExp(`scanned ${tmp}; its last step, over the roots still below headroom, examined 1 entry with this user's test temp names, 1 kept`), 'it names what it scanned and kept, and which sweep the counts are');
+  assert.match(action.detail, /no tsx cache file of this user's it could remove \(each younger than 10 minutes or held open by a live process\)/, 'it says why nothing was eligible without claiming one unmeasured cause');
+  assert.doesNotMatch(action.detail, /old enough/);
+  assert.match(action.detail, /escalated to 20000 per cycle and tsx cache files older than 10 minutes \(0 \+ 0 removed\)/);
+  assert.match(action.detail, new RegExp(`top consumers: ${leaker} \\(42 entries, owner ${userInfo().username}\\)`));
+  assert.equal(existsSync(join(tmp, 'graphyard-young')), true, 'recording the pass removes nothing');
+
+  // The bound clear: a pass that removed 0 has nothing to report, as before.
+  const clear = await pass(async () => ({ files: 1_048_576, ffree: 900_000 }))();
+  await settleTmpReclaim();
+  assert.equal(clear.tmpPass?.boundStands, false);
+  assert.equal(describeStandingTmpPass(clear), null);
+  // A pass that took entries back is reported by describeReclaim, never as a standing zero.
+  assert.equal(describeStandingTmpPass({ ...clear, tmp: { removed: 3, bytes: 3 }, tmpPass: { ...clear.tmpPass!, boundStands: true } }), null);
+  assert.deepEqual(await cycle(async () => clear), [], 'a pass with the bound clear adds no record');
+});
+
+test('unit:tmp-reclaim-zero-escalates — a standing zero-removal pass with errors fails its row and adds no fault of its own', async () => {
+  const root = await temporaryDirectory('zero-pass-errors');
+  const credentials = await temporaryDirectory('zero-pass-errors-credentials');
+  execFileSync('git', ['init', '-q', root]);
+  execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
+  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)), credentialDirectory: credentials },
+    (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch);
+  const config = await loadMasterConfig(root), clock = Date.now();
+  const effects = {
+    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: new Date(clock).toISOString() }), closeSession: () => {},
+    dispatch: async () => {}, requestProof: () => {}, recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(clock).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
+    reclaimResources: async () => ({ at: new Date(clock).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: ['Tmp reclaim: /tmp/graphyard-held: EBUSY'],
+      tmpPass: { roots: ['/tmp'], scanned: 1, kept: 1, boundStands: true } }),
+  } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config);
+  await runCycle(config, state, effects, () => clock);
+  const row = state.actions[standingTmpKey];
+  assert.equal(row?.state, 'failed', 'a pass that met errors is not recorded as done');
+  assert.match(row.detail, /1 could not be reclaimed: Tmp reclaim: \/tmp\/graphyard-held: EBUSY/);
+  assert.equal(row.faultClass, undefined, 'the row carries no fault of its own');
+  assert.equal(state.faults.failing[standingTmpKey], undefined);
+  assert.deepEqual(Object.entries(state.actions).filter(([, action]) => action.kind === 'reclaim' && action.state === 'failed').map(([key]) => key.split(':').slice(0, 2).join(':')).sort(), ['reclaim:resources', 'reclaim:tmp'], 'the resources row and the /tmp row');
+  // Another resource's failure in the same report (a pane close) is not the /tmp pass's: its row stays done and names no error.
+  const other = emptyDaemonState(config);
+  await runCycle(config, other, { ...effects, reclaimResources: async () => ({ at: new Date(clock).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 },
+    errors: ['Pane close: w1:p1: herdr refused'], tmpPass: { roots: ['/tmp'], scanned: 1, kept: 1, boundStands: true } }) } as DaemonEffects, () => clock);
+  assert.equal(other.actions[standingTmpKey]?.state, 'done', 'an unrelated failure does not fail the /tmp row');
+  assert.doesNotMatch(other.actions[standingTmpKey].detail, /could not be reclaimed|Pane close/);
+  assert.equal(other.actions[Object.keys(other.actions).find(key => key.startsWith('reclaim:resources:'))!]?.state, 'failed', 'the resources row carries it');
 });

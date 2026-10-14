@@ -25,8 +25,10 @@ import type { Work } from './work.js';
  * - `session` — a live session is already doing exactly what the gate waits for.
  * - `human` — one of the three decisions the project reserves for a person (AGENTS.md).
  * - `settled` — no gate refuses: the item is delivered, or merged and awaiting its record.
+ * - `window` — the observation the item owes cannot exist before its recorded instant
+ *   (`observationWindow.notBefore`, GY-1698); the loop dispatches it once the instant passes.
  */
-export const waitKinds = ['dependency', 'session', 'human', 'settled'] as const;
+export const waitKinds = ['dependency', 'session', 'human', 'settled', 'window'] as const;
 export type WaitKind = typeof waitKinds[number];
 export interface ActionWait {
   kind: WaitKind;

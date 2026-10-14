@@ -2070,7 +2070,8 @@ export async function reworkRoundsWithOwnCauses<T extends Record<string, any>>(r
 export const deliverySpeedWindows = [{ id: '24h', ms: day }, { id: '7d', ms: 7 * day }] as const;
 export type DeliverySpeedWindow = typeof deliverySpeedWindows[number]['id'];
 export interface DeliverySpeedTargets { readyToMergedP90Ms: number; mergedToProductionP90Ms: number }
-export const defaultDeliverySpeedTargets: DeliverySpeedTargets = { readyToMergedP90Ms: 2 * 3_600_000, mergedToProductionP90Ms: 8 * 3_600_000 };
+/** GY-1488: continuous promotion cuts a candidate as soon as the last concludes, so merged→production's p90 target is 45 minutes. */
+export const defaultDeliverySpeedTargets: DeliverySpeedTargets = { readyToMergedP90Ms: 2 * 3_600_000, mergedToProductionP90Ms: 45 * 60_000 };
 /** The window a breach is judged over: a week's sample, so one slow item in a quiet day is not an alarm. */
 export const deliverySpeedJudgedWindow: DeliverySpeedWindow = '7d';
 /** The judged window in words, for the report's sentences ("7 days"). */
@@ -2146,6 +2147,8 @@ export function deliverySpeed(items: readonly Work[], options: { now: number; re
     readyEventsComplete: readyComplete, deliveryMode, statements };
 }
 const hours = (ms: number) => `${Math.round(ms / 360_000) / 10}h`;
+/** A target in words: whole minutes under an hour ("45 min"), else hours. */
+const targetSpan = (ms: number) => ms < 3_600_000 ? `${Math.round(ms / 60_000)} min` : hours(ms);
 /**
  * One line per measure whose p90 over the judged window exceeds its target, naming the slowest
  * items; a pending item already older than the merged→production target is among them, since it
@@ -2165,7 +2168,7 @@ export function deliverySpeedBreaches(speed: DeliverySpeed, minimumSample = deli
     // The stage holding the p90 (GY-1382), so the line says where the time goes, not only which items are slow.
     const stage = speed.stages?.dominant[measure] ?? null;
     const held = stage ? `; the largest share of the p90 is held in ${deliveryStageLabels[stage.stage]} (${Math.round(stage.share * 100)}% of the slowest tenth's time), most delayed there: ${named(stage.items)}` : '';
-    return [{ measure, stage, text: `${label} p90 is ${hours(value.p90Ms)} over ${judgedWindowLabel} (${value.count} item${value.count === 1 ? '' : 's'}), above the ${hours(target)} target; slowest: ${named(value.slowest)}${held}` }];
+    return [{ measure, stage, text: `${label} p90 is ${hours(value.p90Ms)} over ${judgedWindowLabel} (${value.count} item${value.count === 1 ? '' : 's'}), above the ${targetSpan(target)} target; slowest: ${named(value.slowest)}${held}` }];
   });
 }
 /**

@@ -10,11 +10,14 @@ import { masterStatusReport } from '../src/cli/master-status.js';
 import { approverSessionName, decisionInput, launchApprover, listHerdrAgents, masterConfigSchema, type ContainmentAssessment, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import { expandTypedCommand, requestOf } from './helpers/launch-shell.js';
 import { containmentGraceMs } from '../src/quarantine.js';
+import { containmentSettleWaitBoundMs } from '../src/model/containment.js';
 import type { Work } from '../src/model.js';
 import { decideScopeRequest } from '../src/model/scope.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { installUnitsFile, perInstallUnits } from '../src/install/units.js';
 import { cappedEscalationKey, cappedFilingKey } from '../src/daemon/cycle-review-cap.js';
 import { observedReviewBody } from '../src/review-cap.js';
+// Time-bomb allowance (GY-1694): the 2031-03-01 clockStart is the loop's injected now and every verdict/lease instant and loopLiveness call takes it explicitly; new Date() only stamps an empty snapshot for a lockless status.
 
 /**
  * GY-84: the loop drives every routine decision unattended.
@@ -560,7 +563,11 @@ test('integration:no-actionable-silence — every cycle records what it could ac
   const simulation = plane([{ key: 'GY-400', rounds: ['pass'] }]);
   // A two-minute cycle, so cycling every two simulated minutes is a healthy loop rather than a
   // stalled one: this proof is about silence in the work, not about the loop's own liveness.
-  const master = config({ workers: [profile('claude-a')], run: { intervalSeconds: 120 } });
+  // The loop runs from a fixture checkout that records its units, so the harness remedy validates it and, with no Claude settings installed, has nothing to journal (GY-1662).
+  const recorded = await temporaryDirectory('silence-checkout');
+  await mkdir(join(recorded, '.graphyard'), { recursive: true });
+  await writeFile(join(recorded, installUnitsFile), JSON.stringify(perInstallUnits('owner/project')));
+  const master = config({ cliPath: join(recorded, 'bin/graphyard.mjs'), workers: [profile('claude-a')], run: { intervalSeconds: 120 } });
   const state = emptyDaemonState(master);
   // The one worker profile has no usable credential, so nothing can claim the ready item: the
   // pipeline has something actionable and no way to act on it, which is exactly the silence GY-84
@@ -832,7 +839,10 @@ test('routine decisions rest on what the loop verified and are supervised to the
   assert.match(routineDecision(lapsed, master, at, assessed(true))!.reason, /the master loop verified on machine-a that the supervisor of epoch 1 is gone\.$/);
   const delivered = { ...lapsed, stage: 'done' } as Work;
   assert.equal(routineDecision(delivered, master, at, assessed(false, ['Epoch 1 is registered on host machine-b; automatic verification must run there'])), null, 'recovery lowers the same fence on the same attestation');
-  assert.equal(routineDecision(delivered, master, at, assessed(true))!.action, 'recover');
+  // GY-1633: inside the settle bound the reclaim step settles a delivered item's fence itself; only past it is recovery asked.
+  assert.equal(routineDecision(delivered, master, at, assessed(true)), null, 'a verified-dead delivered fence inside its settle bound is the reclaim step\'s');
+  const stranded = { ...delivered, containmentQuarantine: fence(at - containmentGraceMs - containmentSettleWaitBoundMs - 60_000) } as Work;
+  assert.equal(routineDecision(stranded, master, at, assessed(true))!.action, 'recover');
   assert.equal(routineDecision({ ...delivered, containmentQuarantine: fence(at - containmentGraceMs / 2) } as Work, master, at, assessed(true)), null);
 
   // The same in the cycle. A verdict stands, the worker's fence lapsed, and this host cannot

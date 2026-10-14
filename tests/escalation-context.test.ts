@@ -17,6 +17,7 @@ import { expandTypedCommand, roleOf, startedAtOnce } from './helpers/launch-shel
 import { autonomyContract } from '../src/autonomy.js';
 import { Store } from '../src/store.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-01-01 and 2026-09-2x stamps are ledger and decision fixtures assembleEscalationContext copies verbatim; new Date() only stamps observations nothing compares with them.
 
 // GY-90: the control plane assembles an escalation's context from the project — the repository's
 // own rules and policy, the goals and priorities the work graph records, the item slice and the

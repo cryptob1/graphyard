@@ -5,19 +5,21 @@ import { hotFileSet } from '../daemon/hotspots.js';
 import type { ConflictReport } from '../conflicts.js';
 import { standingCapacity, describeCapacity, quotaRoles } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, openHumanRequests } from '../model/human-request.js';
-import { type Work, carriedBindings, describeGround, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance } from '../model.js';
+import { type Work, carriedBindings, describeGround, observationWindowHold, loopObservation, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance } from '../model.js';
 import { containmentAttestation, containmentGraceMs } from '../quarantine.js';
 import { pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, restoredApproval, refusedReconciliation, blockedPastProbe } from '../merge-queue.js';
 import { MERGE_PROTOCOL } from '../protocol-version.js';
 import { mergeBaseDismissal, mergeBaseDismissalAttention } from '../merge-base-ancestry.js';
 import { pipelineSpeed, pipelineSpeedSummary } from '../pipeline-speed.js';
-import { profileSessions, type WorkerProfile } from './profiles.js';
+import { profileSessions, promotionCommand, type Supervision, type WorkerProfile } from './profiles.js';
 import { sessionActivity } from './launch.js';
 import { launchingSession, sessionView } from '../model/session-state.js';
 import type { HerdrAgent } from './herdr.js';
 import { type ContainmentAssessment, containmentHold, containmentPhase } from './containment.js';
+import { containmentInMotion } from '../model/containment.js';
 import { agentOwner, type AttentionItem, controlPlaneAttention, type ControlPlaneStatus, fleetStatus, workAttentionOwner, type WorkAttentionCause } from './attention.js';
 import { classified } from '../model/fault-classes.js';
+import { launchFailedBeforeStart } from '../model/escalation.js';
 import { mechanicalProof, unexercisedDetail, unexercisedFindings } from '../model/mechanical-proofs.js';
 import { requestRemedy } from '../model/dispatch.js';
 import { unrunnableRemedies } from './harness.js';
@@ -125,6 +127,22 @@ export function roleConcurrency(role: 'reviewer' | 'producer', profiles: RolePro
   const longest = waiting[0] ?? null;
   return { role, limit, running, free: Math.max(0, limit - running), waiting: waiting.length, longestWaitMs: longest?.waitedMs ?? null, longest, starved: limit > 0 && running >= limit && waiting.length > 0, profiles: perProfile };
 }
+/** Who reviews and merges, as master status reads it (GY-1501): the config's supervision and the operator's GitHub login. */
+export interface SupervisionInput { mode?: Supervision; operatorLogin?: string | null }
+/**
+ * Supervised mode in master status (GY-1501): one line saying the operator reviews and merges each
+ * pull request and naming the promotion command, and an attention item for every open candidate the
+ * operator's own login authored, whose approval by that operator would not be independent. Null and
+ * none in autonomous mode.
+ */
+export function supervisionReport(supervision: SupervisionInput | undefined, work: readonly Work[]): { line: string | null; attentionItems: AttentionItem[] } {
+  if (supervision?.mode !== 'supervised') return { line: null, attentionItems: [] };
+  const login = supervision.operatorLogin?.toLowerCase() ?? null;
+  const own = login ? work.filter(item => !isClosed(item) && item.stage !== 'done' && item.candidate?.author?.toLowerCase() === login) : [];
+  return { line: `Supervised: the operator reviews and merges each pull request on GitHub; no agent reviewer or approver runs. Promote to autonomy with ${promotionCommand}.`,
+    attentionItems: own.map(item => ({ subject: item.key, text: `PR #${item.candidate!.pr} at ${item.candidate!.sha.slice(0, 12)} is authored by ${supervision.operatorLogin}, the operator's own login, so the operator's approval of it would not be independent and GitHub will not count it`, ...classified('gate'),
+      ...agentOwner('master', `Have someone other than ${supervision.operatorLogin} approve PR #${item.candidate!.pr} on GitHub, or release ${item.key} so a worker identity authors its pull request`) })) };
+}
 /** A starved role is attention for the master: the limit and the wait, with what raises the one. */
 export const concurrencyStarvedMs = 10 * 60_000;
 export function concurrencyAttention(reports: RoleConcurrencyReport[]): AttentionItem[] {
@@ -132,7 +150,8 @@ export function concurrencyAttention(reports: RoleConcurrencyReport[]): Attentio
     text: `${report.role} capacity is saturated: ${report.running} session${report.running === 1 ? '' : 's'} running against a limit of ${report.limit} (${report.profiles.map(entry => `${entry.profile} ${entry.running}/${entry.limit}`).join(', ')}), ${report.waiting} request${report.waiting === 1 ? '' : 's'} waiting for a slot, the longest (${report.longest!.work}${report.longest!.group ? ` ${report.longest!.group} proofs` : ''}) for ${Math.round(report.longestWaitMs! / 60_000)} minutes`,
     ...agentOwner('master', `Raise concurrency on a ${report.role} profile in .graphyard/master.json, or add a ${report.role} profile on another account (master ${report.role} add); master run adopts the change on its next tick and starts more sessions without a restart. See docs/onboarding.md#size-review-and-proof-capacity`) }));
 }
-export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles, cliPath = 'graphyard', loop?: { projectMemory?: ProjectMemory | null } | { error: string } | null) {
+export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles, cliPath = 'graphyard', loop?: { projectMemory?: ProjectMemory | null } | { error: string } | null, supervision?: SupervisionInput) {
+  const supervised = supervisionReport(supervision, snapshot.work);
   const now = Date.parse(snapshot.now);
   const scheduling = dispatchSchedule(snapshot.work, now);
   const installation = controlPlaneAttention(controlPlane), registry = fleetStatus(controlPlane?.fleet);
@@ -160,6 +179,10 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     // GitHub's to merge: every gate passes on the candidate (GY-1235); the observation's age is not read.
     const mergeable = mergeAuthorized(work);
     const dwellMs = now - Date.parse(work.stageEnteredAt);
+    // The earliest instant the item's reading can exist (GY-1698), and whether it still holds the dispatch.
+    // GY-1762: waiting on the loop's own live reading, not ready for a worker.
+    const observing = work.stage === 'ready' && !work.blocker && !active ? loopObservation(work, new Date(now), snapshot.work) : null;
+    const observationWindow = work.observationWindow ? { ...work.observationWindow, waiting: !!observationWindowHold(work, new Date(now)) } : null;
     const review = reviewState(work);
     const assessed = containment[work.id];
     const phase = containmentPhase(work, now);
@@ -181,7 +204,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : null;
     const seconds = (ms: number) => `${Math.ceil(ms / 1000)}s`;
     const containmentAttention: [string, Parameters<typeof workAttentionOwner>[1]] | null = !quarantine || quarantine.phase === 'live' ? null
-      : quarantine.settleable ? [`Containment quarantine from epoch ${quarantine.epoch} is verified settleable; run master settle-containment ${work.key}`, 'containment-settleable']
+      : quarantine.settleable ? [`Containment quarantine from epoch ${quarantine.epoch} is verified settleable; ${containmentInMotion(work, now) ? 'the loop settles it within its settle bound' : `run master settle-containment ${work.key}`}`, 'containment-settleable']
       : quarantine.phase === 'grace' ? [`Worker lease for epoch ${quarantine.epoch} lapsed at ${quarantine.lapsedAt}; containment grace window has ${seconds(quarantine.graceRemainingMs!)} remaining before supervisor absence can be verified`, 'containment-grace']
       : [`Containment quarantine from epoch ${quarantine.epoch} blocks dispatch: ${quarantine.lapsedAt ? `worker lease lapsed at ${quarantine.lapsedAt}, past the ${seconds(containmentGraceMs)} grace window; ` : ''}${quarantine.refusals[0]}`, 'containment'];
     const gaps = work.proofGaps ?? [];
@@ -227,7 +250,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
         ? `removed by merge ${merged.reverted.removedBy.mergeSha?.slice(0, 12) ?? 'commit unknown'} of ${merged.reverted.removedBy.key ? `${merged.reverted.removedBy.key}, ` : ''}pull request #${merged.reverted.removedBy.pr}${merged.reverted.removedBy.commit ? ` (commit ${merged.reverted.removedBy.commit.slice(0, 12)})` : ', whose head carried this item\'s commits without their content'}`
         : 'and the merge that removed them could not be identified from the branch history'}. This is a reverted delivery, not an unreconciled merge: nothing is delivered until the content is restored${merged.refusal ? `; the last reconciliation was refused — ${merged.refusal}` : ''}`, 'merged-reverted']
       : merged ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) though its gates had not passed on that head: ${merged.violation}. It is held at the merge stage; ${merged.refusal ? `the last reconciliation was refused — ${merged.refusal}; an operator may deliver it as operator-authorized by a decision citing that refusal` : 'a two-party merge decision requested now reconciles it if every gate passed for the merged head at the merge cutoff'}`, 'merged-unauthorized']
-      : active && !['working', 'idle', 'launching'].includes(sessionState) ? [`Assigned worker session is ${sessionState}`, 'session']
+      // A launch that failed before its runtime started is its dispatch's failure, recorded there; the
+      // moment the attempt's lease outlives it is not a second, session fault of the item's (GY-1561).
+      : active && !launchFailedBeforeStart(handle) && !['working', 'idle', 'launching'].includes(sessionState) ? [`Assigned worker session is ${sessionState}`, 'session']
       : gaps.length ? [`No principal is authorized to produce ${gaps.join(', ')}; grant the proof name before dispatch`, 'proof-gap']
       : review?.exhausted ? [`Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`, 'reviewer-exhausted']
       : stalledLaunch ? [`Automatic ${stalledLaunch.failure!.kind} launch for ${work.key} refused ${stalledLaunch.failure!.attempts} time(s): ${stalledLaunch.failure!.reason}`, stalledLaunch.failure!.kind === 'review' ? 'launch-review' : 'launch-producer']
@@ -245,6 +270,10 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // never left as a silent wait (every merge once stalled on a refused auto-merge).
       : mergeRefusal ? [`GitHub refused the merge request for ${work.key} at ${mergeRefusal.head.slice(0, 12)} since ${mergeRefusal.at}: ${mergeRefusal.reason}`, 'merge-refused']
       : baseRefresh && !work.blocker ? [null, null]
+      // A follow-up held on its observation window (GY-1698) is waiting for the instant, not stalled at its gate.
+      : (observationWindow?.waiting || (observing && !observing.due)) && !work.blocker && !active ? [null, null]
+      // The reading is owed now (GY-1762): the loop's own, never a worker's submission the build gate is waiting for.
+      : observing?.due && !work.blocker && !active ? [`${work.key} owes ${observing.waitingFor}; no code worker can record it, so it is escalated for the reading`, 'gate']
       : work.blocker || dwellMs > 3_600_000 ? [first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour`, 'gate'] : [null, null];
     const attentionOwner = cause ? workAttentionOwner(work, cause, now) : null;
     if (cause) causes.set(work.key, cause);
@@ -252,6 +281,10 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // The risk lane the item rides and its speed target (GY-883), stamped by the last evaluation
       // and shown per row: the lane names the ceremony the item's change is asked for.
       lane: work.lane ?? null, speedTarget: work.speedTarget ?? null,
+      // The observation window a windowed post-deploy follow-up carries (GY-1698): `waiting` while it holds the dispatch.
+      observationWindow,
+      // The loop's observation an all-manual post-deploy item waits for (GY-1762): counted as waiting, never ready.
+      observing: observing ? observing.waitingFor : null, observationDue: !!observing?.due,
       // Set only for an item GitHub merged though its gates had not passed: the merge, the violation and
       // the last refused reconciliation, so the row reads as stuck rather than as a candidate.
       merged,
@@ -313,7 +346,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   const remedyItems: AttentionItem[] = remedies.map(entry => ({ subject: entry.key, text: entry.text, ...classified('unrunnable-remedy'),
     ...agentOwner('master', `Create a work item that lets the ${entry.role} run \`${entry.command}\` (or has the control plane perform it); the ${entry.role} harness rule ${entry.rule} denies it`) }));
   return { observedAt: snapshot.now,
-    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + remedyItems.length + capacityItems.length + concurrencyItems.length + installation.attention.length + registry.attentionItems.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
+    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready' && !row.observing).length, waiting: rows.filter(row => row.stage === 'ready' && row.observing).length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + supervised.attentionItems.length + remedyItems.length + capacityItems.length + concurrencyItems.length + installation.attention.length + registry.attentionItems.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
       // Candidates the guarded merge could take once their gates pass, and the items GitHub already
       // merged though their gates had not passed, which are never candidates and wait on a reconciliation.
       mergeCandidates: rows.filter(row => row.stage === 'merge' && !row.merged).length, mergedUnreconciled: rows.filter(row => row.merged && !row.merged.reverted).length, revertedDeliveries: rows.filter(row => row.merged?.reverted).length,
@@ -327,7 +360,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // Closed without delivery (model/closure.ts): never open, never delivered, counted only here.
       closed: snapshot.work.filter(isClosed).length },
     // Every attention item with the role that resolves it and the next command, work items first.
-    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner, ...classified(causes.get(row.key) ?? 'gate') }] : []), ...remedyItems, ...capacityItems, ...concurrencyItems, ...installation.attentionItems, ...registry.attentionItems] as AttentionItem[],
+    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner, ...classified(causes.get(row.key) ?? 'gate') }] : []), ...supervised.attentionItems, ...remedyItems, ...capacityItems, ...concurrencyItems, ...installation.attentionItems, ...registry.attentionItems] as AttentionItem[],
+    // Who reviews and merges (GY-1501): one line in supervised mode, null in autonomous mode.
+    supervision: supervised.line,
     // What waits on the human, longest first, with how to answer; the roles out of capacity; each
     // role's sessions against its concurrency limit with the longest wait for a slot; the
     // fleet's concurrency — every open item in flight or dispatchable — beside its idle workers;

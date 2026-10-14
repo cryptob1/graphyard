@@ -2,12 +2,15 @@
 // structural item filed per recurring class.
 import { createHash } from 'node:crypto';
 import type { Work } from '../model.js';
-import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, standingScopeRequest, statusFaults, trackFaults, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
+import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, releaseOvertakenLinks, standingScopeRequest, statusFaults, trackFaults, unboundedAttemptKey, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
+import { forgetDoneLinks, linkInstance } from '../model/fault-record.js';
 import { buildMasterStatus, diskThresholdBytes, type AttentionItem, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { hostMemoryAttention } from '../master-resources.js';
 import { qualifyTimingFailures, type CheckAnnotations } from '../cli/timing-failures.js';
 import { type DaemonAction, type DaemonState, faultActionKey, message } from './state.js';
+export { unboundedAttemptKey };
+import type { UnsubmittedAttempt } from '../model/attempt-bound.js';
 import { readyToRetry } from './sessions.js';
 import { type DaemonEffects, record } from './effects.js';
 import { actionableIntervalMs, loopAttention } from './liveness.js';
@@ -23,7 +26,7 @@ import { candidateKey } from './reconcile.js';
 import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
 import { baseRefreshConflict } from '../merge-queue.js';
 import { mergeBaseDismissal } from '../merge-base-ancestry.js';
-import { containmentGraceMs, containmentPhase, containmentSettleWaitBoundMs } from '../model/containment.js';
+import { containmentInMotion, containmentSettleWaitBoundMs } from '../model/containment.js';
 import { openAction } from '../model/next-action.js';
 import { carriedDecision } from '../model/concerns.js';
 import { masterTurnWaitBoundMs } from './decisions.js';
@@ -67,7 +70,8 @@ export interface FaultSources {
  * restates a fault the item's own record shows (the same kind, or a kind in `restatements`) is that
  * fault, so it is not counted twice; a different fault of the same class on the item is its own
  * instance. Nor is the one-hour dwell line (`gate`) or containment grace window (`containment-grace`) counted,
- * nor a lapsed fence the loop is still settling (containmentInMotion) or the owed line restating its escalation (owedContainmentLine), nor an escalation inside the master's turn (owedEscalationInMotion), nor a line whose `inMotionUntil` has not passed (GY-1315), which are the ordinary pace of work — a gate nothing moves is `stalled-item`. Failed actions are not read here:
+ * nor a lapsed fence the loop is still settling (containmentInMotion) or the owed line restating its escalation (owedContainmentLine), nor an escalation inside the master's turn (owedEscalationInMotion), nor a line whose `inMotionUntil` has not passed (GY-1315), which are the ordinary pace of work — a gate nothing moves is `stalled-item`. Nor is the documentation
+ * set inside its headroom band (`docs-headroom`, GY-1515): the budget test refuses every change that would grow it and the trim item restores it, so only a set over its budget is a resources fault. Failed actions are not read here:
  * the action history retains failures long after they stopped mattering, so each is noted once, as it happens, by storeAction.
  */
 export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, sources: FaultSources = {}): FaultObservation[] {
@@ -75,7 +79,8 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
   // A fence the loop settled — this cycle's reclaim step included — is gone, though the snapshot the cycle began with still shows it (GY-1299).
   const work = snapshot.map(item => fenceSettled(state, item) ? { ...item, containmentQuarantine: null } : item);
   const byKey = new Map(work.map(item => [item.key, item]));
-  const recorded = work.flatMap(item => workFaults(item, now, routes)).filter(fault => !(containmentKinds.has(fault.kind) && containmentInMotion(byKey.get(fault.subject), now)));
+  // An attempt inside the loop's own reclaim bound is the record's to name, not this step's to count (attemptReclaimInMotion, GY-1557).
+  const recorded = work.flatMap(item => workFaults(item, now, routes, attempt => attemptReclaimInMotion(state, item, attempt))).filter(fault => !(containmentKinds.has(fault.kind) && containmentInMotion(byKey.get(fault.subject), now)));
   // A blocker inside its actor's turn is not counted, nor is a derived line restating it (`shown` below keeps it).
   const own = recorded.filter(fault => !(fault.kind === 'blocker' && blockerInMotion(byKey.get(fault.subject), now)));
   const derived: FaultObservation[] = [], attributed: FaultObservation[] = [];
@@ -91,10 +96,11 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
     }
     const listed = { work: status.work, attentionItems: [...(sources.loop ?? []), ...status.attentionItems, ...(sources.reported ?? [])] };
     for (const item of classifyAttention(sources.attribute ? sources.attribute(listed) : listed.attentionItems))
-      if (item.kind !== 'gate' && item.kind !== 'containment-grace' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind))
+      if (item.kind !== 'gate' && item.kind !== 'containment-grace' && item.kind !== 'docs-headroom' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind))
         && !(containmentKinds.has(item.kind) && containmentInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'base-conflict' && baseConflictInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'merge-base-dismissed' && mergeBaseDismissalInMotion(byKey.get(item.subject), now))
+        && !(item.kind === 'stalled-step' && reworkDecisionInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'owed-decision' && owedReworkLine(byKey.get(item.subject), item.text) && reworkDecisionInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'owed-decision' && owedEscalationInMotion(byKey.get(item.subject), item.text, now))
         && !(item.kind === 'owed-decision' && owedContainmentLine(byKey.get(item.subject), item.text) && !standingFence(byKey.get(item.subject), now))
@@ -147,30 +153,29 @@ export function blockerInMotion(work: Work | undefined, now: number): boolean {
   const since = raised ? Date.parse(raised.at) : Number.NaN;
   return Number.isFinite(since) && now - since <= masterTurnWaitBoundMs;
 }
+/**
+ * GY-1557. Whether an attempt held past the worker bound without a submission (one workFaults
+ * would observe) is still in motion: the loop's own remedy ends it at the reclaim bound
+ * (`workerReclaimBoundMs`, cycle-reclaim.ts stopUnboundedAttempts), one further bound after the
+ * record first names it, so an attempt inside that bound is the ordinary pace of work — on
+ * 8 October 2026 GY-1549 counted at 0 minutes past the worker bound, an hour before the remedy's
+ * turn. Past it, an attempt the loop ended this cycle is gone though the snapshot the cycle began
+ * with still shows its lease (the rule a settled fence keeps, `fenceSettled`); one it could not end
+ * counts, as the failed end is recorded. A lapsed lease belongs to the lapse-and-containment path,
+ * whose fence counts under its own kinds.
+ */
+export function attemptReclaimInMotion(state: Pick<DaemonState, 'actions' | 'cycle'>, work: Pick<Work, 'id'>, attempt: UnsubmittedAttempt): boolean {
+  if (!attempt.reclaim || !attempt.live) return true;
+  const ended = state.actions[unboundedAttemptKey(work, attempt.epoch)];
+  return ended?.state === 'done' && ended.cycle === state.cycle;
+}
 /** Whether the loop recorded the settlement of the item's standing fence: its settle action for the fence's epoch is done. */
 const fenceSettled = (state: Pick<DaemonState, 'actions'>, item: Work) =>
   !!item.containmentQuarantine && state.actions[`settle:${item.id}:${item.containmentQuarantine.epoch}`]?.state === 'done';
 /** The kinds a lapsed fence is counted under: the item's own record, and the settle or hold line master status derives for it. */
 const containmentKinds: ReadonlySet<FaultKind> = new Set<FaultKind>(['containment', 'containment-settleable']);
 export { containmentSettleWaitBoundMs };
-/**
- * GY-1299. Whether a containment fence is still in motion: its owner's lease has lapsed and the
- * fence is inside its grace window or within `containmentSettleWaitBoundMs` after it. The reclaim
- * step probes the host and settles a verified-dead fence on its own (settleQuarantine; cycleFaults
- * reads a fence whose settle action is done as gone, even in the cycle that settled it), so a fence
- * that recent is a step the loop is already taking, not a fault: on 5 October 2026 GY-1147 counted
- * 11s past its grace window and autosettled 28s later, and GY-1289 counted twice for one fence —
- * once as verified settleable while its grace window still ran, once as a hold 90s later, in the
- * very cycle that settled it. Neither kind counts inside the bound, so a fence the loop settles
- * opens no instance, and one standing past it counts once, as the item's own `containment` fault
- * (the settleable line restates it). A fence with no deadline to date it counts at once.
- */
-export function containmentInMotion(work: Work | undefined, now: number): boolean {
-  const phase = work ? containmentPhase(work, now) : null;
-  if (!phase || phase.state === 'live') return false;
-  if (phase.state === 'grace') return true;
-  return !!phase.lapsedAt && now - Date.parse(phase.lapsedAt) - containmentGraceMs <= containmentSettleWaitBoundMs;
-}
+export { containmentInMotion };
 /**
  * GY-1337. Whether an owed line names the item's containment escalation: its open action escalates
  * the `containment` trigger and the line carries that action's own owed decision (`needsHuman.decision`,
@@ -334,8 +339,10 @@ export function endFailingRuns(state: Pick<DaemonState, 'actions' | 'faults'>, p
  */
 export async function fileRecurringFaultClasses(state: DaemonState, effects: DaemonEffects, work: Work[], clock: number, now: () => number, performed: DaemonAction[], budget?: FilingBudget) {
   const policy = effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env);
+  releaseOvertakenLinks(state.faults.instances, work); // GY-1632: a closure applied before this cycle's links overtook them
+  forgetDoneLinks(state.faults, work);
   for (const recurrence of recurringClasses(state.faults.instances, work, policy, clock, standingFaultClassItem)) {
-    if (recurrence.item) { for (const instance of recurrence.unlinked) instance.linkedTo = recurrence.item.key; continue; }
+    if (recurrence.item) { for (const instance of recurrence.unlinked) linkInstance(state.faults, instance, recurrence.item.key); continue; }
     if (!recurrence.file || !effects.fileFaultClass) continue;
     const key = faultActionKey(recurrence.faultClass), previous = state.actions[key];
     if (previous && previous.state !== 'done' && !readyToRetry(previous, state.cycle)) continue;
@@ -347,7 +354,7 @@ export async function fileRecurringFaultClasses(state: DaemonState, effects: Dae
     await record(state, key, { kind: 'fault', work: null, principal: null, state: 'started', detail: `Filing one item for the recurring ${recurrence.faultClass} fault class: ${recurrence.count} instances in ${policy.windowHours} hours`, attempts, cycle: state.cycle }, now(), effects.persist);
     try {
       const filed = await spend(budget, () => effects.fileFaultClass!(faultClassItem(recurrence, policy, clock), idempotency));
-      for (const instance of recurrence.recent) instance.linkedTo = filed.key;
+      for (const instance of recurrence.recent) linkInstance(state.faults, instance, filed.key);
       work.push(filed);
       performed.push(await record(state, key, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} for the recurring ${recurrence.faultClass} fault class (${recurrence.count} ≥ ${policy.threshold} in ${policy.windowHours} hours), linking ${recurrence.recent.length} instance(s); later instances link to it`, attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
@@ -403,7 +410,11 @@ export async function docsHeadroomStatus(root: string, baseBranch: string, count
     const counted = await count(root, ref);
     if (!counted) continue;
     const headroom = docsHeadroom(counted.pages, counted.budget), text = docsHeadroomText(headroom, ref);
-    return { docs: { base: ref, headroom }, attention: text ? [{ subject: 'docs', text, kind: 'resource-bound', faultClass: 'resources', ...agentOwner('master', 'The loop files one trim item for it (a docs-trim bug naming the largest pages); dispatch it ahead of items that add documentation') }] : [] };
+    // GY-1515: inside the band the set is what the budget test holds (no change may add a word to it) and the trim
+    // item restores; that line is attention, never a fault (cycleFaults). Over the budget the band was overrun by
+    // changes merged together and the budget test fails on the base: the set is a resource at its bound.
+    const kind = headroom.remaining < 0 ? 'resource-bound' : 'docs-headroom';
+    return { docs: { base: ref, headroom }, attention: text ? [{ subject: 'docs', text, kind, faultClass: 'resources', ...agentOwner('master', 'The loop files one trim item for it (a docs-trim bug naming the largest pages); dispatch it ahead of items that add documentation') }] : [] };
   }
   return { docs: null, attention: [] };
 }

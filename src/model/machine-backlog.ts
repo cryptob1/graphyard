@@ -126,6 +126,11 @@ export type TriageJudgement = z.infer<typeof triageJudgementSchema>;
  */
 export interface TriageRecord { judgement: TriageJudgement; state: 'applied' | 'proposed' | 'refused'; by: string; at: string; runtime?: string; decision?: string | null; refusal?: string | null }
 export const triageRecordSchema = z.object({ judgement: triageJudgementSchema, runtime: z.string().trim().min(1).max(200).optional() }).strict();
+/**
+ * The loop withdrawing a closure it proposed (GY-1632): the proposal recorded at `triageAt` no longer holds — a
+ * recurrence after the delivered fix landed was linked to the item — so it returns to triage, refused with `reason`.
+ */
+export const triageWithdrawalSchema = z.object({ withdraw: z.object({ triageAt: z.string().datetime(), reason: z.string().trim().min(1).max(2000) }).strict() }).strict();
 
 const oldestFirst = (a: Pick<Work, 'createdAt' | 'key'>, b: Pick<Work, 'createdAt' | 'key'>) =>
   a.createdAt.localeCompare(b.createdAt) || Number(a.key.split('-')[1]) - Number(b.key.split('-')[1]);

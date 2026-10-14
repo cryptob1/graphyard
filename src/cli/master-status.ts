@@ -1,5 +1,6 @@
 import { workerLaunchStatus } from '../master/dispatch.js';
 import { type HumanRequestRow } from '../model/human-request.js';
+import { herdrAttachCommand } from '../master/herdr.js';
 import { agentOwner, assessContainment, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, statusWorktreeInventory, managedRootStatus, planWorktreeReclaim, reclaimIdleMs, worktreesDirectory, type AttentionItem, type MasterConfig, observeHerdrAgents, installationOwner } from '../master.js';
 import { type Work } from '../model/work.js';
 import { installationMerger } from '../executor.js';
@@ -8,7 +9,7 @@ import { slowCycleAttention } from '../daemon/liveness.js';
 import { promotionStatus } from '../daemon/deployment.js';
 import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, loopMemoryAttention, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
-import { approverLaunchAttention, nameBaseBreaks } from './status-attention.js';
+import { approverLaunchAttention, mergeWriterLine, nameBaseBreaks } from './status-attention.js';
 import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from './unanswered-requests.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
@@ -149,9 +150,13 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     runtime, reviewRuntime, humanOnly, masterApi, decisions, approvals: cycling?.approvals ?? [],
   });
   return {
+    // The merger setting (src/merger-mode.ts): first in the report while the control plane is the merge writer.
+    ...mergeWriterLine(coordinator),
     ...status, ...attributed, ...faulted(attributeAttention(attributed.attentionItems, resources.readings)), resources: resources.report,
     unavailable: sections.unavailable,
     docsBudget: docs,
+    // GY-1511: the Herdr server holding this install's agents, and the one command that opens them on this host.
+    herdr: { instance: master.herdrInstance ?? null, attach: herdrAttachCommand(master.herdrInstance ?? null), running: runtime.available },
     delivery: delivery.report,
     // The loop's promotion drive (GY-1302): the last promoted SHA, merges production is behind, the next due promotion.
     promotion: promotionStatus('error' in daemonState ? null : daemonState.promotion),

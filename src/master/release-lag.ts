@@ -40,6 +40,13 @@ export function promotionWait(state: { deployment?: { source?: string; sha: stri
 
 /** The promotion that would serve the pending deliveries is on schedule: a candidate in validation, or not yet due. */
 export const promotionOnSchedule = (wait: PromotionWait | null | undefined, now: number) => !!wait && (wait.inFlight || (!!wait.nextDueAt && Date.parse(wait.nextDueAt) > now));
+/**
+ * The promotion wait that excuses a loop behind its checkout (GY-1400, GY-1464): the loop loaded the
+ * release production verifiably serves, and what it has not loaded waits on a promotion on schedule.
+ * The loaded-revision reading counts nothing and the self-upgrade owes no restart for exactly this.
+ */
+export const promotionHolds = (wait: PromotionWait | null | undefined, loaded: string | null | undefined, now: number) =>
+  !!wait && wait.pending.length > 0 && sameCommit(loaded, wait.deployedSha) && promotionOnSchedule(wait, now);
 /** The loop's checkout is aligned with the release production verifiably serves: a restart reloads that same release. */
 export const alignedWithDeployment = (wait: PromotionWait | null | undefined) => !!wait && sameCommit(wait.alignedRelease, wait.deployedSha);
 /** How the promotion wait reads in a line: when it is due, or that a candidate is in validation. */
@@ -80,28 +87,51 @@ export interface ReleaseLagReport { baseTip: string | null; components: ReleaseL
   promotion: { nextDueAt: string | null; inFlight: boolean; onSchedule: boolean; pending: string[] } | null }
 
 /**
+ * The deliveries a loaded release does not contain, from one git child run (GY-1776). The report
+ * used to ask `git merge-base --is-ancestor` once per delivery per component, and a plane with
+ * hundreds of deliveries spent seconds of `master status` in git. The right side of the symmetric
+ * differences `release...merge` is every commit reachable from a merge but not from the release,
+ * so a merge commit is listed exactly when the release does not contain it. `--ignore-missing`
+ * keeps the old reading of what git cannot place: a merge this checkout does not hold drops its
+ * range and is never listed, and a release git cannot place drops every range, so nothing is
+ * counted against it; a run that fails (no repository, no git) reads the same way. The call is
+ * skipped for a component with no release and for a report with no deliveries.
+ */
+async function missingDeliveries(root: string, run: ChildRun, commit: string, deliveries: readonly LagDelivery[]): Promise<Set<string>> {
+  const merges = [...new Set(deliveries.map(delivery => delivery.mergeSha.toLowerCase()))];
+  if (!merges.length) return new Set();
+  let listed: string[];
+  try { listed = (await run('git', ['-C', root, 'rev-list', '--right-only', '--ignore-missing', ...merges.map(merge => `${commit}...${merge}`)])).split('\n').filter(Boolean); }
+  catch { return new Set(); }
+  const commits = new Set(listed);
+  // A merge recorded by its full name is looked up; an abbreviated one matches what git expanded it to.
+  return new Set(merges.filter(merge => commits.has(merge) || (merge.length < 40 && listed.some(line => line.startsWith(merge)))));
+}
+
+/**
  * Per component, the release it loaded against the base tip. A delivery counts as behind when
  * git answers and answers no — a commit this checkout does not hold, or a component with no
  * readable release, reads as unknown and is never counted, so attention is raised only on what
- * is known.
+ * is known. Git is asked once per distinct loaded release, whatever the number of deliveries.
  */
 export async function releaseLag(baseTip: string | null, deliveries: readonly LagDelivery[], components: readonly LagComponent[],
   deps: { root: string; run?: ChildRun; now: number; graceMs?: number; promotion?: PromotionWait | null }): Promise<ReleaseLagReport> {
   const run = deps.run ?? defaultChildRun;
   const graceMs = deps.graceMs ?? releaseLagGraceMs;
-  const contains = async (commit: string, mergeSha: string): Promise<boolean> => {
-    if (commit === mergeSha) return true;
-    try { await run('git', ['-C', deps.root, 'merge-base', '--is-ancestor', mergeSha, commit]); return true; }
-    catch (error: any) { return error?.status !== 1; }
+  // Components on the same release share one answer: at most one git run per component, fewer when releases repeat.
+  const answers = new Map<string, Promise<Set<string>>>();
+  const missingFor = (commit: string) => {
+    let answer = answers.get(commit);
+    if (!answer) { answer = missingDeliveries(deps.root, run, commit, deliveries); answers.set(commit, answer); }
+    return answer;
   };
   const wait = deps.promotion ?? null;
   const onSchedule = promotionOnSchedule(wait, deps.now);
   const pending = new Set(wait?.pending ?? []);
   const rows = components.map(async (component): Promise<ReleaseLagRow> => {
     const commit = component.release.commit;
-    const missing = async (delivery: LagDelivery) => commit ? !(await contains(commit, delivery.mergeSha.toLowerCase())) : false;
-    const behind: LagDelivery[] = [];
-    for (const delivery of deliveries) if (await missing(delivery)) behind.push(delivery);
+    const missing = commit ? await missingFor(commit) : new Set<string>();
+    const behind = deliveries.filter(delivery => missing.has(delivery.mergeSha.toLowerCase()));
     // A delivery the verified release does not serve yet, while its promotion is on schedule, is
     // the promotion window (GY-1400): the loop could not have loaded it, so only the rest count.
     const awaiting = new Set(onSchedule ? behind.filter(delivery => pending.has(delivery.key)).map(delivery => delivery.key) : []);
@@ -124,7 +154,7 @@ export async function releaseLag(baseTip: string | null, deliveries: readonly La
     subject: row.component === 'loop' ? 'loop' : row.component,
     text: `${row.label} runs ${shortCommit(row.release.commit)}${row.release.dirty ? ' (dirty)' : ''}, more than one delivery behind the base tip ${shortCommit(baseTip)} since ${row.since}: ${row.behind.map(entry => entry.key).join(', ')} merged and are not in what it loads${servesDeployed(row) ? `; it runs the verified release production serves, and ${wait!.pending.length ? `${wait!.pending.join(', ')} wait on ${describePromotion(wait!)}` : `the rest wait on ${describePromotion(wait!)}`}` : ''}`,
     ...agentOwner('master', servesDeployed(row)
-      ? `Nothing to restart: ${row.label.toLowerCase()} already runs ${shortCommit(wait!.deployedSha)}, the release production serves, and loads the rest once a verified release serves them. ${onSchedule ? `They wait on ${describePromotion(wait!)}` : `${describePromotion(wait!)} has passed with no candidate in validation: master status names the promotion drive under promotion`}`
+      ? `Nothing to restart: ${row.label.toLowerCase()} already runs ${shortCommit(wait!.deployedSha)}, the release production serves, and loads the rest once a verified release serves them. ${onSchedule ? `They wait on ${describePromotion(wait!)}` : `${describePromotion(wait!)} has passed with no candidate in validation: master status names the promotion drive under promotion${row.component === 'loop' ? ', and a restart the self-upgrade owes onto a checkout ahead of what the loop loaded (GY-1464) under upgrade' : ''}`}`
       : row.restart ?? `The loop upgrades itself between cycles once a delivery is verified deployed; a dirty or non-detached coordinator checkout holds it back, and master status names it under upgrade`) }));
   return { baseTip, components: settled, attention, promotion: wait ? { nextDueAt: wait.nextDueAt, inFlight: wait.inFlight, onSchedule, pending: wait.pending } : null };
 }

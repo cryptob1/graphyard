@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { actionAccount, nextAction } from '../src/model/next-action.js';
 import { graphyardTools } from '../integrations/pi/index.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): NOW (2026-10-03) is the explicit clock of the unit half; the Postgres half's 2026-01-01 direct-merge window and 2026-02-01 mergedAt are past instants that new Date() only moves further behind.
 
 // GY-1126: a broad item is split into small, independently mergeable child items before its
 // first dispatch. The loop's step runs one Pi session (a fake runner here) that proposes the

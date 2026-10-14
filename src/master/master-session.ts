@@ -105,10 +105,10 @@ export async function launchMasterSession(root: string, config: MasterConfig, he
       '--label', `Graphyard master · ${config.repository}`, '--env', 'GRAPHYARD_MASTER=1', '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`,
       ...Object.entries(plan.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
-    // Unconfined, exactly as `master start` launches it: the master is the one session the checkout's
-    // OS-level confinement exempts (its commands and deny rules bound it), so the two paths never
-    // diverge and a host without bubblewrap can still run the loop's master.
-    ({ delivery } = await startAgentSession(name, kind, pane, plan.args, masterRequest(config, handover), run, { directory: root, retry, contract: plan.contract, environment: plan.environment, timeoutMs: launchStartMs(config), confinement: false }));
+    // Confined exactly as `master start` launches it (GY-1658): the checkout read-only at the OS
+    // level, its managed .graphyard state and the shared Git areas writable. A host that cannot
+    // apply the confinement refuses the launch; the master is never started unconfined.
+    ({ delivery } = await startAgentSession(name, kind, pane, plan.args, masterRequest(config, handover), run, { directory: root, retry, contract: plan.contract, environment: plan.environment, timeoutMs: launchStartMs(config), confinement: 'master' }));
   } catch (error) { throw await abandon(error, 'master session launch failed'); }
   // The record is part of the launch: an adopted session's spent account is held from it.
   try { await saveMasterLaunch(root, { agentName: name, pane, account: selected.account.name, runtime: kind, session: selected.account.fleet.session, startedAt: new Date().toISOString() }); }

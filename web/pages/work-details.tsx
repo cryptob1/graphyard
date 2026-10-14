@@ -22,6 +22,7 @@ import { groupWithin, nextActor, timedGroups } from '../groups';
 import { checkStates, prSteps, stepHeld } from '../../src/model/pr-steps';
 import { releaseView } from '../../src/model/release';
 import { blastRadius } from '../../src/model/blast-radius';
+import { riskOf } from '../../src/model/risk-class';
 import StatusBadge from '../components/status-badge';
 import { StepsDetail } from '../components/steps-bar';
 import { RequestCard } from './human-requests';
@@ -54,6 +55,10 @@ const oneLine = (text: string) => { const first = text.split(/(?<=[.;:])\s/)[0];
 export default function WorkDetails({ item, work, status, token, observedAt, jobs, events, busy, codexAvailable, editingRequirements, setEditingRequirements, action, api, refresh, setSelected, setView, sessionEpoch, stepMoves, signOut }: Dashboard & { item: Work }) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const plain = plainStatus(item, now);
+  // The recorded blocker is written once, under Blocker as recorded (GY-1739): any other line that
+  // quotes it, whole or from its opening words onward, points there instead.
+  const unechoed = (text: string) => { const b = item.blocker; if (!b) return text; if (text.includes(b)) return text.split(b).join('the recorded blocker, above');
+    const head = b.slice(0, 60), at = b.length > 60 ? text.indexOf(head) : -1; return at < 0 ? text : `${text.slice(0, at)}the recorded blocker, above`; };
   // The same duration and the same threshold the card carries; this view is another view of it.
   const release = releaseView(status);
   const held = stepHeld(item, now, stepMoves, release);
@@ -113,6 +118,8 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const reviewGate = item.gates.find(g => g.name === 'review');
   // What merging it would reach and what could take it back (GY-972), from its scope and gates.
   const radius = blastRadius(item);
+  // The risk class of the delta the merge would apply, computed on read beside the path-glob lane (GY-1521).
+  const risk = riskOf(item);
   const review = !reviewGate || reviewGate.passed ? 'Approved' : reviewGate.reasons.some(r => r.startsWith('Outstanding change requests')) ? 'Changes requested' : 'Waiting for approval';
   return <article className="item-page" aria-label={item.title}>
     <button type="button" className="text-button back" autoFocus onClick={() => setSelected(null)}>← Back</button>
@@ -146,6 +153,8 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
         {prUrl && <div><dt>Link</dt><dd><a className="pr-open" href={prUrl} target="_blank" rel="noopener noreferrer" aria-label={`Pull request on GitHub for ${item.key}`}>Open on GitHub ↗</a></dd></div>}
         <div><dt><Term term="commit" focusable={false}>Commit</Term></dt><dd className="candidate-details"><CandidateSha repository={status?.repository} sha={item.candidate.sha} workKey={item.key}/></dd></div>
         {item.observation?.files && <div><dt>Changes</dt><dd>{item.observation.files.length} {item.observation.files.length === 1 ? 'file' : 'files'}</dd></div>}
+        <div><dt>Lane</dt><dd className="lane-details">{item.lane ?? 'unknown'}</dd></div>
+        <div><dt>Risk</dt><dd className="risk-details">{risk.risk}{risk.reasons.length ? <small> · {risk.reasons.join(' · ')}</small> : <small> · no sensitive path in the merge delta</small>}</dd></div>
         <div><dt>Checks</dt><dd>{checks.length ? checks.map(check => `${check.name} ${check.state}`).join(' · ') : 'none required'}</dd></div>
         <div><dt>Review</dt><dd>{!item.policy.review ? 'not required' : review}</dd></div>
       </dl> : <p className="muted">No pull request yet.</p>}
@@ -172,11 +181,13 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
         <div><dt>Owner</dt><dd className="assignment-details">{owner.active ? owner.label : owner.owner ? owner.text : 'Nobody yet'}</dd></div>
       </dl>
       {plain.blocking && <p className="blocking-now"><strong>Blocking now:</strong> <Explained sentence={plain.blocking}/></p>}
+      {/* The recorded blocker as its agent wrote it, here and nowhere else (GY-1739): every other line reads its summary. */}
+      {item.blocker && <p className="blocker-recorded"><strong>Blocker as recorded:</strong> <span className="mono">{item.blocker}</span></p>}
       <div className="tags"><span>{item.type}</span><span>P{item.priority}</span><span>{item.stage}</span><span>In this step for {age(item.stageEnteredAt)}</span><span>Policy v{item.policyRevision}</span><span>Revision {item.revision}</span>{deploySmokeRequired(item.policy) && <span><Term term="post-deploy check">e2e:deploy-smoke</Term> after deploy</span>}</div>
       <h3>Ownership</h3><p>{owner.text}</p>{owner.owner && <p className="muted">Worker ID: {owner.owner} · assignment {owner.epoch}</p>}<p>{owner.active && item.lease ? `Active lease · expires ${new Date(item.lease.expiresAt).toLocaleTimeString()}` : 'No active assignment'}</p>{item.workspaces.map(w => <code key={w.epoch}>{w.host}:{w.path}<br/>{w.branch} · assignment {w.epoch}</code>)}
       {!failedDelivery && postDeployment}
-      <h3>Gate decisions</h3>{item.gates.map(g => <div className="gate" key={g.name}><strong className={g.passed ? 'green-text' : 'amber'}>{g.passed ? '✓' : '○'} {g.name}</strong>{g.reasons.map(r => <p key={r}>{shortShas(r)}</p>)}</div>)}
-      <h3>Coordination</h3>{diagnose(item, work, observedAt, jobs).map((d, i) => <div className="criterion" key={i}><strong>{shortShas(d.message)}</strong><p>{shortShas(d.next)}</p></div>)}
+      <h3>Gate decisions</h3>{item.gates.map(g => <div className="gate" key={g.name}><strong className={g.passed ? 'green-text' : 'amber'}>{g.passed ? '✓' : '○'} {g.name}</strong>{g.reasons.map(r => <p key={r}>{r === item.blocker ? 'The recorded blocker, above' : shortShas(r)}</p>)}</div>)}
+      <h3>Coordination</h3>{diagnose(item, work, observedAt, jobs).filter(d => d.message !== item.blocker).map((d, i) => <div className="criterion" key={i}><strong>{shortShas(d.message)}</strong><p>{shortShas(d.next)}</p></div>)}
       {!!item.exclusiveResources?.length && <p>Exclusive resources: {item.exclusiveResources.join(', ')}. Reserved only while an assignment lease is active.</p>}
       {overlap && <p className="overlap-line">{overlap}. Coordinate the changes; this warning does not establish a semantic conflict.</p>}
       <h3>Code review</h3><p>Provider: {item.policy.reviewProvider === 'codex' ? 'Codex cloud' : item.policy.reviewProvider === 'agent' ? 'Identity-bound agent reviewers' : 'Formal GitHub approval'}</p>{item.policy.reviewProvider === 'agent' && <p className="muted">Reviewer profiles in failover order: {(item.policy.reviewerProfiles ?? []).map(p => `${p.name} (${p.runtime})`).join(' → ') || 'none configured'}</p>}{item.observation?.agentReview && <p>{shortShas(item.observation.agentReview.reason)}</p>}{(item.reviewFailovers ?? []).filter(f => f.sha === item.candidate?.sha && f.baseSha === item.candidate?.baseSha && f.policyRevision === item.policyRevision).map(f => <p className="amber" key={`${f.profile}-${f.at}`}>Failover: {f.profile} exhausted ({f.exhaustion}) · {f.nextProfile ? `dispatched to ${f.nextProfile}` : 'no reviewer profile remains'}</p>)}{admin && <p className="muted">Changing provider creates a policy revision and requires fresh acceptance evidence. Agent reviewer profiles are configured through the CLI or API because they name registered reviewer App identities.</p>}
@@ -184,11 +195,11 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       {item.nextAction && <p className="next-action"><strong>Next:</strong> <code>{item.nextAction.kind}</code>{(() => { const row = actions.find(entry => entry.kind === item.nextAction!.kind); return row?.claim ? ` — ${row.claim.executor} on ${row.claim.host} is running it` : row ? (unserved ? ` — nobody can claim it: no live executor serves ${row.kind} (waited ${age(unserved.since)}); ${unserved.start}` : ' — waiting for an executor to claim it') : ''; })()}</p>}
       {unserved && <p className="amber">This action is not queued behind other work: {status.executors.live === 0 ? 'no executor is alive' : `the ${status.executors.live} live executor(s) serve ${(status.executors.served ?? []).join(', ') || 'nothing'}`}, and nothing moves until one that serves <code>{unserved.kind}</code> is started.</p>}
       {item.nextAction
-        ? <p>The control plane computes <code>{item.nextAction.kind}</code> for this item{item.nextAction.gate ? <> from the <strong>{item.nextAction.gate}</strong> gate’s refusal “{shortShas(item.nextAction.refusal ?? '')}”</> : ''}: {shortShas(item.nextAction.reason)}. {item.nextAction.llmRole ? `The action starts a session whose judgment is ${item.nextAction.llmRole}; running the action itself needs no model.` : 'Running it needs no language model at all.'}</p>
+        ? <p>The control plane computes <code>{item.nextAction.kind}</code> for this item{item.nextAction.gate ? <> from the <strong>{item.nextAction.gate}</strong> gate’s refusal “{shortShas(unechoed(item.nextAction.refusal ?? ''))}”</> : ''}: {shortShas(unechoed(item.nextAction.reason))}. {item.nextAction.llmRole ? `The action starts a session whose judgment is ${item.nextAction.llmRole}; running the action itself needs no model.` : 'Running it needs no language model at all.'}</p>
         : <p className="muted">The control plane has no outstanding action for this item.</p>}
       {actions.map(row => <div className="criterion" key={row.id}><strong>{row.kind} · {row.state}{row.claim ? ` · ${row.claim.executor} on ${row.claim.host}` : ''}</strong>
-        <p>Requested by {row.requestedBy} {age(row.requestedAt)} ago · attempt {row.attempts}{row.resolution ? ` · last result: ${shortShas(row.resolution)}` : ''}</p>
-        <ul>{row.history.slice(-5).map((entry, index) => <li key={index}>{entry.event}{entry.executor ? ` by ${entry.executor}` : ''}: {shortShas(entry.reason)}</li>)}</ul></div>)}
+        <p>Requested by {row.requestedBy} {age(row.requestedAt)} ago · attempt {row.attempts}{row.resolution ? ` · last result: ${shortShas(unechoed(row.resolution))}` : ''}</p>
+        <ul>{row.history.slice(-5).map((entry, index) => <li key={index}>{entry.event}{entry.executor ? ` by ${entry.executor}` : ''}: {shortShas(unechoed(entry.reason))}</li>)}</ul></div>)}
       {running.length > 0 && <><h3>Sessions running now</h3><ul className="sessions">{running.map(handle => <li key={handle.id}>
         <strong>{handle.kind}</strong> · {handle.principal} · {handle.runtime} on {handle.host} · working on {shortShas(handle.subject)} · {age(handle.startedAt)} · seen {formatAge(handle.seenAt ?? handle.updatedAt, now)} ago<br/><code>{handle.attach}</code></li>)}</ul></>}
       <h3>Sessions ({sessions.length})</h3>

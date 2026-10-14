@@ -1,7 +1,9 @@
 import type { Work } from './work.js';
 import { fleetRoles, rolePolicy } from './registry.js';
-import { foldObservation } from './registry.js';
-import type { AccountSmoke, AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, RolePolicy, RunOutcome, SelectionRequest, SessionSkip } from './registry.js';
+import { exhaustedTwin, foldObservation } from './account-quota.js';
+import type { AccountSmoke, AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRole, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, RolePolicy, RunOutcome, SelectionRequest, SessionSkip } from './registry.js';
+import { accountProvider, busyDifferentProvider, sameProviderFallback, sharedProviderSkip, type ReviewDiversity } from './review-diversity.js';
+import { workerOrder } from './worker-preference.js';
 import { deriveAccountPlan, groupAccountsByPlan, type FleetPlanView } from '../provider-usage.js';
 
 /**
@@ -117,14 +119,18 @@ export function accountIneligibility(registry: AgentRegistry, account: FleetAcco
   const plan = deriveAccountPlan(account, registry.accounts);
   const planAccounts = registry.accounts.filter(other => other.name === account.name || deriveAccountPlan(other, registry.accounts).planId === plan.planId);
   const held = (other: FleetAccount) => other.quota.state === 'exhausted' && (!other.quota.resetsAt || Date.parse(other.quota.resetsAt) > now);
-  // An operator hold on the plan wins; otherwise the newest probe on the plan decides, so a stale exhaustion one host
-  // reported without a reset is superseded by a later probe elsewhere (GY-1158). A pure read: nothing is rewritten here.
-  const probes = planAccounts.filter(other => other.quota.source === 'probe' && other.quota.observedAt && other.quota.state !== 'unknown')
+  // An operator hold on the plan wins, and so does a session's exhaustion report until its reset (GY-1581): no probe outranks either. Otherwise the
+  // newest probe on the plan decides, so a stale exhaustion one host reported without a reset is superseded by a later probe elsewhere (GY-1158).
+  // Another account's guessed report holds nothing here, never even as a probe: its host resends it every selection, so it is always the newest. A pure read.
+  const guessed = (other: FleetAccount) => other.quota.session === 'guessed' && other.name !== account.name, reported = (other: FleetAccount) => !!other.quota.session && !guessed(other) && held(other);
+  const probes = planAccounts.filter(other => other.quota.source === 'probe' && other.quota.observedAt && other.quota.state !== 'unknown' && !guessed(other))
     .sort((a, b) => Date.parse(b.quota.observedAt!) - Date.parse(a.quota.observedAt!));
-  const exhausted = planAccounts.find(other => other.quota.source === 'operator' && held(other))
-    ?? (probes.length ? [probes[0]].find(held) : [account, ...planAccounts].find(held));
+  const exhausted = planAccounts.find(other => other.quota.source === 'operator' && held(other)) ?? [account, ...planAccounts].find(reported)
+    ?? (probes.length ? [probes[0]].find(held) : [account, ...planAccounts].find(other => !guessed(other) && held(other)));
   if (exhausted?.name === account.name) return `${account.name} quota is exhausted${until(account.quota.resetsAt)}${account.quota.reason ? ` (${account.quota.reason})` : ''}`;
   if (exhausted) return `${account.name} quota is exhausted on plan ${plan.planName} (${exhausted.name} quota is ${exhausted.quota.source === 'operator' ? 'marked exhausted by operator' : 'exhausted'}${until(exhausted.quota.resetsAt)}${exhausted.quota.reason ? `: ${exhausted.quota.reason}` : ''})`;
+  const twin = exhaustedTwin(registry, account, now);
+  if (twin) return `${account.name} quota is exhausted${until(twin.quota.resetsAt)}: it is the same provider login as ${twin.name}, whose quota is ${twin.quota.source === 'operator' ? 'marked exhausted by operator' : 'exhausted'}${twin.quota.reason ? ` (${twin.quota.reason})` : ''}`;
   const running = liveSessions(registry).filter(session => session.account === account.name).length;
   if (account.maxSessions !== null && running >= account.maxSessions) return `${account.name} is at its session limit (${running} of ${account.maxSessions} live)`;
   return null;
@@ -197,27 +203,42 @@ export interface SessionRefusal { account: null; reason: string; skipped: Sessio
 /**
  * The session an action runs on: the first account of the role, in the role's own order, that is
  * placed on the asking host, logged in, within quota and under its session limit, provided the
- * role itself is under its concurrency limit. Pure: the registry passed in already carries the
- * executor's fresh observations and only sessions that are still live.
+ * role itself is under its concurrency limit. For role reviewer with a known implementer provider
+ * (GY-1496) the first such account on another provider is chosen; one only at its session limit is
+ * waited for, and with none the first same-provider account serves with the fallback recorded.
+ * Pure: the registry passed in already carries the executor's fresh observations and only live sessions.
  */
-export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRequest, 'role' | 'host'>, now: number): SessionChoice | SessionRefusal {
+export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRequest, 'role' | 'host'> & Partial<Pick<SelectionRequest, 'prefer' | 'exclude'>>, now: number, diversity: ReviewDiversity | null = null): SessionChoice | SessionRefusal {
   const role = registry.roles.find(entry => entry.name === request.role);
   if (!role) return { account: null, reason: `role ${request.role} is not configured in the agent registry`, skipped: [] };
   if (!role.accounts.length) return { account: null, reason: `role ${request.role} names no account`, skipped: [] };
   const running = liveSessions(registry).filter(session => session.role === role.name);
   if (running.length >= role.concurrency) return { account: null, skipped: [],
     reason: role.concurrency === 0 ? `role ${role.name} is paused (concurrency 0)` : `role ${role.name} is at its concurrency limit (${running.length} of ${role.concurrency} live: ${running.map(session => `${session.account}${session.work ? ` on ${session.work}` : ''}`).join(', ')})` };
-  const skipped: SessionSkip[] = [];
-  for (const [index, name] of role.accounts.entries()) {
-    const account = registry.accounts.find(entry => entry.name === name);
-    const refusal = account ? accountIneligibility(registry, account, now, request.host) ?? roleIneligibility(account, role.name, now) : `${name} is not a registered account`;
-    if (refusal) { skipped.push({ account: name, reason: refusal }); continue; }
+  const skipped: SessionSkip[] = [], diverse = role.name === 'reviewer' ? diversity : null, others: SessionSkip[] = [], busy: SessionSkip[] = [];
+  let fallback: { account: FleetAccount; index: number; skip: SessionSkip } | null = null; const shared = new Set<SessionSkip>();
+  const chosen = (account: FleetAccount, index: number, passed: SessionSkip[], note: string): SessionChoice => {
     // The role's policy names the model its sessions run, where it names one; else the account's own.
-    const policy = rolePolicy(role), runtime = registry.runtimes.find(entry => entry.name === account!.runtime)!;
-    const model = registry.models.find(entry => entry.name === (policy.model ?? account!.model)) ?? registry.models.find(entry => entry.name === account!.model)!;
-    return { account: account!, runtime, model, policy, skipped,
-      reason: `${name} is the first eligible account for ${role.name} (preference ${index + 1} of ${role.accounts.length}; ${running.length + 1} of ${role.concurrency} concurrent)${skipped.length ? ` — passed over ${skipped.map(entry => entry.reason).join('; ')}` : ''}` };
+    const policy = rolePolicy(role), runtime = registry.runtimes.find(entry => entry.name === account.runtime)!;
+    const model = registry.models.find(entry => entry.name === (policy.model ?? account.model)) ?? registry.models.find(entry => entry.name === account.model)!;
+    return { account, runtime, model, policy, skipped: passed,
+      reason: `${account.name} is the first eligible account for ${role.name} (preference ${index + 1} of ${role.accounts.length}; ${running.length + 1} of ${role.concurrency} concurrent)${note}${passed.length ? ` — passed over ${passed.map(entry => entry.reason).join('; ')}` : ''}` };
+  };
+  for (const [index, name] of workerOrder(registry, role, request.prefer ?? null).entries()) {
+    const account = registry.accounts.find(entry => entry.name === name);
+    const refusal = request.exclude?.includes(name) ? `${name} already failed to start a session under this dispatch` : account ? accountIneligibility(registry, account, now, request.host) ?? roleIneligibility(account, role.name, now) : `${name} is not a registered account`;
+    const differs = !!diverse && !!account && accountProvider(registry, account) !== diverse.provider;
+    if (refusal) {
+      skipped.push({ account: name, reason: refusal });
+      if (differs) others.push({ account: name, reason: refusal });
+      if (differs && account!.maxSessions !== null && !accountIneligibility(registry, { ...account!, maxSessions: null }, now, request.host) && !roleIneligibility(account!, role.name, now)) busy.push({ account: name, reason: refusal });
+      continue;
+    }
+    if (diverse && !differs) { const skip = sharedProviderSkip(name, diverse); skipped.push(skip); shared.add(skip); fallback ??= { account: account!, index, skip }; continue; }
+    return chosen(account!, index, skipped, diverse ? ` on provider ${accountProvider(registry, account!)}, not the implementer's ${diverse.provider}` : '');
   }
+  if (diverse && busy.length) return { account: null, skipped, reason: busyDifferentProvider(role.name, diverse, busy) };
+  if (fallback) return chosen(fallback.account, fallback.index, skipped.filter((entry, at) => at < skipped.indexOf(fallback!.skip) || !shared.has(entry)), `; ${sameProviderFallback(diverse!, others)}`);
   return { account: null, skipped, reason: `no eligible account for ${role.name}: ${skipped.map(entry => entry.reason).join('; ')}` };
 }
 
@@ -296,4 +317,3 @@ function roleAttention(role: FleetRoleView, live: FleetSession[]): string[] {
   const idle = role.role === 'master' ? [] : live.filter(session => session.role === role.role && !session.work);
   return idle.length ? [`role ${role.role} is at its concurrency limit (${role.live} of ${role.concurrency} live) with ${idle.length} session${idle.length === 1 ? '' : 's'} carrying no work: ${idle.map(session => `${session.id} (${session.account})`).join(', ')}`] : [];
 }
-

@@ -1,16 +1,19 @@
 name: Release candidate
 # One moving main, a frozen candidate, UAT, then that exact SHA in production (docs/delivery.md).
 # A cut tags main's tip (rc/ID) and nothing else, so merges keep flowing while the candidate is under
-# test. The long suites the pre-merge gate never runs (GY-1093) — the soak, the timing-budget suites,
-# container acceptance, container recovery and the chart — run against the candidate's exact SHA,
-# never on a pull request and never as a required check; then Railway's uat environment serves that
+# test. The long suites the pre-merge gate never runs (GY-1093) — container acceptance, container
+# recovery and the chart here, the advisory soak and timing-budget suites in release-candidate-soak.yml,
+# which this run dispatches (GY-1513) — run against the candidate's exact SHA, never on a pull request
+# and never as a required check; then Railway's uat environment serves that
 # SHA and the suites that drive the deployment run against it. Railway's uat and production track
 # release/uat and release/production, never main; `graphyard release` moves them to the exact SHA.
 # A dispatched `sha`, or a pushed rc tag (rc-*), validates that one commit with the long suites alone:
 # it is not a recorded candidate, so it is never deployed or promoted.
+# The master loop dispatches the next cut as soon as the last concludes and main has moved (GY-1488);
+# the six-hourly cron is only a fallback for a loop that is down.
 on:
   schedule:
-    - cron: '0 */2 * * *'
+    - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
       sha:
@@ -64,54 +67,24 @@ jobs:
           node bin/graphyard.mjs release cut --trigger "${{ github.event_name == 'schedule' && 'schedule' || 'manual' }}" | tee cut.json
           echo "id=$(node -p "const r=require('./cut.json'); r.cut ? r.candidate.id : ''")" >> "$GITHUB_OUTPUT"
           echo "sha=$(node -p "const r=require('./cut.json'); r.cut ? r.candidate.sha : ''")" >> "$GITHUB_OUTPUT"
-  long-suites:
-    name: soak and timing-budget suites
+  soak:
+    name: start the advisory soak
     needs: candidate
     if: needs.candidate.outputs.sha != ''
     env:
       CANDIDATE_SHA: ${{ needs.candidate.outputs.sha }}
     runs-on: ubuntu-latest
-    # The soak runs the launcher's real mount namespace on every simulated launch (GY-888) and
-    # takes about twenty minutes on a runner by itself; the timing budgets, one at a time, about fifteen.
-    timeout-minutes: 60
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    # The soak and timing-budget suites run in release-candidate-soak.yml, a run of their own for this
+    # exact SHA (GY-1513): they are advisory (GY-1440), so this run concludes when promote does rather
+    # than ~17 minutes later, and the loop cuts the next candidate while this one's soak still runs.
     steps:
-      - name: Refuse anything but a full commit SHA
-        run: '[[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "sha must be a full 40-character commit SHA: $CANDIDATE_SHA" >&2; exit 1; }'
-        shell: bash
-      - uses: actions/checkout@v4
-        with: { ref: '${{ env.CANDIDATE_SHA }}', persist-credentials: false }
-      - uses: actions/setup-node@v4
-        with: { node-version: '24', cache: npm }
-      - run: npm ci
-      - name: Install bubblewrap (the soak confines every simulated launch in real namespaces)
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q bubblewrap
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
-      # The timing budgets run first and one file at a time, the soak after them: a budget measured
-      # beside another suite's load (plane-load's ten minutes of users, the soak's loop days) measures
-      # that load, not the candidate (GY-1440). The soak runs whatever the budgets' verdict.
-      - name: Run the release-candidate test files
-        shell: bash
-        run: |
-          set -euo pipefail
-          node scripts/ci-tests.mjs release-candidate --suite timing-budget --out "$RUNNER_TEMP/timing-budget-tests.txt"
-          node scripts/ci-tests.mjs release-candidate --suite soak --out "$RUNNER_TEMP/soak-tests.txt"
-          mkdir -p "$RUNNER_TEMP/timing"
-          export GRAPHYARD_TIMING_SLACK=1.5 GRAPHYARD_TIMING_RECORD="$RUNNER_TEMP/timing/release-candidate.jsonl"
-          status=0
-          npm test -- --files-from "$RUNNER_TEMP/timing-budget-tests.txt" --test-concurrency=1 --durations "$RUNNER_TEMP/timing/durations-timing-budget.jsonl" 2>&1 | tee "$RUNNER_TEMP/timing/test-timing-budget.log" || status=1
-          npm test -- --files-from "$RUNNER_TEMP/soak-tests.txt" --durations "$RUNNER_TEMP/timing/durations-soak.jsonl" 2>&1 | tee "$RUNNER_TEMP/timing/test-soak.log" || status=1
-          exit "$status"
-      - name: Summarise the timing-dependent assertions
-        if: always()
-        run: npx tsx tests/helpers/timing-report.ts "$RUNNER_TEMP/timing/release-candidate.jsonl" "$RUNNER_TEMP/timing/test-timing-budget.log" "$RUNNER_TEMP/timing/test-soak.log"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: graphyard-release-candidate-timing
-          path: ${{ runner.temp }}/timing/
-          if-no-files-found: ignore
+      - name: Dispatch the soak and timing-budget suites for the candidate SHA
+        run: gh workflow run release-candidate-soak.yml --repo "$GITHUB_REPOSITORY" --ref main -f sha="$CANDIDATE_SHA" -f candidate="${{ needs.candidate.outputs.id }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
   container-acceptance:
     needs: candidate
     if: needs.candidate.outputs.sha != ''
@@ -124,6 +97,30 @@ jobs:
         with: { ref: '${{ env.CANDIDATE_SHA }}', persist-credentials: false }
       - uses: actions/setup-node@v4
         with: { node-version: '24' }
+      # Docker Hub refuses anonymous pulls from shared runner addresses past its rate limit (GY-1607):
+      # the daemon is given the mirror.gcr.io registry mirror (verified with docker info before any
+      # docker command), and this job's Docker Hub images are pulled by their mirror.gcr.io name and
+      # tagged with their Docker Hub name, so no step contacts Docker Hub for them. The step fails when
+      # the mirror cannot serve an image, or when the tagged image does not resolve to the mirror.
+      - name: Pull Docker Hub images through the registry mirror
+        shell: bash
+        env:
+          DOCKER_HUB_IMAGES: node:24-bookworm-slim postgres:17-alpine
+        run: |
+          set -euo pipefail
+          { sudo cat /etc/docker/daemon.json 2>/dev/null || echo '{}'; } | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' > "$RUNNER_TEMP/daemon.json"
+          sudo install -m 0644 "$RUNNER_TEMP/daemon.json" /etc/docker/daemon.json
+          sudo systemctl restart docker
+          mirrors="$(docker info --format '{{json .RegistryConfig.Mirrors}}')"
+          echo "Docker daemon registry mirrors: $mirrors"
+          [[ $mirrors == *'https://mirror.gcr.io'* ]] || { echo '::error::the Docker daemon is not using the registry mirror' >&2; exit 1; }
+          for image in $DOCKER_HUB_IMAGES; do
+            docker pull --quiet "mirror.gcr.io/library/$image"
+            docker tag "mirror.gcr.io/library/$image" "$image"
+            digests="$(docker image inspect --format '{{json .RepoDigests}}' "$image")"
+            echo "$image resolved through the registry mirror: $digests"
+            [[ $digests == *'mirror.gcr.io/library/'* ]] || { echo "::error::$image does not resolve to the registry mirror" >&2; exit 1; }
+          done
       - name: Build candidate image as the release process would
         run: |
           version="$(node -p "require('./package.json').version")"
@@ -148,6 +145,30 @@ jobs:
         with: { ref: '${{ env.CANDIDATE_SHA }}', persist-credentials: false }
       - uses: actions/setup-node@v4
         with: { node-version: '24' }
+      # Docker Hub refuses anonymous pulls from shared runner addresses past its rate limit (GY-1607):
+      # the daemon is given the mirror.gcr.io registry mirror (verified with docker info before any
+      # docker command), and this job's Docker Hub images are pulled by their mirror.gcr.io name and
+      # tagged with their Docker Hub name, so no step contacts Docker Hub for them. The step fails when
+      # the mirror cannot serve an image, or when the tagged image does not resolve to the mirror.
+      - name: Pull Docker Hub images through the registry mirror
+        shell: bash
+        env:
+          DOCKER_HUB_IMAGES: node:24-bookworm-slim postgres:17-alpine
+        run: |
+          set -euo pipefail
+          { sudo cat /etc/docker/daemon.json 2>/dev/null || echo '{}'; } | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' > "$RUNNER_TEMP/daemon.json"
+          sudo install -m 0644 "$RUNNER_TEMP/daemon.json" /etc/docker/daemon.json
+          sudo systemctl restart docker
+          mirrors="$(docker info --format '{{json .RegistryConfig.Mirrors}}')"
+          echo "Docker daemon registry mirrors: $mirrors"
+          [[ $mirrors == *'https://mirror.gcr.io'* ]] || { echo '::error::the Docker daemon is not using the registry mirror' >&2; exit 1; }
+          for image in $DOCKER_HUB_IMAGES; do
+            docker pull --quiet "mirror.gcr.io/library/$image"
+            docker tag "mirror.gcr.io/library/$image" "$image"
+            digests="$(docker image inspect --format '{{json .RepoDigests}}' "$image")"
+            echo "$image resolved through the registry mirror: $digests"
+            [[ $digests == *'mirror.gcr.io/library/'* ]] || { echo "::error::$image does not resolve to the registry mirror" >&2; exit 1; }
+          done
       - name: Build candidate image
         run: docker build --tag graphyard-ci .
       - name: Recover an expired lease on a second machine identity
@@ -174,20 +195,60 @@ jobs:
           helm template graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials > /dev/null
           # An installation with nowhere to hold credentials must not render.
           if helm template graphyard deploy/helm/graphyard > /dev/null 2>&1; then echo 'chart rendered without credentials' >&2; exit 1; fi
+      # Docker Hub refuses anonymous pulls from shared runner addresses past its rate limit (GY-1607):
+      # the daemon is given the mirror.gcr.io registry mirror (verified with docker info before any
+      # docker command), and this job's Docker Hub images are pulled by their mirror.gcr.io name and
+      # tagged with their Docker Hub name, so no step contacts Docker Hub for them. The step fails when
+      # the mirror cannot serve an image, or when the tagged image does not resolve to the mirror.
+      - name: Pull Docker Hub images through the registry mirror
+        shell: bash
+        env:
+          DOCKER_HUB_IMAGES: node:24-bookworm-slim
+        run: |
+          set -euo pipefail
+          { sudo cat /etc/docker/daemon.json 2>/dev/null || echo '{}'; } | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' > "$RUNNER_TEMP/daemon.json"
+          sudo install -m 0644 "$RUNNER_TEMP/daemon.json" /etc/docker/daemon.json
+          sudo systemctl restart docker
+          mirrors="$(docker info --format '{{json .RegistryConfig.Mirrors}}')"
+          echo "Docker daemon registry mirrors: $mirrors"
+          [[ $mirrors == *'https://mirror.gcr.io'* ]] || { echo '::error::the Docker daemon is not using the registry mirror' >&2; exit 1; }
+          for image in $DOCKER_HUB_IMAGES; do
+            docker pull --quiet "mirror.gcr.io/library/$image"
+            docker tag "mirror.gcr.io/library/$image" "$image"
+            digests="$(docker image inspect --format '{{json .RepoDigests}}' "$image")"
+            echo "$image resolved through the registry mirror: $digests"
+            [[ $digests == *'mirror.gcr.io/library/'* ]] || { echo "::error::$image does not resolve to the registry mirror" >&2; exit 1; }
+          done
       - name: Build the candidate image
         run: |
           version="$(node -p "require('./package.json').version")"
           docker build --build-arg "GRAPHYARD_VERSION=$version" --build-arg "GRAPHYARD_BUILD_REVISION=$CANDIDATE_SHA" --tag "graphyard:$version" .
           docker tag "graphyard:$version" "graphyard:$version-next"
+      # kind's node image sets no registry config_path (containerd 2 then defaults to a path list), so
+      # the cluster is created from deploy/helm/kind-config.yaml, which sets it to /etc/containerd/certs.d.
       - uses: helm/kind-action@v1
-        with: { cluster_name: graphyard }
+        with: { cluster_name: graphyard, config: deploy/helm/kind-config.yaml }
+      # The cluster's containerd pulls the chart's Docker Hub images (the bundled postgres:17-alpine)
+      # itself, so each node resolves docker.io through mirror.gcr.io alone, with no Docker Hub fallback.
+      # The step reads each node's effective config (containerd config dump: version 2 or 3, double or
+      # single quoted) and fails when config_path is not exactly /etc/containerd/certs.d.
+      - name: Pull the cluster's Docker Hub images through the registry mirror
+        shell: bash
+        run: |
+          set -euo pipefail
+          for node in $(kind get nodes --name graphyard); do
+            docker exec "$node" mkdir -p /etc/containerd/certs.d/docker.io
+            printf '%s\n' 'server = "https://mirror.gcr.io"' '[host."https://mirror.gcr.io"]' '  capabilities = ["pull", "resolve"]' | docker exec -i "$node" tee /etc/containerd/certs.d/docker.io/hosts.toml
+            dump="$(docker exec "$node" containerd config dump)"
+            grep -Eq "^[[:space:]]*config_path *= *(\"/etc/containerd/certs.d\"|'/etc/containerd/certs.d')[[:space:]]*\$" <<< "$dump" || { echo "::error::kind node $node does not read /etc/containerd/certs.d" >&2; exit 1; }
+          done
       - name: Install, exercise, upgrade and restore on a real cluster
         run: bash deploy/helm/exercise.sh "graphyard:$(node -p "require('./package.json').version")"
   uat:
     needs: [candidate, container-acceptance, container-recovery, chart]
     # Runs once the container and chart jobs finish, passed or not, so their verdicts join the
-    # candidate's UAT record. The soak and timing-budget suites are advisory: they run beside UAT
-    # and report on the run, but neither delay nor decide promotion (docs/delivery.md).
+    # candidate's UAT record. The soak and timing-budget suites are advisory: they run in their own
+    # workflow beside UAT and report on that run, but neither delay nor decide promotion (docs/delivery.md).
     if: ${{ !cancelled() && needs.candidate.outputs.id != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -218,8 +279,12 @@ jobs:
         # serves in Chromium, signs in with the UAT token and opens the Work view, and `e2e` runs every
         # repository case under e2e/cases/ targeted at uat (docs/validation.md), writing its report for
         # the next step. Those four exercise
-        # the UAT deployment itself; the long suites ran on runners at the candidate SHA, so each
-        # long-suite job's result above joins the record as a suite of its own. A failing or flaky
+        # the UAT deployment itself; the container and chart suites ran on runners at the candidate SHA, so each
+        # of those jobs' results above joins the record as a suite of its own. `zero-touch` (GY-1481)
+        # runs the zero-touch onboarding scenario on this checkout of the candidate's SHA: `graphyard up
+        # --agent --goal FILE` on a throwaway repository against an in-process GitHub must reach a merged
+        # first planned item with no human step but GitHub's one App approval, so a change that adds a
+        # human step to onboarding fails the candidate and blocks its promotion. A failing or flaky
         # required case files one release hold per failed outcome of e2e/contract.json, read from
         # that report; any other failure files one follow-up item naming the failing suite and the
         # candidate SHA; only that filing uses GRAPHYARD_TOKEN, which no --suite command is given.
@@ -231,7 +296,8 @@ jobs:
             --suite 'e2e=node --import tsx --eval "import(\"./src/e2e/runner.ts\").then(m => m.runE2eSuite())"' \
             --suite 'container-acceptance=test "$CONTAINER_ACCEPTANCE" = success' \
             --suite 'container-recovery=test "$CONTAINER_RECOVERY" = success' \
-            --suite 'chart=test "$CHART" = success'
+            --suite 'chart=test "$CHART" = success' \
+            --suite 'zero-touch=node --import tsx --eval "import(\"./src/release-candidate.ts\").then(m => m.runZeroTouchSuite())"'
         env:
           CONTAINER_ACCEPTANCE: ${{ needs.container-acceptance.result }}
           CONTAINER_RECOVERY: ${{ needs.container-recovery.result }}
@@ -244,15 +310,20 @@ jobs:
           GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
       - name: Record the E2E case runs on the control plane's Tests page
         # Best effort and after the verdict: recording never decides promotion. The suite command
-        # never holds the release credential, so this step records the report it wrote.
+        # never holds a control-plane credential, so this step records the report it wrote. It uses
+        # its own GRAPHYARD_E2E_RECORD_TOKEN (GY-1614): the release filing credential above is an
+        # operator agent holding only intent:create, which the scenario routes refuse. This step runs
+        # the candidate's own checkout, so that token is an operator agent holding only e2e:record,
+        # never an admin credential: it reaches repository E2E cases on the scenario routes alone.
         if: ${{ !cancelled() }}
         continue-on-error: true
         shell: bash
         run: |
-          if [[ -f "$RUNNER_TEMP/e2e-report.json" ]]; then node bin/graphyard.mjs e2e record "$RUNNER_TEMP/e2e-report.json"; else echo 'The e2e suite wrote no report; nothing to record'; fi
+          if [[ -z "$GRAPHYARD_TOKEN" ]]; then echo 'GRAPHYARD_E2E_RECORD_TOKEN is not set; the E2E case runs are not recorded'
+          elif [[ -f "$RUNNER_TEMP/e2e-report.json" ]]; then node bin/graphyard.mjs e2e record "$RUNNER_TEMP/e2e-report.json"; else echo 'The e2e suite wrote no report; nothing to record'; fi
         env:
           GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
-          GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
+          GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_E2E_RECORD_TOKEN }}
   promote:
     needs: [candidate, uat]
     if: needs.uat.result == 'success' && (github.event_name == 'schedule' || inputs.promote)

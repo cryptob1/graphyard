@@ -3,13 +3,17 @@
 
 Sidebar: **Work**, **Workers**, **Shipped**, **Tests**, **Insights**, **Settings**.
 
+## From your phone
+
+A local dashboard listens on `127.0.0.1:4310`, or its install's free port ([install](install.md)). With Tailscale, `graphyard up` prints `tailscale serve --bg --http=4310 http://127.0.0.1:4310` and its tailnet URL; `--share-tailnet` runs it, keeps `up.json` `reachableUrl`, sign-in links use it: tailnet-only, never `tailscale funnel`. A green `up` ends with one single-use sign-in link (`signIn`, 10min).
+
 ## Work
 
-Open items by group (tiles count, filter): **Needs you** (yours alone), **Blocked**, **Moving**, **Up next**, **Backlog**. `GET /api/board` items carry `group`, `stage`, `owner`, `actor`, `command`, `since`, `overdue` (Moving/Blocked past `overdueAfterMs`, 30 min); master-owed: `master status` `board.owed`.
+Open items by group: **Needs you** (yours alone), **Blocked**, **Moving**, **Up next**, **Backlog**. `GET /api/board` items carry `group`, `stage`, `owner`, `actor`, `command`, `since`, `overdue` (Moving/Blocked past `overdueAfterMs`, 30min); master-owed: `master status` `board.owed`. Blocked rows: one sentence naming its clearer (`blocker.summary`; a wait's UTC `until`).
 
 ## Needs you
 
-Cards: ask, **Recommended** choice (or safest way), one-line why, numbered steps, choices (recommended first, preselected); agent detail folds under **Details for agents** (older requests: need's first sentence). `graphyard login`: single-use sign-in link; **Provide now** seals credentials for `unseal GY-N`; operator approvals offer **Approve** or terminal **Decline** (`master refuse GY-N DECISION REASON`), answered only from human admin sessions.
+Cards: ask, **Recommended** choice (or safest way), one-line why, numbered steps, choices (recommended first, preselected); agent detail folds under **Details for agents**. `graphyard login`: single-use sign-in link; **Provide now** seals credentials for `unseal GY-N`; operator approvals offer **Approve** or terminal **Decline** (`master refuse GY-N DECISION REASON`), answered only from human admin sessions.
 
 ## Workers
 
@@ -19,12 +23,12 @@ Cards: ask, **Recommended** choice (or safest way), one-line why, numbered steps
 
 ## Settings › Agents
 
-**Can launch now?** role chips (titles name next account; blocked roles: reason, earliest time). **Accounts** rows (working, idle, out of work): state chip (Disabled, No role, Spent, Launch failing, Unavailable, Working, Idle), **Usage** (bar, percent, hover reset; — unreported), **Why** (live work or refusal); shared plans head groups; same-day spent collapse (*4 spent until Oct 8*). **Roles (N)**: preference, launch policy.
+**Can launch now?** role chips (blocked roles: reason, earliest time). **Accounts** rows: state chip (Disabled, No role, Spent, Launch failing, Unavailable, Working, Idle), **Usage**, **Why**; same-day spent accounts collapse. **Roles (N)**: preference, launch policy.
 
 ## The status sentence
 
-**Build, Validate, Test, Review, Prove, Merge, Deploy**, then *Merged*, *Live* once served. Item page: **What is left**, **Requirements** (✓/○), **Pull request** (**Merge danger** low/medium/high), **Test cases**, **Activity**, **Technical details** (gates, sessions, evidence, overlaps).
+**Build, Validate, Test, Review, Prove, Merge, Deploy**, then *Merged*, *Live* once served. Item page: **What is left**, **Requirements**, **Pull request** (**Merge danger**), **Test cases**, **Activity**, **Technical details** (gates, sessions, evidence, overlaps, verbatim blocker).
 
 ## Insights
 
-**Flow** (landed/day, merges/hour, waits); **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), flow analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats filed `bug` unless `GRAPHYARD_INTERVENTION_PATTERNS=0`), **Validation**, **Releases**. Reworks on loop-handled ground (base conflict, failed required check, change request, merge refusal, failed proof) aren't interventions, whoever asked, until approver declines one; nor are loop operator agent's recorded-ground rounds (capped change requests to its approver included) applied by risk lane or operator agent; hand-approved or hand-applied ones count; pre-window decision counts only for in-window outcome naming it.
+**Flow**; **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), flow analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats filed `bug` unless `GRAPHYARD_INTERVENTION_PATTERNS=0`; pattern: owners, causes, rounds, [under-threshold days](protocol/read-endpoints.md)), **Validation**, **Releases**.

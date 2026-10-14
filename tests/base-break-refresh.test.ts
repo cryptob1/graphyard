@@ -16,6 +16,7 @@ import { emptyDaemonState, failedCheckRework, runCycle, type DaemonEffects } fro
 import { nameBaseBreaks } from '../src/cli/status-attention.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { baseBreakHold, baseBreakRefreshNeeded, describeBaseBreak, failedTestsAnnotation, failedTestsFromLog, judgeBaseBreak, parseFailedTests, wakeOwnObservation, type BaseBreak } from '../src/master/base-break-refresh.js';
+// Time-bomb allowance (GY-1694): the 2026-09-26 `at` is passed to judgeBaseBreak as its explicit observation time and echoed back; new Date()/Date.now() stamp live observations in separate tests.
 
 // GY-793. On 2026-09-26 main was briefly broken; every candidate whose CI ran in that window failed
 // `test` on the one broken test, the approvers refused the rework, and nothing brought them onto

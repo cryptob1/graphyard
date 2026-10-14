@@ -1,12 +1,15 @@
 import { z } from 'zod';
 import { demand } from './refusal.js';
 import { proofSchema } from './proof.js';
-import { criterionSchema, resourcesSchema } from './policy.js';
+import { criteriaSchema, resourcesSchema } from './policy.js';
 import { implementerIdentities, proofExerciseSchema } from './evidence.js';
 import { standingEscalations } from './escalation.js';
 import { closureKinds } from './closure.js';
 import { createSchema, escalationTriggers, operatorCapability, type OperatorCapability, type Principal, type Work } from './work.js';
 import { baseRefreshConflict } from '../merge-queue.js';
+import { loopOwnedRefusal } from './loop-owned.js';
+import { judgedSame, situatedDecisionActions, type DecisionSituation } from './decision-situation.js';
+export { decisionSituation, judgedSame, situatedDecisionActions, situationLabel, supersededSituation, type DecisionSituation } from './decision-situation.js';
 
 /**
  * Two-party decisions: the calls the guides used to reserve for a human operator. An agent
@@ -50,7 +53,7 @@ export const decisionInputs = {
   // still raise the requirement-weakening escalation the engine records for any narrowing.
   // `answers` binds a widening to the worker scope request it answers (GY-176): the engine applies
   // it only while that request is open and its attempt holds the lease, in the same transaction.
-  requirements: z.object({ expectedPolicyRevision: revision, criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs,
+  requirements: z.object({ expectedPolicyRevision: revision, criteria: criteriaSchema(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs,
     answers: z.object({ epoch: revision, at: z.iso.datetime(), sha: sha.nullable().optional() }).strict().optional() }).strict(),
   resolve: z.object({ trigger: z.enum(escalationTriggers), expectedRevision: revision }).strict(),
   attest: z.object({ proof: proofSchema.refine(proof => proof.startsWith('manual:'), 'Only manual: proofs are attested; automated proofs come from producers'), sha, baseSha: sha, policyRevision: revision, result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: z.url().max(2000).optional(), exercise: proofExerciseSchema.optional() }).strict(),
@@ -87,7 +90,18 @@ export const decisionRefusalSchema = z.object({ action: z.literal('refuse'), dec
  * refused, why and when. It is distinct from `refusals`, the conflicted approvals the server
  * turned away, and from a decision still `requested` because no session ever judged it.
  */
-export type DecisionState = 'requested' | 'approved' | 'applied' | 'failed' | 'refused' | 'superseded';
+export type DecisionState = 'requested' | 'approved' | 'applied' | 'failed' | 'refused' | 'superseded' | 'held' | 'stale';
+/**
+ * GY-1687: the two engine refusals that mean only "the item has a live attempt" (a live lease, an unverified containment
+ * fence), never that the revision is wrong. A requirements decision refused for one is `held`; the attempt's end applies it.
+ */
+export const liveLeaseRevisionRefusal = 'Stop and release the active worker before revising requirements';
+export const quarantinedRevisionRefusal = (epoch: number | undefined) => `Task is quarantined by unverified containment from epoch ${epoch}; requirements remain immutable until settlement or stopped-worker recovery`;
+export const heldByLiveAttempt = (message: string) => message === liveLeaseRevisionRefusal || /^Task is quarantined by unverified containment from epoch \d+; requirements remain immutable until settlement or stopped-worker recovery$/.test(message);
+/** How a held decision is applied when the attempt ends: the engine call its approval made, replayed as its requester. */
+export interface HeldApplication { actor: Principal; reason: string }
+/** GY-1687: the attempt that refused the approved revision; the hold is bound to it so a replacement claim racing the held outcome does not strand the decision on the new worker. */
+export type HeldAttempt = { kind: 'lease'; epoch: number } | { kind: 'quarantine'; epoch: number };
 export interface Decision {
   id: string; workId: string; action: DecisionAction; input: any; reason: string;
   requestedBy: string; requestedAt: string; state: DecisionState;
@@ -104,40 +118,13 @@ export interface Decision {
   /** For a rework or recover request, the candidate it was requested against (GY-229); null otherwise and for requests recorded before it was kept. */
   situation?: DecisionSituation | null;
   superseded?: { bound: DecisionSituation; current: DecisionSituation } | null; // GY-1297: the situation it was bound to, and the item's
+  /** GY-1687: why the approved decision waits for the attempt to end, since when, and the engine call that applies it then. */
+  held?: { reason: string | null; at: string; application: HeldApplication | null; attempt?: HeldAttempt | null } | null;
 }
-/**
- * What a rework or recover request judged: the item's candidate head and the base it was built
- * on when the request was made; the grounds it judges travel in the request's `binding` input
- * (GY-407). The server records both with the request, and a refusal stands only against a request
- * made for the same pair and the same grounds (GY-229, GY-407): their input is otherwise the bare
- * attestation `{ previousWorkerStopped: true }`, identical for every request on the item.
- */
-export interface DecisionSituation { sha: string | null; baseSha: string | null }
-export const situatedDecisionActions: readonly DecisionAction[] = ['rework', 'recover'];
-export const decisionSituation = (action: string, work: Pick<Work, 'candidate'>): DecisionSituation | null =>
-  situatedDecisionActions.includes(action as DecisionAction) ? { sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null } : null;
-const sameSituation = (recorded: DecisionSituation | null | undefined, current: DecisionSituation | null | undefined) =>
-  !recorded || ((recorded.sha ?? null) === (current?.sha ?? null) && (recorded.baseSha ?? null) === (current?.baseSha ?? null));
-/**
- * Whether a refused decision judged the same situation as a new request. Only rework and recover
- * are situated; any other action's input already names what it binds. For a situated action the
- * grounds binding is part of that input (GY-407), so a refusal on one ground never matches a
- * request whose binding differs, whatever the head. A refusal recorded before situations were
- * kept judged a candidate nobody can name any more, so it still stands against every request
- * whose input it shares — today, one that names no binding — until one cites it, as it always
- * did; the loop cites it with its new grounds.
- */
-const judgedSame = (action: DecisionAction, decision: { situation?: DecisionSituation | null }, situation: DecisionSituation | null | undefined) =>
-  !situatedDecisionActions.includes(action) || sameSituation(decision.situation, situation);
 // GY-1297. An approved decision left without an outcome refused its action forever (GY-949): one bound to a head
 // and base the item has left is `superseded`, naming both; one whose situation holds is resumed past the grace.
 export const approvalApplyGraceMs = 60_000, approvedDecisionBoundMs = 300_000;
-export function supersededSituation(decision: { action: string; state: string; situation?: DecisionSituation | null }, work: Pick<Work, 'candidate'>): { bound: DecisionSituation; current: DecisionSituation } | null {
-  const bound = decision.state === 'approved' ? decision.situation : null, current = bound ? decisionSituation(decision.action, work) : null;
-  return !bound || !current || sameSituation(bound, current) ? null : { bound: { sha: bound.sha ?? null, baseSha: bound.baseSha ?? null }, current };
-}
 export const stalledApproval = (decision: { state: string; approvedAt?: string | null }, now: number) => decision.state === 'approved' && !!decision.approvedAt && now - Date.parse(decision.approvedAt) >= approvalApplyGraceMs;
-export const situationLabel = (situation: DecisionSituation) => situation.sha ? `head ${situation.sha.slice(0, 12)} on base ${String(situation.baseSha).slice(0, 12)}` : 'no candidate';
 export interface DecisionEvent { kind: string; actor: string; at: string; payload: any }
 
 /** Rebuild every decision on an item from its append-only ledger entries, oldest first. */
@@ -149,7 +136,7 @@ export function foldDecisions(workId: string, events: DecisionEvent[]): Decision
       decisions.set(details.id, { id: details.id, workId, action: details.action, input: details.input, reason: details.reason, requestedBy: event.actor, requestedAt: event.at, state: 'requested',
         approvedBy: null, approvedAt: null, approvalReason: null, outcome: null, refusals: [], refusal: null,
         precedent: Array.isArray(details.precedent) ? [...details.precedent] : [], context: typeof details.context === 'string' ? details.context : null, noPrecedent: typeof details.noPrecedent === 'string' ? details.noPrecedent : null, concurrences: [],
-        situation: details.situation && typeof details.situation === 'object' ? { sha: details.situation.sha ?? null, baseSha: details.situation.baseSha ?? null } : null });
+        situation: details.situation && typeof details.situation === 'object' ? { sha: details.situation.sha ?? null, baseSha: details.situation.baseSha ?? null, ...(typeof details.situation.reauthorizes === 'string' ? { reauthorizes: details.situation.reauthorizes } : {}) } : null });
       continue;
     }
     const decision = decisions.get(details.id);
@@ -160,6 +147,11 @@ export function foldDecisions(workId: string, events: DecisionEvent[]): Decision
     if (event.kind === 'decision.approved') Object.assign(decision, { state: 'approved', approvedBy: event.actor, approvedAt: event.at, approvalReason: details.reason });
     if (event.kind === 'decision.applied') Object.assign(decision, { state: 'applied', outcome: details.outcome ?? null });
     if (event.kind === 'decision.failed') Object.assign(decision, { state: 'failed', outcome: details.error ?? null });
+    if (event.kind === 'decision.held') Object.assign(decision, { state: 'held', outcome: details.reason ?? null, held: { reason: details.reason ?? null, at: event.at, application: details.application ?? null, ...(details.attempt ? { attempt: details.attempt } : {}) } });
+    // GY-1687: a held decision whose expectedPolicyRevision moved before the attempt ended settles
+    // `decision.stale` in that same transaction; without folding it, settleHeldOnClose still sees held
+    // and appends decision.failed over the required stale outcome.
+    if (event.kind === 'decision.stale') Object.assign(decision, { state: 'stale', outcome: details.reason ?? null });
     if (event.kind === 'decision.superseded') Object.assign(decision, { state: 'superseded', outcome: details.reason ?? null, superseded: { bound: details.bound ?? null, current: details.current ?? null } });
   }
   return [...decisions.values()];
@@ -274,6 +266,7 @@ export function decisionPrecondition(action: DecisionAction, input: any, work: W
   if (work.stage === 'done') return 'Delivered work is immutable; create a follow-up task';
   if ((action === 'release' || action === 'unblock' || action === 'resolve' || (action === 'close' && input.expectedRevision !== undefined)) && input.expectedRevision !== work.revision) return `Task revision changed (now ${work.revision}); reload and request again`;
   if (action === 'release' && (work.stage !== 'backlog' || work.ready)) return 'Only unreleased backlog work can be released';
+  if (action === 'release') { const owned = loopOwnedRefusal(work); if (owned) return owned; }
   if (action === 'unblock' && !work.blocker) return 'Task has no blocker to clear';
   if (action === 'resolve' && !standingEscalations(work).some(entry => entry.trigger === input.trigger)) return `No standing ${input.trigger} escalation; standing: ${standingEscalations(work).map(entry => entry.trigger).join(', ') || 'none'}`;
   if (action === 'requirements' && input.expectedPolicyRevision !== work.policyRevision) return `Policy revision changed (now ${work.policyRevision}); reload and request again`;

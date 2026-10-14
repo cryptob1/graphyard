@@ -6,11 +6,12 @@ import { createServer, type Server } from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { loadMasterConfig, managedMasterInstructions, masterConfigSchema, setupMaster, type MasterConfig } from '../src/master.js';
+import { loadMasterConfig, masterInstructions, masterConfigSchema, setupMaster, type MasterConfig } from '../src/master.js';
 import { managedInstructions } from '../src/repository-setup.js';
 import { assessDeploymentVerification, checkoutRelease, deploymentFreshnessMs, emitInstructions, masterLoopStatements, missingLoopStatements, verificationEffects, verifyDeployment, type EmittedInstructions } from '../src/master-verification.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01 clock is passed as `now` to assessDeploymentVerification beside observations dated from it; the integration halves take Date.now() and build observations relative to it.
 
 // integration:master-loop-deployment-verification — the deployment-verification step of the
 // perpetual master loop, proven against a stubbed deployed release: an endpoint that reports
@@ -72,9 +73,9 @@ const close = (server: Server) => new Promise<void>(resolve => server.close(() =
 
 test('integration:master-loop-deployment-verification — the generated instructions and the guide carry every statement the verifier checks', async () => {
   const worker = managedInstructions('# Rules\n', 'https://graphyard.example');
-  const master = managedMasterInstructions(worker);
+  const master = masterInstructions;
   const guide = await readFile(join(root, 'docs/master-agent.md'), 'utf8');
-  for (const [name, text] of [['worker section', worker], ['master section', master], ['master guide', guide]] as const) assert.deepEqual(missingLoopStatements(text), [], `${name} carries the loop`);
+  for (const [name, text] of [['worker section', worker], ['master instructions', master], ['master guide', guide]] as const) assert.deepEqual(missingLoopStatements(text), [], `${name} carries the loop`);
   assert.equal(masterLoopStatements.length, 6);
   // The statements are the real content, not a coincidence of the wrapper: an earlier
   // generation that stopped at the observed merge fails every one of them.
@@ -231,7 +232,7 @@ test('integration:master-loop-deployment-verification — the checkout identity 
     const missing = checkoutRelease(join(outside, 'bin/graphyard.mjs'));
     assert.equal(missing.sha, null); assert.equal(missing.clean, false); assert.ok(missing.reason);
     const emitted = await emitInstructions(config(release.cliPath, 'https://graphyard.example'));
-    assert.match(emitted.guide, /^# Master-agent operating mode/); assert.doesNotMatch(emitted.guide, /^<!-- page:/);
+    assert.ok(emitted.guide.startsWith(masterInstructions), 'the role instructions lead the guide'); assert.match(emitted.guide, /^# Master-agent operating mode/m); assert.doesNotMatch(emitted.guide, /^<!-- page:/m);
     assert.match(emitted.init, /This repository uses Graphyard at https:\/\/graphyard\.example/);
     assert.deepEqual(missingLoopStatements(emitted.guide), []); assert.deepEqual(missingLoopStatements(emitted.init), []);
     assert.equal(execFileSync('git', ['-C', release.checkout, 'status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8' }).trim(), '', 'emitting instructions leaves the release checkout untouched');
@@ -293,9 +294,10 @@ test('unit:deployment-verification-exact-release — a coordinator checkout ahea
   const ahead = git('rev-parse', 'HEAD');
   await writeFile(join(release.checkout, 'src/master.ts'), '// local edit\n', { flag: 'a' });
   const scratches: string[] = [];
-  const run = (command: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv }) => {
-    if (command === 'git' && args[0] === 'clone') scratches.push(args.at(-1)!);
-    return execFileSync(command, args, { ...options, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const run = (command: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string }) => {
+    if (command === 'git' && args[0] === 'init' && args.at(-1)!.endsWith('/release')) scratches.push(args.at(-1)!);
+    // The release's filer reads its input on stdin.
+    return execFileSync(command, args, { ...options, encoding: 'utf8', stdio: [options?.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
   };
   try {
     const master = config(release.cliPath, url);
@@ -338,8 +340,8 @@ test('unit:deployment-verification-exact-release — a coordinator checkout ahea
   assert.equal(unserved.result, 'refused'); assert.match(unserved.refusals[0], /does not serve GY-42 merge commit a{40} yet/);
   const absent = await verifyDeployment(item, { ...base, observe: async () => observation, isolate: async requested => ({ reason: `Deployed release ${requested} is missing from the coordinator checkout; fetch it and verify again` }) });
   assert.equal(absent.result, 'refused'); assert.deepEqual(absent.refusals, [`Deployed release ${sha} is missing from the coordinator checkout; fetch it and verify again`]);
-  // Served, clean and exact: verified from the isolated release with the coordinator ahead.
+  // Served, clean and exact: verified from the isolated release, whose own filer owes nothing, with the coordinator ahead.
   const recorded: unknown[] = [];
-  const exact = await verifyDeployment(item, { ...base, observe: async () => observation, isolate: isolatedAt(true), record: async (_work, data) => { recorded.push(data); } });
+  const exact = await verifyDeployment(item, { ...base, observe: async () => observation, isolate: async requested => ({ ...(await isolatedAt(true)(requested)), checks: async () => [] }), record: async (_work, data) => { recorded.push(data); } });
   assert.equal(exact.result, 'verified'); assert.deepEqual(exact.emittedFrom, { sha, clean: true, isolated: true }); assert.deepEqual(recorded, [{ sha, mergeSha: sha, source: 'endpoint', observedAt: observation.at }]);
 });

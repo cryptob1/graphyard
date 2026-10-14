@@ -23,6 +23,7 @@ import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
 import type { CliContext } from '../src/cli/context.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { acceptanceJudgementParameters, acceptanceParameters, graphyardTools as piTools, schemaErrors } from '../integrations/pi/index.js';
+// Time-bomb allowance (GY-1694): the 2026-10-07 daemon clock lies behind every approval the server stamps, so the day-after-approval verdict needs the explicit Date.now() + 25h; new Date() otherwise stamps observations and commands.
 
 // GY-1417: a goal becomes approved customer outcomes and required E2E cases before any code is
 // written, by an acceptance role whose author never approves its own draft, and once merged those
@@ -369,7 +370,7 @@ test('unit:acceptance-role-drafts-and-approval — the loop launches the accepta
   // A refused draft whose pull request could not be closed holds the next draft until the close succeeds.
   verdict = { verdict: 'refuse', reason: 'The case checks the wrong page' };
   await cycle(); await cycle();
-  const refusedPr = (await read(fifth.key)).refusal!.pr;
+  const refusedPr = (await read(fifth.key)).refusal!.pr!;
   const close = fx.close;
   let closeFails = 1;
   fx.close = async (pr, comment) => { if (closeFails-- > 0) throw new Error('gh pr close: HTTP 502'); return close(pr, comment); };

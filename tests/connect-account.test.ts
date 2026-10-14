@@ -122,7 +122,8 @@ const connectViews = async () => (await ok('agent-registry/connect', operator)).
 
 test('unit:connect-account-default-roles — a strong account joins worker and reviewer, a cheap one research, approver and the unit producer, appended to the failover order', async () => {
   assert.deepEqual([...connectDefaultRoles('strong')], ['worker', 'reviewer']);
-  assert.deepEqual([...connectDefaultRoles('fast')], ['research', 'approver', 'producer']);
+  assert.deepEqual([...connectDefaultRoles('fast', 'opencode')], ['research', 'approver', 'producer'], 'a cheap OpenCode account is not a worker: dispatch would treat it as strong');
+  assert.deepEqual([...connectDefaultRoles('fast', 'pi')], ['research', 'worker', 'approver', 'producer']);
   // A fleet that already serves its roles from one account, so the append order is visible.
   await ok('agent-registry/apply', operator, {
     runtimes: [
@@ -159,7 +160,7 @@ test('unit:connect-account-default-roles — a strong account joins worker and r
   const roleOrder = (name: string) => document.roles.find((role: { name: string }) => role.name === name)?.accounts as string[] | undefined;
   assert.deepEqual(roleOrder('approver'), ['claude-q', cheapName], 'a cheap account is appended to the approver failover order, not prepended');
   assert.deepEqual(roleOrder('producer'), [cheapName], 'a cheap account joins the unit producer');
-  assert.ok(!roleOrder('worker')?.includes(cheapName), 'a cheap account does not take worker');
+  assert.ok(!roleOrder('worker')?.includes(cheapName), 'a cheap OpenCode account stays out of worker (GY-1746): only Pi is tried first, every other runtime counts as strong');
   assert.deepEqual((await connectViews()).find(entry => entry.provider === cheap.id)?.placement, ['research', 'approver', 'producer'], 'the card states the cheap account joined research, approver and producer');
   // A cheap account whose research append could not land joins only the registry roles: the card
   // never claims a placement the fleet cannot launch.
@@ -232,7 +233,7 @@ test('connect Pi — a z.ai key pasted for Pi lands in Pi\'s own auth document i
   assert.equal(reports[0].state, 'healthy', reports[0].detail);
   const name = reports[0].detail.split(' ')[0];
   assert.match(name, /^pi-[a-z]$/);
-  assert.equal(reports[0].detail, `${name} joined approver, producer`, 'Pi joins no research: the research wrapper reads an OpenCode key');
+  assert.equal(reports[0].detail, `${name} joined worker, approver, producer`, 'Pi joins no research: the research wrapper reads an OpenCode key');
   const home = join(scratch, 'agents', name);
   // Pi's letter never collides with an OpenCode account's research wrapper directory.
   const opencodeLetters = (await ok('agent-registry/document', operator)).accounts.filter((account: { runtime: string }) => account.runtime === 'opencode').map((account: { name: string }) => account.name.split('-').at(-1));
@@ -246,8 +247,7 @@ test('connect Pi — a z.ai key pasted for Pi lands in Pi\'s own auth document i
   assert.equal(account?.runtime, 'pi');
   assert.deepEqual(account?.credential, { host: HOST, home });
   assert.ok(document.runtimes.some((runtime: { name: string; launch: { homeVariable: string } }) => runtime.name === 'pi' && runtime.launch.homeVariable === 'PI_CODING_AGENT_DIR'));
-  for (const role of ['approver', 'producer']) assert.ok(document.roles.find((entry: { name: string }) => entry.name === role)?.accounts.includes(name), role);
-  assert.ok(!document.roles.find((entry: { name: string }) => entry.name === 'worker')?.accounts.includes(name));
+  for (const role of ['worker', 'approver', 'producer']) assert.ok(document.roles.find((entry: { name: string }) => entry.name === role)?.accounts.includes(name), role);
   assert.ok(!JSON.stringify(await ok('agent-registry/connect', operator)).includes(KEY), 'no API read returns the key');
 });
 

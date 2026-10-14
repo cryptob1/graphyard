@@ -12,11 +12,24 @@ import { registeredLaunch } from './model/session-state.js';
 import { answeredByPendingSession, independentProducerProfiles } from './producer.js';
 import { answeredByPendingReview } from './reviewer.js';
 import { daemonSummary, profileHealth, readDaemonState, type DaemonState, type DeploymentObservation } from './master-daemon.js';
+import { deferPostDeployFollowUps, filePostDeployFollowUps, patternReader, releasePostDeployFiler, type PatternReader } from './master-verification.js';
+export { patternReader };
 import { withLaunchedRuntime } from './master/launch.js';
 import { launchedSessionHandle, selectReviewerProfile, type ExecutorEffects, type ExecutorHandler } from './auto-dispatch.js';
 import type { ExecutorRelease } from './executor-fleet.js';
 import { dispatchReserved, profileConcurrency, type HerdrAgent, type MasterConfig, type ProducerProfile, type WorkerProfile } from './master.js';
 import { agentNameReadings, assertNameAvailable, attributeRefusal } from './master-resources.js';
+import { nonRepositoryPaths } from './model/scope-repository.js';
+import { unplannedPaths } from './model/scope.js';
+import { baseTree } from './cli/planned-files-intent.js';
+import { defaultChildRun, type ChildRun } from './child-runner.js';
+
+/** GY-1764: the base tree read after a fetch that succeeded. A failed fetch leaves the last fetched tree, which can lag a base that gained the file asked for, so no terminal refusal may rest on it: the read throws and the ask waits. */
+export async function currentBaseTree(root: string, baseBranch: string, run: ChildRun = defaultChildRun) {
+  try { await run('git', ['fetch', '--quiet', 'origin', baseBranch], { cwd: root, timeoutMs: 30_000 }); }
+  catch (error) { throw new Error(`the base tree of ${baseBranch} could not be refreshed (${error instanceof Error ? error.message : error}); a terminal scope refusal waits for a current read`); }
+  return baseTree(root, baseBranch, run);
+}
 import { agentOwner, loadMasterConfig, type AttentionItem } from './master.js';
 import { processConnectAccounts } from './master/environments.js';
 import { parseCoordinatorCheckout, checkoutGuardApplies, coordinatorCheckoutRefusal, coordinatorCheckoutRoot } from './master/profiles.js';
@@ -52,8 +65,25 @@ export interface ControlPlaneEffects {
   launchReview: (work: Work, request: DispatchRequest, agents: HerdrAgent[], observedAt: string) => Promise<any>;
   launchProducer: (work: Work, request: DispatchRequest, profile: ProducerProfile, agents: HerdrAgent[], observedAt: string) => Promise<any>;
   observeDeployment: (delivered: Work[]) => Promise<DeploymentObservation>;
+  /**
+   * `POST work` as the master's operator-agent identity, the one that may create work (GY-1660): files
+   * the follow-up a delivered item's unobserved post-deploy verification owes. The coordinator
+   * credential `mutate` carries cannot create work.
+   */
+  fileWork?: (input: unknown, requestId: string) => Promise<{ key?: string }>;
+  /**
+   * Releases a filed follow-up from backlog as the same operator-agent identity (GY-1747): the release serving its delivery
+   * has just been observed, so nothing remains for a person to decide. An item already released is left as it is.
+   */
+  releaseWork?: (key: string) => Promise<void>;
+  /** The intervention report's reading for a pattern (GY-1698): a windowed follow-up's observation instant is taken from it; absent or failing, the merge time plus the criterion's window stands. */
+  readPattern?: PatternReader;
+  /** The observed release's post-deploy filer, or why it cannot be had (GY-1732); `releasePostDeployFiler` over the executor's config by default. */
+  postDeployFiler?: (sha: string) => ReturnType<typeof releasePostDeployFiler>;
   /** Records a launched session's durable handle on the item (AC-8). */
   recordSession?: (work: Work, handle: SessionHandleInput) => Promise<unknown>;
+  /** GY-1764: the base branch's tracked files the approve-scope handler judges a scope ask's paths against; built from the coordinator checkout when absent, injectable so a test supplies its own tree. */
+  repositoryFiles?: () => Promise<ReadonlySet<string>>;
   /** The clock and the wait a fenced worker start retries on (GY-1431); real time when absent. */
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -214,6 +244,10 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     if (!work) throw new Error(`${action.key} is not in the work snapshot this executor can read`);
     return { work, all: snapshot.work, observedAt: snapshot.now };
   };
+  // GY-1764: the approve-scope handler judges a scope ask on the same evidence the loop's scope step
+  // reads once per cycle — the base branch's tracked files, from the coordinator checkout this
+  // executor loaded its modules from. A wiring may supply the read; a test injects its tree.
+  const repositoryFiles = effects.repositoryFiles ?? (checkout ? () => currentBaseTree(checkout.root, config().baseBranch).then(tree => tree.files) : null);
   const herdr = async () => {
     const agents = await effects.agents();
     if (!agents) throw new Error('Herdr session inventory is unavailable; a launch needs it to keep one session per profile');
@@ -328,7 +362,8 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       if (action.inputs.kind !== 'request-review') throw new Error('unreachable');
       const request = work.autoDispatch?.review;
       if (!request || request.state !== 'requested') throw new Error(`${work.key} has no open review request; the control plane raises one for each observed head`);
-      const { profile, reason } = selectReviewerProfile(config());
+      const mode = work.observation?.source === 'control-plane' || !config().githubAppId || (action.inputs as any).provider === 'control-plane' || (work.policy && work.policy.reviewProvider && work.policy.reviewProvider !== 'github') ? 'control-plane' : 'github';
+      const { profile, reason } = selectReviewerProfile(config(), mode);
       if (!profile) throw new Error(reason!);
       const agents = await herdr();
       // A name every session of the profile could take is held: the namespace is at its bound,
@@ -358,7 +393,15 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       const { work } = await find(action);
       if (action.inputs.kind !== 'approve-scope') throw new Error('unreachable');
       // The control plane decides it from the item's own criteria; the executor carries no verdict.
-      const decided: Work = await effects.mutate(`work/${work.id}/autoscope`, { epoch: action.inputs.epoch }, randomUUID());
+      // The evidence gate rides along (GY-1764): the base tree read once per claim, exactly as the
+      // loop's scope step reads it once per cycle, so an ask naming what is not a repository file is
+      // refused as this claim's verdict and never routed to the independent approver. A failed read
+      // fails the claim to retry, exactly as the loop's failed read waits a cycle: the rules alone never decide it.
+      const request = work.scopeRequest;
+      const offenders = request && request.epoch === action.inputs.epoch && repositoryFiles
+        ? nonRepositoryPaths(unplannedPaths(work.plannedFiles, request.paths), await repositoryFiles())
+        : [];
+      const decided: Work = await effects.mutate(`work/${work.id}/autoscope`, { epoch: action.inputs.epoch, ...(repositoryFiles ? { treeRead: true } : {}), ...(offenders.length ? { nonRepository: offenders } : {}) }, randomUUID());
       const decision = decided.scopeDecision;
       return `the widening rule decided ${work.key}'s scope request: ${decision?.state ?? 'no decision recorded'} — ${decision?.reason ?? ''}`.slice(0, 2000);
     },
@@ -401,13 +444,35 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       return `${work.key}: GitHub merges ${work.candidate?.sha.slice(0, 12) ?? 'the candidate'} on its branch protection; Graphyard records the delivery from the merged observation`;
     },
     'verify-deployment': async action => {
-      const { work } = await find(action);
+      const { work, all } = await find(action);
       if (action.inputs.kind !== 'verify-deployment') throw new Error('unreachable');
       const observation = await effects.observeDeployment([work]);
       if (observation.source === 'unavailable' || !observation.sha) throw new Error(observation.reason ?? `no deployment could be read for ${work.key}`);
       if (!observation.deployed.includes(work.key)) throw new Error(observation.reason ?? `the running release ${observation.sha.slice(0, 12)} does not carry ${work.key}'s merge ${action.inputs.mergeSha.slice(0, 12)} yet`);
+      // GY-1660: the release just observed checks the item's declared post-deploy verifications, and an
+      // owed one files its follow-up before the observation is recorded: a filing that fails fails the
+      // action, which retries it, where a recorded observation would refuse every retry.
+      // GY-1732: the follow-ups are filed by the observed release's own code, never by an executor checkout at another commit;
+      // where that code cannot be had or run, each is deferred under its request id and the observation waits for a retry.
+      // That code also decides whether anything is owed: this checkout may not recognise a proof the release does.
+      const sha = observation.sha, source = await (effects.postDeployFiler ?? (release => releasePostDeployFiler(config(), release)))(sha);
+      if ('reason' in source && !deferPostDeployFollowUps(work, sha, all, source.reason).some(check => check.deferred))
+        throw new Error(`${work.key}: whether the release ${sha.slice(0, 12)} owes post-deploy follow-ups is its own code's to decide, and ${source.reason}; the deployment observation waits for it`);
+      const checks = 'reason' in source ? deferPostDeployFollowUps(work, sha, all, source.reason)
+        : await filePostDeployFollowUps(work, sha, all, effects.fileWork, new Date(effects.now?.() ?? Date.now()), effects.readPattern, new Date(observation.at), source.filer).finally(source.dispose);
+      const deferred = checks.filter(check => check.deferred);
+      if (deferred.length) throw new Error(`${work.key}: ${deferred.map(check => `${check.criterion} (${check.proof}) owes its post-deploy follow-up ${check.requestId}, whose filing is deferred: ${check.deferred}`).join('; ')}; the deployment observation waits for it`);
+      const owed = checks.filter(check => check.result === 'owed');
+      const unfiled = owed.filter(check => !check.followUp);
+      if (unfiled.length) throw new Error(`${work.key}: ${unfiled.map(check => `${check.criterion} (${check.proof})`).join(', ')} owes its post-deploy follow-up, and ${effects.fileWork ? 'filing it returned no item' : 'this executor has no operator-agent identity to file it with; run graphyard master autonomy --admin-token-stdin --apply'}; the deployment observation waits for it`);
+      // GY-1747: the observation that the release serves the delivery is the follow-up's release from backlog; a failed release
+      // fails the action, which retries it, before the observation is recorded.
+      // Authority is owed only for a follow-up still unreleased: a retry after an earlier attempt released it has nothing left to release.
+      const filed = checks.filter(check => check.followUp && !all.some(item => item.key === check.followUp && item.ready));
+      if (filed.length && !effects.releaseWork) throw new Error(`${work.key}: ${filed.map(check => `${check.criterion} (${check.proof})`).join(', ')} has a filed post-deploy follow-up, and this executor has no operator-agent identity to release it from backlog with; run graphyard master autonomy --admin-token-stdin --apply; the deployment observation waits for it`);
+      for (const check of filed) await effects.releaseWork!(check.followUp!);
       await effects.mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: action.inputs.mergeSha, source: observation.source, observedAt: observation.at }, randomUUID());
-      return `observed the release serving ${observation.sha.slice(0, 12)} for ${work.key}`;
+      return `observed the release serving ${observation.sha.slice(0, 12)} for ${work.key}${owed.length ? `; ${owed.map(check => `${check.criterion} owes its post-deploy observation${check.followUp ? ` (${check.followUp})` : ''}`).join(', ')}` : ''}`;
     },
   };
   if (checkoutRefusal) for (const kind of Object.keys(handlers) as NextActionKind[]) {

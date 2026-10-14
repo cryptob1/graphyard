@@ -10,7 +10,7 @@ import { classifyScope, regressionRefusals } from '../src/regression-guard.js';
 import { parseGeneratedFiles } from '../src/generated-files.js';
 import { attributeConflicts, hasConflictMarkers, managedServerUrl, parseGeneratedManifest, regenerateManagedBlocks } from '../src/sync.js';
 import { managedInstructions } from '../src/repository-setup.js';
-import { managedMasterInstructions } from '../src/master.js';
+import { withoutMasterInstructions } from '../src/master.js';
 import type { ScopeFile, Work } from '../src/model.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -18,6 +18,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 const exec = promisify(execFile);
 const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
 const launcher = join(repositoryRoot, 'bin/graphyard.mjs');
+const legacyMasterBlock = '<!-- graphyard-master -->\n## Graphyard master agent\n\nRules every session loaded.\n<!-- /graphyard-master -->';
 const checkDocs = join(repositoryRoot, 'scripts/check-docs.mjs');
 const file = (path: string, status: ScopeFile['status'] = 'modified', overrides: Partial<ScopeFile> = {}): ScopeFile => ({ path, status, sha: 'new', additions: 3, deletions: 2, binary: false, baseSha: 'old', ...overrides });
 
@@ -82,7 +83,8 @@ async function fixtureRepository() {
   const page = (path: string, section: string, order: number, summary: string, body = 'Body.') => writeFile(join(main, path), `<!-- page: ${section} | ${order} | ${summary} -->\n# ${path}\n\n${body}\n`);
   for (const [path, [section, order, summary]] of Object.entries(pages)) await page(path, section, order, summary);
   execFileSync(process.execPath, ['scripts/check-docs.mjs', '--write'], { cwd: main });
-  const agents = managedMasterInstructions(managedInstructions('# Fixture rules\n\nHand-written.\n', 'https://graphyard.example'));
+  // The base carries a graphyard-master block an earlier master init wrote (before GY-1493), which sync's regeneration drops.
+  const agents = `${managedInstructions('# Fixture rules\n\nHand-written.\n', 'https://graphyard.example')}\n${legacyMasterBlock}\n`;
   await writeFile(join(main, 'AGENTS.md'), agents);
   git(main, 'add', '.'); git(main, 'commit', '-q', '-m', 'base'); git(main, 'push', '-q', 'origin', 'main');
   execFileSync('git', ['clone', '-q', origin, branch], { stdio: 'ignore' }); git(branch, 'config', 'user.email', 't@example.com'); git(branch, 'config', 'user.name', 'T');
@@ -163,7 +165,8 @@ test('integration:generated-index-no-conflict — sync regenerates the managed A
     assert.match(first.output.next, /rerun sync GY-1/);
     const agents = await readFile(join(branch, 'AGENTS.md'), 'utf8');
     assert.ok(!hasConflictMarkers(agents)); assert.match(agents, /every 30 seconds/); assert.match(agents, /^# Fixture rules\n\nHand-written\./, 'the hand-written text around the blocks is kept');
-    assert.equal(agents, managedMasterInstructions(managedInstructions(agents, 'https://graphyard.example')), 'the blocks are exactly what the templates render');
+    assert.equal(agents, managedInstructions(agents, 'https://graphyard.example'), 'the worker block is exactly what the template renders');
+    assert.ok(!agents.includes('<!-- graphyard-master -->') && !agents.includes('## Graphyard master agent'), 'the master block is dropped, not rendered again');
     assert.ok(hasConflictMarkers(await readFile(join(branch, 'docs/start.md'), 'utf8')), 'the worker still owns the real conflict');
     // The worker resolves the remaining conflict and reruns sync: it finishes the merge.
     await page(branch, 'docs/start.md', 'Start here', 1, 'start.', 'Resolved body.');
@@ -198,12 +201,13 @@ test('integration:generated-index-no-conflict — the pure helpers behind sync: 
   ]);
 });
 
-test('integration:generated-index-no-conflict — AGENTS.md carries exactly the blocks this tree\'s templates render, so drift is caught here rather than by a committed diff in every PR', async () => {
+test('integration:generated-index-no-conflict — AGENTS.md carries exactly the worker block this tree\'s template renders and no master block, so drift is caught here rather than by a committed diff in every PR', async () => {
   const agents = await readFile(join(repositoryRoot, 'AGENTS.md'), 'utf8');
   const url = managedServerUrl(agents);
   assert.ok(url, 'AGENTS.md names the Graphyard server its coordination block was rendered for');
   assert.equal(managedInstructions(agents, url!), agents, 'the coordination block matches src/repository-setup.ts; run graphyard init --apply (or update the template) and commit');
-  assert.equal(managedMasterInstructions(agents), agents, 'the master block matches src/master.ts; run graphyard master init and commit');
+  assert.ok(!agents.includes('graphyard-master -->'), 'AGENTS.md carries no graphyard-master block: the master reads its instructions from graphyard master guide');
+  assert.equal(withoutMasterInstructions(agents), agents);
 });
 
 test('manual:overlap-docs — the guides describe optimistic dispatch, smallest-scope-first dispatch, conflict sets, generated files and sync regeneration', async () => {

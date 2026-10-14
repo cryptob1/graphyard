@@ -14,6 +14,9 @@ import { closeWork } from '../close.js';
 import { recordTriage } from '../followups.js';
 import { answerResearch, recordResearch } from '../../research.js';
 import { recordDecomposition } from '../../decomposition.js';
+import { recordShadowVerdict } from '../shadow-verdict.js';
+import { recordReviewLaunch, recordReviewVerdict } from '../review-verdict.js';
+import { recordMergeEvent } from '../merge-record.js';
 import { issuePushCredential } from '../push-credential.js';
 import { controlPlaneSyncPush } from '../../sync.js';
 
@@ -110,6 +113,33 @@ export const workRoutes = defineRoutes('work', [
     async handle(context, [id]) {
       await refuseLead(context, id, 'closed-question');
       return judgeClosedQuestion(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
+    },
+  },
+  // The shadow merge gate's verdict for a head (GY-1522): an observation recorded by the loop's coordinator identity only.
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/shadow-verdict$/,
+    async handle(context, [id]) {
+      await refuseLead(context, id, 'shadow-verdict');
+      return recordShadowVerdict(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
+    },
+  },
+  // Review by risk in control-plane mode (GY-1525): the coordinator registers each reviewer launch
+  // with its token hash, and the launched session posts its one verdict as that token.
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/(review-launch|review-verdict)$/,
+    async handle(context, [id, action]) {
+      await refuseLead(context, id, action);
+      const data = await parseJson(context), key = context.idempotencyKey(), target = decodeURIComponent(id);
+      return action === 'review-launch' ? recordReviewLaunch(context.services, context.actor, target, data, key) : recordReviewVerdict(context.services, context.actor, target, data, key);
+    },
+  },
+  // The merge writer's ledger (GY-1524): intent, trial, pushed, reconciled and refused, recorded by the
+  // loop's coordinator identity only; a reconciliation delivers the item in the same transaction.
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/merge-record$/,
+    async handle(context, [id]) {
+      await refuseLead(context, id, 'merge-record');
+      return recordMergeEvent(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
     },
   },
   // A worker session's short-lived push credential (GY-999), for the lease holder only.

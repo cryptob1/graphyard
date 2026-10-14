@@ -11,6 +11,7 @@ import type { FleetClient, FleetProbe } from '../src/fleet.js';
 import { expandTypedCommand } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
+// Time-bomb allowance (GY-1694): the 2026-09-25 `clock` is the ScreenPane's virtual start clock, advanced only by wait() and handed via bounds(); Date.now()/new Date() stamp the credential expiry and the dispatch observedAt.
 
 // GY-417: a runtime's start is judged from the runtime's own screen, and a launch whose preferred
 // account's runtime never starts is visible in the fallback it made. OpenCode 1.18's start screen
@@ -242,7 +243,8 @@ test('unit:start-failure-fallback-visible — a worker role the agent registry d
     const client: FleetClient = {
       document: async () => structuredClone(registry),
       select: async request => {
-        const choice = chooseSession(registry, request, clock);
+        // A registry that predates the request's `exclude` (GY-1746) chooses the failed account again: the launcher's own guard still ends the dispatch.
+        const choice = chooseSession(registry, { ...request, exclude: [] }, clock);
         if (!choice.account) return { selected: false, reason: choice.reason, skipped: choice.skipped, session: null, account: null, runtime: null, model: null, revision: registry.revision };
         const session: FleetSession = { id: `session-${chosen.length + 1}`, role: request.role, account: choice.account.name, runtime: choice.runtime.name, model: choice.model.name, host: request.host, work: request.work, principal: request.principal, group: request.group,
           selectedAt: at, selectedBy: 'master', reason: choice.reason, skipped: choice.skipped, endedAt: null, endReason: null };

@@ -224,8 +224,34 @@ export function codexProjects(text: string): CodexProject[] {
   }
   return projects;
 }
+/**
+ * Codex's workspace-write sandbox protects `.agents` and `.codex` under its working directory, and
+ * bubblewrap cannot create a missing one under a read-only mount, so a session started where either
+ * is absent failed every command with `bwrap: Can't create file …/.agents: Read-only file system`
+ * (GY-1717). Each missing one is created empty before the launch; an entry already there, whether
+ * a directory, a file or a symlink (dangling or not), is left as it is, and a folder that does not
+ * exist yet is left for the launch itself to report. Bubblewrap also rejects a protected path that
+ * is a symlink (a dangling one takes the missing-path route), so such an entry refuses the launch
+ * by name rather than starting a session whose every command fails. Under the test runner only a
+ * folder in a temporary directory is touched.
+ */
+export const codexProtectedPaths = ['.agents', '.codex'] as const;
+export async function createCodexProtectedPaths(folder: string) {
+  if (underTestRunner() && !temporaryDirectories().some(temporary => `${folder}${sep}`.startsWith(`${temporary}${sep}`))) return [];
+  if (!(await stat(folder).then(entry => entry.isDirectory(), () => false))) return [];
+  const created: string[] = [], linked: string[] = [];
+  for (const name of codexProtectedPaths) {
+    const path = resolve(folder, name);
+    try { if ((await lstat(path)).isSymbolicLink()) linked.push(path); continue; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    try { await mkdir(path); created.push(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+  }
+  if (linked.length) throw new LaunchRefusedError('codex', `Graphyard refuses to launch the codex runtime in ${folder}: ${linked.join(' and ')} ${linked.length > 1 ? 'are symlinks' : 'is a symlink'}, which Codex's bubblewrap sandbox rejects as a protected path, so every command in the session would fail in the sandbox; Graphyard leaves it untouched, so remove the symlink, then launch again.`);
+  return created;
+}
 export async function trustCodexFolder(directory: string, environment: Record<string, string> = {}): Promise<FolderTrust> {
   const file = codexConfigFile(environment), folder = canonicalPath(directory);
+  try { await createCodexProtectedPaths(folder); }
+  catch (error) { if (error instanceof LaunchRefusedError) throw error; throw new LaunchRefusedError('codex', `Graphyard refuses to launch the codex runtime in ${folder}: its sandbox-protected ${codexProtectedPaths.join(' and ')} could not be created (${error instanceof Error ? error.message : String(error)}), so every command in the session would fail in the sandbox.`); }
   if (underTestRunner() && !temporaryDirectories().some(temporary => canonicalPath(file).startsWith(`${temporary}${sep}`))) return { file, directory: folder, written: false };
   const refuse = (why: string) => new LaunchRefusedError('codex', `Graphyard refuses to launch the codex runtime in ${folder}: ${why}, so the session would stop at Codex's "Trust this folder?" dialog for a human.`);
   const read = async () => {
@@ -456,7 +482,24 @@ export function launchPlan(kind: string | undefined, approvals: ApprovalMode = '
 }
 
 export interface HarnessRule { rule: string; why: string }
-export interface HarnessPlan { harness: string; file: string | null; allow: HarnessRule[]; deny: HarnessRule[]; manual: string | null; note: string; retired?: string[] }
+/** One Claude Code command hook Graphyard generates: the event, the tool matcher and the command it runs. */
+export interface HarnessHook { event: 'PreToolUse'; matcher: string; command: string; timeout: number; why: string }
+export interface HarnessPlan { harness: string; file: string | null; allow: HarnessRule[]; deny: HarnessRule[]; manual: string | null; note: string; retired?: string[]; hooks?: HarnessHook[] }
+/**
+ * Whether a settings hook entry is Graphyard's own (GY-1494): one whose command runs a CLI's
+ * `scope-guard KEY EPOCH`. A regeneration replaces exactly these and keeps every other entry.
+ */
+export const graphyardHookEntry = (entry: unknown) => Array.isArray((entry as any)?.hooks)
+  && (entry as any).hooks.some((hook: any) => typeof hook?.command === 'string' && / scope-guard \S+ \d+$/.test(hook.command.trim()));
+/** The settings `hooks` object with the plan's hooks in place of Graphyard's earlier ones; operator-added entries are kept. */
+export function mergeHarnessHooks(existing: unknown, hooks: readonly HarnessHook[]) {
+  const current: Record<string, unknown> = existing && typeof existing === 'object' && !Array.isArray(existing) ? { ...existing as Record<string, unknown> } : {};
+  for (const event of new Set(hooks.map(hook => hook.event))) {
+    const kept = (Array.isArray(current[event]) ? current[event] as unknown[] : []).filter(entry => !graphyardHookEntry(entry));
+    current[event] = [...kept, ...hooks.filter(hook => hook.event === event).map(hook => ({ matcher: hook.matcher, hooks: [{ type: 'command', command: hook.command, timeout: hook.timeout }] }))];
+  }
+  return current;
+}
 
 /**
  * How Claude Code judges one shell command against a rule set: a matching deny wins, then a
@@ -635,7 +678,8 @@ export async function writeHarnessPermissions(root: string, plan: HarnessPlan, a
   // Operator-added entries are never removed; generation adds the master's own rules and removes
   // only the retired rules an earlier Graphyard itself generated.
   const kept = (list: unknown) => (Array.isArray(list) ? list : []).filter(rule => !plan.retired?.includes(rule));
-  const next = { ...settings, permissions: { ...permissions, allow: [...kept(permissions.allow), ...addedAllow.map(entry => entry.rule)], deny: [...kept(permissions.deny), ...addedDeny.map(entry => entry.rule)] } };
+  const next = { ...settings, permissions: { ...permissions, allow: [...kept(permissions.allow), ...addedAllow.map(entry => entry.rule)], deny: [...kept(permissions.deny), ...addedDeny.map(entry => entry.rule)] },
+    ...(plan.hooks?.length ? { hooks: mergeHarnessHooks(settings.hooks, plan.hooks) } : {}) };
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
   await assertIgnored(root, plan.file);
   const temporary = `${file}.${randomUUID()}.tmp`;

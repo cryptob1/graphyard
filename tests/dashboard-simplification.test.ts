@@ -78,7 +78,7 @@ test('unit:plain-status-copy — every stage and every gate reason reads as one 
   assert.equal(plainStatus(find('GY-13'), NOW).sentence, 'Waiting for someone to pick this up');
   assert.equal(plainStatus(find('GY-14'), NOW).sentence, 'Alex is building it — no pull request yet');
   assert.equal(plainStatus(find('GY-15'), NOW).sentence, 'Waiting for review of PR #42');
-  assert.equal(plainStatus(find('GY-17'), NOW).sentence, 'Stuck: needs a second Postgres instance');
+  assert.equal(plainStatus(find('GY-17'), NOW).sentence, 'Stuck: A fault blocks it; the master agent clears it.');
   // A lapsed claim is waiting for a worker, and says who stopped.
   assert.equal(plainStatus(find('GY-12'), NOW).sentence, 'Waiting for someone to pick this up — Robin stopped working on it');
 
@@ -101,7 +101,7 @@ test('unit:plain-status-copy — every stage and every gate reason reads as one 
     ['done (awaiting deploy)', { ...find('GY-18'), delivery: { ...find('GY-18').delivery!, deployment: undefined }, policy: { ...find('GY-18').policy, deploySmoke: true } as any }, 'Shipped in PR #40 — waiting to be deployed', 'waiting'],
     // No per-item deployment record is written unless the policy asks for the check after deploying (GY-161 AC-11).
     ['done (no deployment record)', { ...find('GY-18'), delivery: { ...find('GY-18').delivery!, deployment: undefined } }, 'Shipped in PR #40', 'shipped'],
-    ['blocked', { ...find('GY-17') }, 'Stuck: needs a second Postgres instance', 'stuck'],
+    ['blocked', { ...find('GY-17') }, 'Stuck: A fault blocks it; the master agent clears it.', 'stuck'],
   ];
   const seen = new Set<string>();
   for (const [name, item, sentence, tone] of table) {
@@ -217,7 +217,7 @@ test('integration:dashboard-word-budget — the home page answers what needs you
   const order = ['aria-label="Blocked"', 'aria-label="Moving"', 'aria-label="Up next"', 'aria-label="Backlog"', 'aria-label="Shipped this week"'].map(label => page.indexOf(label));
   assert.ok(order.every(index => index > 0) && order.every((index, i) => i === 0 || index > order[i - 1]), `sections in order: ${order}`);
   assert.ok(page.indexOf('Move sessions to Postgres') < page.indexOf('Add dark mode to settings'), 'the blocked item is listed first');
-  assert.match(text(page), /Needs a second Postgres instance/);
+  assert.match(text(page), /A fault blocks it; the master agent clears it/);
 });
 
 test('integration:item-view-structure — state, why, who acts next and the pull request first; the steps; each criterion once; edits in an admin menu; at most 250 words', () => {
@@ -424,7 +424,7 @@ test('integration:work-page-density — every group has one tile, an empty group
   assert.equal(byGroup['needs-you'].length, 0);
   assert.ok(page.includes('data-tile="needs-you"'), 'the empty group keeps its tile, reading 0');
   assert.ok(!page.includes('data-group-section="needs-you"'), 'but draws no empty list');
-  assert.match(text(page), /Needs a second Postgres instance/, 'the blocked row says why');
+  assert.match(text(page), /A fault blocks it; the master agent clears it/, 'the blocked row says why');
   for (const item of byGroup.moving) assert.ok(page.includes(`data-row="${item.key}"`), item.key);
   assert.ok(words(page).length <= 150, `home renders ${words(page).length} words excluding item titles: ${text(page)}`);
 });

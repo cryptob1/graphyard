@@ -11,6 +11,7 @@ import { cycleCost, cycleTimes, loopLiveness, slowCycleAttention, slowCycleMs } 
 import { type CycleMetrics, emptyCycleSteps } from '../src/daemon/state.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01 snapshot `now` is the cycle's own logic clock (runCycle adopts snapshot.now); Date.now() only times the cycle and the launcher waves, which nothing compares with 2030.
 
 // GY-616: a burst of session launches ran inside the master cycle, one Herdr pane and session
 // registration after another, and every merge, decision and close after them waited for the burst.

@@ -1,21 +1,24 @@
 // Concern: session and worker harness permissions, and starting the master session.
 import { lstat, mkdir } from 'node:fs/promises';
-import { mkdirSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, resolve, basename } from 'node:path';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { nameForLaunch } from '../session-name.js';
 import { executorUnitDirectory, launchAuthorization } from '../repository-setup.js';
-import { type HarnessPlan, type HarnessRule, writeHarnessPermissions, masterHarnessPlan, harnessDecision, claudeRuleProblem, bashRuleMatches } from '../harness.js';
-import { executorInstance, legacyLoopUnit, readInstallUnits } from '../install/units.js';
+import { type HarnessHook, type HarnessPlan, type HarnessRule, writeHarnessPermissions, mergeHarnessHooks, masterHarnessPlan, harnessDecision, claudeRuleProblem, bashRuleMatches } from '../harness.js';
+import { executorInstance, foreignUnitText, initialiseUnitsCommand, installUnitsFile, type InstallUnits, LegacyUnitRefusal, legacyLoopUnit, perInstallUnits, proposedInstallUnits, readInstallUnits, recordInstallUnits, resolveInstallUnits, unitCheckout } from '../install/units.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
-import { coordinatorCheckoutRoot, workerConfinementRefusal } from './profiles.js';
+import { coordinatorCheckoutRoot, promotionCommand, workerConfinementRefusal } from './profiles.js';
 import { atomicPrivateText, loadMasterConfig } from './config.js';
 import { accountLaunch } from './environments.js';
 import { type RequestDelivery, startAgentSession } from './launch.js';
 import { createdHerdrTab, type HerdrAgent, herdrJson, stopCreatedHerdrTab } from './herdr.js';
 import type { PreparedWorker } from './dispatch.js';
 import { worktreeRoot } from '../install/worktree-root.js';
+import { scopeGuardCommand, scopeGuardMatcher } from '../scope-guard.js';
+import type { MergerMode } from '../merger-mode.js';
 import { verificationEnvironment, verificationSlotsDirectory } from './verification-slots.js';
 
 /**
@@ -96,6 +99,10 @@ export function installUnitRules(root: string, unitDirectory: string): { allow: 
  */
 export type SessionRole = 'worker' | 'reviewer' | 'producer' | 'docs-sync';
 export interface SessionHarnessInput { role: SessionRole; kind: string | undefined; cliPath: string; repository: string; baseBranch: string; credentialHome: string; credentialDirectories: string[]; branch?: string; pr?: number;
+  /** A worker's own item and epoch, which its scope-guard hook names (GY-1494). */
+  key?: string; epoch?: number;
+  /** The recorded merger the launch read (GY-1523); under `control-plane` no scope-guard hook is installed (GY-1528). */
+  mergeWriter?: MergerMode;
   /** The detached checkout Graphyard allocated for a reviewer session under the managed worktree root. */
   checkout?: string }
 export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
@@ -125,13 +132,14 @@ export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
     { rule: 'Bash(git commit:*)', why: 'This session changes nothing in the candidate.' },
     { rule: `Bash(${cli} claim:*)`, why: 'Claiming work would make this principal an implementer.' },
   ];
-  let allow: HarnessRule[], deny: HarnessRule[];
+  let allow: HarnessRule[], deny: HarnessRule[], hooks: HarnessHook[] = [];
   if (input.role === 'worker') {
     if (!input.branch) throw new Error('A worker harness names the assigned branch it may push');
     // The same worker rules installWorkerHarness writes into the worktree, plus the shared secret
     // and verdict denies: loaded through --settings they apply even though the worktree's own
     // settings file is not loaded.
-    const worker = workerHarnessPlan({ cliPath: input.cliPath, branch: input.branch, baseBranch: input.baseBranch, credentialHome: input.credentialHome });
+    const worker = workerHarnessPlan({ cliPath: input.cliPath, branch: input.branch, baseBranch: input.baseBranch, credentialHome: input.credentialHome, key: input.key, epoch: input.epoch, mergeWriter: input.mergeWriter });
+    hooks = worker.hooks ?? [];
     const extra = [...secrets, ...noVerdict, { rule: `Bash(${cli} evidence:*)`, why: 'Implementation workers never submit trusted evidence.' }];
     allow = worker.allow;
     deny = [...worker.deny, ...extra.filter(entry => !worker.deny.some(existing => existing.rule === entry.rule))];
@@ -139,7 +147,9 @@ export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
     allow = [
       { rule: 'Bash(gh pr diff:*)', why: 'Read the candidate diff.' },
       { rule: 'Bash(gh pr view:*)', why: 'Read the pull request and poll its mergeability before posting.' },
-      ...(input.pr ? [{ rule: `Bash(gh api --method POST repos/${input.repository}/pulls/${input.pr}/reviews*)`, why: 'Post the one verdict this session was launched for; the master itself is denied every review call.' }] : []),
+      // GY-1492: the verdict goes through review post, which checks the launch's binding, the head,
+      // mergeability and the thread lines before its one POST; a raw review call is denied below.
+      { rule: `Bash(${cli} review post:*)`, why: 'Post the one verdict this session was launched for, checked against its launch binding; the master itself is denied every review call.' },
       // Surrounding code is read from a detached checkout under the managed worktree root, which
       // Graphyard allocates for the session and removes when it ends.
       ...(input.checkout ? [{ rule: 'Bash(git fetch:*)', why: 'Fetch the exact head under review.' },
@@ -147,6 +157,7 @@ export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
     ];
     deny = [...secrets, ...noPush,
       { rule: `Bash(${cli} evidence:*)`, why: 'A reviewer never submits evidence.' },
+      { rule: 'Bash(gh api *pulls/*/reviews*)', why: 'The verdict is posted only through review post, which checks it first.' },
       { rule: 'Edit(./**)', why: 'The review session is read-only.' },
       { rule: 'Write(./**)', why: 'The review session is read-only.' },
     ];
@@ -177,7 +188,7 @@ export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
     ];
     deny = [...secrets, ...noPush, ...noVerdict];
   }
-  return { harness: 'claude', file: null, allow, deny, manual: null, note: `Role-scoped ${input.role} rules; the session loads these and the operator's user settings, never the repository's project or local settings where the master's rules live.` };
+  return { harness: 'claude', file: null, allow, deny, manual: null, ...(hooks.length ? { hooks } : {}), note: `Role-scoped ${input.role} rules; the session loads these and the operator's user settings, never the repository's project or local settings where the master's rules live.` };
 }
 
 /** The one push a docs-sync session makes, after `git push`: the resolved merge to the item's own branch. */
@@ -262,7 +273,8 @@ export async function prepareSessionHarness(root: string, config: MasterConfig, 
   if (input.kind !== 'claude' || !await repositoryCarriesClaudeSettings(root)) return { plan, file: null, args: [] as string[], role: null as string | null, environment };
   const file = sessionHarnessFile(root, input.role, input.profile);
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-  await atomicPrivateText(file, `${JSON.stringify({ permissions: { allow: plan.allow.map(entry => entry.rule), deny: plan.deny.map(entry => entry.rule) } }, null, 2)}\n`);
+  await atomicPrivateText(file, `${JSON.stringify({ permissions: { allow: plan.allow.map(entry => entry.rule), deny: plan.deny.map(entry => entry.rule) },
+    ...(plan.hooks?.length ? { hooks: mergeHarnessHooks({}, plan.hooks) } : {}) }, null, 2)}\n`);
   // The authorization is the session's role text: startAgentSession writes it to the session's
   // role file and the command line loads that file (GY-121), never the text itself.
   return { plan, file, args: ['--setting-sources', 'user', '--settings', file], role: launchAuthorization.replace(/\s+/g, ' ') as string | null, environment };
@@ -274,8 +286,13 @@ export async function prepareSessionHarness(root: string, config: MasterConfig, 
  * control-plane truth (master-session.ts masterRequest), so both paths start the same session.
  */
 export function masterPrompt(config: MasterConfig): string {
-  const prompt = `You are the dedicated Graphyard master agent for ${config.repository}. Do not implement product work, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, run node ${config.cliPath} master guide, then run node ${config.cliPath} master status. Use Graphyard as assignment and progression truth and Herdr only for session health and control. Route ready work to configured worker profiles, require workers to claim for themselves, preserve handoffs, and leave dispatch, review, proof production and routine merge of system-driven items (every item not created with "systemDriven": false) to node ${config.cliPath} master run, whose loop performs each; the master CLI refuses those hand actions on them. The loop drives an item created with "systemDriven": false the same way; opting out only also allows those hand actions, so take one only where master status shows the loop has not, and merge by hand only through graphyard master merge after every exact-candidate gate passes. Act without asking: only goals and priorities, spending money or opening third-party accounts, and issuing credentials to people belong to the human. Create, release, unblock and add requirements with node ${config.cliPath} master create, release, unblock, or requirements; request every other decision with node ${config.cliPath} master decide GY-N ACTION REASON and launch its independent approver with node ${config.cliPath} master approver GY-N DECISION.${config.operatorAgent ? '' : ` Your operator-agent and approver identities are not provisioned yet; report that onboarding must run node ${config.cliPath} master autonomy --admin-token-stdin --apply once.`}`;
-  const reviewInstruction = config.reviewer
+  // GY-1501: a supervised install has no approver by design; that is its mode, not an onboarding fault.
+  const supervised = config.supervision === 'supervised';
+  const supervisedInstruction = `This install is supervised: the operator reviews and merges each pull request on GitHub, and no two-party decision can be approved yet, because supervised mode provisions no operator-agent or approver identity; that is the mode the operator chose, not an onboarding fault, so do not report the missing identities. Record what needs the operator in master status and leave it there; promotion to autonomy (${promotionCommand}) is the operator's choice.`;
+  const prompt = `You are the dedicated Graphyard master agent for ${config.repository}. Do not implement product work, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, run node ${config.cliPath} master guide, then run node ${config.cliPath} master status. Use Graphyard as assignment and progression truth and Herdr only for session health and control. Route ready work to configured worker profiles, require workers to claim for themselves, preserve handoffs, and leave dispatch, review, proof production and routine merge of system-driven items (every item not created with "systemDriven": false) to node ${config.cliPath} master run, whose loop performs each; the master CLI refuses those hand actions on them. The loop drives an item created with "systemDriven": false the same way; opting out only also allows those hand actions, so take one only where master status shows the loop has not, and merge by hand only through graphyard master merge after every exact-candidate gate passes. Act without asking: only goals and priorities, spending money or opening third-party accounts, and issuing credentials to people belong to the human. ${supervised ? supervisedInstruction : `Create, release, unblock and add requirements with node ${config.cliPath} master create, release, unblock, or requirements; request every other decision with node ${config.cliPath} master decide GY-N ACTION REASON and launch its independent approver with node ${config.cliPath} master approver GY-N DECISION.${config.operatorAgent ? '' : ` Your operator-agent and approver identities are not provisioned yet; report that onboarding must run node ${config.cliPath} master autonomy --admin-token-stdin --apply once.`}`}`;
+  const reviewInstruction = supervised
+    ? `The operator reviews and merges: when a candidate passes the build gate, the operator's own GitHub approval of its exact head passes the review gate and GitHub auto-merge merges it. node ${config.cliPath} master run launches no reviewer, approver or escalation session; never review or approve a candidate yourself, never launch a reviewer, and never submit evidence.`
+    : config.reviewer
     ? `Independent review and proof collection start on their own: when a candidate passes the build gate the control plane records a review request and producer requests bound to its exact head, and node ${config.cliPath} master run launches the reviewer identity ${config.reviewer.slug}[bot] and one producer session per proof group for them within 30 seconds. Read the findings, route rework, and merge; never launch reviews or producers by hand, never review a candidate yourself, and never submit evidence. master status shows what is running per candidate and since when, and node ${config.cliPath} master review GY-N is only the recovery of a review request the loop has stopped relaunching: its session settled without answering it, its automatic sessions are exhausted, or its launch reached the dispatch failure limit with no request-review row still queued; on a system-driven item it is refused before then.`
     : `No reviewer identity is registered yet. Run node ${config.cliPath} master reviewer setup before routing work that needs independent review; once it is registered, master run launches reviews and producers for every submitted head on its own. Never approve a candidate yourself.`;
   const administrationInstruction = config.browser
@@ -305,10 +322,10 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
     // The master starts on its own request too; a runtime without that contract is prompted
     // after start, with the text last and the confirmation following it. The request is the
     // shared master prompt (GY-898), the same one the loop's launch carries with its handover.
-    // The master is not one of the confined roles (GY-888): it runs the loop's own configuration,
-    // administration and browser-flow commands from the coordinator root, and its harness rules
-    // above remain what bounds it. Every other launched session carries the OS-level confinement.
-    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, masterPrompt(config), run, { directory: root, confirm: 'follow', retry: masterRetry, environment: launch.environment, confinement: false }));
+    // The master is confined like every other launched session (GY-1658): its configuration,
+    // administration and browser-flow commands run from the coordinator root with the checkout
+    // read-only, its managed .graphyard state writable; a host that cannot confine it refuses.
+    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, masterPrompt(config), run, { directory: root, confirm: 'follow', retry: masterRetry, environment: launch.environment, confinement: 'master' }));
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) try { await stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }
@@ -347,6 +364,84 @@ const autonomyDeny = (credentialHome: string): HarnessRule[] => [
   { rule: 'Bash(*GRAPHYARD_APPROVER=*)', why: 'Only a launched approver session carries the approver marker; the master never claims it.' },
   { rule: `Edit(//${credentialHome}/**)`, why: 'Agent credentials are issued by onboarding and rotated through the API, never edited in place.' },
 ];
+/** Thrown when the checkout a harness apply resolved is not one it may apply against (GY-1662); `unit` is the unit file to update, when one names the right checkout elsewhere. */
+export class HarnessCheckoutRefusal extends Error {
+  override readonly name = 'HarnessCheckoutRefusal';
+  constructor(readonly root: string, readonly unit: string | null, detail: string) { super(detail); }
+}
+/**
+ * GY-1662: the checkout the loop applies the Claude harness contract against, checked before any
+ * write. A loop's research effect names its scratch worktree, which records no units, so an apply
+ * resolved from it met the legacy unit refusal every cycle; the loop's own checkout is what it
+ * applies against. ROOT is refused, naming it and the `master init` remedy, when it records no units
+ * (naming too the legacy unit that runs another checkout, when one does); and when the unit serving this loop (SERVINGUNIT, in
+ * UNITDIRECTORY) runs a checkout other than ROOT, cannot be read, or is not the master unit ROOT
+ * records, naming that unit to update rather than applying against the wrong checkout.
+ */
+/**
+ * The checkout a master unit with no WorkingDirectory launches, when it is not ROOT (GY-1662):
+ * foreignUnitText reads a master unit's checkout only from its WorkingDirectory, so one that omits
+ * it and runs another checkout's bin/graphyard.mjs passed. Without a WorkingDirectory the CLI its
+ * ExecStart runs is the only evidence of the checkout, so one naming no CLI under ROOT is refused;
+ * a unit whose WorkingDirectory is ROOT may run an external launcher (a private CLI path).
+ */
+function launchedCheckout(text: string, root: string, home: string): string | null {
+  const { workingDirectory, execStart } = unitCheckout(text, home);
+  if (workingDirectory) return null;
+  const real = (path: string) => { const absolute = resolve(path); try { return realpathSync(absolute); } catch { return absolute; } };
+  const cli = execStart?.split(/\s+/).map(part => part.replace(/^"|"$/g, '')).find(part => /\/bin\/graphyard\.mjs$/.test(part));
+  if (!cli) return `a command with no WorkingDirectory and no ${root}/bin/graphyard.mjs in its ExecStart (${execStart ?? 'none'})`;
+  const checkout = dirname(dirname(cli));
+  return real(checkout) === real(root) ? null : checkout;
+}
+/**
+ * GY-1692 (GY-1666): the unit record `master init` writes, written by the loop itself when the
+ * evidence `harnessApplyCheckout` asks for is in hand — the unit serving this loop is read and runs
+ * ROOT, and its name is the master unit ROOT would record (the legacy alias when every legacy unit
+ * installed runs ROOT, else the per-install name). GY-1662 refused every units-less checkout because
+ * with no serving unit a separate launcher checkout could pass; a serving unit that runs ROOT is that
+ * proof, so waiting on a person to run `master init` for it asked them for the loop's own job. Returns
+ * the units recorded now, or null when nothing was recorded: a record exists, no serving unit is known,
+ * its file cannot be read or runs elsewhere, or its name is not the one ROOT would record.
+ */
+export async function recordServingUnits(root: string, repository: string, options: { servingUnit?: string | null; unitDirectory?: string; home?: string } = {}): Promise<InstallUnits | null> {
+  const unitDirectory = options.unitDirectory ?? executorUnitDirectory(), home = options.home ?? homedir();
+  if (!options.servingUnit || existsSync(resolve(root, installUnitsFile))) return null;
+  let text: string;
+  try { text = readFileSync(resolve(unitDirectory, options.servingUnit), 'utf8'); } catch { return null; }
+  if (foreignUnitText(text, root, home) ?? launchedCheckout(text, root, home)) return null;
+  if (proposedInstallUnits(root, repository, unitDirectory, home).master !== options.servingUnit) {
+    // GY-1745: a leftover legacy-named unit that also runs ROOT makes the proposal the legacy alias, though the unit serving the loop, which runs ROOT, is this install's own per-install unit: that name is what the install records.
+    const own = perInstallUnits(repository);
+    return own.master === options.servingUnit ? recordInstallUnits(root, own) : null;
+  }
+  return resolveInstallUnits(root, repository, unitDirectory, home);
+}
+export function harnessApplyCheckout(root: string, options: { servingUnit?: string | null; unitDirectory?: string; home?: string } = {}) {
+  const unitDirectory = options.unitDirectory ?? executorUnitDirectory(), home = options.home ?? homedir();
+  let units: InstallUnits;
+  try { units = readInstallUnits(root, unitDirectory, home); }
+  catch (error) {
+    if (!(error instanceof LegacyUnitRefusal)) throw error;
+    throw new HarnessCheckoutRefusal(root, error.unitPath, `The harness contract was not applied: ${root} records no units (${installUnitsFile} is absent) and the legacy unit ${error.unitPath} runs another checkout (${error.checkout}). Run ${initialiseUnitsCommand} in ${root} to record its own units, or update ${error.unitPath} if ${root} is the checkout it should run`);
+  }
+  // The legacy alias readInstallUnits falls back to is no proof ROOT is this install's checkout: with no serving unit detected, a separate launcher checkout would pass and receive the managed repository's plan.
+  if (!existsSync(resolve(root, installUnitsFile))) throw new HarnessCheckoutRefusal(root, null, `The harness contract was not applied: ${root} records no units (${installUnitsFile} is absent), so it is not established that it is this install's checkout. Run ${initialiseUnitsCommand} in ${root} to record its own units`);
+  if (options.servingUnit) {
+    const path = resolve(unitDirectory, options.servingUnit);
+    // Only an absent unit file names no checkout; one that exists but cannot be read cannot show it runs ROOT, so it is refused.
+    let text: string | null = null;
+    try { text = readFileSync(path, 'utf8'); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code;
+      if (code !== 'ENOENT') throw new HarnessCheckoutRefusal(root, path, `The harness contract was not applied: the unit serving this loop, ${path}, could not be read (${code ?? (error instanceof Error ? error.message : String(error))}), so it is not established that it runs ${root}, the checkout this apply targets. Make ${path} a readable unit file that runs ${root}, then systemctl --user daemon-reload and restart it`);
+    }
+    const other = text === null ? null : foreignUnitText(text, root, home) ?? launchedCheckout(text, root, home);
+    if (other) throw new HarnessCheckoutRefusal(root, path, `The harness contract was not applied: the unit serving this loop, ${path}, runs ${other}, not ${root}, the checkout this apply targets. Update ${path} (its WorkingDirectory and ExecStart) to run ${root}, then systemctl --user daemon-reload and restart it, rather than apply against the wrong checkout`);
+    if (options.servingUnit !== units.master) throw new HarnessCheckoutRefusal(root, path, `The harness contract was not applied: the unit serving this loop, ${options.servingUnit}, is not the master unit ${root} records (${units.master} in ${installUnitsFile}), so the contract built from the recorded units would misclassify the unit actually serving it. Serve the loop from ${units.master}, or record ${options.servingUnit} as the master unit in ${root}/${installUnitsFile} if it is this checkout's own`);
+  }
+  return { root, units };
+}
 export function masterHarness(root: string, config: MasterConfig, harness: string, options: { unitDirectory?: string } = {}) {
   const credentialHome = dirname(dirname(config.credentialFile));
   const plan = withMasterOwnedRules(masterHarnessPlan({ harness, root, cliPath: config.cliPath, repository: config.repository, baseBranch: config.baseBranch, credentialHome }), config, root, options.unitDirectory ?? executorUnitDirectory());
@@ -397,7 +492,14 @@ export function coordinatorWriteDenials(coordinatorRoot: string): HarnessRule[] 
   const why = (area: string) => `The coordinator checkout runs the loop and the executors; this session writes only its assigned worktree, never ${area}/ there (GY-857).`;
   return checkoutAreas.flatMap(area => [{ rule: `Edit(${absolute}/${area}/**)`, why: why(area) }, { rule: `Write(${absolute}/${area}/**)`, why: why(area) }]);
 }
-export function workerHarnessPlan(input: { cliPath: string; branch: string; baseBranch: string; credentialHome: string }): HarnessPlan {
+/**
+ * GY-1494. The worker's scope guard: before every file edit Claude Code runs scope-guard for the
+ * worker's own item and epoch, which denies an edit complete would refuse as outside plannedFiles
+ * and names the scope-request command. Its read is bounded at five seconds and it fails open.
+ */
+export const scopeGuardHook = (cliPath: string, key: string, epoch: number): HarnessHook => ({ event: 'PreToolUse', matcher: scopeGuardMatcher, command: scopeGuardCommand(cliPath, key, epoch), timeout: 30,
+  why: 'Deny an edit outside plannedFiles when it happens, naming scope-request, instead of at complete; complete stays the authority.' });
+export function workerHarnessPlan(input: { cliPath: string; branch: string; baseBranch: string; credentialHome: string; key?: string; epoch?: number; mergeWriter?: MergerMode }): HarnessPlan {
   const cli = `node ${input.cliPath}`;
   const allow: HarnessRule[] = [
     ...['status', 'sync', 'restore-branch', 'complete', 'blocked', 'heartbeat', 'events', 'diagnose'].map(command => ({ rule: `Bash(${cli} ${command}:*)`, why: `The worker's own ${command} command on its claimed item; the server checks the lease epoch.` })),
@@ -457,7 +559,9 @@ export function workerHarnessPlan(input: { cliPath: string; branch: string; base
     { rule: `Read(//${input.credentialHome}/**)`, why: 'Credentials are used through the CLI, never read into a transcript.' },
     { rule: 'Read(**/*.token)', why: 'Token files are never read into a session transcript.' },
   ];
-  return { harness: 'claude', file: '.claude/settings.local.json', allow, deny, manual: null, note: 'Worker rules for one assigned worktree: its own commands and its own branch. A harness rule is a prompt policy; branch protection, leases and the merge gate remain the enforcement.' };
+  // GY-1528: under the control-plane merger nothing is refused on plannedFiles, so no scope guard is installed.
+  const hooks = input.key && input.epoch && input.mergeWriter !== 'control-plane' ? [scopeGuardHook(input.cliPath, input.key, input.epoch)] : [];
+  return { harness: 'claude', file: '.claude/settings.local.json', allow, deny, manual: null, ...(hooks.length ? { hooks } : {}), note: 'Worker rules for one assigned worktree: its own commands and its own branch. A harness rule is a prompt policy; branch protection, leases and the merge gate remain the enforcement.' };
 }
 /**
  * How a worker restores its assigned branch after it was contaminated, as the exact
@@ -516,7 +620,7 @@ export function unrunnableRemedies(work: Work[], input: { cliPath: string; baseB
   });
 }
 /** Install the worker rules in a freshly prepared worktree, only where Git already ignores them. */
-export async function installWorkerHarness(config: MasterConfig, profile: WorkerProfile, key: string, prepared: PreparedWorker) {
+export async function installWorkerHarness(config: MasterConfig, profile: WorkerProfile, key: string, prepared: PreparedWorker, mergeWriter: MergerMode = 'github') {
   // GY-857: a profile whose own settings would turn its runtime's write confinement off is
   // refused here, at the launch, whatever its kind — the worker never starts able to write
   // outside its assigned worktree.
@@ -525,7 +629,7 @@ export async function installWorkerHarness(config: MasterConfig, profile: Worker
   if (profile.kind !== 'claude') return { applied: false, reason: `No generated worker rules for ${profile.kind}` };
   try { await defaultChildRun('git', ['check-ignore', '--quiet', '--', '.claude/settings.local.json'], { cwd: prepared.path }); }
   catch { return { applied: false, reason: 'The worktree does not ignore .claude/settings.local.json, so no rules were written into it' }; }
-  const plan = workerHarnessPlan({ cliPath: config.cliPath, branch: `graphyard/${key.toLowerCase()}-${prepared.epoch}`, baseBranch: config.baseBranch, credentialHome: dirname(dirname(config.credentialFile)) });
+  const plan = workerHarnessPlan({ cliPath: config.cliPath, branch: `graphyard/${key.toLowerCase()}-${prepared.epoch}`, baseBranch: config.baseBranch, credentialHome: dirname(dirname(config.credentialFile)), key, epoch: prepared.epoch, mergeWriter });
   const written = await writeHarnessPermissions(prepared.path, plan, true);
   return { applied: written.applied, reason: null, added: written.added.length };
 }

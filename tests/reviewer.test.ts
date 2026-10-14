@@ -18,6 +18,7 @@ import { nativeReviewRequired, type Work } from '../src/model.js';
 import { parseResolvedThreads, readUnresolvedThreads } from '../src/review-threads.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-23 thread createdAt and 2026-09-18 submittedAt are parsed fixture fields passed through unchanged; the real clock only bounds observation age and token expiry via offsets from Date.now().
 
 const execFile = promisify(execFileCallback);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -126,7 +127,7 @@ test('a reviewer launch is bound to the exact observed candidate and its prompt 
   assert.throws(() => assertReviewCandidate(work({ observation: { ...work().observation!, prState: 'closed' } }), now), /is closed/);
   assert.throws(() => assertReviewCandidate(work(), 'not-a-time'), /valid Graphyard snapshot clock/);
   const prompt = reviewPrompt({ repository: 'owner/project' } as any, binding);
-  for (const fragment of ['owner/project', '#42', 'a'.repeat(40), 'b'.repeat(40), 'policy revision 2', 'read-only', `commit_id=${'a'.repeat(40)}`, 'REQUEST_CHANGES']) assert.ok(prompt.includes(fragment), `prompt must state ${fragment}`);
+  for (const fragment of ['owner/project', '#42', 'a'.repeat(40), 'b'.repeat(40), 'policy revision 2', 'read-only', 'review post --event APPROVE', 'REQUEST_CHANGES']) assert.ok(prompt.includes(fragment), `prompt must state ${fragment}`);
   assert.match(prompt, /do not edit, stage, commit, push, rebase, or merge/);
   assert.match(prompt, /never weaken a requirement/);
   assert.doesNotMatch(prompt, /resolve-thread|unresolved review thread/, 'no thread list, no thread section');

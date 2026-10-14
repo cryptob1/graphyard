@@ -29,13 +29,14 @@ const stepOfGate = (gate: string, handedIn: boolean): StepId | undefined =>
 /**
  * One gate's reasons in plain words, each once: a proof still owed is named by the proof. A parked
  * request's blocker carries the whole agent detail; its card states the ask, so the line here only
- * points at it (GY-1408).
+ * points at it (GY-1408). Given the item, a recorded blocker reads as the same summary its status
+ * sentence gives, so both name one clearer (GY-1739).
  */
-export function plainLines(gate: Gate): string[] {
+export function plainLines(gate: Gate, work?: Work, now = Date.now()): string[] {
   return [...new Set(gate.reasons.map(reason => {
     if (reason.startsWith(humanRequestBlocker)) return 'Waiting on your answer to the request on this page';
     const proof = reason.match(/^AC-\d+: (\S+) needs trusted/)?.[1];
-    return proof ? `The proof ${proof} has not passed yet` : plainReason(reason, gate.name).text;
+    return proof ? `The proof ${proof} has not passed yet` : plainReason(reason, gate.name, now, work).text;
   }))];
 }
 
@@ -43,12 +44,12 @@ export function plainLines(gate: Gate): string[] {
  * Who clears a failing ready gate, read from its refusal rather than from the Build step it holds,
  * the same way "Who acts next" reads it (web/groups.ts `nextActor`): a parked human-only decision
  * is yours; a recorded blocker, or an item not yet released from the backlog, is the master
- * agent's; unfinished dependencies are nobody's yet. Anything else leaves the step's own actor.
+ * agent's; unfinished dependencies and undelivered split children are nobody's yet. Anything else leaves the step's own actor.
  */
 export function readyOwner(work: Work, gate: Gate): string | undefined {
   if (parkedOnHuman(work)) return 'You';
   if ((work.blocker && gate.reasons.includes(work.blocker)) || gate.reasons.includes('Not released from backlog')) return 'Master agent';
-  if (gate.reasons.length && gate.reasons.every(reason => reason.startsWith('Dependency '))) return 'Nobody yet';
+  if (gate.reasons.length && gate.reasons.every(reason => /^(?:Dependency |Split into child items: )/.test(reason))) return 'Nobody yet';
   return undefined;
 }
 
@@ -68,14 +69,14 @@ export function whatIsLeft(work: Work, now: number, release: ReleaseView = noRel
   const own = steps.current !== 'build' ? work.gates.find(gate => gate.name === stepGate[steps.current!] && !gate.passed) : undefined;
   const failing = own ?? unmet[0];
   const handedIn = steps.current !== 'build';
-  const groups: LeftGroup[] = [{ step: steps.current, label: stepLabel[steps.current], who: (failing?.name === 'ready' ? readyOwner(work, failing) : undefined) ?? steps.who, lines: failing ? plainLines(failing) : [], current: true }];
+  const groups: LeftGroup[] = [{ step: steps.current, label: stepLabel[steps.current], who: (failing?.name === 'ready' ? readyOwner(work, failing) : undefined) ?? steps.who, lines: failing ? plainLines(failing, work, now) : [], current: true }];
   for (const gate of unmet) {
     if (gate === failing) continue;
     const step = stepOfGate(gate.name, handedIn);
     if (!step) continue;
     const group = groups.find(entry => entry.step === step);
-    if (group) { group.lines = [...new Set([...group.lines, ...plainLines(gate)])]; continue; }
-    groups.push({ step, label: stepLabel[step], who: (gate.name === 'ready' ? readyOwner(work, gate) : undefined) ?? waitsOn(step, gate, work, now, release).who, lines: plainLines(gate), current: false });
+    if (group) { group.lines = [...new Set([...group.lines, ...plainLines(gate, work, now)])]; continue; }
+    groups.push({ step, label: stepLabel[step], who: (gate.name === 'ready' ? readyOwner(work, gate) : undefined) ?? waitsOn(step, gate, work, now, release).who, lines: plainLines(gate, work, now), current: false });
   }
   const [current, ...later] = groups;
   return [current, ...later.sort((a, b) => stepIds.indexOf(a.step) - stepIds.indexOf(b.step))].filter(group => group.lines.length > 0);
@@ -93,9 +94,9 @@ export function activityLabel(kind: string): string {
     // Commands (src/engine.ts `commands`), recorded under their own names.
     create: 'Created', ready: 'Released for work', requirements: 'Requirements changed', reviewpolicy: 'Review rules changed', unblock: 'Unblocked',
     rework: 'Sent back for changes', resolve: 'A decision was recorded', recover: 'Recovered after a builder stopped', claim: 'Picked up by a builder',
-    rereview: 'Asked for a fresh review', heartbeat: 'The builder is still working', quarantine: 'A stopped builder was fenced off', launch: 'A session was started',
+    rereview: 'Asked for a fresh review', mechanicalplan: 'A planned fix round was recorded for the review', heartbeat: 'The builder is still working', quarantine: 'A stopped builder was fenced off', launch: 'A session was started',
     settle: 'A builder’s attempt ended', autosettle: 'A builder’s attempt ended', release: 'A builder stopped working on it', workspace: 'The builder said where the code lives',
-    submit: 'Handed in', blocked: 'The builder reported it blocked', dispatchblock: 'Graphyard stopped starting it after the same launch failure repeated', scope: 'The builder asked to change the planned files', autoscope: 'The planned files were changed',
+    submit: 'Handed in', blocked: 'The builder reported it blocked', defer: 'The builder found its reading cannot exist yet and set it to wait', window: 'Set to wait until its reading can exist', dispatchblock: 'Graphyard stopped starting it after the same launch failure repeated', scope: 'The builder asked to change the planned files', autoscope: 'The planned files were changed',
     evidence: 'Proof recorded', deployment: 'Deployment recorded', revoke: 'A proof was withdrawn', session: 'A session was recorded', request: 'An agent asked for a decision',
     repair: 'Asked to repair the branch', mergerefused: 'The merge kept being refused, so a fresh review or rework was asked for',
     refresh: 'Asked to merge the repaired base in',

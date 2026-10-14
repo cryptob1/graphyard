@@ -48,6 +48,25 @@ export function runEnvironment(base: NodeJS.ProcessEnv, extra: Record<string, st
 const text = (content: unknown): string => typeof content === 'string' ? content
   : Array.isArray(content) ? content.map(part => part?.type === 'text' ? String(part.text ?? '') : '').filter(Boolean).join('\n') : '';
 const bounded = (value: string, limit = 2000) => value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+/** At most this many characters of a rejected tool payload are named beside its validation error (GY-1661). */
+export const rejectedPayloadChars = 1000;
+/**
+ * Why a tool payload was rejected: the validation error and at most the first rejectedPayloadChars
+ * characters of the payload as JSON. The detail is persisted in run failures and action notes, so
+ * before it is cut every value in `secrets` (every environment value the run could read, inherited or
+ * injected, such as an account's provider key) and every credential-shaped token is replaced by `[redacted]`.
+ */
+export function payloadValidationFailure(tool: string, error: unknown, payload: unknown, secrets: Iterable<string> = []) {
+  let shown: string;
+  try { shown = JSON.stringify(payload) ?? String(payload); } catch { shown = String(payload); }
+  const known = [...new Set(secrets)].filter(value => value.length >= 8).sort((a, b) => b.length - a.length);
+  const scrub = (value: string) => redactCredentials(known.reduce((text, secret) => text.split(secret).join('[redacted]')
+    .split(JSON.stringify(secret).slice(1, -1)).join('[redacted]'), value));
+  return `the ${tool} payload failed validation: ${scrub(error instanceof Error ? error.message : String(error))}; payload: ${scrub(shown).slice(0, rejectedPayloadChars)}`;
+}
+/** Credential-shaped tokens — bearer and labelled tokens, GitHub and AWS keys, JWTs, URL credentials — masked, the rule replay records pass (`redactString`) without its bound. */
+const credentialPattern = /((?:authorization\s*:\s*)?bearer\s+|(?:token|password|passwd|secret|api[_-]?key|authorization)"?\s*[=:]\s*"?)[^\s",}]+|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|([a-z][a-z0-9+.-]*:\/\/)[^/\s:@"]+:[^@\s"]+@/gi;
+const redactCredentials = (value: string) => value.replace(credentialPattern, (_match, label?: string, scheme?: string) => label ? `${label}[redacted]` : scheme ? `${scheme}[redacted]@` : '[redacted]');
 
 /** One Pi JSONL record as a runner event; null for the streaming noise a record does not keep. */
 export function piEvent(record: any, at: string): RunEvent | null {
@@ -229,19 +248,26 @@ export function piRunner(configured: PiRunnerOptions = {}): Runner {
       } catch (error) {
         failure = `${command} could not be started: ${error instanceof Error ? error.message : String(error)}`;
       }
-      return watchRun<T>(directory, meta, options, { pollMs: configured.pollMs, scratch, failure: () => failure, child });
+      return watchRun<T>(directory, meta, options, { pollMs: configured.pollMs, scratch, failure: () => failure, child, secrets: visibleValues({ ...configured.environment, ...options.env }) });
     },
     adopt<T>(directory: string, options: Omit<RunOptions<T>, 'cwd' | 'env' | 'runs'>): Run<T> {
       const meta = readRunMeta(directory);
       if (!meta) {
         const now = new Date().toISOString();
         return watchRun<T>(directory, { version: 1, id: basename(directory), command, pid: null, identity: null, containment: 'setsid', unit: null, startedAt: now, timeoutMs: options.timeoutMs, exitGraceMs: grace },
-          options, { pollMs: configured.pollMs, scratch: false, failure: () => null, child: null });
+          options, { pollMs: configured.pollMs, scratch: false, failure: () => null, child: null, secrets: visibleValues(configured.environment ?? {}) });
       }
-      return watchRun<T>(directory, meta, options, { pollMs: configured.pollMs, scratch: false, failure: () => null, child: null });
+      return watchRun<T>(directory, meta, options, { pollMs: configured.pollMs, scratch: false, failure: () => null, child: null, secrets: visibleValues(configured.environment ?? {}) });
     },
   };
 }
+
+/**
+ * Every environment value a run can read: the inherited environment `runEnvironment` passes on and
+ * the runner's own. An adopted run is judged against this process's inheritance and the runner's
+ * configured environment; per-run `env` carries only role names and file paths, never a credential.
+ */
+const visibleValues = (extra: Record<string, string>) => Object.values(runEnvironment(process.env, extra));
 
 /** How far past its watcher's bound a scratch run's own bound lies, so a live watcher always stops it first. */
 export const scratchBoundMarginSeconds = 30;
@@ -313,7 +339,7 @@ export function cancelScratchRuns(reason = 'the process that started it is stopp
  * records one, its bound, and its process. The run started here or in a process that has since
  * restarted — the directory holds everything either needs, so both watch it the same way.
  */
-function watchRun<T>(directory: string, meta: RunMeta, options: Pick<RunOptions<T>, 'tool' | 'validate' | 'timeoutMs'>, watch: { pollMs?: number; scratch: boolean; failure: () => string | null; child: ChildProcess | null }): Run<T> {
+function watchRun<T>(directory: string, meta: RunMeta, options: Pick<RunOptions<T>, 'tool' | 'validate' | 'timeoutMs'>, watch: { pollMs?: number; scratch: boolean; failure: () => string | null; child: ChildProcess | null; secrets?: Iterable<string> }): Run<T> {
   const files = runFiles(directory), events: RunEvent[] = [], listeners = new Set<(event: RunEvent) => void>();
   const accepted: T[] = [];
   let invalid: string | null = null, lastError: string | null = null, cancelled: string | null = null, timedOut = false, settledAt: number | null = null, stopSent = false;
@@ -351,7 +377,7 @@ function watchRun<T>(directory: string, meta: RunMeta, options: Pick<RunOptions<
     if (record.type === 'tool_execution_end' && record.toolName === options.tool) {
       if (record.isError === true) { invalid = `the ${options.tool} call was rejected: ${text(record.result?.content) || 'no reason given'}`; return; }
       try { accepted.push(options.validate(record.result?.details)); }
-      catch (error) { invalid = `the ${options.tool} payload failed validation: ${error instanceof Error ? error.message : String(error)}`; }
+      catch (error) { invalid = payloadValidationFailure(options.tool, error, record.result?.details, watch.secrets); }
     }
     if (record.type === 'agent_settled' && settledAt === null) settledAt = Date.now();
   };

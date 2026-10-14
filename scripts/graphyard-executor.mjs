@@ -9,7 +9,8 @@
 //
 // It reads this host's .graphyard/master.json for the launch profiles the dispatching actions
 // need and authenticates with the coordinator credential named there — the same credential
-// `master run` uses, and nothing broader. `--kinds` narrows what this executor claims; the
+// `master run` uses, and nothing broader; the one exception is verify-deployment's filing of a
+// post-deploy follow-up, which, like the loop's own filings, creates work as the operator agent. `--kinds` narrows what this executor claims; the
 // default is every kind it has a handler for. Two kinds can never be among them: `escalate` and
 // `request-rework` are judgments made in the step itself, and the process refuses to start with a
 // handler for either, which is what keeps a language model out of the loop rather than inside it.
@@ -33,10 +34,11 @@
 // service is accepted); `graphyard master executors restart` restarts every registered executor
 // through that unit, and no claim starts while its fence stands.
 import { randomUUID } from 'node:crypto';
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { heldRelease } from '../bin/held-release-hooks.mjs';
 
 export function parseArguments(argv) {
   const options = { once: false, intervalSeconds: null, kinds: null, name: null, slot: null, install: false, count: null, unit: null };
@@ -91,16 +93,48 @@ export async function installCheck(installed, executor, read, template) {
   return report;
 }
 
-/** The TypeScript modules this process is a thin entry point for; tsx is a runtime dependency already. */
-export async function load() {
+/**
+ * The TypeScript modules this process is a thin entry point for; tsx is a runtime dependency already.
+ * While the self-upgrade holds a restart for the release production serves (GY-1585), they load from
+ * the held snapshot of that release, as every command the checkout's launcher starts does: a slot its
+ * supervisor starts during the hold speaks the protocol the serving plane accepts.
+ */
+export async function load(held = heldRelease(new URL('../', import.meta.url))) {
   const { tsImport } = await import('tsx/esm/api');
-  const here = import.meta.url;
+  const here = held ? new URL('scripts/graphyard-executor.mjs', held.to).href : import.meta.url;
   const [master, daemon, dispatch, executor, reviewer, producer, actions, view, setup, fleet] = await Promise.all([
     tsImport('../src/master.ts', here), tsImport('../src/master-daemon.ts', here), tsImport('../src/auto-dispatch.ts', here),
     tsImport('../src/executor.ts', here), tsImport('../src/reviewer.ts', here), tsImport('../src/producer.ts', here),
     tsImport('../src/model/next-action.ts', here), tsImport('../src/server/work-view.ts', here), tsImport('../src/repository-setup.ts', here), tsImport('../src/executor-fleet.ts', here),
   ]);
-  return { master, daemon, dispatch, executor, reviewer, producer, actions, view, setup, fleet };
+  return { master, daemon, dispatch, executor, reviewer, producer, actions, view, setup, fleet, held };
+}
+
+/**
+ * The checkout whose script this process was started with: the managed repository's own when the
+ * unit's ExecStart names its script, and the Graphyard package's when the unit fell back to the
+ * package's (renderExecutorUnit). It is read from the invoked path, as the unit spells it, not from
+ * the resolved module URL: a checkout that links the shipped scripts in is still the checkout whose
+ * commit this executor runs. The unit's WorkingDirectory names the managed repository either way,
+ * and that one is only where the configuration is read.
+ */
+export const executorModuleRoot = (script = process.argv[1]) => resolve(dirname(script), '..');
+
+/**
+ * The release this process loaded and the checkout commit it is compared against before every claim
+ * (GY-126), both read from `root`, the checkout the modules load from (executorModuleRoot), never
+ * from the managed repository the unit runs in: a fallback executor registers the package's commit,
+ * which is what the coordinator CLI's checkout commit is reconciled against, so a restart or an
+ * upgrade of the package observes it on the requested release instead of a split fleet. A slot
+ * loaded from a held snapshot (GY-1585) runs the pinned commit, and while a pin stands the
+ * checkout's commit is the pin's: the hold moving the checkout to a tip production does not serve
+ * yet stands no slot down onto that tip, and the lift (or a newer pin) does.
+ */
+export function executorRelease(root, held, fleet) {
+  return {
+    release: held ? { commit: held.commit, dirty: false } : fleet.readRelease(root),
+    current: () => heldRelease(pathToFileURL(`${root}/`))?.commit ?? fleet.readCommit(root),
+  };
 }
 
 /** An exit status the supervisor reads: a slot the declaration does not have stays down instead of flapping. */
@@ -116,10 +150,12 @@ class SlotUndeclared extends Error { constructor(message, exitCode) { super(mess
  * executor would claim every dispatch row and then report no agents at all, failing each one.
  */
 export function controlPlaneEffects(modules, context) {
-  const { master: m, daemon: d, reviewer: r, producer: pr } = modules;
-  const { root, current, run, snapshot, mutate } = context;
+  const { master: m, daemon: d, reviewer: r, producer: pr, executor: x } = modules;
+  const { root, current, run, snapshot, mutate, read } = context;
   return {
     snapshot, mutate,
+    // GY-1698: a windowed post-deploy follow-up takes its observation instant from the intervention report's projection.
+    ...(read ? { readPattern: x.patternReader(read) } : {}),
     agents: async () => { const runtime = await m.observeHerdrAgents(run); return runtime.available ? runtime.agents : null; },
     workerCredentials: profiles => m.inspectWorkerCredentials(root, profiles),
     producerCredentials: profiles => m.inspectProducerCredentials(root, profiles),
@@ -128,6 +164,24 @@ export function controlPlaneEffects(modules, context) {
     launchProducer: (work, producerRequest, profile, agents, observedAt) => pr.launchProducer(root, work, producerRequest, profile, agents, observedAt, { run }),
     observeDeployment: delivered => d.observeDeployment(current(), delivered, run, fetch, () => Date.now(), { root }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
+    // GY-1660: the one call made beyond the coordinator credential, as the loop files its follow-ups:
+    // the follow-up an unobserved post-deploy verification owes, created as the master's operator agent.
+    // It may create work and nothing else this process needs; absent, verify-deployment fails rather than lose the follow-up.
+    ...(current().operatorAgent ? { fileWork: async (input, requestId) => {
+      const config = current(), operator = await m.agentToken(root, config, 'operatorAgent');
+      const response = await fetch(`${config.url}/api/work`, { method: 'POST', body: JSON.stringify(input), headers: { Authorization: `Bearer ${operator}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, signal: AbortSignal.timeout(30_000) });
+      const body = await response.json();
+      if (!response.ok) throw new Error(typeof body?.error === 'string' ? body.error : JSON.stringify(body));
+      return body;
+    },
+    // GY-1747: a follow-up is released from backlog by the loop once the release serving its delivery is observed.
+    releaseWork: async key => {
+      const config = current(), operator = await m.agentToken(root, config, 'operatorAgent');
+      const item = (await snapshot()).work.find(entry => entry.key === key);
+      if (!item || item.stage !== 'backlog' || item.ready) return;
+      const response = await fetch(`${config.url}/api/work/${item.id}/ready`, { method: 'POST', body: JSON.stringify({ expectedRevision: item.revision, reason: 'the release serving the delivery is observed deployed' }), headers: { Authorization: `Bearer ${operator}`, 'Content-Type': 'application/json', 'Idempotency-Key': `release-${item.id}-${item.revision}` }, signal: AbortSignal.timeout(30_000) });
+      if (!response.ok) { const body = await response.json().catch(() => null); throw new Error(typeof body?.error === 'string' ? body.error : `releasing ${key} returned ${response.status}`); }
+    } } : {}),
   };
 }
 
@@ -145,7 +199,10 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     // enables would fail on start and be restarted every ten seconds.
     await m.loadMasterConfig(root);
     const installed = await s.installExecutorSupervision(root, { ...(options.count !== null ? { count: options.count } : {}), ...(options.kinds ? { kinds: options.kinds } : {}), ...(options.intervalSeconds !== null ? { intervalSeconds: options.intervalSeconds } : {}) });
-    return installCheck(installed, x, path => readFile(path, 'utf8'), resolve(root, 'examples/master', s.executorUnitTemplate));
+    const templatePath = existsSync(resolve(root, 'examples/master', s.executorUnitTemplate))
+      ? resolve(root, 'examples/master', s.executorUnitTemplate)
+      : resolve(new URL('../examples/master', import.meta.url).pathname, s.executorUnitTemplate);
+    return installCheck(installed, x, path => readFile(path, 'utf8'), templatePath);
   }
   // A supervised slot is configured by the host's declaration, not by its command line, so every
   // slot on a host serves the same kinds and a change to the declaration reaches all of them.
@@ -180,7 +237,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 
   const live = m.liveMasterConfig(root, config), current = () => live.current;
   const snapshot = () => request('work-snapshot', {}, { [v.coordinationViewHeader]: 'coordination' });
-  const handlers = x.controlPlaneHandlers(current, controlPlaneEffects(modules, { root, current, run, snapshot, mutate }));
+  const handlers = x.controlPlaneHandlers(current, controlPlaneEffects(modules, { root, current, run, snapshot, mutate, read: path => request(path) }));
   // The rule, not the prose: a kind whose judgment happens in the step itself may never have a
   // handler here, so no way of configuring this process puts one inside the loop.
   const judgment = x.judgmentInExecutorLoop(handlers);
@@ -210,8 +267,10 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   // rather than a new one appearing beside a ghost; the pid says which incarnation is speaking.
   const identity = { id: options.name ?? (options.slot !== null ? `${status.actor.id}@${config.hostId}/${options.slot}` : `${status.actor.id}@${config.hostId}:${process.pid}`), host: config.hostId };
   // The release these modules were loaded from, recorded on this host before the first claim and
-  // refreshed on every claim; the commit is re-read from the checkout in front of each claim.
-  const release = f.readRelease(root);
+  // refreshed on every claim; the commit is re-read in front of each claim from the checkout the
+  // modules load from, which is the package's when the unit runs its script for a repository without one.
+  const moduleRoot = executorModuleRoot();
+  const { release, current: checkoutCommit } = executorRelease(moduleRoot, modules.held, f);
   const registrar = f.executorRegistrar(config, { name: identity.id, host: identity.host, pid: process.pid, principal: status.actor.id, kinds: a.executorKinds(effects.handlers),
     intervalSeconds: options.intervalSeconds, root, release, supervisor: f.detectSupervisorUnit({ named: options.unit }) });
   await registrar.started();
@@ -229,7 +288,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   // itself writes the item and defeats the loop's revision check.
   const single = x.loopMergeGuardedEffects(effects, () => x.detectLoopMerger(root, { config: current() }), line => console.error(line));
   const guarded = x.releaseGuardedEffects(single, {
-    loaded: release, current: () => f.readCommit(root),
+    loaded: release, current: checkoutCommit,
     claimed: action => registrar.claimed(action), settled: () => registrar.settled(),
     // A fleet restart raises a fence beside the records; no claim starts while it stands.
     claiming: () => registrar.claiming(), abandoned: () => registrar.abandoned(),
@@ -245,7 +304,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     },
     resumed: () => { console.error(`[graphyard-executor] ${identity.id} claims again: its checkout is back on ${release.commit.slice(0, 12)}`); return registrar.resumed(); },
   });
-  console.error(`[graphyard-executor] ${identity.id} runs ${release.commit ? release.commit.slice(0, 12) : 'an unknown commit'}${release.dirty ? ' (dirty)' : ''} from ${root}${registrar.registration.supervisor ? ` under ${registrar.registration.supervisor.unit}` : ' with no supervisor unit'}; registered at ${registrar.file}`);
+  console.error(`[graphyard-executor] ${identity.id} runs ${release.commit ? release.commit.slice(0, 12) : 'an unknown commit'}${release.dirty ? ' (dirty)' : ''} from ${moduleRoot}${moduleRoot !== root ? ` for ${root}` : ''}${registrar.registration.supervisor ? ` under ${registrar.registration.supervisor.unit}` : ' with no supervisor unit'}; registered at ${registrar.file}`);
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, stop);
   notify?.('ready');
   console.error(`[graphyard-executor] ${identity.id} (pid ${process.pid}) serving ${a.executorKinds(effects.handlers).join(', ')} every ${options.intervalSeconds}s${options.slot !== null ? ` as slot ${options.slot}` : ''}${notify ? ' under systemd supervision' : ''}`);

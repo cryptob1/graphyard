@@ -3,44 +3,44 @@
 
 ## Daily checklist
 
-- `/healthz` healthy at expected `commit`; `/api/status` without job errors, `delegationLimits.attention` or `production.incidents`.
-- `graphyard master status`: `daemon.liveness` `running`, attention owned; recent verified `graphyard db backup`.
+- `/healthz` at expected `commit`; `/api/status`: no job errors, `delegationLimits.attention`, `production.incidents`.
+- `master status`: `daemon.liveness` `running`, attention owned; recent verified `graphyard db backup`.
 
 ## Incident decision tree
 
 - **Item not moving**: fix refusal's cause. Never weaken requirements.
-  - Escalation: declared human session runs `graphyard resolve GY-N TRIGGER "reason"`; explained `lease-loss` needs only `admin --attestation` ([who](delegation.md#who-may-settle-what)).
-  - Expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission); another attempt: [rework](operations-reference.md#submitted-implementation-needs-rework); fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
-  - Moving waits fault late: owed `request-rework` head (`owed-decision`) at 30min (`reworkDecisionWaitBoundMs`); lapsed containment fence 10min past grace (`containmentSettleWaitBoundMs`; not one settled that cycle; an owed line restating it counts as it); unanswered decision with watch launches left 15min after last approver launch (`approverRelaunchWaitBoundMs`); unwatched one, owed non-containment escalation (carried too), blocker 30min after request or raise (`masterTurnWaitBoundMs`); stale non-release decision 30min after staling; unre-asked refusal 30min after, once (`decision-refused`); `actorless` head behind base 30min after submission (`baseConflictWaitBoundMs`).
-  - Plane-wide failures (502–504, startup 503, refused, timeout) retry: no `loop`/`session-liveness` fault or pre-launch lease loss; dispatch ticks read `plane-unavailable`, outside `dispatch-failures`, dispatch blocker. Faults/deployment steps fit interval/5: reads stop waiting (`faults:deferred`, `deployment:deferred`), rest carries (`faults:carried`); `loop-cost` names slowest step's share.
-  - A failed manual proof a producer may run returns to worker, never to an operator escalation; one no producer may run needs operator witness, an unexecuted one an attestation.
-- **Merge refused**: wait or repair; never bypass. Auto-merge `BLOCKED` 10min with passing gates retries head-bound; after 30min one `merge-blocked` item names GitHub's answer. **Merged outside Graphyard**: [bypass](operations-reference.md#merge-bypass). **Wrong accepted evidence**: [revoke](operations-reference.md#accepted-evidence-turns-out-to-be-wrong). **GitHub paused or webhook silent**: [budget](operations-reference.md#github-request-budget). **Smoke proof failed**: [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
+  - Escalation: declared human runs `graphyard resolve GY-N TRIGGER "reason"` ([settling](delegation.md#who-may-settle-what)).
+  - Expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission); retry: [rework](operations-reference.md#submitted-implementation-needs-rework); fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
+  - Late-fault waits: 30min: owed `request-rework` (`owed-decision`), unwatched decision, owed escalation/blocker, stale non-release, `actorless` head behind base; 10min: containment past grace; 15min: watched decision after approver launch; once: unre-asked refusal (`decision-refused`).
+  - Plane-wide failures (502–504, refused, timeout) retry faultless (`plane-unavailable`); slow fault/deployment reads defer (`faults:deferred`, `deployment:deferred`); `loop-cost` names the slowest.
+  - A failed producer-runnable manual proof returns to worker, never to an operator escalation; one no producer may run needs operator witness, an unexecuted one an attestation.
+- **Merge refused**: wait or repair, never bypass; `BLOCKED` retries head-bound 10min, `merge-blocked` 30min quotes GitHub. **Merged outside**: [bypass](operations-reference.md#merge-bypass). **Wrong evidence**: [revoke](operations-reference.md#accepted-evidence-turns-out-to-be-wrong). **GitHub paused/webhook silent**: [budget](operations-reference.md#github-request-budget). **Smoke failed**: [delivered](operations-reference.md#delivered-with-a-failed-smoke-proof).
 - **Main ahead of production**: [deployment incident](deployment.md#production-deployment-observation). An up-to-date release takes no coordination locks; a migrating release fails fast within health check, touching only tables whose DDL changed since its per-table digest, retrying deadlocks and expired lock waits with backoff in one 30-second lock budget, each attempt waiting ≤3 s per lock so live writes never queue longer.
-- **Diagnosis `waiting`**: provider quota hold ([diagnosis](master-agent.md#research-and-diagnosis)). **Loop down**: [loop](operations-reference.md#master-coordination-loop). **Self-proving change**: [bootstrap](operations-reference.md#bootstrap-mode-for-a-self-proving-change).
+- **Diagnosis `waiting`**: [provider quota](master-agent.md#research-and-diagnosis). **Loop down**: [loop](operations-reference.md#master-coordination-loop). **Self-proving change**: [bootstrap](operations-reference.md#bootstrap-mode-for-a-self-proving-change).
 
 ## Recovery recipes
 
 ```sh
 graphyard rework GY-N --previous-worker-stopped "reason"                # worker stopped
 graphyard master settle-containment GY-N "reason"                       # settleable
-graphyard recover-containment GY-N --previous-worker-stopped "reason"   # delivered, stop confirmed
+graphyard recover-containment GY-N --previous-worker-stopped "reason"   # delivered
 graphyard unblock GY-N "reason"                                         # unowned blocker
-systemctl --user restart graphyard-master-OWNER-NAME                    # loop down, supervised (units.json)
+systemctl --user restart graphyard-master-OWNER-NAME                    # loop down
+graphyard master checkout-restore "reason"                              # dirty, drifted or diverged
 ```
 
-Never attest a stop you have not confirmed; merged work changes only via follow-ups. Outside lock's PID namespace `master status` judges loop by stall bound alone; stalled or absent, on coordinator host (`/home/vish/code/graphyard`): stop hand-started loops, copy `examples/master/graphyard-master.service` to `~/.config/systemd/user/`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-master`.
+Never attest a stop you have not confirmed; merged work changes only via follow-ups. Outside its namespace `master status` judges the loop by stall bound; stalled/absent: stop hand-started loops, install `examples/master/graphyard-master.service`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-master`.
 
 ## Worker host keyring proxy
 
-Confined masters, approvers, proof producers read their GitHub login (`gh auth git-credential`) via keyring-only D-Bus proxy; workers, reviewers their own. Per host: copy `deploy/systemd/graphyard-secrets-bus.socket`, `graphyard-secrets-bus.service`, `graphyard-secrets-bus-filter.service` to `~/.config/systemd/user/`, disable earlier-enabled `graphyard-secrets-bus.service`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-secrets-bus.socket`. Listening at `$XDG_RUNTIME_DIR/graphyard-secrets-bus` (or `GRAPHYARD_SECRETS_BUS`); absent, bus masked, sessions push with `GH_TOKEN`. Keyring items aren't filtered: keep other secrets out or use `GH_TOKEN`.
+Confined masters, approvers, producers (not workers, reviewers) read GitHub login via a keyring-only D-Bus proxy: copy `deploy/systemd/graphyard-secrets-bus*`, `systemctl --user enable --now graphyard-secrets-bus.socket` (`$XDG_RUNTIME_DIR/graphyard-secrets-bus` or `GRAPHYARD_SECRETS_BUS`); absent, sessions push `GH_TOKEN`.
 
 ## Safety facts that never change
 
 - Workers never hold `admin`/`coordinator`/`producer` tokens. No AI principal can hold `admin`.
 - Proof authority: live [grant](operations-reference.md#proof-authority-grants); `admin` attests only `manual:` proofs; operator agents only add requirements.
 - GitHub merges on passing gates: no bypass, no lifecycle-state endpoint.
-- Non-master sessions use own checkouts under `run.worktreeRoot`.
-- History is append-only; only routine rows past retention are [compacted](operations-reference.md#storage-retention), each batch audited.
+- History is append-only; routine rows past retention get [compacted](operations-reference.md#storage-retention).
 
 ## Deeper references
 
@@ -48,6 +48,8 @@ Confined masters, approvers, proof producers read their GitHub login (`gh auth g
 
 ## Resources and disk
 
-`resourceRegistry` declares bounded resources (`resources`, [remedies](operations-reference.md#control-plane-resources)). Loop removes finished worktrees after `run.reclaimIdleHours` (never dirty/unpushed), stale test temp entries, idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed) seen twice; `disk` attention below `run.diskThresholdGb`. Clean detached coordinator HEAD moved forward onto verified-release-served base descendant self-recovers (`upgrade:recovered`: executors restart, loop re-executes); until then (no verified release or supervisor unit) `escalation:dirty-checkout` says restart onto it, never roll back. Dirty, non-detached or non-forward stays refused (naming paths, HEAD, sessions), blocking self-upgrade.
+`resourceRegistry` bounds resources ([remedies](operations-reference.md#control-plane-resources)); worktrees reclaimed after `run.reclaimIdleHours` (never dirty/unpushed), idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed) seen twice; `disk` attention under `run.diskThresholdGb`; a loop under a supervisor unit records an absent `units.json`. Clean detached HEAD on a verified-release descendant self-recovers (`upgrade:recovered`); otherwise `escalation:dirty-checkout` (no rollback): `master checkout-restore` serves from a signed-grant snapshot of the verified release; clean moved HEAD: `adopted` (reverted on a failed restart); diverged HEAD: saved under `refs/graphyard/checkout-restore/diverged-*`, checkout detached at the serving release; stale loop: `handoff` (the command serves when HEAD predates the serve entry); cwd-unreadable processes: every live thread judged (inside: writer; unread: unverifiable); a signalled entry reaps its Git children, then thaws.
 
-Main guard revert approver ([provisioning](deployment.md#manual-fallback)): redeploy; verify `/api/status` `mainGuard.revertApprover` names it, `mainGuard.attention` empty, `graphyard doctor` `revert-approver` ready.
+Main guard revert approver ([provisioning](deployment.md#manual-fallback)): redeploy; verify `mainGuard.revertApprover`, empty `mainGuard.attention`, `doctor`.
+
+`/tmp` pass (own, unheld, same-device): test temps 2h; agent checkouts, `opencode` scratch 24h; `tsx-UID`, `node-compile-cache` 6h; `.pnpm-store` 7d; under a quarter inodes free, runtime roots keep 12 newest.

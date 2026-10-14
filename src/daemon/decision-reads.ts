@@ -1,13 +1,15 @@
 // Concern: the decision histories the decisions step reads, kept across cycles (GY-1142).
 import type { Work } from '../model.js';
 import { approvalApplyGraceMs, situationLabel, stalledApproval, supersededSituation, type DecisionSituation } from '../model/approval.js';
-import { routableScopeRequest } from '../model/scope.js';
-import type { ApprovalWatch } from './state.js';
+import { routedScopeRequest } from '../model/scope-collapse.js';
+import type { ApprovalWatch, DaemonAction, DaemonState } from './state.js';
+import type { FaultKind } from '../model/fault-classes.js';
+import { planeUnavailableText } from '../model/refusal.js';
 import type { DaemonEffects } from './effects.js';
 import { staleReleaseCandidates } from '../model/stale-release.js';
 
 /** Every kind the control plane folds an item's decision history from (server/decision-ledger.ts). */
-export const decisionEventKinds = ['requested', 'concurred', 'refused', 'declined', 'approved', 'applied', 'failed', 'stale', 'withdrawn', 'superseded'].map(kind => `decision.${kind}`);
+export const decisionEventKinds = ['requested', 'concurred', 'refused', 'declined', 'approved', 'applied', 'failed', 'held', 'stale', 'withdrawn', 'superseded'].map(kind => `decision.${kind}`);
 type DecisionHistory = Awaited<ReturnType<NonNullable<DaemonEffects['decisions']>>>['decisions'];
 /** The decision histories the loop keeps across cycles, by work id, and the ledger seq they are current to. */
 export interface HeldDecisions { seq: string | null; histories: Map<string, DecisionHistory>; refreshedAt: number | null }
@@ -27,6 +29,32 @@ export const lateDecisionRead = (detail: string) => / ms read deadline passed be
  * nothing and is no decision fault — the next snapshot shows it done (GY-1336's diagnosis rule).
  */
 export const deliveredMeanwhile = (detail: string) => /Delivered work is immutable/.test(detail);
+/**
+ * GY-1505. A decision step failure the step itself recovers from, which judged nothing: a request
+ * or launch that met a control plane that did not answer it (GY-1344's plane silence — on 8 October
+ * 2026 the rework puts for GY-1491 and GY-1497 hit their 30 s timeout 30 s apart), or an approver
+ * launch that lost the folder-trust race (GY-1152, GY-1306: a session sharing the account's config
+ * rewrote it after the trust record was read back, and GY-1488's approver stopped at the dialog).
+ * The watch relaunches next cycle and the request is asked again, so one alone is no decision fault.
+ */
+export const selfHealingDecisionFailure = (detail: string) => planeUnavailableText(detail) || / stopped at a workspace-trust prompt in pane .* although its launch records the folder trusted/.test(detail);
+/** How many cycles back a self-healing failure of the same item still makes a run with this one (its retry is the next cycle). */
+export const selfHealingRepeatCycles = 3;
+/**
+ * The fault kind a failed decision action of `work` is stored with (GY-1505): none for a
+ * self-healing failure unless the item's decision step already failed the same way on one of the
+ * last `selfHealingRepeatCycles` cycles — at this key (`previous`, the row this write replaces) or
+ * at any other: the request, the watch's relaunch and the launcher's own row are one decision. A
+ * repeat did not heal and counts: plane silence as `plane-unavailable`, anything else as the
+ * action's own class (`undefined`). Every other failure keeps the action's own class.
+ */
+export function decisionFailureKind(state: Pick<DaemonState, 'actions' | 'cycle'>, work: string, detail: string, previous?: Pick<DaemonAction, 'state' | 'detail' | 'cycle' | 'kind' | 'work'>): FaultKind | null | undefined {
+  if (!selfHealingDecisionFailure(detail)) return undefined;
+  const earlier = (row: Pick<DaemonAction, 'state' | 'detail' | 'cycle' | 'kind' | 'work'> | undefined) => !!row && row.kind === 'decision' && row.work === work && row.state === 'failed'
+    && selfHealingDecisionFailure(row.detail) && row.cycle < state.cycle && state.cycle - row.cycle <= selfHealingRepeatCycles;
+  if (!earlier(previous) && !Object.values(state.actions).some(earlier)) return null;
+  return planeUnavailableText(detail) ? 'plane-unavailable' : undefined;
+}
 /**
  * GY-1430. A rework the server refused because the candidate it was bound to — the head of this
  * cycle's snapshot — is no longer the item's ("The rework is bound to X but the current candidate is
@@ -108,13 +136,15 @@ export async function decisionReads(effects: DaemonEffects, held: HeldDecisions,
     call && ((item: Work, ...rest: A) => { moves(item); const made = call(item, ...rest); made.then(() => moves(item), () => moves(item)); return made; });
   const reads: DaemonEffects = new Proxy(effects, { get: (target, property, receiver) => {
     if (property === 'decisions') return target.decisions && read;
-    if (property === 'decide' || property === 'withdraw') return writes(Reflect.get(target, property, receiver));
+    // Each by its own type: one call over their union would infer `writes`'s arguments from whichever member TypeScript orders first.
+    if (property === 'decide') return writes(target.decide);
+    if (property === 'withdraw') return writes(target.withdraw);
     if (property === 'resume') return writes(target.resume);
     return Reflect.get(target, property, receiver);
   } });
   // The waiting scope requests' and open watches' histories are read ahead, a bounded few at a time, while the step works.
   const keys = new Set(watched.filter(watch => !watch.settledAt).map(watch => watch.work));
-  const scoped = open.filter(item => item.stage !== 'done' && !!routableScopeRequest(item, clock));
+  const scoped = open.filter(item => item.stage !== 'done' && !!routedScopeRequest(item, clock));
   const watching = open.filter(item => keys.has(item.key) && !scoped.includes(item));
   // Last, the unreleased backlog the stale-release step reads (GY-1315), so a cold backlog is read while the step works, not when it reaches them.
   const backlog = staleReleaseCandidates(open).filter(item => !scoped.includes(item) && !watching.includes(item));

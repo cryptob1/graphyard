@@ -44,7 +44,7 @@ const authored = (minute: number, before: string[], after: string[]) => {
   const reason = `Approve graphyard-opencode-1's scope request: the change needs them`;
   return row('requirements', minute, operator, { before: { plannedFiles: before }, intent: { reason, plannedFiles: after }, reason, liveScopeWidening: true }, after);
 };
-const routedReason = (paths: string[], named = criteria) => scopeDecisionReason(key, { requestedBy: 'graphyard-opencode-1', reason: 'the change needs them', decision: { state: 'refused', reason: 'outside the rule', at: at(1), decidedBy: 'graphyard', waitedMs: 0, paths, requestedBy: 'graphyard-opencode-1', requestedAt: at(0) } }, named, paths, null);
+const routedReason = (paths: string[], named = criteria) => scopeDecisionReason(key, { requestedBy: 'graphyard-opencode-1', reason: 'the change needs them', decision: { state: 'refused', reason: 'outside the rule', at: at(1), decidedBy: 'graphyard', treeRead: true, waitedMs: 0, paths, requestedBy: 'graphyard-opencode-1', requestedAt: at(0) } }, named, paths, null);
 const widenings = (rows: InterventionLedgerRow[]) => foldInterventions(rows, [], at(59)).interventions.filter(entry => entry.kind === 'scope-widening');
 
 test('unit:scope-widening-settled-by-control-plane — a widening the loop grants on its own audited grounds is no intervention (GY-1381 shape)', () => {
@@ -92,7 +92,7 @@ test('unit:scope-widening-settled-by-control-plane — a widening somebody autho
 
 test('unit:routed-scope-ask-not-pre-empted — the guard and the board leave a routed ask to the approver, and only while it judges it', () => {
   const now = Date.parse(at(10));
-  const refused = { at: at(1), state: 'refused' as const, reason: 'outside the rule', decidedBy: 'graphyard', waitedMs: 0, paths: ['src/b.ts'], requestedBy: 'graphyard-opencode-1', requestedAt: at(0), epoch: 1 };
+  const refused = { at: at(1), state: 'refused' as const, reason: 'outside the rule', decidedBy: 'graphyard', treeRead: true, waitedMs: 0, paths: ['src/b.ts'], requestedBy: 'graphyard-opencode-1', requestedAt: at(0), epoch: 1 };
   const item = { key, plannedFiles: ['src/a.ts'], criteria, lease: { owner: 'graphyard-opencode-1', epoch: 1, expiresAt: at(30) }, blocker: 'Scope request refused: outside the rule',
     scopeRequest: { epoch: 1, paths: ['src/b.ts'], reason: 'the change needs it', requestedBy: 'graphyard-opencode-1', at: at(0), decision: refused } } as unknown as Work;
   assert.ok(routedScopeAsk(item, ['src/a.ts', 'src/b.ts'], now), 'a widening covering the routed ask pre-empts it');

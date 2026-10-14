@@ -8,7 +8,7 @@ import type { AddressInfo } from 'node:net';
 import { parseEnv } from 'node:util';
 import { dirname, join } from 'node:path';
 import { applyInstall, buildPlan, prepareInstall, type InstallDependencies, type InstallInputs } from '../src/install/index.js';
-import { claimHash, ghWrapper, HOST_BWRAP_PROBE, hostGithubFiles, hostLayout, hostRuntimes, CONNECT_PATH, HOST_GH_WRAPPER, OPENCODE_WORKER_PERMISSION, HOST_USER, MIGRATE_SOURCE_VARIABLE, SIGNIN_CLAIM_VARIABLE } from '../src/install/host.js';
+import { claimHash, ghWrapper, hostRegistryChange, HOST_BWRAP_PROBE, hostGithubFiles, hostLayout, hostRuntimes, CONNECT_PATH, HOST_GH_WRAPPER, OPENCODE_WORKER_PERMISSION, HOST_USER, MIGRATE_SOURCE_VARIABLE, SIGNIN_CLAIM_VARIABLE } from '../src/install/host.js';
 import { hostSizing, recommendServerType, parseServerTypes } from '../src/install/pricing.js';
 import { ensureTokens, fingerprint, installDirectory, plannedPrincipals, Vault, writeInstallRecord } from '../src/install/secrets.js';
 import { principalSchema } from '../src/server/principals.js';
@@ -134,6 +134,13 @@ test('unit:host-install-plan — apply provisions the fixture host: units, runti
     assert.equal(master.input, session.tokens.get('owner-project-master'));
     assert.ok(!master.args.some(arg => arg.includes(master.input!)), 'the coordinator credential is never an argument');
     assert.ok(master.args.includes('--herdr-workspace') && master.args.includes('w1'));
+    // GY-1479: the master's agent identities are provisioned on the host, with the admin credential on standard input.
+    const autonomy = hostOf(fixture).commands.find(command => command.args.includes('master') && command.args.includes('autonomy'))!;
+    assert.ok(autonomy.args.includes('--admin-token-stdin') && autonomy.args.includes('--apply'), autonomy.args.join(' '));
+    assert.equal(autonomy.input, session.tokens.get(session.principals.find(principal => principal.role === 'admin')!.id));
+    assert.ok(!autonomy.args.some(arg => arg.includes(autonomy.input!)), 'the admin credential is never an argument');
+    assert.ok(hostOf(fixture).commands.indexOf(autonomy) > hostOf(fixture).commands.indexOf(master), 'after master init wrote the master configuration');
+    assert.equal(summary.host!.masterIdentities, true);
     assert.ok(lines.some(line => line.includes('graphyard-executor.mjs --install --count 2')));
     assert.ok(lines.some(line => line.includes('systemctl --user enable --now graphyard-master-owner-project.service')));
 
@@ -196,6 +203,20 @@ test('unit:host-install-plan — every installed worker profile passes the launc
     }
     assert.equal(profiles.find(profile => profile.kind === 'opencode').environment.OPENCODE_PERMISSION, OPENCODE_WORKER_PERMISSION);
   } finally { await fixture.cleanup(); }
+});
+
+test('unit:host-install-plan — a Pi worker is installed like the other runtimes: it gets a confined worker profile and a seat in the worker role (GY-1746)', async () => {
+  const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test' });
+  try {
+    await applyHost(fixture, hostInputs({ workers: 4 }));
+    const profiles = [...fixture.hostFiles.entries()].filter(([path]) => path.startsWith(`${CONFIG}/profiles/`)).map(([, file]) => JSON.parse(file.content));
+    assert.deepEqual(profiles.map(profile => profile.kind).sort(), ['claude', 'codex', 'opencode', 'pi']);
+    for (const profile of profiles) assert.equal(workerConfinementRefusal(profile), null, profile.name);
+  } finally { await fixture.cleanup(); }
+  const accounts = ['claude', 'pi'].map(runtime => ({ name: `${runtime}-a`, runtime, home: `/home/graphyard/accounts/${runtime}-a` })) as Parameters<typeof hostRegistryChange>[1];
+  const change = hostRegistryChange({ runtimes: [], models: [], accounts: [], roles: [] }, accounts, 'graphyard-host', 2);
+  assert.deepEqual(change.roles.find(role => role.name === 'worker')!.accounts, ['claude-a', 'pi-a'], 'Pi serves the worker role');
+  assert.deepEqual(change.roles.find(role => role.name === 'reviewer')!.accounts, ['claude-a'], 'Pi stays out of the roles it is not proposed for');
 });
 
 test('unit:host-install-plan — worker profiles for a repository with a long name generate bounded Herdr session names', async () => {

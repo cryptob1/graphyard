@@ -10,7 +10,7 @@ import type { CliContext } from './context.js';
  * goal's history. A reason is everything after `--`.
  */
 const usage = `Use goal FILE | goal list [--all] | goal show GOAL-N | goal draft GOAL-N DRAFT.json | goal approve|refuse GOAL-N -- REASON
-  | goal land GOAL-N | goal closed GOAL-N PR -- REASON | goal plan GOAL-N PLAN.json | goal plan-approve|plan-refuse GOAL-N -- REASON | goal release GOAL-N | goal deliver GOAL-N GY-N... -- REASON | goal case-change GOAL-N GY-N CASE... -- REASON | goal case-change-approve|case-change-refuse GOAL-N CHANGE_ID -- REASON`;
+  | goal land GOAL-N | goal closed GOAL-N PR|change -- REASON | goal plan GOAL-N PLAN.json | goal plan-approve|plan-refuse GOAL-N -- REASON | goal release GOAL-N | goal deliver GOAL-N GY-N... -- REASON | goal case-change GOAL-N GY-N CASE... -- REASON | goal case-change-approve|case-change-refuse GOAL-N CHANGE_ID -- REASON`;
 /** The words before `--`, and the reason after it. */
 function split(args: string[]) {
   const at = args.indexOf('--');
@@ -39,7 +39,8 @@ async function goal(context: CliContext) {
   if (sub === 'plan') return print(await post('plan', await json(rest[0])));
   if (sub === 'plan-approve' || sub === 'plan-refuse') return print(await post(sub, { reason: needReason(reason) }));
   if (sub === 'release') return print(await post('release', {}));
-  if (sub === 'closed') return print(await post('closed', { pr: Number(rest[0]), reason: needReason(reason) }));
+  // GY-1535: a merge-writer acceptance change has no pull request; `change` names it.
+  if (sub === 'closed') return print(await post('closed', { pr: rest[0] === 'change' ? null : Number(rest[0]), reason: needReason(reason) }));
   if (sub === 'case-change') return print(await post('case-change', { work: rest[0], cases: rest.slice(1), reason: needReason(reason) }));
   if (sub === 'case-change-approve' || sub === 'case-change-refuse') return print(await post(sub, { change: rest[0], reason: needReason(reason) }));
   // Anything else names the goal file to record.
@@ -58,8 +59,9 @@ export const goalCommands = defineCommands([{
     '                                Judge an acceptance draft (never its author)',
     '  goal land GOAL-N              Land the approved acceptance PR at its approved head;',
     '                                merged there, its cases are protected',
-    '  goal closed GOAL-N PR -- REASON',
-    '                                Record the acceptance PR closed unmerged (drafted again)',
+    '  goal closed GOAL-N PR|change -- REASON',
+    '                                Record the acceptance PR (or, under the control-plane merger,',
+    '                                the merge-writer change) closed unmerged (drafted again)',
     '  goal plan GOAL-N PLAN.json    Record a plan {note, items} for a goal whose acceptance',
     '                                merged (the planner role writes it)',
     '  goal plan-approve|plan-refuse GOAL-N -- REASON',

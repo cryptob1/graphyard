@@ -8,6 +8,7 @@ import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { botReviewerStates, dispatchEffects, dispatchSummary, emptyDispatchCursor, runDispatchTick, type BotActivity, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-25 `at`/clock is the fixed now handed to reconcileAutoDispatch, dispatchEffects and dispatchSummary; the new Date() readings only stamp the stub's snapshot and review records.
 
 // GY-349: an automatic bot reviewer that has announced its quota is spent posts no review, so a
 // reviewer launch that waits for it loses the whole wait on every round. Each test is named for

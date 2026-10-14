@@ -4,12 +4,14 @@ import { lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, statfs, wr
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isProfileSession, neverStartedReason, privateFile, profileConcurrency, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
+import type { HerdrPane } from './master/herdr.js';
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
-import { describeTmpReclaim, hostTmpRoots, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
+import { agentRuntimeScratchRoots, agentScratchMinAgeMs, agentScratchPatterns, compileCacheName, describeTmpReclaim, packageStoreMinAgeMs, packageStoreNames, runtimeScratchCapEntries, tmpReclaimBaseClasses, tmpReclaimClassNames, type TmpReclaimClass, hostTmpRoots, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpInodeHeadroom, tmpReclaimEscalation, tmpReclaimLimitPerCycle, tmpReclaimMinAgeMs, tmpConsumersScanBound, tmpReclaimWorkMsPerCycle, tsxCacheName, type TmpConsumer, type TmpRootPressure, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
 import { alignKey, upgradeTouchesCode } from './daemon/upgrade.js';
 import type { UpgradeStall } from './daemon/state.js';
-import { describePromotion, promotionOnSchedule, promotionWait, type PromotionWait } from './master/release-lag.js';
+import { workerReclaimBoundMs, workerSubmissionBoundMs } from './model/attempt-bound.js';
+import { describePromotion, promotionHolds, promotionWait, type PromotionWait } from './master/release-lag.js';
 import type { LoopState } from './daemon/liveness.js';
 import type { Work } from './model.js';
 import { runChild } from './child-runner.js';
@@ -30,6 +32,8 @@ import { runChild } from './child-runner.js';
  * the reclaim pass gives each one back; and `/healthz` reports the plane unhealthy while it cannot record.
  */
 
+/** A duration as the registry and the tmp-inodes detail spell it: whole hours, else minutes. */
+const minutes = (ms: number) => ms >= 3_600_000 ? `${ms / 3_600_000} hour${ms === 3_600_000 ? '' : 's'}` : `${ms / 60_000} minutes`;
 export const resourceIds = ['review-ledger', 'producer-ledger', 'agent-names', 'session-slots', 'github-budget', 'executor-liveness', 'loaded-revision', 'database-capacity', 'worktree-disk', 'tmp-inodes'] as const;
 export type ResourceId = typeof resourceIds[number];
 export type ResourceState = 'ok' | 'low' | 'exhausted' | 'unknown';
@@ -89,11 +93,19 @@ export interface ResourceInputs {
   /** The reclaim pass's seen-unowned map (pane → first seen), from .graphyard/resource-reclaims.json; absent or null when unread. */
   reclaimSeen?: Record<string, string> | null;
   disk: { path: string; totalBytes: number; freeBytes: number; thresholdBytes: number } | null;
-  /** The host temporary directory's inodes, and what the loop's last /tmp pass removed (GY-1074); absent or null when unread. */
-  tmp?: TmpInodes | null;
+  /**
+   * The host temporary directories' inodes, and what the loop's last /tmp pass removed (GY-1074):
+   * one per filesystem the pass scans (GY-1602), each read as its own row; absent or null when unread.
+   */
+  tmp?: TmpInodes | readonly TmpInodes[] | null;
 }
-/** The latest finished /tmp pass: its count, when it was recorded and the directories it scanned (GY-1081, GY-1368). */
-export interface TmpPassRecord { removed: number; at: string; roots?: string[] }
+/**
+ * The latest finished /tmp pass: its count, when it was recorded and the directories it scanned
+ * (GY-1081, GY-1368); the escalation steps it ran below the inode headroom and, when the bound
+ * still stood at its end, the top consumers it named (GY-1597); and how many entries each class
+ * took (GY-1655) — the base classes always, a retention class (pnpm store, compile cache) once it took one (GY-1683).
+ */
+export interface TmpPassRecord { removed: number; at: string; roots?: string[]; classes?: Partial<Record<TmpReclaimClass, number>>; escalated?: TmpReclaimReport['escalated']; consumers?: TmpConsumer[]; pressure?: TmpRootPressure[] }
 export interface TmpInodes {
   path: string; totalInodes: number; freeInodes: number;
   /** What the last /tmp pass to remove anything removed, and when it was recorded. */
@@ -105,9 +117,19 @@ export interface TmpInodes {
   /**
    * This user's own top-level entries in the directory, and how many carry a test temp name
    * (GY-1081): the per-user quota is not readable without quotactl, so this is what the reading can
-   * show of this user's share. `capped` when the count stopped at `ownEntriesScanBound`.
+   * show of this user's share. `capped` when the count stopped at `ownEntriesScanBound`. `tsxCache`
+   * names this user's tsx compile cache and the entries under it, which `entries` includes (GY-1512):
+   * one top-level directory that held 89,896 of them on 8 October 2026. `agentScratch` counts the
+   * top-level entries carrying an agent scratch name the pass also reclaims (GY-1618), when any do.
    */
-  own?: { entries: number; testTemp: number; capped: boolean } | null;
+  own?: { entries: number; testTemp: number; capped: boolean; tsxCache?: { name: string; entries: number }; agentScratch?: number } | null;
+  /**
+   * The consumers the latest pass named in this directory's own census, and whether that census
+   * stopped at its budget (GY-1602): another root's consumers never stand in for this one's.
+   */
+  consumers?: TmpConsumer[]; censusPartial?: boolean;
+  /** Whether the latest pass measured this directory still below its headroom at its end (GY-1602). */
+  belowAfterPass?: boolean;
 }
 
 export interface ResourceDefinition {
@@ -238,10 +260,13 @@ function liveOwner(profile: ReturnType<typeof roleProfiles>[number], name: strin
  * When the session last holding `name` settled: the newest ledger record on the name for a reviewer
  * or producer, the newest implementation session of the principal for a worker. Null when nothing
  * records one — a reviewer or producer record is written before its pane, so such a holder has none.
+ * A worker session that names its pane settles that pane alone (GY-1547): a pane launched after
+ * the snapshot was taken is named by no session in it, and the principal's sessions on other panes
+ * settle their own, never the new one. A session naming no pane settles the name as before.
  */
-function holderSettledAt(profile: ReturnType<typeof roleProfiles>[number], name: string, input: Pick<ResourceInputs, 'reviews' | 'producers' | 'work'>) {
+function holderSettledAt(profile: ReturnType<typeof roleProfiles>[number], name: string, input: Pick<ResourceInputs, 'reviews' | 'producers' | 'work'>, pane?: string | null) {
   if (profile.role === 'worker') {
-    const times = input.work.flatMap(item => (item.sessions ?? []).filter(handle => handle.kind === 'implementation' && handle.principal === profile.principal)
+    const times = input.work.flatMap(item => (item.sessions ?? []).filter(handle => handle.kind === 'implementation' && handle.principal === profile.principal && (!pane || !handle.pane || handle.pane === pane))
       .map(handle => Date.parse(handle.endedAt ?? handle.updatedAt))).filter(Number.isFinite);
     return times.length ? Math.max(...times) : null;
   }
@@ -305,21 +330,29 @@ export const resourceRegistry: ResourceDefinition[] = [
       // stood seen-unowned for the bound. A holder the pass has not seen, or with no pane it could
       // close, keeps the settling clock.
       const seenAt = (agent: HerdrAgent) => { const first = agent.pane_id ? input.reclaimSeen?.[agent.pane_id] : undefined; const at = first ? Date.parse(first) : NaN; return Number.isFinite(at) ? at : null; };
+      // A holder nothing in the snapshot settled — no record or session names it — whose status Herdr
+      // does not report as finished is a launch the snapshot predates (its session and lease land in
+      // the next one) or a pane only the reclaim pass judges, on its own clock, as a recordless launch
+      // that may be stuck before its record lands (GY-1192): it is overdue once that clock has run the
+      // bound, never at once (GY-1547). A finished holder nothing settled is still overdue at once.
+      const unplaced = (agent: HerdrAgent) => holderSettledAt(profile, agent.name!, input, agent.pane_id) === null && agent.agent_status !== 'idle' && agent.agent_status !== 'done';
       const overdue = stale.filter(agent => {
         const seen = seenAt(agent);
         if (seen !== null) return input.now - seen >= nameReclaimBoundMs;
-        const at = holderSettledAt(profile, agent.name!, input); return at === null || input.now - at >= nameReclaimBoundMs;
+        if (unplaced(agent)) return false;
+        const at = holderSettledAt(profile, agent.name!, input, agent.pane_id); return at === null || input.now - at >= nameReclaimBoundMs;
       });
       const late = (agent: HerdrAgent) => seenAt(agent) !== null ? `not reclaimed within ${nameReclaimBoundMs / 60_000} minutes of the reclaim pass first seeing it unowned` : `not reclaimed within ${nameReclaimBoundMs / 60_000} minutes of settling`;
+      const underWay = (agent: HerdrAgent) => seenAt(agent) !== null ? ` (seen unowned since ${new Date(seenAt(agent)!).toISOString()})` : unplaced(agent) ? ' (no session of this snapshot names the pane; the reclaim pass judges it on its own clock)' : '';
       return { id: profile.name, used: held.length, bound: profileConcurrency(profile), reclaimable: stale.length, overdue: overdue.length,
-        detail: held.length ? `${profile.role} profile ${profile.name}: ${held.map(agent => `${agent.name} (${agent.agent_status ?? 'unknown'}${overdue.includes(agent) ? `, no live session, ${late(agent)}` : stale.includes(agent) ? `, no live session, reclaim under way${seenAt(agent) !== null ? ` (seen unowned since ${new Date(seenAt(agent)!).toISOString()})` : ''}` : ''}${agent.pane_id ? `, pane ${agent.pane_id}` : ''})`).join(', ')}` : `${profile.role} profile ${profile.name}: no name held` };
+        detail: held.length ? `${profile.role} profile ${profile.name}: ${held.map(agent => `${agent.name} (${agent.agent_status ?? 'unknown'}${overdue.includes(agent) ? `, no live session, ${late(agent)}` : stale.includes(agent) ? `, no live session, reclaim under way${underWay(agent)}` : ''}${agent.pane_id ? `, pane ${agent.pane_id}` : ''})`).join(', ')}` : `${profile.role} profile ${profile.name}: no name held` };
     }),
   },
   {
     id: 'session-slots', title: 'Session slots', unit: 'sessions',
     bound: 'the summed concurrency of the role\'s launch profiles in .graphyard/master.json',
     usage: 'pending reviewer and producer ledger records, and live worker leases held by launch-profile principals', owner: 'the master loop and its dispatcher (src/master-daemon.ts, src/auto-dispatch.ts)',
-    reclaim: `a session settles when its request is answered or superseded; the reclaim pass fails a pending session finished or blocked on a prompt for ${stuckSessionMs / 60_000} minutes, or absent from Herdr on every pass for ${stuckSessionMs / 60_000} minutes, which releases its slot`,
+    reclaim: `a session settles when its request is answered or superseded; the reclaim pass fails a pending session finished or blocked on a prompt for ${stuckSessionMs / 60_000} minutes, or absent from Herdr on every pass for ${stuckSessionMs / 60_000} minutes, which releases its slot; a worker lease held past the ${workerSubmissionBoundMs / 60_000}-minute worker bound without a submission is a stalled-gate fault however it renews, and past ${workerReclaimBoundMs / 60_000} minutes with no submission progress the loop ends the attempt and stops its supervisor, which returns its slot`,
     remedy: 'raise concurrency on a profile of the role, or add a profile on another account, in .graphyard/master.json',
     warnBelow: () => 1, symptoms: [/every (?:reviewer|independent producer) profile is busy/, /is at its concurrency limit/],
     read: input => (['worker', 'reviewer', 'producer'] as const).map(role => {
@@ -372,7 +405,7 @@ export const resourceRegistry: ResourceDefinition[] = [
     id: 'loaded-revision', title: 'Loop loaded-code revision', unit: 'commits behind',
     bound: 'zero: the loop must run the code its checkout holds',
     usage: 'commits the coordinator checkout moved past the one the running loop process loaded, from the checkout\'s HEAD reflog and the process start time; a move that touches no loaded code (src/, scripts/, bin/, package.json) counts none, as the self-upgrade restarts nothing for it', owner: 'the master loop process and the coordinator checkout',
-    reclaim: `the between-cycles self-upgrade restarts the loop onto the checkout's revision; a move it has not loaded within ${selfUpgradeBoundMs / 60_000} minutes counts, unless the restart it owes onto that revision was attempted within the same bound (retried each cycle while an executor holds a claim, whether or not production is verified), or the loop runs the verified release production serves and what it has not loaded waits on a promotion not yet due or in validation`,
+    reclaim: `the between-cycles self-upgrade restarts the loop onto the checkout's revision; a move it has not loaded within ${selfUpgradeBoundMs / 60_000} minutes counts, unless the restart it owes onto that revision was attempted within the same bound (retried each cycle while an executor's claim refuses the fleet restart, whether or not production is verified; the loop re-executes onto it by itself once that refusal has stood ${selfUpgradeBoundMs / 2 / 60_000} minutes, the self-upgrade's fleet wait), or the loop runs the verified release production serves and what it has not loaded waits on a promotion not yet due or in validation`,
     remedy: 'graphyard master restart so the loop runs the code the checkout holds',
     warnBelow: () => 0, symptoms: [],
     // A move the self-upgrade is still within its bound for is the upgrade under way (GY-1196):
@@ -391,7 +424,7 @@ export const resourceRegistry: ResourceDefinition[] = [
       // verified release serves yet (GY-1400): while the promotion that would serve them is on
       // schedule, the loop could not have loaded them, and a restart would reload the same release.
       const wait = input.upgrade?.promotion ?? null;
-      const promoting = !pending && !restarting && revision.behind > 0 && !!wait && wait.pending.length > 0 && sameCommit(revision.loaded, wait.deployedSha) && promotionOnSchedule(wait, input.now);
+      const promoting = !pending && !restarting && revision.behind > 0 && promotionHolds(wait, revision.loaded, input.now);
       // Why the owed restart cannot complete, beside the two revisions (GY-1445): a named cause and
       // its latest attempt, never a silent pin at the bound.
       const stalled = revision.behind > 0 ? input.upgrade?.stalled ?? null : null;
@@ -428,17 +461,23 @@ export const resourceRegistry: ResourceDefinition[] = [
     // not readable without quotactl, so the reading warns early rather than claiming to track it.
     bound: 'the inode count of the filesystem holding the host temporary directory (filesystem-wide, not the per-user quota, which can break shells first), so it warns at a quarter free',
     usage: 'statfs of the host temporary directory (os.tmpdir() of the reading process)', owner: 'test runs and sessions on the coordinator host, and the loop\'s /tmp reclaim pass (src/tmp-reclaim.ts)',
-    reclaim: `the loop's reclaim pass scans its own tmpdir and /tmp, each once, and removes this user's test temp entries (${testTempPatterns.map(pattern => `${pattern.source.slice(1)}*`).join(', ')}) older than ${testTempMinAgeMs / 3_600_000} hours that no live process holds, at most ${tmpReclaimLimitPerCycle} per cycle`,
+    reclaim: `the loop's reclaim pass scans its own tmpdir and /tmp, each once, and removes this user's test temp entries (${testTempPatterns.map(pattern => `${pattern.source.slice(1)}*`).join(', ')}) older than ${testTempMinAgeMs / 3_600_000} hours, this user's agent scratch entries (${agentScratchPatterns.map(pattern => `${pattern.source.slice(1).replace('\\d+', '<n>')}*`).join(', ')}) and agent worktrees (any top-level linked git worktree or git checkout, whatever its name) whose whole tree, and a linked worktree's gitdir, went unwritten for ${agentScratchMinAgeMs / 3_600_000} hours, the entries inside agent runtimes' scratch roots (${agentRuntimeScratchRoots.join(', ')}) unwritten as long, one by one and never the root, the regular files in this user's tsx compile cache (tsx-<uid>) older than ${tmpReclaimMinAgeMs / 3_600_000} hours and under a same-volume pnpm store (${packageStoreNames.join(', ')}) older than ${packageStoreMinAgeMs / 86_400_000} days, and ${compileCacheName} version directories whose whole tree went unwritten for the cache bound, that no live process holds open or names in its command line, at most ${tmpReclaimLimitPerCycle} per cycle; while /tmp stays below a quarter of its inodes free the same pass escalates (${tmpReclaimEscalation.map(step => `${step.limit} per cycle and cache files older than ${minutes(step.cacheAgeMs)}`).join(', then ')}), caps each runtime scratch root to its ${runtimeScratchCapEntries} most recently written entries whatever their age and, if the bound still stands, names the top /tmp consumers by path, entry count and owner`,
     remedy: 'graphyard master run --once reclaims now; find what else fills /tmp (ls /tmp | sort | uniq -c) and stop the process leaking it',
-    warnBelow: bound => Math.ceil(bound / 4), symptoms: [],
+    warnBelow: tmpInodeHeadroom, symptoms: [],
     // The quarter-free line is an early warning on a filesystem-wide count every process on the host
     // fills (GY-1379): while the loop's latest pass is current and scanned the measured directory, it
-    // has taken back all it may, so a reading above a tenth free is reported and raises nothing.
+    // has taken back all it may, so a reading above a tenth free is reported and raises nothing — unless
+    // that pass itself left the directory below the headroom, whatever it removed (GY-1597, GY-1602).
+    // One row per root the pass scans (GY-1602): a low /tmp raises its own attention, naming its own
+    // consumers, whatever the loop's TMPDIR reads, even when both sit on one filesystem.
     read: input => {
-      if (!input.tmp) return [{ id: '', used: null, bound: null, detail: 'the host temporary directory\'s inodes could not be read', reclaimable: 0 }];
-      const answered = tmpPassAnswers(input.tmp, input.now);
-      return [{ id: '', used: input.tmp.totalInodes - input.tmp.freeInodes, bound: input.tmp.totalInodes, reclaimable: 0, ...(answered ? { answered } : {}),
-        detail: `${describeTmpInodes(input.tmp)}${answered ? `; that pass is current over ${input.tmp.path}, so what remains is outside its reach and only falling below a tenth free raises attention` : ''}` }];
+      const roots = !input.tmp ? [] : Array.isArray(input.tmp) ? input.tmp as readonly TmpInodes[] : [input.tmp as TmpInodes];
+      if (!roots.length) return [{ id: '', used: null, bound: null, detail: 'the host temporary directory\'s inodes could not be read', reclaimable: 0 }];
+      return roots.map((tmp, index) => {
+        const answered = tmpPassAnswers(tmp, input.now);
+        return { id: index ? tmp.path : '', used: tmp.totalInodes - tmp.freeInodes, bound: tmp.totalInodes, reclaimable: 0, ...(answered ? { answered } : {}),
+          detail: `${describeTmpInodes(tmp)}${answered ? `; that pass is current over ${tmp.path}, so what remains is outside its reach and only falling below a tenth free raises attention` : ''}` };
+      });
     },
   },
 ];
@@ -448,17 +487,35 @@ export const tmpPassCurrentMs = 30 * 60_000;
 /**
  * Whether the loop's own /tmp pass answers a low tmp-inodes reading (GY-1379): it finished within
  * `tmpPassCurrentMs`, scanned the measured directory, and the volume is still above a tenth free.
+ * A pass that left this directory below its headroom at its end, so named its top consumers,
+ * answers nothing, whatever it removed (GY-1597, GY-1602): what still fills it is outside the
+ * pass's reach, and the attention must carry the consumers it named until someone stops the leaker.
  */
 export function tmpPassAnswers(tmp: TmpInodes, now: number) {
   const at = tmp.latest ? Date.parse(tmp.latest.at) : Number.NaN;
+  if (tmp.belowAfterPass || consumersOf(tmp).length) return false;
   return Number.isFinite(at) && now - at < tmpPassCurrentMs && tmp.measuredScanned === true && tmp.freeInodes >= tenthOf(tmp.totalInodes);
 }
 const entries = (count: number) => `${count} entr${count === 1 ? 'y' : 'ies'}`;
+/** The consumers the latest pass named in this directory: its own census, or, from a record without one, those under its path. */
+const consumersOf = (tmp: TmpInodes) => tmp.consumers ?? tmp.latest?.consumers?.filter(consumer => consumer.path.startsWith(`${tmp.path}/`)) ?? [];
+/**
+ * How many entries each class of the /tmp pass took (GY-1655): `3 test temp, 0 tsx cache, 2 agent
+ * worktree, 40 runtime scratch`, the base classes always and a retention class the record carries
+ * after them (`…, 52699 pnpm store, 2 compile cache`, GY-1683).
+ */
+export const describeTmpClasses = (classes: Partial<Record<TmpReclaimClass, number>>) =>
+  (Object.keys(tmpReclaimClassNames) as TmpReclaimClass[]).filter(kind => tmpReclaimBaseClasses.includes(kind) || classes[kind] !== undefined).map(kind => `${classes[kind] ?? 0} ${tmpReclaimClassNames[kind]}`).join(', ');
 /** The tmp-inodes detail: free inodes, this user's share, the latest pass's count and the last count that was not 0. */
 function describeTmpInodes(tmp: TmpInodes) {
   const parts = [`measured ${tmp.path}: ${tmp.freeInodes} of ${tmp.totalInodes} inodes free`];
-  if (tmp.own) parts.push(`${tmp.own.capped ? 'at least ' : ''}${entries(tmp.own.entries)} at its top level are this user's (${tmp.own.testTemp} with test temp names); the per-user quota itself is not readable`);
-  if (tmp.latest) parts.push(`the loop's latest /tmp pass removed ${entries(tmp.latest.removed)} at ${tmp.latest.at}${tmp.latest.roots ? `, scanning ${tmp.latest.roots.join(' and ')}` : ''}`);
+  if (tmp.own) parts.push(`${tmp.own.capped ? 'at least ' : ''}${entries(tmp.own.entries)} are this user's (${tmp.own.testTemp} top-level with test temp names${tmp.own.agentScratch ? `, ${tmp.own.agentScratch} with agent scratch names` : ''}${tmp.own.tsxCache ? `, ${entries(tmp.own.tsxCache.entries)} under its tsx compile cache ${tmp.own.tsxCache.name}` : ''}); the per-user quota itself is not readable`);
+  if (tmp.latest) parts.push(`the loop's latest /tmp pass removed ${entries(tmp.latest.removed)} at ${tmp.latest.at}${tmp.latest.classes ? ` (${describeTmpClasses(tmp.latest.classes)})` : ''}${tmp.latest.roots ? `, scanning ${tmp.latest.roots.join(' and ')}` : ''}`);
+  // Below the headroom the pass escalated in the same run (GY-1597): say how far, and what it could not reach.
+  const top = tmp.latest?.escalated?.at(-1);
+  if (top) parts.push(`below the inode headroom it escalated to ${top.limit} per cycle and tsx cache files older than ${minutes(top.cacheAgeMs)} (${tmp.latest!.escalated!.map(step => step.removed).join(' + ')} removed by the escalated steps)`);
+  const consumers = consumersOf(tmp);
+  if (consumers.length) parts.push(`the bound still stood, so the top /tmp consumers are ${consumers.map(consumer => `${consumer.path} (${consumer.capped ? 'at least ' : ''}${entries(consumer.entries)}, owner ${consumer.owner})`).join(', ')}${tmp.censusPartial ? ` (a partial census: it stopped at its ${tmpConsumersScanBound}-entry budget)` : ''}`);
   // A pass over another directory than the one warned about removes nothing here: say so (GY-1368).
   if (tmp.measuredScanned === false) parts.push(`that pass did not scan ${tmp.path}`);
   if (tmp.removed === null) parts.push('the loop has recorded no /tmp pass that removed anything');
@@ -621,11 +678,18 @@ const runCommand: Run = (command, args) => execFileSync(command, args, { encodin
  */
 const touchesCodeCache = new WeakMap<Run, Map<string, boolean>>();
 const touchesCodeCacheBound = 1_000;
-export function loadedRevision(root: string, pid: number, run: Run = runCommand, now = Date.now()) {
+/**
+ * `measuredAt` is the instant `ps` is asked, which the age it answers counts back from: the host's
+ * clock, never the instant a reading is judged at (GY-1547). A reading judges its snapshot at the
+ * snapshot's own instant (GY-1379), tens of seconds before the faults step asks `ps`; an age
+ * counted back from that earlier instant placed the loop's start before the checkout move its own
+ * restart had followed, so the reading named the revision before the move as loaded.
+ */
+export function loadedRevision(root: string, pid: number, run: Run = runCommand, measuredAt = Date.now()) {
   try {
     const elapsed = Number(run('ps', ['-o', 'etimes=', '-p', String(pid)]).trim());
     if (!Number.isFinite(elapsed)) return null;
-    const startedAt = Math.floor(now / 1000) - elapsed;
+    const startedAt = Math.floor(measuredAt / 1000) - elapsed;
     const checkout = run('git', ['-C', root, 'rev-parse', 'HEAD']).trim();
     // The reflog entry's own time (`%gd` under --date=unix is HEAD@{<seconds>}), not the commit's:
     // a checkout that fast-forwards onto an older commit moved after the process started.
@@ -670,25 +734,38 @@ export const ownEntriesScanBound = 20_000;
 /** This user's own top-level entries in `path`, and how many carry a test temp name; null where there are no uids. */
 export async function countOwnEntries(path: string, uid = process.getuid?.()): Promise<TmpInodes['own']> {
   if (uid === undefined) return null;
-  const names = await readdir(path);
-  let entries = 0, testTemp = 0;
+  const names = await readdir(path), cacheName = tsxCacheName(uid);
+  let entries = 0, testTemp = 0, agentScratch = 0, tsxCache: { name: string; entries: number } | undefined;
   for (const name of names.slice(0, ownEntriesScanBound)) {
     let info;
     try { info = await lstat(resolve(path, name)); } catch { continue; }
     if (info.uid !== uid) continue;
     entries++;
     if (testTempPatterns.some(pattern => pattern.test(name))) testTemp++;
+    else if (agentScratchPatterns.some(pattern => pattern.test(name))) agentScratch++;
+    // The tsx cache is one top-level name over tens of thousands of inodes: its entries are counted
+    // by name alone, so the reading names it when it is what fills the volume.
+    if (name === cacheName && info.isDirectory()) {
+      const inside = (await readdir(resolve(path, name), { recursive: true }).catch(() => [] as string[])).length;
+      tsxCache = { name, entries: inside };
+      entries += inside;
+    }
   }
-  return { entries, testTemp, capped: names.length > ownEntriesScanBound };
+  return { entries, testTemp, capped: names.length > ownEntriesScanBound, ...(tsxCache ? { tsxCache } : {}), ...(agentScratch ? { agentScratch } : {}) };
 }
 
+type TmpVolume = (path: string) => Promise<{ files: number | bigint; ffree: number | bigint }>;
 /**
  * The host temporary directory's inode headroom, this user's own entries in it, the latest /tmp
  * pass's count and the count the last pass to remove anything removed, from the reclaim record
  * (GY-1074, GY-1081). Null when the volume cannot be read, or reports no inode count (a filesystem
  * without fixed inodes).
  */
-export async function readTmpInodes(root: string, path = tmpdir(), volume: (path: string) => Promise<{ files: number | bigint; ffree: number | bigint }> = statfs, uid = process.getuid?.()): Promise<TmpInodes | null> {
+export async function readTmpInodes(root: string): Promise<TmpInodes[]>;
+export async function readTmpInodes(root: string, path: string, volume?: TmpVolume, uid?: number): Promise<TmpInodes | null>;
+export async function readTmpInodes(root: string, path?: string, volume: TmpVolume = statfs, uid = process.getuid?.()): Promise<TmpInodes | TmpInodes[] | null> {
+  // Without a directory named, every root the loop's pass scans is read, each on its own filesystem (GY-1602).
+  if (path === undefined) return readTmpRoots(root);
   try {
     const info = await volume(path);
     const totalInodes = Number(info.files), freeInodes = Number(info.ffree);
@@ -699,8 +776,30 @@ export async function readTmpInodes(root: string, path = tmpdir(), volume: (path
     const latest = file.tmpLatest ?? null, real = (directory: string) => realpath(directory).catch(() => directory);
     const measured = await real(path);
     const measuredScanned = latest?.roots ? (await Promise.all(latest.roots.map(real))).includes(measured) : null;
-    return { path, totalInodes, freeInodes, removed: last ? last.tmp.removed : null, removedAt: last?.at ?? null, latest, measuredScanned, own };
+    // This directory's own census from the pass, matched by realpath (GY-1602).
+    let pressure: TmpRootPressure | undefined;
+    for (const entry of latest?.pressure ?? []) if (!pressure && await real(entry.root) === measured) pressure = entry;
+    // A pass that measured its roots but not this one named nothing here.
+    const census = pressure ? { consumers: pressure.consumers ?? [], ...(pressure.partial ? { censusPartial: true } : {}), ...(pressure.below ? { belowAfterPass: true } : {}) } : latest?.pressure ? { consumers: [] } : {};
+    return { path, totalInodes, freeInodes, removed: last ? last.tmp.removed : null, removedAt: last?.at ?? null, latest, measuredScanned, own, ...census };
   } catch { return null; }
+}
+/**
+ * `readTmpInodes` for each directory the loop's pass scans (GY-1602): its own tmpdir and /tmp, by
+ * default, each measured on its own filesystem. Directories that resolve to one path are read once;
+ * distinct directories on one filesystem are each read, since each carries its own census, and an
+ * unreadable one is left out.
+ */
+export async function readTmpRoots(root: string, paths: readonly string[] = hostTmpRoots(), volume: TmpVolume = statfs, uid = process.getuid?.()): Promise<TmpInodes[]> {
+  const seen = new Set<string>(), readings: TmpInodes[] = [];
+  for (const path of paths) {
+    const real = await realpath(path).catch(() => path);
+    if (seen.has(real)) continue;
+    seen.add(real);
+    const reading = await readTmpInodes(root, path, volume, uid);
+    if (reading) readings.push(reading);
+  }
+  return readings;
 }
 
 // ---- The reclaim pass --------------------------------------------------------------------------
@@ -712,8 +811,18 @@ export interface ResourceReclaimReport {
   released: { name: string; ledger: 'review' | 'producer'; reason: string }[];
   /** The stale /tmp entries the pass removed and the bytes they freed (GY-421, GY-1074). */
   tmp: { removed: number; bytes: number };
+  /**
+   * What the finished /tmp pass scanned, kept and found of its volume (GY-1600): the roots, the
+   * candidates it examined and kept, whether the inode bound still stood, its escalation steps and
+   * the consumers it named. Absent when no pass finished this cycle.
+   */
+  tmpPass?: Pick<TmpReclaimReport, 'roots' | 'scanned' | 'kept' | 'boundStands' | 'escalated' | 'consumers'>;
   errors: string[];
 }
+/** How a /tmp pass's own errors are marked among a reclaim report's errors (GY-1600). */
+export const tmpErrorPrefix = 'Tmp reclaim: ';
+/** The errors of the report's /tmp pass alone, not its ledger, pane or persistence errors (GY-1600). */
+export const tmpPassErrors = (report: Pick<ResourceReclaimReport, 'errors'>) => report.errors.filter(error => error.startsWith(tmpErrorPrefix));
 export const resourceReportFile = (root: string) => resolve(root, '.graphyard/resource-reclaims.json');
 const retainedReports = 50;
 
@@ -820,9 +929,11 @@ export function owedUpgrade(state: { upgrade?: { pending: { from: string | null;
  * The loop's bounds for one /tmp pass — at most `tmpReclaimLimitPerCycle` directories and
  * `tmpReclaimWorkMsPerCycle` of removal — over `tmpRoots`, or the host's temporary directories
  * (`hostTmpRoots`: this process's tmpdir and /tmp, each once, GY-1368) unless the caller names
- * others (a test's scratch roots, so it never sweeps the developer's real /tmp).
+ * others (a test's scratch roots, so it never sweeps the developer's real /tmp). Over the host's
+ * roots the pass measures their volumes and escalates while one is below its inode headroom
+ * (GY-1597); a caller's own roots keep the base bounds.
  */
-export const loopTmpReclaimOptions = (tmpRoots?: readonly string[]): TmpReclaimOptions => ({ limit: tmpReclaimLimitPerCycle, workMs: tmpReclaimWorkMsPerCycle, tmpRoots: tmpRoots ?? hostTmpRoots() });
+export const loopTmpReclaimOptions = (tmpRoots?: readonly string[]): TmpReclaimOptions => ({ limit: tmpReclaimLimitPerCycle, workMs: tmpReclaimWorkMsPerCycle, tmpRoots: tmpRoots ?? hostTmpRoots(), ...(tmpRoots ? {} : { volume: statfs }) });
 /** The loop's /tmp pass in flight, and the report of the last one to finish, not yet recorded. */
 let tmpPass: Promise<void> | null = null;
 let tmpFinished: TmpReclaimReport | null = null;
@@ -910,6 +1021,9 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
       if (!released && (!gates.reclaimable(agent) || wait === null || (settled && now - settledAt(settled) < finishedSessionGraceMs))) continue;
       const first = file.seen[agent.pane_id] ?? report.at;
       if (!released && now - Date.parse(first) < wait!) { seen[agent.pane_id] = first; continue; }
+      // The sighting stands through the close (GY-1547): a close that fails leaves the pane held, and
+      // the reading flags it once this clock has run the bound, instead of the clock starting over.
+      seen[agent.pane_id] = first;
       // A recordless pane that never finished is closed as never started, the cause the launcher's
       // retry policy keys on, rather than as a session that merely left no record.
       const neverStarted = !settled && wait !== finishedSessionGraceMs;
@@ -967,10 +1081,11 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
       // `unownedPaneConfirmMs` and no launch of the principal is under way (GY-1166); only a running one is spared.
       const recognised = finished.includes(agent.agent_status ?? '');
       if (!gates.reclaimable(agent) || (!recognised && launchingWorker(worker.principal, observed.work, now))) continue;
-      const settled = holderSettledAt(profile, agent.name!, { reviews: [], producers: [], work: observed.work });
+      const settled = holderSettledAt(profile, agent.name!, { reviews: [], producers: [], work: observed.work }, agent.pane_id);
       if (settled !== null && now - settled < finishedSessionGraceMs) continue;
       const first = file.seen[agent.pane_id!] ?? report.at;
       if (now - Date.parse(first) < (recognised ? finishedSessionGraceMs : unownedPaneConfirmMs)) { seen[agent.pane_id!] = first; continue; }
+      seen[agent.pane_id!] = first; // kept through the close attempt (GY-1547), as in step 2
       try {
         await close(agent.pane_id!);
         report.closed.push({ name: agent.name!, pane: agent.pane_id!, reason: recognised ? 'its worker session finished and holds no active assignment' : `its worker session holds no active assignment and Herdr reports it ${agent.agent_status ?? 'with no status'}` });
@@ -992,11 +1107,12 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
   const tmp = namesOnly ? null : takeTmpReclaim(() => (options.tmpPass ?? reclaimTmpDirectories)(loopTmpReclaimOptions(options.tmpRoots ?? (options.tmpRoot === undefined ? undefined : [options.tmpRoot]))));
   if (tmp) {
     report.tmp = { removed: tmp.removed.length, bytes: tmp.bytes };
-    report.errors.push(...tmp.errors.map(error => `Tmp reclaim: ${error}`));
+    report.tmpPass = { roots: tmp.roots, scanned: tmp.scanned, kept: tmp.kept, boundStands: tmp.boundStands, escalated: tmp.escalated, consumers: tmp.consumers };
+    report.errors.push(...tmp.errors.map(error => `${tmpErrorPrefix}${error}`));
   }
   const took = !!(report.reaped.review || report.reaped.producer || report.closed.length || report.released.length || report.tmp.removed || report.errors.length);
   // A finished pass is recorded as the latest even when it removed nothing, so status never shows an old count as current.
-  const tmpLatest = tmp ? { removed: tmp.removed.length, at: report.at, ...(tmp.roots ? { roots: tmp.roots } : {}) } : file.tmpLatest ?? null;
+  const tmpLatest = tmp ? { removed: tmp.removed.length, at: report.at, ...(tmp.roots ? { roots: tmp.roots } : {}), ...(tmp.classes ? { classes: tmp.classes } : {}), ...(tmp.escalated ? { escalated: tmp.escalated } : {}), ...(tmp.consumers ? { consumers: tmp.consumers } : {}), ...(tmp.pressure ? { pressure: tmp.pressure } : {}) } : file.tmpLatest ?? null;
   if (took || tmp || JSON.stringify(seen) !== JSON.stringify(file.seen)) {
     try {
       await withReclaimLock(root, async () => {
@@ -1022,10 +1138,44 @@ export function describeReclaim(report: ResourceReclaimReport) {
   return parts.length ? `Resource reclaim: ${parts.join('; ')}` : null;
 }
 
+/**
+ * One line for the loop's action record when the finished /tmp pass removed 0 entries while a
+ * scanned root's volume stayed below its inode headroom (GY-1600): what it scanned, why nothing
+ * was eligible, how far it escalated and the consumers it named. Null for any other pass, so a
+ * pass that took entries back, or one with the bound clear, records only what `describeReclaim` says.
+ * Only what the pass measured is claimed: its counts are the last sweep's (an escalation step's
+ * sweep covers only the roots still below headroom), and a tsx cache file it could not remove is
+ * either younger than the final cache age or held open, which the pass does not tell apart. Only the
+ * /tmp pass's own errors are named: another resource's failure in the same report is not this pass's.
+ */
+export function describeStandingTmpPass(report: ResourceReclaimReport) {
+  const pass = report.tmpPass;
+  if (!pass?.boundStands || report.tmp.removed) return null;
+  const roots = pass.roots?.length ? pass.roots.join(' and ') : 'its temporary directories';
+  const top = pass.escalated?.at(-1), errors = tmpPassErrors(report);
+  const sweep = top ? `; its last step, over the roots still below headroom, examined` : ':';
+  return [
+    `/tmp reclaim removed 0 entries while the inode bound stands: scanned ${roots}${sweep} ${entries(pass.scanned)} with this user's test temp names, ${pass.kept} kept (younger than ${testTempMinAgeMs / 3_600_000} hours, a live owner or holder, or past the pass's bounds), and no tsx cache file of this user's it could remove (each younger than ${minutes(top?.cacheAgeMs ?? tmpReclaimMinAgeMs)} or held open by a live process)`,
+    top ? `escalated to ${top.limit} per cycle and tsx cache files older than ${minutes(top.cacheAgeMs)} (${pass.escalated!.map(step => step.removed).join(' + ')} removed)` : '',
+    pass.consumers?.length ? `what fills it is outside the pass's reach; top consumers: ${pass.consumers.map(consumer => `${consumer.path} (${consumer.capped ? 'at least ' : ''}${entries(consumer.entries)}, owner ${consumer.owner})`).join(', ')}` : '',
+    errors.length ? `${errors.length} could not be reclaimed: ${errors[0]}` : '',
+  ].filter(Boolean).join('; ');
+}
+
 // ---- The host's panes (GY-842) -----------------------------------------------------------------
 
-/** The count of agentless panes a Graphyard launch opened past which attention is raised (GY-842). */
+/** The count of agentless panes standing in Graphyard worktrees past which attention is raised (GY-842). */
 export const agentlessPaneAttentionBound = 20;
+
+/**
+ * The item key and attempt epoch a Graphyard worktree path names (…/.graphyard/worktrees/GY-N-EPOCH,
+ * or anywhere beneath it), or null for any other directory. A worktree removed under its shell
+ * reads with Linux's ` (deleted)` suffix, which is kept apart as `deleted`.
+ */
+export function graphyardWorktree(cwd: string | undefined): { key: string; epoch: number; deleted: boolean } | null {
+  const match = /\/\.graphyard\/worktrees\/([A-Za-z][A-Za-z0-9]*-\d+)-(\d+)(?:\/[^]*?)?( \(deleted\))?\s*$/.exec(cwd ?? '');
+  return match ? { key: match[1], epoch: Number(match[2]), deleted: !!match[3] } : null;
+}
 
 export interface PaneReclaimStatus {
   at: string;
@@ -1033,45 +1183,53 @@ export interface PaneReclaimStatus {
   panes: number | null;
   /** Panes a Graphyard launch opened: the pane ids its sessions recorded. */
   launched: number;
-  /** Launched panes holding no agent — a runtime that exited and left its shell behind. */
+  /** Agentless panes standing in Graphyard worktrees, recorded by a session or not: what the sweep will close. */
   agentless: number;
-  /** The oldest agentless launched pane, by the start its session recorded. */
+  /** The longest-standing agentless pane, by its session's recorded start or, unrecorded, its first sighting. */
   oldest: { pane: string; work: string; kind: string; launchedAt: string } | null;
   /** One attention item once agentless panes pass the bound, naming the counts and the remedy. */
   attention: AttentionItem | null;
 }
 
 /**
- * The pane picture of this host (GY-842): how many panes the runtime holds, how many a Graphyard
- * launch opened, and how many of those stand agentless — the runtime exited and left its shell,
- * which holds a pty, a process and memory whether or not anything runs in it. Herdr held 621 panes
- * on 26 September 2026, 584 of them Graphyard's, agentless; the host throttled and every session
- * and test run on it slowed. A pane counts as agentless only when the runtime reports the pane
- * with no agent in it, and only a pane a Graphyard session recorded is Graphyard's — a pane the
- * operator or another tool opened is never counted, and never closed. Only the handles `hostId`
- * recorded count: the reading is this host's, and a remote handle naming the same pane coordinate
- * is another host's launch, not this host's pane.
+ * The pane picture of this host (GY-842, GY-1533): how many panes the runtime holds, how many a
+ * Graphyard launch recorded, and how many stand agentless in Graphyard worktrees — the runtime
+ * exited and left its shell, which holds a pty, a process and memory whether or not anything runs
+ * in it. Herdr held 621 panes on 26 September 2026, 584 of them Graphyard's, agentless; the host
+ * throttled and every session and test run on it slowed. On 7 October 246 bare shells in deleted
+ * worktrees stood for over a day while this reading said 6: it counted only the panes a session
+ * recorded, and the agent inventory it read never carries a bare shell. The reading is now the
+ * pane inventory's, exactly as the sweep's candidates are: every pane it reports with no agent
+ * whose cwd is a Graphyard worktree (present or deleted), recorded or not, except one whose exact
+ * item and epoch holds a live lease. A pane outside the worktrees is never counted, and never
+ * closed. Only the handles `hostId` recorded count as launched: a remote handle naming the same
+ * pane coordinate is another host's launch. The agentless count is 0 while the inventory cannot be
+ * read, since nothing can be seen or closed on it.
  */
-export function paneReclaimStatus(panes: { pane_id?: string }[] | null, work: Work[], agents: HerdrAgent[] | null, now: number, hostId: string): PaneReclaimStatus {
-  // Every pane on the host, from the pane inventory; the agent inventory stands in for presence
-  // when the pane list could not be read, since it lists a session's pane while the pane exists.
+export function paneReclaimStatus(panes: HerdrPane[] | null, work: Work[], agents: HerdrAgent[] | null, now: number, hostId: string, sighted: Record<string, string> = {}): PaneReclaimStatus {
   const listed = new Set((panes ?? []).map(pane => pane.pane_id).filter((id): id is string => !!id));
   // A launch's own record of its pane (GY-172): the handle every launcher registers, whatever its role.
-  const recorded = new Map<string, { work: Work; kind: string; launchedAt: string | null; running: boolean }>();
+  const recorded = new Map<string, { work: Work; kind: string; launchedAt: string | null }>();
   for (const item of work) for (const handle of item.sessions ?? []) if (handle.pane && handle.host === hostId)
-    recorded.set(handle.pane, { work: item, kind: handle.kind, launchedAt: Number.isFinite(Date.parse(handle.startedAt)) ? handle.startedAt : null, running: handle.state === 'running' });
-  // A pane with an agent in it is a live session, whatever its state: the inventory detects the agent.
+    recorded.set(handle.pane, { work: item, kind: handle.kind, launchedAt: Number.isFinite(Date.parse(handle.startedAt)) ? handle.startedAt : null });
+  // A pane with an agent in it is a live session by either inventory, whatever its state.
   const withAgent = new Set((agents ?? []).filter(agent => !!agent.agent && !!agent.pane_id).map(agent => agent.pane_id!));
-  const seenByRuntime = new Set((agents ?? []).map(agent => agent.pane_id).filter((id): id is string => !!id));
-  const present = (pane: string) => listed.has(pane) || (panes === null && seenByRuntime.has(pane));
-  const agentless = [...recorded.entries()].filter(([pane, record]) => present(pane) && !withAgent.has(pane));
-  const oldest = agentless.length
-    ? agentless.reduce((earliest, entry) => Date.parse(entry[1].launchedAt ?? '') < Date.parse(earliest[1].launchedAt ?? '') ? entry : earliest, agentless[0])
-    : null;
+  const leased = (tree: { key: string; epoch: number }) => work.some(item => item.key === tree.key && !!item.lease && item.lease.epoch === tree.epoch && Date.parse(item.lease.expiresAt) > now);
+  const agentless: { pane: string; work: string; kind: string; since: string | null }[] = [];
+  for (const pane of panes ?? []) {
+    if (!pane.pane_id || pane.agent || withAgent.has(pane.pane_id)) continue;
+    const tree = graphyardWorktree(pane.cwd);
+    if (!tree || leased(tree)) continue;
+    const record = recorded.get(pane.pane_id);
+    agentless.push({ pane: pane.pane_id, work: record?.work.key ?? tree.key, kind: record?.kind ?? 'unrecorded', since: record?.launchedAt ?? sighted[pane.pane_id] ?? null });
+  }
+  // The longest-standing: the earliest known start; a pane whose standing is undated ranks after every dated one.
+  const standing = (entry: { since: string | null }) => entry.since === null ? Number.POSITIVE_INFINITY : Date.parse(entry.since);
+  const oldest = agentless.length ? agentless.reduce((earliest, entry) => standing(entry) < standing(earliest) ? entry : earliest, agentless[0]) : null;
   const reading = { panes: panes === null ? null : listed.size, launched: recorded.size, agentless: agentless.length,
-    oldest: oldest ? { pane: oldest[0], work: oldest[1].work.key, kind: oldest[1].kind, launchedAt: oldest[1].launchedAt ?? 'an unrecorded time' } : null };
+    oldest: oldest ? { pane: oldest.pane, work: oldest.work, kind: oldest.kind, launchedAt: oldest.since ?? 'an unrecorded time' } : null };
   const attention: AttentionItem[] = agentless.length > agentlessPaneAttentionBound ? [{ subject: 'agentless panes',
-    text: `Herdr holds ${reading.panes ?? 'an unknown number of'} pane(s) on this host and ${agentless.length} of the panes Graphyard launched stand agentless (past the ${agentlessPaneAttentionBound}-pane attention bound), the oldest pane ${reading.oldest!.pane} of ${reading.oldest!.work} (${reading.oldest!.kind}), launched ${reading.oldest!.launchedAt}. Each is a shell holding a pty and memory, and enough of them slow every session and test run on the host`,
+    text: `Herdr holds ${reading.panes ?? 'an unknown number of'} pane(s) on this host and ${agentless.length} of them stand agentless in Graphyard worktrees (past the ${agentlessPaneAttentionBound}-pane attention bound), the oldest pane ${reading.oldest!.pane} of ${reading.oldest!.work} (${reading.oldest!.kind}), standing since ${reading.oldest!.launchedAt}. Each is a shell holding a pty and memory, and enough of them slow every session and test run on the host`,
     ...agentOwner('master', 'the loop sweeps them itself, a bounded number per cycle, once agentless past its launch bound; graphyard master run --once runs a pass now') }] : [];
   return { ...reading, at: new Date(now).toISOString(), attention: attention[0] ?? null };
 }

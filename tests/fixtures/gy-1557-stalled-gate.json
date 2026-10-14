@@ -1,0 +1,60 @@
+[
+  {
+    "id": "actorless|GY-1522|2026-10-08T09:58:19.250Z",
+    "kind": "actorless",
+    "subject": "GY-1522",
+    "at": "2026-10-08T09:58:19.250Z",
+    "epoch": 1,
+    "pr": 1007,
+    "claimedAt": "2026-10-08T07:10:43.869Z",
+    "submittedAt": "2026-10-08T07:57:42.000Z",
+    "headObservedAt": "2026-10-08T07:57:42.000Z",
+    "sha": "09814fb65cbd03b88d23d9da99809afd0fd7ffa9",
+    "baseSha": "ac2d45bde8092845e920b22a6ad969bcd049be7a",
+    "baseTip": "2e4c4eddc1e6921b3aa954e275df6125ce0e4ec4",
+    "baseMovedAt": "2026-10-08T09:57:06Z",
+    "observedAt": "2026-10-08T09:58:02.254Z",
+    "mergeable": null,
+    "conflicting": false,
+    "conflicts": [
+      { "at": "2026-10-08T09:51:50.028Z", "base": "ac2d45bde8092845e920b22a6ad969bcd049be7a", "baseSha": "88889b1be26a53635e6a1f5ab18206e6a0a6020f" },
+      { "at": "2026-10-08T09:58:09.790Z", "base": "2e4c4eddc1e6921b3aa954e275df6125ce0e4ec4", "baseSha": "ac2d45bde8092845e920b22a6ad969bcd049be7a" }
+    ],
+    "movedAt": "2026-10-08T09:58:45.924Z",
+    "moved": "the loop requested the sync rework decision onto base tip 2e4c4eddc1e6 from the control plane's confirmed conflict (graphyard-risk-lane approved and applied it at 09:58:45)"
+  },
+  {
+    "id": "unsubmitted-attempt|GY-1549|2026-10-08T16:39:52.678Z",
+    "kind": "unsubmitted-attempt",
+    "subject": "GY-1549",
+    "at": "2026-10-08T16:39:52.678Z",
+    "epoch": 1,
+    "owner": "graphyard-claude-2",
+    "claimedAt": "2026-10-08T15:39:41.492Z",
+    "leaseExpiresAt": "2026-10-08T16:41:27.886Z",
+    "sessionObservedAt": "2026-10-08T16:36:15.472Z",
+    "movedAt": "2026-10-08T16:43:51.846Z",
+    "moved": "the watch supervisor ended attempt 1 when the agent process exited (code 143), 56 minutes before the loop's own reclaim bound at 17:39:41"
+  },
+  {
+    "id": "actorless|GY-1526|2026-10-08T18:25:53.508Z",
+    "kind": "actorless",
+    "subject": "GY-1526",
+    "at": "2026-10-08T18:25:53.508Z",
+    "epoch": 1,
+    "pr": 1030,
+    "claimedAt": "2026-10-08T17:47:54.008Z",
+    "submittedAt": "2026-10-08T18:20:24.835Z",
+    "headObservedAt": "2026-10-08T18:20:27.699Z",
+    "holdSightedAt": "2026-10-08T18:20:27.699Z",
+    "sha": "bc2da09465e3b435ca81b64f3f4f7b3d41e2ae78",
+    "baseSha": "41fabd1fa94d77de1c5e1263652aee1605f30d68",
+    "baseTip": "41fabd1fa94d77de1c5e1263652aee1605f30d68",
+    "baseMovedAt": "2026-10-08T18:00:51Z",
+    "observedAt": "2026-10-08T18:21:07.439Z",
+    "mergeable": false,
+    "conflicting": true,
+    "movedAt": "2026-10-08T18:26:06.498Z",
+    "moved": "the loop requested the sync rework decision from GitHub's conflict reading at 18:26:01 (graphyard-risk-lane approved and applied it at 18:26:06)"
+  }
+]

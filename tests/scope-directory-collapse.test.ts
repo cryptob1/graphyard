@@ -13,6 +13,7 @@ import { approverSessionName, decisionInput, masterConfigSchema, type HerdrAgent
 import { liveScopeWidening, plannedFilesMax, redecidableScopeRefusal, routableScopeRequest, scopeRequestOutcome, type ScopeRequestState } from '../src/model/scope.js';
 import { collapseArea, collapsePlannedFiles, mergedScopeRequest, widenedPlannedFiles } from '../src/model/scope-collapse.js';
 import type { Principal, Work } from '../src/model.js';
+// Time-bomb allowance (GY-1694): the 2031-03-01 lease and refusal instants meet only the explicit now Date.parse('2031-03-01T10:00:00Z') given to scopeRoutineDecision; Date.now() judges wall-clock-stamped DB items.
 
 // GY-549: a change that legitimately touches more than 100 files (GY-421 migrated 158 test files)
 // could never be scoped. File-by-file requests hit the plannedFiles cap, each batch was its own
@@ -71,7 +72,7 @@ function harness() {
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'no deployment endpoint in this test', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},
-    decideScope: work => ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }) as Promise<Work>,
+    decideScope: work => ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, treeRead: true }) as Promise<Work>,
     reviewFindings: async () => [],
     basePaths: async () => new Set<string>(),
     widenScope: (work, request, paths, reason) => ok(master.token, 'POST', `work/${work.id}/requirements`, answeringWidening(work, request, paths, reason)),
@@ -135,7 +136,7 @@ test('unit:scope-collapses-to-directory — 158 test files plus 10 planned paths
   const now = Date.parse('2031-03-01T10:00:00Z');
   const lease = { epoch: 2, owner: 'implementer', expiresAt: '2031-03-01T10:05:00Z' };
   const paths = [...migrated, ...others];
-  const refused = { state: 'refused' as const, reason: 'outside', at: '2031-03-01T09:59:00Z', decidedBy: 'graphyard', waitedMs: 1, paths, requestedBy: 'implementer', requestedAt: '2031-03-01T09:58:00Z' };
+  const refused = { state: 'refused' as const, reason: 'outside', at: '2031-03-01T09:59:00Z', decidedBy: 'graphyard', treeRead: true, waitedMs: 1, paths, requestedBy: 'implementer', requestedAt: '2031-03-01T09:58:00Z' };
   const item = { key: 'GY-9', stage: 'build', plannedFiles: existing, criteria, lease, scopeRequest: { epoch: 2, paths, reason: 'Migrate every test onto the helper', requestedBy: 'implementer', at: '2031-03-01T09:58:00Z', decision: refused } } as unknown as Work;
   const decision = scopeRoutineDecision(item, now, true)!;
   assert.equal(decision.action, 'requirements');
@@ -241,7 +242,7 @@ test('unit:direct-widening-folds-over-cap — a wide ask the rule or a review fi
   const migrated = testFiles(50);
   await ask(work, migrated, 'Every test file moves onto the shared temp-dir helper');
   work = await reload(work.id);
-  if (work.scopeRequest) work = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest.epoch }) as Work;
+  if (work.scopeRequest) work = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest.epoch, treeRead: true }) as Work;
   work = await reload(work.id);
   assert.equal(work.scopeDecision!.state, 'approved', work.scopeDecision!.reason);
   assert.ok(work.plannedFiles.length <= plannedFilesMax, `the applied widening fits the cap (${work.plannedFiles.length} entries)`);
@@ -270,7 +271,7 @@ test('unit:unrepresentable-widening-refused — an ask no fold represents is ref
   work = await reload((await engine.execute(implementer, 'claim', work.id, {}, randomUUID())).id);
   await ask(work, ['src/other/next.ts'], 'The new path moves onto the shared helper too');
   work = await reload(work.id);
-  work = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }) as Work;
+  work = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, treeRead: true }) as Work;
   work = await reload(work.id);
   assert.equal(work.scopeDecision!.state, 'refused');
   assert.match(work.scopeDecision!.reason, /no fold represents the ask within the 100 entries plannedFiles holds \(101 after folding\)/);

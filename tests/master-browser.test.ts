@@ -16,6 +16,7 @@ import { controlPlanePermissions as declaredPermissions, requiredPermissions } f
 import { statusRoutes } from '../src/server/routes/status.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): 2026-09-18T12:00 is the stub flow's ticking `now` and the recording page's fixed clock; the real clock only stamps the stub snapshot and a sudo deadline relative to itself.
 
 const execFile = promisify(execFileCallback);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));

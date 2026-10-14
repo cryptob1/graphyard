@@ -1,5 +1,7 @@
 import type { ProducerGroup } from './dispatch.js';
 import { endedRuntimeStates } from './sessions.js';
+import { planeWideFailure } from './blocker-class.js';
+import { dispatchHumanWait } from './human-request.js';
 
 /**
  * The action vocabulary: the kinds themselves, the typed inputs each carries, and where the
@@ -181,3 +183,23 @@ export function handoffWaitBound(reason: string): number | null {
   if (workerSlotWait(reason)) return workerSlotWaitBoundMs;
   return null;
 }
+
+/**
+ * The wording of a failure of a call to the Graphyard control plane itself: the blocker probe's record, the launch refused
+ * for an unreadable merge writer or rework decisions, the agent registry, a refused Graphyard request. A timeout or 5xx
+ * without it (the deployment endpoint, GitHub) is another service's and stays a fault.
+ */
+const controlPlaneCall = /\b(?:Could not record|Could not close|merge writer could not be read|rework decisions of \S+ could not be read|agent registry|control plane|Graphyard refused)\b/i;
+
+/**
+ * Whether a failure reason is a wait, not a fault (GY-1758): a dispatch refused because the item is
+ * parked on a human-only decision, whose text names the answer that resumes it, or a failure of a call to the
+ * control plane that is plane-wide (`planeWideFailure`), which fails every step that meets it. Repeating is what such a
+ * reason does while the wait stands, so a run of it is never a stall and files no fault instance.
+ */
+export const waitReason = (reason: string | null | undefined) => !!reason && (reason.includes(dispatchHumanWait) || (controlPlaneCall.test(reason) && planeWideFailure(refusedDetail(reason))));
+/**
+ * A refusal the server answered carries its status in the text; what makes it plane-wide is its body alone, because the
+ * status beside an `error` field of the server's own (`Operator-agent authorization is unavailable`) is that item's.
+ */
+const refusedDetail = (reason: string) => reason.match(/Graphyard refused \S+ \(\d{3}\): (.*)$/s)?.[1] ?? reason;

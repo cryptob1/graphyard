@@ -323,7 +323,12 @@ test('unit:rework-ground-recorded — a high-lane rework the record grounds is a
   assert.equal((await reread(work.id)).reworkRequested, true);
   // The returned head keeps its submission, candidate and conflict until a new head is submitted,
   // but its ground is spent: the retry cap's rework after attempts that never submitted (GY-885)
-  // judges those attempts, so it waits for the independent approver.
+  // judges those attempts, so it waits for the independent approver. A worker claimed the item since (GY-1579): those attempts are its newer grounds.
+  await store.transaction(async db => {
+    const current: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [work.id])).rows[0].document;
+    current.lastAssignment = { owner: 'lane-worker', epoch: current.epoch + 1, claimedAt: new Date(Date.now() + 1_000).toISOString() };
+    await save(db, current, 'lane-operator', 'test.attempt', new Date());
+  });
   const capped = await call(master.token, `work/${work.key}/decide`, { action: 'rework', input: { previousWorkerStopped: true, binding: `overlong-cap:${work.id}:${new Date().toISOString()}` }, reason: 'held: 3 attempts in a row ended without submitting' });
   assert.equal(capped.state, 'requested', 'a returned head\u2019s ground lets no later rework through');
   assert.equal(capped.approvedBy ?? null, null);

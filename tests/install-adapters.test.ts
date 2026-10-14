@@ -3,13 +3,14 @@ import assert from 'node:assert/strict';
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parseEnv } from 'node:util';
+import { execFileSync } from 'node:child_process';
 import { applyInstall, buildPlan, coreEnv, prepareInstall } from '../src/install/index.js';
 import { PRIVATE_KEY_CONTAINER_PATH, composeAdapter, type AdapterContext } from '../src/install/adapters.js';
 import { fakeTransport, localTransport, sshTransport, type Transport } from '../src/install/transport.js';
 import { Vault } from '../src/install/secrets.js';
 import { CHECK_NAME } from '../src/install/github.js';
 import type { Provider } from '../src/install/types.js';
-import { harness, satisfiedProtection, GRAPHYARD_APP_ID, CI_APP_ID, RAILWAY_WORKSPACES, appKey, type Harness } from './install-harness.js';
+import { harness, satisfiedProtection, temporaryRepository, GRAPHYARD_APP_ID, CI_APP_ID, RAILWAY_WORKSPACES, appKey, type Harness } from './install-harness.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const skipWithoutDocker = await (async () => {
@@ -39,6 +40,7 @@ test('--apply provisions Postgres and the application, sets every variable, and 
     hetzner: 'https://graphyard.example.test',
     'docker-host': 'https://graphyard.example.test',
     compose: 'http://127.0.0.1:4310',
+    local: 'http://127.0.0.1:4310',
   };
   for (const provider of ['railway', 'hetzner', 'docker-host', 'compose'] as Provider[]) {
     const fixture = await harness({ provider });
@@ -51,7 +53,9 @@ test('--apply provisions Postgres and the application, sets every variable, and 
       assert.equal(summary.status.repository, 'owner/project');
       assert.equal(summary.github?.appId, GRAPHYARD_APP_ID);
       assert.deepEqual(summary.github?.ciAppIds, [CI_APP_ID]);
-      assert.equal(summary.webhook.delivered, true, `${provider} webhook: ${summary.webhook.detail}`);
+      // A local Compose install registers no webhook and polls GitHub, so its delivery check is skipped (GY-1474).
+      if (provider === 'compose') assert.equal(summary.webhook.skipped, true, summary.webhook.detail);
+      else assert.equal(summary.webhook.delivered, true, `${provider} webhook: ${summary.webhook.detail}`);
 
       const lines = fixture.allCommandLines();
       if (provider === 'railway') {
@@ -254,8 +258,26 @@ test('the multi-line App private key is written beside the bundle and mounted, n
     // must be given to the container user at write time: anything else crash-loops the server.
     assert.equal(key.owner, '1000:1000');
     assert.equal(key.content, appKey);
-    assert.match(bundle(fixture, 'compose.yaml')!.content, new RegExp(`volumes: \\["\\./github-private-key\\.pem:${PRIVATE_KEY_CONTAINER_PATH}:ro"\\]`));
+    // The key is mounted read-only, beside the operator's checkout the server observes heads from.
+    assert.match(bundle(fixture, 'compose.yaml')!.content, new RegExp(`volumes: \\["\\./github-private-key\\.pem:${PRIVATE_KEY_CONTAINER_PATH}:ro", "${fixture.root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:/repo"\\]`));
   } finally { await fixture.cleanup(); }
+});
+
+test('a compose install run from a linked worktree mounts the worktree at /repo and its common Git directory at its own host path, so /repo/.git resolves inside the container (GY-1675)', async () => {
+  const main = await temporaryRepository();
+  execFileSync('git', ['-C', main, 'commit', '-q', '--allow-empty', '-m', 'base'], { env: { ...process.env, GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.com' } });
+  const worktree = join(main, '.graphyard', 'worktrees', 'GY-1-1');
+  execFileSync('git', ['-C', main, 'worktree', 'add', '-q', worktree]);
+  await writeFile(join(worktree, 'package.json'), await readFile(join(main, 'package.json')));
+  const common = execFileSync('git', ['-C', worktree, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8' }).trim();
+  assert.ok((await stat(join(worktree, '.git'))).isFile(), 'a linked worktree keeps its .git as a pointer file');
+  const fixture = await harness({ provider: 'compose', root: worktree });
+  try {
+    await apply(fixture, 'compose');
+    const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.match(bundle(fixture, 'compose.yaml')!.content, new RegExp(`"${escape(worktree)}:/repo", "${escape(common)}:${escape(common)}"\\]`), 'the common Git directory is mounted beside the checkout');
+    assert.ok(parseEnv(bundle(fixture, 'server.env')!.content).GRAPHYARD_REPOSITORY_ROOT === '/repo');
+  } finally { await fixture.cleanup(); await rm(main, { recursive: true, force: true }); }
 });
 
 test('the SSH transport ends the key write with chown and refuses a remote user that cannot give it to the container', async () => {
@@ -285,8 +307,25 @@ test('the SSH transport ends the key write with chown and refuses a remote user 
   );
 });
 
-test('a uid-1000 container reads the key a real transport wrote, through a real bind mount', { skip: skipWithoutDocker }, async () => {
+// The transport's chown fallback and the compose service both run alpine:3. A registry the
+// runner cannot reach (Docker Hub's token endpoint timing out on CI) is not the product's
+// fault, so the case skips only then; a pulled image runs the real bind-mount read unchanged.
+const registryUnreachable = /Client\.Timeout|i\/o timeout|TLS handshake timeout|connection (refused|reset)|no such host|network is unreachable|toomanyrequests|Service Unavailable|Gateway Time-?out/i;
+async function pullAlpine(docker: Transport): Promise<string | null> {
+  let stderr = '';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const pulled = await docker.exec('docker', ['pull', '--quiet', 'alpine:3'], { allowFailure: true, timeout: 120_000 });
+    if (pulled.code === 0) return null;
+    stderr = pulled.stderr.trim();
+    if (!registryUnreachable.test(stderr)) throw new Error(`docker pull alpine:3 failed: ${stderr.slice(-400)}`);
+  }
+  return `the Docker registry is unreachable: ${stderr.slice(-200)}`;
+}
+
+test('a uid-1000 container reads the key a real transport wrote, through a real bind mount', { skip: skipWithoutDocker }, async t => {
   const docker = localTransport();
+  const unreachable = await pullAlpine(docker);
+  if (unreachable) { t.skip(unreachable); return; }
   const workdir = await temporaryDirectory('key-mount');
   try {
     const context: AdapterContext = {
@@ -475,4 +514,49 @@ test('a failing local command reports its exit code and the tail of its stderr',
   await assert.rejects(transport.exec('sh', ['-c', 'echo noise; echo "--workspace required in non-interactive mode" >&2; exit 3']), { message: 'sh exited with 3: --workspace required in non-interactive mode' });
   const tolerated = await transport.exec('sh', ['-c', 'echo failed >&2; exit 4'], { allowFailure: true });
   assert.deepEqual({ code: tolerated.code, stderr: tolerated.stderr.trim() }, { code: 4, stderr: 'failed' });
+});
+
+test('unit:compose-port-chosen-and-persisted — a Compose install whose port another process holds publishes the first free one from 4310, a rerun keeps the port its own server serves, and an explicit taken --port is refused', async () => {
+  // GY-1509: the host's loopback ports, as the preflight's bind probe finds them; the bundle a run
+  // wrote is what `cat` reads back, as on a real machine.
+  const taken = new Set([4310]);
+  let written: string | null = null;
+  const configHome = await temporaryDirectory('config');
+  const workdir = `${configHome}/owner-project/compose`;
+  const extraResponses = [
+    { match: "require('net')", result: (line: string) => taken.has(Number(/listen\((\d+),/.exec(line)![1])) ? { stdout: '', stderr: '', code: 1 } : '' },
+    { match: `cat ${workdir}/compose.yaml`, result: () => written ?? { stdout: '', stderr: 'No such file', code: 1 } },
+  ];
+  const portItem = (plan: Awaited<ReturnType<typeof buildPlan>>) => plan.preflight.find(item => item.name === 'Server port')!;
+  const first = await harness({ provider: 'compose', configHome, extraResponses });
+  let second: Harness | undefined;
+  try {
+    // Another install already serves 4310: this one takes 4311 and its URL, bundle and connection follow.
+    const connections: string[] = [];
+    const session = await prepareInstall(first.root, inputsFor('compose'), { ...first.deps, registerProfiles: async request => { connections.push(request.url); return first.deps.registerProfiles!(request); } });
+    const plan = await buildPlan(session);
+    assert.deepEqual(portItem(plan), { name: 'Server port', ok: true, detail: '127.0.0.1:4310 is taken by another process; this installation publishes 127.0.0.1:4311' });
+    const summary = await applyInstall(session, plan);
+    assert.equal(summary.url, 'http://127.0.0.1:4311');
+    assert.ok(connections.length && connections.every(url => url === 'http://127.0.0.1:4311'), `the master's connection is the chosen port: ${connections.join(', ')}`);
+    assert.equal(JSON.parse(await readFile(join(configHome, 'owner-project', 'install.json'), 'utf8')).url, 'http://127.0.0.1:4311');
+    written = bundle(first, 'compose.yaml')!.content;
+    assert.match(written, /ports: \["127\.0\.0\.1:4311:4310"\]/);
+
+    // The rerun (an upgrade): 4311 is now held by this install's own running server, which keeps it.
+    taken.add(4311);
+    second = await harness({ provider: 'compose', installed: true, protection: satisfiedProtection(null), root: first.root, configHome, extraResponses });
+    const rerun = await prepareInstall(second.root, inputsFor('compose'), second.deps);
+    const replanned = await buildPlan(rerun);
+    assert.deepEqual(portItem(replanned), { name: 'Server port', ok: true, detail: '127.0.0.1:4311 serves this installation' });
+    assert.equal((await applyInstall(rerun, replanned)).url, 'http://127.0.0.1:4311');
+    assert.match(bundle(second, 'compose.yaml')!.content, /ports: \["127\.0\.0\.1:4311:4310"\]/);
+
+    // A port the operator named is never moved: taken, it fails preflight instead.
+    const explicit = await prepareInstall(second.root, { ...inputsFor('compose'), port: 4310 }, second.deps);
+    const refused = portItem(await buildPlan(explicit));
+    assert.equal(refused.ok, false);
+    assert.match(refused.detail, /127\.0\.0\.1:4310 is taken by another process/);
+    assert.equal(explicit.context.port, 4310);
+  } finally { await first.cleanup(); if (second) await second.cleanup(); }
 });

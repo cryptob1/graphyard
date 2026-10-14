@@ -53,17 +53,29 @@ export function missingSubmoduleCommits(git: Git, baseTip: string, refused: read
   return missing;
 }
 
+/** What `sync GY-N --restore` says while the control plane is the merge writer (GY-1528): nothing is restored. */
+export const restoreOffLine = 'Restore is off while the control plane is the merge writer: files outside plannedFiles are not refused, so nothing was restored or committed.';
+
 /**
  * `sync GY-N --restore` takes the remedy itself: one plain commit on top of the branch returns
  * every refused file to the base tip, so the PR updates with a plain push and no history is
  * rewritten. The scope is classified again after the commit, and the report says whether any file
- * still differs; one that does fails the command.
+ * still differs; one that does fails the command. While the control plane is the merge writer no
+ * file is refused on plannedFiles (GY-1528), so restore is off: it says so, commits nothing and
+ * exits 0.
  */
 export async function restoreAndReport(git: Git, print: (value: unknown) => void, sync: {
   work: { key: string; plannedFiles?: string[] }; baseBranch: string; baseTip: string; regenerated: string[]; generated: string[]; refused: readonly string[];
   read?: (sha: string) => Promise<string | null>;
+  /** The control plane is the merge writer (GY-1523), so restore is off (GY-1528). */
+  controlPlane?: boolean;
 }): Promise<void> {
   const { work, baseBranch, baseTip, regenerated, generated } = sync;
+  if (sync.controlPlane) {
+    print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, regenerated, generated, plannedFiles: work.plannedFiles, ok: true, restore: 'off', restored: [],
+      next: `${restoreOffLine} complete ${work.key} EPOCH --head submits the head as it stands.` });
+    return;
+  }
   const missing = missingSubmoduleCommits(git, baseTip, sync.refused);
   if (missing.length) {
     print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, regenerated, generated, plannedFiles: work.plannedFiles, ok: false,

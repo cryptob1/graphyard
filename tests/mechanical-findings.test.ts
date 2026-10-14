@@ -5,7 +5,7 @@ import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { appliedMechanicalRework, botCommitSubject, botCommitSubjectPattern, classifyFinding, judgeBotCommit, mechanicalFixPlan, mechanicalRoundStartMs, parseClassifiedFindings, planMechanicalFix, readMechanicalFixRequests, verifyBotCommit, type BotCommitObservation, type MechanicalFixPlan } from '../src/mechanical-findings.js';
+import { appliedMechanicalRework, botCommitSubject, botCommitSubjectPattern, classifyFinding, judgeBotCommit, mechanicalFixPlan, mechanicalFixRequests, mechanicalPlanFreshMs, mechanicalRoundStartMs, parseClassifiedFindings, planMechanicalFix, readMechanicalFixRequests, verifyBotCommit, type BotCommitObservation, type MechanicalFixPlan } from '../src/mechanical-findings.js';
 import { evaluate } from '../src/model/gates.js';
 import { refusalAction } from '../src/model/refusal-mapping.js';
 import { gateRefusalCatalogue } from '../src/model/refusal-catalogue.js';
@@ -19,6 +19,7 @@ import { interventionKinds, interventionPolicyDefaults, interventionRecordSchema
 import type { Observation, Work } from '../src/model.js';
 import { expandTypedCommand, requestOf, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-30 commit and verdict instants are already past their 60-minute mechanical bound and only recorded; the holds asserted come from approvals stamped new Date() and judged at Date.now(). The plan report's stamps (planOf, and the hold-freshness test's one Date.now() every plan instant derives from) are the loop's own report of a ledger the test just read, judged against the same reading.
 
 // GY-971. A review finding is mechanical (typo, docs placement, formatting, naming) or substantive
 // (behaviour, criteria, scope). An approved head's mechanical findings become one worker-class bot
@@ -102,6 +103,11 @@ const recordOf = (records: ReviewRecord[], sha: string) => records.find(record =
 /** An approval of `sha` as the observation records it: `mechanical` counts its nits classified mechanical (none on a bot commit's head). */
 const approvalOf = (sha: string, id: number, mechanical?: number, submittedAt = new Date().toISOString()) => ({ reviewer, sha, state: 'APPROVED', id, submittedAt, ...(mechanical ? { mechanical } : {}) });
 /** The review gate's refusals for the item at `now`: what GitHub's merge of the head waits on. */
+/** The item as the control plane holds it once the loop has reported the ledger's plan for its candidate (what the loop's plan report does); the plane stamps `at` on the report it accepts. */
+const planOf = (work: Work, requests: readonly { key: string; head: string; reviewId: number }[]): Work => {
+  const plan = requests.find(request => request.key === work.key && request.head === work.candidate?.sha);
+  return { ...work, mechanicalPlan: plan ? { reviewId: plan.reviewId, head: plan.head, at: new Date().toISOString() } : null };
+};
 const reviewRefusals = (work: Work, now = Date.now()) => evaluate(work, [work], new Date(now), []).gates.find(gate => gate.name === 'review')!.reasons;
 
 /** GitHub's observation of PR #7 at `head`, approved by review 901 with `body`; the head commit's message is `message`. */
@@ -137,7 +143,8 @@ async function approvedThenBotRound(root: string, body: string, commit: { parent
   const approved = item(H, 1, [approvalOf(H, 901, parseClassifiedFindings(body).filter(finding => finding.classification === 'mechanical').length)]);
   const planned = await reconcileReviews(root, config, { run: first.run, observe: verdictOf(901, 'APPROVED'), work: [approved], threadsRun: github({ 901: { body, sha: H, state: 'APPROVED' } }) });
   const requests = await readMechanicalFixRequests(root);
-  const held = reviewRefusals(approved);
+  // The ledger's plan is what the loop reports to the control plane (GY-1764); the gate holds on it alone.
+  const held = reviewRefusals(planOf(approved, requests));
   const decision = neededDecision(approved, { autoMerge: true }, undefined, [], requests);
   // The approver applied that rework decision: the next attempt's launch reads it and is the bot round.
   const reviewId = appliedMechanicalRework(approved, [{ action: 'rework', state: 'applied', input: { previousWorkerStopped: true, binding: decision?.binding }, approvedAt: new Date().toISOString() }]);
@@ -196,11 +203,11 @@ test('unit:mechanical-findings-auto-fixed — review findings are classified, an
     // pass, and the review gate does not pass an approval naming mechanical nits until the round, within a bound.
     assert.equal(round.held.length, 1, round.held.join('\n'));
     assert.match(round.held[0]!, /^Approval 901 of aaaaaaaaaaaa names 4 findings classified mechanical, which the worker bot fixes before the reviewer's fresh read \(GY-971\)/);
-    const nitted = item(H, 1, [approvalOf(H, 901, 4)]);
+    const nitted = planOf(item(H, 1, [approvalOf(H, 901, 4)]), round.requests);
     assert.equal(refusalAction(nitted, 'review', round.held[0]!), 'request-rework', 'the hold is answered by the bot round\'s rework');
     assert.ok(gateRefusalCatalogue.some(shape => shape.id === 'mechanical-hold' && shape.match.test(round.held[0]!)), 'the hold is a declared refusal');
     assert.deepEqual(reviewRefusals(nitted, Date.now() + mechanicalRoundStartMs), [], 'an approval whose round never starts holds nothing past the bound');
-    assert.deepEqual(reviewRefusals(item(H, 1, [approvalOf(H, 901)])), [], 'an approval with no mechanical nit is not held');
+    assert.deepEqual(reviewRefusals(planOf(item(H, 1, [approvalOf(H, 901)]), round.requests)), [], 'an approval with no mechanical nit is not held');
     assert.deepEqual(reviewRefusals(item(BOT, 2, [approvalOf(BOT, 902)])), [], 'the fresh read\'s approval of the bot round\'s head is not held');
     // 2. The loop's routine decision returns the approved head to a worker-class bot round.
     assert.equal(round.decision?.action, 'rework');
@@ -358,4 +365,49 @@ test('unit:mechanical-mislabel-caught — a substantive finding misclassified as
     assert.deepEqual(report.byKind.map(entry => [entry.kind, entry.count]), [['misclassified-finding', 1]]);
     assert.ok(report.patterns.some(pattern => pattern.kind === 'misclassified-finding' && pattern.stage === 'review' && pattern.count === 1));
   } finally { await cleanup(); }
+});
+
+// GY-1764. The review gate's hold and the decision step's rework read one source: a planned fix for the approval in the review ledger.
+const planned901 = { key: 'GY-7', pr: 7, head: H, reviewId: 901, epoch: 1, at: '2026-09-30T12:00:00.000Z', mechanical: [], substantive: [], paths: ['docs/widget.md'] };
+test('unit:mechanical-hold-requires-planned-fix — an approval naming mechanical nits holds its head only while the ledger holds a planned fix for that approval, confirmed this cycle', () => {
+  const now = Date.now();
+  const nitted = item(H, 1, [approvalOf(H, 901, 4)]);
+  assert.equal(reviewRefusals(nitted).length, 0, 'the observation alone holds nothing');
+  assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 900, head: H, at: new Date(now).toISOString() } }).length, 0, 'a plan for another approval holds nothing');
+  assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 901, head: B, at: new Date(now).toISOString() } }).length, 0, 'a plan for another head holds nothing');
+  assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 901, head: H, at: new Date(now).toISOString() } }).length, 1, 'a planned fix for this approval holds the head');
+  // GY-1764 rework: the projection is the loop's report of the ledger, and the gate holds only while the loop
+  // could confirm it. A plan whose confirmation instant is past `mechanicalPlanFreshMs` — the loop's write
+  // refused, its ledger read failing — holds nothing, so the head is not held a review the ledger no longer plans.
+  assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 901, head: H, at: new Date(now - mechanicalPlanFreshMs - 60_000).toISOString() } }).length, 0, 'a stale confirmation holds nothing');
+  assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 901, head: H, at: 'not-a-date' } }).length, 0, 'an unstamped projection holds nothing');
+});
+
+test('unit:mechanical-hold-released-without-plan — an approval whose follow-ups were filed, whose fresh read exists or whose plan read failed holds nothing and owes no request-rework', () => {
+  const nitted = item(H, 1, [approvalOf(H, 901, 4)]);
+  const base = { key: 'GY-7', pr: 7, sha: H, state: 'APPROVED' };
+  const fix = { reviewId: 901, head: H, epoch: 1, at: '2026-09-30T12:00:00.000Z', mechanical: [], substantive: [], paths: [] };
+  // planMechanicalFixes never plans these; a plan that fell back or applied is no longer planned either.
+  const ledgers: [string, Parameters<typeof mechanicalFixRequests>[0]][] = [
+    ['follow-ups already filed', [{ ...base, followUps: { reviewId: 901 } }]],
+    ['a fresh read present', [{ ...base, freshRead: { approvedHead: H, reviewId: 901 } }]],
+    ['the plan read failed', [{ ...base, mechanicalFix: { ...fix, state: 'fallback' } }]],
+    ['the round applied', [{ ...base, mechanicalFix: { ...fix, state: 'applied' } }]],
+  ];
+  for (const [name, records] of ledgers) {
+    const requests = mechanicalFixRequests(records), reported = planOf(nitted, requests);
+    assert.deepEqual(reviewRefusals(reported), [], `${name}: nothing holds the head`);
+    assert.equal(neededDecision(reported, { autoMerge: true }, undefined, [], requests), null, `${name}: no request-rework is owed`);
+  }
+});
+
+test('integration:mechanical-hold-and-rework-one-source — the hold and the owed rework agree for every ledger state', () => {
+  const nitted = item(H, 1, [approvalOf(H, 901, 4)]);
+  const states: [string, typeof planned901[]][] = [['planned', [planned901]], ['no plan (follow-ups filed, fresh read present or read failed)', []]];
+  for (const [name, requests] of states) {
+    const reported = planOf(nitted, requests);
+    const held = reviewRefusals(reported).length > 0, owed = neededDecision(reported, { autoMerge: true }, undefined, [], requests) !== null;
+    assert.equal(held, owed, `${name}: held ${held} but rework owed ${owed}`);
+    assert.equal(held, requests.length > 0, name);
+  }
 });

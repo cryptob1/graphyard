@@ -28,6 +28,7 @@ const hour = 3_600_000;
 const served = commit('served-release');
 
 /** GY-87 delivered and observed serving: the window opens at its deployment, and no session-free delivery has landed since. */
+// Time-bomb allowance (GY-1694): the 2100 delivery and deployment instants are the measurement tests' own clock, handed in as now: () => clock; the loop-cycle tests stub measureThroughput, so runCycle's Date.now() never meets them.
 const claim = { id: 'claim', key: throughputClaim.item, stage: 'done', title: 'GY-87', criteria: [], gates: [], violations: [], blocker: null, policy: { checks: [], review: true },
   delivery: { mergedAt: '2100-01-01T00:00:00.000Z', mergedAtRepository: '2100-01-01T00:00:00.000Z', mergeSha: commit('GY-87'), authorizationRevision: 1,
     deployment: { sha: served, mergeSha: commit('GY-87'), source: 'endpoint', observedAt: '2100-01-01T01:00:00.000Z', covers: 'exact', at: '2100-01-01T01:00:00.000Z', observer: 'coordinator-1' } } } as unknown as Work;

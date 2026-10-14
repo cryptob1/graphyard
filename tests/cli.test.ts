@@ -16,6 +16,7 @@ import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 import { captureTrackedRoot, linuxProcessRecord, signalTrackedProcesses, supervise, systemdContainment } from '../src/supervisor.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from '../src/quarantine.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01 leases are judged against the snapshot's own 2030 now or a monotonic stub; the 2026 snapshot nows and deadline are stub fixtures; Date.now() builds relative expiries.
 
 const exec = promisify(execFile);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -343,11 +344,11 @@ test('CLI preserves admin ready and sends the current revision and audit reason 
 
 test('watch refuses the wrong workspace and uses a fresh heartbeat key despite command retry configuration', async () => {
   const cwd = await temporaryDirectory('watch');
-  let registeredPath = tmpdir(), role = 'worker'; const keys: string[] = [];
+  let registeredPath = tmpdir(), role = 'worker'; const keys: string[] = [], posts: string[] = [];
   const http = createServer((req, res) => {
     res.setHeader('Content-Type', 'application/json');
     if (req.url === '/api/status') { res.end(JSON.stringify({ actor: { role } })); return; }
-    if (req.method === 'POST') { keys.push(String(req.headers['idempotency-key'])); res.end(JSON.stringify(renewal())); }
+    if (req.method === 'POST') { keys.push(String(req.headers['idempotency-key'])); posts.push(req.url!); res.end(JSON.stringify(renewal())); }
     else { const task = { id: 'task', key: 'GY-1', workspaces: [{ epoch: 1, host: hostname(), path: registeredPath }] }; res.end(JSON.stringify(req.url === '/api/work/GY-1' ? task : [task])); }
   });
   await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
@@ -360,7 +361,9 @@ test('watch refuses the wrong workspace and uses a fresh heartbeat key despite c
     await assert.rejects(exec(process.execPath, [launcher, 'watch', 'GY-1', '1', '--', process.execPath, '-e', 'process.exit(0)'], { cwd, env }), /requires a worker credential/);
     assert.equal(keys.length, 0); role = 'worker';
     await exec(process.execPath, [launcher, 'watch', 'GY-1', '1', '--', process.execPath, '-e', 'process.exit(0)'], { cwd, env });
-    assert.equal(keys.length, 1); assert.notEqual(keys[0], 'replayed-command');
+    // The agent exited while its lease was live, so the heartbeat is followed by the release (GY-1506).
+    assert.deepEqual(posts, ['/api/work/task/heartbeat', '/api/work/GY-1/release']);
+    assert.ok(keys.every(key => key !== 'replayed-command')); assert.notEqual(keys[0], keys[1]);
   } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
 });
 

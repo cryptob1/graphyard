@@ -60,7 +60,7 @@ async function refusedAt(epoch: number) {
   assert.equal(work.epoch, epoch);
   work = await engine.execute(worker, 'workspace', work.id, { epoch, host: 'scope-host', path: `/tmp/stale-scope/${work.id}`, branch: `graphyard/${work.key.toLowerCase()}-${epoch}` }, id());
   work = await engine.execute(worker, 'scope', work.id, { epoch, paths: ['tests/auto-dispatch.test.ts'], reason: 'The dispatch test fails on this branch' }, id());
-  work = await engine.execute(coordinator, 'autoscope', work.id, { epoch }, id());
+  work = await engine.execute(coordinator, 'autoscope', work.id, { epoch, treeRead: true }, id());
   assert.equal(work.scopeRequest!.decision!.state, 'refused');
   assert.ok(work.blocker!.startsWith(scopeRefusalBlocker));
   assert.ok(ready(work).reasons.some(reason => reason.startsWith(scopeRefusalBlocker)), 'the refusal holds the ready gate while its attempt is live');
@@ -93,7 +93,8 @@ test('unit:scope-request-ends-with-attempt — a refused request from epoch 7 is
   assert.equal(work.nextAction?.kind, 'dispatch', `the reworked item is dispatchable: ${JSON.stringify(work.nextAction)}`);
   work = await engine.execute(worker, 'claim', work.id, {}, id());
   assert.equal(work.epoch, 8, 'the next attempt claims the item');
-  assert.equal(work.scopeRequest ?? null, null);
+  // The rule refusal was still the approver's to judge, so the ask is inherited (GY-1484), but never its blocker.
+  assert.deepEqual([work.scopeRequest?.epoch, work.blocker], [8, null]);
   assert.ok(!ready(work).reasons.some(reason => reason.startsWith(scopeRefusalBlocker)), 'epoch 8 carries no scope refusal');
 
   // A lease that lapses under the request: reconciliation ends the attempt and closes the ask.

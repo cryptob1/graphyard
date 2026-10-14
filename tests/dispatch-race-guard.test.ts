@@ -12,7 +12,7 @@ import { actionClaimMs, actionId, claimAction, reconcileActions, type ActionRow 
 import { nextAction } from '../src/model/next-action.js';
 import { createSchema, systemDrivenDefault, type Work } from '../src/model/work.js';
 import { controlPlaneHandlers } from '../src/executor.js';
-import { dispatchWork, masterConfigSchema, managedMasterInstructions, prepareWorkerLaunch, runAutonomyCommand, unauthorizedMergeViolation, workAttentionOwner, type WorkerProfile } from '../src/master.js';
+import { dispatchWork, masterConfigSchema, masterInstructions, prepareWorkerLaunch, runAutonomyCommand, unauthorizedMergeViolation, workAttentionOwner, type WorkerProfile } from '../src/master.js';
 import { assertHandDispatch, dispatchRaceRefusal, handDecision, mergeDecisionRecovery, handDispatchClaimMarginMs, handDispatchClaimTimeoutMs, handDispatchFenceMs, loopOwned, producerRecovery, releaseEventKinds, reviewRecovery, systemDriven, systemDrivenRefusal } from '../src/cli/hand-actions.js';
 import { dispatchFailureLimit } from '../src/auto-dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -508,8 +508,8 @@ test('unit:system-driven-items the master\'s own next steps name the loop step f
   assert.match(workAttentionOwner(item({ systemDriven: true }), 'session').next, /the loop's dispatcher launches GY-7 again/);
   const produced = item({ systemDriven: true, producerProofs: ['manual:produced-review'], gates: [{ name: 'acceptance', passed: false, reasons: ['AC-1: manual:produced-review needs trusted passing evidence'] }] as any });
   assert.match(workAttentionOwner(produced, 'gate').next, /The loop's producer session produces manual:produced-review/);
-  // The AGENTS.md master block routes system-driven items to the loop, keeps the hand commands for the opt-out and leaves merging to GitHub.
-  const block = managedMasterInstructions('').replace(/\s+/g, ' ');
+  // The master instructions (printed by master guide) route system-driven items to the loop, keeps the hand commands for the opt-out and leaves merging to GitHub.
+  const block = masterInstructions.replace(/\s+/g, ' ');
   assert.match(block, /Items are system-driven unless created with `"systemDriven": false`: for them `graphyard master run` dispatches and launches review, and the master CLI refuses those hand actions, naming the loop step/);
   // An opted-out item is still driven by the loop: the instructions allow the hand commands in addition, never instead.
   assert.match(block, /The loop drives an item created `"systemDriven": false` the same way; opting out only also allows the hand actions/);

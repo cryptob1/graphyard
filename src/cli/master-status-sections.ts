@@ -1,8 +1,11 @@
 // Concern: report section assembly, service profiles, ledgers and runtime environment formatting for the master status report.
-import { directMergeLine, docsBudgetAttention } from './status-attention.js';
+import { directMergeLine, docsBudgetAttention, mergeWriterLine } from './status-attention.js';
 import { masterBoard } from '../model/board.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
 import { branchReport, mergeProtocolSkew, profileConcurrency, reclaimIdleMs, type AttentionItem, type MasterConfig } from '../master.js';
+import { launchStartMs, readSessionScreen } from '../master/launch.js';
+import { readApproverLaunches } from '../master/autonomy.js';
+import { stallScreenLines } from '../master/approver-stall.js';
 import { reviewLedgerSpec, sessionLedgerHeadroom } from '../reviewer.js';
 import { producerLedgerSpec } from '../producer.js';
 import { actionReport, sessionReport } from './loop-report.js';
@@ -15,11 +18,15 @@ import { slowReportReader } from '../master/report-cache.js';
 import { interventionSummary, interventionSummaryRoute } from './intervention-status.js';
 import { executorFleetReport, readCommit, readExecutorRegistrations } from '../executor-fleet.js';
 import { terminalDecisions } from './decision-report.js';
-import { throughputStatus } from '../throughput.js';
+import { openThroughputOwner, throughputStatus } from '../throughput.js';
+import { throughputEscalatedAt } from '../daemon/cycle-delivery.js';
+import { readDaemonState } from '../daemon/state.js';
 import { attributeAttention, derivedAttention, ledgerRefusalAttention, resourceStatus } from '../master-status.js';
 import { workerLaunchStatus } from '../master/dispatch.js';
 import type { ReportSections } from '../master/sections.js';
 import type { releaseLagStatus } from '../master/release-lag.js';
+import { upgradeBoundMs } from '../master-resources.js';
+import { readHeldCli } from '../daemon/upgrade.js';
 
 export async function assembleStatusSections<
   TStatus extends { work: any[] },
@@ -67,6 +74,7 @@ export async function assembleStatusSections<
 
   return {
     ...directMergeLine(coordinator),
+    ...mergeWriterLine(coordinator),
     board: await timedStep('board', () => masterBoard(masterApi, snapshot, coordinator, decisions.unanswered)),
     humanOnly: humanOnly.map(humanOnlyStatusRow),
     conflictHotspots: hs.report,
@@ -143,15 +151,24 @@ export async function assembleReportedAttention(
   const summarized = await timedStep('attention: interventions', () => interventionSummary(reports.read));
   if (summarized.summary.error) sections.mark('interventions', interventionSummaryRoute, summarized.summary.error);
   const interventions = { ...summarized, summary: { ...summarized.summary, ...reports.freshness() } };
-  const releases = executorFleetReport(await readExecutorRegistrations(master).catch(() => []), { commit: observed.commit ?? readCommit(root) }, { hostId: master.hostId });
-  const decisions = await timedStep('attention: decisions', () => sections.optional('decisions', 'GET /api/work/:id/decisions', () => terminalDecisions(masterApi, snapshot.work, { approvals: observed.approvals, runtime: observed.runtime, now: Date.now() }),
+  const decisions = await timedStep('attention: decisions', () => sections.optional('decisions', 'GET /api/work/:id/decisions', async () => terminalDecisions(masterApi, snapshot.work, { approvals: observed.approvals, runtime: observed.runtime, now: Date.now(),
+    // GY-1598: the launch records `master approver` judges a listed approver's age by, so the command status names succeeds.
+    starts: { records: await readApproverLaunches(root).catch(() => []), boundMs: launchStartMs(master), read: agent => readSessionScreen(agent.pane_id ?? agent.name!, undefined, stallScreenLines) } }),
     () => ({ listed: [], attentionItems: [] as AttentionItem[], unanswered: [], refused: 0 })));
-  const throughput = await timedStep('attention: throughput', () => throughputStatus(root, coordinator, snapshot.work));
+  // GY-1609: the revision the loop raised the open owner's needs-decision at, from its cursor, so an
+  // applied answer reads as answered rather than as the decision asked again. Read only while one is open. GY-1630: with
+  // the operator-agent identity the loop requests that decision itself, so the attention names the loop, not a master.
+  const escalations = openThroughputOwner(snapshot.work) ? (await readDaemonState(root, master).catch(() => null))?.actions ?? {} : {};
+  const throughput = await timedStep('attention: throughput', () => throughputStatus(root, coordinator, snapshot.work, Date.now(), owner => throughputEscalatedAt(escalations, owner), !!master.operatorAgent));
   // The readings judge the snapshot's leases and sessions at the snapshot's own instant (GY-1379): the
   // loop reads this at the end of a cycle that can run ten minutes, and a two-minute lease taken at its
   // start read against the wall clock then is a live worker misread as gone.
   const at = Date.parse(snapshot.now);
   const resources = await timedStep('attention: resources', () => resourceStatus(root, master, { reviews: observed.reviews, producers: observed.producers, agents: observed.runtime.available ? observed.runtime.agents : null, work: snapshot.work, loop: observed.loop }, Number.isFinite(at) ? { now: at } : {}));
+  // GY-1619: the fleet beside the checkout, read with what the loop's own self-upgrade is doing about a split: the pin a held
+  // restart places, and the restart the cursor owes, so an advance under way is in motion rather than a configuration fault.
+  const releases = executorFleetReport(await readExecutorRegistrations(master).catch(() => []), { commit: observed.commit ?? readCommit(root) },
+    { hostId: master.hostId, ...(Number.isFinite(at) ? { now: at } : {}), held: readHeldCli(root), upgrade: resources.upgrade, boundMs: upgradeBoundMs(observed.loop) });
   const derived = await timedStep('attention: derived', () => derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } }));
   if (!derived.executors.presence.available && /^GET \/api\/actions failed/.test(derived.executors.presence.reason)) sections.mark('executors', 'GET /api/actions', derived.executors.presence.reason);
   const docs = await timedStep('docs budget', () => docsBudgetAttention(root, master.baseBranch, generatedFiles));

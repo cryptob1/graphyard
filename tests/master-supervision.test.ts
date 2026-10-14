@@ -14,6 +14,7 @@ import { ChildProcessError, defaultChildTimeoutMs } from '../src/child-runner.js
 import { installLoopSupervisor, LoopSupervisorRefusal, loopStopTimeoutSeconds, loopSupervision, loopSupervisionAttention, loopUnitDirectory, loopUnitName, loopUnitText, loopWatchdogSeconds, supervisorSupport, temporaryDirectories, testSuiteHomeGuard, underTestRunner, unsupervisedInstruction } from '../src/supervisor.js';
 import { perInstallUnits } from '../src/install/units.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-07 upgrade.last.at is a cursor record loopSupervisorEvidence reads for its `self` flag, never aged; Date.now() only measures how long the bounded runs took.
 
 /**
  * Each test is named for the proof it produces (GY-114): integration:setup-installs-supervisor,

@@ -10,6 +10,7 @@ import { server } from '../src/server.js';
 import { directMergeFromEnv, directMergeStatus } from '../src/direct-merge.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): every absolute instant (the 2024-2026 `since` windows and mergedAt values) is past and compared only with the others; the new Date() merge follows off closing the window.
 
 /**
  * Direct-merge mode: an operator-owned window inside which a merge no execution authorized is

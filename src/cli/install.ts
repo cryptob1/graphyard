@@ -6,7 +6,7 @@ import { deliveryModes, type DeliveryMode } from '../model/delivery-policy.js';
 import { appPageBusy, appPagePortFree, startGithubSetup, updateAppPermissions } from '../github-setup.js';
 import { applyProposal, loadAppliedSetup, loadProposal, readDocumentationConfig, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
 import { protectionRun } from '../protection.js';
-import { appCommand, applyInstall, buildPlan, InstallPaused, installRequestFromArgs, prepareInstall } from '../install/index.js';
+import { appCommand, applyInstall, appStepWait, buildPlan, InstallPaused, installHerdrOnly, installRequestFromArgs, prepareInstall } from '../install/index.js';
 import { runManifestFlow } from '../install/manifest.js';
 import { delegationLimitAssignments } from '../install/limits.js';
 import { ciProducerProvisioningSteps, readRoster, registerCiProducer } from '../install/ci-proofs.js';
@@ -16,7 +16,7 @@ import { readSecretFromStdin } from './context.js';
 import { documentationDrift } from '../model/documentation.js';
 import { agentEnvironmentRoot } from '../master/environments.js';
 import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
-import { describeUpEvent, runUp, upDependencies, upRequestFromArgs, upSudoCode } from '../up.js';
+import { mergerDoctorLine } from './merger.js'; import { upCommand, upHelpRequested, upUsage } from '../up.js'; import { mergerFromStatus } from './install-merger.js'; import { coordinatorDoctor } from '../master/known-good.js';
 
 const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
   const setup = await startGithubSetup(root, repository, deployment);
@@ -32,7 +32,6 @@ const interactiveGithubSetup = (root: string) => async (repository: string, depl
     } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   }
 };
-
 /**
  * The capacity variables that accompany the principals `init --apply` registers: derived from
  * the roster in .graphyard/principals.json, and — when the operator credential reaches the
@@ -51,49 +50,47 @@ export async function capacityForPrincipals(principalsFile: string, status: () =
   return { variables: limits.variables, lines: limits.lines, drift: limits.drift,
     next: `Set ${limits.lines.join(' ')} beside GRAPHYARD_PRINCIPALS on the Graphyard deployment${limits.drift.length ? ` (drift: ${limits.drift.map(entry => entry.reason).join(' ')})` : error ? `; no drift can be reported because ${error}` : ''}` };
 }
-
 /** Repository onboarding: install a control plane, propose and apply the delivery workflow, register Apps, inspect readiness. */
 export const installCommands = defineCommands([
   {
     name: 'up',
     help: [
-      '  up --repo OWNER/NAME [--provider compose|railway|hetzner] [--reviewer NAME]',
+      '  up --repo OWNER/NAME [--provider compose|railway|hetzner|local] [--local] [--reviewer NAME]',
       '     [--master claude|codex] [--agent] [--goal FILE] [--browser-profile PROFILE]',
       '     [--confirm-price X | --max-monthly N] [--ssh-key NAME] [--ssh-host HOST] [--ssh-user USER]',
-      '     [--reuse-app SLUG]... [--github-mobile]',
+      '     [--reuse-app SLUG]... [--github-mobile] [--wait MINUTES] [--no-wait] [--share-tailnet]',
       '  up --sudo-code CODE|email',
-      '                                First-run setup in one command: preflight, control plane,',
-      '                                host supervisor and Herdr, onboarding, agent accounts,',
-      '                                harness and master loop, resumable (.graphyard/up.json).',
-      '                                Onboarding files are published as a pull request; the goal',
-      '                                waits for it to merge. Price and SSH flags pass to install.',
-      '                                A step that needs a person prints one one-time link that signs',
-      '                                in to the dashboard Setup page, and waits for it to turn green.',
-      '                                --agent runs every step non-interactively (JSON events on stderr), Apps in',
-      '                                the given or master\'s browser profile (none: exit 2), handing off only device',
-      '                                approvals: Confirm access lists the page\'s methods, re-checked every 10 s',
-      '                                (--sudo-code a 6-digit authenticator/email code, typed within 2 s; email:',
-      '                                GitHub sends one; or click the local App page in your own browser: the drive',
-      '                                runs on a profile copy); --github-mobile: Mobile first, password link after',
-      '                                60 s. --reuse-app passes to install. Exit 0 green, 1 failed, 2 prereq, 3 waiting.',
+      '                                First-run setup in one command: preflight, control plane, host supervisor and',
+      '                                Herdr, onboarding, agent accounts, harness and master loop, resumable (.graphyard/up.json;',
+      '                                a rerun reuses its --repo/--provider). Ctrl-C stops the install too. Onboarding files are',
+      '                                published as a pull request; the goal waits for it to merge. Price and SSH flags pass to',
+      '                                install. A step that needs a person prints one one-time link that signs in to the',
+      '                                dashboard Setup page, and waits for it to turn green. Accounts registers host agent',
+      '                                logins first (registry propose --apply), asking only for an empty role. A green run',
+      '                                ends with one fresh sign-in link (signIn). A Tailscale host prints its tailnet-only',
+      '                                `tailscale serve` URL; --share-tailnet runs it, links use it (reachableUrl); never public.',
+      '                                --agent runs every step non-interactively (JSON events on stderr), Apps in the given,',
+      '                                master\'s or same-login other install\'s Chrome profile (none: exit 2), handing off only',
+      '                                device approvals. Confirm access: GitHub Mobile when offered (its number; 3 prompts; password link',
+      '                                after 60 s); else the page\'s methods, re-checked each 10 s: your Chrome (shared profile; a copy:',
+      '                                the App page in your browser), --sudo-code a 6-digit authenticator/email code typed in 2 s (email:',
+      '                                GitHub sends one), or app import both Apps, --reuse-app each (--no-wait exits 3 saying so). A drive',
+      '                                giving up hands off the page; a GitHub rejection exits 1 quoting it. --wait MINUTES bounds a wait',
+      '                                (agent: 20); rerun resumes Confirm access; up --help: options, exit codes.',
     ],
     // `up` installs the control plane and records the connection; it never reads a stale one.
     readsConnection: () => false,
     async run(context) {
-      const args = [context.id, ...context.args].filter((value): value is string => value !== undefined);
-      const handed = await upSudoCode(context.repositoryRoot(), args);
-      if (handed) return context.print(handed);
-      const request = upRequestFromArgs(args);
-      const emit = (event: Parameters<typeof describeUpEvent>[0]) => console.error(request.agent ? JSON.stringify(event) : describeUpEvent(event));
-      const result = await runUp(request, upDependencies(context.repositoryRoot(), await context.activeCliPath(), request, emit));
+      if (upHelpRequested([context.id, ...context.args])) { console.log(upUsage); return; }
+      const result = await upCommand(context.repositoryRoot(), () => context.activeCliPath(), [context.id, ...context.args].filter((value): value is string => value !== undefined));
       context.print(result);
-      process.exitCode = result.exitCode;
+      if ('exitCode' in result) process.exitCode = result.exitCode;
     },
   },
   {
     name: 'install',
     help: [
-      '  install --provider railway|hetzner|docker-host|compose --repo OWNER/NAME',
+      '  install --provider railway|hetzner|docker-host|compose|local --repo OWNER/NAME',
       '          [--plan|--apply] [--domain HOST] [--workers N] [--reviewer NAME]',
       '          [--producer-proof PROOF] [--ssh-host HOST] [--ssh-user USER]',
       '          [--ssh-key NAME] [--port N] [--workspace NAME-OR-ID] [--image REF]',
@@ -101,7 +98,7 @@ export const installCommands = defineCommands([
       '                                Install or reconcile a complete control plane.',
       '  install --target host|hetzner --repo OWNER/NAME [--plan|--apply]',
       '          [--ssh-host HOST | --local] [--migrate] [--max-monthly N | --confirm-price X]',
-      '          [--github-app FILE] [--reuse-app SLUG]...',
+      '          [--github-app FILE] [--reuse-app SLUG]... [--herdr-only]',
       '                                Self-contained host: server, Postgres, loop, executors,',
       '                                Herdr and agent runtimes on one machine (hetzner creates it',
       '                                and needs its monthly price confirmed). --migrate moves an',
@@ -115,11 +112,10 @@ export const installCommands = defineCommands([
       '                                refused. The App page offers the same reuse.',
       '                                --plan prints every action with secrets redacted and',
       '                                changes nothing; --apply executes the same plan. UAT and',
-      '                                production resources that cost money are created only with',
-      '                                --create-environments. A Herdr graphyard plugin bound to',
-      '                                another server is repointed only with --herdr-rebind.',
-      '                                An App step nobody confirms within 900 s exits 1 with a',
-      '                                JSON summary and the exact resume command.',
+      '                                production resources that cost money are created only with --create-environments.',
+      '                                A Herdr plugin bound elsewhere is repointed only with --herdr-rebind; --herdr-only sets up Herdr alone.',
+      '                                An App step nobody confirms within 900 s (under up: its --wait,',
+      '                                plus a minute) exits 1 with a JSON summary and the exact resume command.',
       '                                See docs/install.md for the agent-executable runbook.',
     ],
     // The installer creates the connection file; it must never read a stale one.
@@ -128,9 +124,10 @@ export const installCommands = defineCommands([
       const { values, request: inputs } = installRequestFromArgs(context.rest);
       const session = await prepareInstall(process.cwd(), inputs, {
         cliPath: await context.activeCliPath(), hostId: context.individualHostId(), log: line => console.error(line),
-        githubApp: request => runManifestFlow(request.root, request.repository, request.origin, { reviewer: request.reviewer, announce: line => console.error(line), dependencies: { file: request.file, ...(request.reuse ? { reusable: request.reuse.slugs, reuse: request.reuse.adopt } : {}) } }),
+        githubApp: request => runManifestFlow(request.root, request.repository, request.origin, { reviewer: request.reviewer, announce: line => console.error(line), ...appStepWait(process.env), dependencies: { file: request.file, ...(request.reuse ? { reusable: request.reuse.slugs, reuse: request.reuse.adopt } : {}) } }),
       }, values.apply ? 'apply' : 'plan');
       if (values.logs) return console.log(await session.adapter.logs(session.context));
+      if (values['herdr-only']) { const result = await installHerdrOnly(session); context.print(result); if (!result.herdr) process.exitCode = 1; return; }
       const plan = await buildPlan(session);
       if (!values.apply) return context.print(plan);
       try { return context.print(await applyInstall(session, plan)); }
@@ -179,8 +176,9 @@ export const installCommands = defineCommands([
           if (differences.length) throw new Error(`${differences.join('; ')}. Rerun init --scan, review the refreshed proposal, then apply it again. The stored proposal was left unchanged.`);
           const url = selected ?? installed?.url;
           if (!url) throw new Error('Applying requires the Graphyard server URL; pass --url');
+          const merger = await mergerFromStatus(() => context.api('status'));
           if (installed) {
-            const result = await applyProposal(root, stored.proposal, { url, installed, github: protectionRun });
+            const result = await applyProposal(root, stored.proposal, { url, installed, github: protectionRun, merger });
             return print({ proposal: stored.file, ...result, installed: installed.directory });
           }
           // Apply rewrites the registry from the reviewed proposal; the CI producer's token is read
@@ -188,7 +186,7 @@ export const installCommands = defineCommands([
           const roster = await readRoster(resolve(root, '.graphyard/principals.json'));
           // The App page init would open needs port 4311; a busy one refuses here, before any write.
           if (!(await loadAppliedSetup(root))?.artifacts.githubApp && !await readFile(resolve(root, '.graphyard/github-app.json')).then(() => true, () => false) && !await appPagePortFree()) throw appPageBusy(4311);
-          const result = await applyProposal(root, stored.proposal, { url, githubSetup: interactiveGithubSetup(root), github: protectionRun, writeCredentials: true });
+          const result = await applyProposal(root, stored.proposal, { url, githubSetup: interactiveGithubSetup(root), github: protectionRun, writeCredentials: true, merger });
           if (!result.principalsFile) throw new Error('applyProposal wrote no principals registry');
           const ciProofs = await registerCiProducer(result.principalsFile, roster);
           return print({ proposal: stored.file, ...result, ciProofs: { ...ciProofs, next: ciProducerProvisioningSteps(stored.proposal.repository, url) },
@@ -242,8 +240,7 @@ export const installCommands = defineCommands([
       const committedDocumentation = await readDocumentationConfig(root).catch((error: any) => ({ error: error.message as string }));
       const documentation = committedDocumentation && 'error' in committedDocumentation ? { committed: null, deployed: live?.documentation ?? null, drift: null, error: committedDocumentation.error }
         : { committed: committedDocumentation, deployed: live?.documentation ?? null, drift: live?.documentation ? documentationDrift(committedDocumentation, live.documentation)?.attention ?? null : null };
-      // Capacity drift and production lag are the two installation facts a deploy can break
-      // silently; the server reports both and doctor repeats them beside the App preflight.
+      // Capacity drift and production lag, which a deploy can break silently: the server reports both.
       const delegationLimits = live?.delegationLimits ?? null, production = live?.production ?? null;
       // Validation definitions are readable by operators and readers; every other credential
       // leaves the runner-path items `unknown` with the command that reads them.
@@ -268,6 +265,8 @@ export const installCommands = defineCommands([
         : documentation.drift ? documentation.drift
         : production?.incidents?.length ? `Production has not deployed ${production.incidents.map((incident: any) => incident.key).join(', ')}: ${production.incidents[0].reason}`
         : readiness.next;
+      console.error(mergerDoctorLine(live?.mergeWriter));
+      await coordinatorDoctor(root, discovered.repository, production);
       return context.print({ discovered, server: base, cliPath: await context.activeCliPath(), hostId: context.individualHostId(), connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, release: live?.release ?? null, failure,
         setup,
         appPermissions: appPermissions ? { verifiedAt: appPermissions.verifiedAt, missing: appPermissions.missing, attention: appPermissions.attention, installationUrl: appPermissions.installationUrl } : null,

@@ -158,7 +158,7 @@ test('unit:postmerge-proof-refused-premerge — create and requirements refuse a
     assert.match(message, /AC-1: manual:speed-target-met-postmerge is a post-merge proof/);
     assert.match(message, /can never pass before the merge it gates/);
     assert.match(message, /Require it as a delivery obligation instead: policy\.deploySmoke for e2e:deploy-smoke/);
-    assert.match(message, /follow-up work item that depends on this one/);
+    assert.match(message, /declare it a post-deploy verification of this item \(manual:post-deploy\/NAME\)/);
   }
   // A post-deploy name, and a criterion that declares itself post-merge, are refused alike.
   assert.match(await refusal('create', { title: 'Live', plannedFiles: ['src/'], criteria: [{ id: 'AC-2', text: 'Live', proofs: ['integration:checkout/post-deploy'] }] }), /integration:checkout\/post-deploy is a post-merge proof/);

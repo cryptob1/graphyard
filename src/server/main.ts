@@ -10,7 +10,7 @@ import { Delivery } from '../delivery.js';
 import { ProofGrants } from '../proof-grants.js';
 import { artifactBackendFromEnv, artifactCapacityFromEnv } from '../artifacts.js';
 import { projectFlow } from '../flow-analytics.js';
-import { openPatternItems, startPatternScan } from '../interventions.js';
+import { LedgerRowCache, openPatternItems, readScanWindow, startPatternScan } from '../interventions.js';
 import { startRetroIndexWatch, synthesizeRetro } from '../retro-synthesis.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
@@ -22,6 +22,8 @@ import { startDirectMerge } from '../direct-merge.js';
 import { GitHubCacheStore } from '../github-cache.js';
 import { pruneReceipts, receiptPruneIntervalMs } from '../store/receipts.js';
 import { compactLedger, configuredLedgerRetentionMs, ledgerCompactionIntervalMs } from '../store/compaction.js';
+import { processControlPlaneJob } from './control-plane-observation.js';
+import { recordedMergerMode } from '../merger-mode.js';
 
 /** Overrides for tests that start the process entry in-process; the deployment reads PORT and HOST. */
 export interface MainOptions { port?: number; host?: string }
@@ -91,7 +93,7 @@ export async function main(options: MainOptions = {}) {
   // opens first; until startup validation completes, /healthz reports `readiness: false`, every
   // mutation that could act on unvalidated state is refused with a retryable 503, and the
   // observation workers and production watch are not started. A failed attempt is logged and the
-  // reconciliation tick retries it.
+  // reconciliation tick retries it. Webhooks soft-accept while readiness is false (GY-1700).
   let ready = false, validating = false, prepared = false, closing = false;
   let watching: ReturnType<typeof startProductionWatch> | null = null;
   let scanning: ReturnType<typeof startPatternScan> | null = null;
@@ -142,16 +144,20 @@ export async function main(options: MainOptions = {}) {
       failed: error => console.error('production watch failed', error instanceof Error ? error.message : 'unknown'),
     });
     // The observation workers run beside the tick, never in it: a queue of due jobs is drained at
-    // the concurrency the installation sets, whatever the rest of the tick is doing (GY-492).
-    observing = github ? startObservationWorkers(engine, github, capacity.concurrency) : null;
+    // the concurrency the installation sets, whatever the rest of the tick is doing (GY-492). The
+    // recorded merger picks each claim's backend: the checkout while the control plane merges, else GitHub (GY-1675).
+    observing = startObservationWorkers(engine, github, capacity.concurrency);
     console.log(`Observation workers: ${observing?.concurrency ?? 0} (database pool ${capacity.poolMax})`);
     // A recurring intervention becomes work on its own (GY-98), once a minute and beside the tick,
     // never in it (GY-1381): its ledger read held the whole tick on 2026-09-23. On unless
     // GRAPHYARD_INTERVENTION_PATTERNS=0.
+    // The window is read once and shared by both, and the rows it projected are kept for the next scan (GY-1749).
+    const scanned = new LedgerRowCache();
     scanning = startPatternScan(async () => {
-      for (const work of (await openPatternItems(engine, http.services.interventionPolicy)).opened) console.log(`Opened ${work.key} for a recurring intervention pattern: ${work.title}`);
+      const window = await readScanWindow(engine.store, http.services.interventionPolicy, { cache: scanned });
+      for (const work of (await openPatternItems(engine, http.services.interventionPolicy, { window })).opened) console.log(`Opened ${work.key} for a recurring intervention pattern: ${work.title}`);
       // The same window read by cause (GY-970): drafts for independent approval, never work items.
-      for (const artefact of (await synthesizeRetro(engine.store, http.services.interventionPolicy)).drafted) console.log(`Drafted retro artefact ${artefact.id} (${artefact.kind}) for ${artefact.pattern.label}`);
+      for (const artefact of (await synthesizeRetro(engine.store, http.services.interventionPolicy, { window })).drafted) console.log(`Drafted retro artefact ${artefact.id} (${artefact.kind}) for ${artefact.pattern.label}`);
     }, { failed: error => console.error('intervention pattern scan failed', error instanceof Error ? error.message : 'unknown') });
   };
   const [handle] = http.listeners('request') as ((req: IncomingMessage, res: ServerResponse) => void)[];
@@ -188,6 +194,7 @@ export async function main(options: MainOptions = {}) {
 
   const close = async () => {
     closing = true;
+    services.readiness = false; // soft-accept webhooks before the pool drains (GY-1700)
     reconciliation.stop(); watching?.stop(); watching = null; await observing?.stop(); observing = null; await scanning?.stop(); scanning = null; retroIndex.stop();
     process.off('SIGTERM', shutdown); process.off('SIGINT', shutdown);
     await new Promise<void>(resolve => http.close(() => resolve()));
@@ -203,7 +210,8 @@ export async function main(options: MainOptions = {}) {
  * Whether a request is refused while startup validation runs (GY-1127): every mutation under /api
  * except a GitHub webhook delivery, which only wakes durable jobs, and a work lease heartbeat,
  * which reads no validation state and would otherwise lapse leases for the whole startup window.
- * Reads stay open, and /healthz answers liveness throughout.
+ * Reads stay open, and /healthz answers liveness throughout. Webhooks stay open for HMAC; the
+ * route soft-accepts while not ready (GY-1700) rather than this gate answering 503.
  */
 export function refusedBeforeReady(method = 'GET', url = '/'): boolean {
   if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return false;
@@ -242,28 +250,36 @@ export const observationConcurrency = (poolMax = defaultDatabasePoolSize) => obs
  * observation; workers that keep claiming while jobs are due are what drains a backlog and keeps
  * the head observed at its twenty-second cadence.
  *
- * Before each claim a worker takes a slot from the shared pace (`GitHub.paceObservation`, GY-567)
- * and waits when there is none, so all of them together spend the budget above the merge-path
- * reserve evenly until its reset; the slot is returned with what the job actually charged.
+ * The backend is the recorded merger's, read before every claim, never the GitHub client's presence
+ * (GY-1675): while the control plane merges, heads are observed from the checkout and GitHub is not
+ * asked — an App-bound install switched with `master merger control-plane` submits allocated change
+ * numbers no pull request answers to; while GitHub merges, the client observes, and without one
+ * nothing is claimed. Before a GitHub claim a worker takes a slot from the shared pace
+ * (`GitHub.paceObservation`, GY-567) and waits when there is none, so all of them together spend the
+ * budget above the merge-path reserve evenly until its reset; the slot is returned with what the
+ * job actually charged.
  */
-export async function observationWorkers(engine: Engine, github: GitHub, concurrency: number, stopped: () => boolean = () => false, idleMs = 1000): Promise<void> {
+export async function observationWorkers(engine: Engine, github: GitHub | null, concurrency: number, stopped: () => boolean = () => false, idleMs = 1000): Promise<void> {
+  const idle = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
   const worker = async () => {
     while (!stopped()) {
-      const slot = github.paceObservation?.();
-      if (slot && !slot.settle) { await new Promise(resolve => setTimeout(resolve, Math.min(slot.wait, idleMs * 5))); continue; }
+      const local = await recordedMergerMode(engine.store.pool).then(setting => setting.merger === 'control-plane', error => { console.error('observation worker could not read the merger', error instanceof Error ? error.message : 'unknown'); return null; });
+      if (local === null || (!local && !github)) { await idle(idleMs); continue; }
+      const slot = local ? undefined : github!.paceObservation?.();
+      if (slot && !slot.settle) { await idle(Math.min(slot.wait, idleMs * 5)); continue; }
       let claimed = false, charged: number | undefined;
-      try { claimed = await processJob(engine, github, cost => { charged = cost; }); }
+      try { claimed = local ? await processControlPlaneJob(engine) : await processJob(engine, github!, cost => { charged = cost; }); }
       catch (error) { console.error('observation worker job failed', error instanceof Error ? error.message : 'unknown'); }
       // An unclaimed slot charged nothing; a job that failed before its cost was known keeps its estimate.
       finally { slot?.settle(claimed ? charged : 0, Date.now()); }
-      if (!claimed) await new Promise(resolve => setTimeout(resolve, idleMs));
+      if (!claimed) await idle(idleMs);
     }
   };
   await Promise.all(Array.from({ length: Math.max(1, Math.floor(concurrency)) }, worker));
 }
 
 /** Start the observation workers for the process's lifetime; `stop` resolves once each has finished its current job. */
-export function startObservationWorkers(engine: Engine, github: GitHub, concurrency = observationConcurrency(engine.store.pool.options.max)) {
+export function startObservationWorkers(engine: Engine, github: GitHub | null, concurrency = observationConcurrency(engine.store.pool.options.max)) {
   let stopped = false;
   const done = observationWorkers(engine, github, concurrency, () => stopped)
     .catch(error => console.error('observation workers stopped', error instanceof Error ? error.message : 'unknown'));

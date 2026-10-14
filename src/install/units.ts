@@ -13,6 +13,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 
 export const legacyLoopUnit = 'graphyard-master.service';
@@ -147,13 +148,17 @@ export function foreignUnitCheckout(path: string, root: string, home = homedir()
   try { text = readFileSync(path, 'utf8'); } catch { return null; }
   return foreignUnitText(text, root, home);
 }
+/** This package's own executor script, which a unit for a repository without one runs. */
+const packageExecutorScript = fileURLToPath(new URL('../../scripts/graphyard-executor.mjs', import.meta.url));
 /** `foreignUnitCheckout` of a unit's TEXT, read from wherever it lives (this machine or a host). */
 export function foreignUnitText(text: string, root: string, home = homedir()): string | null {
   const { workingDirectory, execStart } = unitCheckout(text, home);
   const own = canonical(root);
   if (workingDirectory && canonical(workingDirectory) !== own) return workingDirectory;
   const script = execStart?.split(/\s+/).find(part => /\/scripts\/graphyard-executor\.mjs$/.test(part));
-  if (script && canonical(dirname(dirname(script))) !== own) return dirname(dirname(script));
+  // A repository without its own executor script runs this package's (renderExecutorUnit): that unit, working in ROOT, is ROOT's.
+  const packaged = workingDirectory && script && canonical(script) === canonical(packageExecutorScript);
+  if (script && !packaged && canonical(dirname(dirname(script))) !== own) return dirname(dirname(script));
   return null;
 }
 
@@ -185,7 +190,11 @@ export async function resolveInstallUnits(root: string, repository: string, unit
   let text: string | null;
   try { text = await readFile(file, 'utf8'); } catch (error) { if (!absent(error)) throw error; text = null; }
   if (text !== null) return parseInstallUnits(text, file, () => legacyInstallUnits);
-  const units = proposedInstallUnits(root, repository, unitDirectory, home);
+  return recordInstallUnits(root, proposedInstallUnits(root, repository, unitDirectory, home));
+}
+/** Writes `units` as the record ROOT keeps (installUnitsFile), atomically; the caller has decided they are ROOT's. */
+export async function recordInstallUnits(root: string, units: InstallUnits): Promise<InstallUnits> {
+  const file = resolve(root, installUnitsFile);
   await mkdir(dirname(file), { recursive: true });
   const temporary = `${file}.${randomUUID()}.tmp`;
   await writeFile(temporary, `${JSON.stringify(units, null, 2)}\n`, { mode: 0o600, flag: 'wx' });

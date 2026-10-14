@@ -13,8 +13,9 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * GY-1442: GitHub App creation no longer depends on a GitHub Mobile push arriving.
  *
  * unit:sudo-method-fallback — a recorded Confirm-access page offering a passkey, a password, or only
- * GitHub Mobile: passkey or password is handed off first, Mobile only when the page offers nothing
- * else or the operator chose it, a Mobile code unapproved for 60 s is handed off again with the
+ * GitHub Mobile: passSudo's passkey-or-password route hands passkey or password off first, Mobile
+ * only when the page offers nothing else or the operator chose it; graphyard up takes Mobile whenever
+ * the page offers it (GY-1510). A Mobile code unapproved for 60 s is handed off again with the
  * passkey or password link, and the recorded steps name the method used.
  *
  * unit:reuse-app-install — `--reuse-app SLUG` reuses an App saved on this host: the repository is
@@ -121,16 +122,16 @@ test('unit:sudo-method-fallback — a Mobile prompt unapproved for 60 s is hande
   assert.match(sudoAttention(sudoStates[1], 1)!.instruction, /choose 64, or, if no prompt arrived, confirm with your password at https:\/\/github\.com\/sessions\/sudo\?type=password/);
 });
 
-test('unit:sudo-method-fallback — graphyard up hands the operator the passkey or password route first, and GitHub Mobile only with --github-mobile', async () => {
+test('unit:sudo-method-fallback — graphyard up hands the operator the passkey or password route when the page offers no GitHub Mobile, and requests GitHub Mobile whenever it does (GY-1510)', async () => {
   const { browserAppDriver, upRequestFromArgs } = await up();
-  assert.equal(upRequestFromArgs(['--repo', 'acme/shop']).sudo, undefined, 'passkey or password first by default');
+  assert.equal(upRequestFromArgs(['--repo', 'acme/shop']).sudo, undefined, 'the page decides by default');
   assert.equal(upRequestFromArgs(['--repo', 'acme/shop', '--github-mobile']).sudo, 'mobile');
   const controls: Record<string, Located> = {
     'button:Register Graphyard App →': { selector: '#register', tag: 'button', checked: null, value: null, text: '' },
     'button:Create GitHub App for acme': { selector: '#create', tag: 'button', checked: null, value: null, text: '' },
   };
-  for (const method of ['passkey', 'password'] as const) {
-    const fake = confirmPage({ [method]: true, mobile: true });
+  for (const [method, mobile] of [['passkey', false], ['password', false], ['passkey', true], ['password', true]] as const) {
+    const fake = confirmPage({ [method]: true, mobile }, { approveMobileAfterPolls: 1 });
     let created = false, polls = 0;
     const page: BrowserPage = { ...fake.page,
       url: () => created && fake.state.sudo ? SUDO : 'http://127.0.0.1:4311/',
@@ -138,11 +139,16 @@ test('unit:sudo-method-fallback — graphyard up hands the operator the passkey 
       locate: (kind, text) => created && fake.state.sudo ? fake.page.locate(kind, text) : controls[`${kind}:${text}`] ?? null,
       click: selector => { if (selector === '#create') created = true; fake.page.click(selector); } };
     const handed: { sentence: string; url: string | null }[] = [];
-    const drive = browserAppDriver({ page, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sleep: async () => { if (++polls === 2) fake.confirm(); } });
+    const drive = browserAppDriver({ page, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sleep: async () => { if (++polls === 2 && !mobile) fake.confirm(); } });
     assert.deepEqual(await drive('http://127.0.0.1:4311', (sentence, link) => { handed.push({ sentence, url: link.url ?? null }); }), { state: 'done' });
     assert.equal(handed.length, 1, method); assert.equal(handed[0].url, SUDO);
-    assert.equal(handed[0].sentence.split('\n')[0], FIRST_LINE, `${method}: the first line names the one confirmation that always works`);
-    assert.ok(!fake.state.clicked.includes('#mobile'), `${method}: GitHub Mobile is only the operator's choice`);
+    if (mobile) {
+      assert.deepEqual(fake.state.clicked.filter(selector => selector === '#mobile'), ['#mobile'], `${method} and Mobile offered: the Mobile prompt is requested`);
+      assert.equal(handed[0].sentence, 'Approve the GitHub Mobile prompt on your phone and choose 64');
+    } else {
+      assert.equal(handed[0].sentence.split('\n')[0], FIRST_LINE, `${method}: the first line names the one confirmation that always works`);
+      assert.ok(!fake.state.clicked.includes('#mobile'), `${method}: no Mobile on the page, none requested`);
+    }
   }
 });
 

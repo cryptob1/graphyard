@@ -158,6 +158,8 @@ function waitDueAt(work: Work, wait: ActionWait, all: Work[], now: Date): string
     return rows[0] ?? now.toISOString();
   }
   if (wait.kind === 'human') return iso(Date.parse(heldSince(work)) + 24 * 60 * 60_000);
+  // An observation window is due at its instant (GY-1698): past it the account names the dispatch, so the wait never stales.
+  if (wait.kind === 'window') return work.observationWindow?.notBefore ?? null;
   return iso(Math.max(Date.parse(heldSince(work)) + livenessWaitBoundMs, ...sessionObligations(work).map(entry => Date.parse(entry.at) + roleSessionMaximumMs[entry.role])));
 }
 

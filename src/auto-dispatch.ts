@@ -1,3 +1,4 @@
+import { assertGhNotPaused, GhPausedError, notePossibleGhRateLimit } from './gh-pause.js';
 import { randomUUID } from 'node:crypto';
 import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
@@ -15,9 +16,15 @@ import { nextActionKinds, type NextActionKind } from './model/next-action.js';
 import { agentOwner, assertOutsideWorktrees, closeHerdrPane, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, neverStarted, neverStartedReason, selectionKey, sessionAgentName, SessionStartError, sessionWords, withReviewerDefaults, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
 import { withLaunchedRuntime } from './master/launch.js';
+import { herdrSubcommand, isHerdrCommand } from './master/herdr.js';
 import { boundedLaunch, launchBoundMs } from './master/launch-bound.js';
 import { capacityRefusal } from './fleet.js';
-import { answeredByPendingReview, launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, type ReviewRecord } from './reviewer.js';
+import { answeredByPendingReview, postMergeFindingsMax, launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, updateReviewLedger, vanishedSettledSession, type ReviewRecord } from './reviewer.js';
+import { owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId, wholeFindings } from './model/post-merge-review.js';
+import { riskOf } from './model/risk-class.js';
+import { blockingFindings, followUpFindingsOf } from './review-cap.js';
+import { readProjectMemory, recordDecisionInMemory, writeProjectMemory } from './project-memory.js';
+import { agentToken } from './master/autonomy.js';
 import { answeredByPendingSession, independentProducerProfiles, launchProducer, reconcileProducers, requestAttemptLimit, sessionRetry, type ProducerRecord } from './producer.js';
 import { currentEvidence } from './model/evidence.js';
 import { judgeHostMemory, memoryDeferral, readHostMemory, reclaimResources, type HostMemoryReading } from './master-resources.js';
@@ -329,13 +336,18 @@ export async function writeDispatchCursor(config: MasterConfig, cursor: Dispatch
   await rename(temporary, file); await chmod(file, 0o600);
 }
 
+/** Why a supervised install launches no reviewer (GY-1501). */
+export const supervisedReview = 'supervised: the operator reviews and approves each pull request on GitHub, so no reviewer session is launched';
 /**
  * The reviewer profile that answers automatic requests: the configured one, else the only one.
  * The configured one runs `automaticReviewerConcurrency` sessions when it declares none (GY-1072).
  */
-export function selectReviewerProfile(input: MasterConfig): { profile: ReviewerProfile | null; reason: string | null } {
+export function selectReviewerProfile(input: MasterConfig, mode: 'github' | 'control-plane' = 'github'): { profile: ReviewerProfile | null; reason: string | null } {
+  // GY-1501: a supervised install's operator reviews on GitHub; no reviewer session is launched for it.
+  if (input.supervision === 'supervised') return { profile: null, reason: supervisedReview };
   const config = withReviewerDefaults(input);
-  if (!config.reviewer) return { profile: null, reason: 'no reviewer identity is registered; run master reviewer setup or master reviewer bind' };
+  // A control-plane review (GY-1525) posts through the API under a one-time token: it needs a profile, not a reviewer App.
+  if (!config.reviewer && mode !== 'control-plane') return { profile: null, reason: 'no reviewer identity is registered; run master reviewer setup or master reviewer bind' };
   if (config.run.reviewerProfile) {
     const profile = config.reviewers.find(item => item.name === config.run.reviewerProfile) ?? null;
     return profile ? { profile, reason: null } : { profile: null, reason: `run.reviewerProfile names ${config.run.reviewerProfile}, which is not a configured reviewer profile` };
@@ -428,6 +440,17 @@ export interface DispatchEffects {
   /** This host's memory (GY-612): below its floor, no reviewer or producer is launched and each request waits with the reason. */
   hostMemory?: () => Promise<HostMemoryReading | null>;
   /**
+   * Review by risk in control-plane mode (GY-1525): launches the one post-merge reviewer session of a
+   * delivered normal-risk merge commit; a dispatcher wired without it launches none. `createWork`
+   * files and releases one follow-up item per BLOCKING finding of its verdict (POST /api/work then
+   * /ready, as the master's operator-agent identity), `recordFindings` keeps the other findings in project memory, and
+   * `settlePostMerge` records on the ledger what was done so a verdict is filed once.
+   */
+  launchPostMergeReview?: (work: Work, request: DispatchRequest, profile: ReviewerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
+  createWork?: (body: unknown, requestId: string) => Promise<{ key: string }>;
+  recordFindings?: (work: Work, record: ReviewRecord, findings: string[]) => Promise<unknown>;
+  settlePostMerge?: (record: ReviewRecord, outcome: PostMergeOutcome) => Promise<unknown>;
+  /**
    * Ends one session record the liveness sweep found settled. A dispatcher wired without it still
    * launches and still judges liveness — it simply leaves the record standing, which is the state
    * GY-113 exists to end, so the shipped `dispatchEffects` always wires it.
@@ -439,6 +462,11 @@ export interface DispatchEffects {
    * without it leaves the reading to that cadence.
    */
   wakeObservation?: (work: Work) => Promise<unknown>;
+  /**
+   * Hands the tick's snapshot and agent list to the loop beside it (GY-1490, daemon/loop-wake.ts),
+   * which wakes its sleep for anything new its next cycle acts on. It never fails the tick.
+   */
+  observeLoopSubjects?: (work: Work[], agents: HerdrAgent[] | null, clock: number) => void;
   persist: (cursor: DispatchCursor) => Promise<void>;
 }
 
@@ -481,15 +509,16 @@ export function watchInstantExit(run: ChildRun, now: () => number = Date.now): I
   let pane: string | null = null, screen: string | null = null, missing: unknown = null;
   const exit = () => { const notice = pane && screen !== null ? detectExhaustion(screen, now()) : null; return notice ? new InstantExitError({ pane: pane!, words: sessionWords(screen), notice }, missing) : null; };
   return {
-    run: (command, args, options) => {
-      const herdr = command === 'herdr';
+    run: (command, given, options) => {
+      // The instance's `--session NAME` (GY-1511) is not part of what the watch reads.
+      const herdr = isHerdrCommand(command), args = herdr ? herdrSubcommand(given) : given;
       if (herdr && args[0] === 'pane' && args[1] === 'run') { pane = args[2] ?? null; screen = null; missing = null; }
       const read = (result: string) => { if (herdr && pane && args[0] === 'pane' && args[1] === 'read' && args[2] === pane) screen = String(result); return result; };
       const refused = (error: unknown): never => { if (herdr && pane && args[0] === 'agent' && args[1] === 'get' && args[2] === pane && herdrErrorCode(error) === 'agent_not_found') missing = error; throw error; };
       // The runner's answer is passed on as it came: a test's table answers at once, the process's
       // bounded runner (GY-125) answers on the event loop, and the watch notes the read either way.
       let result: Promise<string> | string;
-      try { result = run(command, args, options); } catch (error) { return refused(error); }
+      try { result = run(command, given, options); } catch (error) { return refused(error); }
       return typeof result === 'string' ? read(result) : result.then(read, refused);
     },
     // A pane already showing the notice is refused before the pause; otherwise the pause is a timer
@@ -647,7 +676,99 @@ export const herdrSessionListing = (agents: HerdrAgent[]): HerdrAgent[] => agent
 
 export interface DispatchLaunch { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; profile: string; group?: string; proofs?: string[]; failover?: string[]; relaunched?: boolean; reason?: string }
 export interface DispatchWait { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; reason: string; group?: string; requestedAt?: string; answeredAt?: string }
+/** What the loop did with one post-merge verdict (GY-1525): the follow-up item per BLOCKING finding, the nits kept in memory, and a filing failure to retry. */
+export type PostMergeOutcome = NonNullable<ReviewRecord['postMergeFollowUps']>;
+/** The wait a normal-risk control-plane head's pre-merge review request reports (GY-1525): it merges on its trial and is reviewed after. */
+export const postMergeWaitReason = 'normal-risk delta in control-plane mode: it merges on its trial and is reviewed after the merge, so no pre-merge reviewer session is launched';
+/** Whether the item's pre-merge review request is answered by a post-merge review instead: a control-plane head whose merge delta reads normal. */
+export const reviewedAfterMerge = (work: Work) => work.observation?.source === 'control-plane' && !!work.policy.review && riskOf(work).risk === 'normal';
+/**
+ * The dispatch request a post-merge review is launched under: one per delivered merge commit, bound
+ * to nothing else. Its base is the merge commit's first parent, the tip the merge writer's ledger
+ * merged onto; a delivery whose ledger names none leaves the launcher to read the parent from the
+ * object store (reviewer.ts `postMergeBinding`). No provider: GitHub never answers it.
+ */
+export function postMergeRequest(work: Work): DispatchRequest {
+  const mergeSha = work.delivery!.mergeSha;
+  const baseSha = work.mergeLedger?.mergeSha === mergeSha && work.mergeLedger.baseTip ? work.mergeLedger.baseTip : unknownParent;
+  return { id: postMergeRequestId(work.key, mergeSha), kind: 'review', sha: mergeSha, baseSha, policyRevision: work.policyRevision, pr: work.candidate?.pr ?? work.submission?.pr ?? 0,
+    requestedAt: work.delivery!.mergedAt, reason: `post-merge review of ${work.key}'s normal-risk delta ${mergeSha.slice(0, 12)}`, state: 'requested' };
+}
+/** The base a post-merge request carries while the merge commit's first parent is not on the ledger. */
+export const unknownParent = '0'.repeat(40);
+/**
+ * File one follow-up item through the API as the given credential (GY-1525 AC-4): created under
+ * `requestId`, then released under `requestId:ready` so it is worked without a triage pass, as the
+ * research brief recommends for a defect a reviewer judged blocking on shipped code. Both calls
+ * replay under their keys, so a retry after a failed release creates nothing twice.
+ */
+export async function postFollowUpItem(base: string, token: string, body: unknown, requestId: string, post: typeof fetch = fetch): Promise<{ key: string }> {
+  const call = async (path: string, key: string, payload: unknown) => {
+    const response = await post(`${base.replace(/\/$/, '')}/api/work${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(payload), signal: AbortSignal.timeout(30_000) });
+    const result = await response.json().catch(() => ({})) as { id?: string; key?: string; revision?: number; error?: string };
+    if (!response.ok) throw new Error(typeof result?.error === 'string' ? result.error : JSON.stringify(result));
+    return result;
+  };
+  const created = await call('', requestId, body);
+  if (typeof created.key !== 'string' || typeof created.id !== 'string') throw new Error('the control plane created the follow-up without a key');
+  // The operator agent releases at the revision it created (engine.ts demands it); a replayed creation returns that same revision.
+  await call(`/${encodeURIComponent(created.id)}/ready`, `${requestId}:ready`, { ...(typeof created.revision === 'number' ? { expectedRevision: created.revision } : {}), reason: 'post-merge review finding: released by the loop' });
+  return { key: created.key };
+}
+/**
+ * File what a post-merge verdict found (GY-1525 AC-4): one follow-up item per BLOCKING line, planned
+ * on the finding's file, keyed so a retried filing replays; every other finding to project memory.
+ * A filing that fails is recorded with its reason and retried on the next tick for the findings not
+ * yet filed; the delivered item is never reopened. Null when the record holds no verdict to file.
+ */
+export async function filePostMergeFollowUps(work: Work, record: ReviewRecord, effects: Pick<DispatchEffects, 'createWork' | 'recordFindings'>, now: Date): Promise<PostMergeOutcome | null> {
+  if (!record.postMerge || !record.verdict) return null;
+  const launch = work.reviewLaunch && (record.launch ? work.reviewLaunch.id === record.launch : work.reviewLaunch.head === record.sha) ? work.reviewLaunch : null;
+  const body = launch?.verdict?.sha === record.sha ? launch.verdict.body : null;
+  if (body === null) return null;
+  const filed = [...(record.postMergeFollowUps?.filed ?? [])];
+  // blockingFindings caps a body at ten; read line by line, every BLOCKING line is a finding.
+  const lines = body.split('\n').flatMap(line => blockingFindings(line));
+  // Every line is filed, never cut: at most postMergeFindingsMax per tick, the rest on the next ticks (`pending`).
+  // `through` counts the lines filed in order, so the ledger lists only the most recent window of them.
+  let through = record.postMergeFollowUps?.through ?? 0;
+  let failure: string | undefined;
+  let batch = 0;
+  for (const [index, text] of lines.entries()) {
+    const finding = text.slice(0, 300);
+    // Completion is per line, not per wording: two distinct lines with the same text each get their own item.
+    if (index < through || filed.some(entry => entry.index === index || (entry.index === undefined && entry.finding === finding))) continue;
+    if (batch >= postMergeFindingsMax) break;
+    if (!effects.createWork) { failure = 'no follow-up filer is wired; the finding stands on the verdict'; break; }
+    try {
+      const created = await effects.createWork(postMergeFollowUp(work, record.sha, parseFinding(text), index), `post-merge-follow-up:${work.key}:${record.sha}:${index}`);
+      filed.push({ key: created.key, finding, index });
+      if (index === through) through = index + 1;
+      batch++;
+    } catch (error) { failure = `filing the follow-up for "${finding.slice(0, 80)}" failed: ${(error instanceof Error ? error.message : String(error)).split('\n')[0]}`.slice(0, 500); break; }
+  }
+  // Non-blocking findings stay retryable until project memory accepts them: a write failure must
+  // not settle the count, or later ticks skip the verdict and the findings are never recorded.
+  let memory = record.postMergeFollowUps?.memory;
+  if (memory === undefined) {
+    // Every finding that is no BLOCKING line: the body without those lines, read as a change request's
+    // follow-ups are, but neither counted nor cut — the API bounds the verdict body, so every one is kept.
+    const rest = body.split('\n').filter(line => !/^\s*(?:[-*]\s*)?\**BLOCKING\**\s*:/i.test(line)).join('\n');
+    const nits = wholeFindings(rest, followUpFindingsOf(rest, Infinity));
+    if (nits.length && effects.recordFindings) {
+      try { await effects.recordFindings(work, record, nits); memory = nits.length; }
+      catch (error) {
+        const reason = `recording non-blocking findings in project memory failed: ${(error instanceof Error ? error.message : String(error)).split('\n')[0]}`.slice(0, 500);
+        failure = failure ? `${failure}; ${reason}`.slice(0, 500) : reason;
+      }
+    } else memory = nits.length;
+  }
+  const pending = lines.filter((_, index) => index >= through && !filed.some(entry => entry.index === index)).length;
+  return { at: now.toISOString(), filed: filed.slice(-postMergeFindingsMax), through, ...(pending > 0 ? { pending } : {}), ...(memory !== undefined ? { memory } : {}), ...(failure ? { failure } : {}) };
+}
 export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused: (DispatchFailure & { requestId: string })[]; waiting: DispatchWait[]; skipped: number;
+  /** Post-merge verdicts this tick filed (GY-1525): the follow-up items per item and merge commit. */
+  followUps?: { work: string; sha: string; filed: string[]; memory: number; failure?: string }[];
   /** Session records this tick reconciled against the runtime, and the ones whose closure could not be written back. */
   closed: SessionClosure[]; closeFailures: { work: string; id: string; reason: string }[];
   /** The session report (GY-172): how many sessions this tick observed, how many records it wrote, and the writes that failed. */
@@ -723,6 +844,8 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   const clock = Number.isFinite(Date.parse(observedAt)) ? Date.parse(observedAt) : now();
   const tick: DispatchTick = { at: new Date(clock).toISOString(), launched: [], refused: [], waiting: [], skipped: 0, closed: [], closeFailures: [] };
   const herdr = await timings.step('herdr', () => effects.agents());
+  // GY-1490: the loop sleeping beside this tick is woken for what its next cycle acts on, within one tick of it appearing.
+  try { effects.observeLoopSubjects?.(snapshot.work, herdr, clock); } catch { /* a wake that cannot be judged leaves the loop to its interval */ }
   const { reviews, threads, released } = await timings.step('reconcile reviews', () => effects.reconcileReviews(snapshot.work, herdr));
   if (threads?.length) tick.threads = threads;
   const { producers } = await timings.step('reconcile producers', () => effects.reconcileProducers(snapshot.work, herdr));
@@ -800,10 +923,13 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
    * as surely as a listed pane does, and the record outlives a restart of this loop. A session the
    * sweep above judged over holds nothing: that is what makes a name busy only while a live session
    * has it, rather than until somebody ends the record by hand (GY-113 AC-2). Nor does one on a pane
-   * the review reconcile closed this tick.
+   * the review reconcile closed this tick, nor one the runtime no longer lists whose ledger record
+   * settled (GY-1716): its request is still open, so no fact closes the handle, and only a
+   * replacement launched into the slot it held can answer that request.
    */
   const held = () => snapshot.work.flatMap(item => (item.sessions ?? [])
-    .filter(handle => handle.state === 'running' && !!handle.agentName && !settledHandles.has(sessionHandleKey(item.id, handle.id)) && !isReleased(handle.pane, handle.agentName))
+    .filter(handle => handle.state === 'running' && !!handle.agentName && !settledHandles.has(sessionHandleKey(item.id, handle.id)) && !isReleased(handle.pane, handle.agentName)
+      && !vanishedSettledSession(handle, handle.kind === 'review' ? reviews : handle.kind === 'proof' ? producers : [], herdr, config.hostId))
     .map(handle => ({ name: handle.agentName! })));
   // The launchers still see the runtime's own inventory unfiltered: a name the runtime lists at all
   // cannot be taken again, whatever state it is in, and that check is theirs to make.
@@ -1047,13 +1173,19 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     return turn;
   };
   const dispatchReview = async (item: Work, review: DispatchRequest) => {
-    if (!session('review', item, review, reviews)) { /* settled, or waiting to relaunch */ }
+    // A supervised install's operator reviews on GitHub (GY-1501): no session and no wait to report.
+    if (config.supervision === 'supervised') { /* the operator's GitHub approval answers it */ }
+    // A normal-risk control-plane head merges on its trial (model/gates.ts, GY-1525): its review comes after the merge.
+    else if (reviewedAfterMerge(item)) wait('review', item, review, postMergeWaitReason);
+    else if (!session('review', item, review, reviews)) { /* settled, or waiting to relaunch */ }
     else if (!herdr) wait('review', item, review, 'Herdr session inventory is unavailable');
     else if (memoryDeferred) wait('review', item, review, memoryDeferred);
     else if (spent('review')) wait('review', item, review, capacityWait('review'));
     else if (!retryable(review)) wait('review', item, review, `launch refused ${cursor.failures[review.id].attempts} time(s): ${cursor.failures[review.id].reason}; ${cursor.failures[review.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt, launch it with master review once the cause is fixed' : `next attempt at ${cursor.failures[review.id].nextAt}`}`);
     else {
-      const { profile, reason } = selectReviewerProfile(config);
+      // A control-plane observation, or an install with no GitHub App, has its review answered by a control-plane reviewer.
+      const mode = item.observation?.source === 'control-plane' || !config.githubAppId ? 'control-plane' : 'github';
+      const { profile, reason } = selectReviewerProfile(config, mode);
       // The selected profile answers; the other reviewer profiles are its failover when none of
       // its accounts can launch. A profile with no slot left is passed over for one with room,
       // and a request no profile has room for waits on the limit it names.
@@ -1085,6 +1217,8 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
             wakeSettlement(item, answered.answered.at);
             wait('review', item, review, `reviewer session ${answered.agentName} already answered with ${answered.answered.state} (review ${answered.answered.reviewId}); ${launchWaitWording.settles}`, answered.answered.at);
           }
+          // A launch deferred by the gh rate-limit pause is a wait, never a failure: nothing is counted against the request, and it launches on the first tick after the pause.
+          else if (error instanceof GhPausedError) { delete cursor.failures[review.id]; wait('review', item, review, message(error)); }
           else if (!outOfCapacity('review', item, review, error)) refuse('review', item, review, error);
         }
         await persist();
@@ -1162,13 +1296,60 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     } finally { outcomes = await Promise.all([...deferred, ...producerLaunches]); }
   });
   for (const outcome of outcomes) if (outcome) throw outcome.error;
+  // Review by risk (GY-1525 AC-4): a normal-risk delta the merge writer delivered owes one review of
+  // its merge delta. It launches through the same ledger, retry and capacity rules as a pre-merge
+  // review, under a request of its own per merge commit; its verdict's BLOCKING findings become
+  // follow-up items and the rest project memory, once per record.
+  const owed = effects.launchPostMergeReview ? owedPostMergeReviews(snapshot.work) : [];
+  await timings.step('post-merge reviews', async () => {
+    for (const item of owed) {
+      const request = postMergeRequest(item);
+      if (!session('review', item, request, reviews)) continue;
+      if (!herdr) { wait('review', item, request, 'Herdr session inventory is unavailable'); continue; }
+      if (memoryDeferred) { wait('review', item, request, memoryDeferred); continue; }
+      if (spent('review')) { wait('review', item, request, capacityWait('review')); continue; }
+      if (!retryable(request)) { wait('review', item, request, `launch refused ${cursor.failures[request.id].attempts} time(s): ${cursor.failures[request.id].reason}; ${cursor.failures[request.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt' : `next attempt at ${cursor.failures[request.id].nextAt}`}`); continue; }
+      const { profile, reason } = selectReviewerProfile(config, 'control-plane');
+      const candidates = profile ? [profile, ...withReviewerDefaults(config).reviewers.filter(other => other.name !== profile.name)] : [];
+      const withRoom = () => preferFreshProfiles(candidates.filter(candidate => room(candidate, reviews).free > 0), reviews, request.id);
+      const busy = () => wait('review', item, request, `${launchWaitWording.busy}: ${candidates.map(candidate => atLimit(candidate, reviews)).join('; ')}; raise concurrency in .graphyard/master.json or add a reviewer profile`);
+      if (!profile) { wait('review', item, request, reason!); continue; }
+      if (!withRoom().length) { busy(); continue; }
+      try {
+        // The delivered item names no live request, so no session handle is recorded on it: the ledger holds the session.
+        const launched = await launchInTurns(request, withRoom(), candidate => room(candidate, reviews).free > 0, candidate => {
+          const handle = launchedSessionHandle('review', request, `${item.key}: post-merge review ${request.sha.slice(0, 12)}`, config.hostId, undefined, candidate.kind, config.herdrWorkspace);
+          return registeredLaunch(undefined, handle, withinBound(handle, withLaunchedRuntime(handle, () => effects.launchPostMergeReview!(item, request, candidate, inventory(), observedAt))), result => coordinates(candidate, request, result), attachTo);
+        }, effects.holdAccount ? exhaustedAtLaunch('review', item, request) : undefined);
+        if (!launched) busy();
+        else {
+          delete cursor.failures[request.id]; delete cursor.capacity.review;
+          tick.launched.push({ kind: 'review', work: item.key, requestId: request.id, sha: request.sha, profile: launched.profile.name, reason: 'post-merge review of the delivered merge commit', ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
+        }
+      } catch (error) {
+        const answered = answeredByPendingReview(error, request);
+        if (answered) wait('review', item, request, `reviewer session ${answered.agentName} is already pending on ${request.sha.slice(0, 12)}; ${launchWaitWording.settles}`);
+        else if (!outOfCapacity('review', item, request, error)) refuse('review', item, request, error);
+      }
+      await persist();
+    }
+    for (const record of reviews) {
+      if (!record.postMerge || !record.verdict || (record.postMergeFollowUps && !record.postMergeFollowUps.failure && !record.postMergeFollowUps.pending)) continue;
+      const item = snapshot.work.find(work => work.key === record.key);
+      if (!item) continue;
+      const outcome = await filePostMergeFollowUps(item, record, effects, new Date(now()));
+      if (!outcome) continue;
+      await effects.settlePostMerge?.(record, outcome);
+      (tick.followUps ??= []).push({ work: item.key, sha: record.sha, filed: outcome.filed.map(entry => entry.key), memory: outcome.memory ?? 0, ...(outcome.failure ? { failure: outcome.failure } : {}) });
+    }
+  });
   for (const { key, wake } of settlementWakes.values()) {
     const failed = await wake;
     if (!failed) { (tick.woken ??= []).push(key); continue; }
     for (const entry of tick.waiting) if (entry.work === key && entry.answeredAt) entry.reason = bounded(`${entry.reason}; waking its observation failed: ${failed}`, cursorTextLimit);
   }
   // A failure for a request the control plane resolved is history the cursor need not keep.
-  const live = new Set(snapshot.work.flatMap(work => [...(work.autoDispatch?.review ? [work.autoDispatch.review.id] : []), ...(work.autoDispatch?.producers ?? []).map(request => request.id)]));
+  const live = new Set([...snapshot.work.flatMap(work => [...(work.autoDispatch?.review ? [work.autoDispatch.review.id] : []), ...(work.autoDispatch?.producers ?? []).map(request => request.id)]), ...owed.map(item => postMergeRequest(item).id)]);
   for (const id of Object.keys(cursor.failures)) if (!live.has(id)) delete cursor.failures[id];
   for (const id of Object.keys(cursor.abandoned)) if (!live.has(id)) delete cursor.abandoned[id];
   cursor.ticks += 1; cursor.lastTickAt = cursor.lastSuccessAt = new Date(now()).toISOString(); cursor.consecutiveFailures = 0;
@@ -1314,6 +1495,22 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     // limit notice is failed over below rather than counted as a refusal.
     launchReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, requestId: request.id, request: { sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision } }).catch(error => { throw watch.classify(error); }); },
     launchProducer: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchProducer(root, work, request, profile, agents, observedAt, { run: watch.run, start: watch.start }).catch(error => { throw watch.classify(error); }); },
+    // Post-merge reviews (GY-1525): launched like a review of the delivered merge commit; the follow-ups
+    // are filed as the master's operator-agent identity, the one that may create work, never the coordinator's.
+    launchPostMergeReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, requestId: request.id, postMerge: { mergeSha: request.sha, ...(request.baseSha !== unknownParent ? { baseTip: request.baseSha } : {}) } }).catch(error => { throw watch.classify(error); }); },
+    createWork: async (body, requestId) => {
+      const config = current();
+      if (!config.operatorAgent) throw new Error('No master operator-agent identity is provisioned; run graphyard master autonomy --admin-token-stdin --apply so the loop can file follow-up items');
+      return postFollowUpItem(config.url, await agentToken(root, config, 'operatorAgent'), body, requestId);
+    },
+    recordFindings: async (work, record, findings) => {
+      const memory = await readProjectMemory(root), at = new Date((deps.now ?? Date.now)()).toISOString();
+      recordDecisionInMemory(memory, { id: `post-merge-review:${work.key}:${record.sha.slice(0, 12)}`, key: work.key, action: 'post-merge-review', state: 'applied', approvedBy: record.verdict?.reviewer ?? 'reviewer', at,
+        // Every finding, uncut: the entry is bounded by the verdict body the API accepted (65,536 characters).
+        reason: `Post-merge review of ${record.sha.slice(0, 12)} noted: ${findings.join(' | ')}` });
+      await writeProjectMemory(root, memory);
+    },
+    settlePostMerge: (record, outcome) => updateReviewLedger(root, ledger => { const entry = ledger.reviews.find(candidate => candidate.id === record.id); if (entry) entry.postMergeFollowUps = outcome; }),
     // Who has reviewed the head: one read per head at most every 30 seconds, however often the
     // dispatcher ticks, since it is asked on every tick while a launch waits on a bot reviewer.
     // A read still in flight is shared rather than started again: a tick that gave up on it at its
@@ -1324,12 +1521,13 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
       const pending = headReviewerInFlight.get(key);
       if (pending) return pending;
       const read = (async () => {
+        assertGhNotPaused(at);
         const output = String(await run('gh', ['api', '--paginate', `repos/${current().repository}/pulls/${request.pr}/reviews?per_page=100`, '--jq', '.[] | [.user.login, .commit_id] | @tsv']));
         const logins = [...new Set(output.split('\n').map(line => line.split('\t')).filter(([login, sha]) => login && sha === request.sha).map(([login]) => login))];
         headReviewerReads.set(key, { at, logins });
         for (const [entry, value] of headReviewerReads) if (at - value.at > 3_600_000) headReviewerReads.delete(entry);
         return logins;
-      })().finally(() => headReviewerInFlight.delete(key));
+      })().catch(async error => { await notePossibleGhRateLimit(error, run, at); throw error; }).finally(() => headReviewerInFlight.delete(key));
       headReviewerInFlight.set(key, read);
       return read;
     },
@@ -1347,6 +1545,7 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
       const lines = (output: unknown) => String(output).split('\n').map(line => line.split('\t'));
       const rows = (output: unknown) => lines(output).filter(([login, time]) => login && time && wanted.has(login.toLowerCase()));
       const activity = (async () => {
+        assertGhNotPaused(at);
         const comments = rows(await run('gh', ['api', `repos/${repository}/issues/comments?sort=created&direction=desc&per_page=100`, '--jq', '.[] | [.user.login, .created_at, ((.body // "") | .[0:300] | gsub("[\\t\\n\\r]"; " "))] | @tsv']))
           .map(([login, time, body]): BotActivity => ({ login, kind: 'comment', at: time, body }));
         // Each bot's latest notice, or the one the last judgment still holds when it aged out of the
@@ -1363,7 +1562,7 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
         return [...comments, ...reviews];
       })();
       botActivityRead = { key, at, activity };
-      activity.catch(() => { if (botActivityRead?.activity === activity) botActivityRead = null; });
+      activity.catch(error => { if (botActivityRead?.activity === activity) botActivityRead = null; return notePossibleGhRateLimit(error, run, at); });
       return activity;
     },
     // The handle goes where every Graphyard reader already looks, so watching a reviewer or
@@ -1374,7 +1573,7 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     endSession: (closure: SessionClosure) => mutate(`work/${closure.workId}/session`, closureHandle(closure), randomUUID()),
     // The same three moves the coordination loop makes for a session exhausted mid-work.
     selectedAccount: async (role, profile) => (await readEnvironmentLog(current())).selected?.[selectionKey(role, profile)] ?? null,
-    holdAccount: (account, observed) => recordObservedExhaustion(current(), account, observed, deps.now?.()),
+    holdAccount: (account, observed) => recordObservedExhaustion(current(), account, observed, deps.now?.(), {}),
     reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event),
     persist: cursor => writeDispatchCursor(current(), cursor, onRepair),
   };
@@ -1539,7 +1738,7 @@ export interface ExecutorIdentity { id: string; host: string }
 export type ExecutorHandler = (action: ActionRow, identity: ExecutorIdentity) => Promise<string> | string;
 export interface ExecutorEffects {
   /** Ask the control plane for one row this executor can run; null when the queue has nothing for it. */
-  claim: (request: { host: string; executor: string; kinds: NextActionKind[]; leaseSeconds?: number }) => Promise<{ action: ActionRow | null; open?: number }>;
+  claim: (request: { host: string; executor: string; kinds: NextActionKind[]; serves?: NextActionKind[]; leaseSeconds?: number }) => Promise<{ action: ActionRow | null; open?: number }>;
   settle: (action: ActionRow, result: 'done' | 'failed', reason: string) => Promise<unknown>;
   /**
    * Say the handler is still running, so the claim holds for another lease. An executor wired
@@ -1552,7 +1751,7 @@ export interface ExecutorEffects {
    * hears from an executor, so one that may not claim for a while — behind a fleet restart's
    * fence — says so here instead of falling silent and reading as a dead fleet.
    */
-  present?: (request: { host: string; executor: string; kinds: NextActionKind[] }) => Promise<unknown>;
+  present?: (request: { host: string; executor: string; kinds: NextActionKind[]; serves?: NextActionKind[] }) => Promise<unknown>;
   /** One handler per action kind this executor can run. A kind with no handler is never claimed. */
   handlers: Partial<Record<NextActionKind, ExecutorHandler>>;
   /**
@@ -1618,8 +1817,13 @@ export async function runExecutorTick(identity: ExecutorIdentity, effects: Execu
   if (!kinds.length) return step(null, 'idle', 'this executor has no handler for any action kind');
   const hold = kinds.some(kind => launchingKinds.includes(kind)) && effects.launchHold ? await effects.launchHold().catch(() => null) : null;
   const claimable = hold ? kinds.filter(kind => !launchingKinds.includes(kind)) : kinds;
-  if (!claimable.length) return step(null, 'idle', `claims nothing: ${hold}`);
-  const claimed = await effects.claim({ host: identity.host, executor: identity.id, kinds: claimable });
+  // A launch hold defers rows; it does not change what this executor serves. The claim names only
+  // the kinds it may take now, and a claim is also presence, so the control plane would read the
+  // held launching kinds as served by nobody and file the wait as a configuration fault (GY-1538).
+  // The claim carries every kind this executor runs as serves, which the claim route records as presence; only a tick that sends no claim sends presence alone.
+  const declarePresence = async () => { if (hold) await Promise.resolve(effects.present?.({ host: identity.host, executor: identity.id, kinds, serves: kinds })).catch(() => {}); };
+  if (!claimable.length) { await declarePresence(); return step(null, 'idle', `claims nothing: ${hold}`); }
+  const claimed = await effects.claim({ host: identity.host, executor: identity.id, kinds: claimable, serves: kinds });
   const action = claimed.action;
   if (!action) return step(null, 'idle', hold ? `the queue has no action this executor can run without launching a session, and it launches none: ${hold}` : 'the queue has no action this executor can run');
   // The handlers are not bounded by the claim lease: a dispatch prepares a worktree and waits on

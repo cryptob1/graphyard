@@ -20,6 +20,7 @@ import { controlPlaneHandlers } from '../src/executor.js';
 import { routineDecision, standingVerdict } from '../src/master-daemon.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-22 review submittedAt instants only order verdicts and already exceed threadResolutionGraceMs; items, requests and observations are stamped with new Date().
 
 // GY-124: one review request yields one reviewer session and one verdict. Each test is named for
 // the proof it produces: unit:one-reviewer-per-request and integration:conflicting-verdicts-surfaced.

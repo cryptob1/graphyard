@@ -1,4 +1,5 @@
 import { agentOwner, type AttentionItem } from '../master.js';
+import { webhookState } from '../github.js';
 
 /**
  * Attention the GitHub request budget raises in `master status` (GY-117), read from the control
@@ -17,9 +18,14 @@ import { agentOwner, type AttentionItem } from '../master.js';
  *   own spend rate, read from its own header series and so counting every caller, leaves less
  *   than the merge-path reserve at that token's reset. The pace already holds back what callers
  *   outside it spend; this is raised while there is still time to act on the rest.
- * - **A silent webhook** is a broken webhook, not a slower control plane: no delivery for an hour
- *   while pull requests are open, named with the App settings page that fixes it, instead of
- *   being compensated by polling without a word.
+ * - **A failing webhook** is a broken webhook, not a slower control plane: no delivery for an hour
+ *   while pull requests are open *and* GitHub's own delivery log shows attempts in that hour our
+ *   endpoint did not answer 2xx (GY-1649), named with the failures and the App settings page that
+ *   fixes it, instead of being compensated by polling without a word. An hour in which GitHub
+ *   attempted nothing is quiet, and one whose attempts were all answered is not broken: neither
+ *   raises an item. While the delivery log cannot be read, or its last refresh failed, or its read
+ *   did not reach back to the gap's start, the gap is raised as unverified, never as broken nor as
+ *   an old sample's (or a partial read's) quiet.
  */
 export interface BudgetStatus {
   githubBudget?: {
@@ -32,7 +38,8 @@ export interface BudgetStatus {
     pace?: { tier: string; perMinute: number | null } | null;
     tokens?: { token: string; current: boolean; remaining: number; resetAt: string | null; perMinute: number; otherPerMinute: number; projectedAtReset: number | null; belowReserveAtReset: boolean }[];
   } | null;
-  webhooks?: { lastDeliveryAt: string | null; lastHour: number; configured?: boolean; settingsUrl: string | null; openPullRequests: number } | null;
+  webhooks?: { lastDeliveryAt: string | null; lastHour: number; configured?: boolean; settingsUrl: string | null; openPullRequests: number;
+    lastAttemptAt?: string | null; windowSince?: string | null; coveredFrom?: string | null; attemptsInWindow?: number; failedAttempts?: number; failedStatusCodes?: number[]; deliveryLogAt?: string | null; deliveryLogError?: string | null; state?: string } | null;
   jobs?: { work_id: string; error: string | null }[];
 }
 
@@ -69,20 +76,35 @@ export function tokenProjectionAttention(status: BudgetStatus): AttentionItem[] 
     ...agentOwner('master', `graphyard status (githubBudget.tokens, githubBudget.lastHour) names the token and the spend by kind; the observation pace already yields to the other callers, so what is left to cut is their spend — review and producer launches, merges, the loop's own reads — until ${token.resetAt ?? 'the reset'}`) }));
 }
 
-/** No webhook delivery for an hour while pull requests are open: a broken webhook, named as one. */
+/**
+ * No webhook delivery for an hour while pull requests are open, corroborated with GitHub's delivery
+ * log (GY-1649): raised as broken only when GitHub attempted deliveries in the gap that failed, and
+ * as unverified while the log cannot be read or its refresh failed; a quiet or fully answered gap
+ * raises nothing.
+ */
 export function webhookAttention(status: BudgetStatus, now: number): AttentionItem[] {
   const webhooks = status.webhooks;
   if (!webhooks || webhooks.openPullRequests === 0) return [];
+  const state = webhookState(webhooks, now);
+  if (state !== 'failing' && state !== 'unverified') return [];
   const since = webhooks.lastDeliveryAt ? now - Date.parse(webhooks.lastDeliveryAt) : null;
-  if (since !== null && since < 3_600_000) return [];
   const settings = webhooks.settingsUrl ?? 'https://github.com/settings/apps';
   const open = `${webhooks.openPullRequests} pull request${webhooks.openPullRequests === 1 ? ' is' : 's are'} open`;
+  const silence = `No GitHub webhook delivery has arrived ${since === null ? 'since the control plane started' : `for ${elapsed(since)} (last at ${webhooks.lastDeliveryAt})`} while ${open}`;
+  const secret = webhooks.configured === false ? '; GITHUB_WEBHOOK_SECRET is not set, so every delivery is refused' : '';
+  if (state === 'unverified' && webhooks.coveredFrom && webhooks.deliveryLogAt && !webhooks.deliveryLogError) return [{ subject: 'github',
+    text: `${silence}, and GitHub's webhook delivery log was read back only to ${webhooks.coveredFrom}, after the gap began at ${webhooks.windowSince ?? 'its start'}: the ${webhooks.attemptsInWindow ?? 0} attempt${webhooks.attemptsInWindow === 1 ? '' : 's'} it covers were answered, but an older attempt in the gap is unread, so the gap is neither quiet nor answered${secret}`,
+    ...agentOwner('master', `Read the deliveries under ${settings}/advanced back to ${webhooks.windowSince ?? 'the gap\'s start'}: failed attempts there are a broken webhook (URL https://YOUR-HOST/api/github/webhook, the secret matching GITHUB_WEBHOOK_SECRET); a delivery that arrives clears this`) }];
+  if (state === 'unverified') return [{ subject: 'github',
+    text: `${silence}, and GitHub's webhook delivery log could not be read${webhooks.deliveryLogError ? ` (${webhooks.deliveryLogError})` : ''} to tell a quiet hour from a failing webhook${webhooks.deliveryLogAt ? ` (its last read, at ${webhooks.deliveryLogAt}, is history, not this hour's account)` : ''}${secret}`,
+    ...agentOwner('master', `Read the deliveries under ${settings}/advanced: none attempted is a quiet hour, failed attempts are a broken webhook (URL https://YOUR-HOST/api/github/webhook, the secret matching GITHUB_WEBHOOK_SECRET); a delivery that arrives or a readable log clears this`) }];
+  const failed = webhooks.failedAttempts ?? 0, attempts = webhooks.attemptsInWindow ?? failed;
   return [{ subject: 'github',
-    text: `No GitHub webhook delivery has arrived ${since === null ? 'since the control plane started' : `for ${elapsed(since)} (last at ${webhooks.lastDeliveryAt})`} while ${open}${webhooks.configured === false ? '; GITHUB_WEBHOOK_SECRET is not set, so every delivery is refused' : ''}: polling is compensating at its safety-net cadence, so the webhook is broken rather than the control plane slow`,
-    ...agentOwner('master', `Check the App webhook settings at ${settings} (URL https://YOUR-HOST/api/github/webhook, the secret matching GITHUB_WEBHOOK_SECRET, deliveries listed under ${settings}/advanced); a delivery that arrives clears this`) }];
+    text: `${silence}: GitHub attempted ${attempts} deliver${attempts === 1 ? 'y' : 'ies'} since ${webhooks.windowSince ?? 'the gap began'} and ${failed} failed (status ${(webhooks.failedStatusCodes ?? []).join(', ') || 'unknown'}; last attempt at ${webhooks.lastAttemptAt ?? 'unknown'})${secret}: polling is compensating at its safety-net cadence, so the webhook is broken rather than the control plane slow`,
+    ...agentOwner('master', `Check the App webhook settings at ${settings} (URL https://YOUR-HOST/api/github/webhook, the secret matching GITHUB_WEBHOOK_SECRET, the failed deliveries listed under ${settings}/advanced; status 0 is a connection GitHub could not make, 401 a secret mismatch, 404 a wrong URL, 5xx the endpoint failing); a delivery that arrives clears this`) }];
 }
 
-/** Every budget item, in the order an operator reads them: the pause, the exhaustion ahead, each token short of its reserve, the silent webhook. */
+/** Every budget item, in the order an operator reads them: the pause, the exhaustion ahead, each token short of its reserve, the failing webhook. */
 export function githubBudgetAttention(status: BudgetStatus | null | undefined, now = Date.now()): AttentionItem[] {
   if (!status) return [];
   return [...pauseAttention(status), ...exhaustionAttention(status), ...tokenProjectionAttention(status), ...webhookAttention(status, now)];

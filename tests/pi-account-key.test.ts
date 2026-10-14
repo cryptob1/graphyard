@@ -16,6 +16,7 @@ import type { Runner } from '../src/runner/types.js';
 import { registryCommand } from '../src/cli/master-registry.js';
 import { clearRuns } from '../src/runner/registry.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
+// Time-bomb allowance (GY-1694): the 2026-09-25/26 instants are past and are the explicit `at` handed, with offsets, to recordRunOutcome, chooseSession and needsSmoke; Date.now() stamps and judges only real-clock records.
 
 /**
  * GY-446: a registry Pi account launched the bare `pi` with only its login home, so an account whose

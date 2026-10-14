@@ -35,6 +35,7 @@ import type { Runner } from '../src/runner/types.js';
 import type { EscalationContext } from '../src/model/escalation-context.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01 iso() instants are judged against the stub snapshot's own now iso(0) (lease expiry, fault ages, observedAt); Date.now() only mints tokens, stamps observations and runs reclaim.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);

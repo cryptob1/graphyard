@@ -10,6 +10,7 @@ import type { MasterConfig, HerdrAgent } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { applyRegistryMutation, emptyRegistry, fleetRoles, type AgentRegistry } from '../src/model/registry.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01 `clock0` drives runCycle and the snapshot through `() => at.value`, so the master-session cycles never read the real clock; Date.now() only stamps discovered credentials' expiry.
 
 /**
  * GY-170 AC-1: `master registry propose` turns this installation's ~/.coding_agents tree into a
@@ -108,11 +109,11 @@ test('unit:registry-discovers-agent-environments — propose discovers every ~/.
     for (const account of proposal.accounts) assert.deepEqual(Object.keys(account.credential).sort(), ['home', 'host'], `${account.name} holds a reference, nothing more`);
     assert.deepEqual(proposal.models.map((model: any) => model.name), ['claude-default', 'codex-default', 'cursor-default', 'opencode-default', 'pi-default']);
 
-    // The role mapping: worker, reviewer, approver and producer are all mapped; Pi serves the narrow roles.
+    // The role mapping: worker, reviewer, approver and producer are all mapped; Pi serves the worker (GY-1746) and the narrow roles.
     const roles = Object.fromEntries(proposal.roles.map((role: any) => [role.name, role.accounts]));
     for (const role of ['worker', 'reviewer', 'approver', 'producer']) assert.ok(roles[role]?.length, `role ${role} is mapped`);
     const full = ['claude-a', 'claude-b', 'claude-c', 'codex', 'cursor-a', 'opencode-a', 'opencode-b'];
-    assert.deepEqual(roles.worker, full); assert.deepEqual(roles.reviewer, full);
+    assert.deepEqual(roles.worker, [...full, 'pi-a', 'pi-b']); assert.deepEqual(roles.reviewer, full);
     assert.deepEqual(roles.approver, [...full, 'pi-a', 'pi-b']); assert.deepEqual(roles.producer, [...full, 'pi-a', 'pi-b']);
     // The master role is never proposed (GY-898): the operator names its accounts themselves.
     assert.deepEqual(proposal.roles.map((role: any) => role.name), fleetRoles.filter(name => name !== 'master'));

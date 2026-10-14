@@ -19,6 +19,7 @@ import { attentionKind } from '../src/model/fault-classes.js';
 import type { Work } from '../src/model.js';
 import type { ActionRow } from '../src/model/actions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-07 now is past and handed explicitly to the registry, report and snapshot; slot down time is measured on the host clock (Date.now() in the stub), as the skew loop shows.
 
 /**
  * GY-1432: each code-moving self-upgrade left both executor slots inactive for minutes. The slots

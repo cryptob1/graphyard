@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { demand, type Principal, type Work } from '../model.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionRefusalSchema, decisionRequestSchema, type DecisionSituation } from '../model/approval.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
+import { askIdentity } from '../model/scope-collapse.js';
 import { save } from '../store.js';
 import { authenticated, digest, findWork, readDecisions, receipt, record } from './decisions.js';
 import type { Services } from './routes.js';
@@ -124,9 +125,20 @@ async function answerScopeRequest(db: Parameters<typeof save>[0], work: Work, de
   const answers = decision.action === 'requirements' ? decision.input?.answers : undefined, request = work.scopeRequest;
   // The same liveness the approval path demands: a lease that has expired, reconciled or not, is
   // no attempt to answer, and its item is not written to on that attempt's behalf.
-  const live = !!work.lease && work.lease.epoch === answers?.epoch && Date.parse(work.lease.expiresAt) > now.getTime();
+  // An ask a claim inherited (GY-1568) is answered under the epoch that asked it, and held by the attempt that holds it now.
+  const live = !!work.lease && work.lease.epoch === request?.epoch && Date.parse(work.lease.expiresAt) > now.getTime();
   const current = decision.input?.expectedPolicyRevision === work.policyRevision;
-  if (!answers || !request || request.epoch !== answers.epoch || request.at !== answers.at || !live || !current) return;
+  // GY-1568: the ask an ended attempt carried is routed too, so its refusal is the answer: it is
+  // recorded and the carried ask cleared, or the next claim would inherit it and route it afresh.
+  const carried = work.carriedScopeRequest;
+  if (answers && !request && carried && askIdentity(carried).epoch === answers.epoch && carried.at === answers.at && current) {
+    const paths = unplannedPaths(work.plannedFiles, carried.paths);
+    work.scopeDecision = { state: 'refused', reason, at: now.toISOString(), decidedBy: actor.id, waitedMs: Math.max(0, now.getTime() - Date.parse(carried.at)), paths: paths.length ? paths : carried.paths, requestedBy: carried.requestedBy, requestedAt: carried.at, epoch: carried.epoch };
+    work.carriedScopeRequest = null;
+    await save(db, work, actor.id, 'scope.refused', now, { decision: decision.id, epoch: carried.epoch, requestedAt: carried.at, paths: work.scopeDecision.paths, approver: actor.id, reason, carried: true });
+    return;
+  }
+  if (!answers || !request || askIdentity(request).epoch !== answers.epoch || request.at !== answers.at || !live || !current) return;
   // What was refused is what the approver judged: the paths still outside plannedFiles, not those a
   // partial widening has planned since the worker asked.
   const refused = unplannedPaths(work.plannedFiles, request.paths), paths = refused.length ? refused : request.paths;

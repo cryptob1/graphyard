@@ -12,6 +12,7 @@ import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewL
 import { reconcileLedgers } from '../src/cli/master-status-pipeline.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-05 submittedAt is a past verdict literal that reconcile records without comparing it to a clock; the gh stub's submitted_at and the item timestamps come from Date.now().
 
 // GY-1303, 2026-10-05: with the coordinator checkout mounted read-only, every reconcile pass failed
 // on the review-ledger lock .graphyard/reviews.json.lock (EROFS) after GY-1301 had moved only the

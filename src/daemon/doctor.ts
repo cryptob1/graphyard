@@ -1,15 +1,25 @@
 // Concern: the pipeline doctor (GY-711) — the loop's ten-minute remedy worker, and the
 // deterministic remedies the loop applies itself without an agent.
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { Work } from '../model.js';
 import { createSchema } from '../model.js';
+import { doctorLimitRetryAt, doctorLimitUntilMarker, headlessTimeoutLimitCharge, type ExhaustionSignal, type LimitRunEvent } from '../model/capacity.js';
 import { isClosed } from '../model/closure.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
-import { openFaultClassItem } from '../model/fault-classes.js';
+import { RefusedResponse } from '../model/refusal.js';
+import { doctorCoverNote, faultClassIsCovered, faultClassPolicyDefaults, faultClassPolicyFromEnv, type FaultClassPolicy, type FaultInstance } from '../model/fault-classes.js';
+import { workerSubmissionBoundMs } from '../model/attempt-bound.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
-import { containmentPhase, type MasterConfig } from '../master.js';
+import { containmentPhase, masterHarness, type MasterConfig } from '../master.js';
+import { HarnessCheckoutRefusal, harnessApplyCheckout, recordServingUnits } from '../master/harness.js';
+import { installUnitsFile } from '../install/units.js';
+import { coordinatorCheckoutRoot } from '../master/profiles.js';
+import { harnessDrift, writeHarnessPermissions } from '../harness.js';
 import { selectFleetSession } from '../fleet.js';
+import { heldAwareProbe, recordEnvironmentLog, selectionKey } from '../master/environments.js';
 import { registryHeadlessLaunch, registryRunner, runConfinement } from '../runner/roles.js';
 import { piRunner } from '../runner/pi.js';
 import { doctorActionSchema, doctorFindingsSchema, doctorFiledSchema, doctorRunRecordSchema, type DoctorAction, type DoctorFinding, type DoctorFiled, type DoctorPendingFile, type DoctorRunRecord } from './state.js';
@@ -20,7 +30,7 @@ import { readyToRetry } from './sessions.js';
 import { stoppedStates, record } from './effects.js';
 import { maxApproverLaunches } from './decisions.js';
 import { decisionReadConcurrency } from './decision-reads.js';
-import { message, type DaemonAction, type DaemonState } from './state.js';
+import { message, touchStanding, type DaemonAction, type DaemonState } from './state.js';
 import type { Cycle } from './cycle.js';
 
 // ---------------------------------------------------------------------------
@@ -28,11 +38,12 @@ import type { Cycle } from './cycle.js';
 // sanctioned actions. Here the loop does it. Every `run.doctor.intervalMinutes` (10 by default)
 // it launches one doctor: a headless session on the registry's doctor role, else Pi, with the
 // master's read access and the operator-agent identity's sanctioned commands only — scope,
-// requirements, unblock, decide + approver, settle-containment, close, create, release — never
+// requirements, unblock, decide + approver, settle-containment, close, create, release and
+// checkout-restore (GY-1658: the loop saves a dirty coordinator checkout to a named ref) — never
 // merge, dispatch, evidence or lease commands (the shipped allowlist guard in integrations/pi
 // blocks the rest and the doctor records the refusal). Its prompt is the shipped template below,
-// naming every check bound. The three remedies that need no judgement at all the loop applies
-// itself, every cycle, in `routineRemedies`.
+// naming every check bound. The remedies that need no judgement at all the loop applies itself,
+// every cycle, in `routineRemedies`.
 // ---------------------------------------------------------------------------
 
 export const doctorRole = 'doctor';
@@ -86,16 +97,18 @@ export const doctorEffects = (config: MasterConfig, root: string, post: Operator
     env: { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.operatorAgent!.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_DOCTOR_CLI: config.cliPath },
     runner: async attempt => {
       if (attempt === 'primary') {
-        const fleet = await selectFleetSession(config, doctorRole, { name: doctorRole, principal: config.operatorAgent!.id }, {});
+        const fleet = await selectFleetSession(config, doctorRole, { name: doctorRole, principal: config.operatorAgent!.id }, await heldAwareProbe(config)); // held accounts and twins are spent (GY-1574)
         if (fleet) {
           const launch = registryHeadlessLaunch(fleet.account);
-          // The doctor's command allowlist is the Pi extension's: a registry doctor role on any other runtime would run unguarded, so it is not used.
-          if (launch.command === 'pi') return { runner: registryRunner(fleet.account, [...doctorSessionArgs]), runtime: launch.command, model: launch.model, release: fleet.release };
+          if (launch.command === 'pi') {
+            await recordEnvironmentLog(config, fleet.health ? [fleet.health] : [], fleet.skipped, { key: selectionKey('doctor', doctorRole), environment: fleet.account.name, kind: fleet.account.kind, at: new Date().toISOString(), work: null }).catch(() => {});
+            return { runner: registryRunner(fleet.account, [...doctorSessionArgs]), runtime: launch.command, model: launch.model, account: fleet.account.name, release: fleet.release };
+          }
           await fleet.release(`the registry doctor role names runtime ${launch.command}; the doctor runs only on Pi, where its command allowlist applies`);
         }
       }
       const model = attempt === 'primary' ? settings.model : settings.fallbackModel;
-      return { runner: piRunner({ command: settings.command, model, args: [...doctorSessionArgs], confine: runConfinement() }), runtime: 'pi', model };
+      return { runner: piRunner({ command: settings.command, model, args: [...doctorSessionArgs], confine: runConfinement() }), runtime: 'pi', model, account: null };
     },
     file: (input, key) => post('POST', 'work', input, key) as Promise<Work>,
     recordRun: run => post('POST', 'doctor', run),
@@ -104,12 +117,12 @@ export const doctorEffects = (config: MasterConfig, root: string, post: Operator
 
 /** The fault bounds of the doctor's checks, in minutes, as the shipped template states them. */
 export const doctorBounds = {
-  blockedMinutes: 10, workerMinutes: 60, ciMinutes: 20, reviewRequestMinutes: 5, launchMinutes: 2,
+  blockedMinutes: 10, workerMinutes: workerSubmissionBoundMs / 60_000, ciMinutes: 20, reviewRequestMinutes: 5, launchMinutes: 2,
   proofsMinutes: 30, mergeableMinutes: 5, decisionMinutes: 10,
 } as const;
 
 /** The sanctioned master commands the doctor may run, in the order the template names them. */
-export const doctorSanctionedCommands = ['scope', 'requirements', 'unblock', 'decide', 'approver', 'settle-containment', 'close', 'create', 'release'] as const;
+export const doctorSanctionedCommands = ['scope', 'requirements', 'unblock', 'decide', 'approver', 'settle-containment', 'close', 'create', 'release', 'checkout-restore'] as const;
 
 export interface DoctorEffects {
   settings: DoctorSettings;
@@ -117,8 +130,8 @@ export interface DoctorEffects {
   cwd: string;
   /** The session's environment: the control plane URL and the operator-agent credential by path, never the token itself. */
   env: Record<string, string>;
-  /** The primary run's runner (the registry's doctor role, else Pi on `model`), or the fallback's (Pi on `fallbackModel`). */
-  runner: (attempt: 'primary' | 'fallback') => Promise<{ runner: Runner; runtime: string; model: string; release?: (reason: string) => Promise<unknown> }>;
+  /** The primary run's runner (the registry's doctor role, else Pi on `model`), or the fallback's (Pi on `fallbackModel`). `account` is the registry selection the hold charges (GY-1705). */
+  runner: (attempt: 'primary' | 'fallback') => Promise<{ runner: Runner; runtime: string; model: string; account?: string | null; release?: (reason: string) => Promise<unknown> }>;
   /** Files the fault item, as the master's operator-agent identity on `master create`'s route. */
   file: (input: DoctorFileInput, key: string) => Promise<Work>;
   /** Posts one run summary to the control plane, so the dashboard's Doctor panel and `master status` show it. */
@@ -135,10 +148,11 @@ export interface DoctorInput {
 
 /** The interval one doctor run waits for, from the settings in force. */
 export const doctorIntervalMs = (settings: Pick<DoctorSettings, 'intervalMinutes'>) => settings.intervalMinutes * 60_000;
-/** Whether a doctor run is due: none is in flight and the last one started past the interval. */
+/** Whether a doctor run is due: none is in flight, no provider-limit hold stands (GY-1705), and the last one started past the interval. */
 export function doctorDue(state: { doctor: { runs: DoctorRunRecord[] } }, clock: number, settings: Pick<DoctorSettings, 'intervalMinutes' | 'enabled'>) {
   if (!settings.enabled) return false;
   if (state.doctor.runs.some(entry => entry.state === 'running')) return false;
+  if (doctorLimitRetryAt(state.doctor.runs, clock)) return false;
   const last = state.doctor.runs.at(-1);
   return !last || clock - Date.parse(last.at) >= doctorIntervalMs(settings);
 }
@@ -151,7 +165,7 @@ export function doctorDue(state: { doctor: { runs: DoctorRunRecord[] } }, clock:
 export function doctorPrompt(config: { repository: string; cliPath: string }, input: DoctorInput) {
   const cli = config.cliPath.startsWith('node ') ? config.cliPath : `node ${config.cliPath}`, b = doctorBounds;
   const checklist = [
-    `- blocked: an item blocked for more than ${b.blockedMinutes} min`,
+    `- blocked: an item blocked for more than ${b.blockedMinutes} min; a blocker naming the master-role refusal ('.graphyard/master.json does not exist', 'no master role') is a step only a master-role identity can take: run the master command it names from this checkout yourself — you hold the master role, and checkout-restore is sanctioned — then ${cli} master unblock GY-N with a quoted reason`,
     `- worker: an attempt holding its lease for more than ${b.workerMinutes} min without a submission`,
     `- ci: required checks not settled for more than ${b.ciMinutes} min`,
     `- review-request: a review request standing more than ${b.reviewRequestMinutes} min after green CI`,
@@ -162,10 +176,11 @@ export function doctorPrompt(config: { repository: string; cliPath: string }, in
     `- containment: a lapsed containment quarantine holding an item claimable`,
     `- refusal: stale refusal text standing on an item whose state has moved past it`,
     `- overdue: items overdue in any step, by the stage clocks the evidence shows`,
+    `- checkout: escalation:dirty-checkout standing — the loop refuses its own dirty coordinator checkout; run ${cli} master checkout-restore with a quoted reason, which saves every dirty path under a named ref and restarts the loop, discarding nothing; the same request, filed without a human answer, serves an escalation naming a diverged HEAD (neither on the base branch nor a descendant of the commit the loop runs), saving that HEAD under refs/graphyard/checkout-restore/diverged-* and moving the checkout to the serving release`,
   ].join('\n');
   return `You are the Graphyard pipeline doctor for ${config.repository}. Find stuck and overdue work and fix it through your sanctioned commands, doing what the master would have done by hand. Read the evidence below and the control plane (${cli} status GY-N, ${cli} master status, ${cli} master decisions GY-N, gh pr view). `
-    + `Act only where a check below has passed its fault bound; leave what is merely moving. Your sanctioned commands are ${doctorSanctionedCommands.map(name => `${cli} master ${name}`).join(', ')}, as the master's operator-agent identity; every other mutation is refused by your command allowlist — never merge, dispatch, submit evidence or touch a lease — and a refused command is recorded in your report, never retried. Run each command by its bare program name with literal arguments: no variables, command substitution, redirection, wrappers or node options, and read only paths inside this checkout. Never weaken a requirement; never approve a decision you requested yourself (request it, then ${cli} master approver GY-N DECISION for an independent approver). `
-    + `A finding you cannot act on — a human-only decision (goals and priorities, money or accounts, credentials for people), or a fault class with no item to act through — mark unactionable; for the latter name the fault item to file, which the loop files at P0/P1 only if no open item already covers it. `
+    + `Act only where a check below has passed its fault bound; leave what is merely moving. Your sanctioned commands are ${doctorSanctionedCommands.map(name => `${cli} master ${name}`).join(', ')}, as the master's operator-agent identity; every other mutation is refused by your command allowlist — never merge, dispatch, submit evidence or touch a lease — and a refused command is recorded in your report, never retried. Run each command by its bare program name with literal arguments: no variables, command substitution, redirection, wrappers or node options, and read only paths inside this checkout. Put a free-text reason last, enclosed in one pair of quotes: the allowlist judges only the command's grammar, and the reason runs as one prose argument, never read as a command, whatever words, apostrophes or punctuation it holds. A refusal names the rule that denied the command and the word it denied. Never weaken a requirement; never approve a decision you requested yourself (request it, then ${cli} master approver GY-N DECISION for an independent approver). `
+    + `A finding you cannot act on — a human-only decision (goals and priorities, money or accounts, credentials for people), or a fault class with no item to act through — mark unactionable; for the latter name the fault item to file, which the loop files at P0/P1 only if no open or delivered cover already accounts for it. `
     + `Then call the ${doctorTool} tool exactly once: one finding per stuck or overdue item under its check, one action entry per sanctioned command you ran and what it changed, and one filed entry per fault item you are asking the loop to file. Stop after the call.\n\nThe checks and their bounds:\n${checklist}\n\nThe evidence, as JSON:\n${JSON.stringify(boundedInput(input))}`;
 }
 
@@ -179,30 +194,26 @@ export function boundedInput(input: DoctorInput, limit = 100_000): DoctorInput &
 }
 
 /** Run the primary attempt, and the fallback once when the primary returns no valid report. */
-async function runDoctor(effects: DoctorEffects, prompt: string) {
-  const runs: DoctorRunRecord['runs'] = [], timeoutMs = effects.settings.timeoutMinutes * 60_000;
+async function runDoctor(effects: DoctorEffects, prompt: string): Promise<{ runs: DoctorRunRecord['runs']; report: DoctorReportPayload | null; limit?: ExhaustionSignal | null; account?: string | null; holds?: { account: string; limit: ExhaustionSignal }[] }> {
+  const runs: DoctorRunRecord['runs'] = [], timed: { result: string; detail: string; events: LimitRunEvent[]; account: string | null }[] = [];
+  const timeoutMs = effects.settings.timeoutMinutes * 60_000;
   for (const attempt of ['primary', 'fallback'] as const) {
     if (stopping) { runs.push({ runtime: 'none', model: attempt, result: 'cancelled', detail: stopping.slice(0, 500) }); break; }
     let chosen: Awaited<ReturnType<DoctorEffects['runner']>>;
     try { chosen = await effects.runner(attempt); }
     catch (error) { runs.push({ runtime: 'none', model: attempt, result: 'spawn', detail: `No ${attempt} runner: ${message(error)}`.slice(0, 500) }); continue; }
-    // The selected runner is released however its run ends, and a start that throws is a failed
-    // attempt the fallback follows, never a leaked registry session.
+    const attemptAccount = chosen.account ?? null;
     try {
-      // Shutdown may begin while selection was awaited — before the run is the cancellable one
-      // (`active`) — so recheck here: a stopping loop starts no doctor, and the finally below
-      // releases the selected session without starting it.
-      if (stopping) {
-        runs.push({ runtime: chosen.runtime, model: chosen.model, result: 'cancelled', detail: stopping.slice(0, 500) });
-        break;
-      }
+      if (stopping) { runs.push({ runtime: chosen.runtime, model: chosen.model, result: 'cancelled', detail: stopping.slice(0, 500) }); break; }
       const run = chosen.runner.start(prompt, { cwd: effects.cwd, env: { ...effects.env, GRAPHYARD_PI_ROLE: doctorRole }, tool: doctorTool, timeoutMs,
         validate: payload => doctorReportPayloadSchema.parse(payload) });
       active = run;
       const result = await run.result();
-      runs.push({ runtime: chosen.runtime, model: chosen.model, result: result.ok ? 'reported' : result.failure.reason,
-        detail: (result.ok ? `${result.payload.findings.length} finding(s), ${result.payload.actions.length} action(s), ${result.payload.filed.length} to file` : result.failure.detail).slice(0, 500) });
-      if (result.ok) return { runs, report: result.payload };
+      const detail = (result.ok ? `${result.payload.findings.length} finding(s), ${result.payload.actions.length} action(s), ${result.payload.filed.length} to file` : result.failure.detail).slice(0, 500);
+      const outcome = result.ok ? 'reported' : result.failure.reason;
+      runs.push({ runtime: chosen.runtime, model: chosen.model, result: outcome, detail });
+      if (!result.ok) timed.push({ result: outcome, detail, events: [...run.events], account: attemptAccount });
+      if (result.ok) return { runs, report: result.payload, account: attemptAccount };
       if (result.failure.reason === 'cancelled') break;
     } catch (error) {
       runs.push({ runtime: chosen.runtime, model: chosen.model, result: 'spawn', detail: `The ${attempt} run failed to start: ${message(error)}`.slice(0, 500) });
@@ -211,7 +222,8 @@ async function runDoctor(effects: DoctorEffects, prompt: string) {
       await Promise.resolve().then(() => chosen.release?.(`the ${attempt} doctor run ended`)).catch(() => {});
     }
   }
-  return { runs, report: null };
+  const charged = headlessTimeoutLimitCharge(timed, Date.now());
+  return { runs, report: null, limit: charged?.limit ?? null, account: charged?.account ?? null, holds: charged?.holds ?? [] };
 }
 
 /** One doctor run this process has in flight, settled: a test's way to wait for it. */
@@ -235,13 +247,15 @@ const subjectKey = (work: readonly Work[], subject: string) => work.find(item =>
 
 /**
  * What the loop keeps of a doctor payload: one event per item it found or acted on, and the run
- * summary. `filed` entries are deduplicated first: a fault class an open item already stands for
- * is recorded as covered, never filed twice.
+ * summary. `filed` entries are deduplicated first: a fault class a standing item (open or closed as
+ * answered by an undelivered diagnostician fix), a GY-1632 delivered cover, or a fallen cover still
+ * below the recurrence threshold stands for is recorded covered, never filed ahead of the loop's
+ * own sweep (GY-1711).
  */
-export function dedupDoctorFiles(filed: readonly DoctorFile[], work: readonly Work[]): { file: DoctorFile; covered: boolean }[] {
+export function dedupDoctorFiles(filed: readonly DoctorFile[], work: readonly Work[], instances: readonly FaultInstance[] = [], now = 0, policy: FaultClassPolicy = faultClassPolicyDefaults): { file: DoctorFile; covered: boolean }[] {
   const seen = new Set<string>();
   return filed.map(entry => {
-    const covered = seen.has(entry.faultClass) || !!openFaultClassItem(work, entry.faultClass);
+    const covered = seen.has(entry.faultClass) || faultClassIsCovered(work, entry.faultClass, instances, now, policy);
     seen.add(entry.faultClass);
     return { file: entry, covered };
   });
@@ -259,6 +273,9 @@ export function doctorProofId(proof: string): string {
   return `${kind ? kind[1].toLowerCase() : 'manual'}:${name || 'doctor-filed'}`;
 }
 
+/** The criteria in the form create takes them (see doctorFileItem), which is also what create judges for a refusal digest. */
+const normalisedCriteria = (entry: DoctorFile) => entry.criteria.map((criterion, index) => ({ id: `AC-${index + 1}`, text: criterion.text.slice(0, 2000), proofs: [...new Set(criterion.proofs.map(doctorProofId))] }));
+
 /**
  * The fault item a doctor run files, as `master create` would: the create schema's checks, P0/P1,
  * and the class it closes. The criteria are the doctor's own words, so their shape is normalised
@@ -266,7 +283,7 @@ export function doctorProofId(proof: string): string {
  * a filing is refused only for what normalising cannot mend.
  */
 export function doctorFileItem(entry: DoctorFile, reason: string): DoctorFileInput {
-  const criteria = entry.criteria.map((criterion, index) => ({ id: `AC-${index + 1}`, text: criterion.text.slice(0, 2000), proofs: [...new Set(criterion.proofs.map(doctorProofId))] }));
+  const criteria = normalisedCriteria(entry);
   const input = createSchema.parse({ title: entry.title, description: entry.description, type: 'bug', priority: entry.priority, criteria, plannedFiles: entry.plannedFiles,
     origin: { faultClass: { class: entry.faultClass, threshold: 1, windowHours: 1, count: 1, detectedAt: new Date().toISOString(), instances: [] } } });
   return { ...input, reason: guardBroadScope(input, reason, { allow: false, command: 'master create' }) };
@@ -280,6 +297,57 @@ const invalidFiling = (file: DoctorFile, error: unknown) =>
   `The doctor asked to file "${file.title}" (${file.faultClass}, P${file.priority}), but the filing fails the checks master create applies, so it is not filed; file it by hand with master create: ${message(error)}`.slice(0, 2000);
 
 /**
+ * GY-1530 / GY-1713: create refused the filing (409 demand, or 400 Invalid input under schema skew)
+ * rather than failing to answer — same content stays refused forever (GY-1516 / GY-1700). Structural
+ * status else the operator-agent text; diagnosis reads fix-item refusals by the same rule.
+ */
+export const createRefused = (error: unknown) => error instanceof RefusedResponse
+  ? error.status === 409 || error.status === 400
+  : /^Graphyard refused \S+ \((?:409|400)\)/.test(message(error));
+/**
+ * The scenario a create refusal names as unregistered (src/engine.ts's "Register E2E scenario NAME
+ * before creating work that requires it"), else null. Scenarios register only from the repository's
+ * e2e/cases files (`graphyard e2e sync`) or an admin's defineScenario; a filing that cites one by a
+ * name nothing registers is malformed, as a proof ID the checks refuse is, and can never be filed as written.
+ */
+export const unregisteredScenario = (error: unknown) => /Register E2E scenario (\S+) (?:before creating work that requires it|first)\b/.exec(message(error))?.[1] ?? null;
+
+/**
+ * A filing create refused (GY-1530): the content is malformed as far as the control plane is
+ * concerned, so it is dropped from the pending files — never re-filed — and recorded failed under
+ * the proof class's `fix-item` ("a fix item create refuses"), the cause, instead of the doctor step's
+ * own kind. The escalation beside it names what the master must mend by hand: the scenario the
+ * filing cites with no registered revision, or the refusal itself.
+ */
+/** The refused content's identity: what create judges (class, title, files, criteria), not the evidence prose, which carries a fresh timestamp every run. */
+export const filingDigest = (file: DoctorFile) => createHash('sha256').update(JSON.stringify([file.faultClass, file.title, file.plannedFiles, normalisedCriteria(file)])).digest('hex').slice(0, 32);
+
+/**
+ * The digest as seen refusal at `at`. Nothing evicts a refusal, neither a count nor an age: whenever
+ * the doctor reports that content again, however long after, it is not submitted to create again.
+ */
+const renewRefusal = (refused: DaemonState['doctor']['refusedFilings'], digest: string, at: number) => [...refused.filter(entry => entry.digest !== digest), { digest, at }];
+const isRefused = (refused: DaemonState['doctor']['refusedFilings'], digest: string) => refused.some(entry => entry.digest === digest);
+
+async function dropRefusedFiling(cycle: Pick<Cycle, 'state' | 'effects' | 'performed'>, key: string, file: DoctorFile, error: unknown, attempts: number, now: () => number) {
+  const { state, effects: daemon, performed } = cycle;
+  state.doctor.pendingFiles = state.doctor.pendingFiles.filter(entry => entry.key !== key);
+  // The refusal outlives this run's key: a later run reporting the same content is not filed again, corrected content is.
+  state.doctor.refusedFilings = renewRefusal(state.doctor.refusedFilings, filingDigest(file), now());
+  // A pending retry that met the plane's outage opened a plane-unavailable run on this key (GY-1404),
+  // and a key's later failures are noted against its standing run whatever their kind. The plane has
+  // answered now, so that run is over: ended here, the refusal opens the proof instance it is.
+  const standing = state.faults.failing[key] ? state.faults.instances.find(entry => entry.id === state.faults.failing[key]) : undefined;
+  if (standing && standing.kind !== 'fix-item') delete state.faults.failing[key];
+  const scenario = unregisteredScenario(error);
+  performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file "${file.title}", and it is not filed again: master create refused the filing itself${scenario ? ` for the e2e proof it cites, whose scenario ${scenario} has no registered revision` : ''}: ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), daemon.persist, 'fix-item'));
+  const mend = scenario
+    ? `the filing cites e2e:${scenario}, and no scenario ${scenario} is registered (scenarios register only from e2e/cases files via graphyard e2e sync or an admin's defineScenario); register it, or file the item by hand with master create under a proof that exists`
+    : `master create refused it (${message(error)}); file it by hand with master create once mended`;
+  performed.push(await record(state, `escalation:doctor-filing:${key}`, { kind: 'escalation', work: null, principal: null, state: 'done', detail: `The doctor asked to file "${file.title}" (${file.faultClass}, P${file.priority}), but ${mend}`.slice(0, 2000), attempts: 1, cycle: state.cycle }, now(), daemon.persist));
+}
+
+/**
  * Apply one settled doctor run: record one event per item the run found or acted on, deduplicate
  * and file what it asked filed, and keep one run summary — what was stuck, why, what it did, what
  * it filed — on the cursor and the control plane.
@@ -287,12 +355,17 @@ const invalidFiling = (file: DoctorFile, error: unknown) =>
 export async function applyDoctorRun(cycle: Cycle, effects: DoctorEffects, run: DoctorRunRecord, payload: { findings: DoctorFinding[]; actions: DoctorAction[]; filed: DoctorFile[] }, now: () => number) {
   const { state, effects: daemon, performed } = cycle;
   const key = keyOf([run.at, ...payload.findings.map(finding => finding.subject)]);
-  // GY-1338: a run settles minutes after the cycle that launched it, and items filed meanwhile are
-  // not in that cycle's snapshot: a run started before GY-1332 existed filed GY-1333 for the same
-  // class. Its filings are deduplicated against a read taken now; without one, they wait for the
-  // retry, which deduplicates against its own cycle's snapshot, rather than file blind.
-  const fresh = payload.filed.length ? await daemon.snapshot().then(read => read.work, () => null) : cycle.snapshot.work;
-  const work = fresh ?? cycle.snapshot.work;
+  // GY-1338: settle against a fresh snapshot (items filed meanwhile); without one, wait for retry.
+  // Cover times use the plane clock (snapshot.now, else cycle.clock): host now() can lag the stamps.
+  let work = cycle.snapshot.work, coverNow = cycle.clock, fresh: typeof work | null = payload.filed.length ? null : work;
+  if (payload.filed.length) {
+    const read = await daemon.snapshot().then(entry => entry, () => null);
+    if (read) {
+      work = fresh = read.work;
+      const observed = Date.parse(read.now);
+      if (Number.isFinite(observed)) coverNow = observed;
+    }
+  }
   const note = async (subject: string, detail: string, outcome: DaemonAction['state'] = 'done', kind: DaemonAction['kind'] = 'fault') => {
     const itemKey = subjectKey(work, subject);
     performed.push(await record(state, `${key}:${subject}:${performed.length}`, { kind, work: itemKey, principal: null, state: outcome, detail, attempts: 1, cycle: state.cycle }, now(), daemon.persist));
@@ -306,25 +379,30 @@ export async function applyDoctorRun(cycle: Cycle, effects: DoctorEffects, run: 
   // tried five read-only forms filed "Recurring loop faults" for a loop that never stopped (GY-1295).
   for (const action of payload.actions)
     await note(action.subject, `${action.outcome === 'applied' ? 'Ran' : 'Was refused'} \`${action.command}\`: ${action.detail}`.slice(0, 2000));
-  const deduped = dedupDoctorFiles(payload.filed, work);
+  const policy = daemon.faultClassPolicy ?? faultClassPolicyFromEnv(process.env);
+  const instances = state.faults.instances;
+  const deduped = dedupDoctorFiles(payload.filed, work, instances, coverNow, policy);
   for (const { file, covered } of deduped) {
-    if (covered) { await note('installation', `Not filing "${file.title}": the ${file.faultClass} fault class is already covered by an open item`); continue; }
+    if (covered) { await note('installation', `Not filing "${file.title}": the ${file.faultClass} fault class is already covered by ${doctorCoverNote(work, file.faultClass, instances, coverNow, policy)}`); continue; }
     const filingKey = `${key}:file:${file.faultClass}`;
+    if (isRefused(state.doctor.refusedFilings, filingDigest(file))) { state.doctor.refusedFilings = renewRefusal(state.doctor.refusedFilings, filingDigest(file), now()); await note('installation', `Not filing "${file.title}" again: master create refused this content earlier and the escalation for it stands; it is filed again only when the doctor corrects it`); continue; }
     if (!fresh) {
       state.doctor.pendingFiles = [...state.doctor.pendingFiles.filter(entry => entry.key !== filingKey), { key: filingKey, at: run.at, file }].slice(-40);
-      await note('installation', `Not filing "${file.title}" yet: the open items could not be read when the run settled, so it is filed on a later cycle if no open item covers the ${file.faultClass} fault class`);
+      await note('installation', `Not filing "${file.title}" yet: the open items could not be read when the run settled, so it is filed on a later cycle if no open or delivered cover accounts for the ${file.faultClass} fault class`);
       continue;
     }
     let input: DoctorFileInput;
-    try { input = doctorFileItem(file, `The pipeline doctor found a ${file.faultClass} fault no open item covers: ${file.description.slice(0, 1500)}`); }
+    try { input = doctorFileItem(file, `The pipeline doctor found a ${file.faultClass} fault no open or delivered cover accounts for: ${file.description.slice(0, 1500)}`); }
     catch (error) { await note('installation', invalidFiling(file, error), 'done', 'escalation'); continue; }
     try {
       const filedItem = await effects.file(input, filingKey);
       // Filed: any pending retry of the same filing is dropped before the cursor is persisted.
       state.doctor.pendingFiles = state.doctor.pendingFiles.filter(entry => entry.key !== filingKey);
       run.filed.push({ faultClass: file.faultClass, title: file.title, work: filedItem.key, deduplicated: false });
-      await note(filedItem.key, `Filed ${filedItem.key} (P${file.priority}) for the ${file.faultClass} fault no open item covered: ${file.title}`);
+      await note(filedItem.key, `Filed ${filedItem.key} (P${file.priority}) for the ${file.faultClass} fault no open or delivered cover accounted for: ${file.title}`);
     } catch (error) {
+      // GY-1530: a refusal of the filing itself is never mended by a retry; it is dropped and classified.
+      if (createRefused(error)) { await dropRefusedFiling(cycle, filingKey, file, error, (state.actions[filingKey]?.attempts ?? 0) + 1, now); continue; }
       // A filing the control plane would not take is kept on the cursor — before the failed record
       // persists it — so a later cycle files it again under the same stable key; a control plane
       // that was only briefly unreachable loses no P0/P1 fault item (GY-711).
@@ -367,21 +445,26 @@ export async function postRun(cycle: Pick<Cycle, 'state' | 'effects'>, effects: 
 const retainedRuns = 20;
 
 /**
- * A filing the control plane did not accept when its run applied is filed again on a later cycle,
- * under the same stable key, until the control plane takes it or an open item comes to cover the
- * class. The cursor is updated before the outcome is recorded, so an abrupt exit between the two
- * leaves the filing pending rather than lost.
+ * Retry a filing the plane did not accept: until create takes it, refuses it (GY-1530), or a
+ * standing / delivered cover accounts for the class (GY-1711). Cursor updates before the outcome so
+ * an abrupt exit keeps it pending.
  */
 export async function retryDoctorFile(cycle: Cycle, effects: DoctorEffects, pending: DoctorPendingFile, now: () => number) {
-  const { state, effects: daemon, snapshot } = cycle;
+  const { state, effects: daemon, snapshot, clock } = cycle;
   const attempts = (state.actions[pending.key]?.attempts ?? 0) + 1;
   const drop = async (detail: string, work: string | null, outcome: DaemonAction['state']) => {
     state.doctor.pendingFiles = state.doctor.pendingFiles.filter(entry => entry.key !== pending.key);
     await record(state, pending.key, { kind: 'fault', work, principal: null, state: outcome, detail: detail.slice(0, 2000), attempts, cycle: state.cycle }, now(), daemon.persist);
   };
-  if (openFaultClassItem(snapshot.work, pending.file.faultClass)) return drop(`Not filing "${pending.file.title}" on retry: the ${pending.file.faultClass} fault class is now covered by an open item`, null, 'done');
+  const policy = daemon.faultClassPolicy ?? faultClassPolicyFromEnv(process.env);
+  if (faultClassIsCovered(snapshot.work, pending.file.faultClass, state.faults.instances, clock, policy)) {
+    const by = doctorCoverNote(snapshot.work, pending.file.faultClass, state.faults.instances, clock, policy);
+    return drop(`Not filing "${pending.file.title}" on retry: the ${pending.file.faultClass} fault class is now covered by ${by}`, null, 'done');
+  }
+  // Queued through an outage beside another run's copy, the same content may already have been refused.
+  if (isRefused(state.doctor.refusedFilings, filingDigest(pending.file))) { state.doctor.refusedFilings = renewRefusal(state.doctor.refusedFilings, filingDigest(pending.file), now()); return drop(`Not filing "${pending.file.title}" on retry: master create refused this content earlier and the escalation for it stands`, null, 'done'); }
   let input: DoctorFileInput;
-  try { input = doctorFileItem(pending.file, `The pipeline doctor found a ${pending.file.faultClass} fault no open item covers: ${pending.file.description.slice(0, 1500)}`); }
+  try { input = doctorFileItem(pending.file, `The pipeline doctor found a ${pending.file.faultClass} fault no open or delivered cover accounts for: ${pending.file.description.slice(0, 1500)}`); }
   catch (error) {
     // Refused by the checks themselves, the filing would be refused the same way on every retry.
     state.doctor.pendingFiles = state.doctor.pendingFiles.filter(entry => entry.key !== pending.key);
@@ -392,7 +475,9 @@ export async function retryDoctorFile(cycle: Cycle, effects: DoctorEffects, pend
     const filedItem = await effects.file(input, pending.key);
     await drop(`Filed ${filedItem.key} (P${pending.file.priority}) for the ${pending.file.faultClass} fault on a later cycle: ${pending.file.title}`, filedItem.key, 'done');
   } catch (error) {
-    await record(state, pending.key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Still could not file "${pending.file.title}": ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), daemon.persist);
+    if (createRefused(error)) return dropRefusedFiling(cycle, pending.key, pending.file, error, attempts, now);
+    // Refused again, the retry is a fault: the plane not answering is the plane's (GY-1404), any other the step's own.
+    await record(state, pending.key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Still could not file "${pending.file.title}": ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), daemon.persist, planeWideRefusal(error) ? 'plane-unavailable' : undefined);
   }
 }
 
@@ -440,22 +525,31 @@ export async function doctorStep(cycle: Cycle) {
     faults: state.faults.instances.slice(-40).reverse().map(instance => `${instance.at} ${instance.kind} on ${instance.subject}: ${instance.text}`),
   };
   const prompt = doctorPrompt(cycle.config, input);
-  live = runDoctor(doctor, prompt).catch(error => ({ runs: [{ runtime: 'none', model: 'none', result: 'exit', detail: message(error).slice(0, 500) }], report: null }))
+  live = runDoctor(doctor, prompt).catch(error => ({ runs: [{ runtime: 'none', model: 'none', result: 'exit', detail: message(error).slice(0, 500) }], report: null as DoctorReportPayload | null, limit: null, account: null, holds: [] as { account: string; limit: ExhaustionSignal }[] }))
     .then(async outcome => {
       const current = state.doctor.runs.find(entry => entry.at === run.at);
       if (!current || current.state !== 'running') return;
       current.runs = outcome.runs;
       current.findings = (outcome.report?.findings ?? []).slice(-50);
       current.actions = (outcome.report?.actions ?? []).slice(-50);
+      if (!outcome.report && outcome.limit) {
+        // Settlement time, not the launch clock: the round can run for two timeouts after doctorStep
+        // snapped `clock`, and the hold / named-reset comparison must start when the limit is known.
+        const settledAt = now();
+        const named = outcome.limit.resetsAt ? Date.parse(outcome.limit.resetsAt) : Number.NaN;
+        const until = new Date(Number.isFinite(named) && named > settledAt ? named : settledAt + 3_600_000).toISOString();
+        for (const hold of outcome.holds ?? []) await effects.holdAccount?.(hold.account, { at: new Date(settledAt).toISOString(), resetsAt: hold.limit.resetsAt, reason: hold.limit.reason, role: 'doctor', profile: doctorRole, work: null });
+        current.state = 'failed';
+        current.detail = `no report: ${outcome.runs.map(entry => `${entry.model} ${entry.result}`).join('; ')}; ${doctorLimitUntilMarker}${until}`.slice(0, 1000);
+        state.doctor.unposted = [...new Set([...state.doctor.unposted, current.at])].slice(-40);
+        await record(state, `doctor:${current.at}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `The doctor run hit a provider limit (${outcome.limit.reason}); next run waits until ${until}`, attempts: 1, cycle: state.cycle }, now(), effects.persist, null);
+        await postRun(cycle, doctor, current, now);
+        return;
+      }
       current.detail = outcome.report ? 'reported' : `no report: ${outcome.runs.map(entry => `${entry.model} ${entry.result}`).join('; ')}`.slice(0, 1000);
       if (!outcome.report) {
         current.state = 'failed';
-        // Queued for posting before the fallible record, as the apply-failure path below does: a
-        // failed run is never reaped as lost, so the marker is what keeps it retryable.
         state.doctor.unposted = [...new Set([...state.doctor.unposted, current.at])].slice(-40);
-        // GY-1318: its models died or the loop's own shutdown cancelled it — the run is still failed,
-        // posted and retried, and the next interval's run re-covers, but the loop did not fail to
-        // cycle: no fault kind, so no loop fault instance (as GY-1295 did for allowlist refusals).
         await record(state, `doctor:${current.at}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `The doctor run returned no report: ${current.detail}`, attempts: 1, cycle: state.cycle }, now(), effects.persist, null);
         await postRun(cycle, doctor, current, now);
         return;
@@ -641,11 +735,61 @@ export async function relaunchUnansweredApprovers(cycle: Cycle) {
 /** How often the approver remedy reads one item's decision history. */
 export const decisionCheckMs = 2 * 60_000;
 
-/** The three deterministic remedies, every cycle, before the doctor itself is scheduled. */
+/**
+ * Remedy 4 (GY-1652): apply the Claude harness contract from the loop's unconfined process — the
+ * doctor's checkout is read-only (GY-888), so only the loop can heal host-derived drift. Uses the
+ * CLI checkout (GY-1662), never research's scratch. Refusals wait; failures retry per distinct cause.
+ */
+/** Claude harness settings path relative to the checkout (masterHarnessPlan's file). */
+const claudeSettingsFile = '.claude/settings.local.json';
+
+export async function applyHarnessContract(cycle: Cycle) {
+  const { state, effects, now, performed, config, isolate } = cycle;
+  // GY-1662: the loop's managed checkout (its CLI's), never the research scratch worktree runDaemon rewrites research's cwd to.
+  const root = (config.cliPath ? coordinatorCheckoutRoot(config.cliPath) : null) ?? effects.doctor?.cwd;
+  // A root that does not exist is no checkout at all (a configuration whose CLI path names no files): nothing to validate or write.
+  if (!root || !existsSync(root)) return;
+  await isolate('config', null, 'harness contract', async () => {
+    const key = remedyKey('harness', 'claude'), previous = state.actions[key], attempts = (previous?.attempts ?? 0) + 1;
+    try {
+      // GY-1692 (GY-1666): a checkout that records no units, served by a unit that runs it, records its own before validation, instead of waiting on a person's master init.
+      const units = effects.harness?.servingUnit ? await recordServingUnits(root, config.repository, { servingUnit: effects.harness.servingUnit, unitDirectory: effects.harness.unitDirectory }) : null;
+      const recorded = units ? `Recorded this install's units (${units.master}, ${units.executorTemplate}) in ${root}/${installUnitsFile} from ${effects.harness!.servingUnit}, the unit serving the loop, which runs it. ` : '';
+      // Every resolved checkout is validated first, settings installed or not: one that records no units waits on master init (GY-1662).
+      harnessApplyCheckout(root, { servingUnit: effects.harness?.servingUnit, unitDirectory: effects.harness?.unitDirectory });
+      // A validated checkout with no Claude settings installed has nothing to apply (harnessDrift is null without the file).
+      const plan = existsSync(resolve(root, claudeSettingsFile)) ? masterHarness(root, config, 'claude') : null;
+      if (!plan || !await harnessDrift(root, plan)) {
+        // A refusal the operator's remedy has cleared, or a failure the checkout recovered from, closes once the contract already holds (GY-1662).
+        if ((previous && previous.state !== 'done') || units) performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: 'done', detail: `${recorded}${plan ? `The Claude harness contract already holds for ${root}` : `No Claude harness settings are installed under ${root} (${claudeSettingsFile})`}${previous && previous.state !== 'done' ? `: the earlier ${previous.state} row is resolved with nothing to apply` : ': nothing to apply'}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist));
+        return;
+      }
+      const written = await writeHarnessPermissions(root, plan, true);
+      const changed = [...written.removed.map(entry => `removed stale ${entry.list} ${entry.rule}`), ...written.added.map(entry => `added ${entry.list} ${entry.rule}`)].join(', ');
+      performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: 'done', detail: `${recorded}Applied the Claude harness contract to ${written.file} from the loop's own process, as graphyard master harness claude --apply does, keeping operator-added entries: ${changed}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist));
+    } catch (error) {
+      // A checkout refusal waits on the operator's remedy, which it names: journaled once, never refreshed or retried as a fault, until its cause changes.
+      if (error instanceof HarnessCheckoutRefusal) {
+        const detail = error.message.slice(0, 2000);
+        if (previous?.state !== 'waiting' || previous.detail !== detail) performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: 'waiting', detail, attempts, cycle: state.cycle }, now(), effects.persist));
+        return;
+      }
+      // A filesystem refusal names its random temporary file; its code and the settings directory are the cause, stable across cycles.
+      const code = (error as NodeJS.ErrnoException | null)?.code;
+      const detail = `Could not apply the Claude harness contract from the loop's own process: ${code ? `${code} writing the harness settings under ${root}/.claude` : message(error)}`.slice(0, 2000);
+      // The same cause again is the one standing failure: its time moves (touchStanding), so the fault window keeps the run open while it lasts, but nothing new is journaled.
+      if (previous?.state === 'failed' && previous.detail === detail) { touchStanding(state, key, new Date(now()).toISOString()); await effects.persist(state); return; }
+      performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: 'failed', detail, attempts, cycle: state.cycle }, now(), effects.persist));
+    }
+  });
+}
+
+/** The deterministic remedies, every cycle, before the doctor itself is scheduled. */
 export async function routineRemedies(cycle: Cycle) {
   await settleSubmittedContainment(cycle);
   await clearCoveredBlockers(cycle);
   await relaunchUnansweredApprovers(cycle);
+  await applyHarnessContract(cycle);
 }
 
 /** The runs `master status` reports under daemon.doctor, newest first. */

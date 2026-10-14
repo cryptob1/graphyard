@@ -3,7 +3,13 @@
 
 ## Authority boundaries
 
-An AI `slice-lead` leads slice (`product`, `infrastructure`, `docs-experience`): rules on plans, sends back, escalates; never implements, reviews, proves, merges (`lead.action.refused`). `reject-plan`/`send-back` hold merging (**lead hold**) until that lead's `approve-plan` with `"supersedes": "RULING-ID"` or `rework`. Producers ever assigned item or in its slice: `evidence.producer.refused`. Limits: [deployment variables](deployment.md#variables).
+A `slice-lead` (`product`, `infrastructure`, `docs-experience`) rules on plans, sends back or escalates, never implements, reviews, proves or merges (`lead.action.refused`). `reject-plan`/`send-back` hold merging (**lead hold**) until that lead's `approve-plan` with `"supersedes": "RULING-ID"` or `rework`. Producers ever assigned the item or slice: `evidence.producer.refused`. [Limits](deployment.md#variables).
+
+## Reviewer provider diversity
+
+A `reviewer` account's `provider` (else launch kind) must differ from the item's newest `worker` session's; same-provider accounts are `skipped` (`shares the implementer's provider P on GY-N`) or, at a session limit, waited for; else the first eligible same-provider.
+
+`worker` tries Pi for an item's first two attempts when every `plannedFiles` entry is normal by risk class, lane aside; a directory scope covering a sensitive surface (`src/`, `src/server/`) is sensitive. Sensitive or unplanned changes, later attempts and two failed starts wait for a strong account.
 
 ## Escalation
 
@@ -14,13 +20,13 @@ An AI `slice-lead` leads slice (`product`, `infrastructure`, `docs-experience`):
 | `security-concern` | A lead's `escalate` ruling
 | `requirement-weakening` | A revision retires a criterion, narrows proofs
 
-Unresolved triggers refuse merging; replacements may claim, delivery waits. Explained lapses: `lease.expired` with a [cause](protocol/leases.md#how-a-lease-ends) (`submitted`, `blocked-awaiting-operator`, `stopped-by-attestation`, `exhausted-capacity`); later-explained or superseded `lease-loss` auto-settles (`escalation.auto-settled`: `auto-settled: blocked report for epoch N explains the lapse`, `auto-settled: stopped-worker attestation for epoch N explains the lapse`, `auto-settled: superseded — epoch M is held by OWNER, …`).
+Unresolved triggers refuse merging; replacements may claim. An explained lapse (`lease.expired` [cause](protocol/leases.md#how-a-lease-ends): `blocked-awaiting-operator`, `stopped-by-attestation`…) or superseded `lease-loss` auto-settles (`escalation.auto-settled`: `auto-settled: blocked report for epoch N explains the lapse`, `auto-settled: stopped-worker attestation for epoch N explains the lapse`).
 
 ### Who may settle what
 
-`escalation.resolved` records each:
+`escalation.resolved` records:
 
 - Explained `lease-loss`: reconciliation, or `admin` `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`.
-- Superseded-epoch `lease-loss` (latest attempt leased or submitted, no lost-epoch fence): reconciliation; control-plane `lease-loss` whose attempts all ended (no lease, no containment fence): after 5 min (`auto-settled: ended — …`).
-- `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, lead-raised `lease-loss`: master-requested two-party decision or declared human session (`admin`, `sessionKind: "human"`; settles any).
-- `requirement-weakening` from approved `requirements` decision: records id, settled by that approval (citing approver); no `scope` fault.
+- Superseded-epoch `lease-loss`: reconciliation; all attempts ended unfenced: after 5 min.
+- `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, lead-raised `lease-loss`: master-requested two-party decision or declared human session (`sessionKind: "human"`).
+- `requirement-weakening` from an approved `requirements` decision: settled by that approval, citing its approver; no `scope` fault or [intervention](dashboard.md).

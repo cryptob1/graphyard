@@ -75,7 +75,7 @@ test('the documented collector configuration carries the whole dispatch authorit
  * Run the identical script under whichever the environment actually offers: the four
  * identities, the modes and every assertion below are the same either way.
  */
-const elevated = async (command: string[]): Promise<[string, string[]]> => {
+const elevated = async (command: string[]): Promise<[string, string[]] | { skip: string }> => {
   if (process.getuid?.() === 0) return [command[0], command.slice(1)];
   try {
     await exec('sudo', ['-n', 'true']);
@@ -96,15 +96,22 @@ const elevated = async (command: string[]): Promise<[string, string[]]> => {
       return `${start}:${count}`;
     };
     const [uids, gids] = await Promise.all([subordinate('/etc/subuid'), subordinate('/etc/subgid')]);
-    return ['unshare', [
-      '--map-user=0', '--map-group=0',
-      `--map-users=1:${uids}`, `--map-groups=1:${gids}`,
-      '--', ...command,
-    ]];
+    const mapping = ['--map-user=0', '--map-group=0', `--map-users=1:${uids}`, `--map-groups=1:${gids}`];
+    // Mapping the ranges runs newuidmap, a file-capability binary. A process under no_new_privs
+    // (the loop's systemd unit, a bubblewrap sandbox) is granted no capability by any execve, so
+    // newuidmap fails with "Could not set caps" and no identity can be taken here at all: the
+    // boundary cannot be exercised, which is a host without privilege, not a broken guide (GY-1549).
+    // The same probe decides it as the run itself would, so the test says so instead of failing.
+    try { await exec('unshare', [...mapping, '--', 'true']); }
+    catch (error) {
+      const reason = String((error as { stderr?: string }).stderr || (error as Error).message).trim().split('\n')[0];
+      return { skip: `this process may gain no privilege (sudo refused, and the user namespace could not map its subordinate ids: ${reason}), so the setgid boundary cannot be exercised here; CI exercises it under sudo` };
+    }
+    return ['unshare', [...mapping, '--', ...command]];
   }
 };
 
-test('the documented setgid boundary is writable only by the container and readable by both trusted readers', async () => {
+test('the documented setgid boundary is writable only by the container and readable by both trusted readers', async t => {
   assert.match(guide, /usermod -aG graphyard-boundary graphyard-attestor/);
   assert.match(guide, /usermod -aG graphyard-boundary graphyard-collector/);
   // Four distinct UIDs in the documented primary/supplementary-group layout: the attestor
@@ -132,7 +139,9 @@ if setpriv --reuid="$runner" --regid=30003 --clear-groups test -r "$root/attempt
   echo 'runner unexpectedly reached the attempt boundary' >&2
   exit 1
 fi`;
-  await exec(...(await elevated(['bash', '-c', script])));
+  const run = await elevated(['bash', '-c', script]);
+  if ('skip' in run) { t.skip(run.skip); return; }
+  await exec(...run);
 });
 
 test('the documented acknowledgement retry contract states the bound the runner enforces', () => {

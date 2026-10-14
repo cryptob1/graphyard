@@ -2,7 +2,8 @@
 //
 // Reads the deployed control plane's own release identity and its real ledger, measures
 // first-submit-to-merge and idle-but-actionable over the deliveries made with no master session
-// running since a release carrying GY-87 began serving, and judges the claim against its own
+// running in the 72 hours before the measurement (or --until), never before a release carrying GY-87
+// began serving (GY-1596; --since overrides the start), and judges the claim against its own
 // budgets. It relaxes nothing: a miss is printed as a finding with the measured values and a
 // named follow-up, and every delivery the window holds — counted or excluded — is listed with its
 // figures, the executor that claimed each of its actions, and the reason it is in or out.

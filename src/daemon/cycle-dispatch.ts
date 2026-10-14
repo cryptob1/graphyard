@@ -6,13 +6,13 @@ import { dispatchSort } from '../coordination.js';
 import { type CapacityRole, capacitySignature, standingCapacity, describeCapacity } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { humanNeededActions } from '../model/next-action.js';
-import { assertDispatchable, dispatchReserved, reclaimableAgent, type ContainmentAssessment, type EscalationSession, type RoleCapacity, roleCapacity } from '../master.js';
+import { assertDispatchable, dispatchReserved, type ContainmentAssessment, type EscalationSession, type RoleCapacity, roleCapacity } from '../master.js';
 import { workspaceDispatchFailure } from '../master/dispatch.js';
 import { standingEscalations } from '../model/escalation.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { type DaemonAction, message } from './state.js';
 import { decisionKey, dispatchKey } from './reconcile.js';
-import { clearProfileFailure, profileHealth, readyToRetry, recordProfileFailure } from './sessions.js';
+import { clearProfileFailure, occupiesRoleBound, profileHealth, readyToRetry, recordProfileFailure } from './sessions.js';
 import { detailChanged, fitDecisionReason, routineDecision } from './decisions.js';
 import { capacityKey, record, stoppedStates } from './effects.js';
 import type { Cycle } from './cycle.js';
@@ -147,6 +147,9 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
       'escalation-handler': open.filter(item => waitingEscalations.has(item.key)),
       // No item waits on the master role: its capacity is the loop's own wait, not an item's (GY-898).
       master: [],
+      // Doctor and diagnostician spend quota but no item waits on them (GY-1705).
+      doctor: [],
+      diagnostician: [],
     };
     for (const capacity of capacities) {
       const key = capacityKey(capacity.role), previous = state.actions[key];
@@ -234,8 +237,10 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     const free = await effects.agents();
     // After an attempt ended as reblocked (GY-867), a profile on another runtime is tried first.
     const order = preferOtherRuntime(health, runtimeToAvoid(item));
-    // A finished session no live assignment owns does not hold its profile (GY-1322): the launch closes it.
-    const pick = () => order.find(entry => entry.healthy && !taken.has(entry.profile.name) && !free.some(agent => agent.name === entry.profile.agentName && !reclaimableAgent(entry.profile, agent, snapshot.work, clock)));
+    // A finished session no live assignment owns does not hold its profile (GY-1322 / GY-1708): the
+    // launch closes it, and occupiesRoleBound keeps the role's bound counter truthful through a
+    // mid-attempt capacity redispatch so a second session of the same role is not launched beside it.
+    const pick = () => order.find(entry => entry.healthy && !taken.has(entry.profile.name) && !free.some(agent => agent.name === entry.profile.agentName && occupiesRoleBound(entry.profile, agent, snapshot.work, clock)));
     let choice = pick();
     if (!choice) {
       // Every launch profile working is capacity, not a decision for anyone. Escalate only when no

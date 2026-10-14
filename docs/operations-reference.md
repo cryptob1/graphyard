@@ -7,7 +7,7 @@
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` emits instructions from served-commit checkout, refusing *unobserved*, *stale* (rerun), merge-missing or already-recorded releases; without `--deployment-url`, newest successful [`productionEnvironment`](deployment.md#production-environment-name) (Railway: `<project> / production`) deployment counts.
+`master verify-deployment GY-N` emits instructions from served-commit checkout, refusing *unobserved*, *stale* (rerun), merge-missing or recorded releases; without `--deployment-url`, newest successful [`productionEnvironment`](deployment.md#production-environment-name) deployment counts.
 
 ## Lost worker before submission
 
@@ -19,19 +19,19 @@ On worker, `graphyard master settle-containment GY-N "reason"` verifies nothing 
 
 ## Submitted implementation needs rework
 
-Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; next resubmits. `scripts/rework-causes.mjs` classifies last 100 deliveries' rounds by cause (55% own-change, 33% conflicts; raw median 2); `master status` `speed.reworkRounds.ownChange` excludes out-of-item causes.
+Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; next resubmits. `scripts/rework-causes.mjs` classifies last 100 deliveries' rounds (55% own-change, 33% conflicts; raw median 2); `master status` `speed.reworkRounds.ownChange` excludes out-of-item causes.
 
 ## Retro synthesis
 
-Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables, `master status` then flags crossed patterns as configuration faults) files item per crossed pattern, drafting `retro.drafted` changes (wording, check, producer method, fault-catalogue entry) per recurring refusal or rework cause; non-drafting AI operator agent [approves](protocol/work-commands.md) (`decision:approve`)/refuses each. Approved: [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse failing `complete`.
+Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables) files item per crossed pattern, drafting `retro.drafted` changes per recurring refusal/rework cause; a non-drafting operator agent [approves](protocol/work-commands.md) (`decision:approve`)/refuses each. Approved: [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse failing `complete`.
 
 ## Flaky CI check
 
-[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); pass clears it.
+[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); a pass clears it; on main, later merges wait for reruns. Cancelled/timed-out jobs rerun ≤3 times, then one `escalation:main-guard:SHA` infrastructure fault names run and step, reverting nothing. A real failure reruns once: a pass joins `mainGuardFlakes` (last 20); a second failure, refusal or unconcluded hour reverts.
 
 ## Accepted evidence turns out to be wrong
 
-`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes gate; that head's required checks no longer pass.
+`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes gate; that head's required checks stop passing.
 
 ## GitHub request budget
 
@@ -43,10 +43,10 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 
 | Band | Cadence
 | --- | ---
-| `merge` | gates pass, GitHub may merge: 20s
-| `active` | awaiting check, review, base refresh, rework: 1min
+| `merge` | gates pass: 20s
+| `active` | awaiting check/review/refresh/rework: 1min
 | `steady` | unchanged: 5min, stretched by fleet bound; review requests ≤10min
-| `idle` | awaiting dispatch/escalation: 5min, stretched if unchanged
+| `idle` | awaiting dispatch/escalation: 5min, stretched
 
 Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`).
 
@@ -60,21 +60,21 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ### What a pause means for gates
 
-A `403`/`429` pause stops requests; gates read the last observation until it lifts; GitHub merges on branch protection, recorded on resume ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
+`403`/`429` pauses stop requests; gates read the last observation until it lifts; GitHub merges on branch protection, recorded on resume ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
 
 ### Reading the budget
 
-`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also `master status`): REST-only `perHour` across replicas (`instances`), `limit`, `share`, `target` 0.6, `byEndpoint`. Immutable, per-cycle, webhook-driven reads [aren't repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
+`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also `master status`): REST-only `perHour` across replicas (`instances`), `limit`/`share`/`target` 0.6/`byEndpoint`. Immutable, per-cycle, webhook-driven reads [aren't repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
 
 ### Webhook liveness
 
-Silent webhook hour: `master status` cites `https://github.com/settings/apps/APP-SLUG`.
+`webhooks` checks receipts against GitHub's delivery log (cached 5min/15; merged by delivery id into persisted 48h attempts): `lastAttemptAt`/`windowSince`/`coveredFrom`/`attemptsInWindow`/`failedAttempts`/`failedStatusCodes`/`deliveryLogAt`/`deliveryLogError`. `state`: `delivering` (<1h), `failing` (non-2xx; proved-foreign 403 excused), `quiet`, `answered` (2xx), `unverified` (read failed/`coveredFrom` after `windowSince`). Open PRs cite `https://github.com/settings/apps/APP-SLUG`.
 
 ## Control-plane resources
 
-`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes`, free `TMPDIR`/`/tmp`; `loaded-revision` counts code moves. No fault while remedy acts: owed restart retried within bound, pane unowned <10min, loop's lag, `/tmp` >10% free after pass within 30min.
+`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume+`GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes[:ROOT]`, per `TMPDIR`/`/tmp` (also any-name checkout/worktree, `voice<n>-*` 24h unwritten (tree+gitdir), unheld, unregistered; `/tmp/opencode/*` entries; per-class counts; <25% free: escalates, names consumers, partial census; 0-removal pass ledgered); `loaded-revision`: code moves. No fault remedying: owed restart within bound, pane unowned <10min (unnamed: reclaim pass's clock, kept through failed close), `/tmp` >10% free <30min after a pass left ≥25%. Loop age: host clock.
 
-Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`; managed root's `.verification-slots`); CI unbounded. Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; item `memory` names top consumers; one `memory-pressure` fault per dip) until 1GB above.
+Session-started `npm test`/`test:browser`/typecheck/`tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`; managed root's `.verification-slots`); CI unbounded. Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; one `memory-pressure` fault per dip) until 1GB above.
 
 ## Storage retention
 
@@ -94,7 +94,7 @@ Ungated merges: permanent violations (never backfilled): repair access, file fol
 
 ## Credentials
 
-Rotate [`GRAPHYARD_PRINCIPALS`](deployment.md#variables), redeploy. Operator agents hold only listed capabilities (`graphyard operator-agent setup|list|rotate|revoke`).
+Rotate [`GRAPHYARD_PRINCIPALS`](deployment.md#variables), redeploy. Operator agents hold only listed capabilities (`graphyard operator-agent setup|list|rotate|revoke`); `setup` reinstates a revoked ID (`lastMutation.reinstatedAfter`); `credentialIssuedAt` survives `configure`.
 
 ## Proof authority grants
 
@@ -111,8 +111,8 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥2× workers) pace per token, merge path first (`observationThroughput`). Heartbeat, claim, `complete`, `blocked` own lease pool (`leaseHealth`). Reconcile evaluates moved rows, all every `GRAPHYARD_RECONCILE_FULL_MS` (2000..300000ms, default 10000). Until startup validation ends, `/healthz` reports `readiness: false`, `/healthz?ready` 503.
+`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥2× workers) pace per token, merge path first (`observationThroughput`). Heartbeat/claim/`complete`/`blocked` own a lease pool (`leaseHealth`). During startup validation `/healthz` reports `readiness: false`, `/healthz?ready` 503.
 
 ### Concurrent reconciliation
 
-A 2s tick over 5s logs `reconciliation tick took N ms` (writes, longest lock wait). It opens briefly under coordination lock (row versions, direct-merge sweep); batches evaluate ≤250ms lock-free, planning ≤8 writes, each one transaction: coordination lock (≤500ms wait, no row held), item row (`FOR NO KEY UPDATE`), commit; moved read re-evaluates first; job wakes follow work-id order. Three expired lock waits defer unwritten items tick. Writes read whole only their item, overlaps, dependencies (<500ms at 1,000 items); heartbeats lock only their item. Reconciliation yields to pending requests before each evaluation and write: renewal waits ≤1 evaluation (≤1s). Stale observation snapshots retry after 2s.
+Reconcile evaluates moved rows, all every `GRAPHYARD_RECONCILE_FULL_MS` (10000); ticks >5s log `reconciliation tick took N ms`: each moved key+fields, or the interval, and event-loop lag p50/max; own-write moves re-evaluate only readers (reference/resource/path-scope). Batches evaluate lock-free, write per item under coordination+row locks; expired waits defer unwritten items; heartbeats lock only their item (renewal wait ≤1s).

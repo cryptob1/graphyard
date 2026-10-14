@@ -12,7 +12,8 @@ import { Engine } from '../../src/engine.js';
 import { server } from '../../src/server.js';
 import { type Principal, deploySmokeProof } from '../../src/model.js';
 import { type MasterConfig, type WorkerProfile, atomicPrivateWrite, dispatchWork, loadMasterConfig, masterConfigSchema, setupMaster } from '../../src/master.js';
-import { readAccountStartFailures, workerLaunchStatus } from '../../src/master/dispatch.js';
+import { type CredentialMinter, MergeWriterUnreadError, readAccountStartFailures, workerLaunchStatus } from '../../src/master/dispatch.js';
+import type { MergerMode } from '../../src/merger-mode.js';
 import { paneSweepLimit } from '../../src/daemon/cycle-reclaim.js';
 import { plannedFilesMax } from '../../src/model/scope.js';
 import { type RunOptions, type RunResult, type Runner } from '../../src/runner/types.js';
@@ -60,6 +61,7 @@ export const soakConfig: MasterConfig = masterConfigSchema.parse({ version: 1, u
   operatorAgent: { id: principals.operatorAgent.id, credentialFile: '/outside/operator.token' }, approver: { id: principals.approver.id, credentialFile: '/outside/approver.token' },
   run: { proofWorkflow: 'acceptance.yml', intervalSeconds: 60 } });
 
+// start is the simulated day's clock, installed by soakControlPlanes' before hook; failoverInstalled's Date.now() runs inside a soak test, after that hook, so its credential expires five simulated hours in.
 /** The day, in simulated time from the start. */
 export const start = Date.parse('2031-06-02T08:00:00Z');
 /** Where the day's worker worktrees stand, as the launcher lays them out (…/.graphyard/worktrees/KEY-EPOCH, GY-980). */
@@ -190,7 +192,24 @@ export interface DiagnosisRun { subject: string; attempt: 'primary' | 'fallback'
 export interface LaunchSample { key: string; failures: Awaited<ReturnType<typeof readAccountStartFailures>>; attention: Awaited<ReturnType<typeof workerLaunchStatus>> }
 export type Dispatched = Awaited<ReturnType<typeof dispatchWork>>;
 /** The failover day's inputs and outputs, threaded through `simulateDay` and back to the test. */
-export interface Failover { root: string; master: MasterConfig; world: FailoverWorld; dispatches: Dispatched[]; samples: LaunchSample[] }
+export interface Failover { root: string; master: MasterConfig; world: FailoverWorld; dispatches: Dispatched[]; samples: LaunchSample[];
+  /** GY-1523: every real dispatch the launcher refused before claiming, with the day's instant and the launcher's words. */
+  refused?: { key: string; at: number; error: string }[] }
+/** GY-1746: a failover day whose launches choose their account through the agent registry. */
+export type RegistryFailover = Failover & {
+  /** The fleet probe whose registry decides each launch's account instead of the profile's local accounts. */
+  probe?: import('../../src/fleet.js').FleetProbe;
+  /** The lane the day dispatches its items as; the simulated items ride the high lane otherwise. */
+  lane?: 'low' | 'medium' | 'high';
+  /**
+   * GY-1772: per-item overrides, by the day's item number: the lane the item's dispatch rides and
+   * the files the item plans. A planned path is seeded onto the day's base tree and is what the
+   * item's session pushes, so the change the control plane sees is the change the dispatch
+   * preference judged; the lane is what `dispatchWork` is handed, whatever the day's items would
+   * otherwise ride.
+   */
+  lanes?: Record<number, 'low' | 'medium' | 'high'>;
+  plannedFiles?: Record<number, readonly string[]> }
 
 /**
  * The Herdr side of the failover day: the panes the real `dispatchWork` creates live in the same
@@ -211,8 +230,25 @@ export class FailoverWorld {
   private panes = 0;
   /** The launcher's own start clock: its waits at the start bound pass here, not on the day's. */
   now = clock.now();
-  constructor(private broken: Set<string>) {}
+  /** GY-1523: how many times the real launcher read the merger — one per dispatch, before it claims, and never otherwise. */
+  reads = 0;
+  /** GY-1523: every push credential the real launcher minted; none under the control-plane merger. */
+  minted: { key: string; epoch: number }[] = [];
+  /**
+   * `merger` is what the day's control plane records as its merge writer, answered to every read;
+   * `unreadable` holds the ordinals (from 1) of the reads the plane fails with a 503 instead, as a
+   * status read meets while the plane restarts.
+   */
+  constructor(private broken: Set<string>, readonly merger: MergerMode = 'github', private readonly unreadable: Set<number> = new Set()) {}
   healthyEverywhere() { this.broken.clear(); }
+  /** The launcher's merger read (DispatchOptions.readMergeWriter): counted, and refused on the scheduled ordinals exactly as readMergeWriter refuses a 503. */
+  readMergeWriter = async (config: MasterConfig): Promise<MergerMode> => {
+    this.reads += 1;
+    if (this.unreadable.has(this.reads)) throw new MergeWriterUnreadError(`${config.url}/api/status`, 'HTTP 503');
+    return this.merger;
+  };
+  /** The launcher's push-credential minter: records the attempt it minted for and makes the credential home, as the real minter does. */
+  mint: CredentialMinter = async (_root, input) => { this.minted.push({ key: input.key, epoch: input.epoch }); await mkdir(input.directory, { recursive: true }); };
   wait = (ms: number) => { this.now += ms; };
   bounds() { return { clock: () => this.now, wait: this.wait }; }
   run = (command: string, args: string[]): string => {
@@ -256,7 +292,10 @@ export async function failoverInstalled() {
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', `https://github.com/${repository}.git`], { cwd: root });
   const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository, baseBranch: 'main', githubAppId: 1234 }));
-  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wS' }, coordinatorStatus as typeof fetch);
+  // The install's Herdr workspace is the one the world's panes live in (`w1:pN`): since GY-1441 the
+  // launcher closes only panes in its own workspace, so a scope the world never serves would keep
+  // every failed start's pane, and with it its epoch.
+  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'w1' }, coordinatorStatus as typeof fetch);
   const homes = await temporaryDirectory('soak-homes');
   const opencodeHome = join(homes, 'opencode-a');
   await mkdir(join(opencodeHome, 'opencode'), { recursive: true });
@@ -348,9 +387,14 @@ export const padded = (n: number) => String(n).padStart(3, '0');
  * `blockerEscalateMs`, so the loop reports it to the master once and still clears it when it goes.
  */
 export const blockerPlan = {
-  items: 10, repeating: 7, requestError: 8, blockAfterMs: 5 * minute,
-  clearsAt: { 'github-credential': 150 * minute, 'sandbox-path': 75 * minute, 'control-plane-error': 30 * minute } as Partial<Record<BlockerClass, number>>,
-  classes: { 1: 'github-credential', 2: 'sandbox-path', 3: 'control-plane-error', 4: 'outside-scope-test-failure', 5: 'planned-file-scope', 6: 'needs-decision', 7: 'control-plane-error', 8: 'control-plane-error' } as Record<number, BlockerClass>,
+  items: 13, repeating: 7, requestError: 8, blockAfterMs: 5 * minute,
+  // GY-1567 review: a runtime-exhaustion report holds every worker profile's account until this minute;
+  // item 9 reports later than the rest, so it stands on the spent accounts beside item 10.
+  accountResetAt: 100 * minute, blockAfter: { 9: 14 * minute } as Record<number, number>,
+  clearsAt: { 'github-credential': 150 * minute, 'sandbox-path': 75 * minute, 'control-plane-error': 30 * minute, 'github-outage': 170 * minute } as Partial<Record<BlockerClass, number>>,
+  // GY-1567: items 9-13 stand on their worker's session or GitHub — two of them on spent accounts, two on the same GitHub incident.
+  classes: { 1: 'github-credential', 2: 'sandbox-path', 3: 'control-plane-error', 4: 'outside-scope-test-failure', 5: 'planned-file-scope', 6: 'needs-decision', 7: 'control-plane-error', 8: 'control-plane-error',
+    9: 'runtime-exhaustion', 10: 'runtime-exhaustion', 11: 'runtime-denial', 12: 'github-outage', 13: 'github-outage' } as Record<number, BlockerClass>,
   text: (n: number, branch: string, decision: string | null): string | null => ({
     1: "git push failed: fatal: could not read Username for 'https://github.com': terminal prompts disabled",
     2: `error: unable to append to '.git/logs/refs/remotes/origin/${branch}': Read-only file system`,
@@ -360,6 +404,11 @@ export const blockerPlan = {
     6: `Waiting on decision ${decision}: its approver was never launched`,
     7: 'graphyard complete command failed: connect ECONNREFUSED 127.0.0.1:8787',
     8: 'graphyard complete command failed with Internal error (HTTP 500)',
+    9: "Codex session reached its usage limit mid-verify; the work is committed locally",
+    10: "Worker session's usage limit was reached before the work could be verified; it is committed locally",
+    11: "Cannot push: 'git push -u origin HEAD' and 'gh pr create' were denied by the runtime permission prompt",
+    12: `git push failed: ! [remote rejected] HEAD -> ${branch} (Internal Server Error)`,
+    13: `git push failed: ! [remote rejected] HEAD -> ${branch} (Internal Server Error)`,
   } as Record<number, string>)[n] ?? null,
 };
 export const extraFile = (n: number) => `src/soak/item-${n}-extra.ts`;

@@ -10,21 +10,27 @@ import { exhaustionNoticeLabelWords, exhaustionNoticeMaxLength, exhaustionTailLi
  * command is declined, and the session is then told how to carry on without that command. A
  * runtime's folder-trust dialog is `folder-trust`: the loop never answers it (consent-prompt.ts),
  * it relaunches the session, whose launch records the folder's trust before the runtime starts
- * (GY-1304). Any other prompt is `unknown`, and the loop fails the attempt on it rather than waiting.
+ * (GY-1304). Claude's usage-limit menu is `usage-limit`: the account is spent, the loop never
+ * chooses on it (one choice spends money, which only a person may do) and fails the session over
+ * instead (GY-1566). Any other prompt is `unknown`, and the loop fails the attempt on it rather than waiting.
  */
 export interface RuntimePrompt {
   /**
    * `destructive-command` is a known shape with a safe answer; `folder-trust` is a runtime's folder-trust
-   * dialog, which the loop answers by relaunching; `unknown` is everything else a blocked screen shows.
+   * dialog, which the loop answers by relaunching; `usage-limit` is Claude's menu on a spent account,
+   * which the loop answers by failing the session over; `unknown` is everything else a blocked screen shows.
    */
-  kind: 'destructive-command' | 'folder-trust' | 'unknown';
+  kind: 'destructive-command' | 'folder-trust' | 'usage-limit' | 'unknown';
   /** The prompt's own words, collapsed to one line and bounded, as the record quotes it. */
   text: string;
   /** The keys that choose the non-destructive answer, and that answer's label; null for an unknown prompt. */
   keys: string[] | null; answer: string | null;
+  /** A `usage-limit` menu's exhaustion: the provider's notice above it and the reset time parsed from it. */
+  exhaustion?: ExhaustionSignal;
 }
 export const runtimePromptTextLimit = 400;
-const menuOption = /^\s*(?:[❯>›▶→]\s*)?(\d)[.)]\s+(.+?)\s*$/;
+/** A numbered menu option, inside a dialog's box borders or not. */
+const menuOption = /^[\s│┃║]*(?:[❯>›▶→]\s*)?(\d)[.)]\s+(.+?)\s*[│┃║]?\s*$/;
 const affirmative = /^(?:yes|proceed|continue|allow|run|approve)\b/i, negative = /^(?:no|cancel|deny|decline|reject|abort)\b/i;
 /** The runtime's own words for a prompt whose "yes" cannot be taken back. */
 const runtimeWarning = /\b(?:dangerous|destructive|irreversible|cannot be undone|permanently (?:delete|remove))/i;
@@ -66,11 +72,50 @@ const collapse = (lines: string[]) => {
   return text.length > runtimePromptTextLimit ? `${text.slice(0, runtimePromptTextLimit - 1)}…` : text;
 };
 /**
+ * Claude's usage-limit menu (GY-1566). On a spent account Claude Code prints its limit notice
+ * (`You've hit your weekly limit · resets Oct 10, 10pm (America/Los_Angeles)`) and then asks
+ * `What do you want to do?` — `1. Stop and wait for limit to reset`, `2. Wait here, then continue
+ * automatically at …`, `3. Switch to usage credits` (later `Add funds to continue with usage
+ * credits`) — and the session, blocked rather than stopped, holds its lease for as long as nobody answers. The menu is the runtime's own dialog:
+ * its question directly above, its stop-and-wait choice beside a wait or credits choice, its cursor
+ * on a choice and its key hint below, the last thing on the screen. An agent's prose about a quota,
+ * even one quoting the notice, the question and the choices, has no cursor or key hint, so it is
+ * never read as this menu.
+ */
+const limitMenuQuestion = /^What do you want to do\?$/i;
+const limitMenuStop = /^Stop and wait\b.*\blimit\b/i;
+const limitMenuWait = /^Wait here\b.*\bcontinue automatically\b/i;
+const limitMenuCredits = /\b(?:usage credits|extra usage|add funds)\b/i;
+/** How far above the menu its limit notice may sit: the notice, its hint line, a blank and the question. */
+const limitMenuNoticeLines = 12;
+/** What only the runtime draws around its menu: the selection cursor on a choice, and its key hint below. */
+const limitMenuCursor = /^[\s│┃║]*[❯>›▶→]/, limitMenuHint = /\bEnter to confirm\b|\bEsc to cancel\b/i;
+function usageLimitMenu(above: string[], options: { number: string; label: string }[], drawn: string[], below: string[], now: number): ExhaustionSignal | null {
+  const frameless = (entry: string) => entry.replace(/^[^A-Za-z0-9]+/, '').replace(/[│┃|]\s*$/, '').trim().replace(/\s{2,}/g, ' ');
+  if (below.length > 2 || !options.some(option => limitMenuStop.test(option.label))) return null;
+  // An agent quoting the question, its choices and even the notice is not the dialog: the runtime's own cursor and key hint must be there.
+  if (!drawn.some(entry => limitMenuCursor.test(entry)) || !below.some(entry => limitMenuHint.test(entry))) return null;
+  if (!options.some(option => limitMenuWait.test(option.label) || limitMenuCredits.test(option.label))) return null;
+  const lines = above.slice(-limitMenuNoticeLines).map(frameless).filter(Boolean);
+  if (!limitMenuQuestion.test(lines.at(-1) ?? '')) return null;
+  // The menu vouches for the notice above it, so the notice need not lead its line here.
+  const claude = providerLimitNotices.claude;
+  const noticeAt = (line: string) => Math.min(...claude.map(pattern => pattern.exec(line)?.index ?? Infinity));
+  const found = [...lines].reverse().find(line => line.length <= exhaustionNoticeMaxLength && noticeAt(line) < Infinity);
+  // The notice as the provider wrote it, without the label the runtime drew in front of it.
+  const notice = found ? found.slice(noticeAt(found)) : undefined;
+  // The wait choice names the same reset ("continue automatically at Oct 10, 10pm") when the notice does not.
+  const waitChoice = options.find(option => limitMenuWait.test(option.label))?.label.replace(/^.*?\bcontinue automatically\b\s*(?:at|on)?\s*/i, 'resets ');
+  const resetsAt = (notice ? parseResetTime(notice, now) : null) ?? (waitChoice ? parseResetTime(waitChoice, now) : null);
+  return { reason: (notice ?? `Claude's usage-limit menu: ${lines.at(-1)}`).slice(0, 300), resetsAt };
+}
+
+/**
  * The prompt a blocked session's screen shows. Only the bottom of the screen is read — the last
  * menu on it and the lines just above that menu — so a command the session ran earlier and that
  * scrolled up cannot make the current prompt look destructive. Null when there is no screen.
  */
-export function classifyRuntimePrompt(screen: string | null | undefined): RuntimePrompt | null {
+export function classifyRuntimePrompt(screen: string | null | undefined, now = Date.now()): RuntimePrompt | null {
   if (screen === null || screen === undefined) return null;
   const lines = screen.split('\n').map(entry => entry.replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').trimEnd());
   const filled = lines.map((entry, index) => ({ entry, index })).filter(({ entry }) => entry.trim());
@@ -86,6 +131,10 @@ export function classifyRuntimePrompt(screen: string | null | undefined): Runtim
     const options = filled.slice(start, end + 1).map(({ entry }) => { const [, number, label] = menuOption.exec(entry)!; return { number, label }; });
     const question = filled.slice(Math.max(0, start - 8), start).map(({ entry }) => entry);
     const text = collapse([...question, ...options.map(option => `${option.number}. ${option.label}`)]);
+    // Claude's usage-limit menu is never answered: its choices wait on the spent account or spend money.
+    const entries = (from: number, to?: number) => filled.slice(from, to).map(({ entry }) => entry);
+    const exhaustion = usageLimitMenu(entries(0, start), options, entries(start, end + 1), entries(end + 1), now);
+    if (exhaustion) return { kind: 'usage-limit', text, keys: null, answer: null, exhaustion };
     const yes = options.find(option => affirmative.test(option.label)), no = options.find(option => negative.test(option.label));
     if (yes && no && destructivePrompt(question)) return { kind: 'destructive-command', text, keys: [no.number], answer: `${no.number}. ${no.label}` };
     return { kind: 'unknown', text, keys: null, answer: null };
@@ -153,6 +202,9 @@ const severityLabel = /^(?:\[[^\]]*\]\s*)?(?:api\s+)?error(?:\s+code)?\s*[:#]?\s
  * compact wait (agy's `Resets in 1h31m31s`) is spaced into units the reset parser reads.
  */
 export function detectRuntimeExhaustion(output: string, runtime: string | null | undefined, now: number): ExhaustionSignal | null {
+  // A session blocked on Claude's usage-limit menu is spent, whatever stands around the notice (GY-1566).
+  const menu = classifyRuntimePrompt(output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n').slice(-exhaustionTailLines).join('\n'), now);
+  if (menu?.kind === 'usage-limit' && menu.exhaustion) return menu.exhaustion;
   const notices = runtimeLimitNotices(runtime);
   const lines = output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n').map(line => line.replace(/[│┃|]\s*$/, '').trim().replace(/\s{2,}/g, ' ')).filter(Boolean).slice(-exhaustionTailLines);
   for (let index = lines.length - 1; index >= 0; index--) {

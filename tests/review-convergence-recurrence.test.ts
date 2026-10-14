@@ -13,6 +13,7 @@ import { openReviewConflict, reconcileReviewConflict } from '../src/model/review
 import { cycleFaults, emptyDaemonState, mergeBaseDismissalInMotion, mergeBaseDismissalWaitBoundMs } from '../src/master-daemon.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-03 verdict, window and fault instants are replayed as explicit clocks to reconcileAutoDispatch, reconcileReviewConflict and launchReview; new Date() only stamps items and mint expiry.
 
 // GY-1140: Recurring review-convergence faults: 3 in 24 hours (threshold 3).
 //

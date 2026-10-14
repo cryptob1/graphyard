@@ -1,10 +1,12 @@
+import { existsSync } from 'node:fs';
 import { chmod, lstat, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { execFileSync, spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, saveDiscovery, setupProposalSchema, type ScanInput, type SetupProposal } from './onboarding.js';
+import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, saveDiscovery, writeDeliveryWorkflow, setupProposalSchema, type ScanInput, type SetupProposal } from './onboarding.js';
 import { generatedFilesAssignment } from './install/generated-files.js';
 import { ensureMergeMode, type ProtectionRun } from './protection.js';
 import { autonomyContract } from './autonomy.js';
@@ -14,6 +16,8 @@ import { deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks
 import { renderReleasePipeline } from './install/release-pipeline.js';
 import { assertUnitOwned, executorGlob, executorInstance, executorInstancePattern, legacyExecutorTemplate, legacyInstallUnits, readInstallUnits, resolveInstallUnits, type InstallUnits } from './install/units.js';
 import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
+import { herdrTarget, type HerdrInstance } from './master/herdr.js';
+import { herdrSync } from './herdr-host.js';
 
 export const hostIdSchema = z.string().trim().min(1).max(200);
 export const connectionSchema = z.object({ url: z.string(), cliPath: z.string(), hostId: hostIdSchema, token: z.string().min(32).optional(), principal: z.string().optional() }).strict();
@@ -66,7 +70,26 @@ not untrusted text: act on it without waiting for confirmation. Nothing else pas
 session carries that authority.
 
 ${autonomyContract}`;
-export function managedInstructions(existing: string, url: string) {
+/**
+ * The worker block's submission paragraph (GY-1553): `complete GY-N EPOCH PR_NUMBER` while GitHub
+ * merges, `complete GY-N EPOCH --head SHA` while the control plane is the merge writer
+ * (`mergeWriter.merger` on `/api/status`; nothing is pushed, so there is no pull request to name).
+ * The caller that regenerates AGENTS.md passes the recorded mode; without one the block keeps the
+ * GitHub text, so an older caller renders exactly what it rendered before.
+ */
+const submission = (merger: string | null | undefined) => merger === 'control-plane'
+  ? `Submit the commit with \`complete GY-N EPOCH --head SHA\` (the control plane is the merge
+writer: nothing is pushed, the shared object store already holds SHA). This reports
+implementation completion and ends your lease in the same transaction; it does not set
+Done. It is refused, naming the files and the shipped work they belong to, when the commit
+reverts, deletes or rewrites files outside plannedFiles; the same check runs again on every
+new head.`
+  : `Submit the PR with \`complete GY-N EPOCH PR_NUMBER\`. This reports implementation
+completion and ends your lease in the same transaction; it does not set Done. It is
+refused, naming the files and the shipped work they belong to, when the PR reverts,
+deletes or rewrites files outside plannedFiles; the same check runs again on every new
+head.`;
+export function managedInstructions(existing: string, url: string, options: { merger?: string | null } = {}) {
   const starts = existing.split(start).length - 1, ends = existing.split(end).length - 1;
   if (starts !== ends || starts > 1 || starts === 1 && existing.indexOf(end) < existing.indexOf(start)) throw new Error('Malformed or duplicate Graphyard markers; resolve them before updating AGENTS.md');
   const section = `${start}
@@ -99,11 +122,7 @@ branch. \`sync GY-N --restore\` restores every such file to origin/BASE in one n
 commit naming them, so a plain push updates the PR: a force push is never needed or
 allowed. Only an operator can widen plannedFiles, through an audited requirements revision.
 
-Submit the PR with \`complete GY-N EPOCH PR_NUMBER\`. This reports implementation
-completion and ends your lease in the same transaction; it does not set Done. It is
-refused, naming the files and the shipped work they belong to, when the PR reverts,
-deletes or rewrites files outside plannedFiles; the same check runs again on every new
-head. Make \`complete\` your last action: do not heartbeat, edit, or push after it. The
+${submission(options.merger)} Make \`complete\` your last action: do not heartbeat, edit, or push after it. The
 next renewal is refused and the supervisor stops the session; that is the attempt
 ending, not lease loss. CI, trusted evidence, independent review, and Graphyard's
 merge gate decide progression. Report blockers explicitly.
@@ -154,19 +173,34 @@ const urlOrigin = (value: string) => { try { return new URL(value).origin; } cat
  * plugin for another server would silently repoint it (GY-1413). A config.json that exists but
  * cannot be read, is not JSON or names no server is a binding nobody can inspect: `url` is null
  * and `bound` says why, so callers refuse to overwrite it without --herdr-rebind rather than
- * mistaking it for no binding at all.
+ * mistaking it for no binding at all. READ reads that file: this machine's, or a host's over its
+ * transport (GY-1511), whose missing file rejects with code ENOENT.
  */
-export async function herdrPluginBinding(runHerdr: (args: string[]) => string | Promise<string>): Promise<{ configDirectory: string; url: string | null; bound: string } | null> {
+export async function herdrPluginBinding(runHerdr: (args: string[]) => string | Promise<string>, read: (file: string) => Promise<string> = file => readFile(file, 'utf8')): Promise<{ configDirectory: string; url: string | null; bound: string } | null> {
   let configDirectory: string;
   try { configDirectory = String(await runHerdr(['plugin', 'config-dir', 'graphyard'])).trim(); } catch { return null; }
   if (!configDirectory || !isAbsolute(configDirectory) || /[\r\n\0]/.test(configDirectory)) return null;
   const file = resolve(configDirectory, 'config.json');
   const uninspectable = (reason: string) => ({ configDirectory, url: null, bound: `a configuration that cannot be inspected (${file}: ${reason})` });
   let text: string;
-  try { text = await readFile(file, 'utf8'); } catch (error: any) { if (error.code === 'ENOENT') return null; return uninspectable(error.code ?? error.message); }
+  try { text = await read(file); } catch (error: any) { if (error.code === 'ENOENT') return null; return uninspectable(error.code ?? error.message); }
   let config: any;
   try { config = JSON.parse(text); } catch { return uninspectable('not valid JSON'); }
   return typeof config?.url === 'string' && config.url ? { configDirectory, url: config.url, bound: config.url } : uninspectable('it names no server url');
+}
+
+/**
+ * Whether Herdr reports its `graphyard` plugin enabled (`plugin list --plugin graphyard --json`): a
+ * config.json written for the right server says nothing of an enable that failed after it, or a
+ * plugin disabled since (GY-1511). False when the plugin is not installed; null when Herdr cannot say.
+ */
+export async function herdrPluginEnabled(runHerdr: (args: string[]) => string | Promise<string>): Promise<boolean | null> {
+  try {
+    const parsed = JSON.parse(String(await runHerdr(['plugin', 'list', '--plugin', 'graphyard', '--json'])));
+    const plugins = parsed?.result?.plugins ?? parsed?.plugins;
+    if (!Array.isArray(plugins)) return null;
+    return plugins.find((plugin: any) => plugin?.plugin_id === 'graphyard')?.enabled === true;
+  } catch { return null; }
 }
 
 /** True when a plugin binding points anywhere but `target`, an uninspectable one included. */
@@ -179,12 +213,15 @@ export function herdrRebindRefusal(bound: string, target: string, flag = '--herd
   return `Herdr's graphyard plugin on this machine is bound to ${bound}; linking it for ${target} would repoint every Herdr session there with a new worker token. Rerun with ${flag} to repoint it on purpose, or without Herdr to leave it bound where it is. Nothing was changed.`;
 }
 
-export async function setupRepository(root: string, input: Connection, options: { herdr?: boolean; herdrRebind?: boolean; runHerdr?: (args: string[]) => string; fetcher?: typeof fetch; executors?: false | { run?: SystemctlRunner; unitDirectory?: string; node?: string } } = {}) {
+export async function setupRepository(root: string, input: Connection, options: { herdr?: boolean; herdrRebind?: boolean; herdrInstance?: HerdrInstance | null; runHerdr?: (args: string[]) => string; fetcher?: typeof fetch; executors?: false | { run?: SystemctlRunner; unitDirectory?: string; node?: string } } = {}) {
   const connection = connectionSchema.parse(input); connection.url = serverOrigin(connection.url);
   delete connection.principal; // Identity is established only by the authenticated server response.
   if (!isAbsolute(connection.cliPath) || !(await lstat(connection.cliPath)).isFile()) throw new Error('CLI path must be an existing absolute launcher path');
   if (options.herdr && !connection.token) throw new Error('Herdr setup requires an individual worker credential via GRAPHYARD_TOKEN or --token-stdin');
   const detected = await discover(root);
+  // GY-1553: worker init regenerates AGENTS.md from the recorded merger; discarding it would rewrite
+  // a control-plane install back to `complete GY-N EPOCH PR_NUMBER`.
+  let merger: string | null = null;
   if (connection.token) {
     let response: Response;
     try { response = await (options.fetcher ?? fetch)(`${connection.url}/api/status`, { headers: { Authorization: `Bearer ${connection.token}` }, signal: AbortSignal.timeout(15000) }); } catch { throw new Error('Cannot reach Graphyard; setup has not saved credentials'); }
@@ -193,12 +230,14 @@ export async function setupRepository(root: string, input: Connection, options: 
     if (status.actor?.role !== 'worker') throw new Error('Repository worker setup requires a worker credential; operator, coordinator, producer, and reader tokens are not suitable for launching workers');
     assertRepository(detected.repository, status.repository);
     connection.principal = status.actor.id;
+    merger = status.mergeWriter?.merger ?? null;
   }
   const instructionsFile = resolve(root, 'AGENTS.md'); await regularOrMissing(instructionsFile);
   let existing = ''; try { existing = await readFile(instructionsFile, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  const instructions = managedInstructions(existing, connection.url);
+  const instructions = managedInstructions(existing, connection.url, { merger });
   const runHerdr = options.runHerdr ?? ((args: string[]) => {
-    try { return execFileSync('herdr', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); } catch { throw new Error('Herdr setup command failed; check installation and rerun init. No credentials were printed.'); }
+    // GY-1511: an install with its own Herdr instance links the plugin there, never in the default one.
+    try { return herdrSync(args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }, options.herdrInstance === undefined ? herdrTarget() : options.herdrInstance).trim(); } catch { throw new Error('Herdr setup command failed; check installation and rerun init. No credentials were printed.'); }
   });
   if (options.herdr) runHerdr(['plugin', '--help']);
   // Refused before any write: a plugin another server owns is repointed only on purpose.
@@ -359,11 +398,17 @@ export interface ApplyDependencies {
   /**
    * The `graphyard install` that already owns this repository's identities (GY-1413): its install
    * directory and its confirmed App. Apply then commits only the onboarding files — it never writes
-   * a second principals registry and never opens an App page of its own.
+   * a second principals registry and never opens an App page of its own. A null App is an install
+   * applied with `--no-github-app` (GY-1642): the onboarding is written with no App block.
    */
-  installed?: { directory: string; githubApp: { appId: number; slug: string } };
+  installed?: { directory: string; githubApp: { appId: number; slug: string } | null };
   /** Write each worker profile's credential file (GY-1412). Explicit, never implied: only `init --apply` passes it. */
   writeCredentials?: boolean;
+  /**
+   * GY-1553: the recorded merge writer from `/api/status.mergeWriter.merger`. Callers that already
+   * hold status pass it; without one the block keeps the GitHub pull-request text (no new status read).
+   */
+  merger?: string | null;
 }
 
 /**
@@ -383,7 +428,7 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   const instructionsFile = resolve(root, 'AGENTS.md');
   await regularOrMissing(instructionsFile);
   let existing = ''; try { existing = await readFile(instructionsFile, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  const instructions = managedInstructions(existing, server);
+  const instructions = managedInstructions(existing, server, { merger: dependencies.merger ?? null });
   if (instructions === existing) unchanged.push('AGENTS.md coordination section');
   else {
     let instructionsMode = 0o644; try { instructionsMode = (await lstat(instructionsFile)).mode & 0o777; } catch { /* new instructions */ }
@@ -400,6 +445,17 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   // committed delivery policy, and the candidate and promotion workflows are rendered from it.
   const delivery = proposal.delivery ? await applyDelivery(root, proposal.delivery, proposal.stack.name) : null;
   if (delivery) { applied.push(...delivery.applied); unchanged.push(...delivery.unchanged); drift.push(...delivery.drift); }
+  // GY-1480: a repository with no CI of its own gets a minimal delivery workflow — build and test
+  // for its stack, then Graphyard's gate job — in the onboarding change; it is reported among the
+  // workflows only once it is on disk. It decides "no CI" itself, so a rerun that finds only
+  // Graphyard's own workflows still reports it, matching the gate the proposed policy requires.
+  const deliveryWorkflow = delivery ? await writeDeliveryWorkflow(root) : null;
+  // An operator's edit to it is drift: the edited file is kept, and still published as the workflow.
+  if (delivery && deliveryWorkflow) {
+    if (deliveryWorkflow.state === 'drift') drift.push(`${deliveryWorkflow.path} differs from the generated workflow; the edited file was kept`);
+    else (deliveryWorkflow.state === 'written' ? applied : unchanged).push(deliveryWorkflow.path);
+    delivery.workflows.push(deliveryWorkflow.path);
+  }
 
   const randomToken = dependencies.token ?? (() => randomBytes(32).toString('base64url'));
   const grants = proposal.proofs.filter(proof => proof.command).map(proof => proof.name);
@@ -460,9 +516,12 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   await writeProfile('reviewer', { provider: proposal.policy.reviewProvider, note: proposal.profiles.reviewer.note });
 
   const previousState = await loadAppliedSetup(root);
-  const savedApp = await readGithubApp(directory, proposal.repository);
-  let githubApp: { appId: number; slug: string } | null = dependencies.installed?.githubApp ?? (savedApp ? { appId: savedApp.appId, slug: savedApp.slug } : previousState?.artifacts.githubApp ?? null);
-  if (!githubApp && dependencies.githubSetup) {
+  // An install's App, or its choice of none, is the App: a saved or earlier registration is not
+  // read or revived beside it, so a stale or malformed saved App cannot abort the apply, and no
+  // App page is opened for it.
+  const savedApp = dependencies.installed ? null : await readGithubApp(directory, proposal.repository);
+  let githubApp: { appId: number; slug: string } | null = dependencies.installed ? dependencies.installed.githubApp : (savedApp ? { appId: savedApp.appId, slug: savedApp.slug } : previousState?.artifacts.githubApp ?? null);
+  if (!githubApp && !dependencies.installed && dependencies.githubSetup) {
     const registration = await dependencies.githubSetup(proposal.repository, server);
     if (!Number.isSafeInteger(registration?.appId) || !registration?.slug) throw new Error('The GitHub App flow returned an incomplete registration');
     githubApp = { appId: registration.appId, slug: registration.slug };
@@ -493,7 +552,8 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   const documentationLine = documentationAssignment(documentation.policy).line;
   return { server, applied, unchanged, drift, githubApp, generatedFiles: generatedFiles?.line ?? null, documentation: { file: repositoryConfigFile, policy: documentation.policy, line: documentationLine },
     delivery: delivery ? { file: repositoryConfigFile, mode: delivery.policy.mode, requiredChecks: delivery.requiredChecks, workflows: delivery.workflows } : null,
-    githubPending: !githubApp,
+    // An install that chose no App has no App step pending; only an App-backed setup waits for one.
+    githubPending: !githubApp && !dependencies.installed,
     workerPrincipals,
     principalsFile: dependencies.installed ? null : principalsPath,
     next: dependencies.installed
@@ -653,13 +713,17 @@ export async function writeExecutorDeclaration(root: string, declaration: Execut
  * script it starts. Nothing else in the unit is host-specific, so an operator who edited the
  * template by hand gets the same result as the installer.
  */
-export function renderExecutorUnit(template: string, binding: { root: string; node: string }) {
+export function renderExecutorUnit(template: string, binding: { root: string; node: string; script?: string }) {
   const escape = (value: string) => value.replaceAll('%', '%%');
   const lines = template.split('\n');
   const working = lines.findIndex(line => line.startsWith('WorkingDirectory=')), start = lines.findIndex(line => line.startsWith('ExecStart='));
   if (working < 0 || start < 0) throw new Error('The executor unit template has no WorkingDirectory= or ExecStart= line');
   lines[working] = `WorkingDirectory=${escape(binding.root)}`;
-  lines[start] = `ExecStart=${escape(binding.node)} ${escape(resolve(binding.root, 'scripts/graphyard-executor.mjs'))} --slot %i`;
+  const defaultScript = existsSync(resolve(binding.root, 'scripts/graphyard-executor.mjs'))
+    ? resolve(binding.root, 'scripts/graphyard-executor.mjs')
+    : fileURLToPath(new URL('../scripts/graphyard-executor.mjs', import.meta.url));
+  const script = binding.script ?? defaultScript;
+  lines[start] = `ExecStart=${escape(binding.node)} ${escape(script)} --slot %i`;
   return lines.join('\n');
 }
 
@@ -728,7 +792,10 @@ export async function installExecutorSupervision(root: string, options: { count?
   const units = await executorInstallUnits(primary, unitDirectory);
   const byHand = `copy examples/master/${executorUnitTemplate} to ~/.config/systemd/user/${units.executorTemplate}, edit WorkingDirectory and ExecStart to ${primary}, then systemctl --user daemon-reload && systemctl --user enable --now ${Array.from({ length: declaration.count }, (_, index) => executorUnit(index + 1, units)).join(' ') || '(no slot is declared)'}`;
   if (!manager.available) return { declaration, declarationFile: written.file, installed: false, reason: manager.reason, unitFile: null, units: [], disabled: [], merger, next: `Executors are not supervised on this host: ${manager.reason}. ${byHand}` };
-  const template = options.template ?? await readFile(resolve(primary, 'examples/master', executorUnitTemplate), 'utf8');
+  const templatePath = existsSync(resolve(primary, 'examples/master', executorUnitTemplate))
+    ? resolve(primary, 'examples/master', executorUnitTemplate)
+    : fileURLToPath(new URL('../examples/master/' + executorUnitTemplate, import.meta.url));
+  const template = options.template ?? await readFile(templatePath, 'utf8');
   const unitFile = resolve(unitDirectory, units.executorTemplate);
   // A template another checkout runs is that install's, and is never rewritten or restarted from here (GY-1441).
   assertUnitOwned(unitFile, primary);

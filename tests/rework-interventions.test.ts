@@ -11,6 +11,7 @@ import { decisionRace } from '../src/server/decision-ledger.js';
 import { detectPatterns, foldInterventions, readInterventionLedger, type InterventionLedgerRow } from '../src/interventions.js';
 import { routineReworkGround } from '../src/rework-grounds.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): 2026-10-05 only bounds recorded requestedAt strings and 2026-10-12 is the explicit `now` handed to detectPatterns; new Date() clocks the DB-backed fold whose rows the engine stamped itself.
 
 // GY-1386: 496 rework interventions at the build stage in seven days. Every listed instance is
 // replayed from its own ledger rows (tests/fixtures/gy-1386-rework-instances.json: each instance's

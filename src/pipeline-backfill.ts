@@ -2,7 +2,7 @@ import type { Store } from './store.js';
 import { save } from './store.js';
 import { demand, type Work } from './model.js';
 import { flowLimits } from './flow-analytics.js';
-import { ledgerEntry, ledgerReplayColumns, mergeTimeline, pipelineTimeline, timelineReplay, type TimelineBackfill } from './pipeline-speed.js';
+import { ledgerEntry, ledgerReplayColumns, mergeTimeline, pipelineTimeline, timelineReplay, type PipelineTimeline, type TimelineBackfill } from './pipeline-speed.js';
 
 /**
  * Populating the per-item timeline for the items that predate it.
@@ -173,3 +173,13 @@ export async function catchUpPipelineTimelines(store: Store, options: { items?: 
 
 /** Test seam: forget what this process has done, so a fresh catch-up runs immediately. */
 export function resetPipelineBackfillState() { state.lastRun = null; state.lastError = null; state.settledUntil = 0; state.backfilled = 0; state.running = false; state.failed.clear(); }
+
+/**
+ * Every item's stored timeline, read on its own (GY-1489): the coordination view `master status`
+ * reads drops `pipeline` from every document, so the speed report attaches these by id. An
+ * unfinished reconstruction's `resume` is left out; it is the replay's, not the report's.
+ */
+export async function readPipelineTimelines(store: Store): Promise<{ id: string; key: string; pipeline: PipelineTimeline }[]> {
+  return (await store.pool.query(`SELECT id::text AS id, document->>'key' AS key, (document->'pipeline') #- '{backfill,resume}' AS pipeline
+    FROM work_items WHERE jsonb_typeof(document->'pipeline') = 'object' ORDER BY number`)).rows;
+}
