@@ -1121,7 +1121,12 @@ function observeUnit(run: (command: string, args: string[]) => string, unit: str
  * WorkingDirectory that is not the configured coordinator checkout on a durable path, and an
  * installed unit that runs a different loop unless `replace` was passed explicitly.
  */
-export async function installLoopSupervisor(input: LoopUnitInput, host: LoopSupervisorHost = {}, options: LoopSupervisorInstallOptions = {}): Promise<LoopSupervisorInstallation> {
+export async function installLoopSupervisor(given: LoopUnitInput, host: LoopSupervisorHost = {}, options: LoopSupervisorInstallOptions = {}): Promise<LoopSupervisorInstallation> {
+  // GY-1790: a caller that does not know the held-cli pin (`master init` re-run while a snapshot
+  // restart's pin stands) reads it, so the unit keeps starting the launcher held in the snapshot —
+  // never a launcher the checkout may hold dirty — until the loop's own alignment lifts the pin.
+  // Read lazily: the pin module is the daemon's, loaded long before any loop exists.
+  const input = given.heldLauncher === undefined ? { ...given, heldLauncher: (await import('./daemon/held-cli.js')).heldLauncherOf(given.root) } : given;
   const support = supervisorSupport(host);
   const unitDirectory = loopUnitDirectory(host);
   const home = host.home ?? ((host.env ?? process.env).HOME?.trim() || homedir());
@@ -1205,14 +1210,20 @@ export async function installLoopSupervisor(input: LoopUnitInput, host: LoopSupe
  * restart — so the next process starts under the window `loopWatchdogSeconds` computes. A unit
  * that is not installed is left to `master init`; one that already matches is not touched.
  */
-export async function alignLoopUnit(input: LoopUnitInput, host: LoopSupervisorHost = {}): Promise<{ wrote: LoopSupervisorInstallation['wrote']; reason: string | null; unitPath: string }> {
+export async function alignLoopUnit(input: LoopUnitInput, host: LoopSupervisorHost = {}): Promise<{ wrote: LoopSupervisorInstallation['wrote']; reason: string | null; unitPath: string; launcherStale?: boolean }> {
   const unitPath = join(loopUnitDirectory(host), input.unit ?? loopUnitOf(input.root, loopUnitDirectory(host), host.home));
   let existing: string | null = null;
   try { existing = await readFile(unitPath, 'utf8'); } catch { existing = null; }
   if (existing === null) return { wrote: 'none', reason: `${unitPath} is not installed; graphyard master init installs it`, unitPath };
-  if (existing === loopUnitText(input)) return { wrote: 'unchanged', reason: null, unitPath };
+  const wanted = loopUnitText(input);
+  if (existing === wanted) return { wrote: 'unchanged', reason: null, unitPath };
   const installed = await installLoopSupervisor(input, host, { restart: false });
-  return { wrote: installed.wrote, reason: installed.refused ?? installed.reason, unitPath };
+  // GY-1790: a refused rewrite says whether the installed unit still starts a launcher other than
+  // the one it must — the checkout's under a snapshot's pin, a snapshot's once the pin is lifted —
+  // which withholds the restart that would go through it; a refusal over any other setting does not.
+  const home = host.home ?? ((host.env ?? process.env).HOME?.trim() || homedir());
+  return { wrote: installed.wrote, reason: installed.refused ?? installed.reason, unitPath,
+    ...(installed.wrote === 'refused' ? { launcherStale: unitSetting(existing, 'ExecStart', home) !== unitSetting(wanted, 'ExecStart', home) } : {}) };
 }
 
 /** The same facts, observed rather than installed: what `master status` reports about supervision. */

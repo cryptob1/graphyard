@@ -834,9 +834,11 @@ export async function installExecutorSupervision(root: string, options: { count?
   assertUnitOwned(unitFile, primary);
   // GY-1790: while the CLI pin stands a slot starts the launcher held in the snapshot, never an
   // entry the checkout may hold dirty; a reinstall keeps that binding until the pin lifts. The
-  // caller that knows the pin hands the script in (`heldScript`), so this module stays out of the
-  // daemon's module graph.
-  const held = options.heldScript ? { script: options.heldScript, checkoutRoot: primary } : {};
+  // caller that knows the pin hands the script in (`heldScript`); one that does not (`graphyard
+  // init` re-run on a coordinator host) reads it here, lazily, so this module stays out of the
+  // daemon's module graph and a re-run never points the slots back at the checkout's entry.
+  const heldScript = options.heldScript !== undefined ? options.heldScript : (await import('./daemon/held-cli.js')).heldExecutorEntryOf(primary);
+  const held = heldScript ? { script: heldScript, checkoutRoot: primary } : {};
   const rendered = renderExecutorUnit(template, { root: primary, node: options.node ?? process.execPath, ...held });
   let current: string | null = null;
   try { current = await readFile(unitFile, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }

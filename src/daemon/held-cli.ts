@@ -76,6 +76,14 @@ export async function holdCliAt(root: string, run: ChildRun, commit: string | nu
  */
 export const heldLauncherOf = (root: string, held = readHeldCli(root)): string | null =>
   held ? join(heldCliSnapshotAt(root, held), 'bin', 'graphyard.mjs') : null;
+/**
+ * GY-1790: the entry a supervised executor slot starts while the pin stands — the held snapshot's
+ * own scripts/graphyard-executor.mjs, the unit handing it the checkout as it hands the launcher —
+ * so an entry the checkout holds dirty never boots a slot. Null when no pin stands: the checkout's.
+ * The one definition the restart and an executor reinstall (`installExecutorSupervision`) share.
+ */
+export const heldExecutorEntryOf = (root: string, held = readHeldCli(root)): string | null =>
+  held ? join(heldCliSnapshotAt(root, held), 'scripts', 'graphyard-executor.mjs') : null;
 
 /**
  * GY-1773: the commit of the held snapshot this process's modules were loaded from — the launcher

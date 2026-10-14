@@ -796,6 +796,7 @@
     "tests/soak-shadow-gate.test.ts": 5943,
     "tests/soak-silent-exhaustion.test.ts": 2500,
     "tests/soak-slow-loop.test.ts": 800,
+    "tests/soak-snapshot-launcher.test.ts": 60000,
     "tests/soak-stale-close.test.ts": 2259,
     "tests/soak-stalled-gate-in-motion.test.ts": 78225,
     "tests/soak-stalled-gate-waits.test.ts": 45406,

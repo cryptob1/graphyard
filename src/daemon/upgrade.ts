@@ -18,7 +18,7 @@ import { promotionHolds, promotionWait } from '../master/release-lag.js';
 import { storeAction, touchStanding, message, type DaemonState, type UpgradeStallCause } from './state.js';
 import { detailChanged } from './decisions.js';
 import { checkoutState, unquotePath, type CheckoutState } from './checkout-state.js';
-import { heldCliSnapshotAt, heldCliSnapshots, holdCliAt, launcherFiles, sameCommit } from './held-cli.js';
+import { heldCliSnapshots, heldExecutorEntryOf, holdCliAt, sameCommit } from './held-cli.js';
 import { restartEndedBySupervisorStop } from './loop-supervisor.js';
 
 /**
@@ -50,7 +50,7 @@ const listedPaths = (out: string): string[] => out.split('\n').map(path => unquo
 
 // The held-cli snapshot pin (GY-1585/GY-1773/GY-1790) and the loop's own supervisor unit (GY-916) are
 // modules of their own; this path re-exports them, so every existing import keeps working.
-export { heldCliPointer, heldCliSnapshotAt, readHeldCli, holdCliAt, heldLauncherOf, loadedHeldSnapshot, leftBehindCheckoutAttention } from './held-cli.js';
+export { heldCliPointer, heldCliSnapshotAt, readHeldCli, holdCliAt, heldLauncherOf, heldExecutorEntryOf, loadedHeldSnapshot, leftBehindCheckoutAttention } from './held-cli.js';
 export { loopUnitPattern, detectLoopSupervisorUnit, restartEndedBySupervisorStop, supervisorStopGraceMs, awaitSupervisorRestart, alignRunningLoopUnit } from './loop-supervisor.js';
 
 export { checkoutState, type CheckoutState };
@@ -96,9 +96,11 @@ export interface SelfUpgradeDeps {
   restartSelf?: () => Promise<void>;
   /**
    * Rewrites the loop's supervisor unit when it no longer matches the running configuration
-   * (`alignLoopUnit`), before the loop re-executes itself through it (GY-916).
+   * (`alignLoopUnit`), before the loop re-executes itself through it (GY-916). `launcherStale`
+   * (GY-1790): a refused rewrite left the unit's ExecStart on a launcher other than the one it
+   * must start now — the checkout's while a snapshot's pin stands, a snapshot's once it lifts.
    */
-  alignUnit?: () => Promise<{ wrote: string; reason: string | null }>;
+  alignUnit?: () => Promise<{ wrote: string; reason: string | null; launcherStale?: boolean }>;
   /** Pins the CLI the checkout's launcher runs to the served release while a restart is held, null lifts it (GY-1585); `holdCliAt` on `root` by default. */
   holdCli?: (commit: string | null) => Promise<void>;
   /**
@@ -200,10 +202,10 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
    * rewritten, so the process the restart starts runs under the window the configuration needs.
    * A rewrite is a done action; a refusal is recorded once per distinct reason, never per pass.
    */
-  const alignUnit = async (): Promise<boolean> => {
-    if (!deps.alignUnit) return true;
+  const alignUnitRecorded = async (): Promise<{ wrote: string; reason: string | null; launcherStale?: boolean }> => {
+    if (!deps.alignUnit) return { wrote: 'none', reason: null };
     const unitKey = 'upgrade:unit';
-    const aligned = await deps.alignUnit().catch(error => ({ wrote: 'refused', reason: message(error) }));
+    const aligned = await deps.alignUnit().catch(error => ({ wrote: 'refused', reason: message(error), launcherStale: true }));
     if (aligned.wrote === 'updated' || aligned.wrote === 'created') {
       storeAction(state, unitKey, { kind: 'config', work: null, principal: null, state: 'done', detail: `The loop's supervisor unit no longer matched the running configuration and was rewritten (${aligned.wrote}); the next start runs the loop under it`, attempts: (state.actions[unitKey]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
       await persist();
@@ -213,9 +215,27 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
         storeAction(state, unitKey, { kind: 'config', work: null, principal: null, state: 'failed', detail, attempts: (state.actions[unitKey]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
         await persist();
       }
-      return false;
     }
-    return true;
+    return aligned;
+  };
+  const alignUnit = async (): Promise<boolean> => (await alignUnitRecorded()).wrote !== 'refused';
+  /**
+   * GY-1790: the unit the restart re-executes the loop through, pointed at the launcher it must
+   * start before the cursor records the restart as made — the snapshot's while a snapshot restart's
+   * pin stands, the checkout's once the pin is lifted — and withheld while it is not: a rewrite
+   * refused with the ExecStart still on the other launcher would start the checkout's launcher,
+   * dirty or not, under the snapshot's pin, or a snapshot's launcher after the pin is gone. The
+   * restart then stays owed on the cursor under `snapshot-failed` (upgrade:unit names why) and the
+   * next pass retries the rewrite. A refusal that leaves the launcher as it must be (a drifted
+   * watchdog window on a unit that cannot be rewritten) is recorded and holds nothing, as GY-916
+   * had it. A call that throws is taken for a stale launcher: what the unit names is unknown.
+   */
+  const pointLoopUnit = async (to: string, onto: 'snapshot' | 'checkout'): Promise<SelfUpgradeOutcome | null> => {
+    const aligned = await alignUnitRecorded();
+    if (aligned.wrote !== 'refused' || !aligned.launcherStale) return null;
+    return failed(onto === 'snapshot'
+      ? `the held snapshot of ${shortCommit(to)} stands and the launcher is pinned to it, but the loop's supervisor unit could not be pointed at the snapshot's launcher (upgrade:unit names why); the restart stays owed and is retried next cycle`
+      : `the held snapshot pin is lifted for the restart onto ${shortCommit(to)}, but the loop's supervisor unit still names the snapshot's launcher and could not be returned to the checkout's (upgrade:unit names why); the restart stays owed and is retried next cycle`, 'snapshot-failed');
   };
   /**
    * The release production is observed serving, when it does not contain `commit` yet (GY-1585):
@@ -281,8 +301,10 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       // they execute changed, so their restart is not owed and a held claim cannot stall this.
       const unmade = await holdCli(pending.to).then(() => null, error => message(error));
       if (unmade !== null) return failed(`the held snapshot of ${shortCommit(pending.to)} could not be made for the restart from the dirty coordinator checkout at ${shortCommit(left!.checkout)}: ${unmade}`, 'snapshot-failed');
-      const unpointed = await alignExecutorUnits(join(heldCliSnapshotAt(deps.root, pending.to), 'scripts', 'graphyard-executor.mjs'));
+      const unpointed = await alignExecutorUnits(heldExecutorEntryOf(deps.root, pending.to));
       if (unpointed !== null) return failed(`the held snapshot of ${shortCommit(pending.to)} stands and the launcher is pinned to it, but the executor units could not be pointed at the snapshot's launcher: ${unpointed}`, 'snapshot-failed');
+      const withheld = await pointLoopUnit(pending.to, 'snapshot');
+      if (withheld) return withheld;
       state.upgrade.snapshot = { at: at(), commit: pending.to, checkout: left!.checkout, dirty: left!.dirty.slice(0, 20) };
       state.upgrade.pending = null;
       state.upgrade.last = { at: at(), from: pending.from, to: pending.to, code: false, executors: null, self: !!deps.restartSelf };
@@ -292,7 +314,6 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       await persist();
       if (!deps.restartSelf) return failed(`the held snapshot of ${shortCommit(pending.to)} stands and the launcher is pinned to it, but this loop cannot re-execute itself onto it`, 'supervisor-unreachable');
       await note(`Snapshotted base tip ${shortCommit(pending.to)} under .graphyard/held-cli; the coordinator checkout stays dirty at ${shortCommit(left!.checkout)}${nameDirty(left!)}; no loaded code moved, so the executors keep running and the loop re-executes itself onto the snapshot`, false);
-      await alignUnit();
       try { await deps.restartSelf(); }
       catch (error) {
         // The supervisor's own stop ended the awaited child: the restart is under way (GY-916).
@@ -337,21 +358,30 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     if (left) {
       const unmade = await holdCli(pending.to).then(() => null, error => message(error));
       if (unmade !== null) return failed(`the held snapshot of ${shortCommit(pending.to)} could not be made for the restart from the dirty coordinator checkout at ${shortCommit(left.checkout)}: ${unmade}`, 'snapshot-failed');
-      const unpointed = await alignExecutorUnits(join(heldCliSnapshotAt(deps.root, pending.to), 'scripts', 'graphyard-executor.mjs'));
+      const unpointed = await alignExecutorUnits(heldExecutorEntryOf(deps.root, pending.to));
       if (unpointed !== null) return failed(`the held snapshot of ${shortCommit(pending.to)} stands and the launcher is pinned to it, but the executor units could not be pointed at the snapshot's launcher: ${unpointed}`, 'snapshot-failed');
-      state.upgrade.snapshot = { at: at(), commit: pending.to, checkout: left.checkout, dirty: left.dirty.slice(0, 20) };
     } else {
       // A pointer that failed to go still pins the launcher to the old snapshot: the checkout stays put.
       const unpinned = await holdCli(null).then(() => null, error => message(error));
       if (unpinned !== null) return failed(`the held snapshot pin could not be lifted before the restart onto ${shortCommit(pending.to)}: ${unpinned}`, 'snapshot-failed');
       // GY-1790: a loop that ran a snapshot restarts from the checkout now, so the executor units
-      // return to the checkout's entry before the fleet restarts under them; the loop's own unit
-      // follows the lifted pin through `alignUnit` below.
-      if (state.upgrade.snapshot) {
-        const unpointed = await alignExecutorUnits(null);
-        if (unpointed !== null) return failed(`the held snapshot pin is lifted for the restart onto ${shortCommit(pending.to)}, but the executor units could not be returned to the checkout's launcher: ${unpointed}`, 'snapshot-failed');
-      }
-      delete state.upgrade.snapshot;
+      // return to the checkout's entry before the fleet restarts under them — a reinstall during
+      // a held restart (GY-1585) points them into its snapshot too, so they are returned on every
+      // lift, a no-op for units already there. The record stays until the loop's own unit is
+      // returned as well, below, so a later start never runs a launcher the snapshot cleanup may
+      // since have removed.
+      const unpointed = await alignExecutorUnits(null);
+      if (unpointed !== null) return failed(`the held snapshot pin is lifted for the restart onto ${shortCommit(pending.to)}, but the executor units could not be returned to the checkout's launcher: ${unpointed}`, 'snapshot-failed');
+    }
+    // The loop's own unit, pointed at the snapshot's launcher before anything restarts and before
+    // the cursor says it did (GY-1790): a withheld snapshot restart then costs no fleet restart per
+    // retried pass. A restart from the checkout re-applies the unit after the fleet restarts and
+    // before the loop re-executes, as GY-916 had it, withheld the same way while the unit still
+    // names a snapshot's launcher.
+    if (left) {
+      const withheld = await pointLoopUnit(pending.to, 'snapshot');
+      if (withheld) return withheld;
+      state.upgrade.snapshot = { at: at(), commit: pending.to, checkout: left.checkout, dirty: left.dirty.slice(0, 20) };
     }
     if (!deps.restartExecutors) return failed('loaded code moved but this loop cannot restart the executors', 'executors-unavailable');
     const executors = await deps.restartExecutors(pending.to).catch(error => ({ result: 'refused' as const, reason: message(error), coordinator: { commit: pending.to }, held: [], restarted: [], unsupervised: [], forgotten: [] }));
@@ -370,7 +400,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       // starts. A loop already running the checkout's revision has nothing to re-execute.
       const waited = now() - Date.parse(state.upgrade.stalled?.since ?? at());
       if (!deps.restartSelf || sameCommit(state.release?.commit, pending.to) || waited < fleetWaitMs) return { outcome: 'pending', reason, to: pending.to };
-      await alignUnit();
+      if (!left) { const withheld = await pointLoopUnit(pending.to, 'checkout'); if (withheld) return withheld; }
       try { await deps.restartSelf(); }
       catch (error) {
         if (restartEndedBySupervisorStop(error)) return { outcome: 'pending', reason, to: pending.to, self: true };
@@ -385,6 +415,14 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     // A loop that already re-executed onto this revision while the fleet held its claims runs it:
     // only the executors were owed, so it is not restarted again.
     const running = sameCommit(state.release?.commit, pending.to);
+    if (!left) {
+      // The unit returned to the checkout's launcher before the cursor records the restart and the
+      // loop re-executes; a lift's record stays until it is, so a later start never runs a
+      // launcher the snapshot cleanup may since have removed.
+      const withheld = await pointLoopUnit(pending.to, 'checkout');
+      if (withheld) return withheld;
+      delete state.upgrade.snapshot;
+    }
     // The cursor is written before the loop re-executes itself: the next process must find the
     // alignment complete, never repeat it. `self` is written true before the call, because the
     // process may not survive it; a failed re-execution writes it back to false.
@@ -402,7 +440,6 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     const upgraded = (self: boolean): SelfUpgradeOutcome => ({ outcome: 'upgraded', from: pending.from, to: pending.to, code: true, executors, self, ...(left ? { left } : {}) });
     if (running) return upgraded(false);
     if (!deps.restartSelf) return failed('loaded code moved and the executors were restarted, but this loop cannot re-execute itself', 'supervisor-unreachable');
-    await alignUnit();
     try { await deps.restartSelf(); }
     catch (error) {
       // The supervisor's own stop ended the awaited child: the restart the loop asked for is under
