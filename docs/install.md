@@ -43,7 +43,7 @@ Writes credentials, [variables](deployment.md#variables); deploys; [protects](gi
 
 ## Step 3: App confirmation
 
-Skip with `--no-github-app`; else `--apply` serves `http://127.0.0.1:4311` (no browser) 900 s; the human installs the App (any existing install counts). **Verify** *App registered and installation verified*; unconfirmed: exit 1, rerun `resume`.
+Skip with `--no-github-app`; else `--apply` serves `http://127.0.0.1:4311` (no browser) 900s; the human installs the App (any existing install counts). **Verify** *App registered and installation verified*; unconfirmed: exit 1, rerun `resume`.
 
 ## Step 4: summary
 

@@ -27,7 +27,7 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 
 ## Flaky CI check
 
-[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); pass clears it. On main, no later merge is judged until reruns conclude. Cancelled/timed-out jobs rerun ≤3 times; then one `escalation:main-guard:SHA` infrastructure fault names run and step, reverting nothing. A real failure reruns once: a pass joins `mainGuardFlakes` (last 20); a second failure, refusal or hour without conclusion reverts.
+[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); a pass clears it; on main, later merges wait for reruns. Cancelled/timed-out jobs rerun ≤3 times, then one `escalation:main-guard:SHA` infrastructure fault names run and step, reverting nothing. A real failure reruns once: a pass joins `mainGuardFlakes` (last 20); a second failure, refusal or unconcluded hour reverts.
 
 ## Accepted evidence turns out to be wrong
 
@@ -111,8 +111,8 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥2× workers) pace per token, merge path first (`observationThroughput`). Heartbeat/claim/`complete`/`blocked` own a lease pool (`leaseHealth`). Reconcile evaluates moved rows, all every `GRAPHYARD_RECONCILE_FULL_MS` (10000). Until startup validation ends, `/healthz` reports `readiness: false`, `/healthz?ready` 503.
+`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥2× workers) pace per token, merge path first (`observationThroughput`). Heartbeat/claim/`complete`/`blocked` own a lease pool (`leaseHealth`). During startup validation `/healthz` reports `readiness: false`, `/healthz?ready` 503.
 
 ### Concurrent reconciliation
 
-A 2s tick over 5s logs `reconciliation tick took N ms`. Batches evaluate lock-free, then write each item in its own transaction under the coordination and row locks; expired lock waits defer unwritten items. Heartbeats lock only their item; renewal waits ≤1s.
+Reconcile evaluates moved rows, all every `GRAPHYARD_RECONCILE_FULL_MS` (10000); ticks >5s log `reconciliation tick took N ms`: each moved key+fields, or the interval, and event-loop lag p50/max; own-write moves re-evaluate only readers (reference/resource/path-scope). Batches evaluate lock-free, write per item under coordination+row locks; expired waits defer unwritten items; heartbeats lock only their item (renewal wait ≤1s).

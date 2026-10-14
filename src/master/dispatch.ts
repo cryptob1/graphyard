@@ -216,6 +216,9 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   let mergeWriter: MergerMode, credentialMint: CredentialMinter | null, round: ReworkRound;
   let target = agents.find(agent => agent.name === profile.agentName);
   let selected: Awaited<ReturnType<typeof selectAccount>> | undefined, launched: ReturnType<typeof accountLaunch> | undefined, relaunched = 0;
+  // GY-1772: which runtimes the worker is tried on first, judged from the change the item plans
+  // (`plannedFiles`), never from its path lane; recorded with the selection it ordered.
+  let prefer: 'fast' | 'strong' | null = null;
   let harness: Awaited<ReturnType<typeof installWorkerHarness>> | null = null;
   let dependencies: PreparedWorker['dependencies'] | null = null, reclaimed: string[] = [];
   let delivery: RequestDelivery | null = null, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null;
@@ -270,7 +273,8 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
         if (accounts && !accounts.length)
           throw new Error(`${describeStartFailures(startFailures, null)}; no further account of profile ${profile.name} to fall back to`, { cause: startError });
         try {
-          selected = await selectAccount(config, 'worker', accounts && accounts.length < (profile.accounts?.length ?? 0) ? { ...profile, accounts } : profile, { ...clock, ...options.probe, work: work.key, prefer: workerPreference(work, startFailures.length), exclude: startFailures.map(failure => failure.account) });
+          prefer = workerPreference(work, startFailures.length);
+          selected = await selectAccount(config, 'worker', accounts && accounts.length < (profile.accounts?.length ?? 0) ? { ...profile, accounts } : profile, { ...clock, ...options.probe, work: work.key, prefer, exclude: startFailures.map(failure => failure.account) });
         } catch (error) {
           if (!startFailures.length || !(error instanceof NoHealthyAccountError)) throw error;
           throw new Error(`${describeStartFailures(startFailures, null)}; no further account of profile ${profile.name} could be launched: ${failureText(error).slice(0, 300)}`, { cause: error });
@@ -300,11 +304,12 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
               // The epoch this launch claimed outlives the reservation, so a dispatcher still holding the older snapshot is refused cleanly.
               const at = new Date().toISOString();
               await writeFile(dispatchedFile(root, work.key), JSON.stringify({ epoch, at }), { mode: 0o600 }).catch(() => {});
-              // The dispatch record names the runtime and account the session runs on, and every
-              // account whose runtime failed to start first, so a slot running one runtime under a
-              // profile named for another is on the record, not a surprise (GY-417).
+              // The dispatch record names the runtime and account the session runs on, the preference
+              // that ordered the accounts (GY-1772), and every account whose runtime failed to start
+              // first, so a slot running one runtime under a profile named for another is on the
+              // record, not a surprise (GY-417).
               await writeFile(profileLaunchedFile(root, profile.name), JSON.stringify({ key: work.key, epoch, agentName: profile.agentName, at,
-                runtime: launch.kind ?? null, account: chosen.account?.name ?? null, ...(startFailures.length ? { failedAccounts: startFailures } : {}) }), { mode: 0o600 }).catch(() => {});
+                runtime: launch.kind ?? null, account: chosen.account?.name ?? null, prefer, ...(startFailures.length ? { failedAccounts: startFailures } : {}) }), { mode: 0o600 }).catch(() => {});
               // A start on the account clears its own run of consecutive start failures.
               if (chosen.account) await clearAccountStartFailures(config, chosen.account.name).catch(() => {});
               break;
@@ -337,7 +342,8 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery, sandbox, mergeWriter, pushCredential, ...(reclaimed.length ? { reclaimed } : {}), ...(closedAgent ? { closedAgent } : {}),
     // `awaiting consent` is not a started session: the runtime has not read its request (GY-130).
     started, consent: { answered: consent.answered, awaiting: consent.awaiting ? { prompt: consent.awaiting.prompt, kind: consent.awaiting.kind, pane: consent.awaiting.pane, attach: consent.awaiting.attach, releaseAt: consent.awaiting.releaseAt, attention: consentHoldAttention(consent.awaiting) } : null },
-    account: selected?.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null, relaunched,
+    // The selection names the preference that ordered the accounts it chose from (GY-1772).
+    account: selected?.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped, prefer } : null, relaunched,
     // A dispatch whose preferred account's runtime never started names what happened and where the
     // session runs instead, so the fallback is on the record rather than silent (GY-417).
     fallback: selected && startFailures.length ? { failed: startFailures, note: describeStartFailures(startFailures, selected.account?.name ?? null) } : null,
@@ -427,10 +433,10 @@ export function accountStartFailureAttention(failures: AccountStartFailures, cli
     ...agentOwner('master', `Re-check the account with node ${cliPath} master environments --apply and log its runtime in, or drop it from the profiles' account order with node ${cliPath} master config accounts:PROFILE=… until it starts`) }));
 }
 /** What a profile's last worker dispatch recorded, as master status reads it (GY-417). */
-export interface ProfileLaunchRecord { key: string; epoch: number; agentName: string; at: string; runtime: string | null; account: string | null; failedAccounts: AccountStartFailure[] }
+export interface ProfileLaunchRecord { key: string; epoch: number; agentName: string; at: string; runtime: string | null; account: string | null; /** Which runtimes the dispatch tried first (GY-1772); null on a record written before the preference was recorded. */ prefer: 'fast' | 'strong' | null; failedAccounts: AccountStartFailure[] }
 const profileLaunchRecordSchema = z.object({
   key: z.string().min(1), epoch: z.number().int().min(1), agentName: z.string().min(1), at: z.string().min(1),
-  runtime: z.string().nullable().default(null), account: z.string().nullable().default(null),
+  runtime: z.string().nullable().default(null), account: z.string().nullable().default(null), prefer: z.enum(['fast', 'strong']).nullable().default(null),
   failedAccounts: z.array(z.object({ account: z.string().min(1), kind: z.string().min(1), reason: z.string().min(1), at: z.string().min(1) }).strict()).default([]),
 }).strict();
 /** The last dispatch record of each launch profile; a profile never dispatched reads as absent. */
