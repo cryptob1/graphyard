@@ -70,6 +70,7 @@ import { readMergeWriter } from '../master/dispatch.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
 import { readingEffects, type ReadingEffects } from './reading-effect.js';
+import type { SlowLoopItemInput } from './slow-loop-item.js';
 import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, recoverMovedHead, type SelfUpgradeDeps, type SelfUpgradeOutcome } from './upgrade.js';
 import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
@@ -113,6 +114,8 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   requestProof: (work: Work) => void | Promise<void>;
   /** The throughput owner as the control plane holds it now, read before its needs-decision is keyed by its requirements revision (GY-1609). */
   readThroughputOwner?: (owner: Work) => Promise<Work>;
+  /** Files the slow-loop fix item (GY-1775) as the operator-agent under the release-and-step idempotency key, so a retry after a lost reply returns the item already filed; absent without that identity, as the throughput owner is. */
+  fileSlowLoopItem?: (input: SlowLoopItemInput, key: string) => Promise<Work | null>;
   /** Asks the control plane to decide the item's open scope request and returns the decided document. */
   decideScope?: (work: Work, nonRepository?: readonly { path: string; nearMiss: string | null; why: 'install-local' | 'untracked' }[], treeRead?: boolean) => Promise<Work>; repositoryFiles?: () => Promise<ReadonlySet<string>>;
   wakeObservation?: (work: Work) => Promise<unknown>; // GY-710: a prioritized `resync` now (GY-1266) that waits on no tick (GY-1286), for a step refused on a stale observation
@@ -180,11 +183,9 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   /** GY-1118: withdraws a capped change request as the reviewer App that posted it (GitHub's review dismissal); absent, it is escalated instead. */
   withdrawReview?: (work: Work, reviewId: number, message: string) => Promise<void>;
   /**
-   * GY-437: between cycles, aligns this checkout with the verified deployed release — fetches the
-   * base branch, checks out its tip when the checkout is a clean detached checkout, and, when the
-   * diff touches code the loop or the executors load, restarts the fleet and then re-executes the
-   * loop through its own supervisor. A loop wired without it keeps cycling exactly as before, on
-   * the release it loaded.
+   * GY-437: between cycles, aligns this checkout with the verified deployed release — fetches the base branch, checks out its tip when the
+   * checkout is a clean detached checkout, and, when the diff touches code the loop or the executors load, restarts the fleet and then
+   * re-executes the loop through its own supervisor. A loop wired without it keeps cycling exactly as before, on the release it loaded.
    */
   /** `keepAlive` feeds the supervisor's watchdog while the upgrade waits on the executors. */
   selfUpgrade?: (state: DaemonState, keepAlive?: () => Promise<void>) => Promise<SelfUpgradeOutcome>;
@@ -393,12 +394,11 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    */
   controlPlane?: () => Promise<ControlPlaneStatus & Record<string, unknown>>;
   /**
-   * The attention `master status` adds after `buildMasterStatus` (generated-file drift, context
-   * overflows, intervention patterns, executors, terminal decisions, throughput, resources, and the
-   * requests, review conflicts, stalls, overlong sessions, owed judgments, setup and dispatcher lines
-   * of derivedAttention), read with the control plane's status so the loop tracks every class the report shows.
-   * `attribute` is the report's last step over the whole list — a ledger refusal in place of the launch symptoms
-   * it causes, a resource at its bound named in place of its symptom — so one cause is tracked as the report shows it, once.
+   * The attention `master status` adds after `buildMasterStatus` (generated-file drift, context overflows, intervention patterns, executors,
+   * terminal decisions, throughput, resources, and the requests, review conflicts, stalls, overlong sessions, owed judgments, setup and
+   * dispatcher lines of derivedAttention), read with the control plane's status so the loop tracks every class the report shows. `attribute`
+   * is the report's last step over the whole list — a ledger refusal in place of the launch symptoms it causes, a resource at its bound
+   * named in place of its symptom — so one cause is tracked as the report shows it, once.
    */
   reportedAttention?: (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; available?: boolean; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) => Promise<ReportedAttention>;
   masterSession?: MasterSessionEffects; // the loop's own master session (GY-898); absent, none is launched, woken or rotated
@@ -411,11 +411,10 @@ export const launchAppearanceMs = 120_000;
 /** How long an escalation handler stays stopped with no limit notice before it is taken as finished. */
 export const handlerSettleMs = 180_000;
 /**
- * A session blocked on its runtime's own prompt (GY-197). A known prompt is answered on the cycle
- * that sees it — within one loop interval, well inside two minutes — and answered at most
- * `blockedPromptAnswers` times, `blockedPromptSettleMs` apart, before it counts as one the loop
- * cannot answer. A prompt the loop cannot answer is a failed attempt, not a wait: once it has
- * stood for `blockedPromptFailMs` the session is closed as failed with the prompt as the reason.
+ * A session blocked on its runtime's own prompt (GY-197). A known prompt is answered on the cycle that sees it — within one loop
+ * interval, well inside two minutes — and answered at most `blockedPromptAnswers` times, `blockedPromptSettleMs` apart, before it
+ * counts as one the loop cannot answer. A prompt the loop cannot answer is a failed attempt, not a wait: once it has stood for
+ * `blockedPromptFailMs` the session is closed as failed with the prompt as the reason.
  */
 export const blockedPromptFailMs = 5 * 60_000, blockedPromptAnswers = 2, blockedPromptSettleMs = 15_000;
 export { relaunchSession };
@@ -709,6 +708,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     },
     ...throughputEffects(root, current, run, asCoordinator, asOperatorAgent), ...flakeLedgerEffects(root), ...readingEffects(current, mutate, asCoordinator), // GY-1779: the loop's own post-deploy readings
     readThroughputOwner: async owner => await asCoordinator(`work/${encodeURIComponent(owner.id)}`) as Work,
+    get fileSlowLoopItem() { /* GY-1775: the slow-loop fix item, filed as the operator-agent (read on each call, as a reload may provision it) under the release-and-step key */ return current().operatorAgent ? (input: SlowLoopItemInput, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
       .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),
