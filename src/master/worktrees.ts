@@ -228,15 +228,16 @@ export async function writeWorktreeInventoryCache(root: string, cache: WorktreeI
   await rename(temporary, file);
 }
 /**
- * The worktree inventory as `master status` reads it: the cache the loop's reclaim step keeps,
- * one file read, whatever the number of trees. Only a host whose loop has never reclaimed walks
- * the directory, once, and leaves the cache behind for the next call. No Git command runs here.
+ * The worktree inventory as `master status` reads it: the cache the loop's reclaim step keeps —
+ * one file read and one read of the directory's names, whatever the number of trees; only a host
+ * whose loop has never reclaimed walks the trees, once, leaving the cache behind. No Git runs
+ * here, and unreadability is asked before the cache is trusted (GY-1793): an unreadable directory
+ * reads as unknown, as with no cache, the cache standing for when it returns; a readable one answers from it.
  */
 export async function statusWorktreeInventory(root: string, now = Date.now()): Promise<{ entries: WorktreeEntry[]; at: string; cached: boolean; unreadable?: boolean; held?: HeldWorktree[] }> {
-  const cache = await readWorktreeInventoryCache(root);
-  if (cache) return { entries: cache.entries, at: cache.at, cached: true, held: cache.held };
-  // A directory that exists but cannot be read is an inventory nobody knows, not an empty one: it is not cached, and callers that judge a plan on it say so (GY-1784 review).
-  const unreadable = await worktreesUnreadable(root);
+  const cache = await readWorktreeInventoryCache(root), unreadable = await worktreesUnreadable(root);
+  if (cache && !unreadable) return { entries: cache.entries, at: cache.at, cached: true, held: cache.held };
+  // A directory that exists but cannot be read is an inventory nobody knows, not an empty one, and not the cached one either (GY-1793): it is answered as with no cache and never written over the cache it cannot check, and callers that judge a plan on it say so (GY-1784 review).
   const entries = await inventoryWorktrees(root, now), at = new Date(now).toISOString();
   if (!unreadable) await writeWorktreeInventoryCache(root, { at, entries, held: [] }).catch(() => {});
   return { entries, at, cached: false, ...(unreadable ? { unreadable } : {}) };

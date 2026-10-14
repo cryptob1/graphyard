@@ -85,7 +85,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
   // The loop's latest pass and the standing disk line, from the cursor, decide whether a low reading is answered and where it recovers (GY-1784).
   const cursor = 'error' in daemonState ? null : daemonState;
-  const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan, { reclaimable: reclaimableNow(reclaimPlan, trees, snapshot.work, { idleMs: reclaimIdleMs(master), now: Date.now(), held: 'held' in inventory ? inventory.held : undefined }), pass: worktreePassOf(cursor?.reclaim), standing: standingDiskLine(cursor?.faults.open, 'disk-pressure'), now: Date.now() });
+  const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan, { reclaimable: 'unreadable' in inventory && inventory.unreadable ? null : reclaimableNow(reclaimPlan, trees, snapshot.work, { idleMs: reclaimIdleMs(master), now: Date.now(), held: 'held' in inventory ? inventory.held : undefined }), pass: worktreePassOf(cursor?.reclaim), standing: standingDiskLine(cursor?.faults.open, 'disk-pressure'), now: Date.now() });
   // The managed root, often its own volume, has its own minimum and budget.
   const managedRoot = await timedStep('managed root', () => managedRootStatus(root, master, [...reviewRecords, ...producerRecords]));
   const hs = hotspots(daemonState);
