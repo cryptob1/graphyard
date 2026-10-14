@@ -806,6 +806,7 @@
     "tests/soak-twin-hold-deterministic.test.ts": 314200,
     "tests/soak-verification-map-scope.test.ts": 2000,
     "tests/soak-webhook-corroboration.test.ts": 47660,
+    "tests/soak-worker-fast-gates.test.ts": 33323,
     "tests/soak-worktree-disk.test.ts": 1373,
     "tests/soak-worktree-inventory-unreadable.test.ts": 1000,
     "tests/speed-metric.test.ts": 4808,
