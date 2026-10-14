@@ -134,6 +134,12 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+    # The cut reads the plane's goals (GY-1802) to record outcomes whose plan is undelivered as pending;
+    # the uat environment holds the credential and URL for that read.
+    environment: uat
+    env:
+      GRAPHYARD_URL: \${{ vars.GRAPHYARD_URL }}
+      GRAPHYARD_TOKEN: \${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
     outputs:
       id: \${{ steps.cut.outputs.id }}
       sha: \${{ steps.cut.outputs.sha }}

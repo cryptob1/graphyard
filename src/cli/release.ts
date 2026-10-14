@@ -9,6 +9,7 @@ import {
   ledgerStatus, maxPrsFrom, promote, readLedger, readRecords, readServed, recordSoak, syncLedger, unacceptedFlaky, validateAndRecord, writeRecord, type CutTrigger, type FlakyAcceptance, type SoakRecord, type Suite,
 } from '../release-candidate.js';
 import { acceptancesFrom, foldHolds, foldRecord, holdItemsFor, holdTag, holdTagPrefix, releaseHolds, type HoldRecord } from '../release-holds.js';
+import { pendingFromPlane, readPlane, servingStage } from '../release-pending.js';
 import { checkRepositoryContract, contractFile, loadContract } from '../e2e/case.js';
 
 const switches = new Set(['no-push', 'api']);
@@ -100,7 +101,17 @@ export const releaseCommands = defineCommands([
         const trigger = (options.one('trigger') ?? 'manual') as CutTrigger;
         if (trigger !== 'schedule' && trigger !== 'manual') throw new Error('--trigger is schedule or manual');
         const maxPrs = maxPrsFrom(options.one('max-prs') ?? process.env.GRAPHYARD_RC_MAX_PRS);
-        return print(cut(git, { base, trigger, now: new Date(), push, maxPrs }));
+        // GY-1802: the outcomes whose plan is not delivered yet ride the candidate as pending. A credential that cannot read the plane (the workflow's release filing token) names none, and the loop's cut records them.
+        let unread: string | null = null;
+        const read = async <T>(path: string, pick: (answer: any) => T): Promise<T> => { try { return pick(await api(path)); } catch (error: any) { unread ??= error?.message ?? String(error); throw error; } };
+        const plane = await readPlane({ goals: () => read('goals?open=1', answer => answer.goals), stage: key => read(`work/${encodeURIComponent(key)}`, servingStage) });
+        if (!plane) console.error(`release cut: the plane could not be read (${unread ?? 'no answer'}); no outcome is recorded pending, so a required case bound to an undelivered outcome blocks this candidate`);
+        const pendingOutcomes = (at: { sha: string; undelivered: ReadonlySet<string> }) => {
+          let source: string | null = null;
+          try { source = git(['show', `${at.sha}:${contractFile}`]); } catch { source = null; }
+          return pendingFromPlane(plane, source, at);
+        };
+        return print(cut(git, { base, trigger, now: new Date(), push, maxPrs, pendingOutcomes }));
       }
       if (id === 'status' || !id) { syncLedger(git, base); return print(ledgerStatus(readLedger(git))); }
       if (id === 'uat') return print(deployToUat(git, target, base));

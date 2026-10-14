@@ -1,6 +1,6 @@
 import { releaseVerdict, type E2eReport } from './e2e/runner.js';
 import type { ReleaseContract } from './e2e/case.js';
-import { candidateId, filingReason, readRecords, writeRecord, type E2eCaseRecord, type E2eRecord, type FlakyAcceptance, type Git, type HoldOutcome, type ReleaseCandidate, type UatRecord } from './release-candidate.js';
+import { candidateId, contractPendingCases, filingReason, readRecords, writeRecord, type E2eCaseRecord, type E2eRecord, type FlakyAcceptance, type Git, type HoldOutcome, type ReleaseCandidate, type UatRecord } from './release-candidate.js';
 
 /**
  * Release holds (GY-1378): one hold per customer risk. The release contract (`e2e/contract.json`)
@@ -71,12 +71,16 @@ export function foldHolds(records: readonly HoldRecord[]): Hold[] {
 
 /**
  * The candidate's e2e release run as its UAT record keeps it, or null when the report is not the
- * candidate's own: another run, or a UAT that served another SHA, is never attributed to it.
+ * candidate's own: another run, or a UAT that served another SHA, is never attributed to it. With
+ * the contract (GY-1802) the blocking cases are the candidate record's pending outcomes' cases
+ * removed, and each case that failed or flaked against a pending outcome is kept as `pending: true`
+ * with its failing step, so the record shows it ran and why it did not count.
  */
-export function e2eRecord(report: E2eReport | null, candidate: ReleaseCandidate): E2eRecord | null {
+export function e2eRecord(report: E2eReport | null, candidate: ReleaseCandidate, contract: ReleaseContract | null = null): E2eRecord | null {
   if (!report || report.sha !== candidate.sha || report.runId !== `rc-${candidate.id}`) return null;
-  return { runId: report.runId, sha: report.sha, blocking: releaseVerdict(report).blocking.map(outcome => outcome.id),
-    cases: report.cases.map(outcome => ({ case: outcome.id, verdict: outcome.verdict, required: outcome.required, ...(outcome.stoppedBy ? { stoppedBy: outcome.stoppedBy } : {}), attempts: outcome.attempts, failingStep: outcome.failingStep })) };
+  const pendingCases = contractPendingCases(contract, candidate.pendingOutcomes);
+  return { runId: report.runId, sha: report.sha, blocking: releaseVerdict(report, [], pendingCases).blocking.map(outcome => outcome.id),
+    cases: report.cases.map(outcome => ({ case: outcome.id, verdict: outcome.verdict, required: outcome.required, ...(outcome.pending || pendingCases.includes(outcome.id) && (outcome.verdict === 'failed' || outcome.verdict === 'flaky') ? { pending: true as const } : {}), ...(outcome.stoppedBy ? { stoppedBy: outcome.stoppedBy } : {}), attempts: outcome.attempts, failingStep: outcome.failingStep })) };
 }
 
 /**
@@ -91,6 +95,8 @@ export function assessHolds(contract: ReleaseContract, candidate: ReleaseCandida
   const open = holds.filter(hold => hold.state === 'open');
   const records: HoldRecord[] = [];
   for (const outcome of contract.outcomes) {
+    // GY-1802: an outcome still pending on the candidate files no hold — its cases ran and recorded, but their failure counts against nothing yet.
+    if (candidate.pendingOutcomes?.includes(outcome.id)) continue;
     const failing = e2e.cases.filter(entry => outcome.cases.includes(entry.case) && e2e.blocking.includes(entry.case));
     if (!failing.length) continue;
     const cases = failing.map(entry => ({ case: entry.case, verdict: entry.verdict as HoldCase['verdict'], candidate: candidate.id, sha: candidate.sha, runId: e2e.runId, attempts: entry.attempts, failingStep: entry.failingStep }));
@@ -134,7 +140,7 @@ export function holdItem(record: HoldRecord, candidate: ReleaseCandidate) {
  */
 export const releaseHolds = (git: Git, options: { contract: ReleaseContract | null; report: () => Promise<E2eReport | null>; push: boolean; now?: () => Date;
   file?: (item: ReturnType<typeof holdItem>, requestId: string) => Promise<string> }) => async (candidate: ReleaseCandidate, record: UatRecord): Promise<HoldOutcome> => {
-  const e2e = e2eRecord(await options.report(), candidate);
+  const e2e = e2eRecord(await options.report(), candidate, options.contract);
   const planned = options.contract ? assessHolds(options.contract, candidate, { deployedSha: record.deployedSha, e2e }, foldHolds(readRecords<HoldRecord>(git, holdTagPrefix)), (options.now ?? (() => new Date()))().toISOString()) : [];
   let filingError: string | null = null;
   for (const entry of planned.filter(entry => entry.kind === 'open' && options.file)) {
