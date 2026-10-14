@@ -224,6 +224,9 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   let delivery: RequestDelivery | null = null, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null;
   let started: 'started' | 'awaiting consent' = 'started', consent: { answered: ConsentAnswer[]; awaiting: ConsentHold | null } = { answered: [], awaiting: null };
   let pushCredential: 'minted' | 'none' = 'none';
+  // The epoch the launch claimed, hoisted for the result: the registration's id is guessed from the
+  // snapshot before the claim, and the caller re-keys the record onto this one (GY-1791).
+  let claimedEpoch: number | undefined;
   const startFailures: AccountStartFailure[] = [];
   let closedAgent: string | null = null;
   if (profile.mode === 'existing') {
@@ -301,6 +304,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
               assertClaimDeadline(work.key, options.claimBy);
               let epoch: number;
               ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed, pushCredential } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.supervisor, options.stopSupervisor, credentialMint, options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps, mergeWriter, round));
+              claimedEpoch = epoch;
               // The epoch this launch claimed outlives the reservation, so a dispatcher still holding the older snapshot is refused cleanly.
               const at = new Date().toISOString();
               await writeFile(dispatchedFile(root, work.key), JSON.stringify({ epoch, at }), { mode: 0o600 }).catch(() => {});
@@ -338,7 +342,12 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     } finally { await unreserve(); }
   }
   const concurrent = concurrentOverlap(work, allWork, Date.parse(observedAt));
-  return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
+  // The epoch the launch claimed rides the result (GY-1791): the launcher registered the session
+  // before the claim under its snapshot's `epoch + 1`, and a dispatch that claims again after its
+  // first runtime refused the prompt claims a later epoch — the record the loop, the resume fence
+  // and every watcher key by `principal:epoch` must carry the one that was claimed, so the caller
+  // re-keys the registration once the claim is known.
+  return { work: work.key, epoch: claimedEpoch, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
     launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery, sandbox, mergeWriter, pushCredential, ...(reclaimed.length ? { reclaimed } : {}), ...(closedAgent ? { closedAgent } : {}),
     // `awaiting consent` is not a started session: the runtime has not read its request (GY-130).
     started, consent: { answered: consent.answered, awaiting: consent.awaiting ? { prompt: consent.awaiting.prompt, kind: consent.awaiting.kind, pane: consent.awaiting.pane, attach: consent.awaiting.attach, releaseAt: consent.awaiting.releaseAt, attention: consentHoldAttention(consent.awaiting) } : null },

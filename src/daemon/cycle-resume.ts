@@ -312,15 +312,20 @@ async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLi
         performed.push(await entry(promptKey, 'failed', `${item.key} epoch ${epoch}: ${changed}; the recorded pane cannot be re-prompted: ${paneReason}`, (previous?.attempts ?? 0) + 1));
         // A handle that records no pane (its coordinate write failed or never completed) refuses
         // every resolution for ever: the name-based absence checks see the name's still-listed
-        // holder, and the idle recovery below stays unreachable while the waits stand. The unsafe
-        // paste stays refused, but the first unverifiable observation starts the same reclaim bound
-        // a gone pane starts above, and past it the attempt is handed to a new one that keeps its
-        // branch (GY-953). Nothing is closed: no pane is verifiably this attempt's.
-        if (!own && handle) {
+        // holder, and the idle recovery below stays unreachable while the waits stand. So does a
+        // handle that is not on the record at all — a launch registered this session under the
+        // previous attempt's id (its pre-claim guess was stale), so no write of this attempt's
+        // ever landed under its own (GY-1788's paste was refused for ever with no bound to answer
+        // it). The unsafe paste stays refused, but the first unverifiable observation starts the
+        // same reclaim bound a gone pane starts above, and past it the attempt is handed to a new
+        // one that keeps its branch (GY-953). Nothing is closed: no pane is verifiably this attempt's.
+        if (!own) {
           const seen = state.actions[keys.idle];
-          if (!seen) { await entry(keys.idle, 'waiting', `${item.key} epoch ${epoch}: its handle ${handleId} records no pane yet (its coordinate write has not completed), so the cleared wait cannot be delivered and its agent name is no address; the reclaim bound starts here`); return; }
+          if (!seen) { await entry(keys.idle, 'waiting', handle ? `${item.key} epoch ${epoch}: its handle ${handleId} records no pane yet (its coordinate write has not completed), so the cleared wait cannot be delivered and its agent name is no address; the reclaim bound starts here`
+            : `${item.key} epoch ${epoch}: its handle ${handleId} is not on the record (its launch registered this session under another attempt's id), so the cleared wait cannot be delivered and its agent name is no address; the reclaim bound starts here`); return; }
           if (seen.cycle === state.cycle || now() - Date.parse(seen.at) < launchAppearanceMs) return;
-          await reclaimIdle(`its handle ${handleId} has recorded no pane since ${seen.at} (its coordinate write has not completed), so the cleared wait cannot be verified deliverable to it, and its agent name is no address`, null);
+          await reclaimIdle(handle ? `its handle ${handleId} has recorded no pane since ${seen.at} (its coordinate write has not completed), so the cleared wait cannot be verified deliverable to it, and its agent name is no address`
+            : `its handle ${handleId} has not been on the record since ${seen.at} (its launch registered its session under another attempt's id), so the cleared wait cannot be verified deliverable to it, and its agent name is no address`, null);
         }
         return;
       }

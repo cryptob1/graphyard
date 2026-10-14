@@ -19,7 +19,7 @@ import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
 import { holdBoundWait } from './cycle-decisions.js';
 import { detailChanged } from './decisions.js';
-import { awaitSupervisorRestart, describeSelfUpgrade, detectLoopSupervisorUnit, restartEndedBySupervisorStop, type SelfUpgradeOutcome } from './upgrade.js';
+import { awaitSupervisorRestart, describeSelfUpgrade, detectLoopSupervisorUnit, loadedHeldSnapshot, restartEndedBySupervisorStop, type SelfUpgradeOutcome } from './upgrade.js';
 import { checkoutRestoreFreezeLedgerPath, checkoutRestoreGrantPath, checkoutRestoreRequestPath, loopExecutorsRequestPath, loopRestartRequestPath, serveCheckoutRestore, type CheckoutRestoreOutcome } from '../cli/master-checkout-restore.js';
 import { releasePinnedRestore } from '../cli/checkout-restore-release.js';
 import { divergedHead } from '../cli/checkout-restore-act.js';
@@ -230,6 +230,8 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   restartLoop?: () => Promise<unknown>;
   /** The managed repository's checkout the loop runs for; its research scratch is a worktree of it (GY-1480). Defaults to the CLI launcher's checkout. */
   repository?: string;
+  /** The commit of the held-cli snapshot this process's modules were loaded from (GY-1773), null for the checkout's; defaults to reading where this module was loaded from. */
+  loadedSnapshot?: () => string | null;
   /** The dispatcher's wake (GY-1490, loop-wake.ts): ends the sleep after a cycle as soon as the tick sees work the loop acts on. */
   wake?: Pick<LoopWake, 'sleep'> } ) {
   // Progress goes to stderr so stdout stays the machine-readable result the CLI prints.
@@ -256,7 +258,12 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     // loop launches, and without the scratch it does not run at all.
     // A loop with neither has no scratch to place, so it needs no CLI launcher to place it from.
     const needsScratch = Boolean(raw.research) || 'diagnostician' in raw;
-    const scratchDirectory = needsScratch ? await openResearchScratch(researchScratchSource(config, options.repository), config, raw.loadedRelease?.commit ?? null, log) : null;
+    // GY-1773: a loop the launcher pinned to a held snapshot (the self-upgrade from a dirty checkout)
+    // runs the snapshot's commit, whatever the checkout beside it holds: that is its release.
+    // The read tolerates a configuration without a CLI launcher (no root to read under): such a loop runs the checkout.
+    const snapshot = options.loadedSnapshot ? options.loadedSnapshot() : typeof config.cliPath === 'string' ? loadedHeldSnapshot(coordinatorCheckoutRoot(config.cliPath)) : null;
+    const loadedRelease = snapshot ? { commit: snapshot, dirty: false } : raw.loadedRelease ?? null;
+    const scratchDirectory = needsScratch ? await openResearchScratch(researchScratchSource(config, options.repository), config, loadedRelease?.commit ?? null, log) : null;
     const scoped = new Proxy(raw, { get(target, property, receiver) {
       if (property === 'research') return target.research && scratchDirectory ? { ...target.research, cwd: scratchDirectory } : undefined;
       if (property === 'diagnostician') { const diagnostician = target.diagnostician; return diagnostician && scratchDirectory ? { ...diagnostician, cwd: scratchDirectory } : undefined; }
@@ -266,7 +273,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     acquireDaemonLock(state, options.identity, now(), interval());
     // GY-437: the release is this process's, never the cursor's: a loop re-executed onto a moved
     // checkout must not report the release the process before it loaded.
-    state.release = raw.loadedRelease ?? null;
+    state.release = loadedRelease;
     adoptLoopRelease(state); // GY-1775: a release other than the cursor's starts the slow-loop run at this process's first cycle, persisted before it runs
     await effects.persist(state);
     // Under a supervisor that watches for keep-alives, a hung cycle is a restart rather than a
@@ -298,7 +305,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     // files they match: those matches are the checkout's writes attributed to the attempts most
     // likely to have made them.
     const checkoutOf = async () => options.checkout?.() ?? await readCoordinatorCheckout(coordinatorCheckoutRoot(config.cliPath));
-    const guard = coordinatorCheckoutGuard({ state: () => state, read: checkoutOf, agents: raw.agents, snapshot: raw.snapshot, persist: effects.persist, now, log, recover: effects.recoverHead,
+    const guard = coordinatorCheckoutGuard({ state: () => state, read: checkoutOf, agents: raw.agents, snapshot: raw.snapshot, persist: effects.persist, now, log, recover: effects.recoverHead, runsSnapshot: () => snapshot,
       diverged: (checkout, loaded) => divergedHead(checkout.root, { base: `refs/remotes/origin/${config.baseBranch}`, loaded }).then(head => head === checkout.commit) });
     // GY-1658: the installation's own remedy for a dirty checkout. A `master checkout-restore` request
     // (any master identity, the doctor's included, files it beside the cursor) is carried out here, by
@@ -322,7 +329,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
       catch (error) { log(`[graphyard-master] checkout-restore could not be served: ${message(error)}`); }
     };
     try {
-      const startRefusal = await guard.start(raw.loadedRelease?.commit ?? null);
+      const startRefusal = await guard.start(loadedRelease?.commit ?? null);
       if (startRefusal) {
         // The refused loop keeps its process for its supervisor — a crash would only be restarted
         // onto the same dirty checkout — and cycles nothing until it is restarted on a clean one.
@@ -469,15 +476,22 @@ export function coordinatorCheckoutGuard(deps: {
   recover?: DaemonEffects['recoverHead'];
   /** Whether the checkout's HEAD is diverged from the base branch and the loaded commit (GY-1745); the escalation then names the restore that moves it. */
   diverged?: (checkout: CoordinatorCheckout, loaded: string | null) => Promise<boolean>;
+  /**
+   * The commit of the held snapshot this loop's modules were loaded from (GY-1773), null when they
+   * came from the checkout. Such a loop runs no code the dirty checkout holds, so the dirty tree
+   * refuses it nothing at startup, and a HEAD moved onto that commit is the pin's lift, not drift.
+   */
+  runsSnapshot?: () => string | null;
 }) {
   const applies = deps.applies ?? checkoutGuardApplies, enrichMs = deps.enrichMs ?? 10 * 60_000;
+  const runsSnapshot = () => deps.runsSnapshot?.() ?? null;
   let expectedHead: string | null = null, enriched: { refusal: string; detail: string; at: number } | null = null;
   // GY-1359: a HEAD the recovery found to be merged code moved forward, but could not adopt by itself
   // (no verified release serves it yet, no supervisor unit to re-execute through), keyed by commit to
   // why. Its remedy is a restart onto that HEAD; rolling the checkout back to stale code never is.
   const forward = new Map<string, string>();
   const headDrift = (checkout: CoordinatorCheckout) => {
-    if (!checkout.commit || !expectedHead || checkout.commit === expectedHead) return null;
+    if (!checkout.commit || !expectedHead || checkout.commit === expectedHead || checkout.commit === runsSnapshot()) return null;
     const from = expectedHead.slice(0, 12), to = checkout.commit.slice(0, 12), unrecovered = forward.get(checkout.commit);
     return unrecovered
       ? `the master loop cannot recover onto the coordinator checkout at ${checkout.root} by itself: its HEAD moved from ${from} forward to ${to}, merged code, while the loop was running, and ${unrecovered}. It keeps running the code it loaded; leave the checkout at ${to} and restart the loop onto its own HEAD (systemctl --user restart graphyard-master). ${checkoutRestoreDriftRemedy}`
@@ -552,8 +566,11 @@ export function coordinatorCheckoutGuard(deps: {
       // GY-1658: a standing pane working in the checkout is the suspected writer — every launched
       // session sees it read-only, the master's included — and the installation's own remedy is named.
       else if (pointing.length) detail += ` Suspected ${pointing.length === 1 ? 'writer — one standing session\'s pane still points at it' : `writers — ${pointing.length} standing sessions' panes still point at it`}: ${pointing.slice(0, 8).join('; ')}${pointing.length > 8 ? `; and ${pointing.length - 8} more` : ''}.`;
-      if (coordinatorCheckoutRefusal(checkout, 'the master loop')) detail += ` ${checkoutRestoreRemedy}`;
-      else if (headDrift(checkout)) { try { if (await deps.diverged?.(checkout, expectedHead)) detail += ` ${checkoutRestoreDivergedRemedy}`; } catch { /* the refusal stands without it */ } }
+      if (coordinatorCheckoutRefusal(checkout, 'the master loop')) {
+        detail += ` ${checkoutRestoreRemedy}`;
+        // GY-1773: the dirty tree holds no upgrade back; it only names who wrote in the checkout.
+        detail += runsSnapshot() ? ` This loop runs the held snapshot of ${runsSnapshot()!.slice(0, 12)}, not the checkout, and cycles from it; master status names the checkout left behind under upgrade.` : ' The self-upgrade is not held by it: a merged release restarts the loop and the executors onto a held snapshot of it, the checkout left where it stands.';
+      } else if (headDrift(checkout)) { try { if (await deps.diverged?.(checkout, expectedHead)) detail += ` ${checkoutRestoreDivergedRemedy}`; } catch { /* the refusal stands without it */ } }
       enriched = { refusal, detail, at: deps.now() };
     }
     const state = deps.state(), existing = state.actions[escalationKey];
@@ -565,15 +582,26 @@ export function coordinatorCheckoutGuard(deps: {
     return detail;
   };
   return {
-    /** The startup read: the HEAD found here is the commit the loop runs. The refusal, or null. */
+    /**
+     * The startup read: the HEAD found here is the commit the loop runs. The refusal, or null. A loop
+     * loaded from a held snapshot (GY-1773) is not refused by the dirty tree it was started beside:
+     * the escalation names the tree, and the loop cycles from the snapshot.
+     */
     async start(loaded: string | null) {
       const checkout = await deps.read();
       expectedHead = checkout.commit ?? loaded;
-      return escalate(checkout);
+      const refusal = await escalate(checkout);
+      if (refusal && runsSnapshot() && !headDrift(checkout)) {
+        deps.log(`[graphyard-master] the coordinator checkout at ${checkout.root} is dirty, but this loop runs the held snapshot of ${runsSnapshot()!.slice(0, 12)} and cycles from it`);
+        return null;
+      }
+      return refusal;
     },
     /**
-     * The between-cycles read, then the self-upgrade only when the checkout stands clean and at
-     * the commit the loop runs. The loop's own alignment is the one move it sanctions.
+     * The between-cycles read, then the self-upgrade only when the checkout stands at the commit
+     * the loop runs: a dirty tree is escalated but holds no upgrade back (GY-1773: the upgrade
+     * snapshots the merged commit and leaves the tree where it stands). The loop's own alignment is
+     * the one move it sanctions.
      * `stopping`: the loop is ending this process (its supervisor's stop or restart), so the
      * self-upgrade is off and the next loop loads whatever HEAD the checkout holds — a HEAD that
      * moved is what that restart adopts, not drift to refuse (GY-1531: a loop stopping for its own
@@ -593,7 +621,9 @@ export function coordinatorCheckoutGuard(deps: {
       const recovered = selfUpgrade ? await recoverDrift(checkout, keepAlive) : null;
       if (recovered) { await escalate(checkout); return { refusal: null, upgraded: recovered }; }
       const refusal = await escalate(checkout);
-      if (refusal || !selfUpgrade) return { refusal, upgraded: null };
+      // A snapshot-loaded loop runs no checkout code, so the checkout's HEAD moving is no drift to refuse it for;
+      // a dirty tree never holds the upgrade back, however its HEAD moved (GY-1773), so only a clean moved HEAD does.
+      if (!selfUpgrade || (refusal && !runsSnapshot() && !coordinatorCheckoutRefusal(checkout, 'the master loop') && headDrift(checkout))) return { refusal, upgraded: null };
       let upgraded: SelfUpgradeOutcome | null = null;
       try {
         upgraded = await selfUpgrade(deps.state());
@@ -611,7 +641,8 @@ export function coordinatorCheckoutGuard(deps: {
           if (aligned.commit && (sanctioned || targets.includes(aligned.commit))) expectedHead = aligned.commit;
         } catch { /* the next cycle's read reports what it finds */ }
       }
-      return { refusal: null, upgraded };
+      // GY-1773: a dirty tree's refusal is reported even though it held the upgrade back no longer.
+      return { refusal, upgraded };
     },
     expected: () => expectedHead,
     /**

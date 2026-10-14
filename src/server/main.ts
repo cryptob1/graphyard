@@ -170,8 +170,8 @@ export async function main(options: MainOptions = {}) {
     }
     handle(req, res);
   });
-
   let receiptsPrunedAt = 0, ledgerCompactedAt = 0;
+  const stopPlaneBeat = await engine.startPlaneBeat(); // the gap since the previous process ticked is on the record before the first heartbeat is answered (GY-1791)
   const reconciliation = startReconciliation(async step => {
     if (!ready) { await step('validation.startup', () => runStartupValidation()); if (!ready) return; }
     // The delivery sweep is bounded per tick and resumes from its persisted cursor, so a
@@ -195,7 +195,7 @@ export async function main(options: MainOptions = {}) {
   const close = async () => {
     closing = true;
     services.readiness = false; // soft-accept webhooks before the pool drains (GY-1700)
-    reconciliation.stop(); watching?.stop(); watching = null; await observing?.stop(); observing = null; await scanning?.stop(); scanning = null; retroIndex.stop();
+    reconciliation.stop(); stopPlaneBeat(); watching?.stop(); watching = null; await observing?.stop(); observing = null; await scanning?.stop(); scanning = null; retroIndex.stop();
     process.off('SIGTERM', shutdown); process.off('SIGINT', shutdown);
     await new Promise<void>(resolve => http.close(() => resolve()));
     await Promise.resolve(githubCache?.close());

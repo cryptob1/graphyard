@@ -96,12 +96,15 @@ export const classified = (kind: FaultKind): Classified => ({ kind, faultClass: 
 
 /** The fixed wording of review launch-wait reasons (GY-1175); src/auto-dispatch.ts builds them from it, so neither drifts from the other. */
 export const launchWaitWording = { busy: 'every reviewer profile is busy', settles: 'the control plane settles the request once it reads that verdict' } as const;
+/** The fixed wording of the gh login's rate-limit pause (GY-1791); src/gh-pause.ts builds its error from it, so neither drifts. A launch the pause defers is a GitHub read that is paused — the catalogue's `github-budget`, under observation — never a launch that did not start (GY-1773's instance counted a paused read against session liveness). */
+export const ghPausedWording = { paused: 'gh reads are paused', limit: "the login's API rate limit was exceeded" } as const;
 /**
- * A review launch wait's kind, by its reason (GY-1175): no reviewer profile with a slot is starved capacity, a
- * request a reviewer session already answered waits to settle its verdict, and any other reason is a launch that did not start.
+ * A review launch wait's kind, by its reason (GY-1175): a launch the gh login's rate-limit pause defers is a paused
+ * GitHub read, no reviewer profile with a slot is starved capacity, a request a reviewer session already answered
+ * waits to settle its verdict, and any other reason is a launch that did not start.
  */
 export const launchWaitKind = (reason: string): FaultKind =>
-  reason.includes(launchWaitWording.busy) ? 'concurrency-starved' : reason.includes(launchWaitWording.settles) ? 'review-settlement' : 'launch-review';
+  reason.includes(ghPausedWording.paused) ? 'github-budget' : reason.includes(launchWaitWording.busy) ? 'concurrency-starved' : reason.includes(launchWaitWording.settles) ? 'review-settlement' : 'launch-review';
 const launchWaitLine = /'s review request \S+ on \S+ has waited .+? without a reviewer launch: /s;
 const launchWaitSignature = (kind: FaultKind) => (_: string, text: string) => { const match = launchWaitLine.exec(text); return !!match && launchWaitKind(text.slice(match.index + match[0].length)) === kind; };
 /**

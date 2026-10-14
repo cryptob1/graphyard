@@ -9,7 +9,8 @@ import { humanNeededActions } from '../model/next-action.js';
 import { assertDispatchable, dispatchReserved, type ContainmentAssessment, type EscalationSession, type RoleCapacity, roleCapacity } from '../master.js';
 import { workspaceDispatchFailure } from '../master/dispatch.js';
 import { standingEscalations } from '../model/escalation.js';
-import { registeredLaunch } from '../model/session-state.js';
+import { coordinateAttempts, coordinateRetryMs, registeredLaunch } from '../model/session-state.js';
+import type { SessionHandleInput } from '../model/sessions.js';
 import { type DaemonAction, message } from './state.js';
 import { decisionKey, dispatchKey } from './reconcile.js';
 import { clearProfileFailure, occupiesRoleBound, profileHealth, readyToRetry, recordProfileFailure } from './sessions.js';
@@ -27,6 +28,58 @@ import { dispatchBlockRetryMs, dispatchFailureBlockAfter, dispatchFailureBlocker
 import { closeStanding, closingItems } from './stale-closes.js';
 import { guardCarried, settleCarriedWrites } from './carried-writes.js';
 import { carriedCall, owedWrite, recordCarried, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
+
+/**
+ * Move a launched session's record onto the epoch its launch actually claimed (GY-1791).
+ *
+ * The registration is written before the claim, so its id guesses the epoch as the dispatch
+ * snapshot's `+ 1`; a launch that claims again after its first runtime refused the prompt claims a
+ * later epoch, and the guess lands on the previous attempt's id — exactly where an older session's
+ * record lives. The resume fence, the watcher and the blocker probes all key an attempt's session
+ * by `principal:epoch`, so a record under the wrong id is a session that can never be verified or
+ * told (GY-1788's resume paste was refused for ever by the pane the old id carried). Once the
+ * launch returns the claimed epoch, the record moves in one write: the session is recorded under
+ * the claimed epoch's id with the coordinates the launch returned, and the control plane closes the
+ * guessed record in that same transaction (engine.ts: one principal runs one implementation
+ * session on an item at a time), so no failure between two writes can leave the attempt with two
+ * running handles or with none. The write is retried as a launch's coordinates are
+ * (`coordinateAttempts`), and the outcome is read back from the document the write returns.
+ * No attempt epoch rides the write — only the lease holder may write one (engine.ts) — and the
+ * coordinator's record keys by id alone, as every pre-claim registration does.
+ *
+ * Returns what happened: `unchanged` for a launch that failed or claimed the expected epoch,
+ * `moved` once the record is durable under the claimed id, or `failed` with the refusal when every
+ * attempt failed — the guessed record then still stands untouched, and the dispatch names the
+ * failure so the attempt is not reported addressable when it is not.
+ */
+export type SessionRekey = { outcome: 'unchanged' } | { outcome: 'moved'; from: string; to: string } | { outcome: 'failed'; from: string; to: string; reason: string };
+export async function rekeyLaunchedSession(record: ((handle: SessionHandleInput) => Promise<unknown>) | undefined, handle: SessionHandleInput,
+  expectedEpoch: number, launched: { epoch?: number; pane?: string | null; agentName?: string | null } | undefined,
+  attach?: (pane: string) => string, retryMs = coordinateRetryMs): Promise<SessionRekey> {
+  const claimed = launched?.epoch;
+  if (!record || !Number.isInteger(claimed) || claimed === expectedEpoch) return { outcome: 'unchanged' };
+  const pane = launched?.pane ?? null, agentName = launched?.agentName ?? null;
+  const moved = `${handle.id.slice(0, handle.id.lastIndexOf(':') + 1)}${claimed}`;
+  const destination: SessionHandleInput = { id: moved, kind: handle.kind, principal: handle.principal, runtime: handle.runtime, host: handle.host,
+    ...(handle.workspace ? { workspace: handle.workspace } : {}), subject: handle.subject, state: 'running',
+    ...(agentName ? { agentName } : {}), ...(pane ? { pane, ...(attach ? { attach: attach(pane) } : {}) } : {}) };
+  let reason = 'the control plane did not answer';
+  for (let attempt = 1; attempt <= coordinateAttempts; attempt++) {
+    try {
+      const written = await record(destination) as { sessions?: { id: string; state: string }[] } | undefined;
+      // The document the write returns is the verification: the session stands running under the
+      // claimed id and the guessed record no longer runs. A write that returns no document landed
+      // too — the control plane refuses rather than half-applies — so it counts as moved.
+      const sessions = written?.sessions;
+      const stale = sessions?.find(entry => entry.id === handle.id && entry.state === 'running');
+      const landed = sessions?.find(entry => entry.id === moved && entry.state === 'running');
+      if (!sessions || (landed && !stale)) return { outcome: 'moved', from: handle.id, to: moved };
+      reason = stale ? `the record still runs under ${handle.id} after the write` : `the record is not running under ${moved} after the write`;
+    } catch (error) { reason = error instanceof Error ? error.message : String(error); }
+    if (attempt < coordinateAttempts) await new Promise(done => setTimeout(done, retryMs * attempt));
+  }
+  return { outcome: 'failed', from: handle.id, to: moved, reason: reason.slice(0, 300) };
+}
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
 export const dispatchStep = (cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) =>
@@ -337,13 +390,22 @@ async function dispatchStepWithin(cycle: Cycle, health: ReturnType<typeof profil
           id: `${current.profile.principal}:${item.epoch + 1}`, kind: 'implementation', principal: current.profile.principal, runtime: current.profile.kind ?? current.profile.mode, host: config.hostId,
           ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
           subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
-        }, async () => await effects.dispatch(item, current.profile, free, snapshot) as { pane?: string | null; agentName?: string; principal?: string; reclaimed?: string[]; closedAgent?: string } | undefined,
+        }, async () => await effects.dispatch(item, current.profile, free, snapshot) as { pane?: string | null; agentName?: string; principal?: string; reclaimed?: string[]; closedAgent?: string; epoch?: number } | undefined,
         launched => launched, pane => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`);
+        // The registration guessed the epoch as the snapshot's `+ 1`; the launch names the one it
+        // claimed. When a first runtime refused the prompt and the dispatch claimed again, they
+        // differ, and the record moves onto the claimed epoch's id (GY-1791) — the resume fence,
+        // the watcher and the blocker probes all key this attempt by that id.
+        const rekey = await rekeyLaunchedSession(effects.recordSession ? handle => effects.recordSession!(item, handle) : undefined, {
+          id: `${current.profile.principal}:${item.epoch + 1}`, kind: 'implementation', principal: current.profile.principal, runtime: current.profile.kind ?? current.profile.mode, host: config.hostId,
+          ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
+          subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
+        }, item.epoch + 1, launched as { epoch?: number; pane?: string | null; agentName?: string | null }, pane => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`);
         clearProfileFailure(state, current.profile);
         delete state.dispatchFailures[item.id];
         // The file comes before the claimant keys, so the 2000-character detail bound trims a long
         // key list and never the file it contends on; a cold dispatch records nothing new here.
-        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'done', detail: `Dispatched ${item.key} to ${current.profile.name}; the worker launcher claimed under ${current.profile.principal}${hotspotNote(beside)}${launched?.reclaimed?.length ? `; freed its branch by reclaiming ${launched.reclaimed.join('; ')}` : ''}${launched?.closedAgent ? `; closed finished session ${launched.closedAgent} that held the profile's name` : ''}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'done', detail: `Dispatched ${item.key} to ${current.profile.name}; the worker launcher claimed under ${current.profile.principal}${hotspotNote(beside)}${launched?.reclaimed?.length ? `; freed its branch by reclaiming ${launched.reclaimed.join('; ')}` : ''}${launched?.closedAgent ? `; closed finished session ${launched.closedAgent} that held the profile's name` : ''}${rekey.outcome === 'moved' ? `; the launch claimed epoch ${launched?.epoch}, so its session record moved from ${rekey.from} to ${rekey.to}` : rekey.outcome === 'failed' ? `; the launch claimed epoch ${launched?.epoch} but its session record could not be moved from ${rekey.from} to ${rekey.to} (${rekey.reason}): the attempt's own handle is not on the record, so the loop reclaims it on the bound unless a later write lands` : ''}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
         return;
       } catch (error) {
         // Another dispatcher — an executor, or a hand dispatch — holds the profile or the item

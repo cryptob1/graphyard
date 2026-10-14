@@ -10,7 +10,7 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
+import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, stallCovering, submittedEpoch, type Attestation, type PlaneStall, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
 import { filedFollowUpWindow, followUpRequest, patternOfProof, type PatternProjections, type PatternReader } from './model/observation-window.js';
 import { readInterventionReport } from './interventions/report.js';
 import { interventionPolicyFromEnv } from './model/interventions.js';
@@ -282,6 +282,18 @@ function retainQuarantineFence(work: Work) {
 export async function readAttestations(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, workId: string): Promise<Attestation[]> {
   const rows = (await db.query(`SELECT seq, actor, kind, payload->'details' AS details, ${eventWorkSql()}->'epoch' AS work_epoch, created_at FROM events WHERE work_id=$1 AND kind IN ('blocked','rework','recover') ORDER BY seq`, [workId])).rows;
   return attestationsFromLedger(rows.map(row => ({ seq: Number(row.seq), actor: row.actor, kind: row.kind, at: new Date(row.created_at).toISOString(), details: row.details ?? undefined, workEpoch: row.work_epoch ?? undefined })));
+}
+/**
+ * The plane stalls recorded around `fromMs`..`untilMs` (wall-clock ms): the gaps in the
+ * reconciliation loop's own ticks (recordPlaneLiveness), each once in the ledger with no work of its
+ * own. They are read beside the attestations wherever a lapse is classed, so a lease that ran out
+ * while the plane itself was down is explained by the plane's record rather than counted as a
+ * lost worker (GY-1791). The `created_at` index serves the read; the window is bounded by the
+ * caller to the lapse it is classing.
+ */
+export async function readPlaneStalls(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, fromMs: number, untilMs: number): Promise<PlaneStall[]> {
+  const rows = (await db.query(`SELECT payload->'details' AS details FROM events WHERE kind = 'plane.stall' AND created_at >= to_timestamp($1 / 1000.0) AND created_at <= to_timestamp($2 / 1000.0) ORDER BY created_at`, [fromMs, untilMs])).rows;
+  return rows.map(row => { const details = row.details ?? {}; return { from: String(details.from), to: String(details.to) }; }).filter(stall => Number.isFinite(Date.parse(stall.from)) && Number.isFinite(Date.parse(stall.to)));
 }
 /**
  * Apply this repository's scope rule to an open request and record what it decided (GY-85).
@@ -691,6 +703,8 @@ class ReconcileContended extends Error {}
  * null when the window held no sample.
  */
 export interface ReconcileTick { at: string; candidates: number; evaluated: number; deferred: number; maxAttempts: number; ms: number; writes: number; lockWaitMs: number; full: ReconcileFull | null; lagMs: { p50: number; max: number } | null }
+/** How long the reconciliation loop may go between passes before the gap is recorded as a plane stall (GY-1791): the loop is driven every couple of seconds, so a minute is dozens of missed passes. */
+export const planeStallMs = 60_000;
 /** One item whose fleet face moved (GY-1777): which face fields, or `new` for an item the view first read and `gone` for one deleted. */
 export interface FaceMove { id: string; key: string; fields: string[] }
 /**
@@ -1200,7 +1214,10 @@ export class Engine {
    * A lease past its expiry that a recorded server-side renewal fault still covers (GY-558): the
    * first fault after its last renewal and inside its expiry window extends it to one lease period
    * after that fault, once — a later fault before a successful renewal extends nothing. A lease
-   * whose worker stopped renewing has no such record and expires as before.
+   * whose worker stopped renewing has no such record and expires as before. A gap in the plane's
+   * own ticks (recordPlaneLiveness) that covers the expiry is the same server-side fault in the plane
+   * itself (GY-1791): renewals could not land while no tick ran, so a supervisor still retrying
+   * finds the lease live and renews, where the base lapsed it and raised a lease loss.
    */
   private async renewalGrace(db: PoolClient, work: Work, now: Date) {
     const lease = work.lease as GracedLease | null;
@@ -1209,9 +1226,17 @@ export class Engine {
     const fault = (await db.query(`SELECT payload->>'at' AS at, payload->>'error' AS error FROM events WHERE kind=$1 AND created_at>$2::timestamptz AND work_id=$3
       AND payload->>'owner'=$4 AND (payload->>'epoch')::int=$5 AND (payload->>'at')::timestamptz>$2::timestamptz AND (payload->>'at')::timestamptz<=$6::timestamptz
       ORDER BY (payload->>'at')::timestamptz LIMIT 1`, [renewalFaultEvent, new Date(expires - leaseMs).toISOString(), work.id, lease.owner, lease.epoch, lease.expiresAt])).rows[0] as { at: string; error: string } | undefined;
-    if (!fault) return false;
-    lease.renewalFault = { at: new Date(fault.at).toISOString(), error: fault.error };
-    lease.expiresAt = new Date(Math.max(expires, Date.parse(fault.at) + leaseMs)).toISOString();
+    if (fault) {
+      lease.renewalFault = { at: new Date(fault.at).toISOString(), error: fault.error };
+      lease.expiresAt = new Date(Math.max(expires, Date.parse(fault.at) + leaseMs)).toISOString();
+      return true;
+    }
+    // The stall covers the expiry itself, so the read reaches back one window before it; the
+    // recovery tick wrote the stall at its own `to`, which is the newest row the window can hold.
+    const stall = stallCovering(await readPlaneStalls(db, expires - leaseMs, now.getTime()), expires);
+    if (!stall) return false;
+    lease.renewalFault = { at: stall.from, error: `the control plane was not answering between ${stall.from} and ${stall.to}` };
+    lease.expiresAt = new Date(Math.max(expires, Date.parse(stall.to) + leaseMs)).toISOString();
     return true;
   }
   private async executeCommand(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; ciRun?: CiRunObservation | null; attestation?: EvidenceAttestation } = {}) {
@@ -1480,7 +1505,8 @@ export class Engine {
         // assignment ended, exactly as reconciliation would have: explained lapses are
         // history, a silently vanished worker is an escalation the overwrite cannot erase.
         if (work.lease) {
-          const explained = leaseLapseCause(work, work.lease, await readAttestations(db, work.id));
+          const lapsedStalls = await readPlaneStalls(db, now.getTime() - 24 * 3_600_000, now.getTime());
+          const explained = leaseLapseCause(work, work.lease, await readAttestations(db, work.id), lapsedStalls);
           if (explained) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'lease.expired',
             JSON.stringify({ details: { owner: work.lease.owner, epoch: work.lease.epoch, expiresAt: work.lease.expiresAt, submission: work.submission, ...explained, at: now.toISOString() } })]);
           else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(work.lease), at: now.toISOString(), actor: 'graphyard' });
@@ -1744,6 +1770,18 @@ export class Engine {
         // An observation dated ahead of this clock would read fresh for good, so it is stored as of now.
         const observedAt = data.observedAt && Date.parse(data.observedAt) > now.getTime() ? now.toISOString() : data.observedAt;
         const { supersede: _supersede, ...handle } = data;
+        // One worker principal runs one implementation session on an item at a time, so a launcher
+        // recording that principal's session running under a new id moves it: the running record
+        // the same principal held under another id — the one registered before the claim under the
+        // epoch the snapshot guessed (cycle-dispatch.ts rekeyLaunchedSession, GY-1791) — is closed in
+        // this same transaction, naming where the session now is. One write moves the handle, so
+        // no failure between two can leave the attempt with two running handles or with none.
+        if (handle.kind === 'implementation' && handle.state === 'running' && ['coordinator', 'admin'].includes(actor.role)) {
+          const owner = handle.principal ?? existing?.principal ?? actor.id;
+          for (const other of (work.sessions ?? []).filter(entry => entry.id !== handle.id && entry.kind === 'implementation' && entry.state === 'running' && entry.principal === owner))
+            recordSession(work, { id: other.id, kind: other.kind, runtime: other.runtime, host: other.host, subject: other.subject, state: 'finished',
+              outcome: `superseded: ${owner} runs one implementation session on ${work.key} at a time, and its launcher recorded that session as ${handle.id}`.slice(0, 500) }, actor.id, now);
+        }
         recordSession(work, { ...handle, ...(observedAt ? { observedAt } : {}) }, actor.id, now);
       }
       if (command === 'request') {
@@ -2898,8 +2936,71 @@ export class Engine {
     // The event-loop lag over the tick's window (GY-1777): a timer's overrun past its 10 ms
     // resolution, so a tick slowed by a starved loop is told apart from one waiting on I/O.
     this.eventLoopLag.start();
+    // The plane's liveness is read before this pass classes any lapse (GY-1791): the pass that meets
+    // a lease the stall let run out must already find the stall on the record. The independent beat
+    // (startPlaneBeat) keeps the tick moving through a long pass, so a pass's own length is no gap.
+    await this.recordPlaneLiveness();
     try { await this.reconcilePass(tickStarted); }
     finally { this.eventLoopLag.stop(); }
+  }
+  /**
+   * Record the plane's own liveness (GY-1791): the process beating on its own timer (startPlaneBeat),
+   * before it answers requests (the server's startup), and at the start of every pass all call this.
+   * A gap past `planeStallMs` since the previous record is one `plane.stall` ledger row, read, appended
+   * and moved forward in one transaction under the row's lock, so a failed write leaves the old tick
+   * and a concurrent process sees the gap once. That row is what lets the plane explain its own
+   * outages: a lease lapsing inside a recorded stall is history with its cause, never a lease loss
+   * (leaseLapseCause), and renewal grace keeps the lease live for a supervisor still retrying
+   * (GY-558's rule). Best effort beside the pass — liveness bookkeeping never fails reconciliation.
+   *
+   * The tick runs on the lease pool, the connections heartbeats run on (pools.ts `leaseCommands`),
+   * and on nothing else: a stall is "renewals could not land", so the tick must measure the path
+   * that serves them. The request pool exhausted behind slow queries while heartbeats still land is
+   * no stall — a tick there would have recorded one and explained away a worker that truly vanished
+   * — and a lease pool that cannot take this tick's connection could not take a renewal either.
+   *
+   * The time recorded is read once the lease pool has answered (the connection taken and the
+   * transaction open), never when the beat was sent: a beat held behind a black-holed connection
+   * records when it landed, so beats that waited out an outage cannot replay the times they were
+   * sent at over the gap and move the tick past a stall nothing recorded. A caller measuring a
+   * simulated clock passes `at`.
+   */
+  async recordPlaneLiveness(at?: Date) {
+    let db: PoolClient | null = null;
+    try {
+      db = await this.store.leasePool.connect();
+      await db.query('BEGIN');
+      at ??= new Date();
+      await db.query('INSERT INTO plane_liveness(id,tick_at) VALUES(true,$1) ON CONFLICT (id) DO NOTHING', [at]);
+      const previous = (await db.query('SELECT tick_at FROM plane_liveness WHERE id = true FOR UPDATE')).rows[0].tick_at as Date;
+      if (at.getTime() > previous.getTime()) {
+        if (at.getTime() - previous.getTime() > planeStallMs)
+          await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)',
+            ['graphyard', 'plane.stall', JSON.stringify({ details: { from: previous.toISOString(), to: at.toISOString() } })]);
+        await db.query('UPDATE plane_liveness SET tick_at = $1 WHERE id = true', [at]);
+      }
+      await db.query('COMMIT');
+    } catch {
+      await db?.query('ROLLBACK').catch(() => {}); // the next beat records it
+    } finally { db?.release(); }
+  }
+  /**
+   * Beat the plane's liveness on a timer of its own, so slow serial work between passes is never
+   * read as an outage. The first beat lands before this resolves, so a server starts answering
+   * heartbeats with the gap since its previous process already on the record. One beat is in flight
+   * at a time: a beat the lease pool has not answered is not joined by the next interval's, so an
+   * outage queues no pile of beats to land together when the pool answers again.
+   */
+  async startPlaneBeat(intervalMs = planeStallMs / 6): Promise<() => void> {
+    await this.recordPlaneLiveness();
+    let inFlight = false;
+    const timer = setInterval(() => {
+      if (inFlight) return;
+      inFlight = true;
+      void this.recordPlaneLiveness().finally(() => { inFlight = false; });
+    }, intervalMs);
+    timer.unref();
+    return () => clearInterval(timer);
   }
   private async reconcilePass(tickStarted: number) {
     // A process's first pass would otherwise open on a cold stand-in cache and project every open
@@ -3158,15 +3259,21 @@ export class Engine {
     // attestation. It is read only where a lapse or a standing lease-loss makes it relevant.
     const standingLoss = standingEscalations(work).some(entry => entry.trigger === 'lease-loss');
     const attestations = leaseLost || standingLoss ? await readAttestations(db, work.id) : [];
+    // The plane's own recorded stalls over the last day (recordPlaneLiveness): the read is rare and
+    // indexed, and it serves both the lapse being classed here and the standing losses a recorded
+    // stall explains (GY-1791).
+    const stalls = leaseLost || standingLoss ? await readPlaneStalls(db, now.getTime() - 24 * 3_600_000, now.getTime()) : [];
     const lost = leaseLost ? work.lease! : null;
     if (lost) {
       work.lease = null;
       // A lease that lapses under the epoch it submitted is the expected end of an attempt
       // whose candidate is already bound, and one that lapses under a carried blocked report
       // or after a stopped-worker attestation for its epoch ended because the control plane
-      // acted — recorded as history with its cause, never as an incident. Only an epoch with
-      // no submission, no blocked report and no attestation vanished, and that still escalates.
-      const explained = leaseLapseCause(work, lost, attestations);
+      // acted — recorded as history with its cause, never as an incident. A lapse inside one of
+      // the plane's own recorded stalls is explained by the plane's record the same way. Only an
+      // epoch with no submission, no blocked report, no attestation and no stall covering its
+      // expiry — a worker that silently vanished while the plane was up — still escalates.
+      const explained = leaseLapseCause(work, lost, attestations, stalls);
       if (explained) ledger.push({ kind: 'lease.expired', details: { owner: lost.owner, epoch: lost.epoch, expiresAt: lost.expiresAt, submission: work.submission, ...explained } });
       else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(lost), at: now.toISOString(), actor: 'graphyard' });
       endLapsedAttempt(work, lost, now);
@@ -3182,7 +3289,7 @@ export class Engine {
     // record shows can no longer act is settled here too, not by an approver round: at once when a
     // newer attempt superseded it (GY-1390), and once it has stood its bound when every attempt has
     // ended with no lease and no fence (GY-1393).
-    for (const settled of settleableLeaseLoss(work, attestations, now.getTime())) {
+    for (const settled of settleableLeaseLoss(work, attestations, now.getTime(), stalls)) {
       resolveEscalation(work, settled.escalation.trigger);
       ledger.push({ kind: 'escalation.auto-settled', details: { trigger: settled.escalation.trigger, epoch: settled.epoch, escalation: settled.escalation, note: settled.note, cause: settled.cause, attestation: settled.attestation, submission: work.submission } });
     }
