@@ -150,15 +150,20 @@ const quotedEnd = (text: string) => {
   for (let i = 1; i < text.length; i++) { if (text[i] === '\\') i++; else if (text[i] === '"') return i; }
   return -1;
 };
-/** Only a rename or copy line holds a pair; a modified path that itself contains " -> " is one path. */
-const porcelainPath = (line: string) => {
+/**
+ * Only a rename or copy line holds a pair; a modified path that itself contains " -> " is one path.
+ * An unquoted pair is ambiguous when the destination holds " -> " too, so it yields every possible
+ * destination, longest first, and `checkoutState` keeps the one the index holds.
+ */
+const porcelainCandidates = (line: string): { paths: string[]; pair: boolean } => {
   const text = line.slice(3).trim();
-  if (!/[RC]/.test(line.slice(0, 2))) return unquotePath(text);
+  if (!/[RC]/.test(line.slice(0, 2))) return { paths: [unquotePath(text)], pair: false };
   const end = quotedEnd(text);
-  if (end >= 0) return unquotePath(text.slice(end + 1).startsWith(' -> ') ? text.slice(end + 5).trim() : text);
-  return unquotePath(text.split(' -> ').at(-1)!.trim());
+  if (end >= 0) return { paths: [unquotePath(text.slice(end + 1).startsWith(' -> ') ? text.slice(end + 5).trim() : text)], pair: false };
+  const pieces = text.split(' -> ');
+  const paths = pieces.slice(1).map((_, i) => unquotePath(pieces.slice(i + 1).join(' -> ').trim()));
+  return { paths: paths.length ? paths : [unquotePath(text)], pair: paths.length > 1 };
 };
-const porcelainPaths = (status: string) => status.split('\n').filter(line => line.length > 3).map(porcelainPath).filter(Boolean);
 export async function checkoutState(root: string, run: ChildRun): Promise<CheckoutState> {
   const git = (...args: string[]) => run('git', ['-C', root, ...args]);
   let commit: string | null;
@@ -168,7 +173,15 @@ export async function checkoutState(root: string, run: ChildRun): Promise<Checko
   try { branch = (await git('symbolic-ref', '-q', 'HEAD')).trim() || null; detached = branch ? false : null; }
   catch (error: any) { if (error?.status === 1) detached = true; }
   let dirty: boolean | null, dirtyPaths: string[] = [];
-  try { dirtyPaths = porcelainPaths(await git('status', '--porcelain', '--untracked-files=no')); dirty = dirtyPaths.length > 0; } catch { dirty = null; }
+  try {
+    for (const line of (await git('status', '--porcelain', '--untracked-files=no')).split('\n').filter(entry => entry.length > 3)) {
+      const { paths, pair } = porcelainCandidates(line);
+      let chosen = paths.at(-1)!;
+      if (pair) for (const path of paths) { if ((await git('--literal-pathspecs', 'ls-files', '--', path)).trim()) { chosen = path; break; } }
+      if (chosen) dirtyPaths.push(chosen);
+    }
+    dirty = dirtyPaths.length > 0;
+  } catch { dirty = null; dirtyPaths = []; }
   return { commit, detached, dirty, dirtyPaths, branch };
 }
 
@@ -478,7 +491,9 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       if (unmade !== null) return failed(`the held snapshot of ${shortCommit(pending.to)} could not be made for the restart from the dirty coordinator checkout at ${shortCommit(left.checkout)}: ${unmade}`, 'snapshot-failed');
       state.upgrade.snapshot = { at: at(), commit: pending.to, checkout: left.checkout, dirty: left.dirty.slice(0, 20) };
     } else {
-      await holdCli(null).catch(() => {});
+      // A pointer that failed to go still pins the launcher to the old snapshot: the checkout stays put.
+      const unpinned = await holdCli(null).then(() => null, error => message(error));
+      if (unpinned !== null) return failed(`the held snapshot pin could not be lifted before the restart onto ${shortCommit(pending.to)}: ${unpinned}`, 'snapshot-failed');
       delete state.upgrade.snapshot;
     }
     if (!deps.restartExecutors) return failed('loaded code moved but this loop cannot restart the executors', 'executors-unavailable');
@@ -560,6 +575,8 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       if (left.checkout !== commit || left.dirty.join('\n') !== dirty.join('\n')) { state.upgrade.snapshot = { ...left, checkout: commit, dirty }; await persist(); }
       return { outcome: 'skipped', reason: `the checkout holds ${shortCommit(commit)}, the commit the loop runs from its held snapshot, but loaded code is dirty in it (${dirty.filter(path => upgradeTouchesCode([path])).slice(0, 8).join(', ')}); the pin stays until it is clean` };
     }
+    // Whether loaded paths are dirty is unknown when git status failed: the pin stays until it reads.
+    if (standing.dirty === null) return { outcome: 'skipped', reason: `the checkout holds ${shortCommit(commit)}, the commit the loop runs from its held snapshot, but whether it is dirty could not be read; the pin stays until it is, retried next cycle` };
     // A pointer that failed to go still pins the launcher: the record stays and the next cycle retries.
     const unlifted = await holdCli(null).then(() => null, error => message(error));
     if (unlifted) return { outcome: 'skipped', reason: `the checkout holds ${shortCommit(commit)}, the commit the loop runs from its held snapshot, but the pin could not be lifted: ${unlifted}; retried next cycle` };

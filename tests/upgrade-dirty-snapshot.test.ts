@@ -521,4 +521,7 @@ test('unit:dirty-path-named-with-an-arrow — a modified tracked file whose name
   git(root, 'mv', 'old name.txt', 'new name.txt');
   const renamed = await upgrade.checkoutState(root, run);
   assert.deepEqual(renamed.dirtyPaths, ['new name.txt']);
+  git(root, 'mv', 'new name.txt', 'new -> name.ts');
+  const arrowed = await upgrade.checkoutState(root, run);
+  assert.deepEqual(arrowed.dirtyPaths, ['new -> name.ts'], 'a destination holding " -> " is named whole');
 });
