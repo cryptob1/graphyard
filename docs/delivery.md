@@ -28,7 +28,7 @@ Required: `typecheck`, `test` (`ci.yml`); per candidate `releaseCandidateTests`,
 
 ### One delivery path
 
-Exact-head gates merge; [candidates](#release-candidates) deploy.
+Exact-head gates merge; [candidates](#release-candidates) deploy. See [the redesign](delivery-redesign.md).
 
 ### Main guard
 
