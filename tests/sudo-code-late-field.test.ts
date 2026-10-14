@@ -67,7 +67,9 @@ const noop = { meta: () => null, setChecked() {}, select() {}, screenshot() {}, 
 function fixturePage(options: { renderWaits?: number[]; clock?: { at: number } } = {}) {
   const renders = [...(options.renderWaits ?? [1])];
   const state = { view: 'passkey' as 'passkey' | 'loading' | 'totp' | 'done', waits: 0, pending: 1, field: '', typed: [] as { code: string; at: number }[], submitted: [] as string[], clicked: [] as string[], renderedAt: null as number | null, chosenAt: null as number | null };
-  const html = () => state.view === 'passkey' ? PASSKEY_VIEW : state.view === 'totp' ? TOTP_VIEW : state.view === 'loading' ? TOTP_LOADING : '<h1>Register new GitHub App</h1>';
+  // Rendering is also a matter of elapsed time: polling that only sleeps still lets the input appear.
+  const html = () => { if (options.clock && state.view === 'loading' && state.chosenAt !== null && Number.isFinite(state.pending) && options.clock.at - state.chosenAt >= state.pending * 500) { state.view = 'totp'; state.renderedAt = options.clock.at; } return htmlNow(); };
+  const htmlNow = () => state.view === 'passkey' ? PASSKEY_VIEW : state.view === 'totp' ? TOTP_VIEW : state.view === 'loading' ? TOTP_LOADING : '<h1>Register new GitHub App</h1>';
   const page: BrowserPage = { ...noop,
     open() { if (state.view !== 'done') state.view = 'passkey'; },
     url: () => state.view === 'done' ? 'https://github.com/settings/apps/new' : SUDO,
@@ -196,6 +198,7 @@ test('unit:sudo-code-late-field — a code handed beside a GitHub Mobile prompt,
   assert.deepEqual(fake.state.submitted, [CODE], 'the code handed beside the prompt reached the TOTP field');
   const renderedAt = fake.state.renderedAt!;
   assert.ok(renderedAt !== null, 'the input rendered');
+  assert.ok(renderedAt - fake.state.chosenAt! >= 3_500, `the input rendered ${renderedAt - fake.state.chosenAt!} ms after the view was chosen, not at once`);
   const delay = fake.state.typed[0].at - renderedAt;
   assert.ok(delay >= 0 && delay <= 2_000, `the code was typed ${delay} ms after the input appeared, over its 2 s bound`);
 });
