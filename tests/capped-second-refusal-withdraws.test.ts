@@ -191,6 +191,11 @@ test('unit:no-phantom-review-relaunch-row — GY-1810 AC-2: master status shows 
   assert.equal(bare.work[0]!.attentionOwner!.role, 'master');
   assert.match(bare.attentionItems[0]!.text!, /review-cap step is stalled/);
   assert.equal(bare.attentionItems.length, 1, 'one row per item, replaced in place');
+  // A withdrawal still failing or carried for an earlier candidate sha is not pending for this head.
+  const earlier = statusOf(item, { actions: { [`review-cap:${item.id}:${'e'.repeat(40)}:77`]: { state: 'failed', detail: 'carried', attempts: 1 } } });
+  assert.match(earlier.work[0]!.attention!, /review-cap step is stalled/, 'a pending withdrawal for an earlier sha does not keep the loop row');
+  const pending = statusOf(item, { actions: { [`review-cap:${item.id}:${H}:77`]: { state: 'failed', detail: 'carried', attempts: 1 } } });
+  assert.equal(pending.work[0]!.attention, row(item).attention, 'a pending withdrawal for this head keeps the loop row');
   // The item's other attention entries (supervised session, remedy, capacity) keep their own text and next action.
   const others = [{ subject: item.key, text: 'Its supervised session is not answering', ...agentOwner('master', 'graphyard master sessions GY-1802') }, { subject: item.key, text: 'Capacity is spent', ...agentOwner('control plane', 'Wait for a free slot') }];
   const many = stalledReviewCapAttention({ work: [row(item)], attentionItems: [others[0]!, { subject: item.key, text: 'Outstanding change requests must be resolved through a new review', ...ownerOf(item) }, others[1]!] }, [item], {}, 3, at);

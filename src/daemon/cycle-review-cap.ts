@@ -404,7 +404,7 @@ const reviewCapHoldsHead = (item: Work, all: readonly Work[], cursor: ReviewCapC
   // A binding agent verdict answers the request it was recorded for, so that request is no review in motion.
   && (!(item.reviewRequest && item.reviewRequest.sha === item.candidate.sha) || !item.observation.reviews.some(review => review.sha === item.candidate!.sha && review.state === 'CHANGES_REQUESTED')) && item.autoDispatch?.review?.state !== 'requested'
   && nextAction(item, [...all], new Date(now))?.kind !== 'request-review'
-  && !Object.entries(cursor?.actions ?? {}).some(([key, action]) => key.startsWith(`review-cap:${item.id}:`) && action.state !== 'done' && !(action.state === 'failed' && (action.attempts ?? 0) >= maxCappedFilingAttempts));
+  && !Object.entries(cursor?.actions ?? {}).some(([key, action]) => key.startsWith(cappedHeadKey(item, item.candidate!.sha)) && action.state !== 'done' && !(action.state === 'failed' && (action.attempts ?? 0) >= maxCappedFilingAttempts));
 
 /** Why the step holds the head when it has escalated nothing: the round's rework decision before its approver, or the bare hold. */
 const reviewCapHold = (item: Work, cursor: ReviewCapCursor | null | undefined): string => {
