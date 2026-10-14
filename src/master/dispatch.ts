@@ -594,15 +594,21 @@ export const branchRewriteGuidance = 'Never force-push or rewrite a branch you h
  * ships past it, so the request names them where the sync rule left the before-push discipline:
  * after it, before the complete instruction. One exported constant beside the prompt, so the
  * request (workerPrompt), its test (tests/worker-prompt-gates.test.ts) and the documentation
- * (docs/coordination.md) read the same list; every entry is a test file or script the repository
- * carries, and the test files run as one `npx tsx --test` command while each script runs on its own.
+ * (docs/coordination.md) read the same list; every entry is a test file or script this repository
+ * carries, and all of them run as one command line, chained with `&&`, so the request names one.
  */
 export const workerFastGates = {
   tests: ['tests/module-budgets.test.ts', 'tests/docs-budget.test.ts', 'tests/docs-growth-gate.test.ts', 'tests/docs-glossary.test.ts', 'tests/no-wall-clock-time-bombs.test.ts', 'tests/ci-shards.test.ts'],
   scripts: ['scripts/check-docs.mjs'],
 } as const;
+/** The list lives in this repository's tree only: no other managed repository carries these files. */
+export const workerFastGatesRepository = 'graphyard';
+/** Only this repository's own requests name the gates; any other repository's request renders exactly as before they existed. */
+const fastGatesApply = (repository?: string) => repository?.split('/').at(-1)?.toLowerCase() === workerFastGatesRepository;
+/** The one command line the gates run as: the test files through the suite's own harness (run-tests.ts reserves the port window a bare run lacks), then the docs checker, chained with `&&`. */
+export const workerFastGatesCommand = `node --import tsx tests/helpers/run-tests.ts ${workerFastGates.tests.join(' ')} && ${workerFastGates.scripts.map(script => `node ${script}`).join(' && ')}`;
 /** The one sentence the request adds: the gates, their one command line, and what to do when one fails. */
-export const workerFastGatesSentence = `Before complete, run the fast gates — \`npx tsx --test ${workerFastGates.tests.join(' ')}\` and \`${workerFastGates.scripts.map(script => `node ${script}`).join(' and ')}\` — and fix what they name before pushing, since CI fails on each of them. `;
+export const workerFastGatesSentence = `Before complete, run the fast gates — \`${workerFastGatesCommand}\` — and fix what they name before pushing, since CI fails on each of them. `;
 export function workerPrompt(
   config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository'>>,
   work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'documentation' | 'description' | 'criteria' | 'researchBrief' | 'candidate' | 'plannedFiles' | 'submission' | 'pipeline'>>,
@@ -638,7 +644,7 @@ export function workerPrompt(
   // so the launcher says which trees are already there rather than leaving it to be guessed.
   const installed = dependencies?.shared.length ? `The assigned worktree needs no dependency install: ${dependencies.shared.map(entry => `${entry.name} ${entry.how === 'reachable' ? 'already resolves to' : 'is shared with'} the install at ${entry.source}`).join(', ')}, for this exact lockfile. Do not install dependencies again unless you change the lockfile. ` : '';
   const memoryDigest = projectMemoryDigest(memory, 'worker', { baseSha });
-  return `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. ${workerFastGatesSentence}Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them. `
+  return `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. ${fastGatesApply(config.repository) ? workerFastGatesSentence : ''}Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them. `
     + installed
     + (memoryDigest || '')
     + verificationMapDigest(verificationMaps, work.plannedFiles, 'worker')
