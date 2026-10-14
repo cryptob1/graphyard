@@ -553,7 +553,13 @@ test('integration:owed-decision-gy-1761-replay — approval 5499583025 of 632185
   // Base: the gate held from the observation's review entry alone, until 07:25:00Z, while the ledger planned nothing (mechanicalFix null, follow-ups filed 06:24:59.869Z).
   // Candidate: the loop's report answers the approval — follow-ups are filed, so no plan is owed — and the gate releases on it; there is no owed request-rework to outlast the bound.
   // GY-1814: the answer rides the item as `mechanicalPlan` null, the clear the loop wrote over its provisional report of this approval.
-  assert.equal(mechanicalReviewHold({ ...gy1761, mechanicalPlan: null }, sevenOhOne), null, 'no plan, no hold');
+  assert.equal(mechanicalReviewHold({ ...gy1761, mechanicalPlan: null, mechanicalAnswered: { reviewId: 5499583025, head } }, sevenOhOne), null, 'no plan, no hold');
+  // GY-1814: a clear, or a plan, recorded for another head or approval answers nothing here: a later approval of a later head is held until the loop reports on it.
+  const priorHead = 'a'.repeat(40);
+  assert.match(mechanicalReviewHold({ ...gy1761, mechanicalPlan: null, mechanicalAnswered: { reviewId: 5499583000, head: priorHead } }, sevenOhOne) ?? '', /names 2 findings/, 'a clear of an earlier head holds the new approval');
+  assert.match(mechanicalReviewHold({ ...gy1761, mechanicalPlan: null, mechanicalAnswered: { reviewId: 5499582999, head } }, sevenOhOne) ?? '', /names 2 findings/, 'a clear of an earlier review holds it');
+  assert.match(mechanicalReviewHold({ ...gy1761, mechanicalPlan: { reviewId: 5499583000, head: priorHead, at: '2026-10-13T07:00:00.000Z' } }, sevenOhOne) ?? '', /names 2 findings/, 'a plan for an earlier head holds it');
+  assert.match(mechanicalReviewHold({ ...gy1761, mechanicalPlan: null }, sevenOhOne) ?? '', /names 2 findings/, 'a clear naming no approval holds it');
   assert.equal(decisions.neededDecision(gy1761, { autoMerge: true } as never, undefined, [], []), null, 'and no mechanical rework is owed');
   assert.ok(sevenOhOne - Date.parse('2026-10-13T06:25:05.685Z') > reworkDecisionWaitBoundMs, 'the instance stood past the bound at 07:00:34Z');
   // The same approval with a planned fix the loop confirmed this cycle is held, as GY-971 intends, and owes its round;

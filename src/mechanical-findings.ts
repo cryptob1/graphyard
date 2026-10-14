@@ -305,7 +305,6 @@ export const mechanicalPlanFreshMs = 5 * 60_000;
  */
 export function mechanicalReviewHold(work: Work, now: number): string | null {
   const approval = bindingApproval(work);
-  const matching = !!work.mechanicalPlan && work.mechanicalPlan.head === work.candidate?.sha;
   // GY-1814: the hold covers an approval naming mechanical findings from the moment it is observed until
   // its round window lapses, so the head cannot merge inside the observation job that saw the approval —
   // the pass re-evaluates the gates before any report could exist — nor between the loop's confirms of a
@@ -313,12 +312,13 @@ export function mechanicalReviewHold(work: Work, now: number): string | null {
   // report.ts writes only as a real clear (the ledger answered none: follow-ups filed, a fresh read
   // present, a fallback or an applied round), or when it names another approval of this head (GY-1764).
   // A matching plan past its confirm holds until the loop's next one lands or the clear is written: the
-  // decision step still owes the round the ledger plans, and the round window bounds every hold. A `null`
-  // answered the candidate it was cleared on: a head approved again after its answer stays released until
-  // the loop's next report, the one window the hold does not cover.
-  const review = approval && work.observation?.reviews.find(entry => entry.state === 'APPROVED' && entry.sha === approval.sha && (entry.mechanical ?? 0) > 0 && !!entry.submittedAt
+  // decision step still owes the round the ledger plans, and the round window bounds every hold. A clear
+  // releases only the approval it answered (`mechanicalAnswered`): a plan or clear recorded for an earlier head
+  // or review leaves a later approval held until the loop reports on it.
+  const held = approval ? work.observation?.reviews.filter(entry => entry.state === 'APPROVED' && entry.sha === approval.sha && (entry.mechanical ?? 0) > 0 && !!entry.submittedAt
     && now < Date.parse(entry.submittedAt) + mechanicalRoundStartMs
-    && (work.mechanicalPlan === undefined || (matching && (entry.id === undefined || entry.id === work.mechanicalPlan!.reviewId))));
+    && !(work.mechanicalPlan === null && work.mechanicalAnswered?.head === entry.sha && (entry.id === undefined || work.mechanicalAnswered.reviewId === entry.id))) ?? [] : [];
+  const review = held.find(entry => entry.id !== undefined && entry.id === work.mechanicalPlan?.reviewId) ?? held[0];
   if (!review) return null;
   const until = Date.parse(review.submittedAt!) + mechanicalRoundStartMs;
   const count = review.mechanical!;

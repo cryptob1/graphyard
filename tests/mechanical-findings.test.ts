@@ -106,7 +106,7 @@ const approvalOf = (sha: string, id: number, mechanical?: number, submittedAt = 
 /** The item as the control plane holds it once the loop has reported the ledger's plan for its candidate (what the loop's plan report does); the plane stamps `at` on the report it accepts. */
 const planOf = (work: Work, requests: readonly { key: string; head: string; reviewId: number }[]): Work => {
   const plan = requests.find(request => request.key === work.key && request.head === work.candidate?.sha);
-  return { ...work, mechanicalPlan: plan ? { reviewId: plan.reviewId, head: plan.head, at: new Date().toISOString() } : null };
+  return { ...work, mechanicalPlan: plan ? { reviewId: plan.reviewId, head: plan.head, at: new Date().toISOString() } : null, mechanicalAnswered: plan ? null : { reviewId: work.observation?.reviews.find(review => review.state === 'APPROVED')?.id ?? 1, head: work.candidate!.sha } };
 };
 const reviewRefusals = (work: Work, now = Date.now()) => evaluate(work, [work], new Date(now), []).gates.find(gate => gate.name === 'review')!.reasons;
 
@@ -376,8 +376,8 @@ test('unit:mechanical-hold-requires-planned-fix — an approval naming mechanica
   // report of the ledger's plan could exist — an approval the loop has not answered yet holds its head until
   // its round window, so the head cannot merge without its bot round in that window.
   assert.equal(reviewRefusals(nitted).length, 1, 'an approval the loop has not answered yet holds its head from its observation');
-  assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 900, head: H, at: new Date(now).toISOString() } }).length, 0, 'a plan for another approval holds nothing');
-  assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 901, head: B, at: new Date(now).toISOString() } }).length, 0, 'a plan for another head holds nothing');
+  assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 900, head: H, at: new Date(now).toISOString() } }).length, 1, 'a plan for another approval answers nothing here');
+  assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 901, head: B, at: new Date(now).toISOString() } }).length, 1, 'a plan for another head answers nothing here');
   assert.equal(reviewRefusals({ ...nitted, mechanicalPlan: { reviewId: 901, head: H, at: new Date(now).toISOString() } }).length, 1, 'a planned fix for this approval holds the head');
   // GY-1814: a matching plan the loop has not re-confirmed in `mechanicalPlanFreshMs` — its write refused, its
   // ledger read failing — still holds: the decision step still owes the round the ledger plans, so the head is

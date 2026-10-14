@@ -2124,7 +2124,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     } : {}),
     exhaustedProofs: async () => [...abandoned.values()],
     ...(mechanicalDay ? { mechanicalFixes: async () => ({ ...mechanicalFixState(ledger), answered: answeredMechanicalReviews(ledger) }),
-      recordMechanicalPlan: (work: Work, plan: { reviewId: number; head: string } | null) => api(principals.operatorAgent, 'POST', `work/${work.id}/mechanicalplan`, plan ? { ...plan, planned: true } : { reviewId: work.mechanicalPlan?.reviewId ?? 1, head: work.mechanicalPlan?.head ?? work.candidate!.sha, planned: false }) } : {}),
+      recordMechanicalPlan: (work: Work, plan: { reviewId: number; head: string } | null, answered?: { reviewId: number; head: string }) => api(principals.operatorAgent, 'POST', `work/${work.id}/mechanicalplan`, plan ? { ...plan, planned: true } : { reviewId: answered?.reviewId ?? work.mechanicalPlan?.reviewId ?? 1, head: answered?.head ?? work.mechanicalPlan?.head ?? work.candidate!.sha, planned: false }) } : {}),
     // A rework decision waiting on a stale observation wakes the item's own job (GY-793): the real
     // resync, with the observation job run while the step waits, as the control plane runs it. Its
     // waking resync is an observation wake like GY-710's, and counts as one; the polls do not.
@@ -2251,7 +2251,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     const applied = items[mechanicalDay.applied - 1], firstClear = new Map<string, number>();
     // GitHub recomputes each scenario item's merge state slowly, so the approval's first observation cannot merge the head before the ledger plans its round and the loop confirms the plan.
     for (const n of [mechanicalDay.applied, mechanicalDay.rejected]) github.slowRecompute.add(items[n - 1].key);
-    effects.recordMechanicalPlan = async (work, plan) => {
+    effects.recordMechanicalPlan = async (work, plan, answered) => {
       planReportDay.writes.push({ key: work.key, plan: !!plan, at: clock.now() - dayStart });
       // Only the clear of a plan the loop had confirmed (the projection stands, the ledger ceased to carry it) fails: the no-op clears every candidate gets are the base's.
       if (!plan && work.mechanicalPlan && mechanicalItem(work.key)) {
@@ -2261,7 +2261,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         const timingOut = delivered && work.key === applied.key ? !merged : clock.now() - firstClear.get(work.key)! < timeoutMs;
         if (timingOut) { planReportDay.timeouts.push({ key: work.key, at: clock.now() - dayStart }); throw new Error('The operation was aborted due to timeout'); }
       }
-      try { return await write(work, plan); }
+      try { return await write(work, plan, answered); }
       catch (error) { planReportDay.refusals.push({ key: work.key, detail: error instanceof Error ? error.message : String(error), at: clock.now() - dayStart }); throw error; }
     };
     // The dispatcher beside the cycle reconciles the applied item's merge once, right after the

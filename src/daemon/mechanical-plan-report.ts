@@ -11,7 +11,7 @@ type Plan = { key: string; head: string; pr?: number; epoch?: number; reviewId: 
 /** The approvals a ledger read has answered for: planned, or settled otherwise (follow-ups filed, a fresh read present, a fallback), so a plan still owed is never reported past the ledger's answer. */
 export type AnsweredApproval = { key: string; reviewId: number };
 type LedgerRead = { answered?: readonly AnsweredApproval[] };
-type Effects = { recordMechanicalPlan?: (item: Work, plan: { reviewId: number; head: string } | null) => Promise<unknown>; mechanicalFixes?: unknown };
+type Effects = { recordMechanicalPlan?: (item: Work, plan: { reviewId: number; head: string } | null, answered?: { reviewId: number; head: string }) => Promise<unknown>; mechanicalFixes?: unknown };
 /** Where a report's outcome goes: `fail` names a write that failed (`counts`: as a decision fault); `settle` ends what an earlier failure of the same report recorded, once delivery settled its target. */
 export type PlanReportSink = { fail: (item: Work, detail: string, counts: boolean) => Promise<void>; settle: (item: Work) => Promise<void> };
 type Note = (key: string, item: Work, kind: 'decision', outcome: 'done' | 'failed', detail: string, at?: number, faultKind?: FaultKind | null) => Promise<unknown>;
@@ -96,7 +96,7 @@ export async function reportMechanicalPlans(work: readonly Work[], plans: readon
     if (!wanted && !held && !owed) continue;
     if (wanted?.reviewId === held?.reviewId && wanted?.head === held?.head && held && clock - Date.parse(held.at) < mechanicalPlanFreshMs) continue;
     let failure: unknown = null;
-    for (let attempt = 0; attempt < 2; attempt++) { try { await effects.recordMechanicalPlan(item, wanted); failure = null; break; } catch (error) { failure = error; } }
+    for (let attempt = 0; attempt < 2; attempt++) { try { await effects.recordMechanicalPlan(item, wanted, wanted ? undefined : (owed ?? (held ? { reviewId: held.reviewId, head: held.head } : undefined))); failure = null; break; } catch (error) { failure = error; } }
     if (!failure) continue;
     // GY-1795: the item was delivered after this cycle's snapshot, so the write can never land and the target is
     // settled — no projection to synchronize, no hold, no instance; the next snapshot reads it done (GY-1336's rule).
