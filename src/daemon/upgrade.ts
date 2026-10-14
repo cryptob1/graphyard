@@ -267,7 +267,9 @@ export interface SelfUpgradeDeps {
  * the merged commit is checked out under `.graphyard/held-cli/`, the launcher is pinned to it as a
  * held restart pins it, and the executors and the loop restart onto that, the checkout left where
  * it stands and recorded on the cursor (`upgrade.snapshot`) with its dirty paths; moving the
- * checkout onto the commit lifts the pin. The executors are restarted first, through the shipped command whose
+ * checkout onto the commit lifts the pin. A tip touching no loaded code restarts the loop alone:
+ * the snapshot is made and pinned and the loop re-executed onto it, the executors keep running.
+ * The executors are restarted first, through the shipped command whose
  * refusals (a claim in flight, another restart's fence) leave the owed restarts on the cursor for
  * the next cycle to finish; the loop's own re-execution is last, and everything the next process
  * needs to know is on the cursor before it goes. A refusal that has stood `fleetWaitMs` no longer
@@ -371,11 +373,13 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
    * held snapshot of `pending.to` instead: the launcher is pinned to the snapshot before anything
    * restarts, the executors and the loop restart onto it as they would onto the checkout, and the
    * cursor records the checkout left behind. A hold places no pin for it: the checkout has not moved,
-   * so what the launcher runs today still speaks the served protocol.
+   * so what the launcher runs today still speaks the served protocol. A tip touching no loaded code
+   * is the same restart minus the executors: nothing they run changed, so no claim of theirs can
+   * hold the alignment, and the loop alone re-executes onto the snapshot.
    */
   const finish = async (pending: { from: string | null; to: string; code: boolean }, held = false, left: LeftBehind | null = null): Promise<SelfUpgradeOutcome> => {
     const aligned = held && !sameCommit(release, pending.to) ? state.upgrade.alignedRelease : release ?? state.upgrade.alignedRelease;
-    if (!pending.code) {
+    if (!pending.code && !left) {
       state.upgrade.pending = null;
       state.upgrade.last = { at: at(), from: pending.from, to: pending.to, code: false, executors: null, self: false };
       state.upgrade.alignedRelease = aligned;
@@ -383,6 +387,37 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       unstall();
       await persist();
       return { outcome: 'upgraded', from: pending.from, to: pending.to, code: false, executors: null, self: false };
+    }
+    if (!pending.code) {
+      // GY-1773: from a dirty checkout even a tip touching no loaded code is a restart onto a held
+      // snapshot (AC-1 names no docs-only exemption): the snapshot is made, the launcher pinned to
+      // it, and the loop re-executed onto it, so the cursor records the merged commit as the release
+      // the loop runs while the checkout stands left behind. The executors keep running: nothing
+      // they execute changed, so their restart is not owed and a held claim cannot stall this.
+      const unmade = await holdCli(pending.to).then(() => null, error => message(error));
+      if (unmade !== null) return failed(`the held snapshot of ${shortCommit(pending.to)} could not be made for the restart from the dirty coordinator checkout at ${shortCommit(left!.checkout)}: ${unmade}`, 'snapshot-failed');
+      state.upgrade.snapshot = { at: at(), commit: pending.to, checkout: left!.checkout, dirty: left!.dirty.slice(0, 20) };
+      state.upgrade.pending = null;
+      state.upgrade.last = { at: at(), from: pending.from, to: pending.to, code: false, executors: null, self: !!deps.restartSelf };
+      state.upgrade.alignedRelease = aligned;
+      state.upgrade.refused = null;
+      unstall();
+      await persist();
+      if (!deps.restartSelf) return failed(`the held snapshot of ${shortCommit(pending.to)} stands and the launcher is pinned to it, but this loop cannot re-execute itself onto it`, 'supervisor-unreachable');
+      await note(`Snapshotted base tip ${shortCommit(pending.to)} under .graphyard/held-cli; the coordinator checkout stays dirty at ${shortCommit(left!.checkout)}${nameDirty(left!)}; no loaded code moved, so the executors keep running and the loop re-executes itself onto the snapshot`, false);
+      await alignUnit();
+      try { await deps.restartSelf(); }
+      catch (error) {
+        // The supervisor's own stop ended the awaited child: the restart is under way (GY-916).
+        if (restartEndedBySupervisorStop(error)) return { outcome: 'upgraded', from: pending.from, to: pending.to, code: false, executors: null, self: true, ...(left ? { left } : {}) };
+        state.upgrade.last = { ...state.upgrade.last!, self: false };
+        const reason = `the loop could not re-execute itself through its supervisor: ${message(error)}`;
+        stall('supervisor-unreachable', reason);
+        await persist();
+        await note(`${reason}; it keeps running ${shortCommit(state.release?.commit ?? null)} until its supervisor restarts it`, true);
+        return { outcome: 'failed', reason };
+      }
+      return { outcome: 'upgraded', from: pending.from, to: pending.to, code: false, executors: null, self: true, ...(left ? { left } : {}) };
     }
     // GY-1585: loaded code restarted before the plane serves it speaks a protocol the serving
     // registry's strict schemas still refuse (400 Invalid input on every launch). While production
@@ -608,9 +643,9 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   }
   if (checkout.dirty === true) {
     // GY-1773: a dirty checkout is never touched — no stash, reset, checkout or clean — and holds
-    // nothing back: the merged tip is snapshotted under .graphyard/held-cli and the restarts go onto
-    // the snapshot, the checkout left where it stands. A diff touching no loaded code restarts nothing
-    // and leaves it too. The fetch already brought the tip's objects, which the snapshot shares.
+    // nothing back: every newer merged commit, docs only or not, is snapshotted under
+    // .graphyard/held-cli and the restarts go onto the snapshot, the checkout left where it stands.
+    // The fetch already brought the tip's objects, which the snapshot shares.
     const owed = state.upgrade.pending?.code === true;
     if (state.upgrade.pending) { state.upgrade.pending = null; await persist(); }
     const from = checkout.commit, base = unverified && loaded ? loaded : from, left: LeftBehind = { checkout: from, dirty: checkout.dirtyPaths };
@@ -620,7 +655,9 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       code = owed || upgradeTouchesCode(changed);
     } catch (error) { return unaligned(`the diff from ${shortCommit(base)} to ${shortCommit(to)} could not be read: ${message(error)}`, 'checkout-failed'); }
     if (!code) {
-      await note(`Base tip ${shortCommit(to)} changes ${changed.length} path(s), none of them loaded code; the coordinator checkout stays dirty at ${shortCommit(from)}${nameDirty(left)} and nothing restarts`, false);
+      await note(`Snapshotting base tip ${shortCommit(to)} for the loop: the coordinator checkout is dirty at ${shortCommit(from)}${nameDirty(left)} and stays where it is; ${changed.length} path(s) changed, none of them loaded code`, false);
+      state.upgrade.pending = { from, to, code: false };
+      await persist();
       return finish({ from, to, code: false }, false, left);
     }
     await note(`Snapshotting base tip ${shortCommit(to)} for the loop and the executors: the coordinator checkout is dirty at ${shortCommit(from)}${nameDirty(left)} and stays where it is; ${changed.length} path(s) changed, loaded code among them`, false);

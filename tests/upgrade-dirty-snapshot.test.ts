@@ -164,19 +164,50 @@ test('unit:dirty-checkout-upgrades-by-snapshot — with a dirty checkout and a n
   assert.deepEqual(moving.calls, { executors: [clean.tip], self: 1 });
   assert.equal(clean.launch('watch', 'GY-1', '1').release, 'B', 'the launcher runs the moved checkout');
 
-  // A dirty checkout and a tip touching no loaded code: nothing restarts, nothing is pinned, and the checkout stays.
+  // A dirty checkout and a tip touching no loaded code: still a restart onto a held snapshot — the
+  // snapshot made, the launcher pinned, the loop re-executed onto it — while the executors, whose
+  // code did not move, never restart, and the checkout stays where it stands.
   const docs = await world('dirty-docs', 'docs');
   await dirtied(docs.root);
   const docsState = emptyDaemonState(docs.master);
   docsState.release = { commit: docs.loaded, dirty: true };
   docsState.deployment = verified(docs.tip);
   const quiet = recording(docs.root);
-  assert.deepEqual(await performSelfUpgrade(docs.master, docsState, quiet.deps()), { outcome: 'upgraded', from: docs.loaded, to: docs.tip, code: false, executors: null, self: false });
-  assert.deepEqual(quiet.calls, { executors: [], self: 0 });
-  assert.equal(git(docs.root, 'rev-parse', 'HEAD'), docs.loaded);
-  assert.equal(existsSync(heldCliPointer(docs.root)), false);
-  assert.equal(docsState.upgrade.snapshot, undefined);
-  assert.equal(docsState.upgrade.alignedRelease, docs.tip);
+  const docsUpgraded = await performSelfUpgrade(docs.master, docsState, quiet.deps());
+  assert.deepEqual(docsUpgraded, { outcome: 'upgraded', from: docs.loaded, to: docs.tip, code: false, executors: null, self: true, left: { checkout: docs.loaded, dirty: ['README.md'] } });
+  assert.match(describeSelfUpgrade(docsUpgraded), /^restarted onto a held snapshot of [0-9a-f]{12}; the coordinator checkout stays dirty at [0-9a-f]{12}; no loaded code moved; the loop re-executes itself$/);
+  assert.deepEqual(quiet.calls, { executors: [], self: 1 }, 'the executors keep running: no loaded code moved');
+  assert.equal(git(docs.root, 'rev-parse', 'HEAD'), docs.loaded, 'the checkout is unchanged');
+  assert.equal(status(docs.root), ' M README.md');
+  const docsSnapshot = heldCliSnapshotAt(docs.root, docs.tip);
+  assert.equal(git(docsSnapshot, 'rev-parse', 'HEAD'), docs.tip, 'the snapshot holds the merged commit even though it is docs-only');
+  assert.deepEqual(JSON.parse(await readFile(heldCliPointer(docs.root), 'utf8')), { commit: docs.tip, root: docsSnapshot, loop: true }, 'the launcher is pinned to it');
+  assert.deepEqual(docs.launch('watch', 'GY-1', '1'), { release: 'A', argv: join(docs.root, 'src', 'cli.ts'), schema: 'object' }, 'a command the checkout\'s launcher spawns loads the snapshot\'s modules — release A, the code it already ran — with the checkout\'s entry as its argv');
+  assert.deepEqual(docsState.upgrade, { alignedRelease: docs.tip, pending: null, last: { at: iso(), from: docs.loaded, to: docs.tip, code: false, executors: null, self: true }, refused: null,
+    snapshot: { at: iso(), commit: docs.tip, checkout: docs.loaded, dirty: ['README.md'] } });
+  // The re-executed loop's first pass: the snapshot's commit is what it runs, and the checkout left
+  // behind is no restart target.
+  docsState.release = { commit: docs.loaded, dirty: true };
+  const docsLoop = quiet.deps({ loadedFrom: join(docsSnapshot, 'src', 'daemon', 'upgrade.ts') });
+  assert.deepEqual(await performSelfUpgrade(docs.master, docsState, docsLoop), { outcome: 'skipped', reason: `release ${docs.tip.slice(0, 12)} was already aligned` });
+  assert.deepEqual(docsState.release, { commit: docs.tip, dirty: false }, 'the loop is recorded as running the snapshot\'s commit');
+
+  // A second merged head while the checkout still stands dirty where it was left: the snapshot is
+  // re-made onto the new tip and the loop re-executed onto it — one snapshot, pin and re-execution
+  // per head, the checkout never touched, the executors never restarted.
+  await writeFile(join(docs.origin, 'docs.md'), 'docs for C\n');
+  git(docs.origin, 'commit', '-q', '-am', 'release C');
+  const secondTip = git(docs.origin, 'rev-parse', 'HEAD');
+  docsState.deployment = verified(secondTip);
+  const again = await performSelfUpgrade(docs.master, docsState, quiet.deps({ now: () => clock + 60_000 }));
+  assert.deepEqual(again, { outcome: 'upgraded', from: docs.loaded, to: secondTip, code: false, executors: null, self: true, left: { checkout: docs.loaded, dirty: ['README.md'] } });
+  assert.deepEqual(quiet.calls, { executors: [], self: 2 }, 'one re-execution per head');
+  const secondSnapshot = heldCliSnapshotAt(docs.root, secondTip);
+  assert.equal(git(secondSnapshot, 'rev-parse', 'HEAD'), secondTip);
+  assert.deepEqual(JSON.parse(await readFile(heldCliPointer(docs.root), 'utf8')), { commit: secondTip, root: secondSnapshot, loop: true }, 'the pin advanced to the new head\'s snapshot');
+  assert.equal(existsSync(docsSnapshot), true, 'the snapshot the pin replaced is kept for processes still loading under it');
+  assert.deepEqual(docsState.upgrade.snapshot, { at: iso(60_000), commit: secondTip, checkout: docs.loaded, dirty: ['README.md'] });
+  assert.deepEqual(Object.keys(docsState.actions).filter(key => key.startsWith('upgrade:')).length, 2, 'one upgrade action row per head, the cursor bounded by the heads');
 
   // Production still serving A: the restart is held as a move's would be, but no pin is placed (the
   // checkout has not moved), and the pass whose observation serves B completes it onto the snapshot.
