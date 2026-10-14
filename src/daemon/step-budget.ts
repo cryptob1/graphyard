@@ -131,6 +131,7 @@ export async function recordCarried(cycle: Pick<Cycle, 'state' | 'now' | 'perfor
   const { state, now, performed, effects } = cycle, previous = state.actions[key];
   // A `started` row already counted this attempt; a row of any other state counts it here.
   const attempts = previous?.state === 'started' ? previous.attempts : (previous?.attempts ?? 0) + 1;
+  if (process.env.GY_DEBUG_CARRIED) console.error("CARRIED", key, message(error));
   performed.push(await record(state, key, { kind: row.kind, work: row.work, principal: row.principal ?? null, epoch: row.epoch ?? null, state: 'waiting', detail: `${what} was carried to the next cycle: ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist, null));
 }
 

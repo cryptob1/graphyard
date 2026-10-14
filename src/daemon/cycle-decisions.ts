@@ -22,28 +22,19 @@ import type { Cycle } from './cycle.js';
 import { baseRefreshConflict } from '../merge-queue.js'; import { docsSyncRoute } from './docs-sync-route.js';
 import { throughputDecisionAdopts, throughputRoutineDecision, wakeObservationJob } from './cycle-delivery.js';
 import { createApproverSupervisor } from './cycle-approvers.js';
-import { boundedDecisions, decisionBudget, decisionCallCarried, deferredFirst, settleDeferred } from './decision-budget.js';
-import { boundedCalls, recordCarried, stepCallCarried } from './step-budget.js';
+import { boundedDecisions, decisionBudget, decisionCallCarried, deferredFirst, settleDeferred } from './decision-budget.js'; import { boundedCalls, recordCarried, stepCallCarried } from './step-budget.js';
 import { staleReleaseStep } from './stale-releases.js';
 import { closeStanding, closingItems, recordingWrites, staleCloseStep } from './stale-closes.js';
-/** The approval-watch key prefix of a hand-launched approver, re-exported for the blocker step (GY-403). */
-export { handWatchPrefix };
+/** The approval-watch key prefix of a hand-launched approver, re-exported for the blocker step (GY-403); `approverCalls`: the approvers step's calls (cycle-approvers.ts), bounded like the decisions step's own `decide` (GY-1774), a launch on the launcher beside the cycle using the effects beneath the bound. */
+export { handWatchPrefix }; const approverCalls: readonly (keyof DaemonEffects)[] = ['approver', 'endRegistrySession', 'resume', 'withdraw', 'closeSession'];
 const holdBounds = new WeakMap<DaemonState, Map<string, number>>(); // GY-1622: per loop cursor, each held item's docs-sync hold bound on the local clock; an item the step did not reach this cycle (put off by its budget) keeps the one it last left; one already passed locally while its hold stood is a zero wait, so the next cycle re-reads it; one exactly a wait away still binds, so the guard's time comes off it. `bound` is the earliest bound when it ends this wait, `next` the earliest whether or not it does: one just beyond the wait still caps the sleep left after the checkout guard
 export const holdBoundWait = (state: DaemonState, wait: number, at: number) => { const bounds = holdBounds.get(state); const next = bounds?.size ? Math.min(...bounds.values()) : null; return next !== null && next - at <= wait ? { wait: Math.max(0, next - at), bound: next, next } : { wait, bound: null, next }; };
 /** Step 4c: request and supervise the routine decisions. */
-export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, capacity: { capacities: RoleCapacity[]; approversSpent: boolean }) {
-  // GY-1774: once the step has returned its budget is over, and a call made after it (a launch on the launcher) passes through unbounded.
-  const ended = { value: false };
-  try { await decisionStepWithin(cycle, settled, assessments, capacity, ended); } finally { ended.value = true; }
-}
-/** The approvers step's calls (cycle-approvers.ts), bounded like the decisions step's own `decide` (GY-1774). */
-const approverCalls: readonly (keyof DaemonEffects)[] = ['approver', 'endRegistrySession', 'resume', 'withdraw', 'closeSession'];
-async function decisionStepWithin(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, { capacities, approversSpent }: { capacities: RoleCapacity[]; approversSpent: boolean }, ended: { value: boolean }) {
+export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, { capacities, approversSpent }: { capacities: RoleCapacity[]; approversSpent: boolean }) {
   const { config, state, now, snapshot, clock, clockOffset, performed, isolate, agents, open } = cycle;
   // The items this step writes, which the stale-close step leaves to the next cycle's read (GY-1439).
-  const written = new Set<string>(); let budgetLeft = (): number | null => Number.POSITIVE_INFINITY; // the step budget every call below is capped by, bound where the budget is made; no decide call runs before it
-  const reads = await decisionReads(cycle.effects, cycle.heldDecisions, snapshot.work, Object.values(state.approvals), clock, cycle.effects.decisionReadDeadlineMs);
-  const effects = recordingWrites(boundedDecisions(boundedCalls(reads, cycle.heldDecisions, now, () => budgetLeft(), { step: 'approvers', calls: approverCalls }), cycle.heldDecisions, now, () => budgetLeft()), written);
+  const written = new Set<string>(); let budgetLeft = (): number => Number.POSITIVE_INFINITY; // the step budget every call below is capped by, bound where the budget is made; no decide call runs before it
+  const effects = recordingWrites(boundedDecisions(boundedCalls(await decisionReads(cycle.effects, cycle.heldDecisions, snapshot.work, Object.values(state.approvals), clock, cycle.effects.decisionReadDeadlineMs), cycle.heldDecisions, now, () => budgetLeft(), { step: 'approvers', calls: approverCalls }), cycle.heldDecisions, now, () => budgetLeft()), written);
   // 4c. Routine decisions: request with the master's operator-agent identity, launch an independent approver, supervise every cycle (see `approvalStep`).
   const stamp = new Date(clock).toISOString(), bounds = holdBounds.get(state) ?? new Map<string, number>(); holdBounds.set(state, bounds); for (const id of bounds.keys()) if (!snapshot.work.some(work => work.id === id)) bounds.delete(id);
   const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now(), faultKind?: FaultKind | null) =>
@@ -384,7 +375,7 @@ async function decisionStepWithin(cycle: Cycle, settled: Map<string, Work>, asse
       : `${step.detail}; ${item.key} still needs it, so it is requested again`);
     await request(item, decision, key, coveringGone ? null : watch);
   };
-  const needed = new Set<string>(), unattestable = new Set<string>(), budgetStartedAt = now(), budget = decisionBudget(state, now, (config.run.intervalSeconds ?? 20) * 1000); budgetLeft = () => ended.value ? null : Math.max(0, budget.budgetMs - (now() - budgetStartedAt)); // GY-1766 review: the budget bounds every approver call below as well as the items this step reaches
+  const needed = new Set<string>(), unattestable = new Set<string>(), budgetStartedAt = now(), budget = decisionBudget(state, now, (config.run.intervalSeconds ?? 20) * 1000); budgetLeft = () => Math.max(0, budget.budgetMs - (now() - budgetStartedAt)); // GY-1766 review: the budget bounds every approver call below as well as the items this step reaches
   const pause = githubPause(snapshot.jobs, clock);
   // A scope request is judged by the review-finding rule (step 2a) before it is the approver's: the
   // findings for this request and policy revision were read and named none of it. A loop that
@@ -577,19 +568,14 @@ async function decisionStepWithin(cycle: Cycle, settled: Map<string, Work>, asse
           await note(`approver:${watch.decision}:withdrawn`, item, 'decision', 'done', `Withdrew ${watch.action} decision ${watch.decision}: ${watch.work} no longer needs it and no approver had judged it`);
         }
       } catch (error) {
-        withdrawn = false;
-        // GY-1774: a withdrawal past the step's bound is in flight, joined next cycle; it counts no close attempt.
-        if (stepCallCarried(error)) await recordCarried(cycle, `approver:${watch.decision}:withdrawn`, { kind: 'decision', work: item.key, epoch: item.epoch }, error, `Withdrawing ${watch.action} decision ${watch.decision}`);
-        else {
-          watch.closeAttempts += 1;
-          // GY-1405: a history read that only missed the step's deadline judged nothing, as on the
-          // request path (GY-1293): one alone is no fault, and the withdrawal is tried next cycle; the
-          // second in a row counts. A withdrawal refused on an item delivered meanwhile is moot.
-          const withdrawKey = `approver:${watch.decision}:withdrawn`, prior = state.actions[withdrawKey];
-          const detail = `Could not withdraw ${watch.action} decision ${watch.decision}, which ${watch.work} no longer needs: ${message(error)}`;
-          const late = lateDecisionRead(detail) && !(prior?.state === 'failed' && lateDecisionRead(prior.detail));
-          await note(withdrawKey, item, 'decision', 'failed', detail, now(), late || deliveredMeanwhile(detail) ? null : undefined);
-        }
+        withdrawn = false; const carried = stepCallCarried(error); if (carried) await recordCarried(cycle, `approver:${watch.decision}:withdrawn`, { kind: 'decision', work: item.key, epoch: item.epoch }, error, `Withdrawing ${watch.action} decision ${watch.decision}`); else watch.closeAttempts += 1; // GY-1774: a withdrawal past the step's bound is in flight, joined next cycle; it counts no close attempt
+        // GY-1405: a history read that only missed the step's deadline judged nothing, as on the
+        // request path (GY-1293): one alone is no fault, and the withdrawal is tried next cycle; the
+        // second in a row counts. A withdrawal refused on an item delivered meanwhile is moot.
+        const withdrawKey = `approver:${watch.decision}:withdrawn`, prior = state.actions[withdrawKey];
+        const detail = `Could not withdraw ${watch.action} decision ${watch.decision}, which ${watch.work} no longer needs: ${message(error)}`;
+        const late = lateDecisionRead(detail) && !(prior?.state === 'failed' && lateDecisionRead(prior.detail));
+        if (!carried) await note(withdrawKey, item, 'decision', 'failed', detail, now(), late || deliveredMeanwhile(detail) ? null : undefined);
       }
     }
     // An item no longer open has no pane to close, but its registry session still holds a slot.

@@ -295,7 +295,7 @@ test('unit:step-calls-bounded — every named step runs under the shared bound w
     assert.match(source, new RegExp(`withinStepBudget\\(cycle, '${step}', \\[${calls.map(call => `'${call}'`).join(', ')}\\]`), `${file} runs the ${step} step under the shared bound with its calls`);
   }
   const decisions = readFileSync(`${root}src/daemon/cycle-decisions.ts`, 'utf8');
-  assert.match(decisions, /boundedDecisions\(boundedCalls\(reads, cycle\.heldDecisions, now, \(\) => budgetLeft\(\), \{ step: 'approvers', calls: approverCalls \}\)/, 'the approvers step\'s calls are bounded within the decisions step');
+  assert.match(decisions, /boundedDecisions\(boundedCalls\(await decisionReads\(.*\), cycle\.heldDecisions, now, \(\) => budgetLeft\(\), \{ step: 'approvers', calls: approverCalls \}\)/, 'the approvers step\'s calls are bounded within the decisions step');
   assert.match(decisions, /const approverCalls: readonly \(keyof DaemonEffects\)\[\] = \['approver', 'endRegistrySession', 'resume', 'withdraw', 'closeSession'\]/);
   // Triage: the record is bounded while the step runs; a run settling after it holds no cycle and passes through.
   const recorded = hanging();
