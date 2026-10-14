@@ -7,23 +7,24 @@ import { acceptanceStep } from './acceptance.js';
 import { plannerStep } from './planner.js';
 import type { Cycle } from './cycle.js';
 import type { Work } from '../model.js';
-import { boundedCalls, carriedRow, recordCarried, stepCallBoundMs, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
+import { boundedCalls, boundedPhase, carriedRow, recordCarried, stepCallBoundMs, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
 
 /**
  * Step 7c. Start a triage run for each machine-filed item awaiting triage, on the research account (`run.research`): an unconfigured loop
  * triages nothing, and the item is raised as attention once it has waited a day.
  */
 export const triageBacklogStep = (cycle: Cycle) => withinStepBudget(cycle, 'triage', ['recordTriage', 'withdrawTriage'], triageBacklogStepWithin); // GY-1774: the triage record and the closure withdrawal are bounded
-async function triageBacklogStepWithin(cycle: Cycle) {
+async function triageBacklogStepWithin(cycle: Cycle, budgetLeft: () => number | null) {
   const { config, state, effects, now, snapshot, clock, performed, isolate } = cycle;
   const note = async (key: string, work: string | null, outcome: 'done' | 'failed', detail: string) => {
     if (!detailChanged(state.actions[key], detail)) return;
     performed.push(await record(state, key, { kind: 'decision', work, principal: null, epoch: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   };
   // The acceptance role's goals (GY-1417) move first: they need no research account.
-  await acceptanceStep(cycle);
+  // GY-1774: both phases wait under the step's budget; a slow answer is carried and joined next cycle, never holding the phases after it.
+  await boundedPhase(cycle, 'triage', 'acceptance', budgetLeft, () => acceptanceStep(cycle));
   // A goal whose acceptance merged is planned, its plan judged, released and delivered (GY-1418).
-  await plannerStep(cycle);
+  await boundedPhase(cycle, 'triage', 'planner', budgetLeft, () => plannerStep(cycle));
   if (!effects.recordTriage || !effects.research || !config.run?.research) return;
   await isolate('decision', null, 'triage', async () => {
     const settings = researchSettings(config.run);

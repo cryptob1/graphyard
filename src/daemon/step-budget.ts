@@ -97,6 +97,10 @@ const keyedBeside = (call: string, args: unknown[]): unknown[] => {
   if (call === 'recordSession') return [second?.id ?? null, second?.state ?? null];
   if (call === 'reportCapacity') return [second?.event ?? null, second?.role ?? null, second?.epoch ?? null, second?.requestId ?? null, second?.cause ?? null];
   if (call === 'settleContainment') return [second?.epoch ?? null];
+  // A hold is keyed by the exhaustion it records (never when it was seen), a mark by the state it writes, an end by the resolution it gives: a different one never joins, nor consumes the answer of, another.
+  if (call === 'holdAccount') return [second ? [second.reason, second.role, second.profile, second.work, second.resetsAt, second.identity, second.home, second.kind, second.reported].map(value => value ?? null) : null];
+  if (call === 'markEscalation') return [!!(args[0] as { idleSince?: unknown } | undefined)?.idleSince];
+  if (call === 'endEscalation') return [second ?? null, args[2] ? 'waiting' : null];
   return [];
 };
 export const callKey = (call: string, args: unknown[]) => canonicalJson([call, ...(identityArguments[call as keyof DaemonEffects] ?? args.map((_, index) => index)).map(index => callIdentity(args[index])), ...keyedBeside(call, args)]);
@@ -277,10 +281,45 @@ export async function retryOwedWrites(cycle: CarriedCycle, calls: readonly (keyo
  * `waiting` and retried next cycle, the best-effort writes owed to the step's calls are retried first,
  * and once the step returns the budget ends, so a launch it handed to the launcher passes through unbounded.
  */
-export async function withinStepBudget<T>(cycle: Cycle, step: BoundedStep, calls: readonly (keyof DaemonEffects)[], body: (bounded: Cycle) => Promise<T>, identity: Pick<BoundOptions, 'key'> = {}): Promise<T> {
+export async function withinStepBudget<T>(cycle: Cycle, step: BoundedStep, calls: readonly (keyof DaemonEffects)[], body: (bounded: Cycle, budgetLeft: () => number | null) => Promise<T>, identity: Pick<BoundOptions, 'key'> = {}): Promise<T> {
   const budget = stepBudget(cycle.now, (cycle.config?.run?.intervalSeconds ?? 20) * 1000); // a cycle built by hand (a step's own test) may carry no run settings
   // Nested steps (the resume step runs inside the sessions step) bound the effects beneath every earlier bound, never a bound's own race.
   const effects = boundedCalls(unboundedEffects(cycle.effects), cycle.state as DaemonState, cycle.now, budget.left, { step, calls, ...identity });
   const bounded: Cycle = { ...cycle, effects, isolate: carriedIsolate({ ...cycle, effects }, step) };
-  try { await retryOwedWrites(bounded, calls); return await body(bounded); } finally { budget.end(); }
+  try { await retryOwedWrites(bounded, calls); return await body(bounded, budget.left); } finally { budget.end(); }
+}
+
+/** The nested phases still running when their step's budget passed, per kept state: one phase runs once at a time, and a later cycle joins it instead of starting it again. */
+const phases = new WeakMap<object, Map<string, Promise<void>>>();
+/**
+ * A nested phase whose calls the effects' bound does not reach (the acceptance role's and the planner's own goals, headless runs and posts)
+ * waits under the step's budget: past it the phase keeps running, the step goes on, and the phase is recorded `waiting` on the step's row;
+ * the next cycle joins the run still in flight (or finds it settled) rather than starting a second, so a slow answer never holds a later phase.
+ */
+export async function boundedPhase(cycle: Cycle, step: BoundedStep, name: string, budgetLeft: () => number | null, run: () => Promise<void>): Promise<void> {
+  const running = phases.get(cycle.state) ?? phases.set(cycle.state, new Map()).get(cycle.state)!, key = `${step}:${name}`, previous = cycle.state.actions[`carried:${key}`];
+  let flight = running.get(key), sent = false;
+  if (!flight) {
+    sent = true;
+    const own: Promise<void> = run().finally(() => { if (running.get(key) === own) running.delete(key); });
+    own.catch(() => {});
+    running.set(key, flight = own);
+  }
+  const left = budgetLeft(), boundMs = stepCallBoundMs, capped = left === null ? boundMs : Math.max(0, Math.min(boundMs, left)), startedAt = cycle.now(), wall = Date.now();
+  let timer: ReturnType<typeof setTimeout> | undefined, stopped = false, carried = false;
+  const expired = new Promise<never>((_, reject) => {
+    const tick = () => {
+      if (stopped) return;
+      if (Math.max(cycle.now() - startedAt, Date.now() - wall) >= capped) { carried = true; return void reject(new StepCallCarriedError(`the ${step} step's budget passed before the ${name} phase answered (${boundMs} ms per call, ${capped} ms left); the phase stays owed and is retried next cycle${sent ? '' : ', joining the run still in flight'}`, sent)); }
+      timer = setTimeout(tick, 25); timer.unref?.();
+    };
+    timer = setTimeout(tick, Math.min(capped, 25)); timer.unref?.();
+  });
+  try { await Promise.race([flight, expired]); }
+  catch (error) {
+    if (!carried) throw error;
+    await recordCarried(cycle, `carried:${key}`, { kind: 'decision', work: null }, error, `The ${step} step's ${name} phase`);
+    return;
+  } finally { stopped = true; clearTimeout(timer); }
+  if (carriedRow(previous)) await retireCarried(cycle, `carried:${key}`, previous, `The ${step} step's ${name} phase, carried on cycle ${previous.cycle}, ran through on its retry`);
 }
