@@ -1,4 +1,0 @@
-    volumes:
-      - /home/vish/code/graphyard-snake-v2:/repo
-    environment:
-      - GRAPHYARD_REPOSITORY_ROOT=/repo
