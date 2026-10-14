@@ -75,6 +75,8 @@ export const masterCommands = defineCommands([
       '                                (accounts:PROFILE=a,b); autoMerge and credential paths stay operator-only',
       '  master verify-deployment GY-N Verify that the deployed release serves a delivery and emits',
       '                                the current instructions; records the exact release observed',
+      '  master reading GY-N pass|fail DETAIL',
+      '                                Record by hand a loop-owned observation reading the loop could not take',
       '  master run [--once] [--interval SECONDS]',
       '                                The durable coordination loop: launches reviewers and producers',
       '                                for every submitted head and decides open scope requests',

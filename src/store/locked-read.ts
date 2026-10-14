@@ -28,7 +28,7 @@ import { coordinationDocumentSql, coordinationRecords, coordinationRelevance, co
  * it whole itself — an assignment to a stand-in throws a TypeError. Nor does it carry everything a
  * document does: an open item's projection has no `pipeline`, no observation `scopeFiles`, no
  * evidence `artifacts`, `scopeFiles` or `provenance`, evidence only for its current, carried or
- * requested heads, and only the recent tails of its histories and sessions; a settled summary is
+ * requested heads and the loop's own post-deploy readings, and only the recent tails of its histories and sessions; a settled summary is
  * smaller still. A decision that reads any of these on another item — a landing check reading a peer's
  * `observation.scopeFiles`, say — must read that item whole (`readWhole`), whatever its overlap.
  * `unit:projection-contract` in tests/review-followups-gy-1042.test.ts holds a projection to this contract.
@@ -263,9 +263,10 @@ export function coordinationProjection(document: Work): Work {
     ...lastOf(arrayOf(dispatch.history), keep).map(request => text(request?.sha))].filter(sha => sha !== null));
   const carried = new Set([...arrayOf(doc.queue?.speculation?.carry?.evidence), ...arrayOf(doc.baseRefresh?.carry?.evidence)]
     .filter(entry => entry?.carried === true).map(entry => text(entry.evidenceId)).filter(id => id !== null));
+  // The loop's own post-deploy readings (`reading`, GY-1779) stay whatever head the item carries: its readings step and loopObservation read them here.
   const relevant = (entry: any) => {
     const sha = text(entry?.sha);
-    return (sha !== null && head !== null && sha === head && text(entry?.baseSha) === base) || carried.has(text(entry?.id)!) || (sha !== null && requested.has(sha));
+    return (sha !== null && head !== null && sha === head && text(entry?.baseSha) === base) || carried.has(text(entry?.id)!) || (sha !== null && requested.has(sha)) || isObject(entry?.reading) || (typeof entry?.proof === 'string' && entry.proof.startsWith('manual:post-deploy/'));
   };
   const { pipeline, evidence, observation, queueHistory, actionQueue, autoDispatch, sessions, ...rest } = doc;
   const out: Record<string, any> = { ...rest };
