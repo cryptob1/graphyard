@@ -366,9 +366,12 @@ test('unit:locked-read-relative-bound — a full reconciliation pass over 1000 i
 
 test('unit:reconcile-lock-hold-bounded — a full reconciliation pass over 1000 items (600 delivered) holds the coordination lock within a per-batch budget, the opening read bounded on its own, each batch within its budget', async () => {
   assert.ok(template, 'the benchmark seeded the ledger');
-  // unit:locked-read-relative-bound runs first in this file and leaves the engine's reconcile
-  // view populated; this pass is the full one the bound is about, so it starts from a reset view,
-  // as a restarted server's first pass does (GY-1124).
+  // unit:locked-read-relative-bound runs first in this file and leaves the ledger reconciled and the
+  // engine's reconcile view populated, so this test seeds its own unreconciled rows and starts from
+  // a reset view: its pass is a full, writing pass — every seeded row reprojected, as a restarted
+  // server's first pass over an unprojected ledger is (GY-1124) — whatever ran before it. The seed
+  // is small enough that the opening read stays inside the kept per-batch margin on a loaded runner.
+  await seed(100, 0);
   engine.resetReconcileView();
   label = 'reconcile'; const from = holds.length;
   await engine.reconcile();
