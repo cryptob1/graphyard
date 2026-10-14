@@ -1,7 +1,7 @@
 // Concern: cycle step 2 — decide open scope requests and measure the decision budget.
 import type { Work } from '../model.js';
 import { type ScopeRequestState, companionGround, decideScopeRequest, itemDocumentationPaths, pathScope, pathScopeContains, pinningTestGround, plannedFilesMax, redecidableScopeRefusal, routableScopeRequest, scopeDecisionBinding, testFile, unplannedPaths } from '../model/scope.js';
-import { importingTestGround, newProofTestGround, peerModuleGround } from '../model/scope-companions.js';
+import { importingTestGround, newProofTestGround, peerModuleGround, verificationMapGround } from '../model/scope-companions.js';
 import { type NonRepositoryPath, nonRepositoryPaths } from '../model/scope-repository.js';
 import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import { groundedWideningReason } from '../model/scope-provenance.js';
@@ -39,8 +39,9 @@ export interface ScopeGround { path: string; ground: string; companion?: boolean
  * engine's rule implies on its own (a criterion names it, documentation, a companion such as the
  * docs-budget gate beside a documentation path) is granted here too, and so are the companions only
  * the base can ground: a test importing a module a planned file is or re-exports
- * (importingTestGround), and a new test file the criteria's unit proofs need when no base file holds
- * them (newProofTestGround, searched by `held`).
+ * (importingTestGround), a new test file the criteria's unit proofs need when no base file holds
+ * them (newProofTestGround, searched by `held`), and the verification map whose Paths line covers a
+ * planned file (GY-1783, verificationMapGround).
  */
 export async function automaticScopeGrounds(item: Work, request: ScopeRequestState, paths: readonly string[], findings: readonly ReviewFinding[], exists: (path: string) => boolean, read?: (path: string) => Promise<string | null>, successors?: () => Promise<readonly Successor[]>, mentions?: (identifier: string) => Promise<number>, held?: (proof: string) => Promise<number>): Promise<{ grounds: ScopeGround[] } | { grounds?: ScopeGround[]; refusal: string }> {
   const grounds: ScopeGround[] = [], refusals: string[] = [];
@@ -68,6 +69,8 @@ export async function automaticScopeGrounds(item: Work, request: ScopeRequestSta
     if (read && !pathScope(path).prefix && !path.includes('*') && exists(path)) {
       planned ??= await Promise.all((item.plannedFiles ?? []).filter(scope => !pathScope(scope).prefix && !scope.includes('*')).slice(0, 50).map(async scope => ({ path: scope, text: await read(scope) })));
       const text = await read(path);
+      const map = verificationMapGround(path, text, item, paths);
+      if (map) { grounds.push({ path, ground: map, companion: true }); continue; }
       const barrel = barrelSuccessorGround(path, planned);
       if (barrel) { grounds.push({ path, ground: barrel }); continue; }
       const pinning = testFile(path) ? pinningTestGround(path, request.reason, text, planned) ?? criterionTestGround(path, text, symbols) : null;
@@ -133,7 +136,7 @@ export async function scopeStep(cycle: Cycle) {
   // What an automatic widening stood on, in the audit detail: the grounds it actually used.
   const widenedOn = (grounds: ScopeGround[], count: number): string => {
     const kinds = new Set(grounds.map(entry => entry.companion ? 'companion' : entry.ground.startsWith('successor of ') ? 'successor' : /^review /.test(entry.ground) ? 'finding' : 'criteria'));
-    if (kinds.size === 1 && kinds.has('companion')) return `the companions the change inevitably carries: what the item implies, a test importing a planned module, a peer module a planned file imports or that imports it, the test its proofs live in or the docs-budget gate`;
+    if (kinds.size === 1 && kinds.has('companion')) return `the companions the change inevitably carries: what the item implies, a test importing a planned module, a peer module a planned file imports or that imports it, the test its proofs live in, the verification map whose Paths cover a planned file or the docs-budget gate`;
     if (kinds.size === 1 && kinds.has('successor')) return `the base branch's split or rename of a planned file`;
     if (kinds.size === 1 && kinds.has('finding')) return `the review finding that names ${count === 1 ? 'it' : 'them'}`;
     if (kinds.size === 1) return `what the item's criteria name: a symbol a file defines or calls, or text a test pins`;

@@ -251,6 +251,38 @@ export async function importingTestGround(path: string, text: string | null, pla
   return null;
 }
 
+/** A per-area verification map (verification/AREA.md, GY-1495): a file, never the tree. */
+export const verificationMapFile = (path: string) => !pathScope(path).prefix && /^verification\/[^/]+\.md$/.test(path);
+/** The globs a map's opening `Paths:` line names, as parseVerificationMap reads them, or null when the text opens with no such line. */
+const verificationMapPaths = (text: string) => {
+  const opening = text.replace(/\r\n/g, '\n').split('\n').find(line => line.trim())?.match(/^Paths:\s*(.*)$/);
+  const paths = opening?.[1].split(/[\s,]+/).filter(Boolean) ?? [];
+  return paths.length ? paths : null;
+};
+/**
+ * GY-1783: the ground a verification map is granted on. A map opens with a `Paths:` line naming the
+ * globs it covers and holds the `## Tests` list the repository names an area's test files in, so an
+ * item that changes a file under those paths, or creates a test for one, must edit the map — the
+ * same way the test importing a planned file is granted (importingTestGround). The ground names the
+ * planned file the map's Paths line covers, or the test file a criterion or the ask names under those
+ * paths, and the line itself. `text` is the map on the base: a map the base does not hold, one that
+ * opens with no Paths line, or one whose paths cover none of the planned files is not grounded here
+ * and stays refused and routed as before.
+ */
+export function verificationMapGround(path: string, text: string | null, item: { plannedFiles?: readonly string[]; criteria: readonly CompanionCriterion[] }, ask: readonly string[] = []): string | null {
+  if (!text || !verificationMapFile(path)) return null;
+  const paths = verificationMapPaths(text);
+  if (!paths) return null;
+  const line = `Paths: ${paths.join(', ')}`;
+  // As verificationGlobCovers reads a glob (verification-maps.ts, not imported: it reaches scope.ts back through documentation.ts).
+  const covered = (entry: string) => entry !== path && paths.some(glob => documentationGlobMatches(glob, entry) || pathScope(entry).prefix && glob.startsWith(pathScope(entry).path));
+  const planned = (item.plannedFiles ?? []).find(covered);
+  if (planned) return `${path} is the verification map whose ${line} covers ${planned}, a planned file whose behaviour the item changes`;
+  const created = [...item.criteria.flatMap(criterion => namedPaths(criterion.text)), ...ask].find(entry => testFile(entry) && covered(entry));
+  if (created) return `${path} is the verification map whose ${line} covers ${created}, a test file the item creates`;
+  return null;
+}
+
 /**
  * GY-955 AC-2: the companions plannedFiles carries at authoring time, beside what the criteria name.
  * The test file each criterion's proofs will live in, when the plan holds no test file for them —
