@@ -1,9 +1,9 @@
-// Concern: the decisions step's time budget — which items it reaches this cycle and which wait for the next (GY-1286), and the bound each decision call waits under (GY-1766).
+// Concern: the decisions step's time budget — which items it reaches this cycle and which wait for the next (GY-1286), and the bound each decision call waits under (GY-1766), through the shared step bound (GY-1774).
 import { canonicalJson } from '../onboarding.js';
 import type { Work } from '../model.js';
 import type { Cycle } from './cycle.js';
 import { record, type DaemonEffects } from './effects.js';
-import { actionableIntervalMs } from './liveness.js';
+import { boundedCalls, stepBudgetMs, stepCallBoundMs, stepCallCarried } from './step-budget.js';
 import type { DaemonState } from './state.js';
 
 /**
@@ -16,7 +16,7 @@ import type { DaemonState } from './state.js';
  * its share; a request already in flight at the bound finishes, so the step overruns by one call
  * at most. The loop comes back inside the actionable cadence and starts with what it put off.
  */
-export const decisionBudgetMs = (intervalMs: number) => Math.max(actionableIntervalMs, Math.round(intervalMs * 0.4));
+export const decisionBudgetMs = stepBudgetMs;
 
 /** The items the step left for the next cycle come first, in the order they were put off; the rest keep `order`. */
 export function deferredFirst(order: Work[], deferred: readonly string[]) {
@@ -50,43 +50,22 @@ export function decisionBudget(state: Pick<DaemonState, 'decisionsDeferred'>, no
   };
 }
 
-/** How long one owed decision's approver call may take before the step returns and carries it to the next cycle (GY-1766). */
-export const decisionCallBoundMs = 10_000;
+/** How long one owed decision's approver call may take before the step returns and carries it to the next cycle (GY-1766); the shared per-call bound (GY-1774). */
+export const decisionCallBoundMs = stepCallBoundMs;
 /** GY-1766. A decision call that passed its bound — the per-decision bound, or the step budget left it is capped by: the decision stays owed, with its attempt recorded, and is retried next cycle. */
-export const decisionCallCarried = (detail: string) => / (?:ms per-decision bound|step'?s? budget) passed before .+ answered( \(.+\))?; the decision stays owed and is retried next cycle/.test(detail);
-/** The decide calls unanswered when their bound passed, per kept state, keyed to the request they belong to — the item's binding-bearing identity (head, base, policy revision, epoch), the action and the input — so a retry joins its own call only: a changed head, criterion or action never joins an older call's answer nor has its own request suppressed. */
-const deciding = new WeakMap<object, Map<string, Promise<unknown>>>();
+export const decisionCallCarried = stepCallCarried;
+/** The decide calls unanswered when their bound passed are keyed to the request they belong to — the item's binding-bearing identity (head, base, policy revision, epoch), the action and the input — so a retry joins its own call only: a changed head, criterion or action never joins an older call's answer nor has its own request suppressed. */
 const decidingKey = (item: Work, rest: unknown[]) => canonicalJson([item.id, item.candidate?.sha ?? null, item.candidate?.baseSha ?? null, item.policyRevision, item.epoch, rest[0], rest[2] ?? null]);
 /**
  * GY-1766: the step sees its `decide` through this. One call races its answer against the shorter of the per-decision
  * bound and the step budget `budgetLeft` still has, so several unanswered calls cannot stack the step past the cycle
- * bound; a call past its bound keeps running and its retry joins it (applied once). The wait is polled on the loop's
- * clock, which moves without timers on a simulated day, and on the wall under it, which moves under a fixed test clock.
+ * bound; a call past its bound keeps running and its retry joins it (applied once). GY-1774: the shared step bound
+ * (step-budget.ts) does the racing and the joining; this keeps the decision's key and wording.
  */
-export function boundedDecisions(effects: DaemonEffects, kept: object, clockMs: () => number, budgetLeft: () => number): DaemonEffects {
-  const decide = effects.decide;
-  if (!decide) return effects;
-  const pending = deciding.get(kept) ?? deciding.set(kept, new Map()).get(kept)!;
-  return new Proxy(effects, { get: (target, property, receiver) => property !== 'decide' ? Reflect.get(target, property, receiver) : (item: Work, ...rest: Parameters<typeof decide> extends [Work, ...infer R] ? R : never) => {
-    const startedAt = clockMs(), wall = Date.now(), boundMs = (effects as { decisionCallBoundMs?: number }).decisionCallBoundMs ?? decisionCallBoundMs, left = Math.max(0, Math.min(boundMs, budgetLeft())), budgeted = left < boundMs, key = decidingKey(item, rest);
-    let call = pending.get(key) as ReturnType<typeof decide> | undefined;
-    if (!call) {
-      const made = call = decide.call(target, item, ...rest), done = () => { if (pending.get(key) === made) pending.delete(key); };
-      made.then(done, done);
-      pending.set(key, made);
-    }
-    let timer: ReturnType<typeof setTimeout> | undefined, stopped = false;
-    const expired = new Promise<never>((_, reject) => {
-      const tick = () => {
-        if (stopped) return;
-        const past = Math.max(clockMs() - startedAt, Date.now() - wall);
-        if (past >= left) return void reject(new Error(budgeted ? `the decisions step's budget passed before ${item.key}'s decision call answered (${boundMs} ms per decision, ${left} ms left); the decision stays owed and is retried next cycle` : `the decisions step's ${boundMs} ms per-decision bound passed before ${item.key}'s decision call answered; the decision stays owed and is retried next cycle`));
-        timer = setTimeout(tick, Math.min(left - past, 25)); timer.unref?.();
-      };
-      timer = setTimeout(tick, Math.min(left, 25)); timer.unref?.();
-    });
-    return Promise.race([call, expired]).finally(() => { stopped = true; clearTimeout(timer); });
-  } });
+export function boundedDecisions(effects: DaemonEffects, kept: object, clockMs: () => number, budgetLeft: () => number | null): DaemonEffects {
+  if (!effects.decide) return effects;
+  return boundedCalls(effects, kept, clockMs, budgetLeft, { step: 'decisions', calls: ['decide'], boundMs: fx => (fx as { decisionCallBoundMs?: number }).decisionCallBoundMs ?? decisionCallBoundMs,
+    key: (_call, args) => decidingKey(args[0] as Work, args.slice(1)), wording: (_call, args) => ({ what: `${(args[0] as Work).key}'s decision call`, owed: 'decision', per: 'decision' }) });
 }
 
 const reachedEvery = 'The decisions step reached every item within its budget';

@@ -73,9 +73,9 @@ function baseCount(): DocsBudgetBase {
 }
 /** Facts a criterion requires a budgeted page to state, so trimming for the budget cannot drop them. */
 const REQUIRED_STATEMENTS: [string, RegExp][] = [
-  ['docs/master-agent-reference.md', /decisions step keeps its two-fifths interval budget \(30 s floor\)/],
-  ['docs/master-agent-reference.md', /each approver call is bound to 10 s or the budget left/],
-  ['docs/master-agent-reference.md', /history whose ledger has not moved is kept, not read/],
+  // GY-1774: every step calling an approver, a decision or a session keeps the decisions step's budget and per-call bound; a slow call is carried, never holds the cycle.
+  ['docs/master-agent-reference.md', /Every loop step calling an approver, decision or session keeps a two-fifths interval budget \(30 s floor\): each is bound to 10 s or the budget left; a slower call is carried \(`waiting`, no fault\) and retried next cycle, joining its call in flight/],
+  ['docs/master-agent-reference.md', /one `decision\.\*` ledger read names moved items, an unmoved history is kept unread/],
   // GY-1518: the delivery redesign page keeps the merger setting's two values and the one rule.
   ['docs/delivery-redesign.md', /`github` \(default\) or `control-plane`/],
   ['docs/delivery-redesign.md', /Only Graphyard writes to main/],

@@ -10,6 +10,7 @@ import { roleSessionMaximumMs } from '../model/sessions.js';
 import { credentialBlockedKey, credentialBlockedReason, credentialFailure } from '../worker-credential.js';
 import type { Cycle } from './cycle.js';
 import { settleEndedAttemptFence, supervisorStillRunning } from './cycle-reclaim.js';
+import { carriedRow, recordCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
 
 /** A worker's implementation handle, written by the loop: the one record `master status` and the item's history show of it. */
 export function workerHandle(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string | null, outcome: string, finished: boolean) {
@@ -141,7 +142,9 @@ export function checkPaneStillBelongs(item: Work, handleId: string, pane: string
  * it: one listing miss ends nothing, and an unverifiable handle is reclaimed on a bound instead of
  * refusing every resolution for ever (GY-953).
  */
-export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingLive: boolean) {
+export const resumeStep = (cycle: Cycle, failedOver: Set<string>, listingLive: boolean) =>
+  withinStepBudget(cycle, 'resume', ['promptSession', 'closeSession'], bounded => resumeStepWithin(bounded, failedOver, listingLive)); // GY-1774: the re-prompts and the pane close are bounded
+async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLive: boolean) {
   const { config, state, effects, now, clock, performed, isolate, agents, heldBy } = cycle;
   const live = new Set<string>();
   for (const profile of config.workers.filter(worker => worker.mode === 'launch')) await isolate('session', heldBy(profile), profile.name, async () => {
@@ -174,6 +177,7 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
         performed.push(await entry(reclaimKey, 'done', `${profile.agentName} on ${item.key} epoch ${epoch} was ${reason}; ${next}, keeping the attempt's branch`, attempts));
         await drop(keys.idle);
       } catch (error) {
+        if (stepCallCarried(error)) return recordCarried(cycle, reclaimKey, { kind: 'session', work: item.key, principal: profile.principal, epoch }, error, `Handing ${item.key} epoch ${epoch} to a new attempt`);
         performed.push(await entry(reclaimKey, 'failed', `${profile.agentName} on ${item.key} epoch ${epoch} is ${reason}, but its attempt could not be handed on: ${message(error)}`, attempts));
       }
     };
@@ -200,6 +204,7 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
         performed.push(await entry(key, 'done', `${profile.agentName} on ${item.key} ${reason}; ${next}, keeping the attempt's branch and ending the blocker it recorded`, attempts));
         await drop(keys.blocker, keys.idle);
       } catch (error) {
+        if (stepCallCarried(error)) return recordCarried(cycle, key, { kind: 'session', work: item.key, principal: profile.principal, epoch }, error, `Ending ${item.key} epoch ${epoch} on its credential failure`);
         performed.push(await entry(key, 'failed', `${profile.agentName} on ${item.key} ${reason}, but its attempt could not be ended: ${message(error)}`, attempts));
       }
       return;
@@ -217,6 +222,7 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
         performed.push(await entry(key, 'done', `${profile.agentName} on ${item.key} ${reason}; ${next}, keeping the attempt's branch and ending the blocker it recorded`, attempts));
         await drop(keys.blocker, keys.idle);
       } catch (error) {
+        if (stepCallCarried(error)) return recordCarried(cycle, key, { kind: 'session', work: item.key, principal: profile.principal, epoch }, error, `Ending ${item.key} epoch ${epoch}, blocked again`);
         performed.push(await entry(key, 'failed', `${profile.agentName} on ${item.key} ${reason}, but its attempt could not be ended: ${message(error)}`, attempts));
       }
       return;
@@ -243,6 +249,7 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
               performed.push(await entry(key, 'done', `${profile.agentName} on ${item.key} ${reason}; ${next}`, attempts));
               await drop(keys.blocker, keys.idle);
             } catch (error) {
+              if (stepCallCarried(error)) return recordCarried(cycle, key, { kind: 'session', work: item.key, principal: profile.principal, epoch }, error, `Ending ${item.key} epoch ${epoch} past its time box`);
               performed.push(await entry(key, 'failed', `${profile.agentName} on ${item.key} ${reason}, but its attempt could not be ended: ${message(error)}`, attempts));
             }
             return;
@@ -323,6 +330,7 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
         await workerHandle(cycle, item, profile, epoch, pane, `re-prompted to resume at ${new Date(now()).toISOString()}: ${changed}`, false);
         await drop(keys.blocker, keys.scope, keys.idle);
       } catch (error) {
+        if (stepCallCarried(error)) return recordCarried(cycle, promptKey, { kind: 'session', work: item.key, principal: profile.principal, epoch }, error, `Re-prompting ${profile.agentName} in pane ${pane} to resume ${item.key}`);
         performed.push(await entry(promptKey, 'failed', `${item.key} epoch ${epoch}: ${changed}; re-prompting ${profile.agentName} in pane ${pane} failed: ${message(error)}`, attempts));
       }
       return;
@@ -367,7 +375,7 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
       await reclaimIdle(`idle with a live lease: no activity in pane ${pane} after its re-prompt at ${answered.at} but a turn that ended by ${idle.at}, and none in the ${Math.round((now() - Date.parse(answered.at)) / 60_000)} minutes since the re-prompt${paneReason ? `; its pane no longer verifies (${paneReason})` : ''}`, paneReason ? null : pane);
       return;
     }
-    if (!reprompted || reprompted.state === 'failed') {
+    if (!reprompted || reprompted.state === 'failed' || carriedRow(reprompted)) {
       if (quietMs <= idleLeaseMs || !effects.promptSession || !readyToRetry(reprompted, state.cycle)) return;
       // The pane the name resolved — only before this attempt's own pane was recorded — must still
       // be the one the item's record ties to this attempt's session before the idle re-prompt
@@ -385,6 +393,7 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
         performed.push(await entry(repromptKey, 'done', outcome, attempts));
         await workerHandle(cycle, item, profile, epoch, pane, outcome, false);
       } catch (error) {
+        if (stepCallCarried(error)) return recordCarried(cycle, repromptKey, { kind: 'session', work: item.key, principal: profile.principal, epoch }, error, `Re-prompting idle ${profile.agentName} in pane ${pane} on ${item.key}`);
         performed.push(await entry(repromptKey, 'failed', `${observed}; re-prompting it failed: ${message(error)}`, attempts));
       }
       return;

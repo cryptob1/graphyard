@@ -16,6 +16,7 @@ import { blockedPromptAnswers, blockedPromptFailMs, blockedPromptSettleMs, failo
 import { checkPaneStillBelongs, endWorkerAttempt, resumeStep, workerHandle } from './cycle-resume.js';
 import type { Cycle } from './cycle.js';
 import { settleEndedAttemptFence, supervisorStillRunning } from './cycle-reclaim.js';
+import { recordCarried, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
 
 export { idleLeaseMs, idleReclaimMs, idleRepromptGraceMs, resumeWaitKey, idleLeaseKey, resumePromptText, idlePromptText } from './cycle-resume.js';
 
@@ -52,7 +53,8 @@ export function outputReadDue(state: object, agents: readonly HerdrAgent[], agen
   return true;
 }
 
-export async function closeStep(cycle: Cycle) {
+export const closeStep = (cycle: Cycle) => withinStepBudget(cycle, 'sessions', ['closeSession', 'endSession', 'relaunch', 'answerSession', 'promptSession', 'launchedSessions'], closeStepWithin); // GY-1774: every session call is bounded
+async function closeStepWithin(cycle: Cycle) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, open, owns, heldBy } = cycle;
   // Whether a live lease of `principal` is worked in the worktree `cwd` names (…/worktrees/GY-N-EPOCH).
   const workedHere = (principal: string, cwd: string | undefined) => open.some(item => !!item.lease && item.lease.owner === principal
@@ -103,6 +105,7 @@ export async function closeStep(cycle: Cycle) {
         sighted.delete(seenKey);
         performed.push(await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'done', detail: `Closed finished session ${agent.name} (${exited ? 'its runtime exited' : agent.agent_status ?? 'no status'}) with no active assignment`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
       } catch (error) {
+        if (stepCallCarried(error)) { await recordCarried(cycle, key, { kind: 'close', work: null, principal: profile.principal }, error, `Closing finished session ${agent.name}`); continue; }
         performed.push(await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'failed', detail: `Could not close ${agent.name}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
       }
     }
@@ -246,7 +249,7 @@ export async function closeStep(cycle: Cycle) {
         // failover is recorded done, with the profile it landed on, when it settles.
         cycle.launch('failover', item, key, [], async sink => {
           let next: string;
-          try { next = `relaunched on profile ${(await effects.relaunch!(session, item, snapshot)).profile}`; }
+          try { next = `relaunched on profile ${(await (cycle.detached ? unboundedEffects(effects) : effects).relaunch!(session, item, snapshot)).profile}`; }
           catch (error) {
             next = (error as { capacityExhausted?: boolean })?.capacityExhausted ? `no other account is left for the role (${message(error)}), so it waits for capacity`
               : `it could not be launched again at once (${message(error)}), so the dispatcher launches it on its retry schedule`;
@@ -254,6 +257,7 @@ export async function closeStep(cycle: Cycle) {
           sink.push(await done(next));
         });
       } catch (error) {
+        if (stepCallCarried(error)) return recordCarried(cycle, key, { kind: 'failover', work: item.key }, error, `Failing over ${session.role} session ${session.agentName} for ${item.key}`);
         performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `${session.role} session ${session.agentName} for ${item.key} exhausted its account (${signal.reason}) but could not be failed over: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
       }
     });
@@ -415,6 +419,7 @@ export async function closeStep(cycle: Cycle) {
         const next = await fail(reason);
         performed.push(await record(state, trustKey, { kind: 'session', work: item.key, principal, epoch, state: 'done', detail: `${who} on ${item.key} ${reason}; ${next}`, attempts, cycle: state.cycle }, now(), effects.persist));
       } catch (error) {
+        if (stepCallCarried(error)) return recordCarried(cycle, trustKey, { kind: 'session', work: item.key, principal, epoch }, error, `Closing ${who} on ${item.key} at its folder-trust dialog`);
         performed.push(await record(state, trustKey, { kind: 'session', work: item.key, principal, epoch, state: 'failed', detail: `${who} on ${item.key} ${reason}, but it could not be closed: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
       }
       return;
@@ -432,6 +437,7 @@ export async function closeStep(cycle: Cycle) {
         performed.push(await record(state, answeredKey, { kind: 'session', work: item.key, principal, epoch, state: 'done', detail: `${who} on ${item.key}: the loop ${outcome}`, attempts, cycle: state.cycle }, now(), effects.persist));
         await handle(`The loop ${outcome}`, false);
       } catch (error) {
+        if (stepCallCarried(error)) return recordCarried(cycle, answeredKey, { kind: 'session', work: item.key, principal, epoch }, error, `Declining the destructive-command prompt of ${who} on ${item.key}`);
         performed.push(await record(state, answeredKey, { kind: 'session', work: item.key, principal, epoch, state: 'failed', detail: `${who} on ${item.key} is blocked on its runtime's destructive-command prompt "${prompt.text}", and declining it failed: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
       }
       return;
@@ -456,6 +462,7 @@ export async function closeStep(cycle: Cycle) {
       const next = await fail(reason);
       performed.push(await record(state, failKey, { kind: 'session', work: item.key, principal, epoch, state: 'done', detail: `${who} on ${item.key} was closed as failed: ${reason}; ${next}`, attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
+      if (stepCallCarried(error)) return recordCarried(cycle, failKey, { kind: 'session', work: item.key, principal, epoch }, error, `Closing ${who} on ${item.key} as failed at its prompt`);
       performed.push(await record(state, failKey, { kind: 'session', work: item.key, principal, epoch, state: 'failed', detail: `${who} on ${item.key} was ${reason}, but it could not be closed as failed: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
     }
   };
@@ -513,7 +520,7 @@ export async function closeStep(cycle: Cycle) {
       const key = `relaunch:${session.role}:${session.record}`;
       cycle.launch('session', item, key, [], async sink => {
         let detail: string;
-        try { detail = `${session.role} session ${session.agentName} for ${item.key} relaunched on profile ${(await effects.relaunch!(session, item, snapshot)).profile}`; }
+        try { detail = `${session.role} session ${session.agentName} for ${item.key} relaunched on profile ${(await (cycle.detached ? unboundedEffects(effects) : effects).relaunch!(session, item, snapshot)).profile}`; }
         catch (error) { detail = `${session.role} session ${session.agentName} for ${item.key} could not be launched again at once (${message(error)}), so the dispatcher launches it on its retry schedule`; }
         sink.push(await record(state, key, { kind: 'session', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       });
@@ -675,6 +682,7 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
         // Its sighting goes with it, in this cycle's sweep.
         sighted.delete(seenKey);
       } catch (error) {
+        if (stepCallCarried(error)) return recordCarried(cycle, key, { kind: 'close', work: item.key, principal: handle.principal }, error, `Closing implementation session ${handle.id} of ${item.key}`);
         performed.push(await entry('failed', `Could not close implementation session ${handle.id} of ${item.key}: ${message(error)}`));
       }
     });

@@ -6,12 +6,14 @@ import { record } from './effects.js';
 import { acceptanceStep } from './acceptance.js';
 import { plannerStep } from './planner.js';
 import type { Cycle } from './cycle.js';
+import { withinStepBudget } from './step-budget.js';
 
 /**
  * Step 7c. Start a triage run for each machine-filed item awaiting triage, on the research account (`run.research`): an unconfigured loop
  * triages nothing, and the item is raised as attention once it has waited a day.
  */
-export async function triageBacklogStep(cycle: Cycle) {
+export const triageBacklogStep = (cycle: Cycle) => withinStepBudget(cycle, 'triage', ['recordTriage'], triageBacklogStepWithin); // GY-1774: the triage record is bounded; a run settling after the step passes through
+async function triageBacklogStepWithin(cycle: Cycle) {
   const { config, state, effects, now, snapshot, clock, performed, isolate } = cycle;
   const note = async (key: string, work: string | null, outcome: 'done' | 'failed', detail: string) => {
     if (!detailChanged(state.actions[key], detail)) return;

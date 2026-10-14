@@ -9,6 +9,7 @@ import { closeStanding, closingItems, freshReads } from './stale-closes.js';
 import type { Cycle } from './cycle.js';
 import type { Work } from '../model.js';
 import type { MasterConfig } from '../master.js';
+import { recordCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
 
 /** How many times the step tries to withdraw one change request before it escalates instead. */
 export const maxCappedFilingAttempts = 5;
@@ -248,7 +249,8 @@ export function cappedEscalation(work: Pick<Work, 'key'>, capped: CappedReview, 
  * head, from its re-review, is escalated instead, so a reviewer that keeps requesting changes
  * cannot keep the head re-reviewing.
  */
-export async function reviewCapStep(cycle: Cycle) {
+export const reviewCapStep = (cycle: Cycle) => withinStepBudget(cycle, 'review-cap', ['withdrawReview', 'wakeObservation'], reviewCapStepWithin); // GY-1774: the withdrawal and the observation wake are bounded
+async function reviewCapStepWithin(cycle: Cycle) {
   const { config, state, effects, performed, isolate, now } = cycle;
   // A withdrawal spends a fresh review on the head; an item a close stands on is not reviewed again (GY-1439).
   // A close the loop already knows of holds the item without a read. Otherwise this step, which runs before the
@@ -335,6 +337,7 @@ export async function reviewCapStep(cycle: Cycle) {
     try {
       await effects.withdrawReview(item, capped.reviewId!, request);
     } catch (error) {
+      if (stepCallCarried(error)) return recordCarried(cycle, key, { kind: 'review', work: item.key }, error, `Withdrawing ${capped.reviewer}'s change request ${capped.reviewId} on ${item.key}`);
       performed.push(await record(state, key, { kind: 'review', work: item.key, principal: null, state: 'failed', detail: `${reason}, but withdrawing it failed: ${error instanceof Error ? error.message : String(error)}`,
         attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       return;

@@ -19,6 +19,7 @@ import { boundDetail, detailChanged, namePaths } from './decisions.js';
 import { findingRecheckMs, record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import type { MergerMode } from '../merger-mode.js';
+import { recordCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
 
 /** A requested path the loop grants without an approver, and the audited ground it stands on; `companion` marks a GY-955 companion. */
 export interface ScopeGround { path: string; ground: string; companion?: boolean }
@@ -107,7 +108,8 @@ export async function controlPlaneMerger(cycle: Pick<Cycle, 'effects' | 'state'>
 }
 
 /** Step 2: decide the open scope requests, and measure the decision budget over what is still waiting. */
-export async function scopeStep(cycle: Cycle) {
+export const scopeStep = (cycle: Cycle) => withinStepBudget(cycle, 'scope', ['decideScope', 'widenScope'], scopeStepWithin); // GY-1774: the decision and the finding-grounded widening are bounded
+async function scopeStepWithin(cycle: Cycle) {
   const { state, effects, now, clock, performed, isolate, open } = cycle;
   if (await controlPlaneMerger(cycle)) return { settled: new Map<string, Work>(), budget: scopeBudget([], state.scope, clock) };
   // 2. Decide the open scope requests. A worker that needs a file its own criteria — or this
@@ -208,6 +210,8 @@ export async function scopeStep(cycle: Cycle) {
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: boundDetail(`Widened ${item.key} with ${namePaths(paths)} on ${widenedOn(scoped.grounds!, paths.length)}: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
       return at;
     } catch (error) {
+      // GY-1774: a widening past the step's bound is in flight; it is joined next cycle, which judges the findings again.
+      if (stepCallCarried(error)) { await recordCarried(cycle, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch }, error, `Widening ${item.key} on its review findings`); return null; }
       // The race this widening is bound against, lost: the request was answered, withdrawn or re-asked
       // meanwhile, or its attempt ended, so the widening is moot — answered as the decide path answers
       // it, never a fault (GY-1347). A superseded ask is named, and its fresh ask is judged on its own
@@ -300,6 +304,7 @@ export async function scopeStep(cycle: Cycle) {
           attempts: 1, cycle: state.cycle }, now(), effects.persist));
       }
     } catch (error) {
+      if (stepCallCarried(error)) return recordCarried(cycle, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch }, error, `Deciding ${item.key}'s scope request`);
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'failed',
         detail: boundDetail(`Could not decide ${item.key}'s scope request: ${message(error)}`), attempts, cycle: state.cycle }, now(), effects.persist));
     }

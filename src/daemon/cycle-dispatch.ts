@@ -25,9 +25,12 @@ import { decompositionStep } from '../decomposition-step.js';
 import { judgeHostMemory } from '../master-resources.js';
 import { dispatchBlockRetryMs, dispatchFailureBlockAfter, dispatchFailureBlocker, noteDispatchFailure, planeWideFailure } from './dispatch-failures.js';
 import { closeStanding, closingItems } from './stale-closes.js';
+import { recordCarried, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
-export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) {
+export const dispatchStep = (cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) =>
+  withinStepBudget(cycle, 'dispatch', ['decide', 'approver'], bounded => dispatchStepWithin(bounded, health, assessments)); // GY-1774: the cap decision and its approver launch are bounded
+async function dispatchStepWithin(cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, credentials, open } = cycle;
   // 4. Dispatch claimable work to a healthy profile. The launcher claims under the worker's own
   //    identity; the daemon never holds a lease. An unhealthy profile is skipped, not waited on.
@@ -496,12 +499,21 @@ async function holdAtCap(cycle: Cycle, item: Work, hold: AttemptRetryHold) {
     // The request alone changes nothing; the independent approver session is what applies it.
     // The launch runs on the launcher beside the cycle (GY-616) and is reported next cycle.
     const launchKey = `attempt-cap:approver:${item.id}`;
+    // GY-1774: on the launcher beside the cycle the launch holds no cycle and waits as long as it takes; settled in place, it is bound like the step's other calls.
+    const launchWith = cycle.detached ? unboundedEffects(effects).approver! : approver!;
     const handed = cycle.launch('decision', item, launchKey, [], async sink => {
-      const launched = await approver!(item, requested.id);
+      let launched: Awaited<ReturnType<typeof launchWith>>;
+      try { launched = await launchWith(item, requested.id); }
+      catch (error) {
+        if (!stepCallCarried(error)) throw error;
+        sink.push(await record(state, launchKey, { kind: 'decision', work: item.key, principal: null, state: 'waiting', detail: `Launching the approver of ${item.key}'s cap decision ${requested.id} was carried to the next cycle: ${message(error)}`, attempts: (state.actions[launchKey]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, null));
+        return;
+      }
       sink.push(await record(state, launchKey, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s cap decision ${requested.id}: launched independent approver session ${launched.agentName}`, attempts: (state.actions[launchKey]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     });
     performed.push(await record(state, startedKey, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Requested decision ${requested.id} (rework) for ${item.key} and ${handed ? 'handed the approver session to the launcher' : 'launched the independent approver session'}: ${reason}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
   } catch (error) {
+    if (stepCallCarried(error)) return recordCarried(cycle, startedKey, { kind: 'decision', work: item.key, epoch: item.epoch }, error, `Requesting ${item.key}'s cap decision`);
     performed.push(await record(state, startedKey, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not put ${item.key}'s cap decision to an approver: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
   }
 }

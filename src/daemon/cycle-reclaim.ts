@@ -19,6 +19,7 @@ import { unsubmittedAttempt, unsubmittedAttemptText, workerReclaimBoundMs } from
 import { checkPaneStillBelongs, endWorkerAttempt } from './cycle-resume.js';
 import type { DaemonAction, DaemonState } from './state.js';
 import type { DaemonEffects } from './effects.js';
+import { recordCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
 
 /**
  * Session cleanup for a worker whose supervisor scope has ended (GY-189). `watch` exiting leaves
@@ -60,6 +61,8 @@ export async function closeEndedWorkerPanes(state: DaemonState, effects: DaemonE
       performed.push(await entry('done', `${gone ? 'Pane was already gone' : 'Closed pane'} ${pane} of ${item.key} epoch ${epoch}: ${why}, so its shell no longer lingers in the worktree`));
       closed.push(item);
     } catch (error) {
+      // GY-1774: a close past the step's bound is in flight; it is joined next cycle, and the quarantine stays until then.
+      if (stepCallCarried(error)) { try { await recordCarried({ state, now, performed, effects }, key, { kind: 'close', work: item.key, principal: quarantine.owner, epoch }, error, `Closing pane ${pane} of ${item.key} epoch ${epoch}`); } catch { /* recorded next cycle */ } continue; }
       try { performed.push(await entry('failed', `Could not close pane ${pane} of ${item.key} epoch ${epoch} (${why}): ${message(error)}; the containment quarantine stays until it is closed`)); } catch { /* recorded next cycle */ }
     }
   }
@@ -377,7 +380,8 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
 }
 
 /** Step 3: reclaim disk, the loop's own bounded resources, and the items whose sessions died. */
-export async function reclaimStep(cycle: Cycle) {
+export const reclaimStep = (cycle: Cycle) => withinStepBudget(cycle, 'reclaim', ['panes', 'closeSession'], reclaimStepWithin); // GY-1774: the pane inventory and every pane close are bounded
+async function reclaimStepWithin(cycle: Cycle) {
   const { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, open } = cycle;
   // 3. Reclaim the disk the finished assignments are holding, before anything asks for more of
   //    it. Every attempt and every rework checks the repository out again, so without this step
@@ -555,6 +559,7 @@ export async function stopUnboundedAttempts(cycle: Cycle) {
         const next = await endWorkerAttempt(cycle, item, profile, attempt.epoch, pane, held, `ended without submitting: it ${held}`, { stopFirst: true });
         performed.push(await entry('done', `${item.key} epoch ${attempt.epoch} (${attempt.owner}) ${held}; the loop stopped renewing it: ${next}, with its worktree kept`));
       } catch (error) {
+        if (stepCallCarried(error)) return recordCarried(cycle, key, { kind: 'session', work: item.key, principal: attempt.owner, epoch: attempt.epoch }, error, `Ending ${item.key} epoch ${attempt.epoch} past its reclaim bound`);
         performed.push(await entry('failed', `${unsubmittedAttemptText(attempt)}; but the loop could not end the attempt: ${message(error)}`));
       }
     });

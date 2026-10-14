@@ -15,6 +15,7 @@ import { sessionExhaustion } from './cycle-sessions.js';
 import { decisionFailureKind, resumedApplication } from './decision-reads.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import type { FaultKind } from '../model/fault-classes.js';
+import { recordCarried, stepCallCarried, unboundedEffects } from './step-budget.js';
 
 /**
  * The approver sessions step 4c puts its decisions to (GY-1147 moved them here from
@@ -44,6 +45,8 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     if (!watch.session || !effects.endRegistrySession) return true;
     try { await effects.endRegistrySession(watch.session, why.slice(0, 500)); watch.session = null; return true; }
     catch (error) {
+      // GY-1774: an end past the step's bound is in flight, not refused: it is joined next cycle, and the id stays on the watch.
+      if (stepCallCarried(error)) { await recordCarried(cycle, `close:approver-session:${watch.decision}:${watch.session}`, { kind: 'close', work: item.key, epoch: item.epoch }, error, `Ending approver registry session ${watch.session}`); return false; }
       if (unknownRegistrySession(error)) {
         const session = watch.session!; watch.session = null;
         await note(`close:approver-session:${watch.decision}:${session}`, item, 'close', 'done', unknownSessionDetail(session, error));
@@ -63,6 +66,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     if (!watch.session || !effects.endRegistrySession) return true;
     try { await effects.endRegistrySession(watch.session, why.slice(0, 500)); watch.session = null; return true; }
     catch (error) {
+      if (stepCallCarried(error)) { await recordCarried(cycle, `close:approver-session:${watch.decision}:${watch.session}`, { kind: 'close', work: watch.work }, error, `Ending approver registry session ${watch.session}`); return false; }
       if (!unknownRegistrySession(error)) { watch.closeAttempts += 1; return false; }
       const session = watch.session!; watch.session = null;
       performed.push(await record(state, `close:approver-session:${watch.decision}:${session}`, { kind: 'close', work: watch.work, principal: null, state: 'done', detail: unknownSessionDetail(session, error), attempts: 1, cycle: state.cycle }, now(), effects.persist));
@@ -86,7 +90,11 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       if (handle) await effects.recordSession?.(item, { id: handle.id, kind: handle.kind, runtime: handle.runtime, host: handle.host, subject: handle.subject, state: 'finished', outcome: `closed by the loop: ${why}`.slice(0, 500) }).catch(() => { /* the report closes it once the pane is gone */ });
       await note(key, item, 'close', 'done', `Closed approver session ${watch.agentName} (${session.agent_status ?? 'unknown'}): ${why}`); return true;
     }
-    catch (error) { invalidate(); watch.closeAttempts += 1; await note(key, item, 'close', 'failed', `Could not close approver session ${watch.agentName}: ${message(error)}`); return false; }
+    catch (error) {
+      invalidate();
+      if (stepCallCarried(error)) { await recordCarried(cycle, key, { kind: 'close', work: item.key, epoch: item.epoch }, error, `Closing approver session ${watch.agentName}`); return false; }
+      watch.closeAttempts += 1; await note(key, item, 'close', 'failed', `Could not close approver session ${watch.agentName}: ${message(error)}`); return false;
+    }
   };
   /**
    * GY-1604. A watch whose launch failed or waits for capacity holds no session, so a `master approver` launched by hand for its decision
@@ -239,7 +247,8 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       });
     }
     let launched: Awaited<ReturnType<NonNullable<DaemonEffects['approver']>>>;
-    try { launched = await effects.approver!(item, watch.decision); }
+    // GY-1774: on the launcher beside the cycle the launch holds no cycle, so it waits as long as it takes; in place it is bound like every call of the step.
+    try { launched = await (cycle.detached ? unboundedEffects(effects) : effects).approver!(item, watch.decision); }
     catch (error) {
       // A launch no account could take (GY-182) ran no session either: the watch keeps why, persisted
       // now so the wait survives a restart, and `master status` names it as waiting for a slot.
@@ -411,14 +420,20 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       const adopt = await adoptable(item, watch);
       if (adopt === 'wait') return 'wait';
       try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; ${await launch(item, watch, adopt === 'adopt')}`); }
-      catch (error) { const detail = `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; its approver session could not be launched: ${message(error)}`; await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', detail, undefined, decisionFailureKind(state, item.key, detail)); }
+      catch (error) {
+        if (stepCallCarried(error)) { await recordCarried(cycle, `${base}:launch:${watch.launches + 1}`, { kind: 'decision', work: item.key, epoch: item.epoch }, error, `Launching the approver of ${item.key}'s ${watch.action} decision ${watch.decision}`); return 'done'; }
+        const detail = `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; its approver session could not be launched: ${message(error)}`; await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', detail, undefined, decisionFailureKind(state, item.key, detail));
+      }
       return 'done';
     }
     recordWatchEnded(watch, step.detail);
     if (step.step === 'rerequest') return 'rerequest';
     if (step.step === 'exhausted') { await escalateUnjudged(item, watch, step.detail); return 'done'; }
     try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${step.detail}; ${await launch(item, watch, false)}`); }
-    catch (error) { const detail = `${step.detail}; a replacement approver session could not be launched: ${message(error)}`; await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', detail, undefined, decisionFailureKind(state, item.key, detail)); }
+    catch (error) {
+      if (stepCallCarried(error)) { await recordCarried(cycle, `${base}:launch:${watch.launches + 1}`, { kind: 'decision', work: item.key, epoch: item.epoch }, error, `Launching a replacement approver for ${item.key}'s ${watch.action} decision ${watch.decision}`); return 'done'; }
+      const detail = `${step.detail}; a replacement approver session could not be launched: ${message(error)}`; await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', detail, undefined, decisionFailureKind(state, item.key, detail));
+    }
     return 'done';
   };
   /**
@@ -437,6 +452,8 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       const settled = await effects.withdraw(item, watch.decision, detail) as { state?: string; outcome?: string | null } | undefined;
       await note(key, item, 'decision', 'done', `${detail}; the control plane settled it ${settled?.state ?? 'as asked'}${settled?.outcome ? `: ${boundDetail(settled.outcome, 400)}` : ''}`);
     } catch (error) {
+      // GY-1774: a send past the step's bound is still in flight — it is joined next cycle and counts no send.
+      if (stepCallCarried(error)) { watch.requests -= 1; await recordCarried(cycle, key, { kind: 'decision', work: item.key, epoch: item.epoch }, error, `Settling ${item.key}'s ${watch.action} decision ${watch.decision}`); return; }
       const applied = resumedApplication.test(message(error));
       await note(key, item, 'decision', applied ? 'done' : 'failed', applied ? `${detail}; the control plane applied it` : `${detail}; settling it failed and is tried again next cycle: ${message(error)}`);
     }
@@ -456,7 +473,10 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     try {
       const settled = await effects.resume(item, watch.decision);
       await note(key, item, 'decision', settled.state === 'approved' ? 'failed' : 'done', `${detail}; the control plane settled it ${settled.state ?? 'as asked'}${settled.outcome ? `: ${boundDetail(settled.outcome, 400)}` : ''}`);
-    } catch (error) { await note(key, item, 'decision', 'failed', `${detail}; applying it failed and is tried again on the retry interval: ${message(error)}`); }
+    } catch (error) {
+      if (stepCallCarried(error)) { watch.requests -= 1; await recordCarried(cycle, key, { kind: 'decision', work: item.key, epoch: item.epoch }, error, `Applying ${item.key}'s ${watch.action} decision ${watch.decision}`); return; }
+      await note(key, item, 'decision', 'failed', `${detail}; applying it failed and is tried again on the retry interval: ${message(error)}`);
+    }
   };
   // 4c'. Approver sessions no request of the loop's launched (GY-403). `master approver` records the
   //      item and decision with its launch, and the loop registers such a session in its approval
