@@ -712,3 +712,18 @@ test('unit:e2e-command-step-runs — a process producing far more than the kept 
   assert.deepEqual(lastLines(result.output).slice(-2), ['1199999', '1200000']);
   assert.equal(lastLines(result.output).length, 50);
 });
+
+test('unit:pending-flaky-case-latest-run-is-labelled — a pending case that fails then passes keeps a latest Tests page run that fails at its first failing step, labelled pending', async () => {
+  const sha = '7'.repeat(40);
+  const cases = verdictCases({ 'pending-flaky': { required: true } });
+  const report = await runCases(cases, { url: 'https://uat.example.test', token: 't', runId: 'rc-20261008T120000Z', fetcher: verdictTarget(sha, { 'pending-flaky': [500, 200] }), pendingCases: ['pending-flaky'], retries: 1 });
+  const outcome = report.cases.find(entry => entry.id === 'pending-flaky')!;
+  assert.equal(outcome.verdict, 'flaky');
+  assert.equal(outcome.pending, true);
+  await syncCases(apiAs(operator), cases);
+  await recordRuns(apiAs(operator), cases, report);
+  const runs = (await call('tests/pending-flaky/runs', operator)).body.runs as CaseRun[];
+  const latest = runs.reduce((a, b) => (a.seq ?? 0) > (b.seq ?? 0) ? a : b);
+  assert.equal(latest.result, 'fail', 'the latest run is the labelled failure, not the unlabelled pass');
+  assert.match(latest.e2e!.failingStep!.reason, /recorded pending/);
+});

@@ -357,6 +357,13 @@ export async function recordRuns(api: Api, cases: readonly CaseFile[], report: E
         await api(`scenarios/${encodeURIComponent(outcome.id)}/runs`, { revision, runId, baseUrl: report.url, sha: report.sha, environment: report.environment,
           durationMs: attempt.durationMs, outcome: attempt.outcome, executed: attempt.executed, failingStep }, `e2e-run:${runId}:${outcome.id}`);
       }
+      // A pending flaky case's last attempt passed, which would read as its latest run with no label: a closing run keeps its first failing step, labelled pending, as the latest.
+      const failed = outcome.pending && outcome.verdict === 'flaky' ? attempts.find(attempt => attempt.failingStep) : undefined;
+      if (failed?.failingStep) {
+        const runId = `${report.runId}:pending`;
+        await api(`scenarios/${encodeURIComponent(outcome.id)}/runs`, { revision, runId, baseUrl: report.url, sha: report.sha, environment: report.environment,
+          durationMs: failed.durationMs, outcome: 'fail', executed: failed.executed, failingStep: { ...failed.failingStep, reason: `${failed.failingStep.reason}${pendingNote}`.slice(0, 1000) } }, `e2e-run:${runId}:${outcome.id}`);
+      }
       outcome.recorded = { revision };
     } catch (error) { outcome.recorded = { error: message(error) }; }
   }

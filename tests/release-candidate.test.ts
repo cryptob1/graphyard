@@ -1057,3 +1057,26 @@ test('unit:promotion-ignores-running-soak — with main ahead of production, the
   assert.equal(stub.dispatches, 2);
   assert.equal(promotionStatus(state).candidates[0].soak?.state, 'running', 'master status shows A soaking beside B\'s cut');
 });
+
+test('unit:pending-at-cut-reads-the-plane — repeated cuts read the plane\'s goals and work stages: pending while the serving item is not done, delivered after, and a case shared with a delivered outcome still blocks', async () => {
+  const { pendingAtCut } = await import('../src/release-pending.js');
+  const contract = JSON.stringify({ outcomes: [
+    { id: 'goal-outcome', title: 'A goal outcome', criteria: ['Something a customer can do'], cases: ['goal-case', 'shared-case'] },
+    { id: 'plain-outcome', title: 'A plain outcome', criteria: ['Something else a customer does'], cases: ['plain-case', 'shared-case'] },
+  ] });
+  const merged: any = { id: 'g-1', key: 'GOAL-9', merged: { at: '2026-10-03T10:00:00.000Z', by: 'approver', pr: 1153, mergeSha: 'a'.repeat(40) }, protected: { cases: ['goal-case'], outcomes: ['goal-outcome'] },
+    plan: { note: 'n', items: [{ ref: 'routes', title: 'Routes', description: '', outcomes: ['goal-outcome'], cases: ['goal-case'], criteria: [], plannedFiles: ['src/x.ts'], dependsOn: [] }] },
+    items: [{ ref: 'routes', key: 'GY-900', id: 'w-1' }] };
+  let stage = 'build';
+  const read = (source: string | null = contract, goals: any[] = [merged]) => pendingAtCut({ contract: async () => source, goals: async () => goals, stage: async () => stage });
+  assert.deepEqual(await read(), ['goal-outcome'], 'before the serving item is done the outcome is pending');
+  assert.deepEqual(await read(), ['goal-outcome'], 'a repeated cut reads the same');
+  stage = 'done';
+  assert.deepEqual(await read(), [], 'after the serving item is done the next cut records none');
+  assert.deepEqual(await read(contract, []), [], 'a delivered goal is no longer listed: nothing pends');
+  assert.deepEqual(await read(null), [], 'no contract names none');
+  assert.deepEqual(await pendingAtCut({ contract: async () => contract, goals: async () => { throw new Error('plane down'); }, stage: async () => stage }), [], 'an unreadable plane names none, so the candidate blocks as before');
+  // The case both outcomes bind keeps blocking while the plain outcome is delivered; only the goal-only case pends.
+  const parsed = JSON.parse(contract);
+  assert.deepEqual(contractPendingCases(parsed, ['goal-outcome']), ['goal-case']);
+});

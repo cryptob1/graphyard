@@ -195,7 +195,8 @@ export function pendingOutcomeIds(contract: Pick<ReleaseContract, 'outcomes'>, g
  * no pending outcomes, or a checkout with no contract, names none.
  */
 export const contractPendingCases = (contract: Pick<ReleaseContract, 'outcomes'> | null | undefined, pendingOutcomes: readonly string[] | undefined): string[] =>
-  !contract || !pendingOutcomes?.length ? [] : [...new Set(contract.outcomes.filter(outcome => pendingOutcomes.includes(outcome.id)).flatMap(outcome => outcome.cases))];
+  !contract || !pendingOutcomes?.length ? [] : [...new Set(contract.outcomes.filter(outcome => pendingOutcomes.includes(outcome.id)).flatMap(outcome => outcome.cases))]
+    .filter(id => !contract.outcomes.some(outcome => !pendingOutcomes.includes(outcome.id) && outcome.cases.includes(id)));
 
 /**
  * Pure: the candidate a cut records, or why there is nothing to cut. A candidate starts after the

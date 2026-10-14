@@ -18,7 +18,7 @@ Both: `timeoutSeconds` (600). Case `secrets: ["NAME"]` from `~/.config/graphyard
 
 ## Release verdicts
 
-One retry: **passed**; **failed** (both); **flaky** (retry passed at same served SHA; `RUN:attempt-1`, `RUN:attempt-2` recorded); **unrun** (stopped by a failed required case; listed apart, uncounted; never in a managed repository); **pending** (required case whose outcome no done plan item serves yet, `rc/ID` `pendingOutcomes`: never blocks; blocks once served). Only failed or unaccepted flaky required cases block; optional ones marked on **Tests**.
+One retry: **passed**; **failed** (both); **flaky** (retry passed at same served SHA; `RUN:attempt-1`, `RUN:attempt-2`); **unrun** (stopped by a failed required case; listed apart; never in a managed repository); **pending** (required case whose outcome no done item serves, `rc/ID` `pendingOutcomes`: never blocks unless a delivered outcome shares it; blocks once served). Only failed or unaccepted flaky required cases block; optional ones marked on **Tests**.
 
 Flaky required cases block promotion until `evidence` decision (`{"case":ID,"runId":RUN,"sha":FULL_SHA}` on hold item, another agent approving) accepts; refused unless both attempts recorded at that SHA. `release promote` reads only that run's and SHA's applied decisions, and its workflow's `release promote ID` (`GRAPHYARD_URL`, `GRAPHYARD_TOKEN`) only passing UATs.
 
