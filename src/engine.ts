@@ -705,6 +705,18 @@ class ReconcileContended extends Error {}
 export interface ReconcileTick { at: string; candidates: number; evaluated: number; deferred: number; maxAttempts: number; ms: number; writes: number; lockWaitMs: number; full: ReconcileFull | null; lagMs: { p50: number; max: number } | null }
 /** How long the reconciliation loop may go between passes before the gap is recorded as a plane stall (GY-1791): the loop is driven every couple of seconds, so a minute is dozens of missed passes. */
 export const planeStallMs = 60_000;
+/**
+ * How long past a recorded stall's end a lease the stall kept may stand (GY-1801): the window a
+ * still-retrying supervisor needs to land the renewal the stall ate. A supervisor's renewals wait
+ * under its lease window and retry within a doubling backoff capped at ten seconds (`supervisor.ts`),
+ * so one that was mid-renewal when the plane stopped answering lands a fresh one well inside thirty
+ * seconds of its recovery — a full lease period keeps a lease nobody renews standing instead, and a
+ * pane closed under a lease only the stall keeps is exactly the live-lease close the soak's
+ * invariant forbids (GY-1801). The window therefore ends far inside the loop's own exited-pane
+ * sighting (`cycle-sessions.ts` sights a pane whose runtime left twice, `launchAppearanceMs` apart),
+ * and well past the retry the grace exists for.
+ */
+export const stallRenewalWindowMs = 30_000;
 /** One item whose fleet face moved (GY-1777): which face fields, or `new` for an item the view first read and `gone` for one deleted. */
 export interface FaceMove { id: string; key: string; fields: string[] }
 /**
@@ -1217,7 +1229,12 @@ export class Engine {
    * whose worker stopped renewing has no such record and expires as before. A gap in the plane's
    * own ticks (recordPlaneLiveness) that covers the expiry is the same server-side fault in the plane
    * itself (GY-1791): renewals could not land while no tick ran, so a supervisor still retrying
-   * finds the lease live and renews, where the base lapsed it and raised a lease loss.
+   * finds the lease live and renews, where the base lapsed it and raised a lease loss. That stall
+   * keeps the lease only for `stallRenewalWindowMs` past the stall — the window a still-retrying
+   * supervisor needs to land the renewal the stall ate — never a full lease period (GY-1801): a
+   * lease the stall alone keeps, with nobody renewing it, must lapse inside the loop's own
+   * exited-pane sighting window (launchAppearanceMs), so no step closes the attempt's pane while
+   * the stall alone holds the lease live.
    */
   private async renewalGrace(db: PoolClient, work: Work, now: Date) {
     const lease = work.lease as GracedLease | null;
@@ -1236,7 +1253,7 @@ export class Engine {
     const stall = stallCovering(await readPlaneStalls(db, expires - leaseMs, now.getTime()), expires);
     if (!stall) return false;
     lease.renewalFault = { at: stall.from, error: `the control plane was not answering between ${stall.from} and ${stall.to}` };
-    lease.expiresAt = new Date(Math.max(expires, Date.parse(stall.to) + leaseMs)).toISOString();
+    lease.expiresAt = new Date(Math.max(expires, Date.parse(stall.to) + stallRenewalWindowMs)).toISOString();
     return true;
   }
   private async executeCommand(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; ciRun?: CiRunObservation | null; attestation?: EvidenceAttestation } = {}) {

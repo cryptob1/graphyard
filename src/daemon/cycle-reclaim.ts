@@ -266,10 +266,14 @@ export { graphyardWorktree } from '../master-resources.js';
  * runtime has not yet started is never taken for one that exited; an agent pane once it has stood
  * so past `finishedSessionGraceMs`. It never touches an agentless pane outside a Graphyard worktree
  * (the operator's own shells, the coordinator checkout, review and producer checkouts, whose panes
- * the session-end steps close), a pane whose worktree's exact item and epoch holds a live lease, or
- * an agent pane whose item and epoch does. A pane inventory that cannot be read sweeps no agentless
- * pane. What the host holds is reported with it — the pane count, the agentless Graphyard panes and
- * the oldest — and attention is raised once agentless panes pass the bound.
+ * the session-end steps close), a pane whose worktree's exact item and epoch holds a live lease, a
+ * pane a live lease's own session record names (GY-1801: after a rekey the superseded record keeps
+ * the pane the claimed record runs in), an agent pane whose item and epoch does, or the worktree of
+ * an attempt whose end is not on the record yet (GY-1801: its lease is either live or still to be
+ * classed, and the attempt-ending steps close its pane with the end). A pane inventory that cannot
+ * be read sweeps no agentless pane. What the host holds is reported with it — the pane count, the
+ * agentless Graphyard panes and the oldest — and attention is raised once agentless panes pass the
+ * bound.
  */
 export async function reclaimLaunchedPanes(cycle: Cycle) {
   const { config, state, effects, now, clock, snapshot, performed, isolate, agents, open, closedPanes } = cycle;
@@ -286,6 +290,20 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
   for (const item of snapshot.work) for (const handle of item.sessions ?? []) if (handle.pane && handle.host === config.hostId) recorded.set(handle.pane, { item, handle });
   // Whether that exact item and attempt epoch holds a live lease.
   const leased = (key: string, epoch: number | null | undefined) => epoch != null && open.some(item => item.key === key && !!item.lease && item.lease.epoch === epoch && Date.parse(item.lease.expiresAt) > clock);
+  // Whether the pane is the one a live lease's own claimed session runs in (GY-1801), on this host:
+  // the record keyed `owner:epoch` of the lease's epoch. A rekey leaves the superseded record the
+  // same pane, so the claimed record's pane is what is held; an earlier round's finished handle, or
+  // one another host recorded, names a pane coordinate that may since belong to another launch.
+  const paneLeased = (pane: string | null | undefined) => !!pane && open.some(item => !!item.lease && Date.parse(item.lease.expiresAt) > clock
+    && (item.sessions ?? []).some(handle => handle.pane === pane && handle.host === config.hostId && handle.id === `${item.lease!.owner}:${item.lease!.epoch}`));
+  // Whether the worktree's exact item and epoch names an attempt that still stands (GY-1801): no end
+  // of it is on the record, so the lease it held is either live or still to be classed, and its pane
+  // is not the sweep's — whatever the lease in this cycle's snapshot reads.
+  const standingAttempt = (key: string, epoch: number) => {
+    const item = snapshot.work.find(candidate => candidate.key === key);
+    const attempts = item?.pipeline?.attempts;
+    return !!attempts?.some(entry => entry.epoch === epoch && entry.endedAt == null);
+  };
   // Whether a live lease is worked in the worktree `cwd` names (…/worktrees/GY-N-EPOCH).
   const workedHere = (cwd: string | undefined) => {
     const tree = graphyardWorktree(cwd);
@@ -297,8 +315,9 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
   const withAgent = new Set(agents.filter(agent => !!agent.agent && !!agent.pane_id).map(agent => agent.pane_id!));
   const agentless: { pane: string; name: string | undefined; key: string; item: Work | null; why: string; boundMs: number }[] = [];
   for (const agent of agents) {
-    // Never a pane whose worktree holds a live lease, nor one an earlier step of this cycle closed.
-    if (!agent.pane_id || !agent.agent || closedPanes.has(agent.pane_id) || workedHere(agent.cwd)) continue;
+    // Never a pane whose worktree holds a live lease, whose record a live lease names, nor one an
+    // earlier step of this cycle closed.
+    if (!agent.pane_id || !agent.agent || closedPanes.has(agent.pane_id) || workedHere(agent.cwd) || paneLeased(agent.pane_id)) continue;
     const hit = recorded.get(agent.pane_id), tree = graphyardWorktree(agent.cwd);
     // An agent in the pane is a live session unless the record says it is Graphyard's, ended, and
     // its item and epoch hold no live lease: an idle finished agent is closed after its grace.
@@ -313,7 +332,7 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
   // word and the agent list's. The agent list never carries one (GY-1533), so nothing here is
   // judged from it.
   for (const pane of panes ?? []) {
-    if (!pane.pane_id || pane.agent || withAgent.has(pane.pane_id) || closedPanes.has(pane.pane_id) || workedHere(pane.cwd)) continue;
+    if (!pane.pane_id || pane.agent || withAgent.has(pane.pane_id) || closedPanes.has(pane.pane_id) || workedHere(pane.cwd) || paneLeased(pane.pane_id)) continue;
     const hit = recorded.get(pane.pane_id), tree = graphyardWorktree(pane.cwd);
     // An agentless pane outside Graphyard's worktrees — the operator's own shells, the coordinator
     // checkout, a review or producer checkout — is never the sweep's, whatever its record says: the
@@ -321,15 +340,20 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
     if (!tree) continue;
     const name = hit?.handle.agentName ?? undefined;
     const ended = !!hit && hit.handle.state !== 'running', worktreeGone = tree.deleted;
-    if (hit && (ended || worktreeGone)) {
-      agentless.push({ pane: pane.pane_id, name, key: hit.item.key, item: hit.item, boundMs: launchAppearanceMs,
-        why: ended ? `holds no agent and its ${hit.handle.kind} session ${hit.handle.id} is ${hit.handle.state}` : `holds no agent and its worktree (${pane.cwd}) no longer exists` });
-    } else {
-      // A bare shell in a Graphyard worktree whose item and epoch hold no live lease: the launch
-      // that opened it is over, whether its handle stayed 'running' or it was never recorded.
-      const item = hit?.item ?? snapshot.work.find(candidate => candidate.key === tree.key) ?? null;
-      agentless.push({ pane: pane.pane_id, name, key: tree.key, item, boundMs: launchAppearanceMs,
-        why: `holds no agent in the worktree of ${tree.key} epoch ${tree.epoch}, which holds no live lease${hit ? `, though its ${hit.handle.kind} session ${hit.handle.id} is still recorded running` : ' and no Graphyard session recorded it'}` });
+    // A pane whose worktree's attempt still stands (GY-1801) is that attempt's own hold — the lease
+    // it held is either live or still to be classed, and the loop's attempt-ending steps close it
+    // with the end. What remains closes on its bound: a finished record's session, a pane whose
+    // worktree is gone, or a bare shell whose launch is over, whether its handle stayed 'running'
+    // or it was never recorded.
+    if (!standingAttempt(tree.key, tree.epoch)) {
+      if (hit && (ended || worktreeGone)) {
+        agentless.push({ pane: pane.pane_id, name, key: hit.item.key, item: hit.item, boundMs: launchAppearanceMs,
+          why: ended ? `holds no agent and its ${hit.handle.kind} session ${hit.handle.id} is ${hit.handle.state}` : `holds no agent and its worktree (${pane.cwd}) no longer exists` });
+      } else {
+        const item = hit?.item ?? snapshot.work.find(candidate => candidate.key === tree.key) ?? null;
+        agentless.push({ pane: pane.pane_id, name, key: tree.key, item, boundMs: launchAppearanceMs,
+          why: `holds no agent in the worktree of ${tree.key} epoch ${tree.epoch}, which holds no live lease${hit ? `, though its ${hit.handle.kind} session ${hit.handle.id} is still recorded running` : ' and no Graphyard session recorded it'}` });
+      }
     }
   }
   // A sighting whose pane is no longer a candidate — another step or the operator closed it, it

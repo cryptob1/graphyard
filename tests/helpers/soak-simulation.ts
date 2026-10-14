@@ -1995,7 +1995,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       // GY-1764: the scope soaks run the evidence gate on the loop's own read of the simulated base
       // branch, so every cycle with an open ask reads the tree once and judges the ask against it.
       repositoryFiles: async () => new Set(github.files),
-      decideScope: (work: Work, nonRepository?: readonly { path: string; nearMiss: string | null; why: 'install-local' | 'untracked' }[]) => api(principals.operatorAgent, 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, ...(nonRepository?.length ? { nonRepository } : {}) }),
+      decideScope: (work: Work, nonRepository?: readonly { path: string; nearMiss: string | null; why: 'install-local' | 'untracked' }[], treeRead?: boolean) => api(principals.operatorAgent, 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, ...(treeRead ? { treeRead } : {}), ...(nonRepository?.length ? { nonRepository } : {}) }),
       reviewFindings: async (work: Work) => {
         const named = findings.get(work.key);
         return named ? [{ ground: 'review thread 1', text: `Please also update ${[...named].join(', ')} in this round.` }] : [];

@@ -81,8 +81,16 @@ test('manual:fault-class-configuration — the real loop over a simulated day co
 });
 
 test('manual:fault-class-configuration — the real loop over a simulated day counts a split a stale held-CLI pin would hide: a pin whose lift failed covers nothing once the hold is gone, and the fleet restarted through it onto the old release is one configuration fault, once', { timeout: 600_000 }, async () => {
-  const stalePinAt = 5 * hour + 45 * minute;
-  const day = await simulateDay({ hours: 7, plan, releaseLag: { cutAgoMs: 30 * minute, fleet: { stalePinAt } } });
+  // GY-1801: the pointer goes stale through the only path the self-upgrade leaves it — the snapshot
+  // restart from the dirty checkout (GY-1773). The checkout is left dirty through a quiet stretch,
+  // a late commit moves the tip, and the last deploy lifts the hold: the flow restarts onto a held
+  // snapshot, the launcher is pinned to it, and the pin's lift is impossible for the rest of the
+  // day (stalePinAt arms the EACCES on it). The restart it served is done — pending is null — so
+  // the pin corroborates no owed restart and covers nothing: the split between the fleet, running
+  // the snapshot the pin names, and the checkout stands and is counted once.
+  const stalePinAt = 6 * hour + 20 * minute;
+  const stalePinPlan = { ...plan, deploys: [90 * minute, 3 * hour, 6 * hour, 6 * hour + 45 * minute], notice: 6 * hour + 15 * minute, dirtyCheckout: { from: 6 * hour + 14 * minute, to: 99 * hour } };
+  const day = await simulateDay({ hours: 7.25, plan: stalePinPlan, releaseLag: { cutAgoMs: 30 * minute, fleet: { stalePinAt } } });
   const fleet = day.fleetDay!;
   const stale = fleet.samples.find(sample => sample.elapsed >= stalePinAt && sample.pin !== null && sample.pending === null && sample.loaded === sample.pin && sample.loaded !== sample.coordinator);
   assert.ok(stale, 'the self-upgrade settled its restart while the pin outlived the hold and the fleet ran the pinned release');
