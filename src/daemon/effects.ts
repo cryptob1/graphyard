@@ -83,6 +83,8 @@ import { docsSyncEffects, type DocsSyncEffects } from '../docs-sync.js';
 import { diagnosticianEffects, diagnosticianRole, type DiagnosticianEffects } from './diagnosis.js';
 import { acceptanceEffects, type AcceptanceEffects } from './acceptance.js';
 import { plannerEffects, type PlannerEffects } from './planner.js';
+import type { CaseChangeJudgement } from './case-change-routing.js';
+import type { CaseChangeRequest } from '../model/goal-plan.js';
 import { diagnosticianSettings } from '../runner/payloads.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
 import type { FlowResult, RemedyFlow, RemedyRecord } from '../stall-remedies.js';
@@ -386,6 +388,9 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   unblock?: (work: Work, reason: string) => Promise<Work>;
   diagnostician?: DiagnosticianEffects; // GY-439; absent while `run.diagnostician.enabled` is false or either master identity is missing
   acceptance?: AcceptanceEffects; // the acceptance role (GY-1417); absent while either master identity is missing
+  /** GY-1805: every goal's case change still `requested`, and the independent approver's verdict on one, applied as the approver identity (case-change-approve or case-change-refuse); absent while either master identity is missing. */
+  caseChanges?: () => Promise<CaseChangeRequest[]>;
+  judgeCaseChange?: (change: CaseChangeRequest, judgement: CaseChangeJudgement) => Promise<unknown>;
   planner?: PlannerEffects; // the planner (GY-1418); absent while either master identity is missing — each acts only through the two identities a two-party decision needs
   /** The recurrence rule; the environment's (GRAPHYARD_FAULT_CLASS_*) or the shipped default when absent. */
   faultClassPolicy?: FaultClassPolicy;

@@ -68,6 +68,8 @@ import { docsSyncEffects, type DocsSyncEffects } from '../docs-sync.js';
 import { diagnosticianEffects, diagnosticianRole, type DiagnosticianEffects } from './diagnosis.js';
 import { acceptanceEffects, type AcceptanceEffects } from './acceptance.js';
 import { plannerEffects, type PlannerEffects } from './planner.js';
+import type { CaseChangeJudgement } from './case-change-routing.js';
+import { requestedCaseChanges, type CaseChangeRequest } from '../model/goal-plan.js';
 import { diagnosticianSettings } from '../runner/payloads.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
 import type { FlowResult, RemedyFlow, RemedyRecord } from '../stall-remedies.js';
@@ -413,6 +415,19 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // GY-1535: under a control-plane merger (read afresh before each draft) the draft is committed here and landed by the merge writer's reads, with no pull request.
     get acceptance() { const config = current(); return config.operatorAgent && config.approver ? acceptanceEffects(config, root, { run, fetcher, asCoordinator, asOperatorAgent, merger: recordedMerger,
       writer: mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger }) }) : undefined; },
+    // GY-1805: a goal's requested case changes are put to the approver role; its verdict is posted as the approver identity, whose separation the control plane checks.
+    get caseChanges() { const config = current(); return config.operatorAgent && config.approver ? async () => requestedCaseChanges((await asCoordinator('goals?open=1')).goals) : undefined; },
+    get judgeCaseChange() {
+      const config = current();
+      return config.operatorAgent && config.approver ? async (change: CaseChangeRequest, judgement: CaseChangeJudgement) => {
+        const response = await fetcher(`${config.url}/api/goals/${change.goal}/case-change-${judgement.verdict}`, { method: 'POST', headers: { Authorization: `Bearer ${await agentToken(root, config, 'approver')}`, 'Content-Type': 'application/json', 'Idempotency-Key': `case-change:${change.id}:judged` },
+          body: JSON.stringify({ change: change.id, reason: judgement.reason }), signal: AbortSignal.timeout(30_000) });
+        const text = await response.text();
+        let result: any; try { result = JSON.parse(text); } catch { result = response.ok ? undefined : { text: text.slice(0, 200) }; }
+        if (!response.ok) throw new RefusedResponse(`Graphyard refused case-change-${judgement.verdict} (${response.status}): ${result?.error ?? JSON.stringify(result)}`, response.status, result);
+        return result;
+      } : undefined;
+    },
     get planner() { const config = current(); return config.operatorAgent && config.approver ? plannerEffects(config, root, { fetcher, asCoordinator, asOperatorAgent }) : undefined; },
     // GY-1706: fault-class filing derives plannedFiles like master create; chores with their own plans are left alone.
     get fileFaultClass() {
