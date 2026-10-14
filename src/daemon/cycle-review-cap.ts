@@ -111,6 +111,11 @@ export function refusedCapAnswers<D extends { id: string; action: string; state:
  * the one requested after this change request answers it, and an earlier one is `judged`, cited by what follows. `judged` holds every other refused answer the change request follows — one requested and refused before it
  * was submitted, or one citing an earlier answer — newest last, uncited ones only, as a new request must cite them; with
  * no `answer`, any of them makes this change request the one after a second withdrawal, escalated and never withdrawn.
+ * GY-1813: uncited, that is, by a refusal the change request itself follows. A refusal requested after the review was
+ * submitted is this round's own answer, so what it cites covers nothing for the request that answers the round: a
+ * newer refused capped rework that cites the second refusal leaves that second one standing, and the escalation cites
+ * the first and second refusals — the post-review refusal never takes the second one's place. One whose time the
+ * record cannot place against the review keeps the older reading, as unknown is not after.
  * An answer requested before the head's first re-review posted reads the same as one a withdrawal followed (GitHub's
  * observation keeps one review per reviewer); it never hides a later answer to the first re-review, which still withdraws.
  */
@@ -127,7 +132,13 @@ export function refusedAnswerStanding<D extends Parameters<typeof refusedCapAnsw
   const judged = [...answers, ...asked].filter(entry => entry !== answer && (chained(entry)
     || Date.parse(entry.requestedAt!) <= submitted && Date.parse(entry.refusal?.at ?? entry.requestedAt!) < submitted));
   const standing = [...answers, ...asked];
-  return { answer, judged: judged.filter(entry => !standing.some(other => other.id !== entry.id && cites(other, entry))) };
+  // GY-1813: a refusal requested after the change request was submitted is this round's own answer, not one the
+  // change request follows, so what it cites covers nothing for the request that answers the refusals standing when
+  // the review landed: a newer refused capped rework citing the second refusal leaves the second one standing, and
+  // the escalation cites it beside the first — the post-review refusal never takes the second one's place. One whose
+  // time the record cannot place against the review keeps the older reading, as unknown is not after.
+  const follows = (other: D) => !Number.isFinite(submitted) || Date.parse(other.requestedAt ?? '') <= submitted;
+  return { answer, judged: judged.filter(entry => !standing.some(other => other.id !== entry.id && follows(other) && cites(other, entry))) };
 }
 /** The cursor key of the re-review an approver's refusal of a capped rework asks for (GY-1575): one per head. */
 export const cappedRereviewKey = (work: Pick<Work, 'id'>, sha: string) => `review-cap:rereview:${work.id}:${sha}`;
