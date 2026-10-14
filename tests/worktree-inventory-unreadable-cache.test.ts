@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { readWorktreeInventoryCache, statusWorktreeInventory, worktreesDirectory, writeWorktreeInventoryCache } from '../src/master.js';
+import { freeBytes, readWorktreeInventoryCache, statusWorktreeInventory, worktreesDirectory, writeWorktreeInventoryCache } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1793: the inventory cache the loop's reclaim step keeps answered `master status` whatever the
@@ -59,4 +59,36 @@ test('unit:worktree-inventory-readable-cache-unchanged — a readable directory 
   assert.deepEqual(status.entries, cache.entries);
   assert.deepEqual(status.held, held);
   assert.equal(status.unreadable, undefined);
+});
+
+test('unit:master-status-unreadable-disk-unanswered — master status never answers a low disk reading from a drained pass when the worktrees directory is unreadable under a standing cache', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const { masterConfigSchema } = await import('../src/master.js');
+  const { emptyDaemonState, writeDaemonState } = await import('../src/master-daemon.js');
+  const { masterStatusReport } = await import('../src/cli/master-status.js');
+  const root = await temporaryDirectory('unreadable-status'), secrets = await temporaryDirectory('unreadable-status-secrets');
+  execFileSync('git', ['init', '-q', root]);
+  const credential = join(secrets, 'coordinator.token');
+  await writeFile(credential, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+  // A threshold half again the volume's free space, so the reading is low yet above the exhaustion floor; the loop's latest pass drained, now.
+  const thresholdGb = Math.max(0.1, ((await freeBytes(root)) ?? 1e9) * 1.5 / 1e9);
+  const master = masterConfigSchema.parse({ version: 1, url: 'http://127.0.0.1:9', credentialFile: credential, cliPath: '/bin/true', repository: 'owner/project', baseBranch: 'main',
+    githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [], run: { worktreeRoot: join(secrets, 'checkouts'), diskThresholdGb: thresholdGb } });
+  const state = emptyDaemonState(master);
+  state.reclaim = { at: new Date().toISOString(), scanned: 0, trees: 0, treeBacklog: 0, removed: 0, kept: 0, freedBytes: 0, freeBytes: 1, errors: [], checkouts: 0, checkoutsOffVolume: 0, rootFreeBytes: null };
+  await writeDaemonState(master, state);
+  const status = async (path: string) => path.startsWith('work-snapshot') ? { work: [], now: new Date().toISOString() } : path === 'status' ? { actor: { id: 'coordinator-1', role: 'coordinator' } } : path === 'actions' ? { executors: undefined } : {};
+  const read = () => masterStatusReport(root, master, status as never, { actor: { id: 'coordinator-1' } }, { commit: null }, { reportReadBoundMs: 300 });
+  // A readable, empty directory under its drained cache: the reading is answered.
+  await mkdir(worktreesDirectory(root), { recursive: true });
+  await writeWorktreeInventoryCache(root, { at: new Date().toISOString(), entries: [], held: [] });
+  const readable = await read();
+  assert.equal(readable.disk.low, true);
+  assert.equal(readable.disk.answered, true, 'a drained pass over a readable inventory answers a low reading');
+  // The directory turns unreadable under the standing cache: nothing is known, so nothing is answered.
+  await turnUnreadable(worktreesDirectory(root));
+  const unreadable = await read();
+  assert.equal(unreadable.disk.answered, false, 'an unreadable directory is not a drained plan');
+  assert.equal(unreadable.disk.drained, false);
+  assert.ok((unreadable as unknown as { attentionItems: { subject: string }[] }).attentionItems.some(item => item.subject === 'disk'), 'the low reading raises its attention');
 });
