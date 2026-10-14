@@ -316,6 +316,7 @@
     "tests/candidate-cut.test.ts": 700,
     "tests/candidate-markup.test.ts": 269,
     "tests/capacity-failover.test.ts": 11716,
+    "tests/capture-authenticator-button.test.ts": 1000,
     "tests/card-timing.test.ts": 2525,
     "tests/ci-failure-rework.test.ts": 772,
     "tests/ci-proofs-trust.test.ts": 2691,
