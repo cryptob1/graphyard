@@ -69,6 +69,7 @@ import { revertRecordKey } from '../release-revert.js';
 import { readMergeWriter } from '../master/dispatch.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
+import type { SlowLoopItemInput } from './slow-loop-item.js';
 import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, recoverMovedHead, type SelfUpgradeDeps, type SelfUpgradeOutcome } from './upgrade.js';
 import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
@@ -112,6 +113,12 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   requestProof: (work: Work) => void | Promise<void>;
   /** The throughput owner as the control plane holds it now, read before its needs-decision is keyed by its requirements revision (GY-1609). */
   readThroughputOwner?: (owner: Work) => Promise<Work>;
+  /**
+   * Files the fix item for a slow loop run (GY-1775) as the operator-agent under the release-and-step
+   * idempotency key, so a retry after a lost reply returns the item already filed. Absent without
+   * that identity: nothing is filed, as the throughput owner does.
+   */
+  fileSlowLoopItem?: (input: SlowLoopItemInput, key: string) => Promise<Work | null>;
   /** Asks the control plane to decide the item's open scope request and returns the decided document. */
   decideScope?: (work: Work, nonRepository?: readonly { path: string; nearMiss: string | null; why: 'install-local' | 'untracked' }[], treeRead?: boolean) => Promise<Work>; repositoryFiles?: () => Promise<ReadonlySet<string>>;
   wakeObservation?: (work: Work) => Promise<unknown>; // GY-710: a prioritized `resync` now (GY-1266) that waits on no tick (GY-1286), for a step refused on a stale observation
@@ -709,6 +716,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     },
     ...throughputEffects(root, current, run, asCoordinator, asOperatorAgent), ...flakeLedgerEffects(root),
     readThroughputOwner: async owner => await asCoordinator(`work/${encodeURIComponent(owner.id)}`) as Work,
+    // GY-1775: the slow-loop fix item, filed as the operator-agent (read on each call, as a reload may provision it) under the release-and-step key.
+    get fileSlowLoopItem() { return current().operatorAgent ? (input: SlowLoopItemInput, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
       .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),

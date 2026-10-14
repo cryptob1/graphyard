@@ -389,6 +389,17 @@ export type DoctorPendingFile = z.infer<typeof doctorPendingFileSchema>;
  */
 export const loopReleaseSchema = z.object({ commit: z.string().regex(/^[0-9a-f]{40}$/).nullable(), dirty: z.boolean().nullable() }).strict();
 export type LoopRelease = z.infer<typeof loopReleaseSchema>;
+/**
+ * The slow-loop run (GY-1775): consecutive completed cycles past the cycle bound on the release the
+ * loop loaded, and the fix item filed per release and slowest step (keyed `RELEASE:STEP`), so a later
+ * slow cycle files nothing new and the slow-cycle attention names the item. A new release starts it again.
+ */
+export const slowLoopStateSchema = z.object({
+  release: z.string().max(40).nullable().default(null),
+  consecutive: z.number().int().min(0).default(0),
+  filed: z.record(z.string().max(160), z.object({ key: z.string().max(40), step: z.string().max(80), file: z.string().max(200).nullable(), cycle: z.number().int().min(0), at: z.string().max(40) }).strict()).default({}),
+}).strict();
+export type SlowLoopState = z.infer<typeof slowLoopStateSchema>;
 
 /** The causes an owed self-upgrade restart stalls on (GY-1445); `release-lagged` (GY-1585) is a held restart, not a fault. */
 export const upgradeStallCauses = ['executors-refused', 'executors-unavailable', 'supervisor-unreachable', 'checkout-dirty', 'checkout-not-detached', 'fetch-failed', 'checkout-failed', 'release-lagged'] as const;
@@ -487,6 +498,8 @@ export const daemonStateSchema = z.object({
   mergeWriter: z.lazy(() => mergeWriterStateSchema).default(() => emptyMergeWriterState()), // GY-1524: the control-plane merge executor's queue, flight, last delivery and refusals
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),
+  /** The slow-loop run on that release and the fix item it filed (GY-1775). */
+  slowLoop: slowLoopStateSchema.default(() => ({ release: null, consecutive: 0, filed: {} })),
   upgrade: upgradeStateSchema, // the between-cycles self-upgrade's progress (GY-437)
   /** The last reload of .graphyard/master.json: what the running loop adopted, or why it refused. */
   config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),

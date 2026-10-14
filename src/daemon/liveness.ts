@@ -1,11 +1,12 @@
 // Concern: loop liveness — cycle cost, cycle-failure backoff, loop attention and the watchdog.
 import { type AttentionItem, agentOwner } from '../master.js';
 import { classified, noteFault } from '../model/fault-classes.js';
-import { boundDaemonState, type CycleFailures, type CycleMetrics, type CycleStepName, type CycleSteps, type DaemonState, initialPidNamespace, liveProcess, message, pidNamespace, type StepCost } from './state.js';
+import { boundDaemonState, type CycleFailures, type CycleMetrics, type CycleStepName, type CycleSteps, type DaemonState, initialPidNamespace, liveProcess, type LoopRelease, message, pidNamespace, type SlowLoopState, type StepCost } from './state.js';
 import { approverWait, type LatencyBudget, type SilenceReport } from './metrics.js';
 import type { DaemonEffects } from './effects.js';
 import { slowestSteps } from '../master/timings.js';
 import { planeUnavailable, planeUnavailableText } from '../model/refusal.js';
+import { slowLoopItemFor } from './slow-loop-item.js';
 
 // ---- The loop's own liveness ---------------------------------------------------------------
 export type LoopState = 'running' | 'slow' | 'stalled' | 'absent';
@@ -301,12 +302,14 @@ export function loopAttention(report: { liveness: LoopLiveness; silence?: Silenc
  * included. This liveness attention names the cycle's wall time and its three slowest steps, so a
  * burst of launches or a slow provider holding the delivery steps back is seen, not read as work.
  */
-export function slowCycleAttention(report: { liveness: Pick<LoopLiveness, 'state'>; cost?: CycleCost | null; cycleTime?: ReturnType<typeof cycleTimes> | null }): AttentionItem[] {
+export function slowCycleAttention(report: { liveness: Pick<LoopLiveness, 'state'>; cost?: CycleCost | null; cycleTime?: ReturnType<typeof cycleTimes> | null; release?: Pick<LoopRelease, 'commit'> | null; slowLoop?: SlowLoopState | null }): AttentionItem[] {
   const cost = report.cost;
   if (!cost || cost.durationMs <= slowCycleMs || report.liveness.state === 'absent') return [];
   const usual = report.cycleTime?.p50Ms != null ? ` (p50 ${seconds(report.cycleTime.p50Ms)}, p95 ${seconds(report.cycleTime.p95Ms ?? report.cycleTime.p50Ms)} over the last ${Math.round(report.cycleTime.windowMs / 60_000)} minutes)` : '';
-  return [{ subject: 'loop', text: `Cycle ${cost.cycle} took ${seconds(cost.durationMs)}, past the ${seconds(slowCycleMs)} cycle bound${usual}, and every merge, decision and close in it waited that long; slowest steps: ${cost.slowestSteps.map(step => `${step.step} ${seconds(step.ms)}`).join(', ') || 'none recorded'}`,
-    ...agentOwner('master', `graphyard master status shows the cycle's timings under daemon.metrics.timings and the loop's cycle time under daemon.cycleTime; shorten the ${cost.slowestSteps[0]?.step ?? 'slowest'} step rather than restarting a loop that is still cycling`), ...classified('loop-liveness') }];
+  // GY-1775: once three such cycles on this release filed the fix item, the row names it, so the work is owned rather than re-read.
+  const filed = slowLoopItemFor(report.slowLoop, report.release?.commit, cost.slowestSteps[0]?.step);
+  return [{ subject: 'loop', text: `Cycle ${cost.cycle} took ${seconds(cost.durationMs)}, past the ${seconds(slowCycleMs)} cycle bound${usual}, and every merge, decision and close in it waited that long; slowest steps: ${cost.slowestSteps.map(step => `${step.step} ${seconds(step.ms)}`).join(', ') || 'none recorded'}${filed ? `; the loop filed ${filed} for this slow run` : ''}`,
+    ...agentOwner('master', `graphyard master status shows the cycle's timings under daemon.metrics.timings and the loop's cycle time under daemon.cycleTime; ${filed ? `${filed} owns shortening the ${cost.slowestSteps[0]?.step ?? 'slowest'} step` : `shorten the ${cost.slowestSteps[0]?.step ?? 'slowest'} step`} rather than restarting a loop that is still cycling`), ...classified('loop-liveness') }];
 }
 
 /**
