@@ -186,8 +186,8 @@ interface CarriedRow { kind: DaemonActionKind; work: string | null; principal?: 
  */
 export async function recordCarried(cycle: CarriedCycle, key: string, row: CarriedRow, error: unknown, what: string) {
   const { state, now, performed, effects } = cycle, previous = state.actions[key];
-  // A `started` row already counted this attempt, and a join takes that count off again; a row of any other state counts it here, unless nothing was sent.
-  const attempts = previous?.state === 'started' ? Math.max(1, previous.attempts - (carriedCallSent(error) ? 0 : 1)) : !previous ? 1 : carriedCallSent(error) ? previous.attempts + 1 : previous.attempts;
+  // A `started` row already counted this attempt, and a call never sent (a join, or a spent budget) takes that count off again; a row of any other state counts it here, unless nothing was sent.
+  const attempts = previous?.state === 'started' ? Math.max(0, previous.attempts - (carriedCallSent(error) ? 0 : 1)) : !previous ? (carriedCallSent(error) ? 1 : 0) : carriedCallSent(error) ? previous.attempts + 1 : previous.attempts;
   performed.push(await record(state, key, { kind: row.kind, work: row.work, principal: row.principal ?? null, epoch: row.epoch ?? null, state: 'waiting', detail: `${what} was carried to the next cycle: ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist, null));
 }
 /** Retire a carried row once its call answered: the row is done, with the carried attempts it counted, so nothing stays carried past the answer. */

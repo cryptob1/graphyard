@@ -124,6 +124,10 @@ test('unit:step-calls-applied-once — a retried call joins the one in flight un
   const none = sb.boundedCalls(effects([], { closeSession: spent.call as DaemonEffects['closeSession'] }), {}, () => clock, () => 0, { step: 'sessions', calls: ['closeSession'] });
   await assert.rejects(none.closeSession('pane-4') as Promise<void>, error => sb.stepCallCarried(error) && /the sessions step's budget passed before pane pane-4's closeSession call was made \(30 ms per call, 0 ms left\); the call stays owed and is retried next cycle/.test((error as Error).message) && !sb.carriedCallSent(error));
   assert.equal(spent.calls.length, 0, 'nothing ran behind the step');
+  // An unsent call is no attempt: a first call refused by a spent budget records a carried row counting none.
+  const unsent = { actions: {} as Record<string, DaemonAction>, cycle: 1 } as unknown as DaemonState;
+  await sb.recordCarried({ state: unsent, now: () => clock, performed: [], effects: effects([], {}) } as unknown as Parameters<Helper['recordCarried']>[0], 'k', { kind: 'session', work: 'GY-1' }, new sb.StepCallCarriedError('spent', false), 'x');
+  assert.equal(unsent.actions.k.attempts, 0, 'a call never sent counts no attempt');
   // A call still in flight is joined even on a spent budget, with no new send.
   const inFlight = sb.boundedCalls(effects([], { closeSession: spent.call as DaemonEffects['closeSession'] }), kept, () => clock, () => 10_000, { step: 'sessions', calls: ['closeSession'] });
   await assert.rejects(inFlight.closeSession('pane-5') as Promise<void>, error => sb.carriedCallSent(error));
