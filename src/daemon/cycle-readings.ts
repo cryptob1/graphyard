@@ -1,6 +1,6 @@
 // Concern: step 7c — the loop's own due readings of loop-owned observation items on the serving release (GY-1779): taken, recorded as trusted evidence, closed on a pass, escalated on a fail.
 import { followUpRequest, patternOfProof, type PatternProjection, type PatternReader } from '../model/observation-window.js';
-import { loopObservation, loopObservationProofs, postDeployProofs, type Work } from '../model.js';
+import { loopObservation, loopObservationProofs, postDeployProofPrefix, postDeployProofs, type Work } from '../model.js';
 import { loopReadingOn, observationPass } from '../model/loop-observation.js';
 // Types only: master-verification.ts imports the daemon, so the filer itself arrives through the effects.
 import type { PostDeployFiler } from '../master-verification.js';
@@ -64,6 +64,8 @@ async function projections(parent: Pick<Work, 'criteria'>, patterns?: PatternRea
   return { filer, reader };
 }
 
+/** The item proof a follow-up is filed with for a parent's post-deploy proof (master-verification's filer). */
+const followUpItemProof = (parentProof: string) => `manual:${parentProof.slice(postDeployProofPrefix.length).replace(/\//g, '-')}-on-serving-release`;
 type Taken = { proof: string; reading: PostDeployReading };
 /** What one single-flight read of an item answers: the release it was read on, so an answer for a release the plane no longer serves is discarded, and the readings or the failure. */
 type Read = { release: string } & ({ readings: Taken[] } | { error: unknown });
@@ -163,6 +165,8 @@ export async function readingsStep(cycle: Cycle, served: DaemonState['deployment
       const checks = effects.postDeployFiler ? await effects.postDeployFiler({ work: parent, release, now: new Date(now()).toISOString(), projections: read.filer, ...servedAt }) : [];
       for (const proof of proofs) {
         if (loopReadingOn(item, proof, release)?.result === 'pass') { readings.push({ proof, reading: { result: 'pass', detail: 'already recorded' } }); continue; }
+        // A follow-up's request names one parent proof, and only the item proof filed for it reads through it: any other proof of the item is a different check, never read as the first.
+        if (request && proof !== followUpItemProof(request.proof)) { readings.push({ proof, reading: { unavailable: `${proof} is not the proof this follow-up's request names (${request.proof}), so no parent check stands for it` } }); continue; }
         const parentProof = request ? request.proof : proof, criterion = parent.criteria.find(entry => entry.proofs.includes(parentProof)) ?? null;
         // The parent's own check first: the filer verify-deployment uses reads whether the parent already carries a trusted passing observation of the proof on this release.
         const check = checks.find(entry => entry.proof === parentProof);

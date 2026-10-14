@@ -130,6 +130,17 @@ test('integration:loop-records-due-observation-reading — the deployment-verifi
   assert.equal(run.closed.length, 3);
 });
 
+test('integration:loop-records-due-observation-reading — a follow-up owing a second proof reads only the proof its request names through the parent; the other is never read as the first', async () => {
+  const second = 'manual:other-check-on-serving-release', multi = followUp(1735, { criteria: [followUp(1735).criteria[0], { id: 'AC-2', text: 'a second check', proofs: [second] }] });
+  const asked: string[] = [];
+  // The parent's filer would read the request's proof observed: the second proof must not borrow that.
+  const reader: DaemonEffects['readPostDeploy'] = async input => { asked.push(input.proof); return { result: 'pass', detail: 'read' }; };
+  const run = await cycleOver([parent, multi], await temporaryDirectory('loop-readings-multi'), reader);
+  assert.deepEqual(asked, [proof], 'only the request\'s own proof is read through the parent proof');
+  assert.deepEqual(run.recorded, [], 'a reading waits for every proof: nothing is recorded while the second cannot be taken');
+  assert.match(run.state.actions[`reading:${multi.id}`]!.detail, /manual:other-check-on-serving-release is not the proof this follow-up's request names/);
+});
+
 test('integration:loop-records-due-observation-reading — the serving release not yet observed carrying the parent\'s merge, or unobserved this cycle, records why and takes no reading', async () => {
   const item = followUp(1731), directory = await temporaryDirectory('loop-readings-unserved');
   const other = { ...parent, id: '33333333-3333-4333-8333-333333333333', key: 'GY-1733' } as Work;
