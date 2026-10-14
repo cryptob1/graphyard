@@ -222,4 +222,18 @@ test('unit:no-phantom-review-relaunch-row — GY-1810 AC-2: master status shows 
   // A withdrawal still owed or retried answers it: the loop is on its way to the re-review.
   const withdrawing = statusOf(item, { actions: { [`review-cap:${item.id}:${H}:5468008197`]: { state: 'failed', detail: 'withdrawing it failed once' } } });
   assert.equal(withdrawing.work[0]!.attention, row(item).attention, 'a pending withdrawal keeps the loop\u2019s row');
+
+  // A withdrawal that failed its last permitted attempt is escalated, not retried: the stalled step is named.
+  const exhausted = statusOf(item, { actions: { [`review-cap:${item.id}:${H}:5468008197`]: { state: 'failed', detail: 'withdrawing it failed 5 times', attempts: 5 } } });
+  assert.match(exhausted.work[0]!.attention!, /review-cap step is stalled/, 'an exhausted withdrawal is not pending');
+  const retrying = statusOf(item, { actions: { [`review-cap:${item.id}:${H}:5468008197`]: { state: 'failed', detail: 'withdrawing it failed 4 times', attempts: 4 } } });
+  assert.equal(retrying.work[0]!.attention, row(item).attention, 'a retryable failure keeps the loop\u2019s row');
+
+  // A binding agent-review changes-requested verdict (no GitHub review) holds the head the same way.
+  const agentHeld = capped(rereviewBody, 5468008197, '2026-10-14T17:39:00Z');
+  agentHeld.observation!.reviews = [];
+  agentHeld.policy = { ...agentHeld.policy, reviewProvider: 'agent' };
+  agentHeld.reviewRequest = { sha: H, baseSha: B, policyRevision: agentHeld.policyRevision, createdAt: '2026-10-14T18:00:00Z', commentId: 99 } as Work['reviewRequest'];
+  agentHeld.observation!.agentReview = { provider: 'agent', sha: H, approved: false, reason: 'changes', requestId: 99, verdict: 'changes-requested' };
+  assert.match(statusOf(agentHeld).work[0]!.attention!, /review-cap step is stalled/, 'a binding agent verdict holds the head');
 });

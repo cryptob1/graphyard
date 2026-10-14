@@ -1,5 +1,5 @@
 // Concern: the review-round cap step (GY-1118) — a change request past the cap is withdrawn, or escalated; nothing is filed (GY-1249).
-import { cappedReview, cappedReworkBinding, cappedRevisionMark, detailChanged, type CappedReview } from './decisions.js';
+import { cappedReview, cappedReworkBinding, cappedRevisionMark, detailChanged, standingVerdict, type CappedReview } from './decisions.js';
 import { decisionKey } from './reconcile.js';
 import { decisionBindingMax, decisionSituation, uncitedRefusals, type DecisionSituation } from '../model/approval.js';
 import { defaultReviewRoundCap, pastReviewCap, reviewRound, reviewRoundCapOf } from '../review-cap.js';
@@ -393,17 +393,18 @@ async function reviewCapStepWithin(cycle: Cycle) {
 
 /** The loop's cursor as `master status` reads it for the review-cap hold: its action rows and its standing decision watches. */
 export interface ReviewCapCursor {
-  actions?: Record<string, { state: string; detail: string }>;
+  actions?: Record<string, { state: string; detail: string; attempts?: number }>;
   approvals?: Record<string, { work: string; action: string; decision: string; settledAt: string | null; agentName: string | null }>;
 }
 
-/** Whether the review-cap step holds `item`'s head with nothing that would itself relaunch a review in motion (GY-1810 AC-2): the item is system-driven, past its cap with a change request standing on its head, and it has no review request open for the head, no request-review action queued, and no withdrawal still owed or retried. */
+/** Whether the review-cap step holds `item`'s head with nothing that would itself relaunch a review in motion (GY-1810 AC-2): the item is system-driven, past its cap with a change request standing on its head, and it has no review request open for the head, no request-review action queued, and no withdrawal still owed or retried (a withdrawal that failed `maxCappedFilingAttempts` times is escalated, not retried). */
 const reviewCapHoldsHead = (item: Work, all: readonly Work[], cursor: ReviewCapCursor | null | undefined, cap: number, now: number): boolean =>
   item.systemDriven === true && !!item.candidate && !!item.observation && pastReviewCap(item, cap)
-  && item.observation.reviews.some(review => review.sha === item.candidate!.sha && review.state === 'CHANGES_REQUESTED')
-  && !(item.reviewRequest && item.reviewRequest.sha === item.candidate.sha) && item.autoDispatch?.review?.state !== 'requested'
+  && !!standingVerdict(item)
+  // A binding agent verdict answers the request it was recorded for, so that request is no review in motion.
+  && (!(item.reviewRequest && item.reviewRequest.sha === item.candidate.sha) || !item.observation.reviews.some(review => review.sha === item.candidate!.sha && review.state === 'CHANGES_REQUESTED')) && item.autoDispatch?.review?.state !== 'requested'
   && nextAction(item, [...all], new Date(now))?.kind !== 'request-review'
-  && !Object.entries(cursor?.actions ?? {}).some(([key, action]) => key.startsWith(`review-cap:${item.id}:`) && action.state !== 'done');
+  && !Object.entries(cursor?.actions ?? {}).some(([key, action]) => key.startsWith(`review-cap:${item.id}:`) && action.state !== 'done' && !(action.state === 'failed' && (action.attempts ?? 0) >= maxCappedFilingAttempts));
 
 /** Why the step holds the head when it has escalated nothing: the round's rework decision before its approver, or the bare hold. */
 const reviewCapHold = (item: Work, cursor: ReviewCapCursor | null | undefined): string => {
