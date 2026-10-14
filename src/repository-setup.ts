@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { chmod, lstat, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { execFileSync, spawn } from 'node:child_process';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -713,7 +713,7 @@ export async function writeExecutorDeclaration(root: string, declaration: Execut
  * script it starts. Nothing else in the unit is host-specific, so an operator who edited the
  * template by hand gets the same result as the installer.
  */
-export function renderExecutorUnit(template: string, binding: { root: string; node: string; script?: string }) {
+export function renderExecutorUnit(template: string, binding: { root: string; node: string; script?: string; checkoutRoot?: string }) {
   const escape = (value: string) => value.replaceAll('%', '%%');
   const lines = template.split('\n');
   const working = lines.findIndex(line => line.startsWith('WorkingDirectory=')), start = lines.findIndex(line => line.startsWith('ExecStart='));
@@ -723,8 +723,36 @@ export function renderExecutorUnit(template: string, binding: { root: string; no
     ? resolve(binding.root, 'scripts/graphyard-executor.mjs')
     : fileURLToPath(new URL('../scripts/graphyard-executor.mjs', import.meta.url));
   const script = binding.script ?? defaultScript;
-  lines[start] = `ExecStart=${escape(binding.node)} ${escape(script)} --slot %i`;
+  // GY-1790: an entry bound from the held snapshot is handed the checkout it serves, so the pin and
+  // the commit re-read in front of every claim are the checkout's, read from there.
+  if (binding.checkoutRoot) lines.splice(start, 0, `Environment="GRAPHYARD_CHECKOUT_ROOT=${escape(binding.checkoutRoot)}"`);
+  lines[start + (binding.checkoutRoot ? 1 : 0)] = `ExecStart=${escape(binding.node)} ${escape(script)} --slot %i`;
   return lines.join('\n');
+}
+
+/**
+ * The entry a slot's unit starts while the CLI pin stands (GY-1790): the held snapshot's own
+ * scripts/graphyard-executor.mjs, so an entry the checkout holds dirty is never what boots a slot;
+ * null restores the checkout's. The install's template unit is re-rendered exactly as the
+ * installer renders it, and nothing is restarted — a slot's next start picks the entry up. A unit
+ * that is not installed is reported, not written.
+ */
+export async function alignExecutorUnitScript(root: string, script: string | null, options: { run?: SystemctlRunner; unitDirectory?: string } = {}): Promise<{ wrote: 'updated' | 'unchanged' | 'none'; reason: string | null }> {
+  const primary = connectionRoots(root)[0];
+  const unitDirectory = options.unitDirectory ?? executorUnitDirectory();
+  const units = await executorInstallUnits(primary, unitDirectory);
+  const unitFile = resolve(unitDirectory, units.executorTemplate);
+  let current: string;
+  try { current = await readFile(unitFile, 'utf8'); }
+  catch (error: any) {
+    if (error.code === 'ENOENT') return { wrote: 'none', reason: `${unitFile} is not installed; node scripts/graphyard-executor.mjs --install installs it` };
+    throw error;
+  }
+  const rendered = renderExecutorUnit(current, { root: primary, node: process.execPath, ...(script ? { script, checkoutRoot: primary } : {}) });
+  if (current === rendered) return { wrote: 'unchanged', reason: null };
+  await atomicWrite(unitFile, rendered, 0o644);
+  (options.run ?? systemctl)(['daemon-reload']);
+  return { wrote: 'updated', reason: null };
 }
 
 export type SystemctlRunner = (args: string[]) => string;
@@ -775,7 +803,7 @@ export function executorMergeKinds(kinds: NextActionKind[] | null, loop: { name:
  * and unit are left alone, and `enable --now` on a running instance is a no-op. Without a user
  * manager the declaration is still written, and the result names the unit to install by hand.
  */
-export async function installExecutorSupervision(root: string, options: { count?: number; kinds?: NextActionKind[] | null; intervalSeconds?: number; run?: SystemctlRunner; unitDirectory?: string; template?: string; node?: string; loop?: { name: string } | null } = {}): Promise<ExecutorSupervision> {
+export async function installExecutorSupervision(root: string, options: { count?: number; kinds?: NextActionKind[] | null; intervalSeconds?: number; run?: SystemctlRunner; unitDirectory?: string; template?: string; node?: string; loop?: { name: string } | null; heldScript?: string | null } = {}): Promise<ExecutorSupervision> {
   const primary = connectionRoots(root)[0];
   const existing = await readExecutorDeclaration(primary);
   // Exactly one component merges (GY-245): where the master loop merges, the executors are
@@ -799,7 +827,12 @@ export async function installExecutorSupervision(root: string, options: { count?
   const unitFile = resolve(unitDirectory, units.executorTemplate);
   // A template another checkout runs is that install's, and is never rewritten or restarted from here (GY-1441).
   assertUnitOwned(unitFile, primary);
-  const rendered = renderExecutorUnit(template, { root: primary, node: options.node ?? process.execPath });
+  // GY-1790: while the CLI pin stands a slot starts the launcher held in the snapshot, never an
+  // entry the checkout may hold dirty; a reinstall keeps that binding until the pin lifts. The
+  // caller that knows the pin hands the script in (`heldScript`), so this module stays out of the
+  // daemon's module graph.
+  const held = options.heldScript ? { script: options.heldScript, checkoutRoot: primary } : {};
+  const rendered = renderExecutorUnit(template, { root: primary, node: options.node ?? process.execPath, ...held });
   let current: string | null = null;
   try { current = await readFile(unitFile, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   if (current !== rendered) { await mkdir(dirname(unitFile), { recursive: true }); await atomicWrite(unitFile, rendered, 0o644); }

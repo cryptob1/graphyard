@@ -3,8 +3,8 @@ import type { ChildRun } from '../child-runner.js';
 
 /** How the coordinator checkout stands: its commit, whether HEAD is detached, and whether tracked files differ from the commit (`dirtyPaths` names them: both paths of a rename). */
 export interface CheckoutState { commit: string | null; detached: boolean | null; dirty: boolean | null; dirtyPaths: string[]; branch: string | null }
-/** A porcelain path unquoted: git quotes one holding spaces at either end, control characters, a quote or a backslash. */
-const unquotePath = (path: string) => {
+/** A porcelain path unquoted: git quotes one holding spaces at either end, control characters, a quote or a backslash. Shared with the alignment's `--name-only` listings, so both readings resolve the same names (GY-1790). */
+export const unquotePath = (path: string) => {
   if (!path.startsWith('"') || !path.endsWith('"') || path.length < 2) return path;
   const escapes: Record<string, number> = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11, '"': 34, '\\': 92 };
   const bytes: number[] = [];

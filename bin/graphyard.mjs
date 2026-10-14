@@ -1,8 +1,16 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';import { existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { heldRelease } from './held-release-hooks.mjs';
 const args = process.argv.slice(2);
+// GY-1790: the supervisor units start this launcher from the held snapshot a restart went onto and
+// hand it the checkout it serves in the environment, so launcher files the checkout holds dirty are
+// never the code that boots a process. The checkout root is the handed one there, and this file's
+// own directory's parent otherwise; the code that runs stays what this file's directory holds.
+const checkout = process.env.GRAPHYARD_CHECKOUT_ROOT?.trim()
+  ? pathToFileURL(`${process.env.GRAPHYARD_CHECKOUT_ROOT.trim().replace(/\/+$/, '')}/`)
+  : new URL('../', import.meta.url);
 // GY-1585: while the self-upgrade holds a restart for the release production serves, it names a
 // snapshot of that release in .graphyard/held-cli.json, and every command runs the snapshot's code
 // through bin/held-release-hooks.mjs, so the CLI processes the loop and the executors spawn speak
@@ -11,7 +19,7 @@ const args = process.argv.slice(2);
 // a release from before the hold would refuse that cursor, or restart onto the checkout, so such a
 // loop runs the checkout's code, which holds. The deliberate restart comes after the pin is removed.
 const held = () => {
-  const pin = heldRelease(new URL('../', import.meta.url));
+  const pin = heldRelease(checkout);
   if (!pin || (args[0] === 'master' && args[1] === 'run' && !pin.loop)) return [];
   const data = { from: new URL('../', import.meta.url).href, to: pin.to };
   // GY-1790: the resolve hooks that redirect every module are the ones the pinned snapshot holds,

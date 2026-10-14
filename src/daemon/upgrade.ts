@@ -21,7 +21,7 @@ import { promotionHolds, promotionWait } from '../master/release-lag.js';
 import { agentOwner, type AttentionItem } from '../master/attention.js';
 import { storeAction, touchStanding, message, type DaemonState, type UpgradeStallCause } from './state.js';
 import { detailChanged } from './decisions.js';
-import { checkoutState, type CheckoutState } from './checkout-state.js';
+import { checkoutState, unquotePath, type CheckoutState } from './checkout-state.js';
 
 /**
  * Code the loop and the executors load: TypeScript modules and the package manifest. A diff that
@@ -43,28 +43,13 @@ export function upgradeTouchesCode(paths: readonly string[]): boolean {
 }
 
 /**
- * A pathname as git prints it, with its C-quote escapes resolved (GY-1790): git quotes a path
- * holding a quote, a backslash, spaces at either end or control bytes, and a reading that keeps
- * the quotes misclassifies it (`"src/x.ts"` is not under `src/`) and records a name no commit
- * holds. The rename-pair reading (`checkoutState`, re-exported below) shares this quoting and
- * unquotes before it splits a rename on " -> "; this resolves the same form for the line-oriented
- * `--name-only` listings the alignment classifies.
+ * The real paths one line-oriented git listing names, git's C quoting resolved (GY-1790): git
+ * quotes a path holding a quote, a backslash, spaces at either end or control bytes, and a reading
+ * that keeps the quotes misclassifies it (`"src/x.ts"` is not under `src/`) and records a name no
+ * commit holds. The parser is the one `checkoutState` unquotes its porcelain paths with, so both
+ * readings agree on the same names.
  */
-const unquoteGitPath = (path: string): string => {
-  if (!path.startsWith('"') || !path.endsWith('"') || path.length < 2) return path;
-  const escapes: Record<string, number> = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11, '"': 34, '\\': 92 };
-  const bytes: number[] = [];
-  const body = path.slice(1, -1);
-  for (let i = 0; i < body.length; i++) {
-    if (body[i] !== '\\') { bytes.push(...Buffer.from(body[i]!)); continue; }
-    const octal = body.slice(i + 1, i + 4);
-    if (/^[0-3][0-7]{2}$/.test(octal)) { bytes.push(parseInt(octal, 8)); i += 3; }
-    else { const code = escapes[body[++i] ?? '']; bytes.push(code ?? 92); }
-  }
-  return Buffer.from(bytes).toString('utf8');
-};
-/** The real paths one line-oriented git listing names, git's quoting resolved (GY-1790). */
-const listedPaths = (out: string): string[] => out.split('\n').map(path => unquoteGitPath(path.trim())).filter(Boolean);
+const listedPaths = (out: string): string[] => out.split('\n').map(path => unquotePath(path.trim())).filter(Boolean);
 
 /** Where the launcher reads the release a held restart pins the CLI to (GY-1585): `{ commit, root, loop }`. */
 export const heldCliPointer = (root: string) => join(root, '.graphyard', 'held-cli.json');
@@ -117,6 +102,17 @@ export async function holdCliAt(root: string, run: ChildRun, commit: string | nu
 }
 
 /**
+ * GY-1790: the launcher a supervisor unit starts while the pin stands — the held snapshot's own
+ * bin/graphyard.mjs, so launcher files the checkout holds dirty (bin/graphyard.mjs,
+ * bin/held-release-hooks.mjs) are never the code that boots the loop or an executor. The unit hands
+ * the checkout to it in the environment (GRAPHYARD_CHECKOUT_ROOT), so the snapshot's launcher reads
+ * the checkout's pin and configuration while its own code loads. Null when no pin stands: the
+ * checkout's launcher (config.cliPath) runs, as it always has.
+ */
+export const heldLauncherOf = (root: string, held = readHeldCli(root)): string | null =>
+  held ? join(heldCliSnapshotAt(root, held), 'bin', 'graphyard.mjs') : null;
+
+/**
  * GY-1773: the commit of the held snapshot this process's modules were loaded from — the launcher
  * pinned `master run` to it — or null for a process loaded from the checkout. The loop's checkout
  * guard reads it at startup: such a loop runs the snapshot, never the dirty checkout beside it, so
@@ -139,9 +135,9 @@ export function leftBehindCheckoutAttention(left: { at: string; commit: string; 
   const named = left.dirty.length ? ` (dirty: ${left.dirty.slice(0, 8).join(', ')}${left.dirty.length > 8 ? `; and ${left.dirty.length - 8} more` : ''})` : '';
   // The checkout since moved onto the commit, but still dirty: the pin stays until it is clean there.
   const onto = sameCommit(left.checkout, left.commit);
-  // The launcher is the bootstrap that reads the pin: its edits ran on the restart and run on every start.
+  // The launcher that runs under the pin is the snapshot's (GY-1790): the checkout's launcher edits load nothing.
   const launcher = left.dirty.filter(path => launcherFiles.includes(path));
-  const bootstrap = launcher.length ? ` The checkout's launcher (${launcher.join(', ')}) is dirty too: it runs before the pin redirects any module, so its edits run on every start; return it to the commit first.` : '';
+  const bootstrap = launcher.length ? ` The checkout's launcher (${launcher.join(', ')}) is dirty too: the restart started the launcher held in the snapshot instead, so those edits load nothing while the pin stands and surface only when the checkout returns to the commit and the pin lifts.` : '';
   return [{ subject: 'upgrade', text: `The loop and the executors run ${shortCommit(left.commit)} from its held snapshot under ${root}/.graphyard/held-cli, not from the coordinator checkout, which ${onto ? `holds that commit but is still dirty${named}` : `stood dirty at ${shortCommit(left.checkout)}${named} when the self-upgrade ran at ${left.at} and was left where it stands`}; every command the checkout's launcher starts loads the snapshot while the pin stands.${bootstrap}`,
     ...agentOwner('master', onto ? `Return the checkout's tracked files to the commit, which lifts the pin: git -C ${root} status --porcelain names them (graphyard master checkout-restore REASON saves the dirty paths and returns them to HEAD)`
       : `Move the checkout onto the commit the loop runs and clean it there, which lifts the pin: git -C ${root} status --porcelain names what is in it, and git -C ${root} checkout --detach ${left.commit} moves it (graphyard master checkout-restore REASON saves the dirty paths and returns them to HEAD first)`) }];
@@ -233,10 +229,12 @@ export async function awaitSupervisorRestart(restart: () => unknown, host: Signa
  * (GY-916): its watchdog window follows run.intervalSeconds. Only the packaged unit name is
  * rewritten, and only when the loop runs under it.
  */
-export async function alignRunningLoopUnit(root: string, config: MasterConfig, unit = detectLoopSupervisorUnit()) {
+export async function alignRunningLoopUnit(root: string, config: MasterConfig, unit = detectLoopSupervisorUnit(), align = alignLoopUnit) {
   const own = loopUnitOf(root);
   if (unit !== own) return { wrote: 'none', reason: `this loop does not run under ${own}` };
-  return alignLoopUnit({ root, cliPath: config.cliPath, repository: config.repository, intervalSeconds: config.run.intervalSeconds });
+  // GY-1790: while the pin stands the unit's ExecStart names the launcher held in the snapshot, so
+  // the restart that follows starts that launcher, never one the checkout holds dirty.
+  return align({ root, cliPath: config.cliPath, repository: config.repository, intervalSeconds: config.run.intervalSeconds, heldLauncher: heldLauncherOf(root) });
 }
 
 export interface SelfUpgradeDeps {
@@ -255,6 +253,13 @@ export interface SelfUpgradeDeps {
   alignUnit?: () => Promise<{ wrote: string; reason: string | null }>;
   /** Pins the CLI the checkout's launcher runs to the served release while a restart is held, null lifts it (GY-1585); `holdCliAt` on `root` by default. */
   holdCli?: (commit: string | null) => Promise<void>;
+  /**
+   * GY-1790: points the supervised executor units' entry at `script` — the held snapshot's
+   * scripts/graphyard-executor.mjs while a snapshot restart's pin stands, null for the checkout's —
+   * so a slot its unit starts runs the snapshot's entry, never one the checkout holds dirty. The
+   * loop's own unit follows the pin through `alignUnit`, whose ExecStart is `heldLauncherOf`.
+   */
+  alignExecutorUnits?: (script: string | null) => Promise<{ wrote: string; reason: string | null }>;
   /** The file this module was loaded from: under a held snapshot when the launcher pinned `master run` (GY-1585). */
   loadedFrom?: string;
   now?: () => number;
@@ -278,8 +283,9 @@ export interface SelfUpgradeDeps {
  * touches it; a dirty one is never touched either, but is upgraded by snapshot (GY-1773):
  * the merged commit is checked out under `.graphyard/held-cli/`, the launcher is pinned to it as a
  * held restart pins it, and the executors and the loop restart onto that, the checkout left where
- * it stands and recorded on the cursor (`upgrade.snapshot`) with its dirty paths; moving the
- * checkout onto the commit and cleaning it there lifts the pin. A tip touching no loaded code restarts the loop alone:
+ * it stands and recorded on the cursor (`upgrade.snapshot`) with its dirty paths; the restarts run
+ * the launcher held in the snapshot (GY-1790), never launcher files the checkout holds dirty.
+ * Moving the checkout onto the commit and cleaning it there lifts the pin. A tip touching no loaded code restarts the loop alone:
  * the snapshot is made and pinned and the loop re-executed onto it, the executors keep running.
  * The executors are restarted first, through the shipped command whose
  * refusals (a claim in flight, another restart's fence) leave the owed restarts on the cursor for
@@ -297,6 +303,12 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   const persist = async () => { if (deps.persist) await deps.persist(state); };
   const key = `upgrade:${state.deployment?.sha ?? 'none'}`, heldKey = 'upgrade:held';
   const holdCli = deps.holdCli ?? (commit => holdCliAt(deps.root, deps.run, commit));
+  /** GY-1790: the executor units' entry follows the pin — the snapshot's script while it stands, the checkout's when it lifts. No unit is aligned where none is supervised. */
+  const alignExecutorUnits = async (script: string | null): Promise<string | null> => {
+    if (!deps.alignExecutorUnits) return null;
+    const aligned = await deps.alignExecutorUnits(script).catch(error => ({ wrote: 'refused', reason: message(error) }));
+    return aligned.wrote === 'refused' ? aligned.reason || 'the executor units were not rewritten' : null;
+  };
   // GY-1585: a loop its supervisor restarts while a restart is held runs the held snapshot of the
   // served release, as every command the launcher starts does, but it read its release from the
   // checkout, which holds the move. It is recorded as running the snapshot's commit, so the pass
@@ -345,7 +357,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     const unitKey = 'upgrade:unit';
     const aligned = await deps.alignUnit().catch(error => ({ wrote: 'refused', reason: message(error) }));
     if (aligned.wrote === 'updated' || aligned.wrote === 'created') {
-      storeAction(state, unitKey, { kind: 'config', work: null, principal: null, state: 'done', detail: `The loop's supervisor unit no longer matched the running configuration and was rewritten (${aligned.wrote}); the restart that follows starts the loop under it`, attempts: (state.actions[unitKey]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
+      storeAction(state, unitKey, { kind: 'config', work: null, principal: null, state: 'done', detail: `The loop's supervisor unit no longer matched the running configuration and was rewritten (${aligned.wrote}); the next start runs the loop under it`, attempts: (state.actions[unitKey]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
       await persist();
     } else if (aligned.wrote === 'refused') {
       const detail = `The loop's supervisor unit does not match the running configuration and was not rewritten: ${aligned.reason ?? 'the rewrite was refused'}`;
@@ -387,10 +399,13 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
    * cursor records the checkout left behind. A hold places no pin for it: the checkout has not moved,
    * so what the launcher runs today still speaks the served protocol. A tip touching no loaded code
    * is the same restart minus the executors: nothing they run changed, so no claim of theirs can
-   * hold the alignment, and the loop alone re-executes onto the snapshot. The launcher itself
-   * (bin/graphyard.mjs, bin/held-release-hooks.mjs) is the bootstrap that reads the pin, so its own
-   * edits run on every start, snapshot or not: a dirty launcher holds nothing back either, and
-   * `leftBehindCheckoutAttention` names it for the operator to return to the commit.
+   * hold the alignment, and the loop alone re-executes onto the snapshot. The launcher that boots
+   * the restarted loop and every later slot is the one held in the snapshot (GY-1790): the loop
+   * unit's ExecStart and the executor units' entry point into the snapshot, with the checkout
+   * handed to them in the environment, so launcher files the checkout holds dirty
+   * (bin/graphyard.mjs, bin/held-release-hooks.mjs) are never evaluated; `leftBehindCheckoutAttention`
+   * names them for the operator to return to the commit, and the units go back to the checkout's
+   * launcher when the pin lifts.
    */
   const finish = async (pending: { from: string | null; to: string; code: boolean }, held = false, left: LeftBehind | null = null): Promise<SelfUpgradeOutcome> => {
     const aligned = held && !sameCommit(release, pending.to) ? state.upgrade.alignedRelease : release ?? state.upgrade.alignedRelease;
@@ -411,6 +426,8 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       // they execute changed, so their restart is not owed and a held claim cannot stall this.
       const unmade = await holdCli(pending.to).then(() => null, error => message(error));
       if (unmade !== null) return failed(`the held snapshot of ${shortCommit(pending.to)} could not be made for the restart from the dirty coordinator checkout at ${shortCommit(left!.checkout)}: ${unmade}`, 'snapshot-failed');
+      const unpointed = await alignExecutorUnits(join(heldCliSnapshotAt(deps.root, pending.to), 'scripts', 'graphyard-executor.mjs'));
+      if (unpointed !== null) return failed(`the held snapshot of ${shortCommit(pending.to)} stands and the launcher is pinned to it, but the executor units could not be pointed at the snapshot's launcher: ${unpointed}`, 'snapshot-failed');
       state.upgrade.snapshot = { at: at(), commit: pending.to, checkout: left!.checkout, dirty: left!.dirty.slice(0, 20) };
       state.upgrade.pending = null;
       state.upgrade.last = { at: at(), from: pending.from, to: pending.to, code: false, executors: null, self: !!deps.restartSelf };
@@ -465,6 +482,8 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     if (left) {
       const unmade = await holdCli(pending.to).then(() => null, error => message(error));
       if (unmade !== null) return failed(`the held snapshot of ${shortCommit(pending.to)} could not be made for the restart from the dirty coordinator checkout at ${shortCommit(left.checkout)}: ${unmade}`, 'snapshot-failed');
+      const unpointed = await alignExecutorUnits(join(heldCliSnapshotAt(deps.root, pending.to), 'scripts', 'graphyard-executor.mjs'));
+      if (unpointed !== null) return failed(`the held snapshot of ${shortCommit(pending.to)} stands and the launcher is pinned to it, but the executor units could not be pointed at the snapshot's launcher: ${unpointed}`, 'snapshot-failed');
       state.upgrade.snapshot = { at: at(), commit: pending.to, checkout: left.checkout, dirty: left.dirty.slice(0, 20) };
     } else {
       // A pointer that failed to go still pins the launcher to the old snapshot: the checkout stays put.
@@ -557,6 +576,13 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     // A pointer that failed to go still pins the launcher: the record stays and the next cycle retries.
     const unlifted = await holdCli(null).then(() => null, error => message(error));
     if (unlifted) return { outcome: 'skipped', reason: `the checkout holds ${shortCommit(commit)}, the commit the loop runs from its held snapshot, but the pin could not be lifted: ${unlifted}; retried next cycle` };
+    // The pin is lifted, so the units go back to the checkout's launcher (GY-1790): the loop unit's
+    // ExecStart follows the absent pin through `alignUnit`, the executor units are pointed back at
+    // the checkout's entry. A rewrite that fails keeps the record and retries before it is cleared,
+    // so a later start never runs the checkout's launcher while the cursor still holds a snapshot.
+    const unpointed = await alignExecutorUnits(null);
+    if (unpointed) return { outcome: 'skipped', reason: `the checkout holds ${shortCommit(commit)}, the commit the loop runs from its held snapshot, and the pin is lifted, but the executor units could not be returned to the checkout's launcher: ${unpointed}; retried next cycle` };
+    await alignUnit();
     delete state.upgrade.snapshot;
     state.upgrade.refused = null; unstall(); await persist();
     await note(`The checkout is current at ${shortCommit(commit)}; it was moved onto the commit the loop runs from its held snapshot, so the pin on the snapshot is lifted`, false);

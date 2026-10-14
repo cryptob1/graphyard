@@ -10,6 +10,7 @@ import { deploymentObservationSchema, emptyDaemonState, type DaemonState } from 
 import * as upgrade from '../src/daemon/upgrade.js';
 import type { SelfUpgradeDeps, SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { coordinatorCheckoutGuard } from '../src/daemon/run.js';
+import { loopUnitText, type LoopUnitInput } from '../src/supervisor.js';
 import type { CoordinatorCheckout } from '../src/master/profiles.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -19,8 +20,10 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // pinned to it, the checkout left behind with its dirty paths, and a status read that fails is
 // never taken for clean. Git quotes pathnames holding a quote, an awkward space or an arrow, so
 // every path the upgrade records or classifies is read unquoted; a launcher the checkout holds
-// dirty never decides what loads — the snapshot's own launcher hooks do. Real repositories and
-// the shipped git and launcher throughout; the fleet and the supervisor are recorded fakes. Each
+// dirty never decides what loads — the units start the launcher held in the snapshot, with the
+// checkout handed to it, and a hostile checkout launcher is never the code that boots. Real
+// repositories and the shipped git and launcher throughout; the fleet, the supervisor and the
+// unit alignments are recorded fakes. Each
 // test is named for the proof it produces: unit:pending-restart-dirty-checkout-snapshots,
 // unit:dirty-path-porcelain-unquoted, unit:snapshot-upgrade-survives-head-drift,
 // unit:pending-restart-unknown-dirty-keeps-pin, unit:dirty-launcher-restarts-from-snapshot-launcher.
@@ -307,10 +310,12 @@ test('unit:pending-restart-unknown-dirty-keeps-pin — a pending restart whose c
   assert.ok(named[0].text.includes(short(byHand)), 'master status names the checkout where it was moved to');
 });
 
-test('unit:dirty-launcher-restarts-from-snapshot-launcher — a checkout whose own launcher files are dirty still restarts onto the held snapshot by starting the launcher held in it: the edited hooks never run, and the cursor records the checkout left behind instead of holding the restart as snapshot-failed', async () => {
-  // The launcher is tracked at A, so the snapshot of B holds it too and what the pin starts is
-  // the commit's own launcher. The operator's edited hooks resolve nothing but the checkout and
-  // mark any child they are registered in: if they ran, the checkout's own code would load.
+test('unit:dirty-launcher-restarts-from-snapshot-launcher — a checkout whose own launcher files are dirty still restarts onto the held snapshot by starting the launcher held in it: the supervisor units point into the snapshot, a checkout launcher that drops the held hooks and hooks that pin nothing never run, and the cursor records the checkout left behind instead of holding the restart as snapshot-failed', async () => {
+  // The launcher is tracked at A, so the snapshot of B holds it too and what the units start is
+  // the commit's own launcher. The operator's edits are hostile: the checkout's launcher drops the
+  // held hooks from its spawn and marks every start, and its hooks pin nothing and mark every
+  // process that loads them — if either ran, the checkout's own tree would load and the markers
+  // would name it.
   const hooksOf = (name: string) => fileURLToPath(new URL(`../bin/${name}`, import.meta.url));
   const w = await world('dirty-launcher', {
     seed: async origin => {
@@ -318,35 +323,65 @@ test('unit:dirty-launcher-restarts-from-snapshot-launcher — a checkout whose o
       for (const file of ['graphyard.mjs', 'held-release-hooks.mjs']) await writeFile(join(origin, 'bin', file), await readFile(hooksOf(file)));
     },
   });
+  const launcherMarker = join(w.root, 'checkout-launcher-ran.txt'), hooksMarker = join(w.root, 'edited-hooks-ran.txt');
+  const shipped = await readFile(join(w.root, 'bin', 'graphyard.mjs'), 'utf8');
+  const hostileLauncher = `import { appendFileSync } from 'node:fs'; appendFileSync(${JSON.stringify(launcherMarker)}, 'ran');\n${shipped.replace('...held(), ', '')}`;
+  assert.ok(shipped.includes('...held()') && !hostileLauncher.includes('...held()'), 'the edit drops the held hooks from the spawn');
+  await writeFile(join(w.root, 'bin', 'graphyard.mjs'), hostileLauncher);
   await writeFile(join(w.root, 'bin', 'held-release-hooks.mjs'), [
-    '// edited by the operator — its resolve hooks redirect nothing, so what runs is the checkout\'s tree',
-    'import { existsSync, readFileSync } from \'node:fs\';',
-    'import { pathToFileURL } from \'node:url\';',
-    'export function heldRelease(checkout) {',
-    '  try {',
-    '    const pin = JSON.parse(readFileSync(new URL(\'.graphyard/held-cli.json\', checkout), \'utf8\'));',
-    '    if (typeof pin?.root !== \'string\' || typeof pin.commit !== \'string\') return null;',
-    '    const snapshot = pathToFileURL(`${pin.root}/`).href;',
-    '    return existsSync(new URL(\'src/cli.ts\', snapshot)) ? { commit: pin.commit, to: snapshot, loop: pin.loop === true } : null;',
-    '  } catch { return null; }',
-    '}',
-    'export function initialize(data) { import(\'node:fs/promises\').then(fs => fs.appendFile(new URL(\'../edited-hooks-ran.txt\', import.meta.url), \'ran\')); }',
+    '// edited by the operator: it pins nothing and marks every process that loads it',
+    `import { appendFileSync } from 'node:fs';`,
+    `appendFileSync(${JSON.stringify(hooksMarker)}, 'ran');`,
+    'export function heldRelease() { return null; }',
+    'export function initialize() {}',
     'export async function resolve(specifier, context, next) { return next(specifier, context); }',
     '',
   ].join('\n'));
-  await writeFile(join(w.root, 'bin', 'graphyard.mjs'), `${await readFile(join(w.root, 'bin', 'graphyard.mjs'), 'utf8')}// edited by the operator\n`);
   const before = status(w.root);
   assert.equal(before, ' M bin/graphyard.mjs\n M bin/held-release-hooks.mjs');
   const state = emptyDaemonState(w.master);
   state.release = { commit: w.loaded, dirty: true };
   state.deployment = verified(w.tip);
   const { calls, deps } = recording(w.root);
-  const done = await performSelfUpgrade(w.master, state, deps());
+  // The unit alignments are recorded fakes, wired the way the loop wires them: the loop unit's
+  // ExecStart follows the pin through alignRunningLoopUnit, and the executor units' entry is
+  // pointed at the snapshot's own script before the fleet restarts.
+  const captured: { unit: LoopUnitInput | null } = { unit: null };
+  const executorScripts: (string | null)[] = [];
+  const done = await performSelfUpgrade(w.master, state, deps({
+    alignUnit: async () => {
+      const unitDirectory = join(w.directory, 'units');
+      await mkdir(unitDirectory, { recursive: true });
+      const previous = process.env.XDG_CONFIG_HOME;
+      process.env.XDG_CONFIG_HOME = unitDirectory;
+      try {
+        const aligned = await upgrade.alignRunningLoopUnit(w.root, w.master, 'graphyard-master.service', async input => { captured.unit = input; return { wrote: 'unchanged', reason: null, unitPath: 'unused' }; });
+        return { wrote: aligned.wrote, reason: aligned.reason };
+      } finally { if (previous === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = previous; }
+    },
+    alignExecutorUnits: async script => { executorScripts.push(script); return { wrote: 'updated', reason: null }; },
+  }));
+  const snapshot = upgrade.heldCliSnapshotAt(w.root, w.tip);
   assert.equal(done.outcome, 'upgraded', JSON.stringify(done));
   assert.deepEqual('left' in done && done.left, { checkout: w.loaded, dirty: ['bin/graphyard.mjs', 'bin/held-release-hooks.mjs'] }, 'the restart is not held as snapshot-failed; the checkout is named left behind with its dirty launcher paths');
   assert.equal(readHeldCli(w.root), w.tip, 'the launcher is pinned to the snapshot');
+  assert.deepEqual(executorScripts, [join(snapshot, 'scripts', 'graphyard-executor.mjs')], 'the executor units are pointed at the snapshot\'s entry before the fleet restarts');
   assert.deepEqual(calls, { executors: [w.tip], self: 1 }, 'the executors and the loop restart onto the snapshot');
   assert.deepEqual([git(w.root, 'rev-parse', 'HEAD'), status(w.root)], [w.loaded, before], 'the checkout and its launcher are untouched');
-  assert.equal(w.launch('watch', 'GY-1', '1').release, 'B', 'what loads is the snapshot: the launcher held in it directs the load, whatever the checkout launcher edits');
-  assert.equal(existsSync(join(w.root, 'edited-hooks-ran.txt')), false, 'the edited hooks never ran');
+  // The loop unit's ExecStart follows the pin: it names the launcher held in the snapshot and hands
+  // it the checkout in the environment, never the checkout's own launcher while the pin stands.
+  assert.ok(captured.unit, 'the loop unit is aligned while the pin stands');
+  assert.equal(captured.unit.heldLauncher, join(snapshot, 'bin', 'graphyard.mjs'), 'the unit input carries the launcher held in the snapshot');
+  assert.equal(upgrade.heldLauncherOf(w.root), join(snapshot, 'bin', 'graphyard.mjs'), 'the pin names the snapshot launcher');
+  const unit = loopUnitText(captured.unit);
+  assert.ok(unit.includes(`ExecStart=${process.execPath} ${join(snapshot, 'bin', 'graphyard.mjs')} master run`), 'the unit starts the launcher held in the snapshot');
+  assert.ok(unit.includes(`Environment=GRAPHYARD_CHECKOUT_ROOT=${w.root}`), 'the unit hands the checkout root to the snapshot launcher');
+  assert.ok(!unit.includes(`ExecStart=${process.execPath} ${w.master.cliPath} `), 'the checkout launcher is not what the unit starts while the pin stands');
+  // What the supervisor starts after the restart is the snapshot's launcher with the checkout
+  // handed to it: release B loads even though the checkout launcher registers no hooks and its
+  // hooks pin nothing — the hostile edits never run.
+  const started = JSON.parse(execFileSync(process.execPath, [join(snapshot, 'bin', 'graphyard.mjs'), 'watch', 'GY-1', '1'], { encoding: 'utf8', cwd: w.root, env: { ...process.env, GRAPHYARD_CHECKOUT_ROOT: w.root } })) as { release: string };
+  assert.equal(started.release, 'B', 'the launcher held in the snapshot loads release B with the checkout handed to it');
+  assert.equal(existsSync(launcherMarker), false, 'the checkout\'s hostile launcher never ran');
+  assert.equal(existsSync(hooksMarker), false, 'the checkout\'s hostile hooks never ran');
 });

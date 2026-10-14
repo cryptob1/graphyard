@@ -37,7 +37,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { heldRelease } from '../bin/held-release-hooks.mjs';
 
 export function parseArguments(argv) {
@@ -97,9 +97,15 @@ export async function installCheck(installed, executor, read, template) {
  * The TypeScript modules this process is a thin entry point for; tsx is a runtime dependency already.
  * While the self-upgrade holds a restart for the release production serves (GY-1585), they load from
  * the held snapshot of that release, as every command the checkout's launcher starts does: a slot its
- * supervisor starts during the hold speaks the protocol the serving plane accepts.
+ * supervisor starts during the hold speaks the protocol the serving plane accepts. GY-1790: a slot
+ * started from the snapshot's own entry is handed the checkout it serves in the environment, and the
+ * pin is read from there — the modules stay the snapshot's, the checkout stays the checkout.
  */
-export async function load(held = heldRelease(new URL('../', import.meta.url))) {
+export const handedCheckout = (env = process.env, entry = import.meta.url) => {
+  const root = env.GRAPHYARD_CHECKOUT_ROOT?.trim();
+  return root ? pathToFileURL(`${root.replace(/\/+$/, '')}/`) : new URL('../', entry);
+};
+export async function load(held = heldRelease(handedCheckout())) {
   const { tsImport } = await import('tsx/esm/api');
   const here = held ? new URL('scripts/graphyard-executor.mjs', held.to).href : import.meta.url;
   const [master, daemon, dispatch, executor, reviewer, producer, actions, view, setup, fleet] = await Promise.all([
@@ -130,10 +136,10 @@ export const executorModuleRoot = (script = process.argv[1]) => resolve(dirname(
  * checkout's commit is the pin's: the hold moving the checkout to a tip production does not serve
  * yet stands no slot down onto that tip, and the lift (or a newer pin) does.
  */
-export function executorRelease(root, held, fleet) {
+export function executorRelease(root, held, fleet, checkout = root) {
   return {
     release: held ? { commit: held.commit, dirty: false } : fleet.readRelease(root),
-    current: () => heldRelease(pathToFileURL(`${root}/`))?.commit ?? fleet.readCommit(root),
+    current: () => heldRelease(pathToFileURL(`${checkout}/`))?.commit ?? fleet.readCommit(checkout),
   };
 }
 
@@ -198,7 +204,11 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     // Only a coordinator host can run an executor at all: without master.json every unit this
     // enables would fail on start and be restarted every ten seconds.
     await m.loadMasterConfig(root);
-    const installed = await s.installExecutorSupervision(root, { ...(options.count !== null ? { count: options.count } : {}), ...(options.kinds ? { kinds: options.kinds } : {}), ...(options.intervalSeconds !== null ? { intervalSeconds: options.intervalSeconds } : {}) });
+    // GY-1790: while the CLI pin stands a slot starts the launcher held in the snapshot, never an
+    // entry the checkout may hold dirty; a reinstall keeps that binding until the pin lifts.
+    const pin = heldRelease(new URL('../', import.meta.url));
+    const heldScript = pin ? fileURLToPath(new URL('scripts/graphyard-executor.mjs', pin.to)) : null;
+    const installed = await s.installExecutorSupervision(root, { ...(options.count !== null ? { count: options.count } : {}), ...(options.kinds ? { kinds: options.kinds } : {}), ...(options.intervalSeconds !== null ? { intervalSeconds: options.intervalSeconds } : {}), heldScript });
     const templatePath = existsSync(resolve(root, 'examples/master', s.executorUnitTemplate))
       ? resolve(root, 'examples/master', s.executorUnitTemplate)
       : resolve(new URL('../examples/master', import.meta.url).pathname, s.executorUnitTemplate);
@@ -270,7 +280,11 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   // refreshed on every claim; the commit is re-read in front of each claim from the checkout the
   // modules load from, which is the package's when the unit runs its script for a repository without one.
   const moduleRoot = executorModuleRoot();
-  const { release, current: checkoutCommit } = executorRelease(moduleRoot, modules.held, f);
+  // GY-1790: the checkout the unit hands this entry — the modules' own tree when it runs from the
+  // checkout. The release loaded is the modules', the commit re-read in front of every claim is the
+  // checkout's, so the lift (or a newer pin) reaches a slot running the snapshot.
+  const checkoutPath = env.GRAPHYARD_CHECKOUT_ROOT?.trim() || moduleRoot;
+  const { release, current: checkoutCommit } = executorRelease(moduleRoot, modules.held, f, checkoutPath);
   const registrar = f.executorRegistrar(config, { name: identity.id, host: identity.host, pid: process.pid, principal: status.actor.id, kinds: a.executorKinds(effects.handlers),
     intervalSeconds: options.intervalSeconds, root, release, supervisor: f.detectSupervisorUnit({ named: options.unit }) });
   await registrar.started();

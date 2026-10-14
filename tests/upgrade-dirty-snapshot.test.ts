@@ -544,9 +544,10 @@ test('unit:dirty-path-named-with-an-arrow — a modified tracked file whose name
 });
 
 test('unit:dirty-launcher-snapshots-foreign-head-and-tsconfig-keep-the-pin — a dirty launcher holds no snapshot restart back and is named on the attention, a clean detached foreign HEAD is no restart target while the pin stands, and a dirty tsconfig.json keeps the pin on a checkout moved onto the snapshot', async () => {
-  // The launcher is the bootstrap that reads the pin: its edits run on every start, snapshot or
-  // not, so a dirty one is a dirty checkout like any other — the restart goes onto the snapshot,
-  // the checkout and its launcher untouched, and master status names the launcher.
+  // The launcher is the bootstrap that reads the pin, and since GY-1790 what the units start is
+  // the launcher held in the snapshot, so a dirty one is a dirty checkout like any other — the
+  // restart goes onto the snapshot, the checkout and its launcher untouched, and master status
+  // names the launcher and says its edits load nothing under the pin.
   const l = await world('launcher-dirty');
   git(l.root, 'add', 'bin');
   git(l.root, 'commit', '-q', '-m', 'launcher');
@@ -565,7 +566,7 @@ test('unit:dirty-launcher-snapshots-foreign-head-and-tsconfig-keep-the-pin — a
   assert.deepEqual(state.upgrade.snapshot, { at: iso(), commit: l.tip, checkout: launched, dirty: ['bin/graphyard.mjs', 'bin/held-release-hooks.mjs'] });
   assert.equal(state.upgrade.stalled, undefined);
   const named = leftBehindCheckoutAttention(state.upgrade.snapshot, l.tip, l.root);
-  assert.match(named[0].text, /stood dirty at [0-9a-f]{12} \(dirty: bin\/graphyard\.mjs, bin\/held-release-hooks\.mjs\) when the self-upgrade ran .* The checkout's launcher \(bin\/graphyard\.mjs, bin\/held-release-hooks\.mjs\) is dirty too: it runs before the pin redirects any module, so its edits run on every start; return it to the commit first\.$/);
+  assert.match(named[0].text, /stood dirty at [0-9a-f]{12} \(dirty: bin\/graphyard\.mjs, bin\/held-release-hooks\.mjs\) when the self-upgrade ran .* The checkout's launcher \(bin\/graphyard\.mjs, bin\/held-release-hooks\.mjs\) is dirty too: the restart started the launcher held in the snapshot instead, so those edits load nothing while the pin stands and surface only when the checkout returns to the commit and the pin lifts\.$/);
   assert.equal(l.launch('watch', 'GY-1', '1').release, 'B', 'the edited launcher still reads the pin and loads the snapshot');
   // A clean detached HEAD that is neither the snapshot nor the commit the operator left is a foreign move.
   const f = await world('foreign-head');

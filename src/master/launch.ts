@@ -134,12 +134,17 @@ const cliEntry = (argv1: string) => ['graphyard.mjs', 'cli.ts', 'graphyard-execu
  */
 export const launcherCoordinatorRoot = (argv1: string | undefined = process.argv[1], testRunner: boolean = underTestRunner()): string | null => {
   if (!argv1 || testRunner || !cliEntry(argv1)) return null;
-  const root = coordinatorCheckoutRoot(resolve(argv1));
+  // GY-1790: an entry the restart started from the held snapshot is handed the checkout it serves
+  // in the environment; confinement guards that checkout, not the snapshot's own tree.
+  const handed = process.env.GRAPHYARD_CHECKOUT_ROOT?.trim();
+  const root = handed || coordinatorCheckoutRoot(resolve(argv1));
   return root && root !== '/' ? root : null;
 };
 /** Why the running process is the launcher yet its own coordinator checkout cannot be derived — the launch would start unconfined, so the caller refuses (GY-888); null when there is nothing to refuse on. */
 export const launcherRootUndetermined = (argv1: string | undefined = process.argv[1], testRunner: boolean = underTestRunner()): string | null => {
   if (!argv1 || testRunner || !cliEntry(argv1)) return null;
+  // GY-1790: a snapshot entry is handed its checkout in the environment, so its root is determined.
+  if (process.env.GRAPHYARD_CHECKOUT_ROOT?.trim()) return null;
   const root = coordinatorCheckoutRoot(resolve(argv1));
   return root && root !== '/' ? null : `this launcher's coordinator checkout could not be derived from its entry ${argv1}`;
 };
