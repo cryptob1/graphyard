@@ -1770,6 +1770,18 @@ export class Engine {
         // An observation dated ahead of this clock would read fresh for good, so it is stored as of now.
         const observedAt = data.observedAt && Date.parse(data.observedAt) > now.getTime() ? now.toISOString() : data.observedAt;
         const { supersede: _supersede, ...handle } = data;
+        // One worker principal runs one implementation session on an item at a time, so a launcher
+        // recording that principal's session running under a new id moves it: the running record
+        // the same principal held under another id — the one registered before the claim under the
+        // epoch the snapshot guessed (cycle-dispatch.ts rekeyLaunchedSession, GY-1791) — is closed in
+        // this same transaction, naming where the session now is. One write moves the handle, so
+        // no failure between two can leave the attempt with two running handles or with none.
+        if (handle.kind === 'implementation' && handle.state === 'running' && ['coordinator', 'admin'].includes(actor.role)) {
+          const owner = handle.principal ?? existing?.principal ?? actor.id;
+          for (const other of (work.sessions ?? []).filter(entry => entry.id !== handle.id && entry.kind === 'implementation' && entry.state === 'running' && entry.principal === owner))
+            recordSession(work, { id: other.id, kind: other.kind, runtime: other.runtime, host: other.host, subject: other.subject, state: 'finished',
+              outcome: `superseded: ${owner} runs one implementation session on ${work.key} at a time, and its launcher recorded that session as ${handle.id}`.slice(0, 500) }, actor.id, now);
+        }
         recordSession(work, { ...handle, ...(observedAt ? { observedAt } : {}) }, actor.id, now);
       }
       if (command === 'request') {
@@ -2940,11 +2952,17 @@ export class Engine {
    * outages: a lease lapsing inside a recorded stall is history with its cause, never a lease loss
    * (leaseLapseCause), and renewal grace keeps the lease live for a supervisor still retrying
    * (GY-558's rule). Best effort beside the pass — liveness bookkeeping never fails reconciliation.
+   *
+   * The tick runs on the lease pool, the connections heartbeats run on (pools.ts `leaseCommands`),
+   * and on nothing else: a stall is "renewals could not land", so the tick must measure the path
+   * that serves them. The request pool exhausted behind slow queries while heartbeats still land is
+   * no stall — a tick there would have recorded one and explained away a worker that truly vanished
+   * — and a lease pool that cannot take this tick's connection could not take a renewal either.
    */
   async recordPlaneLiveness(at: Date = new Date()) {
     let db: PoolClient | null = null;
     try {
-      db = await this.store.pool.connect();
+      db = await this.store.leasePool.connect();
       await db.query('BEGIN');
       await db.query('INSERT INTO plane_liveness(id,tick_at) VALUES(true,$1) ON CONFLICT (id) DO NOTHING', [at]);
       const previous = (await db.query('SELECT tick_at FROM plane_liveness WHERE id = true FOR UPDATE')).rows[0].tick_at as Date;

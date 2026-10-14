@@ -356,7 +356,7 @@ export interface SupervisedQuarantine {
   report?: (failure: ContainmentShutdownFailure) => Promise<unknown>;
 }
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
-export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; startupWindowMs?: number; stallAllowanceMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession; quarantine?: SupervisedQuarantine } = {}) {
+export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; startupWindowMs?: number; attemptBoundMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession; quarantine?: SupervisedQuarantine } = {}) {
   let deadline = 0, granted = 0, attempts = 0;
   /** One renewal attempt, sequenced: a beat the supervisor already gave up on never moves the deadline. */
   const heartbeatAttempt = () => {
@@ -375,8 +375,8 @@ export async function supervise(command: string, args: string[], epoch: number, 
   // gets its renewals; at the production 120 s lease it is the full 15 s.
   const margin = () => Math.min(options.safetyMarginMs ?? renewalSafetyMarginMs, granted / 4);
   const retryMs = options.retryMs ?? 1000, retryMaxMs = options.retryMaxMs ?? 10_000;
-  /** A renewal the plane never answered inside its attempt window: a stall, not an answer (GY-1791). */
-  const unanswered = () => Object.assign(new Error('Lease renewal went unanswered past its attempt window'), { name: 'TimeoutError', unanswered: true });
+  /** A renewal the plane did not answer within the attempt's bound (GY-1791): retried afresh, never an answer. */
+  const unanswered = () => Object.assign(new Error('Lease renewal went unanswered past its attempt bound'), { name: 'TimeoutError', unanswered: true });
   /**
    * One renewal, retried with backoff while the lease still has more than the safety margin left
    * (GY-274). A deploy restarts the server for about a minute and its first reconcile used to hold
@@ -387,30 +387,38 @@ export async function supervise(command: string, args: string[], epoch: number, 
    * a supervisor whose worker is gone during an outage surrenders at once rather than after the
    * whole backoff.
    *
-   * Each attempt is bounded by the lease window it serves (GY-1791): a request the plane never
-   * answers — a black-holed deploy, a stalled plane — used to hold this loop for the whole client
-   * timeout, so one hung request consumed every chance the lease had left and a plane that
-   * recovered a second after the deadline still lost the lease. Now the attempt is raced against
-   * the remaining window, and when the window closes on a request that was never answered at all,
-   * the deadline rides one further lease period (`stallAllowanceMs`, the last lease the server
-   * granted by default) while attempts keep going: the plane's own stall record keeps the lease
-   * live across it (engine.ts renewalGrace), so a recovery inside the allowance lands a renewal
-   * and the attempt survives. A definite answer — above all a refusal — always stops at once, so
-   * the allowance is only ever ridden out while the plane says nothing.
+   * Each attempt is bounded (GY-1791): a request the plane never answers — a black-holed deploy, a
+   * stalled plane — used to hold this loop for the whole client timeout (two minutes, the lease
+   * itself), so one hung request consumed every chance the lease had left and a plane that came
+   * back with a minute of lease to spare still lost it. Now an attempt the plane has not answered
+   * within `attemptBoundMs` (the safety margin by default: 15 s at the production lease) is given
+   * up on — a response landing later is superseded and cannot move the deadline of an attempt that
+   * was abandoned — and the retry sends a fresh request, which a recovered plane answers. What never
+   * moves is the deadline: an unanswered request authorises nothing, so the worker still stops at
+   * the expiry the server last issued, and only a renewal the server actually answered extends it
+   * (a worker whose own network path alone is down must not outlive the lease the server expired).
    */
   async function renewWithRetry(stopped: () => boolean, orphaned: () => string | null = () => null, extended: () => void = () => {}): Promise<'renewed' | 'refused' | 'lapsing' | 'stopped' | { orphaned: string }> {
-    let stallRidden = false;
     for (let attempt = 0; ; attempt++) {
       // Inside the safety margin nothing more is attempted: the lease is left to expire on its own.
-      if (attempt === 0 && !stallRidden && deadline - margin() <= performance.now()) return 'lapsing';
+      if (attempt === 0 && deadline - margin() <= performance.now()) return 'lapsing';
       const started = performance.now();
+      // The attempt waits no longer than its bound, and never past the window; the losing timer is
+      // cleared whichever side settles the race, so a renewed lease retains no timer until its expiry.
+      // An infinite bound awaits the request however long it hangs (the base's wiring, for its reproduction).
+      const attemptBound = options.attemptBoundMs ?? margin();
+      const bound = Math.max(1, Math.min(attemptBound, deadline - margin() - started));
+      let unansweredTimer: ReturnType<typeof setTimeout> | undefined;
       const beat = heartbeatAttempt(); beat.catch(() => { /* the race below answers this attempt; an abandoned one is superseded */ });
-      try { await Promise.race([beat, delay(Math.max(1, deadline - margin() - performance.now())).then(() => { throw unanswered(); })]); return 'renewed'; }
+      try {
+        await (Number.isFinite(attemptBound) ? Promise.race([beat, new Promise<never>((_, reject) => { unansweredTimer = setTimeout(() => reject(unanswered()), bound); })]) : beat);
+        return 'renewed';
+      }
       catch (error) {
         const reason = error instanceof Error ? error.message.slice(0, 300) : String(error);
         if (definiteRenewalRefusal(error)) { console.error(`Graphyard refused the lease renewal: ${reason}`); return 'refused'; }
-        // The window closed on a request that never answered: the in-flight beat is superseded, so
-        // a response landing now cannot move the deadline of an attempt that was given up on.
+        // The bound closed on a request that never answered: the in-flight beat is superseded, so a
+        // response landing now cannot move the deadline of an attempt that was given up on.
         if ((error as { unanswered?: boolean }).unanswered === true) attempts++;
         // A server-side failure the server recorded keeps the lease for its grace (GY-558): the
         // deadline moves out to it, measured from when this attempt was sent, and retries go on.
@@ -422,17 +430,6 @@ export async function supervise(command: string, args: string[], epoch: number, 
         const window = deadline - margin() - performance.now();
         const wait = Math.min(retryMs * 2 ** attempt, retryMaxMs, window);
         if (wait <= 0) {
-          // The window closed on a request the plane never answered: the outage is the plane's,
-          // not the worker's, so the supervisor rides one further lease period past the deadline
-          // while it keeps trying (GY-1791), once — a plane that comes back lands a renewal, and
-          // one that answers with a refusal still stops the worker at once.
-          if ((error as { unanswered?: boolean }).unanswered === true && !stallRidden) {
-            stallRidden = true;
-            deadline = Math.max(deadline, started) + (options.stallAllowanceMs ?? granted);
-            extended();
-            console.error(`Graphyard lease renewal went unanswered while the control plane was not responding; the supervisor keeps trying for one more lease period past the deadline and stops at once when the plane answers.`);
-            continue;
-          }
           console.error(`Graphyard lease renewal is still failing (${reason}); retries stop ${Math.round(margin())} ms before the lease expires and the worker stops only if the lease actually expires.`);
           return 'lapsing';
         }
@@ -441,7 +438,7 @@ export async function supervise(command: string, args: string[], epoch: number, 
         if (stopped()) return 'stopped';
         const cause = orphaned();
         if (cause) return { orphaned: cause };
-      }
+      } finally { clearTimeout(unansweredTimer); }
     }
   }
   // The first renewal has no lease of its own to measure a retry window by, so it rides out a

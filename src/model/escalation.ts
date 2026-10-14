@@ -102,12 +102,16 @@ export interface PlaneStall { from: string; to: string }
 export function stallCovering(stalls: readonly PlaneStall[], at: number): PlaneStall | null {
   return stalls.find(stall => at >= Date.parse(stall.from) && at <= Date.parse(stall.to)) ?? null;
 }
-/** How long after a stall's end a raise is still attributed to it: the loss is raised at the first tick after the expiry, and the production lease is 120s, so the expiry lies within one lease of the stall's end (GY-1791). */
-export const planeStallRaiseGraceMs = 120_000;
-/** The stall a lease-loss raised at `raisedAt` stands for, when one does: the stall began before the raise and ended within a lease of it, so it covered the expiry the raise answered. */
-export function stallRaisedInside(stalls: readonly PlaneStall[], raisedAt: string, coverageMs = planeStallRaiseGraceMs): PlaneStall | null {
-  const at = Date.parse(raisedAt);
-  return Number.isFinite(at) ? stalls.find(stall => Date.parse(stall.from) <= at && at <= Date.parse(stall.to) + coverageMs) ?? null : null;
+/**
+ * When the lease of `epoch` ran out, read from the attempt record the lapse closed (pipeline-speed.ts
+ * `endLapsedAttempt` ends the attempt at the lease's own deadline, in the transaction that classed the
+ * lapse), or null when no expired attempt of that epoch is on the record. A standing lease-loss is
+ * attributed to a stall by this instant and never by the time the loss was raised: the raise is the
+ * first tick after the expiry, which a stall that began only later can also be — and a worker whose
+ * lease ran out before the plane stalled vanished on its own (GY-1791 review).
+ */
+export function lapsedLeaseExpiry(work: { pipeline?: { attempts?: readonly { epoch: number; end: string | null; endedAt: string | null }[] } | null }, epoch: number): string | null {
+  return (work.pipeline?.attempts ?? []).find(attempt => attempt.epoch === epoch && attempt.end === 'expired' && attempt.endedAt)?.endedAt ?? null;
 }
 /** Why a lapse of `lease` is expected lifecycle, or null when the worker silently vanished. */
 export function leaseLapseCause(work: Pick<Work, 'submission' | 'capacity'> & Partial<Work>, lease: Pick<Lease, 'epoch'> & Partial<Pick<Lease, 'expiresAt' | 'owner'>>, attestations: Attestation[] = [], stalls: readonly PlaneStall[] = []): { cause: LeaseLapseCause; attestation: Attestation | null; exhaustion?: ExhaustionRecord; stall?: PlaneStall } | null {
@@ -199,7 +203,7 @@ export interface LeaseLossSettlement { escalation: Escalation; epoch: number; ca
  * `leaseLossSettleMs` (GY-1393). The last two rest only on the record, so an approver asked to
  * confirm them confirmed facts the control plane already held.
  */
-export function settleableLeaseLoss(work: Pick<Work, 'submission' | 'capacity' | 'escalation' | 'escalations'> & Partial<Pick<Work, 'epoch' | 'lease' | 'containmentQuarantine' | 'stage'>>, attestations: Attestation[] = [], now?: number, stalls: readonly PlaneStall[] = []): LeaseLossSettlement[] {
+export function settleableLeaseLoss(work: Pick<Work, 'submission' | 'capacity' | 'escalation' | 'escalations'> & Partial<Pick<Work, 'epoch' | 'lease' | 'containmentQuarantine' | 'stage' | 'pipeline'>>, attestations: Attestation[] = [], now?: number, stalls: readonly PlaneStall[] = []): LeaseLossSettlement[] {
   const settlements: LeaseLossSettlement[] = [];
   for (const escalation of standingEscalations(work)) {
     const epoch = leaseLossEpoch(escalation);
@@ -212,10 +216,13 @@ export function settleableLeaseLoss(work: Pick<Work, 'submission' | 'capacity' |
       settlements.push({ escalation, epoch, ...explained, note: leaseLossSettlementNote(explained.cause, explained.attestation, explained.exhaustion ?? null, explained.stall ?? null) });
       continue;
     }
-    // A loss the record cannot otherwise explain, raised for a lapse one of the plane's own stalls
-    // covered: the renewal could not land because the plane was down (GY-1791), which settles it
-    // the way a blocked report does.
-    const stalled = escalation.actor === 'graphyard' ? stallRaisedInside(stalls, escalation.at) : null;
+    // A loss the record cannot otherwise explain, raised for a lease that ran out inside one of the
+    // plane's own stalls: the renewal could not land because the plane was down (GY-1791), which
+    // settles it the way a blocked report does. The stall must cover the expiry itself, read from
+    // the attempt the lapse ended — a loss raised during a stall for a lease that had already run
+    // out before it is still a vanished worker, and stands.
+    const expiry = escalation.actor === 'graphyard' ? lapsedLeaseExpiry(work, epoch) : null;
+    const stalled = expiry ? stallCovering(stalls, Date.parse(expiry)) : null;
     if (stalled) {
       settlements.push({ escalation, epoch, cause: 'control-plane-stall', attestation: null, stall: stalled, note: leaseLossSettlementNote('control-plane-stall', null, null, stalled) });
       continue;
