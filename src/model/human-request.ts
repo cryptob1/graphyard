@@ -103,7 +103,7 @@ export { hostDoableAsk, hostDoableRefusal, type HostDoableAsk };
 /** This item's requirements as a park names them; the change verbs (with the weakening neighbours such an ask hides behind); the auxiliaries between them. */
 const criteriaGroup = String.raw`(?:criteri(?:a|on)|requirements?|AC-\d+)`;
 const changeVerbs = String.raw`\b(?:rewrit|revis|updat|amend|chang|edit|reconcil|match|align|weaken|relax|soften|narrow|revers|merg|replac|drop)\w*`;
-const auxiliaries = String.raw`(?:should|shall|may|might|must|can|could|would|will|is|are|was|were|be|been|being|gets?|got|has|have|had|to|not|never|no longer|also|still|instead|now|again|once)`;
+const auxiliaries = String.raw`(?:should|shall|may|might|must|can|could|would|will|needs?|needed|is|are|was|were|be|been|being|gets?|got|has|have|had|to|not|never|no longer|also|still|instead|now|again|once)`;
 /** "rewrite AC-1" / "revise the acceptance criteria"; "AC-1 should be rewritten" / "requirements dropped"; "a criteria rewrite". */
 const verbThenCriteria = new RegExp(`${changeVerbs}\\s+(?:(?:the|its|their|our|this|that|these|those|a|an|another|each)\\s+)?(?:acceptance\\s+)?${criteriaGroup}\\b`, 'i');
 const criteriaThenVerb = new RegExp(String.raw`\b${criteriaGroup}\b(?:(?:\s+|,\s*)${auxiliaries}\b)*(?:\s+|,\s*)` + changeVerbs, 'i');

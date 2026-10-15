@@ -73,6 +73,10 @@ test('unit:park-requirements-question-refused — GY-1816 AC-1: a goals-and-prio
     { ...clean, reason: 'The criteria should be edited before either gate can pass' },
     { ...clean, reason: 'AC-1 should be updated or amended, which the worker cannot decide' },
     { ...clean, reason: 'This needs a criteria amendment' },
+    // A need connector between the criterion and its verb (review thread PRRT_kwDOUZby-s6smCFc).
+    { ...clean, ask: 'Does AC-1 need to be rewritten?' },
+    { ...clean, needed: 'Whether the requirements need to be revised' },
+    { ...clean, reason: 'The criterion needs to be relaxed, or it never passes' },
   ] as const;
   for (const body of questioned) {
     const refusal = parkRefusal(body)!;
