@@ -3,7 +3,7 @@
 
 ## Launch profiles
 
-`master worker add FILE`: workers ([template](../examples/master/claude-worker.json)); `master reviewer setup` or `master reviewer add FILE` reviewers ([Claude](../examples/master/claude-reviewer.json), [opencode](../examples/master/opencode-reviewer.json)); `master producer replace`, `master producer remove`, `master reviewer remove` apply next tick; `setup.attention` reports blocking setup.
+`master worker add FILE`: workers ([template](../examples/master/claude-worker.json)); `master reviewer setup`/`add FILE` reviewers ([Claude](../examples/master/claude-reviewer.json), [opencode](../examples/master/opencode-reviewer.json)); `master producer replace`, `master producer remove`, `master reviewer remove` apply next tick; `setup.attention` reports blocking setup.
 
 ### Session handles
 
@@ -21,7 +21,7 @@ Non-master launches get own checkouts (master: `.graphyard` writable, host acts 
 
 Codex `--add-dir` roots: `.git/worktrees/NAME`, `objects`, `refs/remotes`, `refs/heads/graphyard`, `logs/`; never `.git`. Reviewers/producers: same grants and probe plus `.git/worktrees`; fetch `--no-write-fetch-head`.
 
-Profile `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless registry defines role. Launches take first account under `run.quotaCeilingPercent`, else (or failed start) **fail over** (`dispatch.accounts`). Runtime limit notices (never agent text; mid-session only beside `[retrying in 4s]`; agy `Individual quota reached`; pi's 429 `Weekly/Monthly Limit Exhausted`, its zone-less reset read in UTC; Claude's blocked usage-limit menu (`❯`, `Enter to confirm`), never answered) or silent done commit unpushed `WIP:`, set `capacity.exhausted` on the session's launch account (not profile's latest; held past probes until reset/`account set`), relaunch elsewhere/after reset, keeping WIP and judgements. The account an item's two latest consecutive epochs ended on (within 2h, reset unpassed, snapshot clock) is re-held first; unwritable holds refuse dispatch. Reviewers/producers use only profile `kind` (others skipped `cross-runtime`).
+Profile `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless registry defines role. Launches take first account under `run.quotaCeilingPercent`, else (or failed start) **fail over** (`dispatch.accounts`). Runtime limit notices (never agent text; mid-session only beside `[retrying in 4s]`; agy `Individual quota reached`; pi 429 `Weekly/Monthly Limit Exhausted`, zone-less reset in UTC; Claude's blocked usage-limit menu (`❯`, `Enter to confirm`), never answered) or silent done commit unpushed `WIP:`, set `capacity.exhausted` on the session's launch account (not profile's latest; held past probes until reset/`account set`), relaunch elsewhere/after reset, keeping WIP and judgements. The account an item's two latest consecutive epochs ended on (within 2h, reset unpassed, snapshot clock) is re-held first; unwritable holds refuse dispatch. Reviewers/producers use only profile `kind` (others skipped `cross-runtime`).
 
 ## The loop's own master session
 
@@ -41,7 +41,7 @@ GY=…/.graphyard/launch/NAME; claude … --settings …/.graphyard/harness/prod
 
 #### The start bound reads the pane
 
-**Ready**: Herdr active with no prompt, or banner shown (`the claude runtime is on screen while Herdr reports it unknown`; OpenCode 1.18 `Ask anything…`/`tab agents`, [fixture](../tests/fixtures/opencode-1.18-start-screen.txt)). Ready within **60 seconds** (`run.launchStartSeconds`) starts; still starting gets **120 seconds** (`started.extended`); supervisor first prints `graphyard: establishing containment for GY-N epoch E`. Refusals quote case and pane's last non-empty line (`the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`), never Herdr's own `agent_not_found`; retry as `Automatic producer launch for GY-N refused 1 time(s)`.
+**Ready**: Herdr active with no prompt, or banner shown (`the claude runtime is on screen while Herdr reports it unknown`; OpenCode 1.18 `Ask anything…`/`tab agents`, [fixture](../tests/fixtures/opencode-1.18-start-screen.txt)). Ready within **60 seconds** (`run.launchStartSeconds`) starts; still starting gets **120 seconds** (`started.extended`); supervisor first prints `graphyard: establishing containment for GY-N epoch E`. Refusals quote case and pane's last non-empty line (`the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`), never Herdr's own `agent_not_found`; retry as `Automatic producer launch for GY-N refused 1 time(s)`.
 
 **Approvers**: replaced panes' bounds run from first sight; failed relaunches adopt a started same-name approver once its registry session ends.
 
