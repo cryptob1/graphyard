@@ -365,7 +365,8 @@ test('unit:tmp-leaks — a worktree registration whose removal failed after its 
 test('unit:tmp-leaks — entries inside an agent runtime\'s scratch root (/tmp/opencode) older than the agent scratch bound go one by one; newer and held ones and the root itself stay', async () => {
   const base = await temporaryDirectory('runtime-scratch'), tmp = join(base, 'tmp'), opencode = join(tmp, 'opencode');
   await mkdir(opencode, { recursive: true });
-  assert.deepEqual(tmpReclaim.agentRuntimeScratchRoots, ['opencode']);
+  assert.deepEqual(tmpReclaim.agentRuntimeScratchRoots(1000), ['opencode', 'claude-1000'], 'the pass scans this user\'s claude-<uid> root like opencode\'s (GY-1827)');
+  assert.deepEqual(tmpReclaim.agentRuntimeScratchRoots(), ['opencode', `claude-${process.getuid!()}`], 'by default the pass scans this process\'s own uid\'s root');
   const stale = day + hour;
   const oldFiles = [join(opencode, '7e5bafba-review.txt'), join(opencode, '500e0ab4-packet.txt')];
   for (const path of oldFiles) await writeFile(path, 'x');

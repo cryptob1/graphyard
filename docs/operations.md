@@ -52,4 +52,4 @@ Confined masters/approvers/producers (not workers/reviewers) read GitHub login v
 
 Main guard revert approver ([provisioning](deployment.md#manual-fallback)): redeploy; verify `mainGuard.revertApprover`, empty `mainGuard.attention`, `doctor`.
 
-`/tmp` pass (own, unheld, same-device): test temps 2h; agent checkouts/`opencode` scratch 24h; `tsx-UID`/`node-compile-cache` 6h; `.pnpm-store` 7d; low inodes keep 12 newest roots.
+`/tmp` pass (own, unheld, same-device): test temps 2h; agent checkouts/`opencode`+`claude-UID` scratch 24h; `tsx-UID`/`node-compile-cache` 6h; `.pnpm-store` 7d; low inodes keep 12 newest roots.
