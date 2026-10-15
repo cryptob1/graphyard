@@ -66,6 +66,13 @@ test('unit:park-requirements-question-refused — GY-1816 AC-1: a goals-and-prio
     { ...clean, reason: 'The request reduces to a criteria revision, which the worker cannot make' },
     // Matching proofs to another item's tests without naming a criterion in the same sentence.
     { ...clean, ask: 'Decide whether this item\'s test assertions should match GY-1700\'s' },
+    // The ordinary revision verbs (review thread PRRT_kwDOUZby-s6sl1Cc): update, amend, change, edit.
+    { ...clean, ask: 'Should we update AC-1?' },
+    { ...clean, ask: 'Should we amend the acceptance criterion?' },
+    { ...clean, ask: 'Should we change AC-2 so the proof resolves?' },
+    { ...clean, reason: 'The criteria should be edited before either gate can pass' },
+    { ...clean, reason: 'AC-1 should be updated or amended, which the worker cannot decide' },
+    { ...clean, reason: 'This needs a criteria amendment' },
   ] as const;
   for (const body of questioned) {
     const refusal = parkRefusal(body)!;
@@ -85,6 +92,10 @@ test('unit:park-requirements-question-refused — GY-1816 AC-1: a goals-and-prio
     'Whether the legacy importer stays a goal this quarter',
     'Decide whether the legacy importer is still a goal before GY-12 removes it',
     'Whether the criteria work is prioritized above the docs trim',
+    // A requirements rewrite named as the work being ordered (review thread PRRT_kwDOUZby-s6sl1CW): the decision is the order.
+    'Whether the requirements rewrite lands before the release cut',
+    'Whether the criteria revision ships after GY-1700 or before it',
+    'Whether the requirements update should be prioritized above the docs trim',
   ] as const;
   for (const needed of accepted) assert.equal(parkRefusal({ kind: 'goals-and-priorities', needed, reason: 'the operator owns goals and priorities' }), null, needed);
 
