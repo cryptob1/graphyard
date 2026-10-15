@@ -179,7 +179,7 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * escalates each and, a cycle later, requests the rework. Absent, nothing is escalated.
    */
   exhaustedProofs?: () => Promise<ExhaustedProof[]>;
-  /** The review ledger's planned mechanical fixes (GY-971), one bot round each: each asks for its round's rework decision. */ mechanicalFixes?: () => Promise<MechanicalFixState>; /** GY-1764: reports the planned fix (or none) the review gate's hold reads. */ recordMechanicalPlan?: (work: Work, plan: { reviewId: number; head: string } | null) => Promise<unknown>;
+  /** The review ledger's planned mechanical fixes (GY-971), one bot round each: each asks for its round's rework decision. `answered` names the approvals the ledger settled otherwise (follow-ups filed, a fresh read, a fallback), so the gate's report of a still-owed plan is provisional, never past the ledger's answer (GY-1814). */ mechanicalFixes?: () => Promise<MechanicalFixState & { answered?: { key: string; reviewId: number }[] }>; /** GY-1764: reports the planned fix (or none) the review gate's hold reads. */ recordMechanicalPlan?: (work: Work, plan: { reviewId: number; head: string } | null, answered?: { reviewId: number; head: string }) => Promise<unknown>;
   /** GY-1118: withdraws a capped change request as the reviewer App that posted it (GitHub's review dismissal); absent, it is escalated instead. */
   withdrawReview?: (work: Work, reviewId: number, message: string) => Promise<void>;
   /**

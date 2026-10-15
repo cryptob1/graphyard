@@ -176,6 +176,8 @@ export interface Work extends Create {
   formalReviewResetRequired?: boolean;
   /** The planned mechanical-fix round the review ledger holds for the current candidate (GY-1764): the only ground that holds an approved head for its bot round. `at` is the instant the control plane accepted the loop's last report of it, so a hold never outlives a ledger the loop can still confirm. */
   mechanicalPlan?: { reviewId: number; head: string; at: string } | null;
+  /** The approval the loop's last clear of `mechanicalPlan` answered (GY-1814): a clear releases the review gate's hold over that approval only, never over a later approval of a later head. */
+  mechanicalAnswered?: { reviewId: number; head: string } | null;
   formalReviewBaseline?: { pr: number; policyRevision: number; reviewIds: number[] };
   // Append-only identities that have held an assignment. Trusted proof producers
   // must stay independent of every one of them, not only the latest assignment.

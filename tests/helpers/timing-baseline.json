@@ -790,6 +790,7 @@
     "tests/soak-release-filing.test.ts": 4721,
     "tests/soak-release-lag.test.ts": 11000,
     "tests/soak-repeated-limit.test.ts": 11000,
+    "tests/soak-red-regression.test.ts": 1000,
     "tests/soak-review-launch.test.ts": 3970,
     "tests/soak-review.test.ts": 68000,
     "tests/soak-rework-brief.test.ts": 22063,
