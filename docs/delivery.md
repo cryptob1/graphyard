@@ -32,7 +32,7 @@ Exact-head gates merge; [candidates](#release-candidates) deploy. [The redesign]
 
 ### Main guard
 
-Every 30 s the main guard reruns, then reverts, merges failing required checks their parents passed; the [revert approver App](deployment.md#variables) approves only a green exact inverse, three refusals abandon (`approval-refused`). A revert failing the merge's named tests is abandoned `base-failure` (delivery kept): one attention row names the test; no further revert for that set; one failing only that set is covered (`coveredBy`, read past) until main passes.
+Every 30 s main guard reruns, then reverts, merges failing required checks their parents passed; the [revert approver App](deployment.md#variables) approves only a green exact inverse, three refusals abandon (`approval-refused`). A revert failing the merge's named tests is abandoned `base-failure` (delivery kept): one attention row names the test; no further revert for that set; one failing only that set is covered (`coveredBy`, read past) until main passes.
 
 ## Managed repositories
 
@@ -74,8 +74,8 @@ Observers `POST /api/delivery/observe`:
 
 Only complete listings verify (`POST /api/delivery/notify`); `graphyard delivery sweep` verifies per `freshnessSeconds`; `graphyard delivery` shows state.
 
-`master status` `delivery`: `readyToMerged`, `mergedToProduction`, `stages` p50/p90; 7-day p90 over `deliverySpeed` (2h ready→merged, 45min merged→production) raises attention.
+`master status` `delivery`: `readyToMerged`, `mergedToProduction`, `stages` p50/p90; 7-day p90 over `deliverySpeed` (2h; merged→production 45min) raises attention.
 
 `POST /api/validation/result` binds manifest, signature, measurements; mismatches record `attribution-undermined`, voiding passes (`GET /api/analytics/attribution`).
 
-A loop-owned post-deploy observation item is never dispatched: deployment verification reads it, records no-smoke deliveries within 7 days (pre-change included), closes passes `delivered-observation`, escalates fails.
+A loop-owned post-deploy observation item is never dispatched: deployment verification reads it; a pass closes it `delivered-observation`, a fail escalates. Verification also records ≤7-day-old no-smoke deliveries.
