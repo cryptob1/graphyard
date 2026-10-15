@@ -330,7 +330,9 @@ function settledItem(index: number, now: Date): Work {
   const history = (n: number) => `settled-history:${key} entry ${n}`;
   Object.assign(work, {
     key, stage: 'done', gates: work.gates.map((gate: any) => ({ ...gate, passed: true, reasons: [] })),
-    delivery: { mergedAt: at, mergeSha: sha(index, 99), authorizationRevision: 400 },
+    // GY-1824: a settled delivery owes nothing — it carries the serving release the executor's
+    // verify-deployment row recorded, or it would not be settled but still read whole.
+    delivery: { mergedAt: at, mergeSha: sha(index, 99), authorizationRevision: 400, deployment: { sha: sha(index, 98), mergeSha: sha(index, 99), source: 'endpoint', observedAt: at, covers: 'exact', at, observer: 'executor-1' } },
     evidence: work.evidence.map((entry: any) => ({ ...entry, artifacts: [], scopeFiles: entry.scopeFiles.slice(0, 2) })),
     observation: { ...work.observation, merged: true, prState: 'closed', scopeFiles: work.observation.scopeFiles.slice(0, 10) },
     pipeline: { submittedAt: at, reworkRounds: 1, attempts: Array.from({ length: SETTLED_HISTORY }, (_, n) => ({ epoch: n + 1, owner: 'worker-a', claimedAt: at, endedAt: at, end: 'expired', note: history(n) })) },

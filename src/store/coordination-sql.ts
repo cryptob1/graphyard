@@ -9,6 +9,7 @@
  *
  * Every fragment reads the document as `d.document`, which the reader selects through `detoasted`.
  */
+import { deploymentRecordCutoffMs } from '../model/delivery.js';
 
 /**
  * A document expression read from storage once. A stored document is a TOAST
@@ -40,10 +41,20 @@ const running = (entry: string) => `${entry}->>'state' = 'running'`;
  * A delivery nothing is owed for any more: done, with no next action, no queue entry, no lease,
  * no containment quarantine, no action row and no running session. The SQL form of `deliverySettled`
  * in src/server/work-view.ts; the two must agree, and tests/store-locks.test.ts holds them to it.
+ *
+ * GY-1824: a done, unclosed delivery the unattended verify-deployment path still owes its record —
+ * no deployment observed, its merge (repository clock when the delivery carries it, else the
+ * provider's, as the delivery analytics read it) inside `deploymentRecordCutoffMs` — is not settled:
+ * a reconciliation pass reads it again and `settleDelivered` raises the verify-deployment row the
+ * executor records. A merge instant that is absent or malformed counts as outside the window, as
+ * `deploymentUnrecorded`'s own finite-instant check does, so such a delivery stays settled.
  */
 export const settledSql = `COALESCE(d.document->>'stage' = 'done' AND ${absent("d.document->'nextAction'")} AND ${absent("d.document->'queue'")} AND ${absent("d.document->'lease'")} AND ${absent("d.document->'containmentQuarantine'")}
   AND ${length("d.document->'actionQueue'->'actions'")} = 0
-  AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(${array("d.document->'sessions'")}) AS s(entry) WHERE ${running('s.entry')}), false)`;
+  AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(${array("d.document->'sessions'")}) AS s(entry) WHERE ${running('s.entry')})
+  AND NOT (${absent("d.document->'closure'")} AND jsonb_typeof(d.document->'delivery') = 'object' AND ${absent("d.document->'delivery'->'deployment'")}
+    AND COALESCE(graphyard_timestamptz(d.document->'delivery'->>'mergedAtRepository'), graphyard_timestamptz(d.document->'delivery'->>'mergedAt'), 'epoch'::timestamptz)
+      >= clock_timestamp() - make_interval(secs => ${deploymentRecordCutoffMs / 1000})), false)`;
 
 /**
  * What makes an evidence record one the coordination view can still consult, gathered once per

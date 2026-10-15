@@ -1,11 +1,16 @@
-import { test } from 'node:test';
+import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { Work } from '../src/model.js';
+import { randomUUID } from 'node:crypto';
+import type { Principal, Work } from '../src/model.js';
 import { deploymentRecordCutoffMs } from '../src/model/delivery.js';
 import { claimAction, openActions, reconcileActions } from '../src/model/actions.js';
 import { nextAction } from '../src/model/next-action.js';
 import { deliverySpeed } from '../src/flow-analytics.js';
 import { controlPlaneHandlers } from '../src/executor.js';
+import { Engine } from '../src/engine.js';
+import { Store } from '../src/store.js';
+import EmbeddedPostgres from 'embedded-postgres';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { MasterConfig } from '../src/master.js';
 
 // GY-1824: a delivery whose policy asks for no post-deployment smoke proof used to stop at
@@ -18,6 +23,13 @@ import type { MasterConfig } from '../src/master.js';
 // item. The reach is bounded (`deploymentRecordCutoffMs`), so the first evaluation after this
 // ships raises the deliveries the loop could have recorded recently, never the whole delivery
 // history at once; a smoke item's raise is unchanged.
+//
+// Deliveries that already were done when this shipped hold no row and are re-evaluated by nothing
+// else: a settled delivery is served as its summary and never visited. The settled rule therefore
+// keeps a delivery that still owes its record out of the settled summaries (the SQL form
+// `settledSql` and its TypeScript form `deliverySettled` agree), and the reconciliation pass
+// settles such an item like one holding leftover rows — the tests below run the real pass over a
+// real Postgres ledger, the only harness that shows the row reaching the executor.
 
 const day = 86_400_000;
 const nowMs = Date.parse('2030-06-01T12:00:00Z');
@@ -128,4 +140,72 @@ test('unit:unattended-verify-deployment — deliverySpeed counts a recorded deli
   assert.equal(after.count, 1);
   assert.equal(after.p90Ms, 3 * 3_600_000);
   assert.equal(after.pending, 0);
+});
+
+// ---- The reconciliation pass over a real ledger ---------------------------------------------
+
+const operator: Principal = { id: 'unattended-operator', role: 'admin', sessionKind: 'human' };
+const coordinator: Principal = { id: 'unattended-coordinator', role: 'coordinator', sessionKind: 'ai' };
+const executor: Principal = { id: 'unattended-executor', role: 'coordinator', sessionKind: 'ai' };
+
+let database: InstanceType<typeof EmbeddedPostgres>, store: Store, engine: Engine;
+before(async () => {
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1824;
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('unattended-verify-deployment'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  await database.initialise(); await database.start(); await database.createDatabase('unattended_verify_deployment_test');
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/unattended_verify_deployment_test`); await store.init();
+  engine = new Engine(store, [15368], 120, 'owner/unattended'); engine.submissionObserver = null;
+  engine.principals = [operator, coordinator, executor];
+});
+after(async () => { await store?.close(); await database?.stop(); });
+
+/** A delivered item planted as the pre-change ledger holds one: done, unclosed, no row, no next action. */
+async function plantDelivered(key: string, mergedAt: number): Promise<Work> {
+  const created = await engine.execute(operator, 'create', null, { title: key, plannedFiles: ['src/unattended/'], criteria: [{ id: 'AC-1', text: 'Served by the release', proofs: ['unit:unattended-verify-deployment'] }] }, randomUUID()) as Work;
+  await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [created.id, JSON.stringify({
+    ...created, stage: 'done', stageEnteredAt: iso(mergedAt), updatedAt: iso(mergedAt), ready: true, epoch: 1, lease: null,
+    candidate: null, nextAction: null, actionQueue: { actions: [], history: [] }, sessions: [], observation: null, violations: [], gates: [],
+    delivery: { mergeSha, mergedAt: iso(mergedAt), authorizationRevision: 1 },
+  })]);
+  return (await store.list()).find(item => item.id === created.id)!;
+}
+const settledOf = async (id: string) => !!(await store.pool.query('SELECT settled FROM work_index WHERE id=$1', [id])).rows[0]?.settled;
+
+test('unit:unattended-verify-deployment — reconciliation gives a delivery that already was done its verify-deployment row, the executor records it, and the delivery settles again', { timeout: 120_000 }, async () => {
+  // The ledger clock stamps the merges, so the two items sit on either side of the reach as the
+  // real ledger's would: one merged this week, one merged before it.
+  const dbNow = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime();
+  const owed = await plantDelivered('GY-1907', dbNow - 2 * day);
+  const beyond = await plantDelivered('GY-1908', dbNow - (deploymentRecordCutoffMs + day));
+
+  // A delivery the unattended path still owes its record is not settled: the pass reads it again
+  // instead of serving the summary forever; one beyond the reach stays with the master's hand.
+  assert.equal(await settledOf(owed.id), false, 'a delivery owing its record is not settled');
+  assert.equal(await settledOf(beyond.id), true, 'a delivery beyond the reach is settled');
+
+  await engine.reconcile();
+
+  const raised = (await store.list()).find(item => item.id === owed.id)!;
+  assert.equal(raised.nextAction?.kind, 'verify-deployment', 'the pass raised the verify-deployment action');
+  assert.equal(raised.actionQueue?.actions.filter(row => row.kind === 'verify-deployment').length, 1, 'the pass left exactly the verify-deployment row');
+  assert.deepEqual(raised.actionQueue?.actions.map(row => row.inputs), [{ kind: 'verify-deployment', mergeSha, mergedAt: iso(dbNow - 2 * day), state: 'delivered' }]);
+  const untouched = (await store.list()).find(item => item.id === beyond.id)!;
+  assert.equal(untouched.nextAction, null, 'a delivery beyond the reach raises nothing');
+  assert.equal(untouched.actionQueue?.actions.length ?? 0, 0, 'a delivery beyond the reach takes no row');
+
+  // The row is a claim an executor takes and runs: it observes the release and records the delivery.
+  const claimed = await engine.claimNextAction(executor, { host: 'host-1', kinds: ['verify-deployment'], work: owed.key }, randomUUID());
+  assert.equal(claimed.action?.kind, 'verify-deployment', 'the executor claims the raised row');
+  await engine.execute(coordinator, 'deployment', owed.id, { sha: release, mergeSha, source: 'endpoint', observedAt: iso(dbNow - 60_000) }, randomUUID());
+  const recorded = (await store.list()).find(item => item.id === owed.id)!;
+  assert.equal(recorded.delivery?.deployment?.sha, release, 'the serving release is recorded with no master session');
+
+  // Settled: the claim's own settlement retires the row, and the pass finds nothing to raise again.
+  await engine.settleClaimedAction(executor, claimed.action!.id, { result: 'done', reason: `observed the release serving ${release.slice(0, 12)}` }, randomUUID());
+  await engine.reconcile();
+  const settled = (await store.list()).find(item => item.id === owed.id)!;
+  assert.equal(settled.delivery?.deployment?.sha, release, 'a recorded delivery is not recorded again');
+  assert.equal(settled.actionQueue?.actions.length ?? 0, 0, 'the settled delivery holds no row');
+  assert.equal(await settledOf(owed.id), true, 'the recorded delivery is settled');
+  assert.equal(await nextAction(settled, [settled], new Date(dbNow)), null, 'nothing is raised for a recorded delivery');
 });

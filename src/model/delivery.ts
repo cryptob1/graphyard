@@ -46,7 +46,10 @@ export const deploymentRecordCutoffMs = 7 * 86_400_000;
  */
 export function deploymentUnrecorded(work: Work, now: number, cutoffMs = deploymentRecordCutoffMs): boolean {
   if (work.stage !== 'done' || work.closure || !work.delivery || work.delivery.deployment) return false;
-  const mergedAt = Date.parse(work.delivery.mergedAt);
+  // The repository clock when the delivery carries it, else the provider's — the same merge instant
+  // the delivery analytics order by (recentDelivered in src/flow-analytics.ts), so the window's
+  // boundary is one clock's, never seconds off between the raise and the figures it feeds.
+  const mergedAt = Date.parse(work.delivery.mergedAtRepository ?? work.delivery.mergedAt);
   return Number.isFinite(mergedAt) && now - mergedAt <= cutoffMs;
 }
 

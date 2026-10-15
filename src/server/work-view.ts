@@ -1,4 +1,5 @@
 import { evidenceBindsCandidate, type Work } from '../model.js';
+import { deploymentUnrecorded } from '../model/delivery.js';
 
 /**
  * The coordination view of the work snapshot: what the master loop and the automatic dispatcher
@@ -68,10 +69,17 @@ const stored = (work: Work) => work as Work & { queue?: unknown; queueHistory?: 
  * index stores exactly this view of it at write time (`settledSql` in src/store/coordination-sql.ts
  * is the SQL form; the two must agree), so the coordination snapshot serves it without reading its
  * document.
+ *
+ * GY-1824: a done, unclosed delivery the unattended verify-deployment path still owes its record —
+ * no deployment observed, its merge (repository clock when the delivery carries it, else the
+ * provider's) inside `deploymentRecordCutoffMs` — is not settled: the SQL form keeps the same
+ * deliveries out of the index's settled summaries, so a reconciliation pass reads the document
+ * again and settleDelivered raises the row the executor records.
  */
 export const deliverySettled = (work: Work) => work.stage === 'done' && absent(work.nextAction) && absent(stored(work).queue) && absent(work.lease) && absent(work.containmentQuarantine)
   && !(Array.isArray(work.actionQueue?.actions) && work.actionQueue.actions.length)
-  && !(Array.isArray(work.sessions) && work.sessions.some(handle => handle?.state === 'running'));
+  && !(Array.isArray(work.sessions) && work.sessions.some(handle => handle?.state === 'running'))
+  && !deploymentUnrecorded(work, Date.now());
 /** A record bound to a release, not a candidate: the loop's own reading or a `manual:post-deploy/*` proof (`relevantEvidence` in src/store/coordination-sql.ts keeps the same). */
 const postDeployRecord = (entry: Work['evidence'][number]) => (!!entry.reading && typeof entry.reading === 'object') || entry.proof.startsWith('manual:post-deploy/');
 const recent = <T>(entries: T[], keep: number) => entries.slice(Math.max(0, entries.length - keep));
