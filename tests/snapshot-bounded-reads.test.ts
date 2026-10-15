@@ -354,8 +354,8 @@ test('integration:api-work-bounded-read — GET /api/work serves the fleet (open
   });
   // Every tenth delivery was settled without a candidate, its submission alone naming its pull
   // request: the shape tests/master-verification.test.ts delivers, which the index's `pr` column
-  // (the candidate's) never carries. GY-1824: a settled delivery owes nothing — each carries the
-  // deployment record the executor's verify-deployment row wrote, or it would not be settled.
+  // (the candidate's) never carries. GY-1824: each delivery carries the deployment record the
+  // executor's verify-deployment row wrote, as a settled delivery does once that row has run.
   const settled = Array.from({ length: settledCount }, (_, index) => document(index, { stage: 'done', candidate: index % 10 === 5 ? null : { sha: hex('c'), baseSha: hex('b'), pr: 3000 + index }, submission: { epoch: 1, pr: 3000 + index }, delivery: { mergeSha: hex('a'), mergedAt: stamp(86_400_000), deployment: { sha: hex('e'), mergeSha: hex('a'), source: 'endpoint', observedAt: stamp(80_000_000), covers: 'exact', at: stamp(80_000_000), observer: 'executor-1' } } }));
   const candidateOpen = document(settledCount, { stage: 'build', candidate: { sha: hex('d'), baseSha: hex('b'), pr: 7777 }, submission: { epoch: 1, pr: 7777 }, lease: { owner: 'worker', epoch: 1, expiresAt: stamp(-600_000) } });
   const submittedOpen = document(settledCount + 1, { stage: 'build', candidate: null, submission: { epoch: 1, pr: 7778 }, lease: { owner: 'worker', epoch: 1, expiresAt: stamp(-600_000) } });

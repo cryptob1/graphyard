@@ -1,7 +1,7 @@
 <!-- page: Build integrations | 4 | release API. -->
 # Releases and delivery
 
-Records intended releases, verifying observers ([rollback](recovery.md#rollback)): `admin` sets policy, approves; `builder`s build; `admin`/`promoter` select; `observer`s lease (`POST /api/delivery/lease`).
+Records releases, verifying observers ([rollback](recovery.md#rollback)): `admin` sets policy, approves; `builder`s build; `admin`/`promoter` select; `observer`s lease (`POST /api/delivery/lease`).
 
 ## Release candidates
 
@@ -14,7 +14,7 @@ Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`
 - Failed candidates file a [hold](validation.md#release-holds) per failed outcome, else a follow-up (`release follow-up ID`) as the [filing credential](#release-filing-credential).
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records advisory `rc-soak/ID`.
 
-**The master loop promotes** (`promote=true`) once main differs from the last `rc-production/` and cut SHAs, nothing is queued and `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`; 10, `0` off) passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`, `GRAPHYARD_PRODUCTION_URL`; no workflow; managed repositories run [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. A `GRAPHYARD_UAT_STATIC` site's [merge-writer](delivery-redesign.md#merge-writer) trials run pre-build required/uat cases uncredentialed: failing or secret-declaring required ones, or none runnable, fail it; timeouts re-queue (`mergeLedger.trial.preview`). `release status` lists candidates; `release GY-N EPOCH` leases. Needs `vars.UAT_URL`/`PRODUCTION_URL`, tokens.
+**The master loop promotes** (`promote=true`) once main differs from the last `rc-production/` and cut SHAs, nothing is queued and `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`; 10, `0` off) passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`, `GRAPHYARD_PRODUCTION_URL`; no workflow; managed repositories run [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. A `GRAPHYARD_UAT_STATIC` site's [merge-writer](delivery-redesign.md#merge-writer) trials run pre-build required/uat cases uncredentialed: failing or secret-declaring required ones, or none runnable, fail it; timeouts re-queue (`mergeLedger.trial.preview`). `release status` lists candidates; `release GY-N EPOCH` leases. Needs `vars.UAT_URL`/`PRODUCTION_URL`.
 
 ### Release filing credential
 
@@ -28,7 +28,7 @@ Required: `typecheck`, `test` (`ci.yml`); per candidate `releaseCandidateTests`,
 
 ### One delivery path
 
-Exact-head gates merge; [candidates](#release-candidates) deploy. [The redesign](delivery-redesign.md) has only Graphyard write main.
+Exact-head gates merge; [candidates](#release-candidates) deploy. Only Graphyard writes main ([redesign](delivery-redesign.md)).
 
 ### Main guard
 
@@ -78,4 +78,4 @@ Only complete listings verify (`POST /api/delivery/notify`); `graphyard delivery
 
 `POST /api/validation/result` binds manifest, signature, measurements; mismatches record `attribution-undermined`, voiding passes (`GET /api/analytics/attribution`).
 
-A loop-owned post-deploy observation item is never dispatched: deployment verification reads it; a pass closes it `delivered-observation`, a fail escalates. Verification also records ≤7-day-old no-smoke deliveries.
+A loop-owned post-deploy observation item is never dispatched: deployment verification reads it; a pass closes it `delivered-observation`, a fail escalates. Verification records no-smoke deliveries, backfilling five per pass.

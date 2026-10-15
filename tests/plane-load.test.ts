@@ -111,8 +111,8 @@ function delivered(n: number, now: number): Work {
     plannedFiles: [n === 1 ? `${SLICE}/delivered.ts` : 'src/module.ts'], revision: 30, policyRevision: 1, createdAt: iso(created), updatedAt: iso(merged), stageEnteredAt: iso(merged),
     ready: true, epoch: 2, stage: 'done', lease: null, workspaces: [{ host: 'machine-a', path: `/srv/worktrees/${key}-2`, epoch: 2, owner: 'graphyard-worker-1', branch: `graphyard/${key.toLowerCase()}-2` }],
     candidate, submission: { epoch: 2, pr: candidate.pr }, reworkRequested: false, scenarioRequirements: [], blocker: null, gates: [], violations: [], closure: null,
-    // GY-1824: a settled delivery owes nothing — each carries the serving release the executor's
-    // verify-deployment row recorded — or the flow report reads it whole and it is not settled.
+    // GY-1824: each delivery carries the serving release the executor's verify-deployment row
+    // recorded, as a settled delivery does once that row has run.
     delivery: { mergedAt: iso(merged), mergeSha: sha(n, 'm'), authorizationRevision: 1, deployment: { sha: sha(n, 'd'), mergeSha: sha(n, 'm'), source: 'endpoint', observedAt: iso(merged + hour), covers: 'exact', at: iso(merged + hour), observer: 'executor-1' } },
     evidence: Array.from({ length: 3 }, (_, e) => ({ id: uuid(n * 10 + e + 5_000_000), proof: 'unit:proof-1', sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 1, result: 'pass', executed: 12, skipped: 0, producer: 'ci-runner', trusted: true, at: iso(created + 2 * hour) })),
     observation: { prState: 'closed', merged: true, mergeSha: sha(n, 'm'), mergedAt: iso(merged), mergeable: true, protected: true, candidate, checks: [{ name: 'test', result: 'success', appId: 15368 }], reviews: [{ reviewer: 'graphyard-reviewer[bot]', sha: candidate.sha, state: 'APPROVED' }], files: [n === 1 ? `${SLICE}/delivered.ts` : 'src/module.ts'], at: iso(merged) },

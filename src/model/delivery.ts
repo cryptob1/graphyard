@@ -31,27 +31,21 @@ export interface Delivery { mergedAt: string; mergeSha: string; authorizationRev
 export const deploySmokeRequired = (policy: Work['policy']) => !!policy.deploySmoke;
 
 /**
- * GY-1824: how far back the unattended verify-deployment reach goes for a delivery whose serving
- * release is not recorded on it yet. Beyond this window an unrecorded delivery stays with the
- * master's hand (`master verify-deployment GY-N`), so the first evaluation after this ships raises
- * the deliveries the loop could have recorded recently, never the whole delivery history at once.
+ * GY-1824: how many settled deliveries still owing their record one full reconciliation pass
+ * raises a verify-deployment row for (newest item first). Deliveries done before the unattended
+ * path shipped hold no row and are re-evaluated by nothing else, so the pass backfills them a few
+ * at a time — the first passes after this ships never sweep the whole delivery history into the
+ * queue at once — and every one of them is reached in turn, however old its merge.
  */
-export const deploymentRecordCutoffMs = 7 * 86_400_000;
+export const deploymentBackfillPerPass = 5;
 
 /**
  * A done, unclosed delivery the unattended verify-deployment path still owes its record: no release
- * observation is bound to it yet, and its merge is inside `deploymentRecordCutoffMs` of `now`. The
- * smoke policy decides what follows a record (the post-deployment smoke proof), never whether the
- * record is owed, so this holds for non-smoke policies too — the gap GY-1824 closes.
+ * observation is bound to it yet. The smoke policy decides what follows a record (the
+ * post-deployment smoke proof), never whether the record is owed, so this holds for non-smoke
+ * policies too — the gap GY-1824 closes — and for a merge of any age.
  */
-export function deploymentUnrecorded(work: Work, now: number, cutoffMs = deploymentRecordCutoffMs): boolean {
-  if (work.stage !== 'done' || work.closure || !work.delivery || work.delivery.deployment) return false;
-  // The repository clock when the delivery carries it, else the provider's — the same merge instant
-  // the delivery analytics order by (recentDelivered in src/flow-analytics.ts), so the window's
-  // boundary is one clock's, never seconds off between the raise and the figures it feeds.
-  const mergedAt = Date.parse(work.delivery.mergedAtRepository ?? work.delivery.mergedAt);
-  return Number.isFinite(mergedAt) && now - mergedAt <= cutoffMs;
-}
+export const deploymentUnrecorded = (work: Work) => work.stage === 'done' && !work.closure && !!work.delivery && !work.delivery.deployment;
 
 /**
  * Post-delivery state, derived from the delivery snapshot alone. `delivered` is the terminal state
