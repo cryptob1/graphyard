@@ -53,9 +53,10 @@ const piPane = `● Reading GY-1816 before editing.
 ${limitError}
 Retry failed after 3 attempts
 `;
-const resetAt = '2026-10-17T08:27:35.000Z';
 /** 2026-10-15T01:10:00Z, the instant the loop read the notice; each cycle advances it. */
 const observedAt = Date.parse('2026-10-15T01:10:00Z');
+/** 2026-10-17T08:27:35Z, the reset the notice names, read in UTC: 55h17m35s after the fixed clock. */
+const resetAt = new Date(observedAt + ((55 * 60 + 17) * 60 + 35) * 1000).toISOString();
 const clock = { skewMs: 0 };
 const now = () => observedAt + clock.skewMs;
 
