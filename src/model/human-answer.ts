@@ -36,9 +36,14 @@ export function resolveHumanAnswer(request: Pick<HumanRequest, 'kind' | 'choices
   return { outcome: choice!.outcome, text: note ? `${choice!.label}: ${note}` : choice!.label, choice: { id: choice!.id, label: choice!.label }, note, secret: choice!.input === 'secret' };
 }
 
-/** `withdrawn`: nobody answered; the item was closed and the question no longer stands (model/closure.ts). */
+/**
+ * `withdrawn`: nobody answered; the item was closed and the question no longer stands (model/closure.ts).
+ * `superseded-by-observation` (GY-1815): the asked state was observed to hold, and a two-party decision
+ * closed the request; `by` is its requester, `approvedBy` its approver, `decision` its id, `text` its reason.
+ */
 export interface HumanAnswer {
-  by: string; at: string; outcome: 'provided' | 'declined' | 'withdrawn'; text: string; waitedMs: number;
+  by: string; at: string; outcome: 'provided' | 'declined' | 'withdrawn' | 'superseded-by-observation'; text: string; waitedMs: number;
+  approvedBy?: string; decision?: string;
   /** The button pressed and the note beside it (GY-738); absent on a free-text answer. */
   choice?: { id: string; label: string } | null; note?: string | null;
   /** A secret choice's value, sealed to the requesting host's key (server/waits.ts `sealToHost`). */

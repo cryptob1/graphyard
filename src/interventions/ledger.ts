@@ -12,7 +12,7 @@ export const interventionLedgerKinds = [
   'scope', 'autoscope', 'requirements', 'blocked', 'unblock',
   'merge.reconciliation.refused', 'merge.operator-authorized', 'merge.reconciled',
   'quarantine', 'settle', 'autosettle', 'recover', 'lease.expired', 'escalation.resolved',
-  'human.requested', 'human.answered', 'intervention.recorded', 'judgement.recorded',
+  'human.requested', 'human.answered', 'human.superseded', 'intervention.recorded', 'judgement.recorded',
 ] as const;
 /** The newest rows of those kinds a reading folds; older signals are outside the report's reach and the report says so. */
 export const interventionLedgerLimit = 20_000;
