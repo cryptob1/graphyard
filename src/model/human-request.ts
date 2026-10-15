@@ -5,7 +5,7 @@ import { shortAskIssues } from './human-ask.js';
 import type { HumanAnswer } from './human-answer.js';
 import type { Work } from './work.js';
 
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------------
 // Decisions only a human may make, as typed state (GY-89).
 //
 // Agents decide everything except three things: goals and priorities, spending money or opening
@@ -13,7 +13,7 @@ import type { Work } from './work.js';
 // which of the three, why, and the exact thing needed — and that one transaction ends the
 // attempt's lease and parks the item: the request is listed for the human with how long it has
 // waited and how to answer it, and the answer returns the item to the loop, which dispatches it.
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------------
 
 export const humanDecisionKinds = ['goals-and-priorities', 'money-or-accounts', 'credentials-for-people'] as const;
 export type HumanDecisionKind = typeof humanDecisionKinds[number];
@@ -69,11 +69,7 @@ export const humanRequestSchema = z.object({
   sealTo: z.string().trim().min(1).max(4000).optional(),
 }).strict().refine(data => data.sealTo || !data.choices?.some(choice => choice.input === 'secret'), 'A secret choice needs sealTo, the requesting host\'s public key')
   .superRefine((data, context) => { for (const message of shortAskIssues(data)) context.addIssue({ code: 'custom', message }); });
-/**
- * What a request's recommendation misses (GY-1410), naming the field; empty when it has one: the choice
- * recommended or the safest way to obtain a value, plus WHY. A request with choices names one by its label
- * (the card preselects it); a value request (a secret choice, or every choice but Decline asking for words) may advise freely.
- */
+/** What a request's recommendation misses (GY-1410), naming the field; empty when it has one: the choice recommended or the safest way to obtain a value, plus WHY. A request with choices names one by its label; a value request may advise freely. */
 export function recommendationIssues(data: { kind?: HumanDecisionKind; choices?: HumanChoice[] | null; sealTo?: string | null; recommendation?: string; why?: string }): string[] {
   const choices = data.kind ? requestChoices({ kind: data.kind, choices: data.choices, sealTo: data.sealTo }) : [];
   const valueRequest = choices.some(choice => choice.input === 'secret') || choices.every(choice => choice.outcome === 'declined' || choice.input !== 'none');
@@ -90,37 +86,38 @@ export function recommendedChoice(request: { kind: HumanDecisionKind; choices?: 
   const advice = request.recommendation ? key(request.recommendation) : null;
   return advice ? requestChoices(request).find(choice => key(choice.id) === advice || key(choice.label) === advice)?.id ?? null : null;
 }
-// The park-refusal classifier (GY-1395, GY-1416, GY-1692) lives in park-refusal.ts; `parkRefusal` here
-// refuses a criterion-rewrite question first (GY-1816), so the server and the CLI see one name.
+// The park-refusal classifier (GY-1395, GY-1416, GY-1692) lives in park-refusal.ts; `parkRefusal` here refuses a criterion-rewrite question first (GY-1816).
 export { hostDoableAsk, hostDoableRefusal, type HostDoableAsk };
 
-/** GY-1818: per sentence, any order — is a requirements object named (AC-N, the criteria, or GY-N beside a tests reference), and does a change operation target it. */
+/** GY-1818: per sentence, any order — is a requirements object named, and does a change operation target it. */
 const criterionId = /\bAC-\d+\b/i, criterionName = /\b(?:acceptance\s+)?criteri(?:a|on)\b|\brequirements?\b/i, itemKey = /\bGY-\d+\b/i, testsReference = /\btests?\/\S*|\b(?:tests?|assertions?|suites?)\b/i,
   requirementsObject = (sentence: string) => criterionId.test(sentence) || criterionName.test(sentence) || (itemKey.test(sentence) && testsReference.test(sentence)),
-  /** GY-1819: the bare noun alone — no criterion id, criteria word or key with tests — names the rewrite as work, not the requirements: its change-noun never asks, whatever its verb, since landing or ordering that work is goals and priorities. */
+  /** GY-1819: the bare noun alone — no criterion id, criteria word or key with tests — names the rewrite as work, not the requirements: its change-noun never asks while the change word keeps a predicate of its own; ordering that work is goals and priorities. */
   bareNounOnly = (sentence: string) => !criterionId.test(sentence) && !/\b(?:acceptance\s+)?criteri(?:a|on)\b/i.test(sentence) && !(itemKey.test(sentence) && testsReference.test(sentence));
 const changeStems = String.raw`rewrit|revis|revers|updat|amend|chang|edit|delet|remov|reconcil|match|align|weaken|relax|soften|narrow|merg|replac|drop`, keyStems = 'match|align|reconcil|revers|revert',
-  changeNoun = /\b(?:AC-\d+|criteri(?:a|on)|requirements?)(?:'s)?\s+(?:rewrit\w*|revis\w*|updat\w*|amend\w*|chang\w*|edit\w*|delet\w*|remov\w*|reconcil\w*|align\w*|weaken\w*|relax\w*|narrow\w*|revers\w*|merg\w*|replac\w*|drops?)\b/i;
-/** Verb and object in one clause, either order ("AC-1 must be revised"), across only determiners, auxiliaries, -ly words or a scoping qualifier, never "to"; another noun's change counts nowhere; a key only of alignment or reversal ("GY-1762 is reversed"), never "drop GY-1700"; an aligned tests/ path counts beside a key. */
+  changeNoun = /\b(?:AC-\d+|criteri(?:a|on)|requirements?)(?:'s)?\s+(?:rewrit\w*|revis\w*|updat\w*|amend\w*|chang\w*|edit\w*|delet\w*|remov\w*|reconcil\w*|align\w*|weaken\w*|relax\w*|narrow\w*|revers\w*|merg\w*|replac\w*|drops?)\b/i,
+  /** GY-1819 review: the change word is the work's noun only while a predicate of its own follows ("the requirements rewrite lands", "should it land?"); clause end, object, "to" or "so" leaves it the verb ("the requirements change"), which objectThenVerb refuses. */
+  ownPredicate = String.raw`(?=\s+(?:\w+ly\s+)*(?:\w+s\b|w(?:ill|ould)|c(?:an|ould)|m(?:ay|ight|ust)|shall|should|are|be(?:en|ing)?|ha(?:d|ve)|land|happen|go|come|ship|merg\w*|wait|slip|preced\w*|follow\w*|run|start|finish|arriv\w*|get)\b)`;
+/** Verb and object in one clause, either order, across only determiners, auxiliaries, -ly words or a scoping qualifier, never "to"; another noun's change counts nowhere; a key only of alignment or reversal, never "drop GY-1700"; an aligned tests/ path counts beside a key. */
 const auxiliaries = String.raw`(?:should|shall|may|might|must|can|could|would|will|needs?|needed|is|are|was|were|be|been|being|gets?|got|has|have|had|to|not|never|no longer|also|still|instead|now|again|once)`,
   verbThenObject = new RegExp(String.raw`\b(?:${changeStems})\w*(?:(?:\s+|,\s*)(?:the|a|an|its|their|our|your|this|that|these|those|another|each|acceptance|\w+ly))*(?:\s+|,\s*)(?:acceptance\s+)?(?:AC-\d+|criteri(?:a|on)|requirements?)(?:'s)?\b|\b(?:${keyStems})\w*(?:\s+(?:the|\w+ly))*\s+GY-\d+`, 'gi');
 const qualifier = String.raw`(?:\s+(?:for|in|of|on|under|about|within|at)(?:\s+[\w'-]+){1,4}?(?=(?:\s+|,\s*)${auxiliaries}\b))?`,
   objectThenVerb = new RegExp(String.raw`\b(?:AC-\d+|criteri(?:a|on)|requirements?)(?:'s)?${qualifier}(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:${changeStems})\w*`, 'gi'),
   keyThenVerb = new RegExp(String.raw`\bGY-\d+(?:'s)?(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:is|are|was|were|be|been|being|gets?|got)\b(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:${keyStems})\w*`, 'gi'),
   pathAligned = new RegExp(String.raw`\b(?:match|align|reconcil)\w*(?:(?:\s+|,\s*)(?:the|a|an|its|their|our|your|this|that|these|those|each|\w+ly))*(?:\s+|,\s*)tests?\/\S+|\btests?\/\S+(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:match|align|reconcil)\w*`, 'gi');
-/** "the tests that match GY-1700" names tests, aligns nothing. A change-noun is scheduled only when its own predicate is tied to an ordering relation ("happens before the cut", "precedes GY-1700"); a bare "lands", a need ("is needed before") or "first or the docs land" schedules nothing. Scheduling matters only beside a named object: a bare noun's change-noun never asks. */
+/** "the tests that match GY-1700" names tests, aligns nothing. A change-noun is scheduled only when its own predicate is tied to an ordering relation; a bare "lands", a need ("is needed before") or "first or the docs land" schedules nothing. */
 const namedNotAligned = /\b(?:match|align|reconcil)\w*(?:ing|ed)(?=\s+(?:tests?|assertions?|suites?)\b(?!\/))|(?<=\b(?:tests?|assertions?|suites?)\s+(?:that|which)\s+)(?:match|align|reconcil)\w*(?:\s+GY-\d+(?:'s)?)?/gi,
   scheduledChange = new RegExp(String.raw`${changeNoun.source}(?:\s+(?:should|shall|may|might|must|can|could|would|will|is|are|was|were|be|been|being|gets?|got|has|have|had|also|still|now|\w+ly))*\s+(?:(?:preced|follow)\w*\s+\w|(?!(?:to|needs?|needed|requires?|required|necessary|wanted)\b)\w+(?:\s+\w+ly)?\s+(?:before|after|until|till|first|then|next|last|later|earlier|sooner|above|below|behind|ahead\s+of)\b(?!,?\s+(?:or|and)\s+(?:the|a|an|its|this|that|these|those)\b))`, 'gi');
-/** A negated change asks only in a question ("should AC-1 not be weakened?"), from the last clause break and never past an although, though or but boundary (GY-1819). A sentence (no dot inside a token ends one) asks when it targets a named requirements object or names unscheduled change work. */
+/** A negated change asks only in a question, from the last clause break and never past an although, though or but boundary (GY-1819). A sentence asks when it targets a named requirements object or names unscheduled change work. */
 const question = (sentence: string) => /\?|\b(?:whether|if)\b/i.test(sentence) || /^(?:should|shall|may|might|must|can|could|would|will|do|does|did|is|are|was|were|has|have)\b/i.test(sentence.trim()),
   verbChain = (text: string, end: number) => { const before = text.slice(0, end); return before.slice(1 + Math.max(before.lastIndexOf(','), before.lastIndexOf(';'), before.lastIndexOf(' but '), before.lastIndexOf(' although '), before.lastIndexOf(' though '), before.lastIndexOf(' so '), before.lastIndexOf(' and '), before.lastIndexOf(' or '))); };
 const requirementsQuestion = (text: string) => (text.match(/(?:[^.;\n?]|\.(?=\S))+\??/g) ?? []).some(sentence => {
-  const asked = sentence.replace(new RegExp(changeNoun.source, 'gi'), 'work').replace(namedNotAligned, '');
+  const asked = sentence.replace(new RegExp(changeNoun.source + ownPredicate, 'gi'), 'work').replace(namedNotAligned, '');
   const targeted = [...asked.matchAll(verbThenObject), ...asked.matchAll(objectThenVerb), ...asked.matchAll(keyThenVerb), ...asked.matchAll(pathAligned)].some(found => !/\b(?:not|never|no longer)\b/i.test(`${found[0]} ${verbChain(asked, found.index!)}`) || question(sentence));
   return requirementsObject(sentence) && (targeted || !bareNounOnly(sentence) && changeNoun.test(sentence.replace(scheduledChange, 'work'))); });
 /** A park's own words: the kind it claims, and every text the human would read. */
 export interface ParkQuestion { kind?: string; needed: string; ask?: string | null; reason?: string | null }
-/** Why a goals-and-priorities park asks a criterion rewrite (GY-1816) — on structure, not phrasing (GY-1818); the bare noun alone names work, not the requirements (GY-1819) — or null: the master requests rewrites, an approver approves (docs/glossary.md#who-decides). */
+/** Why a goals-and-priorities park asks a criterion rewrite (GY-1816, structural since GY-1818; the bare noun alone names work, not the requirements — GY-1819) — or null: the master requests rewrites, an approver approves. */
 export function requirementsQuestionRefusal(data: ParkQuestion): string | null {
   if (data.kind !== 'goals-and-priorities') return null;
   const questioned = [data.ask, data.needed, data.reason].some(text => !!text?.trim() && requirementsQuestion(text));

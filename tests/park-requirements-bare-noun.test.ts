@@ -10,12 +10,14 @@ import { humanRequestSchema, parkRefusal, requirementsQuestionRefusal } from '..
 // the rewrite's verb — "Whether the requirements rewrite lands" refused while "Whether the
 // requirements rewrite happens before the release cut" parked. One rule settles both sentences: the
 // bare noun alone — no criterion id (AC-N), no work-item key, no tests/ path — names the rewrite as
-// work, not the requirements, so its change-noun never asks whatever its verb. Whether that work
-// lands, happens or sits in the order is goals and priorities, the operator's (GY-1818's approved
-// record names the ordering sentence an operator ordering question and its refusal over-refusal);
-// the requirements are asked about when a change verb targets them directly ("revise the
-// requirements", "the requirements are revised") or when a named object is present (AC-N, the
-// criteria, another item's key with tests) — those still refuse, and every GY-1816 and GY-1818
+// work, not the requirements, so its change-noun never asks whatever its verb while the change word
+// keeps a predicate of its own. Whether that work lands, happens or sits in the order is goals and
+// priorities, the operator's (GY-1818's approved record names the ordering sentence an operator
+// ordering question and its refusal over-refusal); the requirements are asked about when a change
+// verb targets them directly ("revise the requirements", "the requirements are revised", "the
+// requirements change", "the requirements drop X" — the change word is the sentence's verb, with no
+// predicate of its own after it) or when a named object is present (AC-N, the criteria, another
+// item's key with tests) — those still refuse, and every GY-1816 and GY-1818
 // fixture outside the four bare-noun pins this rule re-homes keeps its outcome, asserted in
 // tests/park-requirements-question-refused.test.ts and tests/park-requirements-question-structural.test.ts.
 // A negation scopes only its own clause, never past an although, though or but boundary (AC-2,
@@ -40,6 +42,10 @@ test('unit:park-requirements-bare-noun — GY-1819 AC-1: a park whose requiremen
     'Whether the requirements update should be prioritized above the docs trim',
     'Whether the requirements rewrite lands before the docs ship',
     'Whether a requirements revision happens and the docs ship',
+    // The same scheduling asks behind a modal, with the work's predicate in the subjunctive.
+    'Should the requirements rewrite land?',
+    'Should the requirements rewrite go ahead?',
+    'Might the requirements rewrite happen?',
   ];
   for (const needed of parked) {
     assert.equal(requirementsQuestionRefusal({ ...clean, needed }), null, needed);
@@ -50,11 +56,18 @@ test('unit:park-requirements-bare-noun — GY-1819 AC-1: a park whose requiremen
 
   // The bare noun is not a requirements object only as the noun of a change: a change verb targeting
   // the requirements directly still refuses (every GY-1816 fixture of this class keeps its outcome).
+  // The change word as the sentence's verb — no predicate of its own follows it, so it is not the
+  // work's noun — refuses too, clause end, object, "to" and "so" alike (review of c679d5f77786, B1).
   const refused = [
     'Should we revise the requirements?',
     'Whether the requirements need to be revised',
     'Should the requirements for the importer be changed?',
     'The worker asks to revise the requirements so the proof resolves, or to weaken AC-1 instead',
+    'Should the requirements change?',
+    'Whether the requirements change',
+    'Should the requirements change to match the new API?',
+    'Should the requirements drop the importer clause?',
+    'The requirements change so the proof resolves',
     // Named objects keep the GY-1818 outcomes: a bare predicate on the criteria or on AC-N still asks.
     'Whether the criteria revision ships',
     'Whether AC-1\'s rewrite happens',
