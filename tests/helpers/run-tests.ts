@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process';
 import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
+import { availableParallelism } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseShard, readDurations, shardFiles } from '../../scripts/ci-tests.mjs';
 import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, type ReserveOptions } from '../../src/cli/test-isolation.js';
-import { hostMemoryVariable } from '../../src/master-resources.js';
-import { heldVariable, sessionVerificationSlot } from '../../src/master/verification-slots.js';
+import { hostMemoryFloor, hostMemoryVariable, memoryRecoveryMarginBytes, readHostMemory } from '../../src/master-resources.js';
+import { bytesPerSuiteFile, declareSlotFiles, heldVariable, othersDeclaredFiles, sessionVerificationSlot, slotsDirectoryVariable } from '../../src/master/verification-slots.js';
 import { describeTmpReclaim, reclaimTmpDirectories } from '../../src/tmp-reclaim.js';
 
 // The suite's own runner (GY-174): `npm test` and `npm run test:browser` start here, so a clean run
@@ -16,7 +17,11 @@ import { describeTmpReclaim, reclaimTmpDirectories } from '../../src/tmp-reclaim
 //   node --import tsx tests/helpers/run-tests.ts --typecheck          tsc --noEmit (npm run typecheck)
 //
 // Started from a Graphyard session, each of the three first takes a host verification slot
-// (src/master/verification-slots.ts, GY-612), waiting while every slot on the host is held.
+// (src/master/verification-slots.ts, GY-612), waiting while every slot on the host is held. The
+// Node suite then runs at the breadth the host's memory affords (GY-1821): the files in flight
+// stay inside what is available beyond the floor and the deferral margin, less what runs on the
+// other slots declared — a suite alone runs at node's full breadth, and however many suites the
+// slots admit together, they cannot take the host under its memory floor.
 //
 // Three runner options select and measure the Node suite's files (GY-499), as CI's shard jobs do:
 //   --files-from LIST   run the files LIST names, one per line (an empty list runs nothing)
@@ -62,6 +67,33 @@ export async function sweepLeftoverTempDirectories(when: string, tmpRoot?: strin
 /** The browser suite's historical port, tried first. */
 export const defaultBrowserPort = 4319;
 
+/**
+ * How many suite files a run starts at once (GY-1821). The base runner left this to node --test's
+ * default, one file per CPU, whatever the host held: on the 24-CPU host whose dips GY-1821 files,
+ * one full suite swung available memory from 27.4 GB to 9.4 GB (about `bytesPerSuiteFile` a file),
+ * and the second suite the slots bound still admitted took the host under the floor the loop
+ * defers launches at and files memory-pressure faults on. The breadth is what the host's memory
+ * affords beyond its floor and the deferral's own recovery margin, less the files runs on slots
+ * already held declared, never fewer than two and never above node's own default — so a run alone
+ * runs at full speed, and however many suites the slots admit together, their files stay inside
+ * the budget. `budgetBytes` is the caller's reading minus the floor minus the margin.
+ */
+export function suiteBreadth({ budgetBytes, otherFiles, cpus, perFileBytes = bytesPerSuiteFile }: { budgetBytes: number; otherFiles: number; cpus: number; perFileBytes?: number }): number {
+  const affordable = Math.floor(budgetBytes / perFileBytes) - Math.max(0, otherFiles);
+  return Math.max(2, Math.min(affordable, Math.max(2, cpus - 1)));
+}
+
+/** The breadth this run starts at, or null when nothing judges it: a run inside a run, a host whose memory cannot be read (CI keeps node's own default). */
+export async function hostSuiteBreadth(environment: NodeJS.ProcessEnv = process.env, memory: typeof readHostMemory = readHostMemory, pid: number = process.pid): Promise<number | null> {
+  if (environment[heldVariable]) return null;
+  const reading = await memory();
+  if (!reading) return null;
+  const directory = environment[slotsDirectoryVariable];
+  const otherFiles = directory ? othersDeclaredFiles(directory, pid) : 0;
+  const budgetBytes = reading.availableBytes - hostMemoryFloor(reading.totalBytes) - memoryRecoveryMarginBytes;
+  return suiteBreadth({ budgetBytes, otherFiles, cpus: availableParallelism() });
+}
+
 export interface RunOptions {
   cwd?: string;
   /** Test files or extra `node --test` arguments; the default is every tests/*.test.ts under `cwd`. */
@@ -70,6 +102,8 @@ export interface RunOptions {
   environment?: NodeJS.ProcessEnv;
   ports?: ReserveOptions;
   stdio?: 'inherit' | 'pipe';
+  /** How many files to run at once (GY-1821): passed to `node --test` as its own flag when the run is not a shard. Absent: node's default. */
+  breadth?: number;
 }
 export interface RunResult { code: number; base: number; environment: Record<string, string>; stdout: string; stderr: string }
 
@@ -149,7 +183,11 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
     const environment = isolatedTestEnvironment(options.environment ?? process.env, set);
     const [command, commandArgs] = options.browser || !selection
       ? [process.execPath, [fileURLToPath(import.meta.resolve('@playwright/test/cli')), 'test', ...args]]
-      : [process.execPath, ['--import', import.meta.resolve('tsx'), ...(selection.ordered ? [fileURLToPath(new URL('./ordered-tests.mjs', import.meta.url))] : ['--test']), ...selection.args]];
+      : [process.execPath, ['--import', import.meta.resolve('tsx'), ...(selection.ordered ? [fileURLToPath(new URL('./ordered-tests.mjs', import.meta.url))] : ['--test']),
+        // The breadth the host's memory affords (GY-1821). A caller's own flag stands; a shard's
+        // order is ordered-tests.mjs's own concurrency, which stays node's default as CI has it.
+        ...(selection.ordered || options.breadth === undefined || !Number.isFinite(options.breadth) || options.breadth < 1 || runnerOptions(args).rest.some(argument => argument.startsWith('--test-concurrency')) ? [] : [`--test-concurrency=${Math.floor(options.breadth)}`]),
+        ...selection.args]];
     const child = spawn(command, commandArgs, { cwd, env: environment, stdio: options.stdio === 'pipe' ? ['ignore', 'pipe', 'pipe'] : 'inherit' });
     let stdout = '', stderr = '';
     child.stdout?.on('data', chunk => { stdout += chunk; });
@@ -175,6 +213,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const mode = process.argv[2] === '--browser' ? 'browser' : process.argv[2] === '--typecheck' ? 'typecheck' : 'test';
   const args = process.argv.slice(mode === 'test' ? 2 : 3);
   const held = await sessionVerificationSlot(mode === 'typecheck' ? 'npm run typecheck' : mode === 'browser' ? 'npm run test:browser' : `npm test${args.length ? ` ${args.join(' ')}` : ''}`);
-  try { process.exitCode = mode === 'typecheck' ? await typecheck(process.cwd(), args) : (await runTests({ browser: mode === 'browser', args })).code; }
+  // The breadth the host affords is computed with the slot already held, so a run that starts later
+  // sees this one's declaration; it is declared back onto the slot for the runs after it (GY-1821).
+  const breadth = mode === 'test' ? await hostSuiteBreadth() : null;
+  if (held && breadth !== null) declareSlotFiles(held, breadth);
+  try { process.exitCode = mode === 'typecheck' ? await typecheck(process.cwd(), args) : (await runTests({ browser: mode === 'browser', args, breadth: breadth ?? undefined })).code; }
   finally { held?.release(); }
 }

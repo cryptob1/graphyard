@@ -72,9 +72,9 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ## Control-plane resources
 
-`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume+`GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes[:ROOT]`, per `TMPDIR`/`/tmp` (also any-name checkout/worktree, `voice<n>-*` 24h unwritten (tree+gitdir), unheld, unregistered; `/tmp/opencode/*` entries; per-class counts; <25% free: escalates, names consumers, partial census; 0-removal pass ledgered); `loaded-revision`: code moves. No fault remedying: owed restart within bound, pane unowned <10min (unnamed: reclaim pass's clock, kept through failed close), `/tmp` >10% free <30min after a pass left ≥25%. Loop age: host clock.
+`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume+`GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes[:ROOT]`, per `TMPDIR`/`/tmp` (any-name checkout/worktree, `voice<n>-*` 24h unwritten, unheld, unregistered; `/tmp/opencode/*`; <25% free: escalates, names consumers); `loaded-revision`: code moves. No fault: owed restart within bound, pane unowned <10min (unnamed: the pass's clock, kept through failed closes, blind passes, launch waits), `/tmp` >10% free <30min past a ≥25% pass. Loop age: host clock.
 
-Session-started `npm test`/`test:browser`/typecheck/`tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`; managed root's `.verification-slots`); CI unbounded. Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; one `memory-pressure` fault per dip) until 1GB above.
+Session-started `npm test`/`test:browser`/typecheck/`tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`; managed-root `.verification-slots`); CI unbounded. A Node suite's breadth: memory past the floor, less other slots' declarations. Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; one fault per dip) until 1GB above.
 
 ## Storage retention
 

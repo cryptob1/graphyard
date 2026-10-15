@@ -1032,6 +1032,11 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
   const file = await readReclaimFile(root);
   const namesOnly = !!options.namesOnly;
   const seen: Record<string, string> = namesOnly ? Object.fromEntries(Object.entries(file.seen).filter(([key]) => key.startsWith('missing:'))) : {};
+  // A pass that reads no inventory judges no pane (GY-1821): it keeps every sighting it could not
+  // re-see, where the merge below would otherwise drop what the pass did not record — a Herdr read
+  // that failed or starved reset every pane's confirmation clock mid-wait, the two-pass
+  // confirmation restarted, and the name stood past its bound while the host was at its heaviest.
+  if (!observed.agents) Object.assign(seen, file.seen);
   const live = liveRequests(observed.work);
   type Settleable = { id: string; state: string; agentName: string; pane: string | null; requestId?: string; closedAt?: string; idleSince?: string; requestedAt: string; resolution?: string; acknowledgedAt?: string };
   const identity = (record: Settleable) => record.id;
@@ -1137,7 +1142,14 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
       // A holder Herdr reports 'unknown' or with no status is closed too, once confirmed unowned for
       // `unownedPaneConfirmMs` and no launch of the principal is under way (GY-1166); only a running one is spared.
       const recognised = finished.includes(agent.agent_status ?? '');
-      if (!gates.reclaimable(agent) || (!recognised && launchingWorker(worker.principal, observed.work, now))) continue;
+      if (!gates.reclaimable(agent)) continue;
+      // A launch of the principal under way is the pane's replacement arriving (GY-1166), but the
+      // pane is still the unowned one this pass sees: the skip keeps a sighting an earlier pass
+      // recorded rather than letting it drop (GY-1821) — a relaunching principal otherwise reset
+      // the confirmation every pass, and the name stood past its bound while the reading's settling
+      // clock ran on. The skip starts no sighting of its own: within the launch bound the pane is
+      // the launch's own, and the clock stays the base's.
+      if (!recognised && launchingWorker(worker.principal, observed.work, now)) { const prior = file.seen[agent.pane_id!]; if (prior) seen[agent.pane_id!] = prior; continue; }
       const settled = holderSettledAt(profile, agent.name!, { reviews: [], producers: [], work: observed.work }, agent.pane_id);
       if (settled !== null && now - settled < finishedSessionGraceMs) continue;
       const first = file.seen[agent.pane_id!] ?? report.at;
