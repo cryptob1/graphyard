@@ -304,6 +304,20 @@ export const mechanicalPlanFreshMs = 5 * 60_000;
  * follow-ups. The observation counts such nits only on a head that is not itself a bot commit.
  */
 export function mechanicalReviewHold(work: Work, now: number): string | null {
+  const review = heldMechanicalReview(work, now);
+  if (!review) return null;
+  const until = Date.parse(review.submittedAt!) + mechanicalRoundStartMs;
+  const count = review.mechanical!;
+  return `Approval${review.id !== undefined ? ` ${review.id}` : ''} of ${review.sha.slice(0, 12)} names ${count} finding${count === 1 ? '' : 's'} classified mechanical, which the worker bot fixes before the reviewer's fresh read (GY-971); the head is not merged before that round, or before ${new Date(until).toISOString()} if it never starts`;
+}
+
+/** The instant the review gate's mechanical hold of `work` lapses by its round window, or null when it holds nothing. */
+export function mechanicalHoldUntil(work: Work, now: number): number | null {
+  const review = heldMechanicalReview(work, now);
+  return review ? Date.parse(review.submittedAt!) + mechanicalRoundStartMs : null;
+}
+
+function heldMechanicalReview(work: Work, now: number) {
   const approval = bindingApproval(work);
   // GY-1814: the hold covers an approval naming mechanical findings from the moment it is observed until
   // its round window lapses, so the head cannot merge inside the observation job that saw the approval —
@@ -318,11 +332,7 @@ export function mechanicalReviewHold(work: Work, now: number): string | null {
   const held = approval ? work.observation?.reviews.filter(entry => entry.state === 'APPROVED' && entry.sha === approval.sha && (entry.mechanical ?? 0) > 0 && !!entry.submittedAt
     && now < Date.parse(entry.submittedAt) + mechanicalRoundStartMs
     && !(work.mechanicalPlan === null && !!work.mechanicalAnswered && (entry.id !== undefined ? work.mechanicalAnswered.reviewId === entry.id : work.mechanicalAnswered.head === entry.sha))) ?? [] : [];
-  const review = held.find(entry => entry.id !== undefined && entry.id === work.mechanicalPlan?.reviewId) ?? held[0];
-  if (!review) return null;
-  const until = Date.parse(review.submittedAt!) + mechanicalRoundStartMs;
-  const count = review.mechanical!;
-  return `Approval${review.id !== undefined ? ` ${review.id}` : ''} of ${review.sha.slice(0, 12)} names ${count} finding${count === 1 ? '' : 's'} classified mechanical, which the worker bot fixes before the reviewer's fresh read (GY-971); the head is not merged before that round, or before ${new Date(until).toISOString()} if it never starts`;
+  return held.find(entry => entry.id !== undefined && entry.id === work.mechanicalPlan?.reviewId) ?? held[0] ?? null;
 }
 
 /**

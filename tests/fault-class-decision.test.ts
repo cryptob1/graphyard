@@ -909,7 +909,7 @@ async function timedOutClearReplay(state: ReturnType<typeof emptyDaemonState>, c
   for (let step = 0; step < cycles; step++, now += 2 * minute) await daemon.runCycle(config(), state, effects, () => now);
   return { attempts, work: work(), start };
 }
-const timedOutClearDetail = `Could not report GY-1459's mechanical plan (none): The operation was aborted due to timeout; the review gate drops the hold once its last confirmation passes 5 minutes old`;
+const timedOutClearDetail = `Could not report GY-1459's mechanical plan (none): The operation was aborted due to timeout; the review gate drops the hold once its last confirmation passes 5 minutes old, except over an approval still inside its mechanical round, which it holds until a report lands or 2026-10-14T05:15:00.000Z`;
 
 test('manual:fault-class-decision — action:decision|GY-1459|2026-10-14T04:54:55.483Z: a plan-report write that times out is a retried action, not a decision fault', async () => {
   const state = emptyDaemonState(config());
@@ -920,7 +920,7 @@ test('manual:fault-class-decision — action:decision|GY-1459|2026-10-14T04:54:5
   assert.equal(row?.state, 'failed', 'the failed write stays a visible, retried action');
   assert.equal(row!.detail, timedOutClearDetail);
   assert.equal(row!.faultClass, undefined, 'and carries no fault class');
-  assert.deepEqual(state.faults.instances.slice(faultsBefore).map(entry => entry.kind).filter(kind => /decision|escalation/.test(kind)), [], 'the timeout counts no decision fault: the gate drops the hold at mechanicalPlanFreshMs whatever the write does');
+  assert.deepEqual(state.faults.instances.slice(faultsBefore).map(entry => entry.kind).filter(kind => /decision|escalation/.test(kind)), [], 'the timeout counts no decision fault: the hold lapses by its own bound whatever the write does');
 });
 
 // The row a loop before this change stored for the same timed-out clear counts as a decision fault,

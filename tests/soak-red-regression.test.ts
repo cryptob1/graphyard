@@ -107,3 +107,15 @@ test('unit:soak-red-regression — the review gate holds an approval naming mech
   const late = iso(now - mechanicalRoundStartMs - minute);
   assert.equal(mechanicalReviewHold(item(observed([{ ...approval, submittedAt: late }])), now), null, 'an approval past its round window holds nothing');
 });
+
+test('unit:soak-red-regression — a plan report that cannot be written names when the gate actually releases: the round window for an approval still inside it, the confirmation\'s freshness otherwise', async () => {
+  const details: string[] = [], sink = { fail: async (_: Work, detail: string) => { details.push(detail); }, settle: async () => {} };
+  const refused = { mechanicalFixes: (async () => ({ requests: [], answered: [] })) as never, recordMechanicalPlan: async () => { throw new Error('503 Service Unavailable'); } };
+  // The approval is inside its round: the gate holds it past the confirmation's freshness until a report lands or the window lapses (Codex, PR #1215).
+  await reportMechanicalPlans([item()], [], refused, now, sink);
+  assert.deepEqual(details, [`Could not report ${key}'s mechanical plan (review ${reviewId} on ${short}): 503 Service Unavailable; the review gate drops the hold once its last confirmation passes 5 minutes old, except over an approval still inside its mechanical round, which it holds until a report lands or ${iso(Date.parse(submittedAt) + mechanicalRoundStartMs)}`]);
+  // A stale plan whose approval left the round holds nothing past its freshness, so the detail names only that.
+  details.length = 0;
+  await reportMechanicalPlans([item({ ...observed([{ ...approval, submittedAt: iso(now - mechanicalRoundStartMs - hour) }]), mechanicalPlan: { reviewId, head, at: iso(now - 10 * minute) } })], [], refused, now, sink);
+  assert.deepEqual(details, [`Could not report ${key}'s mechanical plan (none): 503 Service Unavailable; the review gate drops the hold once its last confirmation passes 5 minutes old`]);
+});

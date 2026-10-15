@@ -1,7 +1,7 @@
 // Concern: GY-1764 — the loop's report of each item's planned mechanical round to the review gate.
 import type { Work } from '../model.js';
 import { bindingApproval } from '../model/carry.js';
-import { mechanicalPlanFreshMs, mechanicalRoundStartMs } from '../mechanical-findings.js';
+import { mechanicalHoldUntil, mechanicalPlanFreshMs, mechanicalRoundStartMs } from '../mechanical-findings.js';
 import type { FaultKind } from '../model/fault-classes.js';
 import { deliveredMeanwhile } from './decision-reads.js';
 import { detailChanged } from './decision-text.js';
@@ -108,10 +108,12 @@ export async function reportMechanicalPlans(work: readonly Work[], plans: readon
     // agrees with the ledger (nothing owed) while the stale projection lapses by `mechanicalPlanFreshMs` at the gate.
     if (wanted) unreported.add(item.id);
     // GY-1795: a failed write whose content the gate's freshness governs — the same plan re-confirmed, or the clear of a
-    // plan the ledger ceased to carry — is self-healing (the next cycle writes it, and the hold lapses at
-    // `mechanicalPlanFreshMs` whatever the write does), so it stays a visible failed action but counts no decision fault.
+    // plan the ledger ceased to carry — is self-healing (the next cycle writes it, and whatever the write does the hold
+    // lapses at `mechanicalPlanFreshMs`, or for an approval inside its round at that round's window, GY-1814), so it stays a
+    // visible failed action but counts no decision fault. The detail names that later release when it applies (Codex, PR #1215).
     const fresh = !wanted || (wanted.reviewId === held?.reviewId && wanted.head === held?.head);
-    await sink.fail(item, `Could not report ${item.key}'s mechanical plan (${wanted ? `review ${wanted.reviewId} on ${wanted.head.slice(0, 12)}` : 'none'}): ${message(failure)}; the review gate drops the hold once its last confirmation passes ${Math.round(mechanicalPlanFreshMs / 60_000)} minutes old`, !fresh);
+    const until = mechanicalHoldUntil(item, clock);
+    await sink.fail(item, `Could not report ${item.key}'s mechanical plan (${wanted ? `review ${wanted.reviewId} on ${wanted.head.slice(0, 12)}` : 'none'}): ${message(failure)}; the review gate drops the hold once its last confirmation passes ${Math.round(mechanicalPlanFreshMs / 60_000)} minutes old${until ? `, except over an approval still inside its mechanical round, which it holds until a report lands or ${new Date(until).toISOString()}` : ''}`, !fresh);
   }
   return unreported;
 }
