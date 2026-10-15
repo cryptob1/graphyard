@@ -73,12 +73,9 @@ export const humanRequestSchema = z.object({
 }).strict().refine(data => data.sealTo || !data.choices?.some(choice => choice.input === 'secret'), 'A secret choice needs sealTo, the requesting host\'s public key')
   .superRefine((data, context) => { for (const message of shortAskIssues(data)) context.addIssue({ code: 'custom', message }); });
 /**
- * What a request's recommendation misses (GY-1410), naming the field; empty when it has one. Every
- * request tells the human what its requester advises: the choice it recommends or, for a value to
- * provide, the safest way to obtain it (a fine-grained token scoped to one repository, with a short
- * expiry and only the permissions needed), plus WHY, one plain sentence of why. A request with
- * choices to press names one by its label, so the card can preselect it; a value request (a secret
- * choice, or every choice but Decline asking for the human's words) may advise in its own words.
+ * What a request's recommendation misses (GY-1410), naming the field; empty when it has one: the choice
+ * recommended or the safest way to obtain a value, plus WHY. A request with choices names one by its label
+ * (the card preselects it); a value request (a secret choice, or every choice but Decline asking for words) may advise freely.
  */
 export function recommendationIssues(data: { kind?: HumanDecisionKind; choices?: HumanChoice[] | null; sealTo?: string | null; recommendation?: string; why?: string }): string[] {
   const choices = data.kind ? requestChoices({ kind: data.kind, choices: data.choices, sealTo: data.sealTo }) : [];
@@ -170,11 +167,8 @@ export const declineCommand = (key: string, request: Pick<HumanRequest, 'id'>) =
 export interface HumanOnlyChoice { label: string; input: HumanChoice['input']; declines: boolean; body: Record<string, unknown>; note: string | null; recommended?: boolean }
 /** The choices with the recommended one first (GY-1410). */
 export const recommendedFirst = (choices: readonly HumanOnlyChoice[]) => [...choices.filter(choice => choice.recommended), ...choices.filter(choice => !choice.recommended)];
-/**
- * How the operator answers one request from the page, in their own session: the work command it posts to, the fields
- * that body always carries, the field their words go in, and a refusing answer. The command lines beside the form are
- * the equivalent, never the way to answer: a credential on a command line is the defect this surface removes (GY-102).
- */
+/** How the operator answers one request from the page, in their own session: the command posted to, the body's fixed fields, the field
+ * their words go in, and a refusing answer. The command lines beside the form are equivalents, never the way to answer (GY-102). */
 export interface HumanOnlyPost { command: string; body: Record<string, unknown>; field: string; submit: string; decline: { body: Record<string, unknown>; submit: string } | null }
 export interface HumanRequestRow {
   /** The rule that raised it (`humanOnlyRules`); the page asks that rule whether this session may answer. */
