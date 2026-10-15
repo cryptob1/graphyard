@@ -16,7 +16,13 @@ import { humanRequestSchema, parkRefusal, requirementsQuestionRefusal } from '..
 // item's key is a target only in the passive voice, never as the actor ("GY-12 removes it"). A
 // negated change in a statement assures rather than asks; a change an ordering ask schedules as
 // its own predicate ("whether the requirements rewrite lands before the cut") is an ordering
-// decision, still the human's, while an ordering word governing another noun schedules nothing. So the reworded test-ordering, scope, ordering and product-direction questions from
+// decision, still the human's, while an ordering word governing another noun schedules nothing.
+// GY-1819 settles the bare noun: 'requirements' with no criterion id (AC-N), no item key and no
+// tests/ path names the rewrite as work, not the requirements, so its change-noun parks whatever
+// its verb — "lands" parks beside "happens before the cut" (threads PRRT_kwDOUZby-s6snGag,
+// PRRT_kwDOUZby-s6snGai) — while a change verb targeting the requirements ("revise the
+// requirements") still refuses, and a negation never crosses an although, though or but boundary.
+// So the reworded test-ordering, scope, ordering and product-direction questions from
 // GY-1816's fixtures and review threads are accepted without a per-wording exception, and every
 // GY-1816 refusal fixture still refuses.
 
@@ -46,8 +52,8 @@ test('unit:park-requirements-question-structural — GY-1818 AC-1: a goals-and-p
     { ...clean, ask: 'Does AC-1 need to be rewritten?' },
     { ...clean, needed: 'Whether the requirements need to be revised' },
     { ...clean, reason: 'The criterion needs to be relaxed, or it never passes' },
-    // Whether the rewrite happens at all names no order (review thread PRRT_kwDOUZby-s6smFz9); a negated question still asks.
-    { ...clean, needed: 'Whether the requirements rewrite happens' },
+    // A negated question still asks (GY-1816); GY-1819 re-homes the s6smFz9 'happens' wording to the accepted side:
+    // the bare noun names the rewrite as work, so asking whether it happens parks.
     { ...clean, ask: 'Should AC-1 not be weakened instead?' },
     { ...clean, needed: 'Whether the criteria are no longer matched to GY-1762' },
     // A scoping qualifier between the criterion and its verb (review thread PRRT_kwDOUZby-s6smNd6).
@@ -98,6 +104,14 @@ test('unit:park-requirements-question-structural — GY-1818 AC-1: a goals-and-p
     'Whether the requirements rewrite waits until the release cut',
     'Whether the requirements rewrite lands first or after GY-1700',
     'Whether AC-1\'s rewrite precedes the release cut',
+    // GY-1819: the bare noun 'requirements' — no criterion id, item key or tests/ path — names the rewrite
+    // as work, not the requirements, so its change-noun parks whatever its verb (threads
+    // PRRT_kwDOUZby-s6snGag, PRRT_kwDOUZby-s6snGai, PRRT_kwDOUZby-s6smFz9): the ask is the operator's
+    // ordering of work, while a change verb targeting the requirements still refuses.
+    'Whether the requirements rewrite lands',
+    'Whether the requirements rewrite goes ahead',
+    'Whether the requirements rewrite happens',
+    'Whether a requirements revision happens and the docs ship',
     'Whether the criteria revision ships after GY-1700 or before it',
     'Whether the requirements update should be prioritized above the docs trim',
     'Whether the criteria work is prioritized above the docs trim',
@@ -158,13 +172,11 @@ test('unit:park-requirements-question-structural — GY-1818 AC-1: a goals-and-p
   //   The ordering ask schedules the change only as its own predicate (review thread PRRT_kwDOUZby-s6smx3Q):
   //   an ordering word governing another noun in the same sentence leaves the change asked.
   for (const needed of [
-    'Whether a requirements revision happens and the docs ship',
     'Whether a criteria revision is needed after GY-1700 lands',
     'Whether AC-1\'s rewrite happens first or the docs land',
     'Whether the criteria update is needed before the release ships',
-    // A predicate with no ordering relation asks whether the change happens at all (review thread PRRT_kwDOUZby-s6snGag).
-    'Whether the requirements rewrite lands',
-    'Whether the requirements rewrite goes ahead',
+    // A predicate with no ordering relation asks whether a NAMED object's change happens at all
+    // (review thread PRRT_kwDOUZby-s6snGag); the bare noun's own forms moved to the accepted side in GY-1819.
     'Whether the criteria revision ships',
   ]) assert.match(requirementsQuestionRefusal({ ...clean, needed })!, /^Not a human-only decision/, needed);
   assert.equal(requirementsQuestionRefusal({ ...clean, needed: 'Whether the requirements rewrite lands before the docs ship' }), null);
