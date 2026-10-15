@@ -11,7 +11,6 @@ import { decisionInput } from '../src/master/autonomy.js';
 import { assertDispatchable, workerPrompt } from '../src/master/dispatch.js';
 import { foldInterventions, readInterventionLedger } from '../src/interventions.js';
 import { parkedOnHuman, type HumanDecisionKind } from '../src/model/human-request.js';
-import { withdrawParkRefusal } from '../src/model/park-withdrawal.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1815. A goals-and-priorities park whose asked state already held — the operator had done the
@@ -125,6 +124,8 @@ test('unit:human-request-withdraw — an approved withdraw-park closes the open 
   assert.match(again.error, /has no open human-only request to withdraw/);
 
   // It never answers on the operator's behalf: spending money or opening accounts, and issuing credentials, are refused at request time.
+  // Imported here, so a checkout without the module fails this test's assertions instead of the file's load.
+  const { withdrawParkRefusal } = await import('../src/model/park-withdrawal.js');
   for (const [kind, label] of [['money-or-accounts', 'spending money or opening third-party accounts'], ['credentials-for-people', 'issuing credentials to people']] as const) {
     const item = await parked(`Refused ${kind}`, kind, { recommendation: kind === 'money-or-accounts' ? 'Approve with the smallest plan' : 'A fine-grained token scoped to one repository with a short expiry', why: 'It is the least the item needs.' });
     const refused = await call(master.token, 'POST', `work/${item.key}/decide`, withdrawPark(item, 'Observed: the account appears to exist already'), 409);
