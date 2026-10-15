@@ -1403,6 +1403,7 @@ export class Engine {
         // confirmed the plan this recently, so a report whose write or ledger read keeps failing cannot
         // keep holding a head the ledger no longer plans a round for (GY-1764).
         work.mechanicalPlan = data.planned ? { reviewId: data.reviewId, head: data.head, at: now.toISOString() } : null;
+        work.mechanicalAnswered = data.planned ? null : { reviewId: data.reviewId, head: data.head };
       }
       if (command === 'rereview') {
         if (actor.role !== 'admin') { demand(actor.role === 'worker', 'Worker or operator required', 403); activeLease(work, actor, data.epoch, now); }

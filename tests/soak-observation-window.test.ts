@@ -25,7 +25,7 @@ const dayMs = 24 * hour, windowDays = 3, items = 5, filedAfterMs = 25 * minute;
 const plan = { items, releaseEveryMs: 5 * minute, leftovers: 0, slowRecompute: 0, workMs: 15 * minute, rework: new Set<number>(), deaths: new Set<number>(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set<number>(), misread: new Set<number>(), exits: new Set<number>(), spentProducer: 0, lostRuns: 0,
   outOfQueue: { item: items, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: items }, loopRestarts: [] as number[], dirtyCheckout: { from: 99 * hour, to: 100 * hour }, headMove: { from: 99 * hour, to: 100 * hour }, deploys: basePlan.deploys };
 
-test('unit:soak-invariants-hold — over three simulated days of the real loop, a post-deploy follow-up filed for a windowed criterion and released at once is held on its recorded instant: no dispatch, no stalled-gate attention, no fault and no session for two and a half days, every cycle naming the instant; the first cycle past the instant requests its dispatch as Graphyard with no master session live, one attempt delivers it, repeated filings add no second follow-up for the parent, and every system invariant holds', { timeout: 600_000 }, async () => {
+test('unit:soak-invariants-hold — over three simulated days of the real loop, a post-deploy follow-up filed for a windowed criterion and released at once is held on its recorded instant: no dispatch, no stalled-gate attention, no fault and no session for two and a half days, every cycle naming the instant; past the instant it stays loop-owned — undispatched, unleased, without a session and without a fault — awaiting the loop\'s reading with no master session live, repeated filings add no second follow-up for the parent, and every system invariant holds', { timeout: 600_000 }, async () => {
   const day = await simulateDay({ hours: windowDays * 24 + 4, plan, observationWindow: { item: 1, windowDays, filedAfterMs } });
   const window = day.observationWindowDay!, iso = (ms: number) => new Date(ms).toISOString();
   assert.deepEqual(day.violations, [], 'every system invariant holds after every cycle');
@@ -83,9 +83,9 @@ test('unit:soak-invariants-hold — over three simulated days of the real loop, 
  * before GY-1698 filed GY-1689 and GY-1721..GY-1725. The control plane derives the window that filing
  * owed it from the parent's own criterion at create (GY-1735), so the loop holds it from its filing as
  * it holds a windowed one: no worker is dispatched early, none has to defer or block, nothing escalates,
- * and the first cycle past the instant dispatches it once, which delivers it.
+ * and past the instant it stays loop-owned, awaiting the loop's reading (GY-1762).
  */
-test('unit:soak-invariants-hold — over three simulated days of the real loop, an unwindowed post-deploy follow-up is held from its filing on the window the control plane derives: no dispatch, no session, no defer, no fault and no escalation before the instant, dispatched by Graphyard at the instant, delivered by that attempt, and every system invariant holds', { timeout: 600_000 }, async () => {
+test('unit:soak-invariants-hold — over three simulated days of the real loop, an unwindowed post-deploy follow-up is held from its filing on the window the control plane derives: no dispatch, no session, no defer, no fault and no escalation before the instant, loop-owned past it — undispatched, unleased and without a session, awaiting the loop\'s reading — nothing escalating it, and every system invariant holds', { timeout: 600_000 }, async () => {
   const day = await simulateDay({ hours: windowDays * 24 + 4, plan, observationWindow: { item: 1, windowDays, filedAfterMs, unwindowed: true } });
   const window = day.observationWindowDay!, iso = (ms: number) => new Date(ms).toISOString();
   assert.deepEqual(day.violations, [], 'every system invariant holds after every cycle');
@@ -161,10 +161,10 @@ test('integration:soak-stale-coordinator-no-early-dispatch — with the coordina
  * reading that cannot exist before an instant 6, 14 and 22 hours into the day, as GY-1689, GY-1721 and
  * GY-1724 were. No worker can `defer` them (none holds a lease), so the loop's blocker step holds each
  * on its instant itself (`window`). Every cycle samples each one: held once, out of Blocked from the first
- * cycle with no worker launch, never dispatched or overdue before its instant, dispatched by Graphyard at
- * it and delivered by that one attempt.
+ * cycle with no worker launch, never dispatched or overdue before its instant, and past it left to the
+ * loop's reading with no dispatch requested (GY-1762).
  */
-test('unit:soak-invariants-hold — over a simulated day of the real loop, blocked unleased post-deploy follow-ups whose blockers name future instants are each held on their instant once, leave Blocked without a worker launch, stay undispatched and not overdue until it, resume at it, and every system invariant holds', { timeout: 600_000 }, async () => {
+test('unit:soak-invariants-hold — over a simulated day of the real loop, blocked unleased post-deploy follow-ups whose blockers name future instants are each held on their instant once, leave Blocked without a worker launch, stay undispatched and not overdue until it, request no dispatch past it while they await the loop\'s reading, and every system invariant holds', { timeout: 600_000 }, async () => {
   const hours = [6, 14, 22];
   const day = await simulateDay({ hours: 26, plan, blockedHolds: { hours } });
   const holds = day.blockedHoldDay!, iso = (ms: number) => new Date(ms).toISOString();
