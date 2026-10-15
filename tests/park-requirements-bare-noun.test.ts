@@ -68,6 +68,15 @@ test('unit:park-requirements-bare-noun — GY-1819 AC-1: a park whose requiremen
     'Should the requirements change to match the new API?',
     'Should the requirements drop the importer clause?',
     'The requirements change so the proof resolves',
+    // An object opening with a determiner, pronoun or particle is still an object, never the work's
+    // own predicate: only named predicates follow a change noun (review of 0fe4d3fb684e, B1).
+    'Should the requirements drop this clause?',
+    'Should the requirements drop its importer clause?',
+    'Should the requirements change this clause?',
+    'Should the requirements change its scope?',
+    'Should the requirement change as the API did?',
+    'Should the requirements change his clause?',
+    'Should the requirements change us over to the new API?',
     // Named objects keep the GY-1818 outcomes: a bare predicate on the criteria or on AC-N still asks.
     'Whether the criteria revision ships',
     'Whether AC-1\'s rewrite happens',
@@ -90,7 +99,8 @@ test('unit:park-requirements-bare-noun — GY-1819 AC-1: a park whose requiremen
 test('unit:park-requirements-bare-noun — GY-1819 AC-2: a negation scopes only its own clause, never past an although, though or but boundary, so "AC-1 is not changed although the requirements are revised by the selected option" refuses as a requirements question', () => {
   // The review-thread sentence (PRRT_kwDOUZby-s6snWK8) and its though and but forms: the positive
   // revision past the boundary is asked, whatever the negation in the first clause assures.
-  for (const boundary of ['although', 'though', 'but']) {
+  // A boundary is a boundary whatever its case (review thread PRRT_kwDOUZby-s6soQxv).
+  for (const boundary of ['although', 'though', 'but', 'Although', 'Though', 'But', 'ALTHOUGH']) {
     const needed = `AC-1 is not changed ${boundary} the requirements are revised by the selected option`;
     assert.match(requirementsQuestionRefusal({ ...clean, needed })!, /^Not a human-only decision/, needed);
     assert.match(parkRefusal({ ...clean, needed })!, /^Not a human-only decision/, needed);
