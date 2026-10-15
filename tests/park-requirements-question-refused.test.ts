@@ -81,6 +81,10 @@ test('unit:park-requirements-question-refused — GY-1816 AC-1: a goals-and-prio
     { ...clean, needed: 'Whether the requirements rewrite happens' },
     { ...clean, ask: 'Should AC-1 not be weakened instead?' },
     { ...clean, needed: 'Whether the criteria are no longer matched to GY-1762' },
+    // A scoping qualifier between the criterion and its verb (review thread PRRT_kwDOUZby-s6smNd6).
+    { ...clean, needed: 'Whether the acceptance criteria for CSV exports should be revised' },
+    { ...clean, needed: 'Whether AC-1 in the current release should be weakened' },
+    { ...clean, ask: 'Should the requirements for the importer be changed?' },
   ] as const;
   for (const body of questioned) {
     const refusal = parkRefusal(body)!;
@@ -106,6 +110,10 @@ test('unit:park-requirements-question-refused — GY-1816 AC-1: a goals-and-prio
     'Whether the requirements update should be prioritized above the docs trim',
     // Test ordering that names "matching tests" (review thread PRRT_kwDOUZby-s6smF0P) matches nothing to anything.
     'Whether GY-1700\'s matching tests or the other tests should run first',
+    'Whether the tests that match GY-1700 should run first',
+    // A qualified criterion that is only ordered or met still parks.
+    'Whether the criteria in the current release are prioritized above the docs trim',
+    'Whether the requirements for the importer are met by the soak run',
   ] as const;
   for (const needed of accepted) assert.equal(parkRefusal({ kind: 'goals-and-priorities', needed, reason: 'the operator owns goals and priorities' }), null, needed);
   // A reason stating the requirements stay as they are (review thread PRRT_kwDOUZby-s6smF0G) asks no change.
