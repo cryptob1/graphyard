@@ -185,7 +185,7 @@ function histories(n: number, at: string, scale: number) {
     pipeline: { attempts: Array.from({ length: count(30) }, (_, index) => ({ epoch: index, owner: 'engineer-a', claimedAt: at, endedAt: at, end: 'submitted' })), submittedAt: at, reworkRounds: 3 } as unknown as Work['pipeline'],
   };
 }
-/** A delivered item as the live ledger holds one: its candidate merged and delivered, the observation's per-file scope and every history — nothing owed, so settled. */
+/** A delivered item as the live ledger holds one: its candidate merged and delivered, its serving release recorded (GY-1824: an unrecorded one owes that record), the observation's per-file scope and every history — nothing owed, so settled. */
 function delivered(template: Work, n: number): Work {
   const id = randomUUID(), key = `DONE-${n}`;
   const at = stamp(n);
@@ -194,7 +194,8 @@ function delivered(template: Work, n: number): Work {
     stage: 'done', stageEnteredAt: at, ready: true, lease: null, nextAction: null, blocker: null, plannedFiles: paths(n, 6),
     candidate: { sha: sha(n), baseSha: sha(n, 'b'), pr: 1000 + n } as Work['candidate'],
     submission: { epoch: 2, pr: 1000 + n } as Work['submission'],
-    delivery: { mergedAt: at, mergeSha: sha(n, 'm'), authorizationRevision: 40 } as Work['delivery'],
+    delivery: { mergedAt: at, mergeSha: sha(n, 'm'), authorizationRevision: 40,
+      deployment: { sha: sha(n, 'm'), mergeSha: sha(n, 'm'), source: 'endpoint', observedAt: at, covers: 'exact', at, observer: 'graphyard' } } as Work['delivery'],
     observation: { candidate: { sha: sha(n), baseSha: sha(n, 'b'), pr: 1000 + n, branch: `graphyard/done-${n}-2`, author: 'engineer-a' }, merged: true, mergeSha: sha(n, 'm'), mergedAt: at, mergeable: true, protected: true,
       checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }], reviews: [{ author: 'reviewer', state: 'APPROVED', commitId: sha(n), submittedAt: at }],
       files: paths(n, 40), scopeFiles: Array.from({ length: 300 }, (_, index) => ({ path: `src/area-${index}/file.ts`, digest: sha(index, 'f') })), baseTip: sha(n, 'b'), at } as unknown as Work['observation'],
