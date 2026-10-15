@@ -5,18 +5,15 @@ import { shortAskIssues } from './human-ask.js';
 import type { HumanAnswer } from './human-answer.js';
 import type { Work } from './work.js';
 
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------------
 // Decisions only a human may make, as typed state (GY-89).
 //
 // Agents decide everything except three things: goals and priorities, spending money or opening
-// third-party accounts, and issuing credentials to people. An attempt that reaches one of those
-// used to say so in a free-text blocker and keep its lease, so the item sat owned by a session
-// that could not act until a master session read the prose. It now records a typed request — which
-// of the three decisions, why, and the exact thing needed — and that one transaction ends the
-// attempt's lease and parks the item. Nothing else waits: the rest of the graph keeps moving, the
-// request is listed for the human with how long it has waited and how to answer it, and the
-// answer itself returns the item to the loop, which dispatches it without a master session.
-// ---------------------------------------------------------------------------
+// third-party accounts, and issuing credentials to people. Reaching one records a typed request —
+// which of the three, why, and the exact thing needed — and that one transaction ends the
+// attempt's lease and parks the item: the request is listed for the human with how long it has
+// waited and how to answer it, and the answer returns the item to the loop, which dispatches it.
+// ------------------------------------------------------------
 
 export const humanDecisionKinds = ['goals-and-priorities', 'money-or-accounts', 'credentials-for-people'] as const;
 export type HumanDecisionKind = typeof humanDecisionKinds[number];
@@ -42,8 +39,8 @@ export type HumanChoice = z.infer<typeof humanChoiceSchema>;
 const decline: HumanChoice = { id: 'decline', label: 'Decline', outcome: 'declined', input: 'none' };
 /** The choices a request offers when its requester named none: one per kind, always ending with Decline. */
 export function defaultChoices(kind: HumanDecisionKind, sealed = false): HumanChoice[] {
-  // An account or spend is approved or set up in words (GY-1395): a bare Approve resumed GY-1384 and
-  // GY-1365 with nothing provided, and the resumed worker could only ask again.
+  // An account or spend is approved or set up in words (GY-1395): a bare Approve resumed GY-1384 with nothing
+  // provided, and the resumed worker could only ask again.
   if (kind === 'money-or-accounts') return [{ id: 'approve', label: 'Approve, saying what you approved or set up…', outcome: 'provided', input: 'text' }, { id: 'approve-other', label: 'Approve with a different cap…', outcome: 'provided', input: 'text' }, decline];
   if (kind === 'credentials-for-people') return [sealed ? { id: 'provide', label: 'Provide now', outcome: 'provided', input: 'secret' } : { id: 'provided', label: 'Provided it', outcome: 'provided', input: 'text' }, decline];
   return [{ id: 'agree', label: 'Go ahead as asked', outcome: 'provided', input: 'none' }, { id: 'differently', label: 'Go ahead differently…', outcome: 'provided', input: 'text' }, decline];
@@ -72,11 +69,7 @@ export const humanRequestSchema = z.object({
   sealTo: z.string().trim().min(1).max(4000).optional(),
 }).strict().refine(data => data.sealTo || !data.choices?.some(choice => choice.input === 'secret'), 'A secret choice needs sealTo, the requesting host\'s public key')
   .superRefine((data, context) => { for (const message of shortAskIssues(data)) context.addIssue({ code: 'custom', message }); });
-/**
- * What a request's recommendation misses (GY-1410), naming the field; empty when it has one: the choice
- * recommended or the safest way to obtain a value, plus WHY. A request with choices names one by its label
- * (the card preselects it); a value request (a secret choice, or every choice but Decline asking for words) may advise freely.
- */
+/** What a request's recommendation misses (GY-1410), naming the field; empty when it has one: the choice recommended or the safest way to obtain a value, plus WHY. A request with choices names one by its label; a value request may advise freely. */
 export function recommendationIssues(data: { kind?: HumanDecisionKind; choices?: HumanChoice[] | null; sealTo?: string | null; recommendation?: string; why?: string }): string[] {
   const choices = data.kind ? requestChoices({ kind: data.kind, choices: data.choices, sealTo: data.sealTo }) : [];
   const valueRequest = choices.some(choice => choice.input === 'secret') || choices.every(choice => choice.outcome === 'declined' || choice.input !== 'none');
@@ -93,35 +86,39 @@ export function recommendedChoice(request: { kind: HumanDecisionKind; choices?: 
   const advice = request.recommendation ? key(request.recommendation) : null;
   return advice ? requestChoices(request).find(choice => key(choice.id) === advice || key(choice.label) === advice)?.id ?? null : null;
 }
-// The park-refusal classifier (GY-1395, GY-1416, GY-1692) lives in park-refusal.ts. GY-1816 wraps it: `parkRefusal`
-// refuses a criterion-rewrite question first, so the server (`requestHumanDecision`) and the CLI (`routedParkCommand`) see one name.
+// The park-refusal classifier (GY-1395, GY-1416, GY-1692) lives in park-refusal.ts; `parkRefusal` here refuses a criterion-rewrite question first (GY-1816).
 export { hostDoableAsk, hostDoableRefusal, type HostDoableAsk };
 
-/** GY-1818: per sentence, any order — is a requirements object named (AC-N, the criteria, or GY-N beside a tests reference), and does a change operation target it. */
+/** GY-1818: per sentence, any order — is a requirements object named, and does a change operation target it. */
 const criterionId = /\bAC-\d+\b/i, criterionName = /\b(?:acceptance\s+)?criteri(?:a|on)\b|\brequirements?\b/i, itemKey = /\bGY-\d+\b/i, testsReference = /\btests?\/\S*|\b(?:tests?|assertions?|suites?)\b/i,
-  requirementsObject = (sentence: string) => criterionId.test(sentence) || criterionName.test(sentence) || (itemKey.test(sentence) && testsReference.test(sentence));
+  requirementsObject = (sentence: string) => criterionId.test(sentence) || criterionName.test(sentence) || (itemKey.test(sentence) && testsReference.test(sentence)),
+  /** GY-1819: the bare noun alone (no AC-N, criteria word or key with tests) names the rewrite as work, not the requirements. */
+  bareNounOnly = (sentence: string) => !criterionId.test(sentence) && !/\b(?:acceptance\s+)?criteri(?:a|on)\b/i.test(sentence) && !(itemKey.test(sentence) && testsReference.test(sentence));
 const changeStems = String.raw`rewrit|revis|revers|updat|amend|chang|edit|delet|remov|reconcil|match|align|weaken|relax|soften|narrow|merg|replac|drop`, keyStems = 'match|align|reconcil|revers|revert',
-  changeNoun = /\b(?:AC-\d+|criteri(?:a|on)|requirements?)(?:'s)?\s+(?:rewrit\w*|revis\w*|updat\w*|amend\w*|chang\w*|edit\w*|delet\w*|remov\w*|reconcil\w*|align\w*|weaken\w*|relax\w*|narrow\w*|revers\w*|merg\w*|replac\w*|drops?)\b/i;
-/** Verb and object in one clause, either order ("AC-1 must be revised"), across only determiners, auxiliaries, -ly words or a scoping qualifier, never "to"; another noun's change counts nowhere; a key only of alignment or reversal ("GY-1762 is reversed"), never "drop GY-1700"; an aligned tests/ path counts beside a key. */
+  changeNoun = /\b(?:AC-\d+|criteri(?:a|on)|requirements?)(?:'s)?\s+(?:rewrit\w*|revis\w*|updat\w*|amend\w*|chang\w*|edit\w*|delet\w*|remov\w*|reconcil\w*|align\w*|weaken\w*|relax\w*|narrow\w*|revers\w*|merg\w*|replac\w*|drops?)\b/i,
+  /** GY-1819: the change word is a noun only before a predicate of its own ("rewrite lands"); clause end or an object's opening word leaves it the verb ("drop this clause"). */
+  objectOpening = String.raw`(?:the|a|an|this|that|these|those|its|his|her|hers|their|theirs|our|ours|your|yours|my|mine|it|them|us|him|me|you|we|they|he|she|i|one|all|every|each|any|some|both|either|neither|no|none|more|most|less|least|several|many|much|few|other|another|such|what|which|who|whom|whose|\d\w*|to|so|as|than|and|or|but|nor|yet|because|when|whenever|where|while|whilst|if|unless|although|though|since|for|with|without|in|into|onto|on|at|by|from|of|off|over|under|up|down|out|about|across|through|via|per|toward|towards|against|around|between|among|within|beyond|along|like|AC-\d+|GY-\d+|tests?\/\S*|(?:acceptance\s+)?criteri(?:a|on)|requirements?)`,
+  ownPredicate = String.raw`(?=\s+(?:\w+ly\s+)*(?!${objectOpening}(?![\w/-])|\w+ly\b)[a-z]\w*)`;
+/** Verb and object in one clause, either order, across only determiners, auxiliaries, -ly words or a scoping qualifier, never "to"; a key only of alignment or reversal; an aligned tests/ path beside a key. */
 const auxiliaries = String.raw`(?:should|shall|may|might|must|can|could|would|will|needs?|needed|is|are|was|were|be|been|being|gets?|got|has|have|had|to|not|never|no longer|also|still|instead|now|again|once)`,
   verbThenObject = new RegExp(String.raw`\b(?:${changeStems})\w*(?:(?:\s+|,\s*)(?:the|a|an|its|their|our|your|this|that|these|those|another|each|acceptance|\w+ly))*(?:\s+|,\s*)(?:acceptance\s+)?(?:AC-\d+|criteri(?:a|on)|requirements?)(?:'s)?\b|\b(?:${keyStems})\w*(?:\s+(?:the|\w+ly))*\s+GY-\d+`, 'gi');
 const qualifier = String.raw`(?:\s+(?:for|in|of|on|under|about|within|at)(?:\s+[\w'-]+){1,4}?(?=(?:\s+|,\s*)${auxiliaries}\b))?`,
   objectThenVerb = new RegExp(String.raw`\b(?:AC-\d+|criteri(?:a|on)|requirements?)(?:'s)?${qualifier}(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:${changeStems})\w*`, 'gi'),
   keyThenVerb = new RegExp(String.raw`\bGY-\d+(?:'s)?(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:is|are|was|were|be|been|being|gets?|got)\b(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:${keyStems})\w*`, 'gi'),
   pathAligned = new RegExp(String.raw`\b(?:match|align|reconcil)\w*(?:(?:\s+|,\s*)(?:the|a|an|its|their|our|your|this|that|these|those|each|\w+ly))*(?:\s+|,\s*)tests?\/\S+|\btests?\/\S+(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:match|align|reconcil)\w*`, 'gi');
-/** "the tests that match GY-1700" names tests, aligns nothing. A change-noun is scheduled only when its own predicate is tied to an ordering relation ("the rewrite happens before the cut", "precedes GY-1700"): a bare "lands", a need ("is needed before") or a relative term opening another alternative ("first or the docs land") schedules nothing. */
+/** "the tests that match GY-1700" names tests, aligns nothing. A change-noun is scheduled only by a predicate tied to an ordering relation, never a need. */
 const namedNotAligned = /\b(?:match|align|reconcil)\w*(?:ing|ed)(?=\s+(?:tests?|assertions?|suites?)\b(?!\/))|(?<=\b(?:tests?|assertions?|suites?)\s+(?:that|which)\s+)(?:match|align|reconcil)\w*(?:\s+GY-\d+(?:'s)?)?/gi,
   scheduledChange = new RegExp(String.raw`${changeNoun.source}(?:\s+(?:should|shall|may|might|must|can|could|would|will|is|are|was|were|be|been|being|gets?|got|has|have|had|also|still|now|\w+ly))*\s+(?:(?:preced|follow)\w*\s+\w|(?!(?:to|needs?|needed|requires?|required|necessary|wanted)\b)\w+(?:\s+\w+ly)?\s+(?:before|after|until|till|first|then|next|last|later|earlier|sooner|above|below|behind|ahead\s+of)\b(?!,?\s+(?:or|and)\s+(?:the|a|an|its|this|that|these|those)\b))`, 'gi');
-/** A negated change asks only in a question ("should AC-1 not be weakened?"), from the last clause break. A sentence (no dot inside a token ends one) asks when it targets a named requirements object or names unscheduled change work. */
+/** A negated change asks only in a question, from the last clause break (although/though/but too, GY-1819). A sentence asks when it targets a requirements object or names unscheduled change work. */
 const question = (sentence: string) => /\?|\b(?:whether|if)\b/i.test(sentence) || /^(?:should|shall|may|might|must|can|could|would|will|do|does|did|is|are|was|were|has|have)\b/i.test(sentence.trim()),
-  verbChain = (text: string, end: number) => { const before = text.slice(0, end); return before.slice(1 + Math.max(before.lastIndexOf(','), before.lastIndexOf(';'), before.lastIndexOf(' but '), before.lastIndexOf(' so '), before.lastIndexOf(' and '), before.lastIndexOf(' or '))); };
+  verbChain = (text: string, end: number) => { const before = text.slice(0, end), lower = before.toLowerCase(); return before.slice(1 + Math.max(...[',', ';', ' but ', ' although ', ' though ', ' so ', ' and ', ' or '].map(boundary => lower.lastIndexOf(boundary)))); };
 const requirementsQuestion = (text: string) => (text.match(/(?:[^.;\n?]|\.(?=\S))+\??/g) ?? []).some(sentence => {
-  const asked = sentence.replace(new RegExp(changeNoun.source, 'gi'), 'work').replace(namedNotAligned, '');
+  const asked = sentence.replace(new RegExp(changeNoun.source + ownPredicate, 'gi'), 'work').replace(namedNotAligned, '');
   const targeted = [...asked.matchAll(verbThenObject), ...asked.matchAll(objectThenVerb), ...asked.matchAll(keyThenVerb), ...asked.matchAll(pathAligned)].some(found => !/\b(?:not|never|no longer)\b/i.test(`${found[0]} ${verbChain(asked, found.index!)}`) || question(sentence));
-  return requirementsObject(sentence) && (targeted || changeNoun.test(sentence.replace(scheduledChange, 'work'))); });
+  return requirementsObject(sentence) && (targeted || !bareNounOnly(sentence) && changeNoun.test(sentence.replace(scheduledChange, 'work'))); });
 /** A park's own words: the kind it claims, and every text the human would read. */
 export interface ParkQuestion { kind?: string; needed: string; ask?: string | null; reason?: string | null }
-/** Why a goals-and-priorities park asks a criterion rewrite (GY-1816), on structure, not phrasing (GY-1818), or null: the master requests rewrites, an approver approves (docs/glossary.md#who-decides). */
+/** Why a goals-and-priorities park asks a criterion rewrite (GY-1816, GY-1818, GY-1819), or null: the master requests rewrites, an approver approves. */
 export function requirementsQuestionRefusal(data: ParkQuestion): string | null {
   if (data.kind !== 'goals-and-priorities') return null;
   const questioned = [data.ask, data.needed, data.reason].some(text => !!text?.trim() && requirementsQuestion(text));
@@ -130,11 +127,9 @@ export function requirementsQuestionRefusal(data: ParkQuestion): string | null {
 /** The park refusals in the order they fire: a criterion-rewrite question first (GY-1816), then the classifier's own (GY-1395, GY-1416, GY-1692). */
 export const parkRefusal = (data: ParkQuestion): string | null => requirementsQuestionRefusal(data) ?? classifiedParkRefusal(data);
 
-/**
- * The fields every request only a human may answer carries, whatever raised it: the exact thing
- * needed, why, who asked, and when. A `park` request is one; an approval the server will take
- * only from the operator's own credential is another, and is modelled with the same fields so
- * the list, the page and the CLI read one shape (GY-102).
+/** The fields every request only a human may answer carries, whatever raised it: the exact thing
+ * needed, why, who asked, and when. A park request and an approval the server takes only from the
+ * operator's own credential share them, so the list, page and CLI read one shape (GY-102).
  */
 export interface HumanOnlyRequest {
   id: string; kind: string; reason: string; needed: string;
@@ -167,7 +162,7 @@ export const declineCommand = (key: string, request: Pick<HumanRequest, 'id'>) =
 export interface HumanOnlyChoice { label: string; input: HumanChoice['input']; declines: boolean; body: Record<string, unknown>; note: string | null; recommended?: boolean }
 /** The choices with the recommended one first (GY-1410). */
 export const recommendedFirst = (choices: readonly HumanOnlyChoice[]) => [...choices.filter(choice => choice.recommended), ...choices.filter(choice => !choice.recommended)];
-/** How the operator answers one request from the page, in their own session: the command posted to, the body's fixed fields, the field
+/** How the operator answers one request from the page: the command posted to, the body's fixed fields, the field
  * their words go in, and a refusing answer. The command lines beside the form are equivalents, never the way to answer (GY-102). */
 export interface HumanOnlyPost { command: string; body: Record<string, unknown>; field: string; submit: string; decline: { body: Record<string, unknown>; submit: string } | null }
 export interface HumanRequestRow {
@@ -232,10 +227,9 @@ export interface HumanOnlyRule {
 }
 
 /**
- * A decision only a human may make, parked by the worker that reached it. The server refuses an
- * answer from anything but a declared human session (server/waits.ts `answerHumanDecision`, which
- * asks this rule): the three decisions are human by definition, and an agent holding an admin
- * credential is still an agent.
+ * A decision only a human may make, parked by the worker that reached it: the server refuses an
+ * answer from anything but a declared human session (server/waits.ts `answerHumanDecision`). The
+ * three decisions are human by definition; an agent holding an admin credential is still an agent.
  */
 export const parkRule: HumanOnlyRule = {
   kind: 'human-request',
@@ -247,16 +241,14 @@ export const parkRule: HumanOnlyRule = {
 /** The fourth decision the operator keeps, beside the three of `humanDecisionLabel`. */
 export const operatorApprovalLabel = 'authorizing what no agent identity may authorize';
 /**
- * An approval whose decision the server takes from the operator's admin credential alone
- * (model/approval.ts `operatorOnlyDecision`): a requested merge decision that overrides a
- * reconciliation the record refused. Every agent identity is refused it — approved by the
- * master's own pair it applies and then delivers nothing — so it waits for the operator here,
- * with the same fields as a parked request: what is needed, why, who asked, how long it has waited.
+ * An approval the server takes from the operator's admin credential alone
+ * (model/approval.ts `operatorOnlyDecision`): a requested merge decision overriding a
+ * reconciliation the record refused. Every agent identity is refused it — the master's own pair
+ * approving it would deliver nothing — so it waits here, with a parked request's fields.
  */
 export const operatorApprovalRule: HumanOnlyRule = {
   kind: 'operator-approval',
-  // Only an item whose record has refused a reconciliation can carry one of these, so the ledger
-  // read the surface pays for is bounded to the items that could answer it.
+  // Only an item with a refused reconciliation carries one: the ledger read is bounded to items that could answer it.
   reads: work => refusedReconciliations(work).length > 0,
   refuse: operatorCredentialRefusal,
   open(subject, now) {
@@ -272,8 +264,7 @@ export const operatorApprovalRule: HumanOnlyRule = {
         rule: operatorApprovalRule.kind, work: work.key, id: work.id, title: work.title, request,
         waitedMs: Math.max(0, now - Date.parse(decision.requestedAt)), decision: operatorApprovalLabel,
         refusal: operatorCredentialRefusal({ id: 'an agent identity', role: 'operator-agent' })!,
-        // Declining is the operator's considered refusal on the same route (`{ action: 'refuse' }`,
-        // server/decision-refusal.ts): terminal, with their reason, as Decline is on a park request.
+        // Declining is the operator's considered refusal on the same route (server/decision-refusal.ts), terminal with their reason, as on a park request.
         choices: [{ label: `Approve and deliver ${work.key}`, input: 'none', declines: false, body: { decision: decision.id, reason: 'Approved by the operator' }, note: 'reason', recommended: true },
           { label: 'Decline', input: 'none', declines: true, body: { action: 'refuse', decision: decision.id, reason: 'Declined by the operator' }, note: 'reason' }],
         answer: {

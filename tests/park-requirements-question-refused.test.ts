@@ -77,8 +77,8 @@ test('unit:park-requirements-question-refused — GY-1816 AC-1: a goals-and-prio
     { ...clean, ask: 'Does AC-1 need to be rewritten?' },
     { ...clean, needed: 'Whether the requirements need to be revised' },
     { ...clean, reason: 'The criterion needs to be relaxed, or it never passes' },
-    // Whether the rewrite happens at all names no order (review thread PRRT_kwDOUZby-s6smFz9); a negated question still asks.
-    { ...clean, needed: 'Whether the requirements rewrite happens' },
+    // A negated question still asks (GY-1816); GY-1819 re-homes the s6smFz9 'happens' wording to the accepted side:
+    // the bare noun 'requirements' names the rewrite as work, so asking whether it happens parks.
     { ...clean, ask: 'Should AC-1 not be weakened instead?' },
     { ...clean, needed: 'Whether the criteria are no longer matched to GY-1762' },
     // A scoping qualifier between the criterion and its verb (review thread PRRT_kwDOUZby-s6smNd6).
@@ -106,6 +106,8 @@ test('unit:park-requirements-question-refused — GY-1816 AC-1: a goals-and-prio
     'Whether the criteria work is prioritized above the docs trim',
     // A requirements rewrite named as the work being ordered (review thread PRRT_kwDOUZby-s6sl1CW): the decision is the order.
     'Whether the requirements rewrite lands before the release cut',
+    // GY-1819: the bare noun names the rewrite as work, so its change-noun parks whatever its verb.
+    'Whether the requirements rewrite happens',
     'Whether the criteria revision ships after GY-1700 or before it',
     'Whether the requirements update should be prioritized above the docs trim',
     // Test ordering that names "matching tests" (review thread PRRT_kwDOUZby-s6smF0P) matches nothing to anything.
