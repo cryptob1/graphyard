@@ -9,8 +9,11 @@ import { humanRequestSchema, parkRefusal, requirementsQuestionRefusal } from '..
 // (PRRT_kwDOUZby-s6smF0P) and requirement rewrites it let park. The guard now asks two structural
 // questions of each sentence, whatever its word order: which requirements object it names — one of
 // this item's criterion ids (AC-N), its criteria by name, or another work item's key (GY-N)
-// together with a criterion or tests reference, a tests/ path among them — and whether it asks one
-// of that object's change operations, as a verb or as the work itself ("a criteria revision"). A
+// together with a criterion or tests reference, a tests/ path among them — and whether one of the
+// change operations has that object as its target, as a verb in one clause with it (either order)
+// or as the work itself ("a criteria revision"). A change whose target is another noun ("the schema
+// change", "the importer update", "replacing the legacy importer") counts nowhere, and another
+// item's key is a target only in the passive voice, never as the actor ("GY-12 removes it"). A
 // negated change in a statement assures rather than asks; a change an ordering ask schedules
 // ("whether the requirements rewrite lands before the cut") is an ordering decision, still the
 // human's. So the reworded test-ordering, scope, ordering and product-direction questions from
@@ -94,6 +97,22 @@ test('unit:park-requirements-question-structural — GY-1818 AC-1: a goals-and-p
     'Should GY-1762\'s suite run before or after this item\'s tests?',
     'Do the tests that match GY-1700 come first or last?',
     'Whether the soak gate runs GY-1700\'s suite next or this item\'s tests first',
+    // The sentences the review of 48267e1edb38 ran head and base on: each names a requirements
+    // object beside a change word, but the change targets another noun, so both park.
+    'Whether GY-1700\'s tests should run before the schema change lands',
+    'Should GY-1762\'s suite run before or after the importer update?',
+    'Whether GY-1700\'s tests run before the migration is merged',
+    'Whether the soak gate runs GY-1762\'s tests before or after the changes to billing',
+    'Whether the product requirements call for replacing the legacy importer',
+    'Whether the release requirements allow dropping Safari support',
+    'Whether we drop CSV export this quarter given the requirements from sales',
+    // A change verb behind a connector names an unrelated noun phrase, not the object.
+    'Whether the changes to the criteria land before the release cut',
+    // Another item's key acts, it is not targeted: an ordering ask about its own work.
+    'Whether GY-12 removes the legacy importer before this item\'s tests run',
+    // Naming another item's tests never turns into an ask against the key itself.
+    'Should the tests that match GY-1700 be deleted?',
+    'Whether the tests that align with GY-1762 should run first',
   ];
   for (const needed of accepted) assert.equal(parkRefusal({ kind: 'goals-and-priorities', needed, reason: 'the operator owns goals and priorities' }), null, needed);
   // A reason stating the requirements stay as they are (PRRT_kwDOUZby-s6smF0G) assures, it does not ask.
@@ -114,6 +133,9 @@ test('unit:park-requirements-question-structural — GY-1818 AC-1: a goals-and-p
   //   The change named as the work itself asks for it, unless an ordering ask schedules it.
   assert.match(requirementsQuestionRefusal({ ...clean, needed: 'Whether AC-1\'s rewrite happens' })!, /^Not a human-only decision/);
   assert.equal(requirementsQuestionRefusal({ ...clean, needed: 'Whether AC-1\'s rewrite is scheduled before the cut' }), null);
+  //   The verb must target the object: another item's key in the passive voice is a target, as the actor it is not.
+  assert.match(requirementsQuestionRefusal({ ...clean, needed: 'Whether GY-1762 is reversed so its suite passes' })!, /^Not a human-only decision/);
+  assert.equal(requirementsQuestionRefusal({ ...clean, needed: 'Whether GY-1762 removes the duplicated cases itself' }), null);
   //   Each field is judged on its own, and the question is scoped to the kind that claims it.
   assert.match(requirementsQuestionRefusal({ ...clean, ask: 'Decide whether the acceptance criteria are rewritten' })!, /^Not a human-only decision/);
   assert.match(requirementsQuestionRefusal({ ...clean, needed: 'Whether the acceptance criteria are rewritten' })!, /^Not a human-only decision/);
