@@ -293,8 +293,8 @@ async function withdrawParkInTransaction(services: Services, db: Db, now: Date, 
   services.engine.evaluate(work, all, now);
   await (services.engine as unknown as { recordDispatch(db: Db, work: Work, now: Date): Promise<void> }).recordDispatch(db, work, now);
   const details = { request: closed, requestedBy: decision.requestedBy, approvedBy: approver.id, decision: decision.id, reason: decision.reason, approvalReason, at: now.toISOString() };
+  // One ledger row: `save` appends it, and the intervention fold reads it as the request's resolution (interventions/fold-rules.ts).
   await save(db, work, decision.requestedBy, 'human.superseded', now, details);
-  await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, decision.requestedBy, 'human.superseded', JSON.stringify({ details })]);
   return `Withdrew ${work.key}'s human-only request ${closed.id} as superseded by observation`;
 }
 

@@ -10,7 +10,7 @@ import { concurrentOverlap, resourceConflicts } from '../coordination.js';
 import { type SandboxExec, WorkerSandboxError, verifyWorkerSandbox, workerPaths, writablePaths, grantWorkerPaths } from '../worker-sandbox.js';
 import { sweepExpiredWorkerCredentials, withdrawWorkerCredential, workerCredentialDirectory, workerCredentialEnvironment, workerCredentialRoot } from '../worker-credential.js';
 import { assertNoApprovalOptOut } from '../harness.js';
-import { parkedOnHuman, humanDecisionLabel, answerCommand, dispatchHumanWait } from '../model/human-request.js';
+import { parkedOnHuman, humanDecisionLabel, answerCommand, dispatchHumanWait, supersededByObservation } from '../model/human-request.js';
 import { loopOwnedRefusal } from '../model/loop-owned.js';
 import { documentationWorkerSection } from '../model/documentation.js';
 import { workerPreference } from '../model/worker-preference.js';
@@ -662,8 +662,11 @@ function resumedAttempt(work: Partial<Pick<Work, 'capacity' | 'humanRequests'>>)
   const kept = interrupted?.partialWork.commit && interrupted.partialWork.state !== 'discarded'
     ? `The previous attempt (epoch ${interrupted.epoch}) ${ended}; its work is kept as commit ${interrupted.partialWork.commit}${interrupted.partialWork.branch ? ` on local branch ${interrupted.partialWork.branch}` : ''}${interrupted.partialWork.path ? ` (worktree ${interrupted.partialWork.path})` : ''}. Read it with git log and git show, and bring what is sound into your branch with git cherry-pick or git merge instead of redoing it. `
     : interrupted?.partialWork.state === 'discarded' ? `The previous attempt (epoch ${interrupted.epoch}) ${ended}; its uncommitted changes could not be committed and were discarded (${interrupted.partialWork.detail ?? 'no detail recorded'}), so nothing of them is left to read${interrupted.partialWork.branch ? `; its committed work is on local branch ${interrupted.partialWork.branch}` : ''}. ` : '';
-  const answered = work.humanRequests?.at(-1)?.answer?.outcome === 'provided' ? work.humanRequests.at(-1)! : null;
-  return kept + (answered ? `An earlier attempt asked the human for ${answered.needed} (${humanDecisionLabel[answered.kind]}); the human answered: ${answered.answer!.text}. Continue from that answer. ` : '');
+  const last = work.humanRequests?.at(-1), outcome = last?.answer?.outcome;
+  const answered = outcome === 'provided' ? `An earlier attempt asked the human for ${last!.needed} (${humanDecisionLabel[last!.kind]}); the human answered: ${last!.answer!.text}. Continue from that answer. ` : '';
+  // GY-1815: a park withdrawn on observation carries what was observed, so the resumed attempt continues from it instead of parking on it again.
+  const superseded = outcome === supersededByObservation ? `An earlier attempt asked the human for ${last!.needed} (${humanDecisionLabel[last!.kind]}); the request was closed as superseded by observation, because the asked state already holds: ${last!.answer!.text.replace(/^superseded-by-observation: /, '')} (requested by ${last!.answer!.by}${last!.answer!.approvedBy ? `, approved by ${last!.answer!.approvedBy}` : ''}). Continue from that observed state; do not park on the same question again. ` : '';
+  return kept + answered + superseded;
 }
 
 export const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;

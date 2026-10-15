@@ -8,7 +8,8 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import type { Principal, Work } from '../src/model.js';
 import { decisionInput } from '../src/master/autonomy.js';
-import { assertDispatchable } from '../src/master/dispatch.js';
+import { assertDispatchable, workerPrompt } from '../src/master/dispatch.js';
+import { foldInterventions, readInterventionLedger } from '../src/interventions.js';
 import { parkedOnHuman, withdrawParkRefusal, type HumanDecisionKind } from '../src/model/human-request.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -96,12 +97,22 @@ test('unit:human-request-withdraw — an approved withdraw-park closes the open 
   assert.equal(closed.answer!.decision, requested.id);
   assert.match(closed.answer!.text, /^superseded-by-observation: Observed: the operator merged the billing dashboard first/, 'recorded with its reason');
   const ledger = (await store.pool.query("SELECT actor, payload FROM events WHERE work_id=$1 AND kind='human.superseded' ORDER BY seq", [work.id])).rows;
-  assert.ok(ledger.length >= 1, 'the item\'s history records the withdrawal');
-  const entry = ledger.at(-1)!;
+  assert.equal(ledger.length, 1, 'the item\'s history records the withdrawal once');
+  const entry = ledger[0];
   assert.equal(entry.actor, master.id);
   assert.equal(entry.payload.details.approvedBy, approver.id);
   assert.equal(entry.payload.details.reason, observed);
   assert.equal(entry.payload.details.request.answer.outcome, 'superseded-by-observation');
+  // The intervention history resolves the human-only request with that withdrawal: requester, approver and reason.
+  const { rows } = await readInterventionLedger(store.pool, { workId: work.id });
+  const resolved = foldInterventions(rows, await store.list(), new Date().toISOString()).interventions.filter(row => row.kind === 'human-only-decision' && row.work?.key === work.key);
+  assert.equal(resolved.length, 1, JSON.stringify(resolved));
+  assert.equal(resolved[0].resolvedBy, `${master.id} approved by ${approver.id}`);
+  assert.equal(resolved[0].resolution, `superseded-by-observation: ${observed}`);
+  assert.ok(resolved[0].resolvedAt, 'resolved, not left open');
+  // The resumed attempt carries the observation, so its worker continues from it rather than parking on it again.
+  const prompt = workerPrompt({ cliPath: 'graphyard' }, work, { principal: worker.id }, work.epoch + 1);
+  assert.ok(prompt.includes(`the request was closed as superseded by observation, because the asked state already holds: ${observed} (requested by ${master.id}, approved by ${approver.id}). Continue from that observed state; do not park on the same question again.`), prompt);
   // Returned to the loop's dispatch: ready, unleased, unblocked and claimable.
   assert.equal(work.ready, true);
   assert.equal(work.lease, null);
