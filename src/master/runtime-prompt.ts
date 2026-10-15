@@ -181,6 +181,8 @@ const providerUsageErrors: readonly RegExp[] = [
 ];
 /** Z.AI's 429 `Weekly/Monthly Limit Exhausted`, which the runtimes that speak to it print verbatim behind their own error labels (GY-973, GY-1817). */
 const zaiLimitExhausted = /\b(?:weekly|monthly|daily|hourly|usage)(?:\/(?:weekly|monthly|daily|hourly))? limit exhausted\b/i;
+/** The same notice inside Z.AI's own error envelope (`{"code":"1310","message":"Weekly/Monthly Limit Exhausted. …"}`), as pi prints it: the envelope, never the bare phrase an agent may write about it, is the provider speaking. */
+const zaiLimitEnvelope = new RegExp(`"code"\\s*:\\s*"?\\d+"?\\s*,\\s*"message"\\s*:\\s*"${zaiLimitExhausted.source}`, 'i');
 /** Each runtime's own provider-authored limit notices, keyed by the kind its profiles name. */
 export const providerLimitNotices: Readonly<Record<string, readonly RegExp[]>> = {
   claude: [...providerUsageErrors, /\bClaude AI usage limit reached\b/],
@@ -188,7 +190,7 @@ export const providerLimitNotices: Readonly<Record<string, readonly RegExp[]>> =
   opencode: [...providerUsageErrors, zaiLimitExhausted], // OpenCode 1.18's `Weekly/Monthly Limit Exhausted` (GY-973)
   cursor: [...providerUsageErrors],
   agy: [...providerUsageErrors, /\bIndividual quota reached\b(?=.*\b(?:upgrade your subscription|resets? in)\b)/i], // GY-1135
-  pi: [...providerUsageErrors, zaiLimitExhausted], // pi on Z.AI: `Error: 429: {"code":"1310","message":"Weekly/Monthly Limit Exhausted. …"}` (GY-1817)
+  pi: [...providerUsageErrors, zaiLimitEnvelope], // pi on Z.AI: `Error: 429: {"code":"1310","message":"Weekly/Monthly Limit Exhausted. …"}` (GY-1817)
 };
 /** The notices a session on `runtime` is judged against; an unnamed runtime gets the shared provider errors. */
 export const runtimeLimitNotices = (runtime: string | null | undefined): readonly RegExp[] => providerLimitNotices[runtime ?? ''] ?? providerUsageErrors;

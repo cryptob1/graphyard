@@ -147,6 +147,8 @@ test('unit:pi-provider-limit-exhaustion — pi\'s 429 code 1310 "Weekly/Monthly 
     for (const prose of [
       'Tests pass; the weekly limit exhausted branch is covered.',
       'Handled the case where the Weekly/Monthly Limit Exhausted banner is on screen',
+      // The bare phrase leading an agent's own line is not the provider's envelope.
+      'Weekly/Monthly Limit Exhausted handling is now covered',
       '  ⎿ tmp disk quota is exhausted (a known local issue). Clearing the tsx cache, then rerunning.',
       'The 429 code 1310 handling resets at 2026-10-17 08:27:35 in the test I just added',
     ]) assert.equal(detectRuntimeExhaustion(prose, 'pi', at), null, prose);
