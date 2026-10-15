@@ -16,9 +16,10 @@ import { closeWork } from './close.js';
 import { answerWith, applyLaneRework, approvedUnapplied, resumeDecision, settleApprovedDecisions, supersedeMoved, withdrawOrSettle } from './lane-rework.js';
 import { lockedWork, workIdByRef } from '../store/locked-read.js';
 import { appliedOutcome, flakyEvidence } from './evidence.js';
+import { withdrawParkInTransaction } from './withdraw-park.js';
 
 type Db = pg.PoolClient;
-// The ledger's read half lives in decision-ledger.ts (GY-102); decision-refusal.ts reads it from here too.
+// Ledger reads live in decision-ledger.ts (GY-102); decision-refusal.ts reads it from here too.
 export { readDecisions, type DecisionRecord } from './decision-ledger.js';
 // The risk lane's own application of a rework (GY-1110), and the settlement of any approval left
 // unapplied (GY-1297) or its resumption by the loop (GY-1300), live in lane-rework.ts.
@@ -166,7 +167,7 @@ async function recordStale(services: Services, stale: Stale) {
   await services.engine.store.transaction(db => staleEvent(db, stale));
 }
 
-// GY-1296, GY-1463: the rebase of a revision-bound decision past changes that cannot affect its grounds lives in engine.ts.
+// GY-1296, GY-1463: rebasing a revision-bound decision past changes outside its grounds lives in engine.ts.
 export const bookkeepingRebase = async (db: Db, decision: DecisionRecord, work: Work): Promise<DecisionRecord> => (await revisionRebase(db, decision, work)).judged;
 
 /**
@@ -230,8 +231,8 @@ export async function approveDecision(services: Services, caller: Principal, id:
       }
       if (!resuming) await record(db, work!, actor.id, 'decision.approved', { id: decision!.id, action: decision!.action, reason: data.reason, requestedBy: decision!.requestedBy, approver: { id: actor.id, role: actor.role } });
       const applied = appliedOutcome(decision!.action, decision!.input);
-      if (applied || decision!.action === 'resolve') {
-        const outcome = applied ?? await resolveInTransaction(services, db, now, work!, decision!, actor, data.reason);
+      if (applied || decision!.action === 'resolve' || decision!.action === 'withdraw-park') {
+        const outcome = applied ?? await (decision!.action === 'withdraw-park' ? withdrawParkInTransaction : resolveInTransaction)(services, db, now, work!, decision!, actor, data.reason);
         return finish(db, work!, actor, decision!.id, 'decision.applied', { outcome }, key, fingerprint);
       }
       approved = { decision: judged, work: work!, approver: actor };

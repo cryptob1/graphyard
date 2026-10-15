@@ -119,6 +119,9 @@ export function decisionRace(decision: DecisionRecord, work: Work): StaleRace | 
   // A triage closure binds the judgement it applies; a newer judgement, or a settled one, never returns to it.
   if (decision.action === 'close' && (work.triage?.state !== 'proposed' || work.triage.at !== decision.input.triageAt))
     return { expected: { triageAt: decision.input.triageAt }, current: { triageAt: work.triage?.at ?? null, state: work.triage?.state ?? null } };
+  // GY-1815: a withdrawal binds the one open request it closes; once answered or replaced, it never applies.
+  if (decision.action === 'withdraw-park' && (work.humanRequest?.id !== decision.input.request || work.humanRequest?.answer))
+    return { expected: { request: decision.input.request }, current: { request: work.humanRequest?.answer ? null : work.humanRequest?.id ?? null } };
   if (decision.action === 'resolve') {
     // A decision requested before the pin existed falls back to the revision it named:
     // revisions never move back, so a refused request can never become applicable either.

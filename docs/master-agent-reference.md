@@ -3,11 +3,11 @@
 
 ## Items, scope and human waits
 
-Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON`; auto-granted if grounded (docs; criteria/follow-up/finding paths; `web/`/`browser-tests/` for `docs/` planners; pinning tests; symbol defs; successors; companions: budget, timing/wall-clock gates, `manual:fault-class-*`, importing tests, imports). Non-repository paths: refused, never routed. Else `approve-scope`; `master scope GY-N [--allow-broad-scope] REASON` applies refusals; `--wait` ≤15min. Transport-failed widens retry, never stands; a live lease's additive multi-path approver refusal is no fault for 15min, then stands; non-additive or one-path refusals stand at once. Ending attempts close requests; `master unblock GY-N` closes carried. `held`: mid-attempt requirements approvals apply post-attempt; never re-request. Covering revision: watched. Human: `park GY-N EPOCH KIND NEEDED --ask ASK [--step STEP]… --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you)); `answer GY-N …`; [host-doable](deployment.md), refused.
+Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON`; auto-granted if grounded (docs; criteria/follow-up/finding paths; `web/`/`browser-tests/` for `docs/` planners; pinning tests; symbol defs; successors; companions: budget, timing/wall-clock gates, `manual:fault-class-*`, importing tests, imports). Non-repository paths: refused, never routed. Else `approve-scope`; `master scope GY-N [--allow-broad-scope] REASON` applies refusals; `--wait` ≤15min. Transport-failed widens retry, never stands; a live lease's additive multi-path approver refusal is no fault for 15min, then stands; non-additive or one-path refusals stand at once. Ending attempts close requests; `master unblock GY-N` closes carried. `held`: mid-attempt requirements approvals apply post-attempt; never re-request. Covering revision: watched. Human: `park GY-N EPOCH KIND NEEDED --ask ASK [--step STEP]… --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you)); `answer GY-N …`; done out of band: `master decide GY-N withdraw-park REASON`; [host-doable](deployment.md) and criterion-rewrite asks ([requirements decisions](glossary.md#who-decides)) refused.
 
 ## Promotion to autonomy
 
-`graphyard master promote --admin-token-stdin` makes supervised installs autonomous; `master autonomy --apply` refuses on it, `master.json` edits skip checks. Refuses until reviewer App and profile exist, its bot none of your `gh` login, `operatorLogin`, worker App or principals; then logs who/reviewer/time to `.graphyard/master-actions/promotions.jsonl`, provisions operator-agent and approver, writes `supervision: autonomous`; no demotion.
+`graphyard master promote --admin-token-stdin` makes supervised installs autonomous; `master autonomy --apply` refuses on it, `master.json` edits skip checks. Refuses until reviewer App and profile exist, its bot none of your `gh` login, `operatorLogin`, worker App or principals; logs to `.graphyard/master-actions/promotions.jsonl`, provisions operator-agent and approver, writes `supervision: autonomous`; no demotion.
 
 ## Conflict avoidance
 
@@ -19,9 +19,9 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 | Flow | Effect
 | --- | ---
-| `app-permissions` | Raise App permissions to declaration
-| `installation-accept` | Accept pending requests
-| `protection` | Reconcile branch protection
+| `app-permissions` | Permissions raised
+| `installation-accept` | Requests accepted
+| `protection` | Protection reconciled
 
 Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` (`record.json`, `ledger.json`, redacted Confirm-access markup: `master browser fixtures`); a criterion needing a live one runs `master browser capture [--dry-run]` on the sudo-protected App permissions page, submitting nothing, never a human, following each offered method's control as a button or a link, keeping a view only once it opens; a refused capture's record names the controls it saw. Approving *Confirm access* GitHub Mobile on device: human-only; master never stores cookies, uses merge bypass, pushes code, reads worker credentials. On classifier refusals `master harness claude|codex --apply` writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`, token-minting or mutating `gh api`; missing or retired rules are `harness` drift the loop reapplies each cycle to its CLI checkout (no unit record: self-recorded, else waits); `master status` too (read-only).
 
@@ -37,7 +37,7 @@ Dead supervisor fences item; `containment` lists survivors' pid, cmdline and cwd
 
 ### Producer-runtime faults
 
-Unacted producer requests (unstarted, refused, launch-exited) relaunch on untried profile.
+Unacted producer requests (unstarted/refused/launch-exited) relaunch on untried profile.
 
 ## Fault classes
 
@@ -45,10 +45,10 @@ Unacted producer requests (unstarted, refused, launch-exited) relaunch on untrie
 
 ## Shadow merge gate
 
-`run.shadowGate` (`enabled` true, `timeoutMinutes` 20): each cycle trial-merges, builds, affected-tests oldest untried head credential-free in sticky tmp-reclaimed `TMPDIR` (`gy-t*`), pushing nothing; `shadow.verdict` (failing: runner-ran files, 4000-char `logTail`) joins GitHub's outcome in `shadowGate` (`shadow-only-fail`/`shadow-missed`: a line each, merger `github`); errors/timeouts record nothing; third timeout one line. `GET /api/shadow-disagreements`, `/api/shadow-explanations?pair=KEY:HEAD:BASETIP`.
+`run.shadowGate` (`enabled` true, `timeoutMinutes` 20): each cycle trial-merges/builds/affected-tests oldest untried head credential-free in sticky tmp-reclaimed `TMPDIR` (`gy-t*`), pushing nothing; `shadow.verdict` (failing: runner-ran files, 4000-char `logTail`) joins GitHub's outcome in `shadowGate` (`shadow-only-fail`/`shadow-missed`: a line each, merger `github`); errors/timeouts record nothing; third timeout one line. `GET /api/shadow-disagreements`, `/api/shadow-explanations?pair=KEY:HEAD:BASETIP`.
 
 ## Pipeline speed
 
 Target: submit→merge p50 ≤30 minutes, p90 ≤60 minutes. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; verdict `speed.submitToMerge`; `scripts/measure-pipeline-speed.mjs` feeds `manual:speed-target-met`.
 
-Steps calling an approver, decision or session budget two-fifths of the interval (30s floor), each call 10s or what's left; a slower one is carried (`waiting`, no fault), retried next cycle, joining it or consuming its answer, kept while its row stands; spent, it starts none; one `decision.*` ledger read names moved items, an unmoved history is kept unread. Master, merge-mode, record and triage-phase calls too.
+Steps calling an approver, decision or session budget two-fifths of the interval (30s floor), each call 10s or what's left; a slower one is carried (`waiting`, no fault), retried next cycle, joining it or consuming its answer, kept while its row stands; spent, it starts none; one `decision.*` ledger read names moved items, an unmoved history is kept unread. Master/merge-mode/record/triage-phase calls too.

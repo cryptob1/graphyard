@@ -9,6 +9,7 @@ import { createSchema, escalationTriggers, operatorCapability, type OperatorCapa
 import { baseRefreshConflict } from '../merge-queue.js';
 import { loopOwnedRefusal } from './loop-owned.js';
 import { judgedSame, situatedDecisionActions, type DecisionSituation } from './decision-situation.js';
+import { withdrawParkInput, withdrawParkRefusal } from './park-withdrawal.js';
 export { decisionSituation, judgedSame, situatedDecisionActions, situationLabel, supersededSituation, type DecisionSituation } from './decision-situation.js';
 
 /**
@@ -19,16 +20,15 @@ export { decisionSituation, judgedSame, situatedDecisionActions, situationLabel,
  * human-only is not a decision here: goals and priorities, spending money or opening
  * third-party accounts, and issuing credentials to people.
  */
-// `close` is a triage closure (GY-402): a machine-filed item the triage agent judged already fixed,
-// not worth doing, or to be merged into another, which is applied only once an approver agrees.
-// `evidence` accepts one flaky E2E case of one release run at one exact SHA, and `fold` folds one
-// customer outcome's release hold into another's (GY-1378); both are recorded on a release hold item.
-export const decisionActions = ['release', 'unblock', 'requirements', 'resolve', 'attest', 'merge', 'rework', 'recover', 'grant', 'close', 'evidence', 'fold'] as const;
+// `close`: triage closes (GY-402) a machine-filed item judged fixed, not worth doing or a duplicate.
+// `evidence` accepts one flaky E2E case of one release run at one SHA; `fold` folds an outcome's
+// release hold into another's (GY-1378). `withdraw-park` supersedes a park whose ask holds (GY-1815).
+export const decisionActions = ['release', 'unblock', 'requirements', 'resolve', 'attest', 'merge', 'rework', 'recover', 'grant', 'close', 'evidence', 'fold', 'withdraw-park'] as const;
 export type DecisionAction = typeof decisionActions[number];
 export const decisionCapabilities: Record<DecisionAction, OperatorCapability> = {
   release: 'intent:ready', unblock: 'intent:unblock', requirements: 'policy:requirements', resolve: 'decision:resolve',
   attest: 'decision:attest', merge: 'decision:merge', rework: 'decision:rework', recover: 'decision:rework', grant: 'decision:grant', close: 'intent:create',
-  evidence: 'decision:attest', fold: 'decision:resolve',
+  evidence: 'decision:attest', fold: 'decision:resolve', 'withdraw-park': 'decision:resolve',
 };
 export const approveCapability: OperatorCapability = 'decision:approve';
 
@@ -63,13 +63,14 @@ export const decisionInputs = {
   // only the same head, base and grounds, never another ground on the same head.
   rework: z.object({ previousWorkerStopped: z.literal(true), binding: groundsBinding.optional() }).strict(),
   recover: z.object({ previousWorkerStopped: z.literal(true), binding: groundsBinding.optional() }).strict(),
-  // The triage closure (GY-402) binds its judgement (`triageAt`); the diagnostician's duplicate closure (GY-439) binds the item revision.
+  // A triage closure (GY-402) binds its judgement (`triageAt`); a diagnostician's duplicate closure (GY-439) the item revision.
   close: z.union([ z.object({ kind: z.enum(['superseded', 'obsolete', 'duplicate']), ref: z.string().regex(/^[A-Z][A-Z0-9]*-\d+$/).nullable(), reason: z.string().trim().min(1).max(2000), triageAt: z.iso.datetime() }).strict(),
     z.object({ kind: z.enum(closureKinds), ref: z.string().trim().min(1).max(200).nullable().optional(), expectedRevision: revision }).strict()]),
   grant: z.object({ principal: principalId, patterns: z.array(z.string().min(1).max(200)).min(1).max(50), expectedRevision: z.number().int().min(0).optional() }).strict(),
-  // GY-1378: bound to the case, the release run and the full SHA it was flaky at, so it never carries to another SHA.
+  // GY-1378: bound to the case, release run and full SHA it was flaky at; it never carries to another SHA.
   evidence: z.object({ case: caseOrOutcome, runId: z.string().regex(/^[a-zA-Z0-9._:-]+$/).max(100), sha }).strict(),
   fold: z.object({ outcome: caseOrOutcome, into: caseOrOutcome }).strict().refine(input => input.outcome !== input.into, 'A hold folds into another outcome\'s hold'),
+  'withdraw-park': withdrawParkInput,
 } satisfies Record<DecisionAction, z.ZodType>;
 const reason = z.string().trim().min(1).max(2000);
 /**
@@ -93,7 +94,7 @@ export const decisionRefusalSchema = z.object({ action: z.literal('refuse'), dec
 export type DecisionState = 'requested' | 'approved' | 'applied' | 'failed' | 'refused' | 'superseded' | 'held' | 'stale';
 /**
  * GY-1687: the two engine refusals that mean only "the item has a live attempt" (a live lease, an unverified containment
- * fence), never that the revision is wrong. A requirements decision refused for one is `held`; the attempt's end applies it.
+ * fence), never that the revision is wrong. A requirements decision refused for one is `held`, applied when it ends.
  */
 export const liveLeaseRevisionRefusal = 'Stop and release the active worker before revising requirements';
 export const quarantinedRevisionRefusal = (epoch: number | undefined) => `Task is quarantined by unverified containment from epoch ${epoch}; requirements remain immutable until settlement or stopped-worker recovery`;
@@ -121,7 +122,7 @@ export interface Decision {
   /** GY-1687: why the approved decision waits for the attempt to end, since when, and the engine call that applies it then. */
   held?: { reason: string | null; at: string; application: HeldApplication | null; attempt?: HeldAttempt | null } | null;
 }
-// GY-1297. An approved decision left without an outcome refused its action forever (GY-949): one bound to a head
+// GY-1297. An approved decision without an outcome refused its action forever (GY-949): one bound to a head
 // and base the item has left is `superseded`, naming both; one whose situation holds is resumed past the grace.
 export const approvalApplyGraceMs = 60_000, approvedDecisionBoundMs = 300_000;
 export const stalledApproval = (decision: { state: string; approvedAt?: string | null }, now: number) => decision.state === 'approved' && !!decision.approvedAt && now - Date.parse(decision.approvedAt) >= approvalApplyGraceMs;
@@ -275,9 +276,10 @@ export function decisionPrecondition(action: DecisionAction, input: any, work: W
     if (!work.candidate || work.candidate.sha !== input.sha || work.candidate.baseSha !== input.baseSha || work.policyRevision !== input.policyRevision)
       return `The decision names ${String(input.sha).slice(0, 12)} but the current candidate is ${work.candidate?.sha.slice(0, 12) ?? 'none'} at policy revision ${work.policyRevision}`;
   }
+  if (action === 'withdraw-park') return withdrawParkRefusal(work, input);
   if (action === 'rework' && !work.submission) return 'Rework applies to submitted work';
-  // GY-1386: a rework situated on a head (its binding, GY-407) answers grounds read from that head; once the
-  // candidate moved on — a base refresh carried it cleanly onto the tip — those grounds no longer describe it.
+  // GY-1386: a rework bound to a head (GY-407) answers grounds read from that head; once a base refresh
+  // carried the candidate cleanly onto the tip, those grounds no longer describe it.
   const bound = action === 'rework' ? reworkBoundHead(input) : null;
   if (bound && work.candidate?.sha !== bound) return `The rework is bound to ${bound.slice(0, 12)} but the current candidate is ${work.candidate?.sha.slice(0, 12) ?? 'none'}; its grounds no longer describe the item`;
   if (action === 'close' && input.triageAt !== undefined && (work.triage?.state !== 'proposed' || work.triage.at !== input.triageAt)) return `${work.key} has no proposed triage closure from ${input.triageAt}; its triage is ${work.triage ? `${work.triage.state} from ${work.triage.at}` : 'not recorded'}`;
