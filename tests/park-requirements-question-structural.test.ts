@@ -121,6 +121,11 @@ test('unit:park-requirements-question-structural — GY-1818 AC-1: a goals-and-p
     // A tests/ path beside another item's key, ordered rather than aligned.
     'Whether tests/fixtures/example.test.ts runs before GY-1700\'s suite',
     'Should GY-1762 land before tests/e2e/preview.test.ts is split?',
+    // Dropping or removing another item is a goals decision whatever its tests are (PRRT_kwDOUZby-s6snKCL):
+    // a key is a target only of alignment or reversal.
+    'Should we drop GY-1700 from this quarter because its tests are obsolete?',
+    'Should GY-1700 be dropped from this quarter because its tests are obsolete?',
+    'Whether to replace GY-1700 with a smaller item now that its tests are flaky',
   ];
   for (const needed of accepted) assert.equal(parkRefusal({ kind: 'goals-and-priorities', needed, reason: 'the operator owns goals and priorities' }), null, needed);
   // A reason stating the requirements stay as they are (PRRT_kwDOUZby-s6smF0G) assures, it does not ask.
@@ -155,6 +160,10 @@ test('unit:park-requirements-question-structural — GY-1818 AC-1: a goals-and-p
   //   The verb must target the object: another item's key in the passive voice is a target, as the actor it is not.
   assert.match(requirementsQuestionRefusal({ ...clean, needed: 'Whether GY-1762 is reversed so its suite passes' })!, /^Not a human-only decision/);
   assert.equal(requirementsQuestionRefusal({ ...clean, needed: 'Whether GY-1762 removes the duplicated cases itself' }), null);
+  assert.match(requirementsQuestionRefusal({ ...clean, ask: 'Decide whether to reverse GY-1762 so its tests pass' })!, /^Not a human-only decision/);
+  //   Criterion ids and keys are read whatever their case (PRRT_kwDOUZby-s6snKCO).
+  assert.match(requirementsQuestionRefusal({ ...clean, needed: 'Should ac-1 be weakened?' })!, /^Not a human-only decision/);
+  assert.match(requirementsQuestionRefusal({ ...clean, needed: 'Whether this item\'s test assertions should match gy-1700\'s' })!, /^Not a human-only decision/);
   //   Each field is judged on its own, and the question is scoped to the kind that claims it.
   assert.match(requirementsQuestionRefusal({ ...clean, ask: 'Decide whether the acceptance criteria are rewritten' })!, /^Not a human-only decision/);
   assert.match(requirementsQuestionRefusal({ ...clean, needed: 'Whether the acceptance criteria are rewritten' })!, /^Not a human-only decision/);

@@ -101,21 +101,21 @@ export function recommendedChoice(request: { kind: HumanDecisionKind; choices?: 
 export { hostDoableAsk, hostDoableRefusal, type HostDoableAsk };
 
 /** GY-1818: per sentence, any order — is a requirements object named (AC-N, the criteria, or GY-N beside a tests reference), and does a change operation target it. */
-const criterionId = /\bAC-\d+\b/, criterionName = /\b(?:acceptance\s+)?criteri(?:a|on)\b|\brequirements?\b/i, itemKey = /\bGY-\d+\b/, testsReference = /\btests?\/\S*|\b(?:tests?|assertions?|suites?)\b/i,
+const criterionId = /\bAC-\d+\b/i, criterionName = /\b(?:acceptance\s+)?criteri(?:a|on)\b|\brequirements?\b/i, itemKey = /\bGY-\d+\b/i, testsReference = /\btests?\/\S*|\b(?:tests?|assertions?|suites?)\b/i,
   requirementsObject = (sentence: string) => criterionId.test(sentence) || criterionName.test(sentence) || (itemKey.test(sentence) && testsReference.test(sentence));
-const changeStems = String.raw`rewrit|revis|revers|updat|amend|chang|edit|delet|remov|reconcil|match|align|weaken|relax|soften|narrow|merg|replac|drop`,
+const changeStems = String.raw`rewrit|revis|revers|updat|amend|chang|edit|delet|remov|reconcil|match|align|weaken|relax|soften|narrow|merg|replac|drop`, keyStems = 'match|align|reconcil|revers|revert',
   changeNoun = /\b(?:AC-\d+|criteri(?:a|on)|requirements?)(?:'s)?\s+(?:rewrit\w*|revis\w*|updat\w*|amend\w*|chang\w*|edit\w*|delet\w*|remov\w*|reconcil\w*|align\w*|weaken\w*|relax\w*|narrow\w*|revers\w*|merg\w*|replac\w*|drops?)\b/i;
-/** Verb and requirements object in one clause, either order ("rewrite AC-1", "AC-1 must be revised"), across only determiners, auxiliaries, -ly words or a scoping qualifier, never "to"; another noun's change ("the importer update") counts nowhere; a key is a target only if passive ("GY-1762 is reversed"); a tests/ path an alignment targets counts beside a key. */
+/** Verb and object in one clause, either order ("AC-1 must be revised"), across only determiners, auxiliaries, -ly words or a scoping qualifier, never "to"; another noun's change counts nowhere; a key only of alignment or reversal ("GY-1762 is reversed"), never "drop GY-1700"; an aligned tests/ path counts beside a key. */
 const auxiliaries = String.raw`(?:should|shall|may|might|must|can|could|would|will|needs?|needed|is|are|was|were|be|been|being|gets?|got|has|have|had|to|not|never|no longer|also|still|instead|now|again|once)`,
-  verbThenObject = new RegExp(String.raw`\b(?:${changeStems})\w*(?:(?:\s+|,\s*)(?:the|a|an|its|their|our|your|this|that|these|those|another|each|acceptance|\w+ly))*(?:\s+|,\s*)(?:acceptance\s+)?(?:AC-\d+|criteri(?:a|on)|requirements?|GY-\d+)(?:'s)?\b`, 'gi');
+  verbThenObject = new RegExp(String.raw`\b(?:${changeStems})\w*(?:(?:\s+|,\s*)(?:the|a|an|its|their|our|your|this|that|these|those|another|each|acceptance|\w+ly))*(?:\s+|,\s*)(?:acceptance\s+)?(?:AC-\d+|criteri(?:a|on)|requirements?)(?:'s)?\b|\b(?:${keyStems})\w*(?:\s+(?:the|\w+ly))*\s+GY-\d+`, 'gi');
 const qualifier = String.raw`(?:\s+(?:for|in|of|on|under|about|within|at)(?:\s+[\w'-]+){1,4}?(?=(?:\s+|,\s*)${auxiliaries}\b))?`,
   objectThenVerb = new RegExp(String.raw`\b(?:AC-\d+|criteri(?:a|on)|requirements?)(?:'s)?${qualifier}(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:${changeStems})\w*`, 'gi'),
-  keyThenVerb = new RegExp(String.raw`\bGY-\d+(?:'s)?(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:is|are|was|were|be|been|being|gets?|got)\b(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:${changeStems})\w*`, 'gi'),
+  keyThenVerb = new RegExp(String.raw`\bGY-\d+(?:'s)?(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:is|are|was|were|be|been|being|gets?|got)\b(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:${keyStems})\w*`, 'gi'),
   pathAligned = new RegExp(String.raw`\b(?:match|align|reconcil)\w*(?:(?:\s+|,\s*)(?:the|a|an|its|their|our|your|this|that|these|those|each|\w+ly))*(?:\s+|,\s*)tests?\/\S+|\btests?\/\S+(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:match|align|reconcil)\w*`, 'gi');
-/** "the tests that match GY-1700" names tests, aligns nothing. Ordering schedules a change-noun only as its own predicate ("the requirements rewrite lands first"), not another's ("after GY-1700 lands"). */
+/** "the tests that match GY-1700" names tests, aligns nothing. Ordering schedules a change-noun only as its own predicate ("the rewrite lands first"), not another's. */
 const namedNotAligned = /\b(?:match|align|reconcil)\w*(?:ing|ed)(?=\s+(?:tests?|assertions?|suites?)\b(?!\/))|(?<=\b(?:tests?|assertions?|suites?)\s+(?:that|which)\s+)(?:match|align|reconcil)\w*(?:\s+GY-\d+(?:'s)?)?/gi,
   scheduledChange = new RegExp(String.raw`${changeNoun.source}(?:\s+(?:should|shall|may|might|must|can|could|would|will|is|are|was|were|be|been|being|gets?|got|has|have|had|also|still|now|\w+ly))*\s+(?:prioriti[sz]\w*|schedul\w*|sequenc\w*|defer\w*|preced\w*|follow\w*|land(?:s|ed|ing)?|ship(?:s|ped|ping)?|order(?:ed|s)?)\b`, 'gi');
-/** A negated change asks only in a question ("should AC-1 not be weakened?"), read from the last clause break on. A sentence (no dot inside a token ends one) asks when it targets a named requirements object or names unscheduled change work. */
+/** A negated change asks only in a question ("should AC-1 not be weakened?"), from the last clause break. A sentence (no dot inside a token ends one) asks when it targets a named requirements object or names unscheduled change work. */
 const question = (sentence: string) => /\?|\b(?:whether|if)\b/i.test(sentence) || /^(?:should|shall|may|might|must|can|could|would|will|do|does|did|is|are|was|were|has|have)\b/i.test(sentence.trim()),
   verbChain = (text: string, end: number) => { const before = text.slice(0, end); return before.slice(1 + Math.max(before.lastIndexOf(','), before.lastIndexOf(';'), before.lastIndexOf(' but '), before.lastIndexOf(' so '), before.lastIndexOf(' and '), before.lastIndexOf(' or '))); };
 const requirementsQuestion = (text: string) => (text.match(/(?:[^.;\n?]|\.(?=\S))+\??/g) ?? []).some(sentence => {
@@ -124,7 +124,7 @@ const requirementsQuestion = (text: string) => (text.match(/(?:[^.;\n?]|\.(?=\S)
   return requirementsObject(sentence) && (targeted || changeNoun.test(sentence.replace(scheduledChange, 'work'))); });
 /** A park's own words: the kind it claims, and every text the human would read. */
 export interface ParkQuestion { kind?: string; needed: string; ask?: string | null; reason?: string | null }
-/** Why a goals-and-priorities park asks a criterion rewrite (GY-1816), on structure, not phrasing (GY-1818), or null: rewrites are the master's request and an approver's approval (docs/glossary.md#who-decides). */
+/** Why a goals-and-priorities park asks a criterion rewrite (GY-1816), on structure, not phrasing (GY-1818), or null: the master requests rewrites, an approver approves (docs/glossary.md#who-decides). */
 export function requirementsQuestionRefusal(data: ParkQuestion): string | null {
   if (data.kind !== 'goals-and-priorities') return null;
   const questioned = [data.ask, data.needed, data.reason].some(text => !!text?.trim() && requirementsQuestion(text));
