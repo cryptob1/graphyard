@@ -31,6 +31,23 @@ export interface Delivery { mergedAt: string; mergeSha: string; authorizationRev
 export const deploySmokeRequired = (policy: Work['policy']) => !!policy.deploySmoke;
 
 /**
+ * GY-1824: how many settled deliveries still owing their record one full reconciliation pass
+ * raises a verify-deployment row for (newest item first). Deliveries done before the unattended
+ * path shipped hold no row and are re-evaluated by nothing else, so the pass backfills them a few
+ * at a time — the first passes after this ships never sweep the whole delivery history into the
+ * queue at once — and every one of them is reached in turn, however old its merge.
+ */
+export const deploymentBackfillPerPass = 5;
+
+/**
+ * A done, unclosed delivery the unattended verify-deployment path still owes its record: no release
+ * observation is bound to it yet. The smoke policy decides what follows a record (the
+ * post-deployment smoke proof), never whether the record is owed, so this holds for non-smoke
+ * policies too — the gap GY-1824 closes — and for a merge of any age.
+ */
+export const deploymentUnrecorded = (work: Work) => work.stage === 'done' && !work.closure && !!work.delivery && !work.delivery.deployment;
+
+/**
  * Post-delivery state, derived from the delivery snapshot alone. `delivered` is the terminal state
  * for work whose policy asks for no smoke proof; the others describe the second confidence layer.
  */

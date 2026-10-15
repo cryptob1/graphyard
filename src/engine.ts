@@ -10,7 +10,7 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, stallCovering, submittedEpoch, type Attestation, type PlaneStall, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
+import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, stallCovering, submittedEpoch, type Attestation, type PlaneStall, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, deploymentBackfillPerPass, deploymentUnrecorded, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
 import { filedFollowUpWindow, followUpRequest, patternOfProof, type PatternProjections, type PatternReader } from './model/observation-window.js';
 import { readInterventionReport } from './interventions/report.js';
 import { interventionPolicyFromEnv } from './model/interventions.js';
@@ -2816,6 +2816,8 @@ export class Engine {
    * planned, so the count bounds how much one surprise at write time sends back for evaluation.
    */
   reconcileBatchWrites = 8;
+  /** GY-1824: settled deliveries owing their deployment record that one full pass raises a row for. */
+  reconcileDeploymentBackfill = deploymentBackfillPerPass;
   /**
    * How long a batch with writes waits in line for the coordination lock (GY-1115, GY-1290), never
    * more than half the server's `deadlock_timeout` (`coordinationLockWithin`); it holds no row while
@@ -3112,7 +3114,12 @@ export class Engine {
               ...live.filter(id => { const work = fleet.get(id)!.work; return !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime() || standingEscalations(work).length > 0 || reaches.some(reach => readsFace(fleet.get(id)!, reach)); }),
             ]);
             if (full) this.reconcileConfig = config;
-            candidates = live.filter(id => due.has(id)); tick.candidates = candidates.length;
+            // GY-1824: a full pass also takes in a few settled deliveries still owing their deployment
+            // record, newest item first: nothing else re-evaluates one, and a bounded share per pass
+            // backfills the delivery history without sweeping it into the queue at once.
+            const backfill = full ? [...fleet].filter(([, entry]) => entry.settled && deploymentUnrecorded(entry.work))
+              .sort(([, a], [, b]) => b.number - a.number).slice(0, this.reconcileDeploymentBackfill).map(([id]) => id) : [];
+            candidates = [...live.filter(id => due.has(id)), ...backfill]; tick.candidates = candidates.length;
             this.reconcileOwed.clear();
             for (const id of candidates) this.reconcileOwed.add(id);
             decided = true;
@@ -3254,9 +3261,13 @@ export class Engine {
     // A delivered item is not re-evaluated, but one still holding rows, a merge-queue entry (stored
     // before GY-1236) or an action from before its delivery — every item delivered before GY-185 —
     // is settled here once, and the check that finds nothing to settle costs no evaluation.
+    // GY-1824: a delivery still owing its deployment record (`deploymentUnrecorded`) — one done
+    // before the unattended verify-deployment path shipped, which the full pass's backfill brings
+    // here — is settled too, and `settleDelivered` raises the row the executor records, exactly as
+    // the delivery transaction raises a fresh delivery's.
     if (work.stage === 'done') {
       const leftover = !!(work as Work & { queue?: unknown }).queue || (work.actionQueue?.actions ?? []).some(row => row.kind !== 'verify-deployment') || (!!work.nextAction && work.nextAction.kind !== 'verify-deployment');
-      if (!leftover || !settleDelivered(work, all, now)) return false;
+      if ((!leftover && !deploymentUnrecorded(work)) || !settleDelivered(work, all, now)) return false;
       this.reconcileWrites.set(work, { delivered: true });
       if (!dryRun) await this.writeReconciled(db, work, all, now);
       return true;

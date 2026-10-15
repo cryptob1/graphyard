@@ -1,7 +1,7 @@
 <!-- page: Build integrations | 4 | release API. -->
 # Releases and delivery
 
-Records intended releases, verifying observers ([rollback](recovery.md#rollback)): `admin` sets policy, approves; `builder`s build; `admin`/`promoter` select; `observer`s lease (`POST /api/delivery/lease`).
+Records releases, verifying observers ([rollback](recovery.md#rollback)): `admin` sets policy, approves; `builder`s build; `admin`/`promoter` select; `observer`s lease (`POST /api/delivery/lease`).
 
 ## Release candidates
 
@@ -14,7 +14,7 @@ Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`
 - Failed candidates file a [hold](validation.md#release-holds) per failed outcome, else a follow-up (`release follow-up ID`) as the [filing credential](#release-filing-credential).
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records advisory `rc-soak/ID`.
 
-**The master loop promotes** (`promote=true`) once main differs from the last `rc-production/` and cut SHAs, nothing is queued and `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`; 10, `0` off) passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`, `GRAPHYARD_PRODUCTION_URL`; no workflow; managed repositories run [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. A `GRAPHYARD_UAT_STATIC` site's [merge-writer](delivery-redesign.md#merge-writer) trials run pre-build required/uat cases uncredentialed: failing or secret-declaring required ones, or none runnable, fail it; timeouts re-queue (`mergeLedger.trial.preview`). `release status` lists candidates; `release GY-N EPOCH` leases. Needs `vars.UAT_URL`/`PRODUCTION_URL`, tokens.
+**The master loop promotes** (`promote=true`) once main differs from the last `rc-production/` and cut SHAs, nothing is queued and `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`; 10, `0` off) passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`, `GRAPHYARD_PRODUCTION_URL`; no workflow; managed repositories run [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. A `GRAPHYARD_UAT_STATIC` site's [merge-writer](delivery-redesign.md#merge-writer) trials run pre-build required/uat cases uncredentialed: failing or secret-declaring required ones, or none runnable, fail it; timeouts re-queue (`mergeLedger.trial.preview`). `release status` lists candidates; `release GY-N EPOCH` leases. Needs `vars.UAT_URL`/`PRODUCTION_URL`.
 
 ### Release filing credential
 
@@ -22,17 +22,17 @@ UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds and follow-ups a
 
 ### Pre-merge gate and release-candidate validation
 
-Required: `typecheck`, `test` (`ci.yml`); per candidate `releaseCandidateTests`, container, chart, soak/timing (advisory); UAT's `zero-touch` suite (`up --agent --goal`) must merge a first item; other human steps block.
+Required: `typecheck`, `test` (`ci.yml`); per candidate `releaseCandidateTests`, container, chart, soak/timing (advisory); UAT's `zero-touch` suite (`up --agent --goal`) merges a first item; other human steps block.
 
 `deploy/helm/exercise.sh` forwards a kubectl-chosen free port, re-forwarding a lost or foreign one within `FORWARD_BUDGET` seconds; waits for the rollout's new Ready pod, retrying transient API failures (empty reply, reset, stall, non-2xx, bodiless 2xx), else ending `api METHOD /api/PATH failed after 15 attempts: status STATUS, body: BODY`.
 
 ### One delivery path
 
-Exact-head gates merge; [candidates](#release-candidates) deploy. [The redesign](delivery-redesign.md) has only Graphyard write main.
+Exact-head gates merge; [candidates](#release-candidates) deploy. Only Graphyard writes main ([redesign](delivery-redesign.md)).
 
 ### Main guard
 
-Every 30 s the main guard reruns, then reverts, merges failing required checks their parents passed; the [revert approver App](deployment.md#variables) approves only a green exact inverse, three refusals abandon (`approval-refused`). A revert failing the merge's named tests is abandoned `base-failure` (delivery kept): one attention row names the test; no further revert for that set; one failing only that set is covered (`coveredBy`, read past) until main passes.
+Every 30 s main guard reruns, then reverts, merges failing required checks their parents passed; the [revert approver App](deployment.md#variables) approves only a green exact inverse, three refusals abandon (`approval-refused`). A revert failing the merge's named tests is abandoned `base-failure` (delivery kept): one attention row names the test; no further revert for that set; one failing only that set is covered (`coveredBy`, read past) until main passes.
 
 ## Managed repositories
 
@@ -72,10 +72,10 @@ Observers `POST /api/delivery/observe`:
 {"registration":{"id":"production-observer","revision":1},"epoch":4,"environment":{"id":"production","revision":1},"expectedGeneration":4,"snapshotId":"railway:snapshot:01J8Q4Z0Y3","observedAt":"2026-09-18T20:15:07Z","validFrom":"2026-09-18T20:12:31Z","validTo":"2026-09-18T20:15:07Z","services":[{"service":"api","complete":true,"deployment":{"id":"dep-a1","status":"success","deployedAt":"2026-09-18T20:12:31Z"},"instances":[{"instance":"api-1","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","measurement":"host-attestation","healthy":true}]},{"service":"web","complete":true,"deployment":{"id":"dep-w7","status":"success","deployedAt":"2026-09-18T20:12:40Z"},"instances":[{"instance":"web-1","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","measurement":"host-attestation","healthy":true}]}]}
 ```
 
-Only complete listings verify (`POST /api/delivery/notify` hints); `graphyard delivery sweep` verifies per `freshnessSeconds`; `graphyard delivery` shows state.
+Only complete listings verify (`POST /api/delivery/notify`); `graphyard delivery sweep` verifies per `freshnessSeconds`; `graphyard delivery` shows state.
 
 `master status` `delivery`: `readyToMerged`, `mergedToProduction`, `stages` p50/p90; 7-day p90 over `deliverySpeed` (2h; merged→production 45min) raises attention.
 
 `POST /api/validation/result` binds manifest, signature, measurements; mismatches record `attribution-undermined`, voiding passes (`GET /api/analytics/attribution`).
 
-A loop-owned post-deploy observation item is never dispatched: deployment verification reads it; a pass closes it `delivered-observation`, a fail escalates.
+A loop-owned post-deploy observation item is never dispatched: deployment verification reads it; a pass closes it `delivered-observation`, a fail escalates. Verification records no-smoke deliveries, backfilling five per pass.

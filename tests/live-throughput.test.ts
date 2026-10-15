@@ -96,7 +96,10 @@ async function backdateQueue(item: Work, ms: number) {
 async function deliver(item: Work, submitToMergeMs: number, extra: Record<string, unknown> = {}) {
   const current = await reload(item);
   const mergedAt = new Date(Date.parse(current.pipeline!.submittedAt!) + submitToMergeMs).toISOString();
-  await patch(item, { stage: 'done', delivery: { mergedAt, mergedAtRepository: mergedAt, mergeSha: commit(item.key), authorizationRevision: 1, ...extra } });
+  // GY-1824: an executor records each delivery's serving release; the fixture records it with the
+  // merge, so no verify-deployment row is raised and charged as idle against the claim.
+  const deployment = { sha: deployedRevision, mergeSha: commit(item.key), source: 'endpoint', observedAt: mergedAt, covers: 'exact', at: mergedAt, observer: 'executor-1' };
+  await patch(item, { stage: 'done', delivery: { mergedAt, mergedAtRepository: mergedAt, mergeSha: commit(item.key), authorizationRevision: 1, deployment, ...extra } });
   return reload(item);
 }
 

@@ -855,6 +855,9 @@ test('integration:no-llm-in-critical-path — a full ready-to-delivered cycle ru
   assert.ok(delivered.delivery?.mergeSha);
   assert.ok(!log.executed.some(entry => entry.kind === 'escalate'), 'no escalation was needed to deliver');
   assert.ok(!log.executed.some(entry => entry.kind === 'merge'), 'no executor ran a merge');
+  // GY-1824: the delivery's serving release is recorded by an executor too, smoke policy or not.
+  await drain([effects], log, mine);
+  assert.ok((await reload(delivered)).delivery?.deployment, 'an executor recorded the serving release of the no-smoke delivery');
 
   // An item that does raise an escalation stalls at that row rather than being resolved by the
   // loop: the escalation handler is outside the critical path, not quietly automated inside it.

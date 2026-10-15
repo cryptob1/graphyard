@@ -285,8 +285,10 @@ test('integration:index-matches-documents — the index equals the documents aft
   assert.equal(w.stage, 'done'); await check('delivered');
   assert.equal((await store.pool.query('SELECT pr_state FROM work_index WHERE id=$1', [w.id])).rows[0].pr_state, 'merged');
   // Writes that bypass the engine are indexed all the same: its deployment verified, then a
-  // session running on it, then that session finished.
-  await store.pool.query("UPDATE work_items SET document = jsonb_set(document || '{\"nextAction\": null}', '{actionQueue,actions}', '[]') WHERE id=$1", [w.id]);
+  // session running on it, then that session finished. GY-1824: the delivery holds the
+  // verify-deployment row it owes until its serving release is recorded, so it is not settled yet.
+  assert.equal((await store.pool.query('SELECT settled FROM work_index WHERE id=$1', [w.id])).rows[0].settled, false, 'a delivery holding its verify-deployment row is not settled');
+  await store.pool.query('UPDATE work_items SET document = jsonb_set(jsonb_set(document || \'{"nextAction": null}\', \'{actionQueue,actions}\', \'[]\'), \'{delivery,deployment}\', $2::jsonb) WHERE id=$1', [w.id, JSON.stringify({ sha: 'd'.repeat(40), mergeSha: 'e'.repeat(40), source: 'endpoint', observedAt: mergedAt, covers: 'exact', at: new Date().toISOString(), observer: 'executor-1' })]);
   await check('deployment verified');
   assert.equal((await store.pool.query('SELECT settled FROM work_index WHERE id=$1', [w.id])).rows[0].settled, true, 'a delivery owing nothing is settled');
   const handle = { id: 'session-1', kind: 'review', role: 'review', state: 'running', agentName: 'review-1', startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), outcome: null };
@@ -347,7 +349,11 @@ test('integration:index-matches-documents — the index equals the documents aft
       await delay(500);
     }
     assert.equal(view.body.work.length, BOARD_ITEMS);
-    assert.ok(view.bytes < 1_000_000, `the coordination snapshot of ${BOARD_ITEMS} items is ${view.bytes} bytes (the full snapshot is ${full.bytes})`);
+    // GY-1824: every settled delivery's summary carries its recorded serving release (the
+    // deployment observation the executor records), ~170 bytes per settled row that smoke-policy
+    // deliveries always had; the bound moves with the shape it bounds, and still holds the
+    // coordination snapshot at a fraction of the full snapshot's.
+    assert.ok(view.bytes < 1_100_000, `the coordination snapshot of ${BOARD_ITEMS} items is ${view.bytes} bytes (the full snapshot is ${full.bytes})`);
     // Only the live items' documents were read; every settled delivery came from the index.
     const settled = new Set((await board.pool.query('SELECT id FROM work_index WHERE settled')).rows.map(row => row.id));
     const fromDocuments = seen.filter(entry => /\bFROM work_items\b/.test(entry.text)).flatMap(entry => entry.rows).map(row => row.document?.id).filter(Boolean);
@@ -412,7 +418,9 @@ function boardItem(index: number, now: Date, kind: 'settled' | 'active' | 'fresh
     actionQueue: { actions: [], history: resolvedRows },
     sessions, pipeline: { attempts: Array.from({ length: 20 }, (_, n) => ({ attempt: n, startedAt: at, endedAt: at, outcome: 'rework' })) },
     nextAction: delivered ? null : { kind: 'request-review', work: id, key, gate: 'review', refusal: null, reason: 'waiting on review', inputs: { kind: 'request-review' }, llmRole: null, binding: 'review:1' },
-    ...(delivered ? { delivery: { mergeSha: 'f'.repeat(40), mergedAt: at } } : {}),
+    // GY-1824: a delivery's serving release is recorded, as the executor's verify-deployment row
+    // records it moments after delivery, so the board's settled shape carries it.
+    ...(delivered ? { delivery: { mergeSha: 'f'.repeat(40), mergedAt: at, deployment: { sha: 'd'.repeat(40), mergeSha: 'f'.repeat(40), source: 'endpoint', observedAt: at, covers: 'exact', at, observer: 'executor-1' } } } : {}),
   } as unknown as Work;
 }
 
