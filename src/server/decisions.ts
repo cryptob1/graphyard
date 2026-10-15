@@ -2,7 +2,6 @@ import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
 import { Refusal, demand, resolveEscalation, standingEscalations, type Principal, type Work } from '../model.js';
-import { humanRequestBlocker, retainedHumanRequests, supersededRequest } from '../model/human-request.js';
 import { save, wakeJob } from '../store.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, foldDecisions, judgedSame, requiredDecisionCapabilities, standingRefusal, approvalApplyGraceMs, type Decision, type DecisionState } from '../model/approval.js';
 import { lapsedReauthorization, reworkSituation, standingRequest } from './held-rework.js';
@@ -17,9 +16,10 @@ import { closeWork } from './close.js';
 import { answerWith, applyLaneRework, approvedUnapplied, resumeDecision, settleApprovedDecisions, supersedeMoved, withdrawOrSettle } from './lane-rework.js';
 import { lockedWork, workIdByRef } from '../store/locked-read.js';
 import { appliedOutcome, flakyEvidence } from './evidence.js';
+import { withdrawParkInTransaction } from './withdraw-park.js';
 
 type Db = pg.PoolClient;
-// The ledger's read half lives in decision-ledger.ts (GY-102); decision-refusal.ts reads it from here too.
+// Ledger reads live in decision-ledger.ts (GY-102); decision-refusal.ts reads it from here too.
 export { readDecisions, type DecisionRecord } from './decision-ledger.js';
 // The risk lane's own application of a rework (GY-1110), and the settlement of any approval left
 // unapplied (GY-1297) or its resumption by the loop (GY-1300), live in lane-rework.ts.
@@ -167,7 +167,7 @@ async function recordStale(services: Services, stale: Stale) {
   await services.engine.store.transaction(db => staleEvent(db, stale));
 }
 
-// GY-1296, GY-1463: the rebase of a revision-bound decision past changes that cannot affect its grounds lives in engine.ts.
+// GY-1296, GY-1463: rebasing a revision-bound decision past changes outside its grounds lives in engine.ts.
 export const bookkeepingRebase = async (db: Db, decision: DecisionRecord, work: Work): Promise<DecisionRecord> => (await revisionRebase(db, decision, work)).judged;
 
 /**
@@ -277,25 +277,6 @@ async function resolveInTransaction(services: Services, db: Db, now: Date, work:
   await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, decision.requestedBy, 'escalation.resolved', JSON.stringify({ details })]);
   if (work.submission) await wakeJob(db, work.id);
   return `Resolved ${trigger} on ${work.key}`;
-}
-
-/**
- * GY-1815: the approved `withdraw-park` closes the item's open human-only request as superseded by
- * observation — kept in its history with requester, approver and reason — and clears the park's
- * blocker in the approval's own transaction, so the item is claimable and the loop dispatches it.
- */
-async function withdrawParkInTransaction(services: Services, db: Db, now: Date, work: Work, decision: DecisionRecord, approver: Principal, approvalReason: string) {
-  const closed = supersededRequest(work.humanRequest!, { id: decision.id, requestedBy: decision.requestedBy, approvedBy: approver.id, reason: decision.reason }, now);
-  work.humanRequests = [...(work.humanRequests ?? []), closed].slice(-retainedHumanRequests);
-  work.humanRequest = null;
-  if (work.blocker?.startsWith(humanRequestBlocker)) work.blocker = null;
-  const all = (await lockedWork(db, [work.id])).map(item => item.id === work.id ? work : item);
-  services.engine.evaluate(work, all, now);
-  await (services.engine as unknown as { recordDispatch(db: Db, work: Work, now: Date): Promise<void> }).recordDispatch(db, work, now);
-  const details = { request: closed, requestedBy: decision.requestedBy, approvedBy: approver.id, decision: decision.id, reason: decision.reason, approvalReason, at: now.toISOString() };
-  // One ledger row: `save` appends it, and the intervention fold reads it as the request's resolution (interventions/fold-rules.ts).
-  await save(db, work, decision.requestedBy, 'human.superseded', now, details);
-  return `Withdrew ${work.key}'s human-only request ${closed.id} as superseded by observation`;
 }
 
 export async function applyThroughEngine(services: Services, decision: DecisionRecord, approver: Principal, approvalReason: string) {

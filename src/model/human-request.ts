@@ -291,6 +291,8 @@ export function openHumanOnly(subjects: readonly HumanOnlySubject[], now: number
 // answer: it may not stand in for spending, accounts or credentials, nor for a value only the
 // operator can supply, so those are refused at request time and keep waiting for the human.
 export const supersededByObservation = 'superseded-by-observation' as const;
+// Bound to the one request it closes, so a later park on the same item is never withdrawn by it.
+export const withdrawParkInput = z.object({ request: z.string().uuid() }).strict();
 /** Why an agent pair may not withdraw this item's park on observation, or null when it may. */
 export function withdrawParkRefusal(work: { key: string; humanRequest?: HumanRequest | null }, input: { request: string }): string | null {
   const request = work.humanRequest;
