@@ -31,6 +31,26 @@ export interface Delivery { mergedAt: string; mergeSha: string; authorizationRev
 export const deploySmokeRequired = (policy: Work['policy']) => !!policy.deploySmoke;
 
 /**
+ * GY-1824: how far back the unattended verify-deployment reach goes for a delivery whose serving
+ * release is not recorded on it yet. Beyond this window an unrecorded delivery stays with the
+ * master's hand (`master verify-deployment GY-N`), so the first evaluation after this ships raises
+ * the deliveries the loop could have recorded recently, never the whole delivery history at once.
+ */
+export const deploymentRecordCutoffMs = 7 * 86_400_000;
+
+/**
+ * A done, unclosed delivery the unattended verify-deployment path still owes its record: no release
+ * observation is bound to it yet, and its merge is inside `deploymentRecordCutoffMs` of `now`. The
+ * smoke policy decides what follows a record (the post-deployment smoke proof), never whether the
+ * record is owed, so this holds for non-smoke policies too — the gap GY-1824 closes.
+ */
+export function deploymentUnrecorded(work: Work, now: number, cutoffMs = deploymentRecordCutoffMs): boolean {
+  if (work.stage !== 'done' || work.closure || !work.delivery || work.delivery.deployment) return false;
+  const mergedAt = Date.parse(work.delivery.mergedAt);
+  return Number.isFinite(mergedAt) && now - mergedAt <= cutoffMs;
+}
+
+/**
  * Post-delivery state, derived from the delivery snapshot alone. `delivered` is the terminal state
  * for work whose policy asks for no smoke proof; the others describe the second confidence layer.
  */

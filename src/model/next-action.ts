@@ -2,7 +2,7 @@ import { dispatchIneligibility, reviewNeed } from './dispatch.js';
 import { attestationWait } from './unproduced-attestation.js';
 import { standingEscalations } from './escalation.js';
 import { proofStep } from './action-proof-step.js';
-import { deliveryState } from './delivery.js';
+import { deliveryState, deploymentUnrecorded } from './delivery.js';
 import { isDelivered } from './closure.js';
 import { openAgentRequests } from './agent-requests.js';
 import { refusalAction, reviewStandstill } from './refusal-mapping.js';
@@ -139,8 +139,16 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
   if (work.stage === 'done' && work.closure) return waits({ kind: 'settled', on: null, detail: `${key} was closed as ${work.closure.kind}${work.closure.ref ? ` (${work.closure.ref})` : ''} by ${work.closure.by}: ${work.closure.reason}` });
   if (work.stage === 'done') {
     const state = deliveryState(work);
-    if (state === 'awaiting-deployment' && work.delivery) return make('verify-deployment', `${key} merged as ${short(work.delivery.mergeSha)} and no deployment carrying it has been observed`,
-      { kind: 'verify-deployment', mergeSha: work.delivery.mergeSha, mergedAt: work.delivery.mergedAt, state }, `delivery:${work.delivery.mergeSha}`);
+    // GY-1824: a delivery whose serving release carries its merge but is unrecorded owes the
+    // verify-deployment path whatever its smoke policy says — the executor records it exactly as it
+    // records a smoke item's, filing and releasing any owed post-deploy follow-up first. A smoke
+    // policy keeps its own unbounded raise (`awaiting-deployment`); a non-smoke delivery is raised
+    // only inside `deploymentUnrecorded`'s reach, so the first evaluation after this ships does not
+    // sweep the whole delivery history into the queue at once, and an older unrecorded delivery
+    // stays with the master's hand (`master verify-deployment GY-N`).
+    if (work.delivery && !work.delivery.deployment && (state === 'awaiting-deployment' || (state === 'delivered' && deploymentUnrecorded(work, now.getTime()))))
+      return make('verify-deployment', `${key} merged as ${short(work.delivery.mergeSha)} and no deployment carrying it has been observed`,
+        { kind: 'verify-deployment', mergeSha: work.delivery.mergeSha, mergedAt: work.delivery.mergedAt, state }, `delivery:${work.delivery.mergeSha}`);
     return waits({ kind: 'settled', on: null, detail: `${key} is delivered (${state}); its gates are history and no gate refuses it` });
   }
 
