@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { operatorCredentialRefusal, operatorOnlyDecision, refusedReconciliations, type Decision } from './approval.js';
+import { hostDoableAsk, hostDoableRefusal, parkRefusal as classifiedParkRefusal, type HostDoableAsk } from './park-refusal.js';
 import { shortAskIssues } from './human-ask.js';
 import type { HumanAnswer } from './human-answer.js';
 import type { Work } from './work.js';
@@ -95,8 +96,52 @@ export function recommendedChoice(request: { kind: HumanDecisionKind; choices?: 
   const advice = request.recommendation ? key(request.recommendation) : null;
   return advice ? requestChoices(request).find(choice => key(choice.id) === advice || key(choice.label) === advice)?.id ?? null : null;
 }
-// The park-refusal classifier (GY-1395, GY-1416, GY-1692) lives in park-refusal.ts; its surface stays importable from here.
-export { hostDoableAsk, hostDoableRefusal, parkRefusal, type HostDoableAsk } from './park-refusal.js';
+// The park-refusal classifier (GY-1395, GY-1416, GY-1692) lives in park-refusal.ts; its surface stays
+// importable from here. GY-1816 wraps it: `parkRefusal` below refuses a criterion-rewrite question
+// first, then falls through to the classifier, so the server (server/waits.ts `requestHumanDecision`)
+// and the CLI (`routedParkCommand`) both see every refusal through the one name.
+export { hostDoableAsk, hostDoableRefusal, type HostDoableAsk };
+
+/** This item's requirements, as a park's text names them: its criteria, an acceptance criterion, an AC id, its requirements. */
+const criteriaGroup = String.raw`(?:criteri(?:a|on)|requirements?|AC-\d+)`;
+const criteriaNames = new RegExp(String.raw`\b${criteriaGroup}\b`, 'i');
+/** Asking to change them, with the weakening neighbours such an ask hides behind. */
+const changeVerbs = String.raw`\b(?:rewrit|revis|reconcil|match|align|weaken|relax|soften|narrow|revers|merg|replac|drop)\w*`;
+/** The auxiliary words that may sit between a criterion and its verb: "AC-1 should be rewritten", "criteria no longer matched". */
+const auxiliaries = String.raw`(?:should|shall|may|might|must|can|could|would|will|is|are|was|were|be|been|being|gets?|got|has|have|had|to|not|never|no longer|also|still|instead|now|again|once)`;
+/** "rewrite AC-1", "revise the acceptance criteria", "match its requirements". */
+const verbThenCriteria = new RegExp(`${changeVerbs}\\s+(?:(?:the|its|their|our|this|that|these|those|a|an|another|each)\\s+)?(?:acceptance\\s+)?${criteriaGroup}\\b`, 'i');
+/** "AC-1 should be rewritten", "the criteria are matched", "requirements get relaxed", "requirements dropped". */
+const criteriaThenVerb = new RegExp(String.raw`\b${criteriaGroup}\b(?:(?:\s+|,\s*)${auxiliaries}\b)*(?:\s+|,\s*)` + changeVerbs, 'i');
+/** The noun compound: "a criteria rewrite", "requirements revision", "AC-1 reconciliation". */
+const criteriaCompound = /\b(?:criteri(?:a|on)|requirements?)\s+(?:rewrites?|revisions?|reconciliations?|alignments?|weakenings?|narrowings?|relaxations?|reversals?)\b/i;
+/** One sentence of a park's text: the span a matching ask has to read as one breath in. */
+const segments = (text: string) => text.match(/[^.;\n]+/g) ?? [];
+/** … or, without naming a criterion in the same breath, to point this item's proofs at another item's tests: "match GY-1762's test assertions", whichever order the sentence puts it in. */
+const testsMatchOther = (text: string) => segments(text).some(segment =>
+  /\b(?:match|align|reconcil)\w*/i.test(segment) && /\b(?:tests?|assertions?)\b/i.test(segment) && /\b(?:another|other|GY-\d+)\b/i.test(segment));
+
+/** A park's own words: the kind it claims, and every text the human would read. */
+export interface ParkQuestion { kind?: string; needed: string; ask?: string | null; reason?: string | null }
+/**
+ * Why a goals-and-priorities park is a criterion-rewrite question (GY-1816), or null when it is not:
+ * its ask, needed text or reason asks whether this item's criteria are rewritten, revised or matched
+ * to another item's tests. Requirement rewrites are two agent identities' decision — the master
+ * requests one, an independent approver approves it (docs/glossary.md#who-decides) — so the refusal
+ * names that agent route, and a goals-and-priorities park about scope, ordering or product direction
+ * still parks. GY-1814's soak fix sat parked on exactly such an ask until a master session noticed;
+ * this is the question leaving the human's queue the way it came in: through the agents' own route.
+ */
+export function requirementsQuestionRefusal(data: ParkQuestion): string | null {
+  if (data.kind !== 'goals-and-priorities') return null;
+  const questioned = [data.ask, data.needed, data.reason].some(text => !!text?.trim()
+    && (verbThenCriteria.test(text) || criteriaThenVerb.test(text) || criteriaCompound.test(text) || testsMatchOther(text)));
+  return questioned ? 'Not a human-only decision: the request asks whether this item\'s criteria are rewritten, revised or matched to another item\'s tests — a requirements decision, never the human\'s. Agent route: record the conflict with `graphyard blocked GY-N EPOCH REASON`, so the master requests the requirements decision (`graphyard master decide GY-N requirements …`) for an independent approver to approve; the item never parks.' : null;
+}
+/** The park refusals in the order they fire: a criterion-rewrite question first (GY-1816), then the classifier's own (GY-1395, GY-1416, GY-1692). */
+export function parkRefusal(data: ParkQuestion): string | null {
+  return requirementsQuestionRefusal(data) ?? classifiedParkRefusal(data);
+}
 
 /**
  * The fields every request only a human may answer carries, whatever raised it: the exact thing
