@@ -31,6 +31,8 @@ export const slotsDirectoryVariable = 'GRAPHYARD_VERIFICATION_SLOTS_DIR', slotsV
 export const gigabytesPerSlot = 8, minimumSlots = 2;
 /** The directory under the managed worktree root that holds the slots. */
 export const verificationSlotsDirectory = (managedRoot: string) => resolve(managedRoot, '.verification-slots');
+/** The memory one running suite file is planned at: GY-1821 measured a full suite's swing on a 24-CPU host at about this much a file. */
+export const bytesPerSuiteFile = 3 * 2 ** 28;
 
 /** max(2, floor(total memory GB / 8)); `GRAPHYARD_VERIFICATION_SLOTS` on the host overrides it. */
 export function defaultVerificationSlots(totalBytes = totalmem()) {
@@ -41,7 +43,7 @@ export function configuredVerificationSlots(environment: NodeJS.ProcessEnv = pro
   return Number.isInteger(configured) && configured >= 1 ? configured : defaultVerificationSlots(totalBytes);
 }
 
-export interface SlotOwner { pid: number; label: string; cwd: string; at: string }
+export interface SlotOwner { pid: number; label: string; cwd: string; at: string; /** The in-flight suite files the holder declared (`declareSlotFiles`, GY-1821): what later runs deduct from the floor's budget. */ files?: number }
 export interface HeldSlot { slot: number; path: string; release: () => void }
 export interface AcquireOptions {
   directory: string; slots: number; label: string;
@@ -65,6 +67,25 @@ export function heldSlots(directory: string): { slot: number; owner: SlotOwner |
   try { names = readdirSync(directory); } catch { return []; }
   return names.map(name => /^slot-(\d+)$/.exec(name)).filter((match): match is RegExpExecArray => !!match)
     .map(match => ({ slot: Number(match[1]), owner: readOwner(join(directory, match[0])) })).sort((a, b) => a.slot - b.slot);
+}
+
+/**
+ * Record on the holder's own slot how many suite files it runs at once (GY-1821): a run that starts
+ * later takes only what the host's memory floor affords beyond what these runs declared. Best-effort —
+ * a declaration that cannot be written leaves the slot as it was, and the next run plans on nothing.
+ */
+export function declareSlotFiles(held: HeldSlot, files: number, pid: number = process.pid): void {
+  if (!(files >= 1)) return;
+  try {
+    const owner = readOwner(held.path);
+    if (!owner || owner.pid !== pid) return;
+    writeFileSync(join(held.path, 'owner.json'), JSON.stringify({ ...owner, files: Math.floor(files) }));
+  } catch { /* the slot still holds the run; only the budget sharing is lost */ }
+}
+
+/** The suite files runs on other pids declared in `directory`: what this run's breadth is deducted by. */
+export function othersDeclaredFiles(directory: string, pid: number = process.pid): number {
+  return heldSlots(directory).reduce((sum, entry) => entry.owner && entry.owner.pid !== pid ? sum + Math.max(0, entry.owner.files ?? 0) : sum, 0);
 }
 
 /** Take a slot back from an owner that no longer runs. Renamed first, so two waiters never both reclaim it. */

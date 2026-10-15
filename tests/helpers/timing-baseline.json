@@ -399,6 +399,7 @@
     "tests/fault-class-decision-self-healing.test.ts": 1308,
     "tests/fault-class-decision.test.ts": 621,
     "tests/fault-class-deployment.test.ts": 338,
+    "tests/fault-class-resources.test.ts": 362,
     "tests/fault-class-human-decision.test.ts": 3500,
     "tests/fault-class-review-convergence.test.ts": 1047,
     "tests/fault-class-scope.test.ts": 760,
