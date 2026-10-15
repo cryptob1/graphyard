@@ -9,8 +9,11 @@ import { evidenceBindsCandidate, type Work } from '../model.js';
  *
  * - evidence: only the records a coordinator decision can still consult — those binding the
  *   current candidate (exactly or carried) and those on a head an open or recent dispatch request
- *   names, so a pending producer session still reads its outcome — without artifact references,
- *   per-file scope digests or provenance;
+ *   names, so a pending producer session still reads its outcome, and, as its SQL form keeps them,
+ *   the loop's own post-deploy readings (`reading`) and every `manual:post-deploy/*` record, which
+ *   bind a release rather than a candidate: a loop-owned observation item has none, and a reading
+ *   recorded by hand that this view cut was never seen by the loop, which read the item as due
+ *   forever (GY-1820) — without artifact references, per-file scope digests or provenance;
  * - observation: without the per-file scope comparison, which only the server's regression guard
  *   and evidence reuse read (the touched-path list stays, the overlap scheduler needs it);
  * - resolved dispatch requests, resolved action rows and queue history: the most recent entries
@@ -69,6 +72,8 @@ const stored = (work: Work) => work as Work & { queue?: unknown; queueHistory?: 
 export const deliverySettled = (work: Work) => work.stage === 'done' && absent(work.nextAction) && absent(stored(work).queue) && absent(work.lease) && absent(work.containmentQuarantine)
   && !(Array.isArray(work.actionQueue?.actions) && work.actionQueue.actions.length)
   && !(Array.isArray(work.sessions) && work.sessions.some(handle => handle?.state === 'running'));
+/** A record bound to a release, not a candidate: the loop's own reading or a `manual:post-deploy/*` proof (`relevantEvidence` in src/store/coordination-sql.ts keeps the same). */
+const postDeployRecord = (entry: Work['evidence'][number]) => (!!entry.reading && typeof entry.reading === 'object') || entry.proof.startsWith('manual:post-deploy/');
 const recent = <T>(entries: T[], keep: number) => entries.slice(Math.max(0, entries.length - keep));
 
 export function coordinationWork(work: Work, omitted: CoordinationOmissions): Work {
@@ -77,7 +82,7 @@ export function coordinationWork(work: Work, omitted: CoordinationOmissions): Wo
   const history = dispatch?.history ?? [];
   const recentHistory = recent(history, keep);
   const requested = new Set([...(dispatch?.review ? [dispatch.review.sha] : []), ...(dispatch?.producers ?? []).map(request => request.sha), ...recentHistory.map(request => request.sha)]);
-  const evidence = (work.evidence ?? []).filter(entry => requested.has(entry.sha) || evidenceBindsCandidate(work, entry))
+  const evidence = (work.evidence ?? []).filter(entry => requested.has(entry.sha) || evidenceBindsCandidate(work, entry) || postDeployRecord(entry))
     .map(({ artifacts: _artifacts, scopeFiles: _scopeFiles, provenance: _provenance, ...entry }: any) => entry);
   omitted.evidence += (work.evidence?.length ?? 0) - evidence.length;
   omitted.dispatchHistory += history.length - recentHistory.length;

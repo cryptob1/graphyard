@@ -68,7 +68,8 @@ export const coordinationRelevance = (keep: number) => `LATERAL jsonb_to_record(
  * (`reading`, GY-1779: bound to the serving release of an item that may carry no candidate, and
  * the one record the loop's readings step and `loopObservation` consult on the snapshot). The
  * view's own filter then applies the exact rule (which carry applies to the candidate), so this
- * keeps a superset of what it keeps.
+ * keeps a superset of what it keeps; it keeps the readings and post-deploy records as they are here,
+ * or the loop never sees a reading recorded by hand (GY-1820).
  */
 const relevantEvidence = `((entry->>'sha' = r.head AND entry->>'baseSha' IS NOT DISTINCT FROM r.base)
     OR entry->>'id' = ANY(r.carried) OR entry->>'sha' = ANY(r.requested) OR ${object("entry->'reading'")}
