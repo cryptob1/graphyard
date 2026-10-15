@@ -179,13 +179,18 @@ const providerUsageErrors: readonly RegExp[] = [
   /\bexceeded your (?:current )?(?:quota|usage|plan)\b/i,
   /\blimit reached\b.*\breset/i,
 ];
+/** Z.AI's 429 `Weekly/Monthly Limit Exhausted`, which the runtimes that speak to it print verbatim behind their own error labels (GY-973, GY-1817). */
+const zaiLimitExhausted = /\b(?:weekly|monthly|daily|hourly|usage)(?:\/(?:weekly|monthly|daily|hourly))? limit exhausted\b/i;
+/** The same notice inside Z.AI's own error envelope (`{"code":"1310","message":"Weekly/Monthly Limit Exhausted. …"}`), as pi prints it: the envelope, never the bare phrase an agent may write about it, is the provider speaking. */
+const zaiLimitEnvelope = new RegExp(`"code"\\s*:\\s*"?\\d+"?\\s*,\\s*"message"\\s*:\\s*"${zaiLimitExhausted.source}`, 'i');
 /** Each runtime's own provider-authored limit notices, keyed by the kind its profiles name. */
 export const providerLimitNotices: Readonly<Record<string, readonly RegExp[]>> = {
   claude: [...providerUsageErrors, /\bClaude AI usage limit reached\b/],
   codex: [...providerUsageErrors],
-  opencode: [...providerUsageErrors, /\b(?:weekly|monthly|daily|hourly|usage)(?:\/(?:weekly|monthly|daily|hourly))? limit exhausted\b/i], // OpenCode 1.18's `Weekly/Monthly Limit Exhausted` (GY-973)
+  opencode: [...providerUsageErrors, zaiLimitExhausted], // OpenCode 1.18's `Weekly/Monthly Limit Exhausted` (GY-973)
   cursor: [...providerUsageErrors],
   agy: [...providerUsageErrors, /\bIndividual quota reached\b(?=.*\b(?:upgrade your subscription|resets? in)\b)/i], // GY-1135
+  pi: [...providerUsageErrors, zaiLimitEnvelope], // pi on Z.AI: `Error: 429: {"code":"1310","message":"Weekly/Monthly Limit Exhausted. …"}` (GY-1817)
 };
 /** The notices a session on `runtime` is judged against; an unnamed runtime gets the shared provider errors. */
 export const runtimeLimitNotices = (runtime: string | null | undefined): readonly RegExp[] => providerLimitNotices[runtime ?? ''] ?? providerUsageErrors;
@@ -193,13 +198,24 @@ export const runtimeLimitNotices = (runtime: string | null | undefined): readonl
 /** The label a runtime draws in front of a provider error — `Error:`, `API Error:`, `Error code: 429 -` — which is not the agent's voice. */
 const severityLabel = /^(?:\[[^\]]*\]\s*)?(?:api\s+)?error(?:\s+code)?\s*[:#]?\s*(?:\d{3}\s*)?[-–—:]*\s*/i;
 
+/** The runtimes whose provider writes a zone-less reset wall clock in UTC: pi's 429 code 1310 names `2026-10-17 08:27:35` with no zone (GY-1817). Read in the loop host's zone, the hold would differ by whatever offset the host happens to sit in — releasing a still-spent account early on one, out-waiting a reset hours past it on another. */
+const zonelessUtcRuntimes: ReadonlySet<string> = new Set(['pi']);
+/** A zone-less calendar wall clock, matched only where the reset parser would read one without a zone: not beside a zone the provider did name (`… 08:27:35 UTC`, `…T08:27:35+08:00`) and not the truncated head of a longer time (`08:27:35` must never become `08:27Z:35`). */
+const zonelessWallClock = /(\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(?![.:]\d|\s*(?:Z|UTC|[+-]\d{2}:?\d{2}))/g;
+/** Whether a notice names its zone in parentheses (`… 08:27:35 (America/Los_Angeles)`): the reset parser reads the wall clock in that zone, so the UTC default must not override it. The same shape and validity test as the parser's own. */
+function namesZone(text: string): boolean {
+  const zone = /\(\s*([A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+|UTC)\s*\)/.exec(text)?.[1];
+  if (!zone) return false;
+  try { new Intl.DateTimeFormat('en-US', { timeZone: zone }); return true; } catch { return false; }
+}
 /**
  * Whether the tail of a stopped session's output is `runtime`'s provider saying the account is
  * spent. The same tail, lead-of-line and reset-time rules as `detectExhaustion`, matched against
  * the runtime's own provider-authored notices instead of generic quota wording, so a worker's own
  * prose about a quota — a disk's, not the account's — is never a failover. A leading severity
  * label (the runtime's rendering of the provider's answer) is not counted as label words, and a
- * compact wait (agy's `Resets in 1h31m31s`) is spaced into units the reset parser reads.
+ * compact wait (agy's `Resets in 1h31m31s`) is spaced into units the reset parser reads. A
+ * runtime whose provider writes its reset without a zone has that wall clock read in UTC.
  */
 export function detectRuntimeExhaustion(output: string, runtime: string | null | undefined, now: number): ExhaustionSignal | null {
   // A session blocked on Claude's usage-limit menu is spent, whatever stands around the notice (GY-1566).
@@ -214,7 +230,8 @@ export function detectRuntimeExhaustion(output: string, runtime: string | null |
     const at = notices.map(notice => notice.exec(line)?.index ?? -1).filter(offset => offset >= 0);
     if (!at.length || (line.slice(0, Math.min(...at)).match(/\S+/g) ?? []).length > exhaustionNoticeLabelWords) continue;
     const context = [line, ...lines.slice(index + 1, index + 3)].join(' ').replace(/(\d+[dhms])(?=\d)/gi, '$1 ');
-    return { reason: line.slice(0, 300), resetsAt: parseResetTime(context, now) };
+    // The runtime's zone-less resets are its provider's UTC wall clock (GY-1817); every other shape parses as before.
+    return { reason: line.slice(0, 300), resetsAt: parseResetTime(zonelessUtcRuntimes.has(runtime ?? '') && !namesZone(context) ? context.replace(zonelessWallClock, '$1Z') : context, now) };
   }
   return null;
 }
