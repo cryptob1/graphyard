@@ -145,3 +145,27 @@ test('unit:human-request-withdraw — an approved withdraw-park closes the open 
   const stale = await call(master.token, 'POST', `work/${other.key}/decide`, { action: 'withdraw-park', input: { request: request.id }, reason: observed }, 409);
   assert.match(stale.error, new RegExp(`open request is ${other.humanRequest!.id}, not ${request.id}`));
 });
+
+test('unit:human-request-withdraw — a withdrawal whose request the operator answered first settles stale on approval, so a later park on the item is withdrawn by a new decision', async () => {
+  let work = await parked('Answered first', 'goals-and-priorities');
+  const first = work.humanRequest!;
+  const requested = await call(master.token, 'POST', `work/${work.key}/decide`, withdrawPark(work, 'Observed: the billing dashboard shipped first'), 200);
+  // The operator answers before the approver acts: the request the decision binds is gone.
+  await call(token(operator), 'POST', `work/${work.key}/answer`, { request: first.id, answer: 'Billing first' }, 200);
+  const refused = await call(approver.token, 'POST', `work/${work.key}/approve`, { decision: requested.id, reason: 'Confirmed' }, 409);
+  assert.match(refused.error, /has no open human-only request to withdraw; the decision was not applied/);
+  const stale = (await store.pool.query("SELECT payload FROM events WHERE work_id=$1 AND kind='decision.stale' ORDER BY seq", [work.id])).rows;
+  assert.equal(stale.length, 1, 'the decision settles stale rather than standing as requested');
+  assert.deepEqual(stale[0].payload.expected, { request: first.id });
+
+  // The item parks again on a new question: a new withdrawal is accepted, not refused by the old one.
+  work = await reload(work.id);
+  work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
+  await call(token(worker), 'POST', `work/${work.key}/park`, { epoch: work.epoch, kind: 'goals-and-priorities', needed: 'Which report ships next', reason: 'Another priority call',
+    ask: 'Choose which report ships next.', recommendation: 'Go ahead as asked', why: 'The usage report is nearly done.' }, 200);
+  work = await reload(work.id);
+  assert.notEqual(work.humanRequest!.id, first.id);
+  const again = await call(master.token, 'POST', `work/${work.key}/decide`, withdrawPark(work, 'Observed: the usage report already shipped'), 200);
+  assert.equal(again.state, 'requested');
+  assert.deepEqual(again.input, { request: work.humanRequest!.id });
+});
