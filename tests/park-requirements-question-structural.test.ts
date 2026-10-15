@@ -62,6 +62,11 @@ test('unit:park-requirements-question-structural — GY-1818 AC-1: a goals-and-p
     { ...clean, needed: 'Whether AC-1 should be deleted' },
     { ...clean, needed: 'Whether AC-1 should be materially revised' },
     { ...clean, ask: 'Should the criterion be substantially weakened?' },
+    // A tests/ path as the target of an alignment ask beside another item's key (review thread
+    // PRRT_kwDOUZby-s6snChE): the path's own dots end no sentence, and the path is the object.
+    { ...clean, needed: 'Should we match tests/fixtures/example.test.ts to GY-1700\'s tests?' },
+    { ...clean, needed: 'Whether tests/e2e/preview.test.ts should be aligned with GY-1762' },
+    { ...clean, reason: 'The worker cannot decide whether to reconcile the tests/soak.test.ts assertions with GY-1762\'s' },
   ];
   for (const body of refused) {
     const refusal = parkRefusal(body)!;
@@ -113,6 +118,9 @@ test('unit:park-requirements-question-structural — GY-1818 AC-1: a goals-and-p
     // Naming another item's tests never turns into an ask against the key itself.
     'Should the tests that match GY-1700 be deleted?',
     'Whether the tests that align with GY-1762 should run first',
+    // A tests/ path beside another item's key, ordered rather than aligned.
+    'Whether tests/fixtures/example.test.ts runs before GY-1700\'s suite',
+    'Should GY-1762 land before tests/e2e/preview.test.ts is split?',
   ];
   for (const needed of accepted) assert.equal(parkRefusal({ kind: 'goals-and-priorities', needed, reason: 'the operator owns goals and priorities' }), null, needed);
   // A reason stating the requirements stay as they are (PRRT_kwDOUZby-s6smF0G) assures, it does not ask.
@@ -125,6 +133,8 @@ test('unit:park-requirements-question-structural — GY-1818 AC-1: a goals-and-p
   //   Another work item's key together with a criterion id or a tests/ path, with a change ask.
   assert.match(requirementsQuestionRefusal({ ...clean, needed: 'Whether this item\'s criteria should be aligned with GY-1762\'s' })!, /^Not a human-only decision/);
   assert.match(requirementsQuestionRefusal({ ...clean, ask: 'Decide whether GY-1700\'s criteria should match the cases in tests/e2e/cases/preview-isolation-cleanup.json' })!, /^Not a human-only decision/);
+  //   The reviewer's own ask form (PRRT_kwDOUZby-s6snChE), judged before the schema moves the path to REASON.
+  assert.match(requirementsQuestionRefusal({ ...clean, ask: 'Should we match tests/fixtures/example.test.ts to GY-1700\'s tests?' })!, /^Not a human-only decision/);
   //   A key alone names no requirements object: ordering another item around is the operator's call.
   assert.equal(requirementsQuestionRefusal({ ...clean, ask: 'Decide whether the legacy importer is still a goal before GY-12 removes it' }), null);
   //   A negated change asks only in a question; in a statement it assures.
