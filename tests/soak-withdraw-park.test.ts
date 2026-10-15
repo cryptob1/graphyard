@@ -17,10 +17,12 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 /**
  * GY-1815, on the real loop across cycles. A goals park whose asked state already holds is
  * withdrawn by an approved `withdraw-park`; from then on the loop's own cycles dispatch the item
- * once, the resumed attempt's request carries the observation, and the worker — which parks again
- * on the same question whenever its request does not say the state already holds — continues
- * instead. While parked the item is never dispatched; after the withdrawal it is dispatched exactly
- * once however many cycles run, it never parks again, and every system invariant holds every cycle.
+ * once, and the resumed attempt's request carries the observation. That attempt parks on a second,
+ * different question the operator answers; the attempt after it still carries the first
+ * observation beside the answer, so the worker — which parks again on the first question whenever
+ * its request does not say the state already holds — continues instead. While parked the item is
+ * never dispatched; each answer or withdrawal dispatches it exactly once however many cycles run,
+ * it never parks on the withdrawn question again, and every system invariant holds every cycle.
  */
 const repository = 'owner/withdraw-park-soak';
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
@@ -31,6 +33,7 @@ const token = (principal: Principal) => credentials.find(credential => credentia
 const master = { id: 'master-operator', token: `withdraw-soak-master-${'m'.repeat(32)}`, capabilities: ['intent:create', 'intent:ready', 'decision:resolve'] };
 const approver = { id: 'independent-approver', token: `withdraw-soak-approver-${'a'.repeat(32)}`, capabilities: ['decision:approve'] };
 const question = 'Which of the two dashboards ships first this quarter';
+const later = 'Which weekday the billing dashboard launches on';
 const observed = 'Observed: the operator merged the billing dashboard first (PR #42) out of band, so the ordering asked for is already decided';
 let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
@@ -63,18 +66,19 @@ const profile = { name: 'alpha', principal: implementer.id, agentName: 'worker-a
 const loopConfig = () => masterConfigSchema.parse({ version: 1, url, credentialFile: join(tmpdir(), 'withdraw-park-soak-coordinator.token'), cliPath: 'graphyard',
   repository, baseBranch: 'main', githubAppId: 4242, hostId: 'loop-host', masterAgentName: 'graphyard-master-withdraw-soak', workers: [profile] }) as MasterConfig;
 
-test('unit:soak-invariants-hold — across the real loop\'s cycles a withdrawn park is dispatched once, its resumed request carries the observation, the item never parks again on the same question, and every invariant holds every cycle', { timeout: 300_000 }, async () => {
-  const sessions: HerdrAgent[] = [], dispatched: string[] = [], prompts: string[] = [], parks: number[] = [];
-  /** The worker the loop launches: it parks on the ordering unless its request says the ordering already holds. */
+test('unit:soak-invariants-hold — across the real loop\'s cycles a withdrawn park is dispatched once, every later request carries the observation even after a later park is answered, the item never parks again on the withdrawn question, and every invariant holds every cycle', { timeout: 300_000 }, async () => {
+  const sessions: HerdrAgent[] = [], dispatched: string[] = [], prompts: string[] = [], parks: string[] = [];
+  /** The worker the loop launches: it parks on the ordering unless its request says the ordering already holds, then on the launch day unless its request carries the answer. */
   const launch = async (work: Work) => {
     dispatched.push(work.key);
     const claimed = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
     const prompt = workerPrompt(loopConfig(), claimed, profile as any, claimed.epoch);
     prompts.push(prompt);
-    if (!prompt.includes('do not park on the same question again')) {
-      await ok(token(implementer), 'POST', `work/${claimed.key}/park`, { epoch: claimed.epoch, kind: 'goals-and-priorities', needed: question, reason: 'The ordering of the two dashboards is a priority call',
-        ask: 'Choose which dashboard ships first.', recommendation: 'Go ahead as asked', why: 'The billing dashboard is already half built.' });
-      parks.push(claimed.epoch);
+    const asks = !prompt.includes(observed) ? question : !prompt.includes('the human answered: Monday') ? later : null;
+    if (asks) {
+      await ok(token(implementer), 'POST', `work/${claimed.key}/park`, { epoch: claimed.epoch, kind: 'goals-and-priorities', needed: asks, reason: 'The schedule of the dashboards is a priority call',
+        ask: 'Choose as asked.', recommendation: 'Go ahead as asked', why: 'The billing dashboard is already half built.' });
+      parks.push(`${claimed.epoch}: ${asks}`);
       return;
     }
     // It continues: its session runs under the lease, so the one slot stays busy.
@@ -109,7 +113,7 @@ test('unit:soak-invariants-hold — across the real loop\'s cycles a withdrawn p
   // The loop dispatches it; the worker parks on the ordering, and the loop never dispatches it again while it waits.
   await cycles(1);
   assert.deepEqual(dispatched, [work.key]);
-  assert.deepEqual(parks, [1], 'the first attempt parks on the ordering');
+  assert.deepEqual(parks, [`1: ${question}`], 'the first attempt parks on the ordering');
   await cycles(8, async () => assert.ok(parkedOnHuman(await reload(work.id)), 'it stays parked'));
   assert.deepEqual(dispatched, [work.key], 'a parked item is never dispatched while it waits on the human');
 
@@ -119,17 +123,27 @@ test('unit:soak-invariants-hold — across the real loop\'s cycles a withdrawn p
   const applied = await ok(approver.token, 'POST', `work/${work.key}/approve`, { decision: requested.id, reason: 'Confirmed PR #42 merged; the ordering is settled' });
   assert.equal(applied.state, 'applied', JSON.stringify(applied));
 
-  // The loop's own cycles redispatch it once, and the resumed attempt continues from the observation.
+  // The loop's own cycles redispatch it once; the resumed attempt carries the observation and parks only on the later question.
+  await cycles(8, async () => assert.equal((await reload(work.id)).humanRequests?.length, 1, `cycle ${cycle}: the withdrawn request stays closed, never asked again`));
+  assert.deepEqual(dispatched, [work.key, work.key], 'dispatched exactly once after the withdrawal, however many cycles run');
+  assert.deepEqual(parks, [`1: ${question}`, `2: ${later}`], 'the resumed attempt parks only on the later question');
+  assert.match(prompts.at(-1)!, /the request was closed as superseded by observation, because the asked state already holds: Observed: the operator merged the billing dashboard first/);
+
+  // The operator answers the later park; every attempt after it still carries the first observation beside the answer.
+  const open = (await reload(work.id)).humanRequest!;
+  assert.equal(open.needed, later);
+  await ok(token(operator), 'POST', `work/${work.key}/answer`, { request: open.id, answer: 'Monday' });
   await cycles(12, async () => {
     const current = await reload(work.id);
     assert.equal(current.humanRequest ?? null, null, `cycle ${cycle}: the item never parks again`);
-    assert.equal(current.humanRequests?.length, 1, `cycle ${cycle}: no new human-only request`);
+    assert.equal(current.humanRequests?.length, 2, `cycle ${cycle}: no new human-only request`);
   });
-  assert.deepEqual(dispatched, [work.key, work.key], 'dispatched exactly once after the withdrawal, however many cycles run');
-  assert.deepEqual(parks, [1], 'the resumed attempt does not park on the same question');
-  assert.match(prompts.at(-1)!, /the request was closed as superseded by observation, because the asked state already holds: Observed: the operator merged the billing dashboard first/);
+  assert.deepEqual(dispatched, [work.key, work.key, work.key], 'dispatched exactly once after the answer, however many cycles run');
+  assert.deepEqual(parks, [`1: ${question}`, `2: ${later}`], 'the attempt after the answer parks on neither question');
+  assert.match(prompts.at(-1)!, /the request was closed as superseded by observation, because the asked state already holds: Observed: the operator merged the billing dashboard first/, 'the observation outlives the later answered park');
+  assert.match(prompts.at(-1)!, /the human answered: Monday/);
   const final = await reload(work.id);
   assert.equal(final.lease?.owner, implementer.id, 'the resumed attempt holds the item');
-  assert.equal(final.epoch, 2);
+  assert.equal(final.epoch, 3);
   assert.deepEqual(violations, [], 'every system invariant holds every cycle');
 });
