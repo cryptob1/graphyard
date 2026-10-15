@@ -100,7 +100,7 @@ export function decisionInput(action: string, work: Work, input: Record<string, 
   if (action === 'requirements') return { expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies, plannedFiles: work.plannedFiles, exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [], ...input };
   if ((action === 'merge' || action === 'attest') && work.candidate) return { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, ...(action === 'attest' ? { result: 'pass', executed: 1, skipped: 0, ...attestationExercise(work, input.proof) } : {}), ...input };
   if (action === 'rework' || action === 'recover') return { previousWorkerStopped: true, ...input };
-  return input;
+  return action === 'withdraw-park' && work.humanRequest ? { request: work.humanRequest.id, ...input } : input;
 }
 /**
  * GY-523. The exercise record an attestation carries: the proof run against the candidate base —

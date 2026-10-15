@@ -219,6 +219,16 @@ const humanAnswered: FoldRule = ({ row, entry, details, stage, source, emit }) =
   entry.human = null;
 };
 
+/**
+ * GY-1815: a human-only request closed as superseded by observation — a two-party decision, never the
+ * operator's answer. It resolves the request like an answer does, credited to its requester and approver.
+ */
+const humanSuperseded: FoldRule = context => {
+  const { details } = context, request = details.request ?? {}, answer = request.answer ?? {};
+  const by = text(details.requestedBy, text(answer.by, context.row.actor)), approvedBy = text(details.approvedBy, text(answer.approvedBy));
+  humanAnswered({ ...context, row: { ...context.row, actor: by }, details: { ...details, request: { ...request, answer: { ...answer, by: approvedBy ? `${by} approved by ${approvedBy}` : by, text: text(details.reason, text(answer.text)) } } } });
+};
+
 /** The rule for each ledger event kind the fold reads; a row of any other kind changes nothing. */
 export const foldRules: Readonly<Record<string, FoldRule>> = {
   'blocked': blocked,
@@ -246,4 +256,5 @@ export const foldRules: Readonly<Record<string, FoldRule>> = {
   'escalation.resolved': escalationResolved,
   'human.requested': humanRequested,
   'human.answered': humanAnswered,
+  'human.superseded': humanSuperseded,
 };

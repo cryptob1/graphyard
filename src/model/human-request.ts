@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { operatorCredentialRefusal, operatorOnlyDecision, refusedReconciliations, type Decision } from './approval.js';
+import { operatorCredentialRefusal, operatorOnlyDecision, refusedReconciliations } from './operator-decision.js'; // not approval.ts's re-export: approval → park-withdrawal → here would read it uninitialized (GY-1815)
 import { hostDoableAsk, hostDoableRefusal, parkRefusal as classifiedParkRefusal, type HostDoableAsk } from './park-refusal.js';
 import { shortAskIssues } from './human-ask.js';
 import type { HumanAnswer } from './human-answer.js';
@@ -219,7 +219,7 @@ export interface HumanOnlyActor { id?: string; role?: string | null; sessionKind
 const declaredKind = (actor: HumanOnlyActor) => actor.sessionKind ?? 'undeclared';
 
 /** A decision as the surface reads it: the server folds extra terminal states onto the model's own. */
-export type HumanOnlyDecision = Omit<Decision, 'state'> & { state: string };
+export type HumanOnlyDecision = Omit<import('./approval.js').Decision, 'state'> & { state: string };
 /** One item as the rules read it: its document, and its two-party decisions when a rule needs them. */
 export interface HumanOnlySubject {
   work: Work;
