@@ -582,6 +582,7 @@
     "tests/pacer-reserve.test.ts": 3942,
     "tests/pane-reclaim.test.ts": 2427,
     "tests/park-requirements-question-refused.test.ts": 4500,
+    "tests/park-requirements-question-structural.test.ts": 192,
     "tests/pending-restart-dirty-snapshot.test.ts": 3000,
     "tests/per-item-locking.test.ts": 34217,
     "tests/pi-account-key.test.ts": 1854,

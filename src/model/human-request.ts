@@ -100,34 +100,35 @@ export function recommendedChoice(request: { kind: HumanDecisionKind; choices?: 
 // refuses a criterion-rewrite question first, so the server (`requestHumanDecision`) and the CLI (`routedParkCommand`) see one name.
 export { hostDoableAsk, hostDoableRefusal, type HostDoableAsk };
 
-/** This item's requirements as a park names them; the change verbs (with the weakening neighbours such an ask hides behind); the auxiliaries between them. */
-const criteriaGroup = String.raw`(?:criteri(?:a|on)|requirements?|AC-\d+)`;
-const changeVerbs = String.raw`\b(?:rewrit|revis|updat|amend|chang|edit|reconcil|match|align|weaken|relax|soften|narrow|revers|merg|replac|drop)\w*`;
-const auxiliaries = String.raw`(?:should|shall|may|might|must|can|could|would|will|needs?|needed|is|are|was|were|be|been|being|gets?|got|has|have|had|to|not|never|no longer|also|still|instead|now|again|once)`;
-/** "rewrite AC-1" / "revise the acceptance criteria"; "AC-1 should be rewritten" / "requirements dropped"; "a criteria rewrite". A negated chain counts only in a question ("should AC-1 not be weakened?"): "the requirements are not changed by this" states, not asks. A scoping qualifier followed by an auxiliary may sit between criterion and verb ("AC-1 in the current release should be weakened"). */
-const verbThenCriteria = new RegExp(`${changeVerbs}\\s+(?:(?:the|its|their|our|this|that|these|those|a|an|another|each)\\s+)?(?:acceptance\\s+)?${criteriaGroup}\\b`, 'i');
-const qualifier = String.raw`(?:\s+(?:for|in|of|on|under|about|within|at)(?:\s+[\w'-]+){1,4}?(?=(?:\s+|,\s*)${auxiliaries}\b))?`;
-const criteriaThenVerb = new RegExp(String.raw`\b${criteriaGroup}\b${qualifier}(?:(?:\s+|,\s*)${auxiliaries}\b)*(?:\s+|,\s*)` + changeVerbs, 'gi');
-const criterionChanged = (text: string) => (text.match(/[^.;\n?]+\??/g) ?? []).some(segment => [...segment.matchAll(criteriaThenVerb)].some(found => !/\b(?:not|never|no longer)\b/i.test(found[0]) || /\?|\b(?:whether|if)\b/i.test(segment) || /^\s*(?:should|shall|may|might|must|can|could|would|will|do|does|did|is|are|was|were|has|have)\b/i.test(segment)));
-const criteriaCompound = /\b(?:criteri(?:a|on)|requirements?)\s+(?:rewrites?|revisions?|updates?|amendments?|changes?|edits?|reconciliations?|alignments?|weakenings?|narrowings?|relaxations?|reversals?)\b/i;
-/** The rewrite named as work an ordering question schedules ("whether the requirements rewrite lands before the cut"): the decision asked is the order, so the phrase is set aside; "whether it happens" names no order. */
-const orderedRewrite = new RegExp(String.raw`\b${criteriaGroup}\s+(?:rewrites?|revisions?|updates?|amendments?|changes?|edits?)(?=(?:\s+${auxiliaries}\b)*(?:\s+(?:lands?|ships?|merges?|goes|go|comes?|happens?|starts?|runs?))?\s+(?:precedes?|follows?|waits?|prioriti[sz]ed|scheduled|ordered|deferred|before|after|ahead|first|until|later|sooner|next)\b)`, 'gi');
-/** Within one sentence, without naming a criterion: point this item's proofs at another item's tests ("match GY-1762's test assertions"); "the matching tests" or "the tests that match GY-1700" only names them. */
-const testsMatchOther = (text: string) => (text.match(/[^.;\n]+/g) ?? []).map(segment => segment.replace(/\b(?:match|align|reconcil)\w*(?:ing|ed)(?=\s+(?:tests?|assertions?)\b)|(?<=\b(?:tests?|assertions?)\s+(?:that|which)\s+)(?:match|align|reconcil)\w*/gi, '')).some(segment => /\b(?:match|align|reconcil)\w*/i.test(segment) && /\b(?:tests?|assertions?)\b/i.test(segment) && /\b(?:another|other|GY-\d+)\b/i.test(segment));
+/** GY-1818: the guard asks two structural questions of each sentence, whatever its word order — which requirements object it names (one of this item's criterion ids AC-N, its criteria by name, or another work item's key GY-N together with a criterion or tests reference, a tests/ path among them), and whether it asks one of that object's change operations — so no rewording needs a new exception. */
+const criterionId = /\bAC-\d+\b/, criterionName = /\b(?:acceptance\s+)?criteri(?:a|on)\b|\brequirements?\b/i, itemKey = /\bGY-\d+\b/, testsReference = /\btests?\/\S*|\b(?:tests?|assertions?|suites?)\b/i;
+const requirementsObject = (sentence: string) => criterionId.test(sentence) || criterionName.test(sentence) || (itemKey.test(sentence) && testsReference.test(sentence));
+/** The operations that change a requirement, by stem, whichever way the sentence orders them; and that change named as the work itself ("a criteria revision", "AC-1's rewrite"). */
+const changeOperation = /\b(?:rewrit|revis|revers|updat|amend|chang|edit|delet|remov|reconcil|match|align|weaken|relax|soften|narrow|merg|replac|drop)\w*/gi;
+const changeNoun = /\b(?:AC-\d+|criteri(?:a|on)|requirements?)(?:'s)?\s+(?:rewrit\w*|revis\w*|updat\w*|amend\w*|chang\w*|edit\w*|delet\w*|remov\w*|reconcil\w*|align\w*|weaken\w*|relax\w*|narrow\w*|revers\w*|merg\w*|replac\w*|drops?)\b/i;
+/** "matching tests", "the tests that match GY-1700": names tests, aligns nothing. An ordering ask ("lands before the cut", "prioritized above the trim") schedules the change-noun instead of asking the human for it. */
+const namedNotAligned = /\b(?:match|align|reconcil)\w*(?:ing|ed)(?=\s+(?:tests?|assertions?|suites?)\b)|(?<=\b(?:tests?|assertions?|suites?)\s+(?:that|which)\s+)(?:match|align|reconcil)\w*/gi, orderingAsk = /\b(?:before|after|ahead|first|until|later|sooner|next|above|below)\b|\b(?:prioriti[sz]\w*|schedul\w*|sequenc\w*|defer\w*|preced\w*|follow\w*|land(?:s|ed|ing)?|ship(?:s|ped|ping)?|order(?:ed|ing|s)?)\b/i;
+/** A question: a negated change there still asks ("should AC-1 not be weakened?"); in a statement it assures ("the requirements are not changed by this"). The verb's chain runs from the last clause break, so "or it never passes" does not clear "must be revised". */
+const question = (sentence: string) => /\?|\b(?:whether|if)\b/i.test(sentence) || /^(?:should|shall|may|might|must|can|could|would|will|do|does|did|is|are|was|were|has|have)\b/i.test(sentence.trim()),
+  verbChain = (text: string, end: number) => { const before = text.slice(0, end); return before.slice(1 + Math.max(before.lastIndexOf(','), before.lastIndexOf(';'), before.lastIndexOf(' but '), before.lastIndexOf(' so '), before.lastIndexOf(' and '), before.lastIndexOf(' or '))); };
+/** One sentence asks for a requirements change: it names a requirements object and asks a change of it — a change verb outside a negated statement, or the change named as work no ordering ask schedules. */
+const requirementsQuestion = (text: string) => (text.match(/[^.;\n?]+\??/g) ?? []).some(sentence => {
+  const asked = sentence.replace(new RegExp(changeNoun.source, 'gi'), 'work').replace(namedNotAligned, '');
+  return requirementsObject(sentence) && ([...asked.matchAll(changeOperation)].some(found => !/\b(?:not|never|no longer)\b/i.test(verbChain(asked, found.index!)) || question(sentence)) || changeNoun.test(sentence) && !orderingAsk.test(sentence));
+});
 
 /** A park's own words: the kind it claims, and every text the human would read. */
 export interface ParkQuestion { kind?: string; needed: string; ask?: string | null; reason?: string | null }
 /**
- * Why a goals-and-priorities park is a criterion-rewrite question (GY-1816), or null: its ask, needed text or
- * reason asks whether this item's criteria are rewritten, revised or matched to another item's tests.
- * Requirement rewrites are two agent identities' decision — the master requests one, an independent approver
- * approves it (docs/glossary.md#who-decides) — so the refusal names that agent route; a park about scope,
- * ordering or product direction still parks. GY-1814's soak fix sat parked on exactly such an ask.
+ * Why a goals-and-priorities park is a criterion-rewrite question (GY-1816), or null: a sentence of its ask,
+ * needed text or reason names a requirements object and asks a change of it — on that structure alone, never on
+ * phrasing (GY-1818), so a reworded ordering, scope or product-direction question still parks. Requirement rewrites
+ * are two agent identities' decision — the master requests one, an independent approver approves it
+ * (docs/glossary.md#who-decides) — so the refusal names that agent route; GY-1814's soak fix sat parked on such an ask.
  */
 export function requirementsQuestionRefusal(data: ParkQuestion): string | null {
   if (data.kind !== 'goals-and-priorities') return null;
-  const questioned = [data.ask, data.needed, data.reason].map(text => text?.replace(orderedRewrite, 'work')).some(text => !!text?.trim()
-    && (verbThenCriteria.test(text) || criterionChanged(text) || criteriaCompound.test(text) || testsMatchOther(text)));
+  const questioned = [data.ask, data.needed, data.reason].some(text => !!text?.trim() && requirementsQuestion(text));
   return questioned ? 'Not a human-only decision: the request asks whether this item\'s criteria are rewritten, revised or matched to another item\'s tests — a requirements decision, never the human\'s. Agent route: record the conflict with `graphyard blocked GY-N EPOCH REASON`, so the master requests the requirements decision (`graphyard master decide GY-N requirements …`) for an independent approver to approve; the item never parks.' : null;
 }
 /** The park refusals in the order they fire: a criterion-rewrite question first (GY-1816), then the classifier's own (GY-1395, GY-1416, GY-1692). */
