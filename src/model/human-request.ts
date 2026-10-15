@@ -112,17 +112,18 @@ const verbThenObject = new RegExp(String.raw`\b(?:${changeStems})\w*(?:(?:\s+|,\
 const qualifier = String.raw`(?:\s+(?:for|in|of|on|under|about|within|at)(?:\s+[\w'-]+){1,4}?(?=(?:\s+|,\s*)${auxiliaries}\b))?`;
 const objectThenVerb = new RegExp(String.raw`\b(?:AC-\d+|criteri(?:a|on)|requirements?)(?:'s)?${qualifier}(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:${changeStems})\w*`, 'gi');
 const keyThenVerb = new RegExp(String.raw`\bGY-\d+(?:'s)?(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:is|are|was|were|be|been|being|gets?|got)\b(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:${changeStems})\w*`, 'gi');
-/** "matching tests", "the tests that match GY-1700" (key and all): names tests, aligns nothing. An ordering ask ("lands before the cut", "prioritized above the trim") schedules the change-noun instead of asking the human for it. */
-const namedNotAligned = /\b(?:match|align|reconcil)\w*(?:ing|ed)(?=\s+(?:tests?|assertions?|suites?)\b)|(?<=\b(?:tests?|assertions?|suites?)\s+(?:that|which)\s+)(?:match|align|reconcil)\w*(?:\s+GY-\d+(?:'s)?)?/gi, orderingAsk = /\b(?:before|after|ahead|first|until|later|sooner|next|above|below)\b|\b(?:prioriti[sz]\w*|schedul\w*|sequenc\w*|defer\w*|preced\w*|follow\w*|land(?:s|ed|ing)?|ship(?:s|ped|ping)?|order(?:ed|ing|s)?)\b/i;
+/** "matching tests", "the tests that match GY-1700" (key and all): names tests, aligns nothing. An ordering ask schedules the change-noun only as that noun's own predicate ("the requirements rewrite lands before the cut", "the criteria update should be prioritized above the trim"); an ordering word governing another noun ("a requirements revision happens and the docs ship", "a criteria revision is needed after GY-1700 lands") schedules nothing, so the change is still asked. */
+const namedNotAligned = /\b(?:match|align|reconcil)\w*(?:ing|ed)(?=\s+(?:tests?|assertions?|suites?)\b)|(?<=\b(?:tests?|assertions?|suites?)\s+(?:that|which)\s+)(?:match|align|reconcil)\w*(?:\s+GY-\d+(?:'s)?)?/gi,
+  scheduledChange = new RegExp(String.raw`${changeNoun.source}(?:\s+(?:should|shall|may|might|must|can|could|would|will|is|are|was|were|be|been|being|gets?|got|has|have|had|also|still|now|\w+ly))*\s+(?:prioriti[sz]\w*|schedul\w*|sequenc\w*|defer\w*|preced\w*|follow\w*|land(?:s|ed|ing)?|ship(?:s|ped|ping)?|order(?:ed|s)?)\b`, 'gi');
 /** A question: a negated change there still asks ("should AC-1 not be weakened?"); in a statement it assures ("the requirements are not changed by this"). The verb's chain runs from the last clause break, so "or it never passes" does not clear "must be revised". */
 const question = (sentence: string) => /\?|\b(?:whether|if)\b/i.test(sentence) || /^(?:should|shall|may|might|must|can|could|would|will|do|does|did|is|are|was|were|has|have)\b/i.test(sentence.trim()),
   verbChain = (text: string, end: number) => { const before = text.slice(0, end); return before.slice(1 + Math.max(before.lastIndexOf(','), before.lastIndexOf(';'), before.lastIndexOf(' but '), before.lastIndexOf(' so '), before.lastIndexOf(' and '), before.lastIndexOf(' or '))); };
-/** One sentence asks for a requirements change: it names a requirements object and a change operation has that object as its target — verb and object in one clause, either order — outside a negated statement, or names the change as work no ordering ask schedules. */
+/** One sentence asks for a requirements change: it names a requirements object and a change operation has that object as its target — verb and object in one clause, either order — outside a negated statement, or names the change as work its own predicate does not schedule. */
 const requirementsQuestion = (text: string) => (text.match(/[^.;\n?]+\??/g) ?? []).some(sentence => {
   const asked = sentence.replace(new RegExp(changeNoun.source, 'gi'), 'work').replace(namedNotAligned, '');
   const targeted = [...asked.matchAll(verbThenObject), ...asked.matchAll(objectThenVerb), ...asked.matchAll(keyThenVerb)]
     .some(found => !/\b(?:not|never|no longer)\b/i.test(`${found[0]} ${verbChain(asked, found.index!)}`) || question(sentence));
-  return requirementsObject(sentence) && (targeted || changeNoun.test(sentence) && !orderingAsk.test(sentence));
+  return requirementsObject(sentence) && (targeted || changeNoun.test(sentence.replace(scheduledChange, 'work')));
 });
 
 /** A park's own words: the kind it claims, and every text the human would read. */

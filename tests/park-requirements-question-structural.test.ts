@@ -14,9 +14,9 @@ import { humanRequestSchema, parkRefusal, requirementsQuestionRefusal } from '..
 // or as the work itself ("a criteria revision"). A change whose target is another noun ("the schema
 // change", "the importer update", "replacing the legacy importer") counts nowhere, and another
 // item's key is a target only in the passive voice, never as the actor ("GY-12 removes it"). A
-// negated change in a statement assures rather than asks; a change an ordering ask schedules
-// ("whether the requirements rewrite lands before the cut") is an ordering decision, still the
-// human's. So the reworded test-ordering, scope, ordering and product-direction questions from
+// negated change in a statement assures rather than asks; a change an ordering ask schedules as
+// its own predicate ("whether the requirements rewrite lands before the cut") is an ordering
+// decision, still the human's, while an ordering word governing another noun schedules nothing. So the reworded test-ordering, scope, ordering and product-direction questions from
 // GY-1816's fixtures and review threads are accepted without a per-wording exception, and every
 // GY-1816 refusal fixture still refuses.
 
@@ -133,6 +133,15 @@ test('unit:park-requirements-question-structural — GY-1818 AC-1: a goals-and-p
   //   The change named as the work itself asks for it, unless an ordering ask schedules it.
   assert.match(requirementsQuestionRefusal({ ...clean, needed: 'Whether AC-1\'s rewrite happens' })!, /^Not a human-only decision/);
   assert.equal(requirementsQuestionRefusal({ ...clean, needed: 'Whether AC-1\'s rewrite is scheduled before the cut' }), null);
+  //   The ordering ask schedules the change only as its own predicate (review thread PRRT_kwDOUZby-s6smx3Q):
+  //   an ordering word governing another noun in the same sentence leaves the change asked.
+  for (const needed of [
+    'Whether a requirements revision happens and the docs ship',
+    'Whether a criteria revision is needed after GY-1700 lands',
+    'Whether AC-1\'s rewrite happens first or the docs land',
+    'Whether the criteria update is needed before the release ships',
+  ]) assert.match(requirementsQuestionRefusal({ ...clean, needed })!, /^Not a human-only decision/, needed);
+  assert.equal(requirementsQuestionRefusal({ ...clean, needed: 'Whether the requirements rewrite lands before the docs ship' }), null);
   //   The verb must target the object: another item's key in the passive voice is a target, as the actor it is not.
   assert.match(requirementsQuestionRefusal({ ...clean, needed: 'Whether GY-1762 is reversed so its suite passes' })!, /^Not a human-only decision/);
   assert.equal(requirementsQuestionRefusal({ ...clean, needed: 'Whether GY-1762 removes the duplicated cases itself' }), null);
