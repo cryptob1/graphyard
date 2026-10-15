@@ -96,47 +96,35 @@ export function recommendedChoice(request: { kind: HumanDecisionKind; choices?: 
   const advice = request.recommendation ? key(request.recommendation) : null;
   return advice ? requestChoices(request).find(choice => key(choice.id) === advice || key(choice.label) === advice)?.id ?? null : null;
 }
-// The park-refusal classifier (GY-1395, GY-1416, GY-1692) lives in park-refusal.ts, importable from here. GY-1816 wraps it: `parkRefusal`
+// The park-refusal classifier (GY-1395, GY-1416, GY-1692) lives in park-refusal.ts. GY-1816 wraps it: `parkRefusal`
 // refuses a criterion-rewrite question first, so the server (`requestHumanDecision`) and the CLI (`routedParkCommand`) see one name.
 export { hostDoableAsk, hostDoableRefusal, type HostDoableAsk };
 
-/** GY-1818: the guard asks two structural questions of each sentence, whatever its word order — which requirements object it names (one of this item's criterion ids AC-N, its criteria by name, or another work item's key GY-N together with a criterion or tests reference, a tests/ path among them), and whether one of the change operations has that object as its target — so no rewording needs a new exception. */
-const criterionId = /\bAC-\d+\b/, criterionName = /\b(?:acceptance\s+)?criteri(?:a|on)\b|\brequirements?\b/i, itemKey = /\bGY-\d+\b/, testsReference = /\btests?\/\S*|\b(?:tests?|assertions?|suites?)\b/i;
-const requirementsObject = (sentence: string) => criterionId.test(sentence) || criterionName.test(sentence) || (itemKey.test(sentence) && testsReference.test(sentence));
-/** The operations that change a requirement, by stem; and that change named as the work itself ("a criteria revision", "AC-1's rewrite"). */
-const changeStems = String.raw`rewrit|revis|revers|updat|amend|chang|edit|delet|remov|reconcil|match|align|weaken|relax|soften|narrow|merg|replac|drop`;
-const changeNoun = /\b(?:AC-\d+|criteri(?:a|on)|requirements?)(?:'s)?\s+(?:rewrit\w*|revis\w*|updat\w*|amend\w*|chang\w*|edit\w*|delet\w*|remov\w*|reconcil\w*|align\w*|weaken\w*|relax\w*|narrow\w*|revers\w*|merg\w*|replac\w*|drops?)\b/i;
-/** The change operation with a requirements object as its target, in one clause, either order: "rewrite AC-1", "revise the acceptance criteria", "match GY-1700's"; "AC-1 should be materially revised", "the requirements for the importer be changed", "the criteria are no longer matched". Nothing but determiners, auxiliaries, -ly modifiers or a scoping qualifier sits between verb and object — never a connector like "to", so "the changes to the criteria" names no ask — and a change whose target is another noun ("the schema change lands", "the importer update", "replacing the legacy importer", "dropping Safari support") counts nowhere. Another item's key is the target only in the passive voice ("GY-1762 is reversed"), never as the actor ("GY-12 removes the importer"). */
-const auxiliaries = String.raw`(?:should|shall|may|might|must|can|could|would|will|needs?|needed|is|are|was|were|be|been|being|gets?|got|has|have|had|to|not|never|no longer|also|still|instead|now|again|once)`;
-const verbThenObject = new RegExp(String.raw`\b(?:${changeStems})\w*(?:(?:\s+|,\s*)(?:the|a|an|its|their|our|your|this|that|these|those|another|each|acceptance|\w+ly))*(?:\s+|,\s*)(?:acceptance\s+)?(?:AC-\d+|criteri(?:a|on)|requirements?|GY-\d+)(?:'s)?\b`, 'gi');
-const qualifier = String.raw`(?:\s+(?:for|in|of|on|under|about|within|at)(?:\s+[\w'-]+){1,4}?(?=(?:\s+|,\s*)${auxiliaries}\b))?`;
-const objectThenVerb = new RegExp(String.raw`\b(?:AC-\d+|criteri(?:a|on)|requirements?)(?:'s)?${qualifier}(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:${changeStems})\w*`, 'gi');
-const keyThenVerb = new RegExp(String.raw`\bGY-\d+(?:'s)?(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:is|are|was|were|be|been|being|gets?|got)\b(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:${changeStems})\w*`, 'gi');
-/** A tests/ path as the target of an alignment ask, either order: "match tests/fixtures/example.test.ts to GY-1700's tests", "tests/e2e/x.test.ts should be aligned with GY-1762" — counted only beside another item's key (requirementsObject). */
-const pathAligned = new RegExp(String.raw`\b(?:match|align|reconcil)\w*(?:(?:\s+|,\s*)(?:the|a|an|its|their|our|your|this|that|these|those|each|\w+ly))*(?:\s+|,\s*)tests?\/\S+|\btests?\/\S+(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:match|align|reconcil)\w*`, 'gi');
-/** "matching tests", "the tests that match GY-1700" (key and all): names tests, aligns nothing. An ordering ask schedules the change-noun only as that noun's own predicate ("the requirements rewrite lands before the cut", "the criteria update should be prioritized above the trim"); an ordering word governing another noun ("a requirements revision happens and the docs ship", "a criteria revision is needed after GY-1700 lands") schedules nothing, so the change is still asked. */
+/** GY-1818: per sentence, any order — is a requirements object named (AC-N, the criteria, or GY-N beside a tests reference), and does a change operation target it. */
+const criterionId = /\bAC-\d+\b/, criterionName = /\b(?:acceptance\s+)?criteri(?:a|on)\b|\brequirements?\b/i, itemKey = /\bGY-\d+\b/, testsReference = /\btests?\/\S*|\b(?:tests?|assertions?|suites?)\b/i,
+  requirementsObject = (sentence: string) => criterionId.test(sentence) || criterionName.test(sentence) || (itemKey.test(sentence) && testsReference.test(sentence));
+const changeStems = String.raw`rewrit|revis|revers|updat|amend|chang|edit|delet|remov|reconcil|match|align|weaken|relax|soften|narrow|merg|replac|drop`,
+  changeNoun = /\b(?:AC-\d+|criteri(?:a|on)|requirements?)(?:'s)?\s+(?:rewrit\w*|revis\w*|updat\w*|amend\w*|chang\w*|edit\w*|delet\w*|remov\w*|reconcil\w*|align\w*|weaken\w*|relax\w*|narrow\w*|revers\w*|merg\w*|replac\w*|drops?)\b/i;
+/** Verb and requirements object in one clause, either order ("rewrite AC-1", "AC-1 must be revised"), across only determiners, auxiliaries, -ly words or a scoping qualifier, never "to"; another noun's change ("the importer update") counts nowhere; a key is a target only if passive ("GY-1762 is reversed"); a tests/ path an alignment targets counts beside a key. */
+const auxiliaries = String.raw`(?:should|shall|may|might|must|can|could|would|will|needs?|needed|is|are|was|were|be|been|being|gets?|got|has|have|had|to|not|never|no longer|also|still|instead|now|again|once)`,
+  verbThenObject = new RegExp(String.raw`\b(?:${changeStems})\w*(?:(?:\s+|,\s*)(?:the|a|an|its|their|our|your|this|that|these|those|another|each|acceptance|\w+ly))*(?:\s+|,\s*)(?:acceptance\s+)?(?:AC-\d+|criteri(?:a|on)|requirements?|GY-\d+)(?:'s)?\b`, 'gi');
+const qualifier = String.raw`(?:\s+(?:for|in|of|on|under|about|within|at)(?:\s+[\w'-]+){1,4}?(?=(?:\s+|,\s*)${auxiliaries}\b))?`,
+  objectThenVerb = new RegExp(String.raw`\b(?:AC-\d+|criteri(?:a|on)|requirements?)(?:'s)?${qualifier}(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:${changeStems})\w*`, 'gi'),
+  keyThenVerb = new RegExp(String.raw`\bGY-\d+(?:'s)?(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:is|are|was|were|be|been|being|gets?|got)\b(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:${changeStems})\w*`, 'gi'),
+  pathAligned = new RegExp(String.raw`\b(?:match|align|reconcil)\w*(?:(?:\s+|,\s*)(?:the|a|an|its|their|our|your|this|that|these|those|each|\w+ly))*(?:\s+|,\s*)tests?\/\S+|\btests?\/\S+(?:(?:\s+|,\s*)${auxiliaries}\b|\s+\w+ly)*(?:\s+|,\s*)(?:match|align|reconcil)\w*`, 'gi');
+/** "the tests that match GY-1700" names tests, aligns nothing. Ordering schedules a change-noun only as its own predicate ("the requirements rewrite lands first"), not another's ("after GY-1700 lands"). */
 const namedNotAligned = /\b(?:match|align|reconcil)\w*(?:ing|ed)(?=\s+(?:tests?|assertions?|suites?)\b(?!\/))|(?<=\b(?:tests?|assertions?|suites?)\s+(?:that|which)\s+)(?:match|align|reconcil)\w*(?:\s+GY-\d+(?:'s)?)?/gi,
   scheduledChange = new RegExp(String.raw`${changeNoun.source}(?:\s+(?:should|shall|may|might|must|can|could|would|will|is|are|was|were|be|been|being|gets?|got|has|have|had|also|still|now|\w+ly))*\s+(?:prioriti[sz]\w*|schedul\w*|sequenc\w*|defer\w*|preced\w*|follow\w*|land(?:s|ed|ing)?|ship(?:s|ped|ping)?|order(?:ed|s)?)\b`, 'gi');
-/** A question: a negated change there still asks ("should AC-1 not be weakened?"); in a statement it assures ("the requirements are not changed by this"). The verb's chain runs from the last clause break, so "or it never passes" does not clear "must be revised". */
+/** A negated change asks only in a question ("should AC-1 not be weakened?"), read from the last clause break on. A sentence (no dot inside a token ends one) asks when it targets a named requirements object or names unscheduled change work. */
 const question = (sentence: string) => /\?|\b(?:whether|if)\b/i.test(sentence) || /^(?:should|shall|may|might|must|can|could|would|will|do|does|did|is|are|was|were|has|have)\b/i.test(sentence.trim()),
   verbChain = (text: string, end: number) => { const before = text.slice(0, end); return before.slice(1 + Math.max(before.lastIndexOf(','), before.lastIndexOf(';'), before.lastIndexOf(' but '), before.lastIndexOf(' so '), before.lastIndexOf(' and '), before.lastIndexOf(' or '))); };
-/** One sentence asks for a requirements change: it names a requirements object and a change operation has that object as its target — verb and object in one clause, either order — outside a negated statement, or names the change as work its own predicate does not schedule. A dot inside a token (tests/x.test.ts) ends no sentence. */
 const requirementsQuestion = (text: string) => (text.match(/(?:[^.;\n?]|\.(?=\S))+\??/g) ?? []).some(sentence => {
   const asked = sentence.replace(new RegExp(changeNoun.source, 'gi'), 'work').replace(namedNotAligned, '');
-  const targeted = [...asked.matchAll(verbThenObject), ...asked.matchAll(objectThenVerb), ...asked.matchAll(keyThenVerb), ...asked.matchAll(pathAligned)]
-    .some(found => !/\b(?:not|never|no longer)\b/i.test(`${found[0]} ${verbChain(asked, found.index!)}`) || question(sentence));
-  return requirementsObject(sentence) && (targeted || changeNoun.test(sentence.replace(scheduledChange, 'work')));
-});
-
+  const targeted = [...asked.matchAll(verbThenObject), ...asked.matchAll(objectThenVerb), ...asked.matchAll(keyThenVerb), ...asked.matchAll(pathAligned)].some(found => !/\b(?:not|never|no longer)\b/i.test(`${found[0]} ${verbChain(asked, found.index!)}`) || question(sentence));
+  return requirementsObject(sentence) && (targeted || changeNoun.test(sentence.replace(scheduledChange, 'work'))); });
 /** A park's own words: the kind it claims, and every text the human would read. */
 export interface ParkQuestion { kind?: string; needed: string; ask?: string | null; reason?: string | null }
-/**
- * Why a goals-and-priorities park is a criterion-rewrite question (GY-1816), or null: a sentence of its ask,
- * needed text or reason names a requirements object and asks a change of it — on that structure alone, never on
- * phrasing (GY-1818), so a reworded ordering, scope or product-direction question still parks. Requirement rewrites
- * are two agent identities' decision — the master requests one, an independent approver approves it
- * (docs/glossary.md#who-decides) — so the refusal names that agent route; GY-1814's soak fix sat parked on such an ask.
- */
+/** Why a goals-and-priorities park asks a criterion rewrite (GY-1816), on structure, not phrasing (GY-1818), or null: rewrites are the master's request and an approver's approval (docs/glossary.md#who-decides). */
 export function requirementsQuestionRefusal(data: ParkQuestion): string | null {
   if (data.kind !== 'goals-and-priorities') return null;
   const questioned = [data.ask, data.needed, data.reason].some(text => !!text?.trim() && requirementsQuestion(text));
