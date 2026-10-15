@@ -1,7 +1,8 @@
 // Concern: applying an approved `withdraw-park` decision (GY-1815) inside the approval's transaction.
 import type pg from 'pg';
 import type { Principal, Work } from '../model.js';
-import { humanRequestBlocker, retainedHumanRequests, supersededRequest } from '../model/human-request.js';
+import { humanRequestBlocker, retainedHumanRequests } from '../model/human-request.js';
+import { supersededRequest } from '../model/park-withdrawal.js';
 import { save } from '../store.js';
 import { lockedWork } from '../store/locked-read.js';
 import type { DecisionRecord } from './decision-ledger.js';

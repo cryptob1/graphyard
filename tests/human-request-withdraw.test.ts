@@ -10,7 +10,8 @@ import type { Principal, Work } from '../src/model.js';
 import { decisionInput } from '../src/master/autonomy.js';
 import { assertDispatchable, workerPrompt } from '../src/master/dispatch.js';
 import { foldInterventions, readInterventionLedger } from '../src/interventions.js';
-import { parkedOnHuman, withdrawParkRefusal, type HumanDecisionKind } from '../src/model/human-request.js';
+import { parkedOnHuman, type HumanDecisionKind } from '../src/model/human-request.js';
+import { withdrawParkRefusal } from '../src/model/park-withdrawal.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1815. A goals-and-priorities park whose asked state already held — the operator had done the
