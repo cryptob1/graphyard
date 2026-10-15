@@ -46,6 +46,13 @@ test('unit:park-requirements-bare-noun — GY-1819 AC-1: a park whose requiremen
     'Should the requirements rewrite land?',
     'Should the requirements rewrite go ahead?',
     'Might the requirements rewrite happen?',
+    // Any predicate, named or not, base or past (review of c30e9e3e6951, PRRT_kwDOUZby-s6somYt).
+    'Whether the requirements rewrite succeeds',
+    'Should the requirements rewrite succeed?',
+    'Whether the requirements rewrite succeeded',
+    'Whether the requirements rewrite stalled before the release cut',
+    'Did the requirements rewrite quietly fail?',
+    'Whether the requirements update survives the release cut',
   ];
   for (const needed of parked) {
     assert.equal(requirementsQuestionRefusal({ ...clean, needed }), null, needed);
@@ -68,8 +75,8 @@ test('unit:park-requirements-bare-noun — GY-1819 AC-1: a park whose requiremen
     'Should the requirements change to match the new API?',
     'Should the requirements drop the importer clause?',
     'The requirements change so the proof resolves',
-    // An object opening with a determiner, pronoun or particle is still an object, never the work's
-    // own predicate: only named predicates follow a change noun (review of 0fe4d3fb684e, B1).
+    // An object opening with a determiner, pronoun, quantifier, preposition or particle is still an
+    // object, never the work's own predicate (review of 0fe4d3fb684e, B1); any other word is.
     'Should the requirements drop this clause?',
     'Should the requirements drop its importer clause?',
     'Should the requirements change this clause?',
@@ -77,6 +84,10 @@ test('unit:park-requirements-bare-noun — GY-1819 AC-1: a park whose requiremen
     'Should the requirement change as the API did?',
     'Should the requirements change his clause?',
     'Should the requirements change us over to the new API?',
+    'Should the requirements change significantly?',
+    'Should the requirements drop all importer clauses?',
+    'Should the requirements change in this release?',
+    'Should the requirements change or stay?',
     // Named objects keep the GY-1818 outcomes: a bare predicate on the criteria or on AC-N still asks.
     'Whether the criteria revision ships',
     'Whether AC-1\'s rewrite happens',
