@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { operatorCredentialRefusal, operatorOnlyDecision, refusedReconciliations, type Decision } from './approval.js';
+import type { Decision } from './approval.js';
+import { operatorCredentialRefusal, operatorOnlyDecision, refusedReconciliations } from './operator-decision.js'; // not approval.ts's re-export: approval → park-withdrawal → here would read it uninitialized (GY-1815)
 import { hostDoableAsk, hostDoableRefusal, parkRefusal as classifiedParkRefusal, type HostDoableAsk } from './park-refusal.js';
 import { shortAskIssues } from './human-ask.js';
 import type { HumanAnswer } from './human-answer.js';

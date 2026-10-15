@@ -2,6 +2,8 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -170,4 +172,14 @@ test('unit:human-request-withdraw — a withdrawal whose request the operator an
   const again = await call(master.token, 'POST', `work/${work.key}/decide`, withdrawPark(work, 'Observed: the usage report already shipped'), 200);
   assert.equal(again.state, 'requested');
   assert.deepEqual(again.input, { request: work.humanRequest!.id });
+});
+
+test('unit:human-request-withdraw — each module of the withdrawal cycle loads first in a fresh process: approval.ts imports park-withdrawal.ts, which imports human-request.ts, and none reads another\'s binding before it is initialized', () => {
+  const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
+  for (const entry of ['approval', 'park-withdrawal', 'human-request', 'human-answer']) {
+    const loaded = spawnSync(process.execPath, ['--import', 'tsx', '-e', `import('./src/model/${entry}.ts').then(() => console.log('loaded'))`],
+      { cwd: repositoryRoot, encoding: 'utf8', timeout: 60_000 });
+    assert.equal(loaded.status, 0, `src/model/${entry}.ts loaded first: ${loaded.stderr.split(/\r?\n/).find(line => /Error/.test(line)) ?? loaded.stderr}`);
+    assert.match(loaded.stdout, /loaded/);
+  }
 });
