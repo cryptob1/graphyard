@@ -9,6 +9,7 @@ import { createSchema, escalationTriggers, operatorCapability, type OperatorCapa
 import { baseRefreshConflict } from '../merge-queue.js';
 import { loopOwnedRefusal } from './loop-owned.js';
 import { judgedSame, situatedDecisionActions, type DecisionSituation } from './decision-situation.js';
+import { withdrawParkRefusal } from './human-request.js';
 export { decisionSituation, judgedSame, situatedDecisionActions, situationLabel, supersededSituation, type DecisionSituation } from './decision-situation.js';
 
 /**
@@ -23,12 +24,13 @@ export { decisionSituation, judgedSame, situatedDecisionActions, situationLabel,
 // not worth doing, or to be merged into another, which is applied only once an approver agrees.
 // `evidence` accepts one flaky E2E case of one release run at one exact SHA, and `fold` folds one
 // customer outcome's release hold into another's (GY-1378); both are recorded on a release hold item.
-export const decisionActions = ['release', 'unblock', 'requirements', 'resolve', 'attest', 'merge', 'rework', 'recover', 'grant', 'close', 'evidence', 'fold'] as const;
+// `withdraw-park` closes a human-only request whose asked state was observed to hold (GY-1815, model/human-request.ts).
+export const decisionActions = ['release', 'unblock', 'requirements', 'resolve', 'attest', 'merge', 'rework', 'recover', 'grant', 'close', 'evidence', 'fold', 'withdraw-park'] as const;
 export type DecisionAction = typeof decisionActions[number];
 export const decisionCapabilities: Record<DecisionAction, OperatorCapability> = {
   release: 'intent:ready', unblock: 'intent:unblock', requirements: 'policy:requirements', resolve: 'decision:resolve',
   attest: 'decision:attest', merge: 'decision:merge', rework: 'decision:rework', recover: 'decision:rework', grant: 'decision:grant', close: 'intent:create',
-  evidence: 'decision:attest', fold: 'decision:resolve',
+  evidence: 'decision:attest', fold: 'decision:resolve', 'withdraw-park': 'decision:resolve',
 };
 export const approveCapability: OperatorCapability = 'decision:approve';
 
@@ -70,6 +72,8 @@ export const decisionInputs = {
   // GY-1378: bound to the case, the release run and the full SHA it was flaky at, so it never carries to another SHA.
   evidence: z.object({ case: caseOrOutcome, runId: z.string().regex(/^[a-zA-Z0-9._:-]+$/).max(100), sha }).strict(),
   fold: z.object({ outcome: caseOrOutcome, into: caseOrOutcome }).strict().refine(input => input.outcome !== input.into, 'A hold folds into another outcome\'s hold'),
+  // Bound to the one request it closes, so a later park on the same item is never withdrawn by it.
+  'withdraw-park': z.object({ request: z.string().uuid() }).strict(),
 } satisfies Record<DecisionAction, z.ZodType>;
 const reason = z.string().trim().min(1).max(2000);
 /**
@@ -275,6 +279,7 @@ export function decisionPrecondition(action: DecisionAction, input: any, work: W
     if (!work.candidate || work.candidate.sha !== input.sha || work.candidate.baseSha !== input.baseSha || work.policyRevision !== input.policyRevision)
       return `The decision names ${String(input.sha).slice(0, 12)} but the current candidate is ${work.candidate?.sha.slice(0, 12) ?? 'none'} at policy revision ${work.policyRevision}`;
   }
+  if (action === 'withdraw-park') return withdrawParkRefusal(work, input);
   if (action === 'rework' && !work.submission) return 'Rework applies to submitted work';
   // GY-1386: a rework situated on a head (its binding, GY-407) answers grounds read from that head; once the
   // candidate moved on — a base refresh carried it cleanly onto the tip — those grounds no longer describe it.

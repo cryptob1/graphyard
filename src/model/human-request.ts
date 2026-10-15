@@ -1,5 +1,7 @@
 import { z } from 'zod';
-import { operatorCredentialRefusal, operatorOnlyDecision, refusedReconciliations, type Decision } from './approval.js';
+// Straight from operator-decision.ts, not approval.ts: approval.ts imports this module (GY-1815 `withdrawParkRefusal`).
+import { operatorCredentialRefusal, operatorOnlyDecision, refusedReconciliations } from './operator-decision.js';
+import type { Decision } from './approval.js';
 import { shortAskIssues } from './human-ask.js';
 import type { HumanAnswer } from './human-answer.js';
 import type { Work } from './work.js';
@@ -281,4 +283,25 @@ export function openHumanOnly(subjects: readonly HumanOnlySubject[], now: number
   return subjects.filter(subject => subject.work.stage !== 'done')
     .flatMap(subject => rules.flatMap(rule => rule.open(subject, now)))
     .sort((a, b) => b.waitedMs - a.waitedMs);
+}
+
+// GY-1815. A park whose asked state already holds — the operator did the step out of band — had no
+// agent route off Needs you: only a human answers, and closing the item drops its work. A two-party
+// `withdraw-park` decision closes the open request as superseded by what was observed, never as an
+// answer: it may not stand in for spending, accounts or credentials, nor for a value only the
+// operator can supply, so those are refused at request time and keep waiting for the human.
+export const supersededByObservation = 'superseded-by-observation' as const;
+/** Why an agent pair may not withdraw this item's park on observation, or null when it may. */
+export function withdrawParkRefusal(work: { key: string; humanRequest?: HumanRequest | null }, input: { request: string }): string | null {
+  const request = work.humanRequest;
+  if (!request || request.answer) return `${work.key} has no open human-only request to withdraw`;
+  if (request.id !== input.request) return `${work.key}'s open request is ${request.id}, not ${input.request}; reload and request again`;
+  if (request.kind !== 'goals-and-priorities') return `A ${humanDecisionLabel[request.kind]} request is the operator's to answer, never withdrawn on their behalf: graphyard answer ${work.key} ${request.id}`;
+  if (request.sealTo || requestChoices(request).some(choice => choice.input === 'secret')) return `${work.key}'s request asks for a sealed value only the operator supplies; it is answered, never withdrawn on observation`;
+  return null;
+}
+/** The request closed as superseded by observation, with who requested and approved it and why: the answer its history keeps. */
+export function supersededRequest(request: HumanRequest, decision: { id: string; requestedBy: string; approvedBy: string; reason: string }, at: Date): HumanRequest {
+  return { ...request, answer: { by: decision.requestedBy, at: at.toISOString(), outcome: supersededByObservation, text: `${supersededByObservation}: ${decision.reason}`.slice(0, 4000),
+    waitedMs: Math.max(0, at.getTime() - Date.parse(request.at)), approvedBy: decision.approvedBy, decision: decision.id } };
 }

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
 import { Refusal, demand, resolveEscalation, standingEscalations, type Principal, type Work } from '../model.js';
+import { humanRequestBlocker, retainedHumanRequests, supersededRequest } from '../model/human-request.js';
 import { save, wakeJob } from '../store.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, foldDecisions, judgedSame, requiredDecisionCapabilities, standingRefusal, approvalApplyGraceMs, type Decision, type DecisionState } from '../model/approval.js';
 import { lapsedReauthorization, reworkSituation, standingRequest } from './held-rework.js';
@@ -230,8 +231,8 @@ export async function approveDecision(services: Services, caller: Principal, id:
       }
       if (!resuming) await record(db, work!, actor.id, 'decision.approved', { id: decision!.id, action: decision!.action, reason: data.reason, requestedBy: decision!.requestedBy, approver: { id: actor.id, role: actor.role } });
       const applied = appliedOutcome(decision!.action, decision!.input);
-      if (applied || decision!.action === 'resolve') {
-        const outcome = applied ?? await resolveInTransaction(services, db, now, work!, decision!, actor, data.reason);
+      if (applied || decision!.action === 'resolve' || decision!.action === 'withdraw-park') {
+        const outcome = applied ?? await (decision!.action === 'withdraw-park' ? withdrawParkInTransaction : resolveInTransaction)(services, db, now, work!, decision!, actor, data.reason);
         return finish(db, work!, actor, decision!.id, 'decision.applied', { outcome }, key, fingerprint);
       }
       approved = { decision: judged, work: work!, approver: actor };
@@ -276,6 +277,25 @@ async function resolveInTransaction(services: Services, db: Db, now: Date, work:
   await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, decision.requestedBy, 'escalation.resolved', JSON.stringify({ details })]);
   if (work.submission) await wakeJob(db, work.id);
   return `Resolved ${trigger} on ${work.key}`;
+}
+
+/**
+ * GY-1815: the approved `withdraw-park` closes the item's open human-only request as superseded by
+ * observation — kept in its history with requester, approver and reason — and clears the park's
+ * blocker in the approval's own transaction, so the item is claimable and the loop dispatches it.
+ */
+async function withdrawParkInTransaction(services: Services, db: Db, now: Date, work: Work, decision: DecisionRecord, approver: Principal, approvalReason: string) {
+  const closed = supersededRequest(work.humanRequest!, { id: decision.id, requestedBy: decision.requestedBy, approvedBy: approver.id, reason: decision.reason }, now);
+  work.humanRequests = [...(work.humanRequests ?? []), closed].slice(-retainedHumanRequests);
+  work.humanRequest = null;
+  if (work.blocker?.startsWith(humanRequestBlocker)) work.blocker = null;
+  const all = (await lockedWork(db, [work.id])).map(item => item.id === work.id ? work : item);
+  services.engine.evaluate(work, all, now);
+  await (services.engine as unknown as { recordDispatch(db: Db, work: Work, now: Date): Promise<void> }).recordDispatch(db, work, now);
+  const details = { request: closed, requestedBy: decision.requestedBy, approvedBy: approver.id, decision: decision.id, reason: decision.reason, approvalReason, at: now.toISOString() };
+  await save(db, work, decision.requestedBy, 'human.superseded', now, details);
+  await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, decision.requestedBy, 'human.superseded', JSON.stringify({ details })]);
+  return `Withdrew ${work.key}'s human-only request ${closed.id} as superseded by observation`;
 }
 
 export async function applyThroughEngine(services: Services, decision: DecisionRecord, approver: Principal, approvalReason: string) {
