@@ -77,6 +77,10 @@ test('unit:park-requirements-question-refused — GY-1816 AC-1: a goals-and-prio
     { ...clean, ask: 'Does AC-1 need to be rewritten?' },
     { ...clean, needed: 'Whether the requirements need to be revised' },
     { ...clean, reason: 'The criterion needs to be relaxed, or it never passes' },
+    // Whether the rewrite happens at all names no order (review thread PRRT_kwDOUZby-s6smFz9); a negated question still asks.
+    { ...clean, needed: 'Whether the requirements rewrite happens' },
+    { ...clean, ask: 'Should AC-1 not be weakened instead?' },
+    { ...clean, needed: 'Whether the criteria are no longer matched to GY-1762' },
   ] as const;
   for (const body of questioned) {
     const refusal = parkRefusal(body)!;
@@ -100,8 +104,12 @@ test('unit:park-requirements-question-refused — GY-1816 AC-1: a goals-and-prio
     'Whether the requirements rewrite lands before the release cut',
     'Whether the criteria revision ships after GY-1700 or before it',
     'Whether the requirements update should be prioritized above the docs trim',
+    // Test ordering that names "matching tests" (review thread PRRT_kwDOUZby-s6smF0P) matches nothing to anything.
+    'Whether GY-1700\'s matching tests or the other tests should run first',
   ] as const;
   for (const needed of accepted) assert.equal(parkRefusal({ kind: 'goals-and-priorities', needed, reason: 'the operator owns goals and priorities' }), null, needed);
+  // A reason stating the requirements stay as they are (review thread PRRT_kwDOUZby-s6smF0G) asks no change.
+  assert.equal(parkRefusal({ kind: 'goals-and-priorities', needed: 'Whether GY-1700 lands before the release cut', reason: 'The requirements are not changed by this scheduling decision' }), null);
 
   // The requirements question is scoped to the kind that claims it: other kinds keep their own rules.
   assert.equal(requirementsQuestionRefusal({ kind: 'money-or-accounts', needed: 'Whether AC-1 should be rewritten to match GY-1762\'s test assertions' }), null);
