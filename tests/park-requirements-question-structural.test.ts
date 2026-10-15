@@ -91,6 +91,13 @@ test('unit:park-requirements-question-structural — GY-1818 AC-1: a goals-and-p
     'Whether GY-1700 lands before the release cut or after it',
     'Whether the soak gate orders GY-1762\'s suite before this item\'s tests',
     'Whether the requirements rewrite lands before the release cut',
+    // Any predicate tied to an ordering relation schedules the change (review thread PRRT_kwDOUZby-s6snGai).
+    'Whether the requirements rewrite happens before the release cut',
+    'Whether the requirements rewrite merges after GY-1700',
+    'Whether the criteria revision goes ahead of the docs trim',
+    'Whether the requirements rewrite waits until the release cut',
+    'Whether the requirements rewrite lands first or after GY-1700',
+    'Whether AC-1\'s rewrite precedes the release cut',
     'Whether the criteria revision ships after GY-1700 or before it',
     'Whether the requirements update should be prioritized above the docs trim',
     'Whether the criteria work is prioritized above the docs trim',
@@ -155,6 +162,10 @@ test('unit:park-requirements-question-structural — GY-1818 AC-1: a goals-and-p
     'Whether a criteria revision is needed after GY-1700 lands',
     'Whether AC-1\'s rewrite happens first or the docs land',
     'Whether the criteria update is needed before the release ships',
+    // A predicate with no ordering relation asks whether the change happens at all (review thread PRRT_kwDOUZby-s6snGag).
+    'Whether the requirements rewrite lands',
+    'Whether the requirements rewrite goes ahead',
+    'Whether the criteria revision ships',
   ]) assert.match(requirementsQuestionRefusal({ ...clean, needed })!, /^Not a human-only decision/, needed);
   assert.equal(requirementsQuestionRefusal({ ...clean, needed: 'Whether the requirements rewrite lands before the docs ship' }), null);
   //   The verb must target the object: another item's key in the passive voice is a target, as the actor it is not.
