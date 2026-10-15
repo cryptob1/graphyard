@@ -44,10 +44,14 @@ export const agentScratchPatterns: readonly RegExp[] = [/^voice\d+-/];
 /**
  * The scratch roots agent runtimes keep in a temporary directory, by name under each scanned root
  * (GY-1655): opencode writes a packet and a review file per session into `/tmp/opencode` and never
- * removes them, ~288,700 entries by 10 October 2026. The pass ages the entries inside each root one
- * by one, by `agentScratchMinAgeMs`, and never removes the root itself.
+ * removes them, ~288,700 entries by 10 October 2026, and Claude Code keeps one directory per
+ * project path beside it, `claude-<uid>` with `<uid>` the process uid as tsx's per-uid cache is
+ * (GY-1827): every worker worktree got its own, 1,569 of them — 1,540 unwritten for more than a
+ * day, 17 GB — by 15 October 2026, and none was removed when its session ended. The pass ages the
+ * entries inside each root one by one, by `agentScratchMinAgeMs`, and never removes a root itself.
  */
-export const agentRuntimeScratchRoots: readonly string[] = ['opencode'];
+export const agentRuntimeScratchRoots = (uid = process.getuid?.()): readonly string[] =>
+  uid === undefined ? ['opencode'] : ['opencode', `claude-${uid}`];
 /**
  * What each removal of the pass was (GY-1655), so status can say which class took /tmp back: a test
  * temp name, a tsx compile cache file, an agent's stale checkout (a linked git worktree or git
@@ -477,7 +481,7 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
   const cacheAge = options.prefixes ? null : options.maxAgeMs ?? tmpReclaimMinAgeMs;
   // Only the default pass recognises agent scratch by what it is (GY-1655): a caller's own prefixes are all it asked for.
   const agentAge = options.prefixes ? null : options.maxAgeMs ?? agentScratchMinAgeMs;
-  const runtimeRoots = options.prefixes ? [] : options.runtimeScratchRoots ?? agentRuntimeScratchRoots;
+  const runtimeRoots = options.prefixes ? [] : options.runtimeScratchRoots ?? agentRuntimeScratchRoots();
   // The store and compile cache sweeps are the default pass's too (GY-1683): a caller's own prefixes never reach them.
   const storeAge = options.prefixes ? null : options.maxAgeMs ?? packageStoreMinAgeMs;
   const pass: PassState = { now, minAge, cacheAge, agentAge, storeAge, runtimeRoots, cap: null, written: new Map(), limit: options.limit ?? tmpReclaimLimitPerCycle, uid: process.getuid?.(), held: options.held ?? null, mounts: options.mounts,
