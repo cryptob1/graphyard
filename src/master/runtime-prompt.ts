@@ -200,6 +200,12 @@ const severityLabel = /^(?:\[[^\]]*\]\s*)?(?:api\s+)?error(?:\s+code)?\s*[:#]?\s
 const zonelessUtcRuntimes: ReadonlySet<string> = new Set(['pi']);
 /** A zone-less calendar wall clock, matched only where the reset parser would read one without a zone: not beside a zone the provider did name (`… 08:27:35 UTC`, `…T08:27:35+08:00`) and not the truncated head of a longer time (`08:27:35` must never become `08:27Z:35`). */
 const zonelessWallClock = /(\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(?![.:]\d|\s*(?:Z|UTC|[+-]\d{2}:?\d{2}))/g;
+/** Whether a notice names its zone in parentheses (`… 08:27:35 (America/Los_Angeles)`): the reset parser reads the wall clock in that zone, so the UTC default must not override it. The same shape and validity test as the parser's own. */
+function namesZone(text: string): boolean {
+  const zone = /\(\s*([A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+|UTC)\s*\)/.exec(text)?.[1];
+  if (!zone) return false;
+  try { new Intl.DateTimeFormat('en-US', { timeZone: zone }); return true; } catch { return false; }
+}
 /**
  * Whether the tail of a stopped session's output is `runtime`'s provider saying the account is
  * spent. The same tail, lead-of-line and reset-time rules as `detectExhaustion`, matched against
@@ -223,7 +229,7 @@ export function detectRuntimeExhaustion(output: string, runtime: string | null |
     if (!at.length || (line.slice(0, Math.min(...at)).match(/\S+/g) ?? []).length > exhaustionNoticeLabelWords) continue;
     const context = [line, ...lines.slice(index + 1, index + 3)].join(' ').replace(/(\d+[dhms])(?=\d)/gi, '$1 ');
     // The runtime's zone-less resets are its provider's UTC wall clock (GY-1817); every other shape parses as before.
-    return { reason: line.slice(0, 300), resetsAt: parseResetTime(zonelessUtcRuntimes.has(runtime ?? '') ? context.replace(zonelessWallClock, '$1Z') : context, now) };
+    return { reason: line.slice(0, 300), resetsAt: parseResetTime(zonelessUtcRuntimes.has(runtime ?? '') && !namesZone(context) ? context.replace(zonelessWallClock, '$1Z') : context, now) };
   }
   return null;
 }

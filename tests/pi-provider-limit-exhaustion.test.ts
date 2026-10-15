@@ -134,8 +134,11 @@ test('unit:pi-provider-limit-exhaustion — pi\'s 429 code 1310 "Weekly/Monthly 
     assert.equal(signal.reason, '{"code":"1310","message":"Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-10-17 08:27:35"}', 'the notice, behind the runtime\'s own Error label, is the reason');
     assert.equal(signal.resetsAt, resetAt, 'the provider named no zone, so the reset wall clock is read in UTC, not the host\'s');
     // A zone the provider did name is kept, not overwritten by the UTC default.
-    const zoned = detectRuntimeExhaustion(piPane.replace('08:27:35}', '08:27:35 UTC}'), 'pi', at);
+    const zoned = detectRuntimeExhaustion(piPane.replace('08:27:35"', '08:27:35 UTC"'), 'pi', at);
     assert.equal(zoned?.resetsAt, resetAt, 'an explicit zone survives the UTC default');
+    // A zone the provider names in parentheses is that zone's wall clock: 08:27:35 PDT is 15:27:35Z, not 08:27:35Z.
+    const named = detectRuntimeExhaustion(piPane.replace('08:27:35"', '08:27:35 (America/Los_Angeles)"'), 'pi', at);
+    assert.equal(named?.resetsAt, '2026-10-17T15:27:35.000Z', 'a parenthesized named zone survives the UTC default');
     assert.ok(providerLimitNotices.pi, 'pi has its own entry in the catalogs');
     // Another runtime's catalog does not read pi's banner.
     assert.equal(detectRuntimeExhaustion(piPane, 'claude', at), null, 'the notice is pi\'s catalog, not Claude\'s');
