@@ -36,7 +36,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { heldRelease } from '../bin/held-release-hooks.mjs';
 
@@ -169,6 +169,15 @@ export function controlPlaneEffects(modules, context) {
     launchReview: (work, review, agents, observedAt) => r.launchReview(root, work, current().run.reviewerProfile, agents, observedAt, { run, requestId: review.id }),
     launchProducer: (work, producerRequest, profile, agents, observedAt) => pr.launchProducer(root, work, producerRequest, profile, agents, observedAt, { run }),
     observeDeployment: delivered => d.observeDeployment(current(), delivered, run, fetch, () => Date.now(), { root }),
+    // GY-1831: a verify-deployment failure that only says the running release does not carry the
+    // merge yet is a promotion wait while the pipeline has the merge in flight. The read is the
+    // promotion ledger and workflow runs, fresh at the attempt; a read that fails stands as not
+    // carrying, so the plain reason and the stall it earns are what they were.
+    promotionCarryingMerge: async mergeSha => {
+      const config = current();
+      const reads = d.promotionReads(config, root, run, existsSync(join(root, '.github', 'workflows', d.promotionWorkflow)));
+      return reads ? d.promotionCarryingMerge(reads, mergeSha, root, config.baseBranch, run) : false;
+    },
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
     // GY-1660: the one call made beyond the coordinator credential, as the loop files its follow-ups:
     // the follow-up an unobserved post-deploy verification owes, created as the master's operator agent.

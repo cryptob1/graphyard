@@ -623,6 +623,33 @@ function soakOf(soaks: PromotionState['soaks'], candidate: PromotionCandidate) {
 /** A soak run's conclusion in the record's words: success is passed, failure failed; the rest stand. */
 const soakVerdict = (conclusion: string) => conclusion === 'success' ? 'passed' : conclusion === 'failure' ? 'failed' : conclusion;
 
+/**
+ * GY-1831: whether the promotion pipeline has a delivered merge in flight — a release candidate
+ * carrying it is being built or its soak is running, or the dispatch that will carry it is due — so
+ * a `verify-deployment` attempt that fails only because the running release does not serve the
+ * merge yet is naming the pipeline's ordinary pace, not a fault. Read fresh: the ledger read
+ * fetches the base branch, the `rc/` candidates and the `rc-production/` record, and the workflow
+ * runs are listed again. A merge the promotion record already covers is not in flight — production
+ * not serving it is a rollback or a wedged deploy, and stays a fault — and neither is a merge the
+ * base branch no longer carries. A quiet pipeline whose last candidate already covers main and is
+ * not in flight is not moving either: the row stalls and files as before.
+ */
+export async function promotionCarryingMerge(reads: PromotionReads, mergeSha: string, root: string, baseBranch: string, run: ChildRun): Promise<boolean> {
+  const [ledger, runs, soaks] = await Promise.all([reads.ledger(), reads.runs(), reads.soaks?.() ?? []]);
+  const ancestry = localAncestry(root, baseBranch, run);
+  const carries = async (sha: string | null) => !!sha && await ancestry.contains(mergeSha, sha) === true;
+  if (!await carries(ledger.mainSha) || await carries(ledger.promotedSha)) return false;
+  const cuts = runs.filter(run => run.event === 'workflow_dispatch' || run.event === 'schedule');
+  const inFlight = cuts.some(run => runningStates.has(run.status));
+  const newestCandidate = ledger.candidates?.[0] ?? null;
+  const soaking = !!newestCandidate && !!soaks.find(run => run.sha === newestCandidate.sha && runningStates.has(run.status));
+  // Due: nothing is in flight and main has moved past the last cut, or none was ever cut, so the
+  // next dispatch carries the merge — `promotionCycle` dispatches exactly then (GY-1513).
+  const newestCut = cuts[0];
+  const due = !inFlight && !soaking && (!newestCut || (newestCut.headSha !== undefined && newestCut.headSha.toLowerCase() !== ledger.mainSha));
+  return inFlight || soaking || due;
+}
+
 /** The promotion reads over the managed checkout and GitHub; null when the repository has no release-candidate workflow to dispatch and no local ports (GY-1526). */
 export function promotionReads(config: MasterConfig, root: string, run: ChildRun, workflowExists: boolean, soakExists = existsSync(join(root, '.github', 'workflows', soakWorkflow)),
   options: { merger?: () => Promise<MergerMode>; local?: LocalReleasePorts | null } = {}): PromotionReads | null {

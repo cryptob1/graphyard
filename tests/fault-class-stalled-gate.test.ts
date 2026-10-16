@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { actionStall, actionStallThreshold } from '../src/model/action-progress.js';
-import { waitReason } from '../src/model/action-kinds.js';
+import { actionStall, actionRetryAt, actionRetryMaxMs, actionStallThreshold } from '../src/model/action-progress.js';
+import { handoffWaitBound, promotionWaitBoundMs, promotionWaitClause, waitReason } from '../src/model/action-kinds.js';
 import type { ActionRow } from '../src/model/actions.js';
 import { emptyDaemonState, storeAction } from '../src/daemon/state.js';
 import { assertDispatchable } from '../src/master/dispatch.js';
@@ -13,6 +13,11 @@ import { blockerClassMeaning, classifyBlocker, needsSomeone } from '../src/model
 import { workAttentionOwner } from '../src/master/attention.js';
 import { doctorPrompt } from '../src/daemon/doctor.js';
 import { stalledActionAttention } from '../src/cli/stalled-actions.js';
+import { promotionCarryingMerge } from '../src/daemon/deployment.js';
+import { controlPlaneHandlers } from '../src/executor.js';
+import { recurringClasses } from '../src/model/fault-class-recurrence.js';
+import { faultClassPolicyFromEnv } from '../src/model/fault-classes.js';
+import type { PromotionCandidate, PromotionReads, PromotionRun, SoakRun } from '../src/daemon/deployment.js';
 import type { Work } from '../src/model.js';
 
 // GY-1758 names this file for its proof: manual:fault-class-stalled-gate. The master loop filed 4
@@ -26,6 +31,7 @@ import type { Work } from '../src/model.js';
 // milliseconds so no date is a wall-clock reading.
 
 const t0 = 1_760_000_000_000, stamp = (offset: number) => new Date(t0 + offset * 60_000).toISOString();
+const stampMs = (offset: number) => t0 + offset * 60_000;
 const timeout = (url: string) => `the merge writer could not be read from ${url} (The operation was aborted due to timeout), so the launch is refused before anything is claimed rather than minting a push credential the control plane may have retired; it is dispatched again once the status read succeeds`;
 const parked = (key: string, request: string) => `Dispatch waits on a human-only decision (goals and priorities); graphyard answer ${key} ${request} ANSWER resumes it`;
 // GY-1674's recorded blocker, as the item holds it (GY-1761's third instance): a post-deploy verification whose criterion
@@ -186,4 +192,196 @@ test('the doctor\'s shipped blocked check carries the master-role hand-off: it t
   assert.match(prompt, /blocked: an item blocked for more than 10 min; a blocker naming the master-role refusal/);
   assert.match(prompt, /run the master command it names from this checkout yourself/);
   assert.match(prompt, /master unblock GY-N with a quoted reason/);
+});
+
+// GY-1831's instances: a delivered item's verify-deployment action failed only because the running
+// release did not carry its merge yet, while a release candidate carrying that merge sat in the
+// promotion pipeline the loop runs; about 20 minutes after each merge the promotion landed and the
+// row's own retry would have observed the release serving. The stall classification, its attention
+// row and the fault it filed all fired over that wait — three of them in 24 hours filed this very
+// item. The candidate reads the promotion pipeline fresh at the failed attempt and names the wait,
+// so the run is bounded by the promotion wait bound instead of the stall threshold and files no
+// instance inside it; past the bound, and with no candidate carrying the merge, it stalls and files
+// as before. Instants are epoch millis; the promotion reads are stubbed over a fixture ancestry,
+// which is what `localAncestry` derives containment from.
+
+const doesNotCarry = (key: string, release: string, merge: string) => `the running release ${release} does not carry ${key}'s merge ${merge} yet`;
+const promotionWait = (plain: string) => `${plain}; ${promotionWaitClause}`;
+
+const stalledGateInstances = [
+  { subject: 'GY-1827', release: '3100cb653054', merge: '3733d249f020', attempts: 6, spacing: 3 },
+  { subject: 'GY-1828', release: '3733d249f020', merge: '9f9b403b10cd', attempts: 7, spacing: 4 },
+  { subject: 'GY-1830', release: '9f9b403b10cd', merge: '1b6ba10e01aa', attempts: 5, spacing: 1 },
+] as const;
+
+/** A verify-deployment row whose last `count` attempts all failed for `reason`, one claim between each, `spacing` minutes apart. */
+function failingVerify(key: string, reason: string, count: number, spacing = 3): ActionRow {
+  const history = Array.from({ length: count }, (_, index) => [
+    { at: stamp(index * spacing), event: 'claimed', requester: 'graphyard', executor: 'executor-a', result: null, reason: 'claimed' },
+    { at: stamp(index * spacing + 1), event: 'failed', requester: 'graphyard', executor: 'executor-a', result: 'failed', reason },
+  ]).flat();
+  return { id: `verify-${key}`, kind: 'verify-deployment', work: `id-${key}`, key,
+    inputs: { kind: 'verify-deployment', mergeSha: 'a'.repeat(40), mergedAt: stamp(0), state: 'done' },
+    gate: 'merge', refusal: reason, reason, binding: 'delivery:verify', requestedBy: 'graphyard', requestedAt: stamp(0),
+    state: 'pending', claim: null, attempts: count, history } as unknown as ActionRow;
+}
+
+const attentionFor = (key: string, row: ActionRow) => stalledActionAttention({ work: [
+  { key, id: `id-${key}`, actionQueue: { actions: [row], history: [] } } as unknown as Work,
+], now: stamp(40) });
+
+for (const { subject, release, merge, attempts, spacing } of stalledGateInstances) {
+  const plain = doesNotCarry(subject, release, merge);
+  test(`${subject}: its verify-deployment run is a stall at the base and files the stalled-action instance through the attention path that filed it`, () => {
+    assert.equal(waitReason(plain), false);
+    assert.ok(actionStall(failingVerify(subject, plain, attempts, spacing)), 'the unchanged run the ledger held is a stall');
+    const attention = attentionFor(subject, failingVerify(subject, plain, attempts, spacing));
+    assert.equal(attention.length, 1);
+    assert.equal(attention[0].kind, 'stalled-action');
+    assert.match(attention[0].text, new RegExp(`${subject}'s verify-deployment action is stalled`));
+    const opened = trackFaults(emptyRecord(), classifyAttention(attention), stamp(40));
+    assert.deepEqual(opened.map(instance => instance.faultClass), ['stalled-gate']);
+  });
+
+  test(`${subject}: the same run is no stall once the promotion pipeline is read and names the wait, and none of the three files an instance at the candidate`, () => {
+    const row = failingVerify(subject, promotionWait(plain), attempts, spacing);
+    assert.equal(handoffWaitBound(promotionWait(plain)), promotionWaitBoundMs);
+    assert.equal(actionStall(row), null, 'the wait is bounded, and the recorded window is inside the bound');
+    assert.deepEqual(attentionFor(subject, row), []);
+    assert.deepEqual(trackFaults(emptyRecord(), classifyAttention(attentionFor(subject, row)), stamp(40)), []);
+    // The wait retries on the ordinary schedule, so the promotion that lands about 20 minutes in is
+    // picked up by a retry within minutes, not at the stall backoff's ceiling.
+    const retryAt = Date.parse(actionRetryAt(row, new Date(stamp(40))));
+    assert.ok(retryAt <= stampMs(40) + actionRetryMaxMs, `the wait is retried on the ordinary schedule (retry at ${retryAt})`);
+  });
+
+  test(`${subject}: past the promotion pipeline's own bound the wait is a stall again and files as before`, () => {
+    const row = failingVerify(subject, promotionWait(plain), 7, 12); // 72 minutes of one unchanged reason
+    assert.ok(actionStall(row), 'a run outlasting the bound is a stall');
+    const attention = attentionFor(subject, row);
+    assert.equal(attention.length, 1);
+    assert.deepEqual(trackFaults(emptyRecord(), classifyAttention(attention), stamp(40)).map(instance => instance.faultClass), ['stalled-gate']);
+  });
+}
+
+test('the three instances the base filed are one recurring stalled-gate class — the filing of GY-1831 itself — and the candidate files none', () => {
+  const base = emptyRecord();
+  for (const [index, { subject, release, merge, attempts, spacing }] of stalledGateInstances.entries()) {
+    const attention = attentionFor(subject, failingVerify(subject, doesNotCarry(subject, release, merge), attempts, spacing));
+    trackFaults(base, classifyAttention(attention), stamp(10 + index * 60));
+  }
+  const policy = faultClassPolicyFromEnv({});
+  const recurrence = recurringClasses(base.instances, [], policy, stampMs(130)).find(entry => entry.faultClass === 'stalled-gate');
+  assert.ok(recurrence, 'the three instances recur as one stalled-gate class');
+  assert.equal(recurrence!.count, 3);
+  assert.equal(recurrence!.file, true);
+  assert.deepEqual(recurrence!.recent.map(entry => entry.subject).sort(), ['GY-1827', 'GY-1828', 'GY-1830']);
+
+  const candidate = emptyRecord();
+  for (const [index, { subject, release, merge, attempts, spacing }] of stalledGateInstances.entries()) {
+    const attention = attentionFor(subject, failingVerify(subject, promotionWait(doesNotCarry(subject, release, merge)), attempts, spacing));
+    trackFaults(candidate, classifyAttention(attention), stamp(10 + index * 60));
+  }
+  assert.deepEqual(candidate.instances, [], 'no instance is filed over the bounded promotion wait');
+  assert.equal(recurringClasses(candidate.instances, [], policy, stampMs(130)).length, 0, 'so no class item is filed either');
+});
+
+// ——— The promotion read the executor asks at the failed attempt ———
+
+/** A child runner over a fixture ancestry: `git fetch` is free, `merge-base --is-ancestor` answers from `edges` (`ancestor>descendant`). */
+const ancestryRun = (edges: readonly string[]) => (command: string, args: string[]) => {
+  if (command !== 'git' || args[0] !== '-C') throw new Error(`unexpected ${command} ${args.join(' ')}`);
+  const rest = args.slice(2);
+  if (rest[0] === 'fetch') return '';
+  if (rest[0] === 'merge-base') {
+    const [ancestor, descendant] = rest.slice(2);
+    if (ancestor === descendant || edges.includes(`${ancestor}>${descendant}`)) return '';
+    const refusal = new Error('not an ancestor') as Error & { status?: number };
+    refusal.status = 1;
+    throw refusal;
+  }
+  throw new Error(`unexpected git ${rest.join(' ')}`);
+};
+
+const mergeSha = 'a'.repeat(40), candidateSha = 'b'.repeat(40), mainTip = 'c'.repeat(40), olderCut = 'd'.repeat(40), promotedSha = 'e'.repeat(40);
+const ledger = (over: { mainSha?: string | null; promotedSha?: string | null; candidates?: PromotionCandidate[] } = {}) => async () =>
+  ({ mainSha: mainTip, promotedSha: null, promotedAt: null, behind: null, candidates: [], ...over });
+const cutRun = (over: Partial<PromotionRun> = {}): PromotionRun => ({ status: 'completed', createdAt: stamp(2), event: 'workflow_dispatch', headSha: olderCut, ...over });
+
+const promotionReads = (reads: Pick<PromotionReads, 'ledger' | 'runs'> & Partial<Pick<PromotionReads, 'soaks'>>): PromotionReads => reads as PromotionReads;
+
+test('the promotion read answers in flight while a candidate carrying the merge is building', async () => {
+  assert.equal(await promotionCarryingMerge(promotionReads({ ledger: ledger({ candidates: [{ id: 'rc-1', sha: candidateSha, cutAt: stamp(2), prs: 1, queued: 0 }] }), runs: async () => [cutRun({ status: 'in_progress', headSha: candidateSha })] }), mergeSha, '.', 'main', ancestryRun([`${mergeSha}>${candidateSha}`, `${mergeSha}>${mainTip}`])), true);
+});
+
+test('the promotion read answers in flight while the merge is queued for a candidate the pipeline is building', async () => {
+  // The run in flight cut before the merge, so the merge rides the next candidate — still the pipeline's ordinary pace.
+  assert.equal(await promotionCarryingMerge(promotionReads({ ledger: ledger(), runs: async () => [cutRun({ status: 'queued', headSha: olderCut })] }), mergeSha, '.', 'main', ancestryRun([`${mergeSha}>${mainTip}`])), true);
+});
+
+test('the promotion read answers in flight while the next dispatch is due and will carry the merge', async () => {
+  // Nothing is in flight and main has moved past the last cut: promotionCycle dispatches exactly then.
+  assert.equal(await promotionCarryingMerge(promotionReads({ ledger: ledger(), runs: async () => [cutRun({ headSha: olderCut })] }), mergeSha, '.', 'main', ancestryRun([`${mergeSha}>${mainTip}`])), true);
+});
+
+test('the promotion read answers in flight while the newest candidate soaks', async () => {
+  const reads = promotionReads({ ledger: ledger({ candidates: [{ id: 'rc-1', sha: candidateSha, cutAt: stamp(2), prs: 1, queued: 0 }] }),
+    runs: async () => [cutRun({ headSha: candidateSha })], soaks: async () => [{ sha: candidateSha, status: 'in_progress', conclusion: null, createdAt: stamp(3), url: null } as SoakRun] });
+  assert.equal(await promotionCarryingMerge(reads, mergeSha, '.', 'main', ancestryRun([`${mergeSha}>${candidateSha}`, `${mergeSha}>${mainTip}`])), true);
+});
+
+test('the promotion read answers not in flight once the promotion record covers the merge, when the base branch does not carry it, and while the pipeline sits wedged', async () => {
+  // Production not serving a merge the promotion record already covers is a rollback or a wedged deploy: a fault, not a wait.
+  assert.equal(await promotionCarryingMerge(promotionReads({ ledger: ledger({ promotedSha }), runs: async () => [cutRun()] }), mergeSha, '.', 'main', ancestryRun([`${mergeSha}>${mainTip}`, `${mergeSha}>${promotedSha}`])), false);
+  // A merge the base branch no longer carries is nothing the pipeline can serve.
+  assert.equal(await promotionCarryingMerge(promotionReads({ ledger: ledger(), runs: async () => [cutRun({ status: 'in_progress' })] }), mergeSha, '.', 'main', ancestryRun([])), false);
+  // A quiet pipeline whose last candidate already covers main and is not in flight is not moving: the row stalls as before.
+  assert.equal(await promotionCarryingMerge(promotionReads({ ledger: ledger({ candidates: [{ id: 'rc-1', sha: mainTip, cutAt: stamp(2), prs: 1, queued: 0 }] }), runs: async () => [cutRun({ headSha: mainTip })] }), mergeSha, '.', 'main', ancestryRun([`${mergeSha}>${mainTip}`])), false);
+});
+
+test('the wait clause the executor throws is constant, so the unchanged run accumulates and the bound can hold it', () => {
+  assert.match(promotionWaitClause, /promotion pipeline/);
+  assert.doesNotMatch(promotionWaitClause, /\b[0-9a-f]{7,40}\b/, 'the clause names no candidate, release or merge');
+  assert.doesNotMatch(promotionWaitClause, /\d{2}:\d{2}|minute|count/i, 'the clause names no clock or counter');
+  for (const { subject, release, merge } of stalledGateInstances) assert.ok(promotionWait(doesNotCarry(subject, release, merge)).endsWith(promotionWaitClause));
+});
+
+// ——— The verify-deployment handler at the candidate ———
+
+const work = (key: string) => ({ key, id: `id-${key}`, stage: 'done', delivery: { mergeSha: 'a'.repeat(40), mergedAt: stamp(0) } }) as unknown as Work;
+const verifyRow = (key: string, mergeSha: string): ActionRow => ({ id: `verify-${key}`, kind: 'verify-deployment', work: `id-${key}`, key,
+  inputs: { kind: 'verify-deployment', mergeSha, mergedAt: stamp(0), state: 'done' }, gate: 'merge', refusal: null, reason: '', binding: 'delivery:verify',
+  requestedBy: 'graphyard', requestedAt: stamp(0), state: 'pending', claim: null, attempts: 0, history: [] } as unknown as ActionRow);
+
+/** The handlers Graphyard ships, over a snapshot this test holds: only the deployment observation and the promotion read vary. */
+function verifyHandlers(observation: unknown, promotion?: (mergeSha: string) => Promise<boolean>, recorded: unknown[] = []) {
+  return controlPlaneHandlers(() => config, {
+    snapshot: async () => ({ work: [work('GY-1827')], now: stamp(30) }),
+    mutate: async (path, body) => { recorded.push([path, body]); return {}; },
+    agents: () => [], workerCredentials: async () => ({}), producerCredentials: async () => ({}),
+    dispatchWorker: async () => { throw new Error('no launch here'); }, launchReview: async () => { throw new Error('no launch here'); },
+    launchProducer: async () => { throw new Error('no launch here'); },
+    observeDeployment: async () => observation as never,
+    ...(promotion ? { promotionCarryingMerge: promotion } : {}),
+    postDeployFiler: async () => ({ filer: async () => [], dispose: async () => {} }),
+  })['verify-deployment']!;
+}
+
+const notServing = (reason?: string) => ({ source: 'endpoint', sha: '3100cb6530540000000000000000000000000000', at: stamp(30), deployed: [], pending: ['GY-1827'], ...(reason ? { reason } : {}) });
+
+test('unit:verify-deployment-awaits-promotion — the handler names the promotion wait while the pipeline carries the merge, and keeps the plain reason otherwise', async () => {
+  const rowMerge = 'a'.repeat(12), plain = doesNotCarry('GY-1827', '3100cb653054', rowMerge);
+  await assert.rejects(verifyHandlers(notServing(), async () => true)(verifyRow('GY-1827', 'a'.repeat(40))), error => (error as Error).message === promotionWait(plain));
+  await assert.rejects(verifyHandlers(notServing(), async () => false)(verifyRow('GY-1827', 'a'.repeat(40))), error => (error as Error).message === plain);
+  await assert.rejects(verifyHandlers(notServing())(verifyRow('GY-1827', 'a'.repeat(40))), error => (error as Error).message === plain, 'an executor without the promotion read keeps today\u2019s failure');
+  await assert.rejects(verifyHandlers(notServing(), async () => { throw new Error('the pipeline could not be read'); })(verifyRow('GY-1827', 'a'.repeat(40))), error => (error as Error).message === plain, 'an unreadable pipeline reads as not carrying');
+  await assert.rejects(verifyHandlers(notServing('containment could not be derived: the base branch could not be fetched'), async () => true)(verifyRow('GY-1827', 'a'.repeat(40))), error => (error as Error).message === 'containment could not be derived: the base branch could not be fetched', 'a read that carries its own reason is not the release-lag shape');
+});
+
+test('unit:verify-deployment-awaits-promotion — retried when the promotion lands, the same row observes the release serving and records the deployment', async () => {
+  const recorded: unknown[] = [];
+  const handler = verifyHandlers({ source: 'endpoint', sha: '3733d249f0200000000000000000000000000000', at: stamp(21), deployed: ['GY-1827'], pending: [] }, async () => false, recorded);
+  const outcome = await handler(verifyRow('GY-1827', 'a'.repeat(40)));
+  assert.match(String(outcome), /observed the release serving 3733d249f020 for GY-1827/);
+  assert.deepEqual(recorded.map(entry => (entry as [string])[0]), ['work/id-GY-1827/deployment']);
 });
