@@ -9,6 +9,7 @@ import { processJob, type GitHub } from '../src/github.js';
 import { routineDecision } from '../src/master-daemon.js';
 import { checkRerunProbeMs, checkRerunVisibilityMs, classifyRerunRun, type RerunWorkflowRun } from '../src/merge-queue.js';
 import type { Observation, Principal, Work } from '../src/model.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // GY-1096: with 28 CI runs queued, reruns the control plane requested could not start within 15
 // minutes, expired as failures, and the loop owed each item a new head, whose own CI run deepened
@@ -25,7 +26,7 @@ before(async () => {
   const databaseDir = await temporaryDirectory('rerun-wait');
   database = new EmbeddedPostgres({ databaseDir, user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.controlPlaneAppId = 1234;
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });

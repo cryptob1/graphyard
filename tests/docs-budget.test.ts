@@ -77,7 +77,7 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   ['docs/master-agent-reference.md', /Steps calling an approver, decision or session budget two-fifths of the interval \(30s floor\), each call 10s or what's left; a slower one is carried \(`waiting`, no fault\), retried next cycle, joining it or consuming its answer, kept while its row stands; spent, it starts none/],
   ['docs/master-agent-reference.md', /one `decision\.\*` ledger read names moved items, an unmoved history is kept unread/],
   // GY-1518: the delivery redesign page keeps the merger setting's two values and the one rule.
-  ['docs/delivery-redesign.md', /`github` \(default\) or `control-plane`/],
+  ['docs/delivery-redesign.md', /`github` \(legacy, .*\) or `control-plane` \(default\)/],
   ['docs/delivery-redesign.md', /Only Graphyard writes to main/],
   // GY-1536 AC-4: the general E2E step kinds, declared secrets and the env file, with one example of each kind.
   ['docs/validation.md', /`command`: `run` in the checkout with `TARGET_URL`.*`{"kind":"command","run":"npx playwright test"}`/],

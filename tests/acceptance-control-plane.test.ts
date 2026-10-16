@@ -23,6 +23,7 @@ import { defaultChildRun } from '../src/child-runner.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 /**
  * GY-1535 AC-1 and AC-2. Under the control-plane merger the acceptance role commits a goal's
@@ -57,7 +58,7 @@ before(async () => {
   const port = await freePort();
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('acceptance-cp-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('acceptance_cp_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/acceptance_cp_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/acceptance_cp_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
   http = server(engine, credentials, null);
