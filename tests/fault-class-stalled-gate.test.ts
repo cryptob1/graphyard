@@ -20,7 +20,8 @@ import { recurringClasses } from '../src/model/fault-class-recurrence.js';
 import { faultClassPolicyFromEnv } from '../src/model/fault-classes.js';
 // @ts-expect-error The standalone executor is a dependency-free entry point script.
 import { controlPlaneEffects } from '../scripts/graphyard-executor.mjs';
-import { writeDaemonState, type PromotionState } from '../src/daemon/state.js';
+import { daemonStatePath, writeDaemonState, type PromotionState } from '../src/daemon/state.js';
+import { writeFile } from 'node:fs/promises';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Work } from '../src/model.js';
 
@@ -388,6 +389,15 @@ test('the executor wiring reads the recorded state alone: no cursor means no chi
   assert.equal(await effects.promotionCarryingMerge!(mergeSha), true, 'the recorded flight the loop left on its cursor is the wait the executor names');
   assert.deepEqual(calls.filter(call => call.includes('fetch') || call.startsWith('gh ')), [], 'no fetch and no GitHub request: the loop’s rate-limited reads stay the only ones');
   assert.ok(calls.every(call => call.includes('merge-base')), `only local containment reads ran: ${JSON.stringify(calls)}`);
+  // An unreadable cursor reaches the executor's log through the effects it is built with, and the failure stands as it was.
+  const lines: string[] = [];
+  const logged = controlPlaneEffects(modules as never, { root, current: () => wiringConfig, run: ancestryRun([`${mergeSha}>${mainTip}`], calls), snapshot: async () => ({ work: [work('GY-1827')], now: stamp(30) }), mutate: async () => ({}), log: (line: string) => lines.push(line) });
+  await writeFile(daemonStatePath(wiringConfig), '{ not the cursor');
+  const handler = controlPlaneHandlers(() => wiringConfig, { ...logged, observeDeployment: async () => notServing() as never })['verify-deployment']!;
+  await assert.rejects(async () => handler(verifyRow('GY-1827', 'a'.repeat(40)), executorIdentity), (error: Error) => error.message === doesNotCarry('GY-1827', '3100cb653054', 'a'.repeat(12)));
+  assert.equal(lines.length, 1, `the unreadable cursor is logged once: ${JSON.stringify(lines)}`);
+  assert.match(lines[0], /^\[graphyard-executor\] the promotion state could not be read for GY-1827, so the failure stands as it was: /);
+  assert.equal(typeof controlPlaneEffects(modules as never, { root, current: () => wiringConfig, run: ancestryRun([]), snapshot: async () => ({}), mutate: async () => ({}) }).log, 'function', 'without a log of its own the executor still logs, to its stderr');
 });
 
 test('the wait clause the executor throws is constant, so the unchanged run accumulates and the bound can hold it', () => {

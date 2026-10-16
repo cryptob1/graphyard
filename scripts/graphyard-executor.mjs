@@ -157,9 +157,11 @@ class SlotUndeclared extends Error { constructor(message, exitCode) { super(mess
  */
 export function controlPlaneEffects(modules, context) {
   const { master: m, daemon: d, reviewer: r, producer: pr, executor: x } = modules;
-  const { root, current, run, snapshot, mutate, read } = context;
+  const { root, current, run, snapshot, mutate, read, log = line => console.error(line) } = context;
   return {
     snapshot, mutate,
+    // GY-1831: the handlers' own diagnostics (an unreadable promotion state) go where this executor logs.
+    log,
     // GY-1698: a windowed post-deploy follow-up takes its observation instant from the intervention report's projection.
     ...(read ? { readPattern: x.patternReader(read) } : {}),
     agents: async () => { const runtime = await m.observeHerdrAgents(run); return runtime.available ? runtime.agents : null; },
