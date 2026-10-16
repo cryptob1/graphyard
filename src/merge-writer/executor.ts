@@ -213,20 +213,21 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
   };
   // The trial's shards run beside each other (GY-1832), so their TAP streams are joined: each proof's
   // cases are counted over every shard, as one runner process would count them. A retried trial runs
-  // in a fresh checkout, and only the attempt that answered (the last checkout run in) is counted.
-  let attempt: string | undefined;
+  // in a fresh checkout, and only the attempt that answered is counted: each attempt starts its TAP
+  // and files afresh, even one that stops before its tests run, and a runner child of an earlier attempt adds nothing.
+  let epoch = 0;
   const run: ChildRun = async (command, args, options) => {
     if (command === 'node' && args[0] === 'scripts/ci-tests.mjs' && (args[1] === 'affected' || args[1] === 'select')) return widened(String(await inner(command, args, options)));
     const at = command === 'node' ? args.indexOf(runner) : -1;
     if (at < 0) return inner(command, args, options);
-    if (options?.cwd !== attempt) { attempt = options?.cwd; tap = ''; }
-    const own = attempt;
-    try { const out = String(await inner(command, [...args.slice(0, at + 1), '--test-reporter=tap', '--test-reporter-destination=stdout', ...args.slice(at + 1)], options)); if (own === attempt) tap += `${out}\n`; return out; }
-    catch (error) { if (own === attempt) tap += `${childOutput(error)}\n`; throw error; }
+    const own = epoch;
+    try { const out = String(await inner(command, [...args.slice(0, at + 1), '--test-reporter=tap', '--test-reporter-destination=stdout', ...args.slice(at + 1)], options)); if (own === epoch) tap += `${out}\n`; return out; }
+    catch (error) { if (own === epoch) tap += `${childOutput(error)}\n`; throw error; }
   };
   const counted = (): ProofCounts => Object.fromEntries(input.proofs.map(proof => { const { executed, failed } = countProofCases(tap, proof); return [proof, { executed, failed }]; }));
   let verdict: TrialRun;
-  try { verdict = await runTrial({ ...input, run }); }
+  const onAttempt = (index: number) => { epoch++; tap = ''; files = []; input.onAttempt?.(index); };
+  try { verdict = await runTrial({ ...input, run, onAttempt }); }
   catch (error) {
     // A checkout that would not go is reported beside the verdict it reached, not in place of it.
     if (error instanceof TrialCleanupError && error.verdict) return { ...error.verdict, files, proofs: counted(), leftover: error.message };

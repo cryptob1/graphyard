@@ -26,7 +26,7 @@ const proofsOf = (index: number) => index % 3 === 0 ? ['unit:alpha-works'] : ind
  * TAP cases for that file's proofs and a duration record, failing the files `failing` names. The
  * clock advances by each phase's cost, and the runner processes in flight are counted.
  */
-function repository(files: string[], options: { failing?: string[]; baseline?: Record<string, number>; runner?: (attempt: number, list: string[]) => Error | null; build?: (attempt: number) => Error | null; checkout?: (attempt: number) => Error | null; selection?: (attempt: number) => Error | null } = {}) {
+function repository(files: string[], options: { failing?: string[]; baseline?: Record<string, number>; baselineText?: string; runner?: (attempt: number, list: string[]) => Error | null; build?: (attempt: number) => Error | null; checkout?: (attempt: number) => Error | null; selection?: (attempt: number) => Error | null } = {}) {
   let clock = Date.parse('2030-03-01T00:00:00Z'), inFlight = 0;
   const seen = { maxInFlight: 0, lists: [] as string[][], concurrency: [] as string[], attempts: 0, builds: 0 };
   const failing = new Set(options.failing ?? []);
@@ -36,7 +36,8 @@ function repository(files: string[], options: { failing?: string[]; baseline?: R
       const refused = options.checkout?.(seen.attempts);
       if (refused) throw refused;
       // The merge's own timing baseline, as the checkout holds it.
-      if (options.baseline) { await mkdir(join(args[5]!, 'tests/helpers'), { recursive: true }); await writeFile(join(args[5]!, 'tests/helpers/timing-baseline.json'), JSON.stringify({ files: options.baseline })); }
+      const baselineText = options.baselineText ?? (options.baseline && JSON.stringify({ files: options.baseline }));
+      if (baselineText !== undefined) { await mkdir(join(args[5]!, 'tests/helpers'), { recursive: true }); await writeFile(join(args[5]!, 'tests/helpers/timing-baseline.json'), baselineText); }
       return '';
     }
     if (command === 'npm' && args[0] === 'ci') { clock += 1000; return ''; }
@@ -121,6 +122,24 @@ test('unit:trial-sharded-verdict-equal — runTrial runs the selected files in p
   const clean = await runMergeTrial(await input(repository(files), { cores: 24 })), cleanAlone = await runMergeTrial(await input(repository(files), { cores: 1 }));
   assert.deepEqual(verdict(clean), verdict(cleanAlone));
   assert.deepEqual([clean.tests.failed, clean.runnerExit], [[], 0]);
+
+  // A merge whose timing baseline does not parse is sharded by fallback weights, not retried as a host failure: the same verdict, one attempt.
+  for (const baselineText of ['{ not json', 'null', '[1, 2]']) {
+    const malformed = repository(files, { failing, baselineText });
+    const answered = await runMergeTrial(await input(malformed, { cores: 16 }));
+    assert.equal(malformed.seen.attempts, 1, `${baselineText}: one attempt`);
+    assert.equal(answered.retried, undefined, `${baselineText}: no retry`);
+    assert.deepEqual(verdict(answered), verdict(alone), `${baselineText}: the single process's verdict`);
+  }
+
+  // A retry's verdict counts only its own attempt: the first attempt ran its tests and timed out, the retry failed its build before any test ran,
+  // so the verdict names no file and counts no proof case, never the first attempt's TAP or selection.
+  const stale = repository(files, { runner: attempt => attempt === 1 ? failure({ timedOut: true, signal: 'SIGKILL' }) : null, build: attempt => attempt === 2 ? failure({ status: 1, stdout: 'tsc: error' }) : null });
+  const rebuilt = await runMergeTrial(await input(stale, { cores: 16 }));
+  assert.equal(stale.seen.attempts, 2);
+  assert.ok(stale.seen.lists.length > 0, 'the first attempt ran its tests');
+  assert.deepEqual([rebuilt.build, rebuilt.files, rebuilt.retried?.map(entry => entry.outcome)], ['fail', [], ['timeout']]);
+  assert.deepEqual(rebuilt.proofs, { 'unit:alpha-works': { executed: 0, failed: 0 }, 'integration:beta-holds': { executed: 0, failed: 0 } });
 });
 
 test('unit:trial-phases-and-no-pending — every trial records its install, build, selection and test times; an attempt that times out, is cancelled or meets a host failure records a non-pending outcome naming its phase and reason and is retried once, and a verdict is never retried', async () => {

@@ -208,8 +208,9 @@ export function shardTestFiles(files: readonly string[], lanes: number, duration
   return shards.map(shard => shard.files).filter(shard => shard.length);
 }
 /** The merge's own timing baseline in its checkout, `{}` when it has none or it does not parse. */
-const checkoutDurations = (worktree: string) => readFile(join(worktree, 'tests/helpers/timing-baseline.json'), 'utf8')
-  .then(text => { const files = (JSON.parse(text) as { files?: unknown }).files; return files && typeof files === 'object' ? files as Record<string, number> : {}; }, () => ({}));
+const checkoutDurations = (worktree: string): Promise<Record<string, number>> => readFile(join(worktree, 'tests/helpers/timing-baseline.json'), 'utf8')
+  .then(text => { const files = (JSON.parse(text) as { files?: unknown } | null)?.files; return files && typeof files === 'object' ? files as Record<string, number> : {}; })
+  .catch(() => ({}));
 /** How much of a failing runner child's output its diagnostic record keeps: enough to read the exit, little enough for one daemon action. */
 export const runnerDiagnosticTailLength = 1200;
 /**
@@ -282,6 +283,8 @@ export interface RunTrialInput {
   cores?: number;
   /** How many times a trial that reached no verdict is tried again; `trialRetries` unless a test names another. */
   retries?: number;
+  /** Called as each attempt starts, before it runs anything (GY-1832): a caller keeping attempt-scoped evidence starts it afresh. */
+  onAttempt?: (attempt: number) => void;
   /** Where the trial's temporary directory and short checkout may go; `trialTemporaryRoots()` unless a test names others. */
   temporaryRoots?: readonly string[];
   /** The free space a short checkout's root must have, and how it is measured: the managed worktree root's default and probe unless given. */
@@ -368,6 +371,7 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
   const attempts: TrialNoVerdict[] = [], retries = Math.max(0, Math.floor(input.retries ?? trialRetries));
   for (let attempt = 0; ; attempt++) {
     try {
+      input.onAttempt?.(attempt);
       const verdict = await runTrialAttempt(input);
       return attempts.length ? { ...verdict, retried: attempts } : verdict;
     } catch (error) {
