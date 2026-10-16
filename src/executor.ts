@@ -70,12 +70,15 @@ export interface ControlPlaneEffects {
   observeDeployment: (delivered: Work[]) => Promise<DeploymentObservation>;
   /**
    * GY-1831: whether the promotion pipeline has `mergeSha` in flight — a release candidate carrying
-   * it is being built or soaked, or the dispatch that will carry it is due — read fresh at the
-   * failed attempt. Absent, false, or reading false, a `verify-deployment` failure that the running
-   * release does not carry the merge keeps its plain reason and stalls as before; the wiring fails
-   * it closed the same way when the pipeline cannot be read.
+   * it is being built or soaked, or the dispatch that will carry it is due — answered from the
+   * promotion state the loop already records on its cursor, read at the failed attempt. Absent,
+   * false, or reading false, a `verify-deployment` failure that the running release does not carry
+   * the merge keeps its plain reason and stalls as before; the wiring fails it closed the same way
+   * when the state cannot be read.
    */
   promotionCarryingMerge?: (mergeSha: string) => Promise<boolean>;
+  /** Where the handler's own diagnostics go; absent, a failed promotion read is logged nowhere. */
+  log?: (line: string) => void;
   /**
    * `POST work` as the master's operator-agent identity, the one that may create work (GY-1660): files
    * the follow-up a delivered item's unobserved post-deploy verification owes. The coordinator
@@ -465,9 +468,13 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
         // GY-1831: a release the promotion pipeline is about to serve is the pipeline's ordinary
         // pace, not a fault. Naming the wait bounds the row by the promotion wait bound instead of
         // the stall threshold, so the retries land within minutes of the promotion. A read that
-        // carries its own reason is not this shape, and a pipeline that cannot be read stands as
-        // not carrying: the plain reason, and the stall, are what they were.
-        const waiting = !observation.reason && await Promise.resolve(effects.promotionCarryingMerge?.(action.inputs.mergeSha)).catch(() => false);
+        // carries its own reason is not this shape, and a state that cannot be read stands as not
+        // carrying — logged, so an unreadable pipeline is diagnosable — and the plain reason and
+        // the stall are what they were.
+        const waiting = !observation.reason && await Promise.resolve(effects.promotionCarryingMerge?.(action.inputs.mergeSha)).catch(error => {
+          effects.log?.(`[graphyard-executor] the promotion state could not be read for ${work.key}, so the failure stands as it was: ${error instanceof Error ? error.message : String(error)}`);
+          return false;
+        });
         throw new Error(waiting ? `${plain}; ${promotionWaitClause}` : plain);
       }
       // GY-1660: the release just observed checks the item's declared post-deploy verifications, and an

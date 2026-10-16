@@ -19,7 +19,7 @@ On worker, `graphyard master settle-containment GY-N "reason"` verifies nothing 
 
 ## Submitted implementation needs rework
 
-Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; next resubmits. `scripts/rework-causes.mjs` classifies last 100 deliveries' rounds (55% own-change, 33% conflicts; raw median 2); `master status` `speed.reworkRounds.ownChange` excludes out-of-item causes.
+Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits. `scripts/rework-causes.mjs` classifies last 100 deliveries' rounds (55% own-change, 33% conflicts; raw median 2); `master status` `speed.reworkRounds.ownChange` excludes out-of-item causes.
 
 ## Retro synthesis
 

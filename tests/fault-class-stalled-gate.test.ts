@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { actionStall, actionRetryAt, actionRetryMaxMs, actionStallThreshold } from '../src/model/action-progress.js';
 import { handoffWaitBound, promotionWaitBoundMs, promotionWaitClause, waitReason } from '../src/model/action-kinds.js';
 import type { ActionRow } from '../src/model/actions.js';
@@ -13,11 +14,14 @@ import { blockerClassMeaning, classifyBlocker, needsSomeone } from '../src/model
 import { workAttentionOwner } from '../src/master/attention.js';
 import { doctorPrompt } from '../src/daemon/doctor.js';
 import { stalledActionAttention } from '../src/cli/stalled-actions.js';
-import { promotionCarryingMerge } from '../src/daemon/deployment.js';
+import { noLocalPortsReason, promotionCarryingMerge, promotionFrozenReason, promotionOffReason } from '../src/daemon/deployment.js';
 import { controlPlaneHandlers } from '../src/executor.js';
 import { recurringClasses } from '../src/model/fault-class-recurrence.js';
 import { faultClassPolicyFromEnv } from '../src/model/fault-classes.js';
-import type { PromotionCandidate, PromotionReads, PromotionRun, SoakRun } from '../src/daemon/deployment.js';
+// @ts-expect-error The standalone executor is a dependency-free entry point script.
+import { controlPlaneEffects } from '../scripts/graphyard-executor.mjs';
+import { writeDaemonState, type PromotionState } from '../src/daemon/state.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Work } from '../src/model.js';
 
 // GY-1758 names this file for its proof: manual:fault-class-stalled-gate. The master loop filed 4
@@ -199,11 +203,12 @@ test('the doctor\'s shipped blocked check carries the master-role hand-off: it t
 // promotion pipeline the loop runs; about 20 minutes after each merge the promotion landed and the
 // row's own retry would have observed the release serving. The stall classification, its attention
 // row and the fault it filed all fired over that wait — three of them in 24 hours filed this very
-// item. The candidate reads the promotion pipeline fresh at the failed attempt and names the wait,
-// so the run is bounded by the promotion wait bound instead of the stall threshold and files no
-// instance inside it; past the bound, and with no candidate carrying the merge, it stalls and files
-// as before. Instants are epoch millis; the promotion reads are stubbed over a fixture ancestry,
-// which is what `localAncestry` derives containment from.
+// item. The candidate answers the attempt from the promotion state the loop already records on its
+// cursor and names the wait, so the run is bounded by the promotion wait bound instead of the stall
+// threshold and files no instance inside it; past the bound, under a gate that stops every
+// dispatch, and with no candidate carrying the merge, it stalls and files as before. Instants are
+// epoch millis; the promotion states below are recorded states, and containment is answered from a
+// fixture ancestry over the commits the checkout already holds.
 
 const doesNotCarry = (key: string, release: string, merge: string) => `the running release ${release} does not carry ${key}'s merge ${merge} yet`;
 const promotionWait = (plain: string) => `${plain}; ${promotionWaitClause}`;
@@ -286,57 +291,103 @@ test('the three instances the base filed are one recurring stalled-gate class �
   assert.equal(recurringClasses(candidate.instances, [], policy, stampMs(130)).length, 0, 'so no class item is filed either');
 });
 
-// ——— The promotion read the executor asks at the failed attempt ———
+// ——— The recorded promotion state the executor asks at the failed attempt ———
 
-/** A child runner over a fixture ancestry: `git fetch` is free, `merge-base --is-ancestor` answers from `edges` (`ancestor>descendant`). */
-const ancestryRun = (edges: readonly string[]) => (command: string, args: string[]) => {
-  if (command !== 'git' || args[0] !== '-C') throw new Error(`unexpected ${command} ${args.join(' ')}`);
-  const rest = args.slice(2);
-  if (rest[0] === 'fetch') return '';
-  if (rest[0] === 'merge-base') {
-    const [ancestor, descendant] = rest.slice(2);
-    if (ancestor === descendant || edges.includes(`${ancestor}>${descendant}`)) return '';
-    const refusal = new Error('not an ancestor') as Error & { status?: number };
-    refusal.status = 1;
-    throw refusal;
-  }
-  throw new Error(`unexpected git ${rest.join(' ')}`);
+/** A child runner over a fixture ancestry: `merge-base --is-ancestor` answers from `edges` (`ancestor>descendant`); every call is recorded, so a fetch or a GitHub call cannot hide. */
+const ancestryRun = (edges: readonly string[], calls: string[] = []) => (command: string, args: string[]) => {
+  const rest = command === 'git' && args[0] === '-C' ? args.slice(2) : null;
+  if (!rest) { calls.push(`${command} ${args.join(' ')}`); throw new Error(`the recorded-state read runs nothing but a local merge-base: ${command} ${args.join(' ')}`); }
+  calls.push(`git ${rest.join(' ')}`);
+  if (rest[0] !== 'merge-base') throw new Error(`the recorded-state read runs nothing but a local merge-base: git ${rest.join(' ')}`);
+  const [ancestor, descendant] = rest.slice(2);
+  if (ancestor === descendant || edges.includes(`${ancestor}>${descendant}`)) return '';
+  const refusal = new Error('not an ancestor') as Error & { status?: number };
+  refusal.status = 1;
+  throw refusal;
 };
 
 const mergeSha = 'a'.repeat(40), candidateSha = 'b'.repeat(40), mainTip = 'c'.repeat(40), olderCut = 'd'.repeat(40), promotedSha = 'e'.repeat(40);
-const ledger = (over: { mainSha?: string | null; promotedSha?: string | null; candidates?: PromotionCandidate[] } = {}) => async () =>
-  ({ mainSha: mainTip, promotedSha: null, promotedAt: null, behind: null, candidates: [], ...over });
-const cutRun = (over: Partial<PromotionRun> = {}): PromotionRun => ({ status: 'completed', createdAt: stamp(2), event: 'workflow_dispatch', headSha: olderCut, ...over });
-
-const promotionReads = (reads: Pick<PromotionReads, 'ledger' | 'runs'> & Partial<Pick<PromotionReads, 'soaks'>>): PromotionReads => reads as PromotionReads;
-
-test('the promotion read answers in flight while a candidate carrying the merge is building', async () => {
-  assert.equal(await promotionCarryingMerge(promotionReads({ ledger: ledger({ candidates: [{ id: 'rc-1', sha: candidateSha, cutAt: stamp(2), prs: 1, queued: 0 }] }), runs: async () => [cutRun({ status: 'in_progress', headSha: candidateSha })] }), mergeSha, '.', 'main', ancestryRun([`${mergeSha}>${candidateSha}`, `${mergeSha}>${mainTip}`])), true);
+const quietReason = `The last release candidate cut ${olderCut.slice(0, 12)} and did not promote it; the next is dispatched as soon as main moves past it`;
+const inFlightReason = 'A release candidate is still in validation; the next promotion is dispatched as soon as it concludes';
+const dispatchFailedReason = `Dispatching release-candidate.yml with promote=true failed; the next attempt is due 10 minute(s) after this one: gh failed`;
+/** A recorded promotion state as the loop leaves it, overridable per test. */
+const promotionState = (over: Partial<PromotionState> = {}): PromotionState => ({
+  checkedAt: stamp(1), mainSha: mainTip, promotedSha: null, promotedAt: null, behind: null, ledgerReadAt: stamp(1),
+  inFlight: false, runsReadAt: stamp(1), dispatchedAt: stamp(1), lastDispatchAt: stamp(1), cutSha: olderCut,
+  candidates: [{ id: 'rc-1', sha: olderCut, cutAt: stamp(1), prs: 1, queued: 0 }], nextDueAt: null, reason: quietReason, ...over,
 });
 
-test('the promotion read answers in flight while the merge is queued for a candidate the pipeline is building', async () => {
+const carries = async (state: PromotionState | null, edges: readonly string[] = [`${mergeSha}>${mainTip}`], calls: string[] = []) =>
+  promotionCarryingMerge(state, mergeSha, '.', 'main', ancestryRun(edges, calls));
+
+test('the recorded promotion state answers in flight while a candidate carrying the merge is building', async () => {
+  const calls: string[] = [];
+  assert.equal(await carries(promotionState({ inFlight: true, cutSha: candidateSha, candidates: [{ id: 'rc-1', sha: candidateSha, cutAt: stamp(2), prs: 1, queued: 0 }], reason: inFlightReason }), [`${mergeSha}>${candidateSha}`, `${mergeSha}>${mainTip}`], calls), true);
+  assert.deepEqual(calls, [`git merge-base --is-ancestor ${mergeSha} ${mainTip}`], 'the only child the answer runs is the local containment read; no fetch, no GitHub request, no ledger');
+});
+
+test('the recorded promotion state answers in flight while the merge is queued for a candidate the pipeline is building', async () => {
   // The run in flight cut before the merge, so the merge rides the next candidate — still the pipeline's ordinary pace.
-  assert.equal(await promotionCarryingMerge(promotionReads({ ledger: ledger(), runs: async () => [cutRun({ status: 'queued', headSha: olderCut })] }), mergeSha, '.', 'main', ancestryRun([`${mergeSha}>${mainTip}`])), true);
+  assert.equal(await carries(promotionState({ inFlight: true, reason: inFlightReason })), true);
 });
 
-test('the promotion read answers in flight while the next dispatch is due and will carry the merge', async () => {
+test('the recorded promotion state answers in flight while the next dispatch is due and will carry the merge', async () => {
   // Nothing is in flight and main has moved past the last cut: promotionCycle dispatches exactly then.
-  assert.equal(await promotionCarryingMerge(promotionReads({ ledger: ledger(), runs: async () => [cutRun({ headSha: olderCut })] }), mergeSha, '.', 'main', ancestryRun([`${mergeSha}>${mainTip}`])), true);
+  assert.equal(await carries(promotionState({ reason: dispatchFailedReason })), true, 'a dispatch the loop is retrying is the pipeline moving, inside the bound');
+  assert.equal(await carries(promotionState({ dispatchedAt: stamp(1), lastDispatchAt: stamp(1) })), true);
 });
 
-test('the promotion read answers in flight while the newest candidate soaks', async () => {
-  const reads = promotionReads({ ledger: ledger({ candidates: [{ id: 'rc-1', sha: candidateSha, cutAt: stamp(2), prs: 1, queued: 0 }] }),
-    runs: async () => [cutRun({ headSha: candidateSha })], soaks: async () => [{ sha: candidateSha, status: 'in_progress', conclusion: null, createdAt: stamp(3), url: null } as SoakRun] });
-  assert.equal(await promotionCarryingMerge(reads, mergeSha, '.', 'main', ancestryRun([`${mergeSha}>${candidateSha}`, `${mergeSha}>${mainTip}`])), true);
+test('the recorded promotion state answers in flight while the last candidate left merges queued behind it', async () => {
+  // promotionCycle's queued rule (GY-1491): the candidate at the last dispatch differs from the newest,
+  // which cut short of main with merges queued — the next dispatch carries them without a new merge.
+  const state = promotionState({ cutSha: mainTip, candidateAtDispatch: 'rc-0', candidates: [{ id: 'rc-1', sha: olderCut, cutAt: stamp(1), prs: 2, queued: 2 }] });
+  assert.equal(await carries(state, [`${mergeSha}>${mainTip}`, `${mergeSha}>${olderCut}`]), true);
 });
 
-test('the promotion read answers not in flight once the promotion record covers the merge, when the base branch does not carry it, and while the pipeline sits wedged', async () => {
+test('the recorded promotion state answers in flight while the newest candidate soaks', async () => {
+  const state = promotionState({ cutSha: candidateSha, candidates: [{ id: 'rc-1', sha: candidateSha.toUpperCase(), cutAt: stamp(2), prs: 1, queued: 0 }],
+    soaks: [{ sha: candidateSha, status: 'in_progress', conclusion: null, createdAt: stamp(3), url: null }] });
+  assert.equal(await carries(state, [`${mergeSha}>${candidateSha}`, `${mergeSha}>${mainTip}`]), true, 'the soak run is matched by its own case, whatever case the candidate records');
+});
+
+test('the recorded promotion state answers not in flight once the promotion record covers the merge, when the base branch does not carry it, and while the pipeline sits quiet', async () => {
   // Production not serving a merge the promotion record already covers is a rollback or a wedged deploy: a fault, not a wait.
-  assert.equal(await promotionCarryingMerge(promotionReads({ ledger: ledger({ promotedSha }), runs: async () => [cutRun()] }), mergeSha, '.', 'main', ancestryRun([`${mergeSha}>${mainTip}`, `${mergeSha}>${promotedSha}`])), false);
+  assert.equal(await carries(promotionState({ promotedSha, promotedAt: stamp(1) }), [`${mergeSha}>${mainTip}`, `${mergeSha}>${promotedSha}`]), false);
   // A merge the base branch no longer carries is nothing the pipeline can serve.
-  assert.equal(await promotionCarryingMerge(promotionReads({ ledger: ledger(), runs: async () => [cutRun({ status: 'in_progress' })] }), mergeSha, '.', 'main', ancestryRun([])), false);
-  // A quiet pipeline whose last candidate already covers main and is not in flight is not moving: the row stalls as before.
-  assert.equal(await promotionCarryingMerge(promotionReads({ ledger: ledger({ candidates: [{ id: 'rc-1', sha: mainTip, cutAt: stamp(2), prs: 1, queued: 0 }] }), runs: async () => [cutRun({ headSha: mainTip })] }), mergeSha, '.', 'main', ancestryRun([`${mergeSha}>${mainTip}`])), false);
+  assert.equal(await carries(promotionState({ inFlight: true, reason: inFlightReason }), []), false);
+  // A quiet pipeline whose last candidate already covers main and left nothing queued is not moving: the row stalls as before.
+  assert.equal(await carries(promotionState({ cutSha: mainTip, candidates: [{ id: 'rc-1', sha: mainTip, cutAt: stamp(2), prs: 1, queued: 0 }] })), false);
+});
+
+test('the gates promotionCycle applies hold the answer — off, frozen and control-plane without ports are never a wait, however the flags read', async () => {
+  // Each gate leaves the recorded flags standing from before it closed the drive, so each is read with
+  // in flight set and a dispatch due: the answer is still no, and the row stalls as before (B2).
+  assert.equal(await carries(promotionState({ inFlight: true, reason: promotionOffReason })), false, 'promotion off dispatches nothing, ever');
+  assert.equal(await carries(promotionState({ inFlight: true, reason: promotionFrozenReason({ sha: mainTip, since: stamp(0) }) })), false, 'the main watch’s freeze holds every dispatch');
+  assert.equal(await carries(promotionState({ inFlight: true, reason: noLocalPortsReason })), false, 'a control-plane merger without its ports cuts nothing');
+});
+
+test('no recorded state, an unreadable containment and an unreadable ledger each answer not carrying: the plain failure stands', async () => {
+  assert.equal(await carries(null), false, 'no loop has recorded promotion here, so nothing is in flight');
+  assert.equal(await carries(promotionState({ mainSha: null, reason: 'The base branch tip could not be read, so nothing is promoted' })), false);
+  assert.equal(await carries(promotionState({ reason: 'The base branch and the promotion record could not be read: gh failed' }), []), false, 'a merge the checkout does not hold is unknown containment, and unknown is not a wait');
+});
+
+test('the executor wiring reads the recorded state alone: no cursor means no child run at all, and a recorded flight runs only the local merge-base reads', async () => {
+  const modules = { master: {}, daemon: await import('../src/master-daemon.js'), reviewer: {}, producer: {}, executor: {} }; // only the daemon names the wiring calls are reached through
+  const root = await temporaryDirectory('gy-1831-wiring');
+  execFileSync('git', ['init', '-q', root]); // the credential location is verified against the worktree inventory, as in a managed root
+  const credentials = await temporaryDirectory('gy-1831-credentials'), credential = `${credentials}/coordinator.token`; // beside the cursor, outside the repository, as an install keeps them
+  const wiringConfig = { ...config, credentialFile: credential, url: 'https://graphyard-wiring.example' } as typeof config;
+  const calls: string[] = [];
+  const effects = controlPlaneEffects(modules as never, { root, current: () => wiringConfig, run: ancestryRun([`${mergeSha}>${mainTip}`], calls), snapshot: async () => ({}), mutate: async () => ({}) });
+  assert.equal(await effects.promotionCarryingMerge!(mergeSha), false, 'no cursor, no loop: the failure stands as it was');
+  assert.equal(calls.length, 0, 'answering that read nothing and spawned nothing');
+  const state = emptyDaemonState(wiringConfig);
+  await writeDaemonState(wiringConfig, { ...state, promotion: promotionState({ inFlight: true, reason: inFlightReason }) });
+  assert.equal(await effects.promotionCarryingMerge!(mergeSha), true, 'the recorded flight the loop left on its cursor is the wait the executor names');
+  assert.deepEqual(calls.filter(call => call.includes('fetch') || call.startsWith('gh ')), [], 'no fetch and no GitHub request: the loop’s rate-limited reads stay the only ones');
+  assert.ok(calls.every(call => call.includes('merge-base')), `only local containment reads ran: ${JSON.stringify(calls)}`);
 });
 
 test('the wait clause the executor throws is constant, so the unchanged run accumulates and the bound can hold it', () => {
@@ -349,12 +400,14 @@ test('the wait clause the executor throws is constant, so the unchanged run accu
 // ——— The verify-deployment handler at the candidate ———
 
 const work = (key: string) => ({ key, id: `id-${key}`, stage: 'done', delivery: { mergeSha: 'a'.repeat(40), mergedAt: stamp(0) } }) as unknown as Work;
+/** The executor identity a claim runs under — the handler takes it beside the row. */
+const executorIdentity = { id: 'executor-a', host: 'host-a' };
 const verifyRow = (key: string, mergeSha: string): ActionRow => ({ id: `verify-${key}`, kind: 'verify-deployment', work: `id-${key}`, key,
   inputs: { kind: 'verify-deployment', mergeSha, mergedAt: stamp(0), state: 'done' }, gate: 'merge', refusal: null, reason: '', binding: 'delivery:verify',
   requestedBy: 'graphyard', requestedAt: stamp(0), state: 'pending', claim: null, attempts: 0, history: [] } as unknown as ActionRow);
 
-/** The handlers Graphyard ships, over a snapshot this test holds: only the deployment observation and the promotion read vary. */
-function verifyHandlers(observation: unknown, promotion?: (mergeSha: string) => Promise<boolean>, recorded: unknown[] = []) {
+/** The handlers Graphyard ships, over a snapshot this test holds: only the deployment observation, the promotion read and the log vary. */
+function verifyHandlers(observation: unknown, wiring: { promotion?: (mergeSha: string) => Promise<boolean>; log?: (line: string) => void } = {}, recorded: unknown[] = []) {
   return controlPlaneHandlers(() => config, {
     snapshot: async () => ({ work: [work('GY-1827')], now: stamp(30) }),
     mutate: async (path, body) => { recorded.push([path, body]); return {}; },
@@ -362,26 +415,35 @@ function verifyHandlers(observation: unknown, promotion?: (mergeSha: string) => 
     dispatchWorker: async () => { throw new Error('no launch here'); }, launchReview: async () => { throw new Error('no launch here'); },
     launchProducer: async () => { throw new Error('no launch here'); },
     observeDeployment: async () => observation as never,
-    ...(promotion ? { promotionCarryingMerge: promotion } : {}),
+    ...(wiring.promotion ? { promotionCarryingMerge: wiring.promotion } : {}),
+    ...(wiring.log ? { log: wiring.log } : {}),
     postDeployFiler: async () => ({ filer: async () => [], dispose: async () => {} }),
   })['verify-deployment']!;
 }
 
 const notServing = (reason?: string) => ({ source: 'endpoint', sha: '3100cb6530540000000000000000000000000000', at: stamp(30), deployed: [], pending: ['GY-1827'], ...(reason ? { reason } : {}) });
+const serving = { source: 'endpoint', sha: '3733d249f0200000000000000000000000000000', at: stamp(21), deployed: ['GY-1827'], pending: [] };
 
 test('unit:verify-deployment-awaits-promotion — the handler names the promotion wait while the pipeline carries the merge, and keeps the plain reason otherwise', async () => {
-  const rowMerge = 'a'.repeat(12), plain = doesNotCarry('GY-1827', '3100cb653054', rowMerge);
-  await assert.rejects(verifyHandlers(notServing(), async () => true)(verifyRow('GY-1827', 'a'.repeat(40))), error => (error as Error).message === promotionWait(plain));
-  await assert.rejects(verifyHandlers(notServing(), async () => false)(verifyRow('GY-1827', 'a'.repeat(40))), error => (error as Error).message === plain);
-  await assert.rejects(verifyHandlers(notServing())(verifyRow('GY-1827', 'a'.repeat(40))), error => (error as Error).message === plain, 'an executor without the promotion read keeps today\u2019s failure');
-  await assert.rejects(verifyHandlers(notServing(), async () => { throw new Error('the pipeline could not be read'); })(verifyRow('GY-1827', 'a'.repeat(40))), error => (error as Error).message === plain, 'an unreadable pipeline reads as not carrying');
-  await assert.rejects(verifyHandlers(notServing('containment could not be derived: the base branch could not be fetched'), async () => true)(verifyRow('GY-1827', 'a'.repeat(40))), error => (error as Error).message === 'containment could not be derived: the base branch could not be fetched', 'a read that carries its own reason is not the release-lag shape');
+  const rowMerge = 'a'.repeat(12), plain = doesNotCarry('GY-1827', '3100cb653054', rowMerge), row = verifyRow('GY-1827', 'a'.repeat(40));
+  await assert.rejects(async () => verifyHandlers(notServing(), { promotion: async () => true })(row, executorIdentity), (error: Error) => error.message === promotionWait(plain));
+  await assert.rejects(async () => verifyHandlers(notServing(), { promotion: async () => false })(row, executorIdentity), (error: Error) => error.message === plain);
+  await assert.rejects(async () => verifyHandlers(notServing())(row, executorIdentity), (error: Error) => error.message === plain, 'an executor without the promotion read keeps today’s failure');
+  await assert.rejects(async () => verifyHandlers(notServing(), { promotion: async () => { throw new Error('the pipeline could not be read'); } })(row, executorIdentity), (error: Error) => error.message === plain, 'an unreadable pipeline reads as not carrying');
+  await assert.rejects(async () => verifyHandlers(notServing('containment could not be derived: the base branch could not be fetched'), { promotion: async () => true })(row, executorIdentity), (error: Error) => error.message === 'containment could not be derived: the base branch could not be fetched', 'a read that carries its own reason is not the release-lag shape');
+});
+
+test('unit:verify-deployment-awaits-promotion — an unreadable promotion state is logged where the executor’s log goes, and still reads as not carrying', async () => {
+  const lines: string[] = [];
+  await assert.rejects(async () => verifyHandlers(notServing(), { promotion: async () => { throw new Error('Master daemon state belongs to another Graphyard server'); }, log: line => lines.push(line) })(verifyRow('GY-1827', 'a'.repeat(40)), executorIdentity), (error: Error) => error.message === doesNotCarry('GY-1827', '3100cb653054', 'a'.repeat(12)));
+  assert.deepEqual(lines, ['[graphyard-executor] the promotion state could not be read for GY-1827, so the failure stands as it was: Master daemon state belongs to another Graphyard server']);
+  await assert.rejects(async () => verifyHandlers(notServing(), { promotion: async () => { throw new Error('unreadable'); } })(verifyRow('GY-1827', 'a'.repeat(40)), executorIdentity), (error: Error) => error.message === doesNotCarry('GY-1827', '3100cb653054', 'a'.repeat(12)), 'no log, no crash: the answer stands either way');
 });
 
 test('unit:verify-deployment-awaits-promotion — retried when the promotion lands, the same row observes the release serving and records the deployment', async () => {
   const recorded: unknown[] = [];
-  const handler = verifyHandlers({ source: 'endpoint', sha: '3733d249f0200000000000000000000000000000', at: stamp(21), deployed: ['GY-1827'], pending: [] }, async () => false, recorded);
-  const outcome = await handler(verifyRow('GY-1827', 'a'.repeat(40)));
+  const handler = verifyHandlers(serving, { promotion: async () => false }, recorded);
+  const outcome = await handler(verifyRow('GY-1827', 'a'.repeat(40)), executorIdentity);
   assert.match(String(outcome), /observed the release serving 3733d249f020 for GY-1827/);
   assert.deepEqual(recorded.map(entry => (entry as [string])[0]), ['work/id-GY-1827/deployment']);
 });
