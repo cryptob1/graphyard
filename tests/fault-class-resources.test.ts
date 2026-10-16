@@ -4,8 +4,8 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { classifyAttention, faultClassOf, trackFaults } from '../src/model/fault-classes.js';
-import { hostMemoryAttention, hostMemoryFloor, judgeHostMemory, memoryRecoveryMarginBytes, nameReclaimBoundMs, readReclaimState, readResources, reclaimResources, resourceAttention, describeReclaim, type ResourceInputs, type ResourceReclaimReport } from '../src/master-resources.js';
+import { classifyAttention, faultClassOf, faultClassPolicyDefaults, predateLanding, recurringClasses, releaseOvertakenLinks, trackFaults } from '../src/model/fault-classes.js';
+import { hostMemoryAttention, hostMemoryFloor, judgeHostMemory, memoryRecoveryMarginBytes, nameReclaimBoundMs, readReclaimState, readResources, reclaimResources, resourceAttention, describeReclaim, tmpErrorPrefix, type ResourceInputs, type ResourceReclaimReport } from '../src/master-resources.js';
 import { diskThresholdBytes, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { cycleFaults, emptyDaemonState } from '../src/master-daemon.js';
 import { judgeWorktreeDisk, worktreePassCurrentMs } from '../src/master/worktree-disk.js';
@@ -390,4 +390,126 @@ test('unit:tmp-reclaim-read-only-directories — the pass frees an owned entry h
   assert.deepEqual(others.removed, [], 'an entry that is not the pass\'s uid\'s is never removed');
   assert.equal(existsSync(foreignEntry), true);
   assert.equal((await stat(foreignAdmin)).mode & 0o777, 0o555, 'another user\'s read-only directory is never made writable');
+});
+
+// ---- GY-1830: the class recurred once more — the same EACCES, after the fix had already merged --
+//
+// All four instances are GY-1828's third mechanism still firing: the one stale /var/tmp/gy-teK30QK
+// sandbox entry, reported EACCES by every pass that met it. What is new is when: GY-1828's fix
+// merged at 01:42:44Z and its release was promoted at 02:01:51Z, but the loop went on running the
+// old revision until it restarted onto it at 02:05:26Z — and every pass in between raised the same
+// reclaim failure again (01:48, 01:53, 01:59, 02:04), so the class filed twice more (GY-1829 at
+// 02:05:13, GY-1830 — this item — at 02:38:45) for a cause the delivered fix already answers.
+//
+// The candidate: a delivered item's cover is counted from the moment its fix is running, not from
+// its GitHub merge — the deployment observation that saw a release serving the merge (recorded by
+// the restarted loop, whose own revision is what runs for a fault the loop itself raises) is the
+// landing GY-1632 compares instances against. The instances the old revision raised in between
+// predate the fix, so they link to it and file nothing, and a link to an item closed as its
+// duplicate is not released; an instance first seen after the fix is running files as before.
+
+const gy1830 = [
+  { at: '2026-10-16T01:48:17.117Z', kind: 'action:reclaim', subject: 'reclaim:resources:2026-10-16T01:48:17.113Z' },
+  { at: '2026-10-16T01:53:45.480Z', kind: 'action:reclaim', subject: 'reclaim:resources:2026-10-16T01:53:45.476Z' },
+  { at: '2026-10-16T01:59:13.548Z', kind: 'action:reclaim', subject: 'reclaim:resources:2026-10-16T01:59:13.543Z' },
+  { at: '2026-10-16T02:04:51.597Z', kind: 'action:reclaim', subject: 'reclaim:resources:2026-10-16T02:04:51.593Z' },
+];
+
+test('manual:fault-class-resources — GY-1830 lists 4 instances, and every one is replayed below', () => {
+  assert.equal(gy1830.length, 4);
+  assert.equal(new Set(gy1830.map(instance => instance.at)).size, 4);
+  assert.ok(gy1830.every(instance => faultClassOf(instance.kind) === 'resources'));
+  assert.ok(gy1830.every(instance => instance.subject.startsWith('reclaim:resources:')));
+});
+
+test('manual:fault-class-resources — GY-1830 reproduces: every pass the old revision ran reported the same EACCES (one entry, four instances); the candidate frees the entry on the first pass and the later passes report nothing', async () => {
+  const firstAt = Date.parse(gy1830[0].at);
+
+  // REPRODUCE against the base: the removal the base's passes ran failed on every one of them with
+  // the error the instances record — the same entry, the same unlink, four times in sixteen minutes
+  // (the recorded lines name /var/tmp/gy-teK30QK on the host; the fixture builds the same tree in
+  // its own temporary root).
+  const base = await temporaryDirectory('fault-class-resources-1830-base');
+  const stale = await staleSandboxEntry(base, firstAt - 3_600_000);
+  const firstError = await rm(stale.entry, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 }).then(() => null, error => error as NodeJS.ErrnoException);
+  assert.match(firstError!.message, /EACCES: permission denied, unlink '.*\/graphyard-sandbox-[^/]+\/repo\/.git\/worktrees\/GY-7-1\/HEAD'$/, 'the base\'s removal primitive fails on the read-only admin directory, as every instance records');
+  assert.equal(existsSync(stale.entry), true, 'the base frees nothing, so the next pass meets the same entry again');
+  const again = await rm(stale.entry, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 }).then(() => null, error => error as NodeJS.ErrnoException);
+  assert.equal(again!.code, 'EACCES', 'the second pass fails the same way: one unresolved entry is how four instances accumulated');
+  const recorded = describeReclaim({ at: gy1830[1].at, reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: [`${tmpErrorPrefix}/var/tmp/gy-teK30QK: ${firstError!.message}`] } as unknown as ResourceReclaimReport)!;
+  assert.match(recorded, /^Resource reclaim: 1 could not be reclaimed: Tmp reclaim: \/var\/tmp\/gy-teK30QK: EACCES: permission denied, unlink '.*\/graphyard-sandbox-[^/]+\/repo\/.git\/worktrees\/GY-7-1\/HEAD'$/, 'the line instances 1, 2 and 4 record (instance 3 adds the reaped clause in front of the same tail)');
+
+  // CANDIDATE: the pass as it now runs frees the entry whole at the first of the four instants,
+  // without an error, so the passes at the other three instants meet nothing and report nothing —
+  // no action:reclaim fault ever opens, and the class never counts the four.
+  const fresh = await staleSandboxEntry(await temporaryDirectory('fault-class-resources-1830-candidate'), firstAt - 3_600_000);
+  const freed = await reclaimTmpDirectories({ tmpRoot: fresh.tmp, now: firstAt, held: new Set(), retryMs: 10_000 });
+  assert.deepEqual(freed.errors, [], 'the candidate\'s first pass frees the entry without an error');
+  assert.deepEqual(freed.removed.map(removed => removed.path), [fresh.entry]);
+  assert.equal(existsSync(fresh.entry), false);
+  for (const instance of gy1830.slice(1)) {
+    const next = await reclaimTmpDirectories({ tmpRoot: fresh.tmp, now: Date.parse(instance.at), held: new Set() });
+    assert.deepEqual(next.errors, [], `the pass at ${instance.at} meets nothing: the instance never opens`);
+    assert.deepEqual(next.removed, []);
+  }
+});
+
+/** The delivered GY-1828 record: with the deployment observation the restarted loop recorded, and without it — the base read the merge alone. */
+const gy1828 = (observed: boolean) => ({
+  id: 'id-gy-1828', key: 'GY-1828', stage: 'done',
+  origin: { faultClass: { class: 'resources', threshold: 3, windowHours: 24, count: 3, detectedAt: '2026-10-16T00:20:25.949Z', instances: [] } },
+  delivery: {
+    mergedAt: '2026-10-16T01:42:44Z', mergeSha: '9f9b403b10cd98aff8ac5317292bc3603e43bc1d', authorizationRevision: 1,
+    ...(observed ? { deployment: { sha: '9f9b403b10cd98aff8ac5317292bc3603e43bc1d', mergeSha: '9f9b403b10cd98aff8ac5317292bc3603e43bc1d', source: 'endpoint', observedAt: '2026-10-16T02:16:20.633Z', covers: 'exact', at: '2026-10-16T02:16:21.769Z', observer: 'graphyard-master' } } : {}),
+  },
+}) as unknown as Work;
+const gy1830Instances = gy1830.map(entry => ({
+  id: `${entry.kind}|${entry.subject}|${entry.at}`, kind: entry.kind, faultClass: 'resources' as const, subject: entry.subject,
+  text: 'Resource reclaim: 1 could not be reclaimed: Tmp reclaim: /var/tmp/gy-teK30QK: EACCES: permission denied, unlink \u0027/var/tmp/gy-teK30QK/graphyard-sandbox-5ClynR/repo/.git/worktrees/GY-7-1/HEAD\u0027',
+  at: entry.at, lastSeenAt: entry.at, linkedTo: null,
+}));
+/** The cycle that filed GY-1830: its detectedAt on the item. */
+const gy1830DetectedAt = Date.parse('2026-10-16T02:38:16.072Z');
+
+test('unit:fault-class-cover-from-running-fix — the GY-1828 timeline: the instances raised between the merge and the running moment link to the delivered item and file nothing, a closed duplicate\'s links are not released, and an instance after the fix is running files as before', () => {
+  const policy = faultClassPolicyDefaults;
+
+  // REPRODUCE at the base: the base counted a delivered item's cover from its GitHub merge
+  // (01:42:44Z), so none of the four predates it, the cover fell, and the class filed afresh —
+  // GY-1829 (detected 02:04:36) and GY-1830, the item whose instances these are. The fallback a
+  // record without the serving observation still takes is exactly that rule.
+  assert.equal(predateLanding(gy1830Instances, Date.parse('2026-10-16T01:42:44Z')), false, 'the merge-time rule covers none of the four');
+  const atBase = recurringClasses(gy1830Instances, [gy1828(false)], policy, gy1830DetectedAt);
+  assert.deepEqual(atBase.map(recurrence => [recurrence.faultClass, recurrence.file, recurrence.item?.key ?? null]), [['resources', true, null]], 'the merge-time rule files the class afresh over the four');
+
+  // CANDIDATE: the same record with the observed serving of the release carrying the merge — every
+  // instance first seen between the merge and the running moment predates the fix, the cover
+  // stands, and the cycle links instead of filing.
+  const candidate = recurringClasses(gy1830Instances, [gy1828(true)], policy, gy1830DetectedAt);
+  assert.deepEqual(candidate.map(recurrence => [recurrence.faultClass, recurrence.file, recurrence.item?.key ?? null]), [['resources', false, 'GY-1828']], 'the running moment covers the class: nothing files');
+  assert.equal(candidate[0].unlinked.length, 4, 'every instance the old revision raised links to the delivered fix');
+
+  // …nor is a link to an item closed as its duplicate released: GY-1829 closed as GY-1828's
+  // duplicate keeps its linked instance, first seen before the fix ran. The merge-time rule
+  // released it, which is how it came to count toward filing GY-1830.
+  const closedDuplicate = {
+    id: 'id-gy-1829', key: 'GY-1829', stage: 'done',
+    origin: { faultClass: { class: 'resources', threshold: 3, windowHours: 24, count: 3, detectedAt: '2026-10-16T02:04:36.246Z', instances: [] } },
+    closure: { kind: 'duplicate', reason: 'Covered by GY-1828, delivered for the resources fault class', ref: 'GY-1828', by: 'graphyard-triage', at: '2026-10-16T02:20:00.000Z', from: 'backlog' },
+  } as unknown as Work;
+  const linked = { ...gy1830Instances[1], linkedTo: 'GY-1829' };
+  const kept = [linked];
+  releaseOvertakenLinks(kept, [gy1828(true), closedDuplicate]);
+  assert.equal(kept[0].linkedTo, 'GY-1829', 'predating the running moment, the link to the closed duplicate stands');
+  const released = [{ ...linked }];
+  releaseOvertakenLinks(released, [gy1828(false), closedDuplicate]);
+  assert.equal(released[0].linkedTo, null, 'the merge-time rule released it, and the instance counted toward filing the class afresh');
+
+  // An instance first seen after the fix is running still files as before: the old four are linked
+  // and counted by GY-1828, and three fresh ones past the running moment re-file the class, alone.
+  const after = ['2026-10-16T02:20:00.000Z', '2026-10-16T02:25:00.000Z', '2026-10-16T02:30:00.000Z'].map((at, index) => ({
+    ...gy1830Instances[0], id: `action:reclaim|reclaim:resources:after-${index}|${at}`, subject: `reclaim:resources:after-${index}`, at, lastSeenAt: at, linkedTo: null }));
+  const refiled = recurringClasses([...gy1830Instances.map(entry => ({ ...entry, linkedTo: 'GY-1828' })), ...after], [gy1828(true)], policy, gy1830DetectedAt);
+  assert.deepEqual(refiled.map(recurrence => [recurrence.faultClass, recurrence.file, recurrence.item?.key ?? null]), [['resources', true, null]], 'a recurrence past the threshold after the fix is running files a new item, as before');
+  assert.deepEqual(refiled[0].recent.map(entry => entry.at), after.map(entry => entry.at), 'the new filing carries the post-running instances, never the pre-running ones');
 });

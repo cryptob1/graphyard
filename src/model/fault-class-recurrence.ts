@@ -8,9 +8,19 @@ import type { Work } from './work.js';
 // Instances count against a class item from its landing, not its opening (GY-1632).
 // This module is browser-safe: the dashboard classifies with it too.
 
-/** When a delivered item landed: GitHub's merge time, null when none was recorded. */
+/**
+ * When a delivered item's fix is first known running (GY-1830): the instant the recorded deployment
+ * observation saw a release serving the merge, else GitHub's merge time when none is recorded. A fix
+ * merged but not yet running has answered nothing: the loop went on raising the fault under the old
+ * revision until a release carrying the merge ran — for a fault the loop itself raises, until the
+ * restarted loop's own revision ran it, which is the loop that records the observation — so the
+ * instances raised in between count as predating the fix (GY-1632's landing, refined). Null when
+ * neither instant is recorded.
+ */
 export function landedAt(work: Pick<Work, 'delivery' | 'observation'>): number | null {
-  const at = Date.parse(work.delivery?.mergedAt ?? work.observation?.mergedAt ?? '');
+  const merged = Date.parse(work.delivery?.mergedAt ?? work.observation?.mergedAt ?? '');
+  const serving = Date.parse(work.delivery?.deployment?.at ?? '');
+  const at = Number.isFinite(serving) ? Math.max(merged, serving) : merged;
   return Number.isFinite(at) ? at : null;
 }
 /**
