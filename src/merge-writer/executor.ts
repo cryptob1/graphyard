@@ -319,7 +319,8 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
   if (input.attribute === false) return first;
   // A rerun's attempts start their TAP afresh like the trial's, so each run reads only its own answering attempt.
   const rerunAttempt = () => { epoch++; tap = ''; };
-  return attributeFailures(first, tap, input, inner, async (sha, failing) => {
+  // The proof files the selection discovered are held like those the input named.
+  return attributeFailures(first, tap, { ...input, proofFiles: discovered ?? input.proofFiles }, inner, async (sha, failing) => {
     only = failing;
     try { const rerun = await runTrial({ ...input, mergeSha: sha, changedFiles: failing, run, onAttempt: rerunAttempt }); return { run: rerun, tap }; }
     catch (error) { return error instanceof TrialCleanupError && error.verdict ? { run: error.verdict, tap } : null; }
@@ -342,17 +343,20 @@ export async function attributeFailures(first: MergeTrialRun, firstTap: string, 
   const failed = first.tests.failed.filter(file => /^tests\/[\w./-]+\.test\.ts$/.test(file));
   if (first.build !== 'pass' || !failed.length || failed.length !== first.tests.failed.length) return first;
   const own = (test: string) => { const proof = leadingProof(test); return !!proof && input.proofs.includes(proof); };
-  const named = parseFailedTests(firstTap);
+  // A runner's file-level line (`not ok N - tests/x.test.ts`) names the file, not a case: only cases are named.
+  const casesOf = (tap: string) => parseFailedTests(tap).filter(name => !/^tests\/[\w./-]+\.test\.ts$/.test(name));
+  const named = casesOf(firstTap);
   // A proof file is held only for a failing proof case of the item (or when the run named no case at all):
   // an unrelated case failing beside the proofs is attributed like any other file's.
   const proofFailed = !named.length || named.some(own);
   const held = proofFailed ? failed.filter(file => input.proofFiles.includes(file)) : [];
-  // Every file held: the rerun is still owed when a case that is none of the item's proofs failed beside them, so its flake is filed while the head stays held.
-  if (held.length === failed.length && !named.some(test => !own(test))) return first;
+  // Every file held, or every case named one of the item's proofs: the failure is the head's as it stands. The rerun is
+  // still owed when a case that is none of the item's proofs failed beside them, so its flake is filed while the head stays held.
+  if ((held.length === failed.length || named.some(own)) && !named.some(test => !own(test))) return first;
   // Every failing file reruns, held ones too, so the rerun names each case that failed only once.
   const rerun = await retest(input.mergeSha, failed).catch(() => null);
   if (!rerun || rerun.run.build !== 'pass') return first;
-  const again = new Set(parseFailedTests(rerun.tap));
+  const again = new Set(casesOf(rerun.tap));
   // A file whose rerun fails one of the item's proofs is the head's too: it is never the base's.
   const ownAgain = [...again].some(own);
   const still = failed.filter(file => !held.includes(file) && rerun.run.tests.failed.includes(file));
@@ -372,7 +376,7 @@ export async function attributeFailures(first: MergeTrialRun, firstTap: string, 
   if (!onBase || onBase.run.build !== 'pass') return result;
   const files = still.filter(file => onBase.run.tests.failed.includes(file));
   // Attributed by case, not by file: every case the rerun failed must fail on the base tip too, and a rerun that named no case attributes nothing.
-  const cases = [...again], onBaseTests = parseFailedTests(onBase.tap).filter(test => !own(test));
+  const cases = [...again], onBaseTests = casesOf(onBase.tap).filter(test => !own(test));
   if (!files.length || !cases.length || !cases.every(test => onBaseTests.includes(test))) return result;
   return { ...result, base: { tip, files, tests: onBaseTests, cases } };
 }

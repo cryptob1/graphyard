@@ -2,7 +2,10 @@ import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
+import { readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { processJob, type GitHub } from '../src/github.js';
@@ -14,7 +17,7 @@ import type { Cycle } from '../src/daemon/cycle.js';
 import type { DaemonEffects } from '../src/daemon/effects.js';
 import { baseFailureStep } from '../src/daemon/cycle-base-failures.js';
 import { flakeStep } from '../src/daemon/cycle-flakes.js';
-import { attributeFailures, baseFailurePrefix, baseFailureReason, failureIsBase, parseBaseFailureReason, baseFailureHoldMs, mergeOne, mergeQueue, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
+import { attributeFailures, runMergeTrial, baseFailurePrefix, baseFailureReason, failureIsBase, parseBaseFailureReason, baseFailureHoldMs, mergeOne, mergeQueue, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
 import { applyMainGuardRevert, runMainGuard, type CheckRun, type CommitVerdict, type FileChange, type MainCommit, type MainGuardPorts } from '../src/main-guard.js';
 import { trialFailurePrefix } from '../src/model/rework-ground.js';
 import { foldMergeLedger, type MergeLedgerEvent } from '../src/model/merge-ledger.js';
@@ -22,6 +25,7 @@ import type { FlakeLedger } from '../src/model/flake-ledger.js';
 import type { FlakeLedgerStore } from '../src/flake-ledger.js';
 import type { TrialRun } from '../src/merge-writer/trial.js';
 import type { Observation, Principal, Work } from '../src/model.js';
+import type { ChildRun } from '../src/child-runner.js';
 
 // GY-1834. In the 30 CI runs before 2026-10-16T07:00Z about half failed, almost all on tests that
 // were not the change's: GY-1831 and GY-1824 took six runs each, every one a full rework round, and
@@ -251,6 +255,25 @@ test('unit:failure-attributed-to-base-or-flake — a failing test that is a crit
   assert.deepEqual([proofAgain.tests.failed, proofAgain.base], [[shared], undefined]);
   assert.equal((await mergeOne(ports(mixed).merge, item())).outcome, 'refused');
 
+  // The merge writer discovers the proof files in the trial's selection (GY-1832) rather than naming them:
+  // a discovered proof file whose proof case failed is held like a named one, even when its rerun passes.
+  const runs: string[][] = [];
+  const children: ChildRun = async (command, args) => {
+    if (command === 'node' && args[0] === 'scripts/ci-tests.mjs') return `affected: 1 test files\n${proofFile}\n`;
+    if (command !== 'node' || !args.includes('tests/helpers/run-tests.ts')) return '';
+    const list = (await readFile(args[args.indexOf('--files-from') + 1]!, 'utf8')).split('\n').filter(Boolean);
+    runs.push(list);
+    const failing = runs.length === 1;
+    await writeFile(args[args.indexOf('--durations') + 1]!, `${list.map(file => JSON.stringify({ file, durationMs: 10, passed: !failing })).join('\n')}\n`);
+    if (!failing) return `TAP version 13\nok 1 - ${proofFile}\n`;
+    throw Object.assign(new Error('Command failed'), { status: 1, signal: null, stderr: '', stdout: `TAP version 13\n# Subtest: ${proofFile}\n    not ok 1 - ${ownProof} — works\n    not ok 2 - ${unrelatedCase}\nnot ok 1 - ${proofFile}\n` });
+  };
+  const scratch = await temporaryDirectory('flake-attribution-discovered');
+  const discovered = await runMergeTrial({ ...input, root: join(scratch, 'coordinator'), base: join(scratch, 'base'), temporaryRoots: [scratch], key: 'GY-1', run: children, cores: 1,
+    probe: async path => ({ probed: path, volatile: null, freeBytes: null }), proofFiles: [], discoverProofFiles: async () => [proofFile] });
+  assert.deepEqual([runs, discovered.tests.failed, discovered.flaked, discovered.base], [[[proofFile], [proofFile]], [proofFile], { files: [], tests: [unrelatedCase] }, undefined],
+    'rerun once on the merge commit: the discovered proof file stays failing though its rerun passed, and only the unrelated case is the flake');
+
   // Under GitHub delivery, a base failure that names the candidate's own proof is never set aside.
   const observed = item({ submission: { epoch: 1, pr: 7 }, candidate: { sha: head, baseSha: tip },
     observation: { candidate: { sha: head }, checks: [{ name: 'test', result: 'failure', appId: 15368, id: 70, attempt: 1 }], merged: false, prState: 'open' } });
@@ -269,7 +292,7 @@ async function engineOnPostgres() {
   const port = Number(process.env.GRAPHYARD_FLAKE_ATTRIBUTION_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1834);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('flake-attribution'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store);
   const engine = new Engine(store, [15368], 120, 'owner/project'); engine.controlPlaneAppId = 1234;
   return engine;
 }
