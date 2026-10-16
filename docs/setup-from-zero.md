@@ -16,11 +16,11 @@ Only legacy `--merger github` needs a human (GitHub Mobile).
 
 A new Hetzner server waits (exit 3) for price approval; rerun: `--confirm-price X` or `--max-monthly N` and `--ssh-key NAME`.
 
-`up` runs, in order: preflight, control plane, host supervisor and Herdr, deploy key, merger setting (legacy: `github` only), master identities (`master autonomy --apply`; no admin credential: exit 2; `--local`: none, you review and merge, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to merge (a host install: a person); goals wait. Reruns skip steps `.graphyard/up.json` records. Host Herdr: `install --herdr-only`.
+`up` runs, in order: preflight, control plane, host supervisor and Herdr, deploy key, merger setting (legacy: `github` only) and master identities (`master autonomy --apply`; either without admin credential: exit 2; `--local`: none, you review and merge, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to merge (a host install: a person); goals wait. Reruns skip steps `.graphyard/up.json` records. Host Herdr: `install --herdr-only`.
 
 ## The Setup page
 
-A step needing a person prints one link (`SERVER/#sign-in=CODE&setup`) and waits until green; it signs you in once (within 10 minutes) to the Setup page (also Settings → Agents). Green runs end with a fresh link; [phone access](dashboard.md#from-your-phone). Items:
+A step needing a person prints one link (`SERVER/#sign-in=CODE&setup`) and waits until green; it signs you in once (10 minutes) to the Setup page (also Settings → Agents). Green ends with a fresh link; [phone access](dashboard.md#from-your-phone). Items:
 
 | Item | Button
 | --- | ---

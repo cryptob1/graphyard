@@ -820,15 +820,20 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     // GY-1833: both paths record their merger, github as well, since a plane with none recorded reads as
     // control-plane. Control-plane records it once, as its merger-setting step; the legacy path checks
     // it on every run, outside its unchanged step list, so a resumed github install is recorded too.
+    // Neither path proceeds unrecorded: a github plane read as control-plane has Apps and no deploy key.
     const merger = controlPlaneMerger ? 'control-plane' : 'github';
     const setMerger = async () => {
       const current = await deps.status().catch(() => null);
       if (current?.mergeWriter?.merger === merger) return `merger already ${merger}`;
-      const admin = await deps.operatorToken?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
-      const missing = `the operator's admin credential is not on this machine${state.operatorTokenFile ? ` (${state.operatorTokenFile} is unreadable)` : ''}, so POST /api/merger cannot set the ${merger} writer`;
-      // The legacy path does not stop for it (a host install keeps that credential on the host): it names the admin's one command.
-      if (!admin && !controlPlaneMerger) return `not recorded: ${missing}; until an admin runs graphyard master merger github --reason TEXT the plane reads control-plane`;
-      if (!admin) throw new UpStop(`merger-setting: ${missing}; place it and rerun ${rerun()}`, upExitCodes.prerequisite);
+      // A host install keeps the admin credential on the host: its one-time sign-in claim yields it here, held in memory.
+      let admin = await deps.operatorToken?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
+      if (!admin && claim && !operator && deps.redeemClaim) { operator = await deps.redeemClaim(claim).catch(() => null); if (operator) claim = null; }
+      admin ??= operator;
+      if (!admin) {
+        const missing = `the operator's admin credential is not on this machine${state.operatorTokenFile ? ` (${state.operatorTokenFile} is unreadable)` : ''}, so POST /api/merger cannot set the ${merger} writer`;
+        const where = state.identitiesHost ? `run graphyard master merger ${merger} --reason TEXT with it on ${state.identitiesHost}` : 'place it';
+        throw new UpStop(`merger-setting: ${missing}; ${where} and rerun ${rerun()}`, upExitCodes.prerequisite);
+      }
       // A migrating run's github setting was written under another key: the control-plane one gets its own.
       if (!state.mergerRequest || (state.mergerRequestFor ?? 'control-plane') !== merger) { state.mergerRequest = randomUUID(); state.mergerRequestFor = merger; await writeState(deps.root, state); }
       if (deps.setMerger) await deps.setMerger(admin, state.mergerRequest, merger);

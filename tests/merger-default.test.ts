@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
+import { backupDigest, createBackup, restoreBackup } from '../src/backup.js';
 import { migrationDigestComment, migrationDigests } from '../src/store/schema.js';
 import { defaultMergerMode, recordedMergerMode } from '../src/merger-mode.js';
 import { mergerDoctorLine } from '../src/cli/merger.js';
@@ -19,9 +20,9 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * sets up the control-plane path unless `--merger github`, which records github itself. The Setup
  * checklist and doctor flag a github install as legacy with its migration command.
  */
-let pg: EmbeddedPostgres, store: Store, database: string;
+let pg: EmbeddedPostgres, store: Store, database: string, port: number;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1833;
+  port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1833;
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('merger-default'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('merger_default_test');
   database = `postgres://graphyard:testing-only@127.0.0.1:${port}/merger_default_test`;
@@ -44,9 +45,9 @@ const status = (merger: 'github' | 'control-plane', extra: Record<string, unknow
 });
 
 /** A simulated host for up: install finishes, accounts and the loop are green, the plane reads MERGER. */
-function upWorld(initial: 'github' | 'control-plane') {
+function upWorld(initial: 'github' | 'control-plane', host: { claim: string | null } | null = null) {
   const calls: string[][] = [];
-  const mergers: { requestId: string; merger: string }[] = [];
+  const mergers: { requestId: string; merger: string; token: string }[] = [];
   const deployKeys: string[] = [];
   let installed = false, loop = false, merger = initial, clock = 0;
   const deps = (checkout: string, events: UpEvent[]): UpDependencies => ({
@@ -54,8 +55,10 @@ function upWorld(initial: 'github' | 'control-plane') {
     now: () => clock, sleep: async ms => { clock += ms; },
     serverUrl: async () => installed ? 'http://127.0.0.1:4310' : null,
     masterToken: async () => installed ? 'm'.repeat(40) : null,
-    operatorToken: async () => 'a'.repeat(40),
+    // A host install keeps the admin credential on the host: none on this machine, only its one-time claim's.
+    operatorToken: async () => host ? null : 'a'.repeat(40),
     signIn: async () => null,
+    redeemClaim: async claim => host?.claim && claim.endsWith(`#claim=${host.claim}`) ? 'h'.repeat(48) : null,
     status: async () => installed ? {
       github: true, githubRepository: 'owner/project', appPermissions: { missing: [] }, reviewerApps: [{ id: 'claude', appId: 9 }],
       mergeWriter: { merger, setBy: null },
@@ -66,12 +69,15 @@ function upWorld(initial: 'github' | 'control-plane') {
     onboardingMerged: async () => true,
     installDirectory: () => join(checkout, 'install-dir'),
     ensureDeployKey: async (installDir, repository) => { deployKeys.push(repository); return join(installDir, 'deploy-key'); },
-    setMerger: async (_token, requestId, next) => { mergers.push({ requestId, merger: next }); merger = next; },
+    setMerger: async (token, requestId, next) => { mergers.push({ requestId, merger: next, token }); merger = next; },
     gh: async args => args[1] === 'view' ? { code: 0, stdout: '{"name":"project"}' } : { code: 1, stdout: '', stderr: 'unexpected' },
     async cli(args) {
       calls.push(args);
       if (args[0] === 'install' && args.includes('--plan')) return { code: 0, stdout: JSON.stringify({ installId: 'owner-project', installDirectory: join(checkout, 'install-dir'), principals: [{ id: 'owner-project-operator', role: 'admin', sessionKind: 'human' }], preflight: [{ name: 'GitHub CLI', ok: true }], browserApps: [] }) };
-      if (args[0] === 'install' && args.includes('--apply')) { installed = true; return { code: 0, stdout: JSON.stringify({ ok: true }) }; }
+      if (args[0] === 'install' && args.includes('--apply')) {
+        installed = true;
+        return { code: 0, stdout: JSON.stringify(host ? { ok: true, principals: [{ id: 'owner-project-operator', role: 'admin', tokenFile: '/var/lib/graphyard/tokens/owner-project-operator.token' }], signIn: `http://127.0.0.1:4310/#claim=${host.claim ?? 'spent'.repeat(4)}`, host: { host: 'graphyard-owner-project', masterIdentities: true, units: [] } } : { ok: true }) };
+      }
       if (args.join(' ') === 'master restart') { loop = true; return { code: 0, stdout: '{}' }; }
       return { code: 0, stdout: '{}' };
     },
@@ -110,6 +116,39 @@ test('unit:merger-default-control-plane — a plane with no recorded merger read
   assert.equal((await mergerRows()).length, 1, 'the pin is written once');
 });
 
+test('unit:merger-default-control-plane — a restore keeps the merger the backed-up install ran with: a backup taken before the pin existed is pinned to github over its restored ledger, and a new-default backup restores as control-plane', async () => {
+  const fresh = async (name: string) => { await pg.createDatabase(name); const target = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/${name}`); await target.init(); return target; };
+  // An install that started on the new default: history, no merger event, an unpinned marker.
+  const source = await fresh('merger_default_source');
+  try {
+    await source.pool.query("INSERT INTO events(work_id, actor, kind, payload) VALUES(NULL, 'human-operator', 'test.history', '{}')");
+    const current = await createBackup(source.pool);
+    assert.ok(current.tables.some(table => table.name === 'merger_default_pin'), 'a backup carries the marker');
+    const kept = await fresh('merger_default_kept');
+    try {
+      await restoreBackup(kept.pool, current);
+      assert.equal((await recordedMergerMode(kept.pool)).merger, 'control-plane', 'a new-default install restores on the new default');
+    } finally { await kept.close(); }
+
+    // The same ledger as a release before GY-1833 backed it up: no marker table and no merger event.
+    const { digest: _digest, ...body } = { ...current, tables: current.tables.filter(table => table.name !== 'merger_default_pin') }; void _digest;
+    const legacy = { ...body, digest: backupDigest(body) };
+    const restored = await fresh('merger_default_restored');
+    try {
+      assert.equal((await recordedMergerMode(restored.pool)).merger, 'control-plane', 'the empty target decided unpinned');
+      const result = await restoreBackup(restored.pool, legacy);
+      assert.ok(!result.tablesLeftEmpty.includes('merger_default_pin'), 'the marker is re-derived, not left empty');
+      const mode = await recordedMergerMode(restored.pool);
+      assert.equal(mode.merger, 'github', 'the restored legacy install keeps github');
+      assert.match(String(mode.reason), /graphyard up --merger control-plane/);
+      // The pin appended after the restored sequences: the next event takes a fresh sequence number.
+      await restored.pool.query("INSERT INTO events(work_id, actor, kind, payload) VALUES(NULL, 'human-operator', 'test.after', '{}')");
+      await restored.init();
+      assert.equal((await restored.pool.query("SELECT count(*)::int AS n FROM events WHERE kind='policy.merger.set'")).rows[0].n, 1, 'pinned once');
+    } finally { await restored.close(); }
+  } finally { await source.close(); }
+});
+
 test('unit:merger-default-control-plane — graphyard up without --merger plans the control-plane path (deploy key, merger setting, no GitHub Apps); --merger github plans the App path and records github', async () => {
   const bare = upRequestFromArgs(['--repo', 'owner/project']);
   assert.equal(bare.merger, 'control-plane');
@@ -144,6 +183,23 @@ test('unit:merger-default-control-plane — graphyard up without --merger plans 
   assert.deepEqual(app.mergers.map(entry => entry.merger), ['github'], 'the legacy path records github, since the plane would read control-plane');
   assert.equal(app.merger(), 'github');
   assert.equal(appResult.checklist.find(item => item.id === 'merger')?.done, false, 'up finishes green with the legacy line still failing');
+
+  // A host install keeps the admin credential on the host: the github merger is recorded with the credential its
+  // one-time claim yields, and with neither that nor a local one up stops before onboarding, never finishing unrecorded.
+  const hosted = upWorld('control-plane', { claim: 'c'.repeat(20) });
+  const hostedResult = await runUp(legacy, hosted.deps(await temporaryDirectory('merger-default-up-host'), []));
+  assert.equal(hostedResult.exitCode, 0, hostedResult.next);
+  assert.deepEqual(hosted.mergers.map(entry => [entry.merger, entry.token]), [['github', 'h'.repeat(48)]]);
+  assert.equal(hosted.merger(), 'github');
+  const stranded = upWorld('control-plane', { claim: null });
+  const strandedEvents: UpEvent[] = [];
+  const strandedResult = await runUp(legacy, stranded.deps(await temporaryDirectory('merger-default-up-host-missing'), strandedEvents));
+  assert.equal(strandedResult.exitCode, 2, strandedResult.next);
+  assert.match(strandedResult.next, /^merger-setting: the operator's admin credential is not on this machine.*run graphyard master merger github --reason TEXT with it on graphyard-owner-project and rerun graphyard up .*--merger github/);
+  assert.deepEqual(stranded.mergers, []);
+  assert.equal(stranded.merger(), 'control-plane', 'the plane still reads control-plane');
+  assert.ok(!stranded.calls.some(args => args[0] === 'init'), 'so no onboarding runs');
+  assert.ok(!strandedResult.completed.includes('onboarding') && !strandedResult.completed.includes('master-loop'));
 
   // The migration command: a rerun with --merger control-plane over the recorded github run keeps the shared steps.
   assert.equal(recordedUp(githubCheckout)?.merger, 'github');

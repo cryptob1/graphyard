@@ -9,11 +9,13 @@ import { defineTable } from '../tables.js';
  * migration command. A new database holds no events when it migrates, so it records nothing and
  * reads as control-plane. The marker row records which way the first run went, and the event is
  * written only when it says pinned, so a rerun (a rollback and a later upgrade re-run this DDL)
- * never pins a database that started on the new default. A cache: the ledger event is the record.
+ * never pins a database that started on the new default. A backup carries the marker, so a restore
+ * keeps it; one taken before this table existed carries neither it nor a pin event, so the restore
+ * re-derives both from the restored ledger with `mergerDefaultRederive` (src/backup.ts).
  */
 export const mergerDefaultPinReason = 'install predates the control-plane merger default (GY-1833); graphyard up --merger control-plane migrates it';
 export const mergerDefaultPin = defineTable({
-  name: 'merger_default_pin', orderBy: 'id', cache: true,
+  name: 'merger_default_pin', orderBy: 'id',
   ddl: `CREATE TABLE IF NOT EXISTS merger_default_pin (
   id boolean PRIMARY KEY DEFAULT true CHECK (id), pinned boolean NOT NULL, at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
@@ -24,5 +26,8 @@ INSERT INTO events(work_id, actor, kind, payload)
 SELECT NULL, 'graphyard', 'policy.merger.set', '{"merger":"github","reason":"${mergerDefaultPinReason}","previous":null}'::jsonb
 WHERE EXISTS (SELECT 1 FROM merger_default_pin WHERE pinned) AND NOT EXISTS (SELECT 1 FROM events WHERE work_id IS NULL AND kind='policy.merger.set');`,
 });
+
+/** The pin decided again over a restored ledger whose backup predates the marker: the DDL's own statements, on an emptied marker. */
+export const mergerDefaultRederive = `DELETE FROM merger_default_pin;\n${mergerDefaultPin.ddl}`;
 
 export const mergerDefaultTables = [mergerDefaultPin];
