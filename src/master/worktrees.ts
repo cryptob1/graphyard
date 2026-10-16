@@ -606,17 +606,28 @@ const prepareRecord = (value: unknown): WorktreePrepareRecord | null => {
     && typeof profile === 'string' && typeof ms === 'number' && Number.isSafeInteger(ms) && ms >= 0
     ? { at, key, epoch, profile, ms } : null;
 };
-/** Records one dispatch's preparation time, pruning entries past the retention. A failed recording never fails the dispatch it measured. */
-export async function recordWorktreePrepare(root: string, entry: WorktreePrepareRecord, now = Date.now()): Promise<void> {
+// One chain of recordings per log file: the daemon's launcher runs several dispatches at once in
+// this process, and an unserialized read-prune-write would let one rename drop another's entry.
+const prepareWrites = new Map<string, Promise<void>>();
+let prepareWriteCount = 0;
+/** Records one dispatch's preparation time, pruning entries past the retention. Recordings to one log run one after another, each through its own temporary file. A failed recording never fails the dispatch it measured. */
+export function recordWorktreePrepare(root: string, entry: WorktreePrepareRecord, now = Date.now()): Promise<void> {
   const file = worktreePrepareFile(root);
-  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-  const lines = await readFile(file, 'utf8').then(text => text.split('\n'), () => [] as string[]);
-  const kept = lines.map(line => { try { return prepareRecord(JSON.parse(line)); } catch { return null; } })
-    .filter((record): record is WorktreePrepareRecord => record !== null && now - Date.parse(record.at) < worktreePrepareRetentionMs);
-  kept.push(entry);
-  const temporary = `${file}.${process.pid}.tmp`;
-  await writeFile(temporary, `${kept.map(record => JSON.stringify(record)).join('\n')}\n`, { mode: 0o600 });
-  await rename(temporary, file);
+  const write = async () => {
+    await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+    const lines = await readFile(file, 'utf8').then(text => text.split('\n'), () => [] as string[]);
+    const kept = lines.map(line => { try { return prepareRecord(JSON.parse(line)); } catch { return null; } })
+      .filter((record): record is WorktreePrepareRecord => record !== null && now - Date.parse(record.at) < worktreePrepareRetentionMs);
+    kept.push(entry);
+    const temporary = `${file}.${process.pid}.${++prepareWriteCount}.tmp`;
+    await writeFile(temporary, `${kept.map(record => JSON.stringify(record)).join('\n')}\n`, { mode: 0o600 });
+    await rename(temporary, file);
+  };
+  const recorded = (prepareWrites.get(file) ?? Promise.resolve()).then(write, write);
+  const settled = recorded.catch(() => {});
+  prepareWrites.set(file, settled);
+  void settled.then(() => { if (prepareWrites.get(file) === settled) prepareWrites.delete(file); });
+  return recorded;
 }
 /** Every preparation record still on file, in the order they were recorded. */
 export async function readWorktreePrepares(root: string): Promise<WorktreePrepareRecord[]> {

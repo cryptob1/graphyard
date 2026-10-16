@@ -2,14 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, appendFileSync } from 'node:fs';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dispatchWork, loadMasterConfig, prepareWorkerLaunch, saveWorkerProfile, setupMaster } from '../src/master.js';
 import { readProfileLaunchRecords, workerLaunchRows, workerLaunchStatus } from '../src/master/dispatch.js';
 import { profileLaunchedFile } from '../src/master/dispatch-reservation.js';
 import type { WorkerProfile } from '../src/master/profiles.js';
-import { readWorktreePrepares, recordWorktreePrepare, worktreePreparePercentiles, worktreePrepareWindowMs, type WorktreePrepareRecord } from '../src/master/worktrees.js';
+import { readWorktreePrepares, recordWorktreePrepare, worktreePreparePercentiles, worktreePrepareFile, worktreePrepareWindowMs, type WorktreePrepareRecord } from '../src/master/worktrees.js';
 import type { Work } from '../src/model.js';
 import { clock, hour, minute } from './helpers/soak-world.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -161,6 +161,13 @@ test('unit:worktree-prepare-time-recorded — each dispatch names its worktree p
     const kept = await readWorktreePrepares(root);
     assert.equal(kept.some(entry => entry.key === 'GY-OLD'), false, 'a record no percentile can read again is pruned');
     assert.deepEqual(kept.map(entry => entry.key), ['GY-9006', 'GY-9007']);
+
+    // The daemon's launcher records several dispatches at once in one process: every one is kept.
+    const concurrent = Array.from({ length: 12 }, (_, index) => ({ at: at(0), key: `GY-${9100 + index}`, epoch: 1, profile: 'p', ms: index }));
+    await Promise.all(concurrent.map(entry => recordWorktreePrepare(root, entry)));
+    const together = (await readWorktreePrepares(root)).map(entry => entry.key);
+    assert.deepEqual([...together].sort(), ['GY-9006', 'GY-9007', ...concurrent.map(entry => entry.key)].sort(), 'concurrent recordings never drop one another\'s entry');
+    assert.deepEqual((await readdir(dirname(worktreePrepareFile(root)))).filter(name => name.endsWith('.tmp')), [], 'no temporary file is left behind');
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
 });
 
