@@ -900,9 +900,13 @@ export function owedCheckReruns(work: Work, ciAppIds: readonly number[]): CheckR
  * failing proof always holds the item as its own failure: rerunning it until it passes would let
  * a head land on a proof that failed. Null when no failed test is one of its proofs.
  */
-/** GY-1834: whether any of the item's criteria names a proof, so a failed run's tests must be read before it is rerun. */
+/**
+ * GY-1834: whether any of the item's criteria names a test-backed proof (`unit:` or `integration:`), so a
+ * failed run's tests must be read before it is rerun. A `manual:` or `e2e:` proof is never a failed test
+ * name of the run, so it holds no rerun.
+ */
 export function hasCriterionProofs(work: Pick<Work, 'criteria'>): boolean {
-  return (work.criteria ?? []).some(criterion => criterion.proofs.length > 0);
+  return (work.criteria ?? []).some(criterion => criterion.proofs.some(proof => leadingProof(proof) !== null));
 }
 export function proofFailureRefusal(work: Pick<Work, 'criteria'>, rerun: Pick<CheckRerun, 'check' | 'failedRunId'>, tests: readonly string[]): string | null {
   const proofs = new Set((work.criteria ?? []).flatMap(criterion => criterion.proofs));

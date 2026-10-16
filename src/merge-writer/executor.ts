@@ -346,10 +346,12 @@ export async function attributeFailures(first: MergeTrialRun, firstTap: string, 
   // A runner's file-level line (`not ok N - tests/x.test.ts`) names the file, not a case: only cases are named.
   const casesOf = (tap: string) => parseFailedTests(tap).filter(name => !/^tests\/[\w./-]+\.test\.ts$/.test(name));
   const named = casesOf(firstTap);
-  // A proof file is held only for a failing proof case of the item (or when the run named no case at all):
-  // an unrelated case failing beside the proofs is attributed like any other file's.
-  const proofFailed = !named.length || named.some(own);
-  const held = proofFailed ? failed.filter(file => input.proofFiles.includes(file)) : [];
+  // A proof file is held only for a failing proof case of the item in it (or when the run named no case at all):
+  // an unrelated case failing beside the proofs, in that file or another proof file, is attributed like any other file's.
+  // A failing proof case whose file the TAP does not name holds every failing proof file.
+  const fileOf = caseFiles(firstTap, failed), ownFiles = named.filter(own).map(test => fileOf.get(test));
+  const held = !named.length || ownFiles.includes(undefined) ? failed.filter(file => input.proofFiles.includes(file))
+    : failed.filter(file => ownFiles.includes(file));
   // Every file held, or every case named one of the item's proofs: the failure is the head's as it stands. The rerun is
   // still owed when a case that is none of the item's proofs failed beside them, so its flake is filed while the head stays held.
   if ((held.length === failed.length || named.some(own)) && !named.some(test => !own(test))) return first;
@@ -379,6 +381,24 @@ export async function attributeFailures(first: MergeTrialRun, firstTap: string, 
   const cases = [...again], onBaseTests = casesOf(onBase.tap).filter(test => !own(test));
   if (!files.length || !cases.length || !cases.every(test => onBaseTests.includes(test))) return result;
   return { ...result, base: { tip, files, tests: onBaseTests, cases } };
+}
+
+/**
+ * The test file each failing case of `tap` ran in, of `files`: the case follows its file's
+ * `# Subtest:` opener, at any indent, until the next file's. A case named in two files maps to neither.
+ */
+function caseFiles(tap: string, files: readonly string[]): Map<string, string | undefined> {
+  const map = new Map<string, string | undefined>();
+  let file: string | undefined;
+  for (const line of tap.split('\n')) {
+    const opener = /^\s*# Subtest: (.+?)\s*$/.exec(line)?.[1];
+    if (opener !== undefined) { const match = files.find(path => opener === path || opener.endsWith(`/${path}`)); if (match) file = match; continue; }
+    const name = /^\s*not ok \d+ - (.+?)(\s+#\s+(?:TODO|SKIP)\b.*)?$/i.exec(line);
+    if (!name || name[2] || !file) continue;
+    const test = name[1].trim();
+    map.set(test, map.has(test) && map.get(test) !== file ? undefined : file);
+  }
+  return map;
 }
 
 // ---- One merge, step by step against the ledger ------------------------------------------------------

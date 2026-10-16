@@ -9,7 +9,7 @@ import { recordLegacyMerger } from './helpers/legacy-merger.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { processJob, type GitHub } from '../src/github.js';
-import { proofFailureRefusal } from '../src/merge-queue.js';
+import { hasCriterionProofs, proofFailureRefusal } from '../src/merge-queue.js';
 import { failedTestsMarker } from '../src/master/base-break-refresh.js';
 import { emptyDaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
@@ -250,6 +250,16 @@ test('unit:failure-attributed-to-base-or-flake — a failing test that is a crit
   const besideFiled = filer();
   await flakeStep(cycleOf([heldItem], { flakeLedger: memoryStore(), fileFaultClass: besideFiled.file as never }));
   assert.deepEqual(besideFiled.filed.map(entry => entry.title), [`Flaky test: ${unrelatedCase}`]);
+  // Only the proof file whose proof case failed is held: a second proof file failing an unrelated case is rerun,
+  // judged on its rerun, and its first non-proof flake is the one filed.
+  const secondProofFile = 'tests/item-works-more.test.ts', secondCase = 'unit:item-helper — an unrelated case in another proof file';
+  const twoFiles = retest({ failed: [] }, { failed: [] });
+  const subtests = `TAP version 13\n# Subtest: ${proofFile}\n    not ok 1 - ${ownProof} — works\nnot ok 1 - ${proofFile}\n# Subtest: ${secondProofFile}\n    not ok 1 - ${secondCase}\nnot ok 2 - ${secondProofFile}\n`;
+  const perFile = await attributeFailures(first([proofFile, secondProofFile]), subtests, { ...input, proofFiles: [proofFile, secondProofFile] }, git, twoFiles.fn);
+  assert.deepEqual(twoFiles.calls, [{ sha: mergeSha, files: [proofFile, secondProofFile] }], 'both rerun on the merge commit, never on the base');
+  assert.deepEqual([perFile.tests.failed, perFile.flaked, perFile.base], [[proofFile], { files: [secondProofFile], tests: [secondCase] }, undefined],
+    'the proof\'s file holds the head; the other proof file passed its rerun and its case is the flake');
+  assert.equal((await mergeOne(ports(perFile).merge, item())).outcome, 'refused', 'the proof still holds the head');
   // A file that fails again with one of the item's proofs on its rerun is the head's, wherever else it fails.
   const proofAgain = await attributeFailures(first([shared]), tap(sharedName), input, git, retest({ failed: [shared], names: [`${ownProof} — works`] }, { failed: [shared] }).fn);
   assert.deepEqual([proofAgain.tests.failed, proofAgain.base], [[shared], undefined]);
@@ -305,8 +315,8 @@ test('unit:failure-attributed-to-base-or-flake — under GitHub delivery a faile
   const operator: Principal = { id: 'operator', role: 'admin' }, worker: Principal = { id: 'agent-a', role: 'worker' };
   const at = (label: string) => label.padEnd(40, '0');
   let number = 1833;
-  async function submitted() {
-    let work = await engine.execute(operator, 'create', null, { title: `Head ${number}`, plannedFiles: ['src/app.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: [ownProof] }] }, randomUUID());
+  async function submitted(proofs = [ownProof]) {
+    let work = await engine.execute(operator, 'create', null, { title: `Head ${number}`, plannedFiles: ['src/app.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs }] }, randomUUID());
     work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
     work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
     work = await engine.execute(worker, 'workspace', work.id, { epoch: 1, host: 'machine-a', path: `/tmp/attribution/${work.id}`, branch: `graphyard/${work.key.toLowerCase()}-1` }, randomUUID());
@@ -316,8 +326,8 @@ test('unit:failure-attributed-to-base-or-flake — under GitHub delivery a faile
     checks: [{ name: 'test', result: 'failure', appId: 15368, id: 41 }], reviews: [{ id: 41, reviewer: 'graphyard-reviewer[bot]', sha: candidate.sha, state: 'APPROVED' }], protected: true, mergeable: true,
     merged: false, mergeSha: null, prState: 'open', draft: false, baseTip: candidate.baseSha, baseTree: at('7'), baseTipContained: true, files: ['src/app.ts'], scopeFiles: [], at: iso(clock) } as Observation);
   // `failed` null is a run whose failed tests cannot be read: it published no record, or (`'throws'`) the read fails.
-  async function reconcile(failed: string[] | null | 'throws', observations = 1) {
-    let work = await submitted();
+  async function reconcile(failed: string[] | null | 'throws', observations = 1, proofs = [ownProof]) {
+    let work = await submitted(proofs);
     const candidate = { sha: at(`a${number}`), baseSha: at('b') };
     work = await engine.observe(work.id, work.revision, seen(work, candidate));
     assert.deepEqual(work.checkReruns!.map(entry => entry.state), ['owed']);
@@ -346,6 +356,11 @@ test('unit:failure-attributed-to-base-or-flake — under GitHub delivery a faile
     assert.equal(unknown.reads, 3, 'each observation reads the failed tests again');
     assert.deepEqual(unknown.work.checkReruns!.map(entry => entry.state), ['owed'], 'the rerun stays owed, holding the failure');
   }
+  // Only a test-backed proof holds the rerun: an item whose proofs are all manual: or e2e: names no failed test,
+  // so its failed run is rerun at once and judged on that rerun, its failed tests never read.
+  assert.equal(hasCriterionProofs({ criteria: [{ id: 'AC-1', text: 'Works', proofs: ['manual:item-works', 'e2e:item-flow'] }] } as never), false);
+  const untested = await reconcile(null, 1, ['manual:item-works']);
+  assert.deepEqual([untested.reruns, untested.reads], [[41], 0], 'a failure under a manual proof alone is rerun at once');
 });
 
 // ---- AC-2: the main guard ----------------------------------------------------------------------
