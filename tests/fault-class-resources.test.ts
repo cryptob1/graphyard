@@ -305,6 +305,17 @@ test('manual:fault-class-resources — GY-1828 instances 1 and 2 do not recur: t
   assert.equal(diskLine(null).length, 1, 'a plan the loop cannot read never answers the derived line');
 });
 
+// The EACCES the removal meets in the 0555 admin directory names whichever of its entries readdir
+// yields first — a file (HEAD, index or gitdir) unlinks, the writable logs directory rmdirs — so
+// the assertions match any one entry under GY-7-1, never one fixed entry: which entry comes first
+// differs by filesystem (GitHub's runner met gitdir and logs, the item's host met HEAD).
+/** The EACCES on the read-only admin directory, any entry the removal meets first. */
+const adminEacces = /EACCES: permission denied, (unlink|rmdir) '.*\.git\/worktrees\/GY-7-1\/[^/']+'$/;
+/** The same, anchored to the sandbox repository tree the instances name. */
+const sandboxAdminEacces = /EACCES: permission denied, (unlink|rmdir) '.*\/graphyard-sandbox-[^/]+\/repo\/.git\/worktrees\/GY-7-1\/[^/']+'$/;
+/** The same as the loop's recorded reclaim line quotes it — the wording instances 1, 2 and 4 carry (instance 3 adds the reaped clause in front of the same tail). */
+const recordedAdminEacces = /^Resource reclaim: 1 could not be reclaimed: Tmp reclaim: \/var\/tmp\/gy-teK30QK: EACCES: permission denied, (unlink|rmdir) '.*\/graphyard-sandbox-[^/]+\/repo\/.git\/worktrees\/GY-7-1\/[^/']+'$/;
+
 /** The stale entry the item names, rebuilt: a `gy-` test temp holding a sandbox repository whose linked worktree's admin directory git left mode 0555. */
 async function staleSandboxEntry(base: string, now: number) {
   const tmp = join(base, 'tmp'), entry = join(tmp, 'gy-teK30QK');
@@ -327,10 +338,10 @@ test('manual:fault-class-resources — GY-1828 instance 3 reproduces: the base p
   const { tmp, entry } = await staleSandboxEntry(base, now);
 
   // REPRODUCE against the base: the removal the base's pass runs fails exactly as the item
-  // recorded — `EACCES: permission denied, unlink` on the first file inside the 0555 directory —
+  // recorded — `EACCES: permission denied, unlink` on the first entry inside the 0555 directory —
   // and the entry stays, so the pass reports the error the action record carried as a fault.
   const baseError = await rm(entry, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 }).then(() => null, error => error as NodeJS.ErrnoException);
-  assert.match(baseError!.message, /EACCES: permission denied, unlink '.*\.git\/worktrees\/GY-7-1\/HEAD'$/, 'the base\'s removal primitive fails on the read-only admin directory');
+  assert.match(baseError!.message, adminEacces, 'the base\'s removal primitive fails on the read-only admin directory');
   assert.equal(existsSync(entry), true, 'the base frees nothing: the entry stands');
   const baseReport = { at: new Date(instance3At).toISOString(), reaped: { review: 1, producer: 0 }, closed: [], released: [], tmp: { removed: 1, bytes: 38_973_291 }, errors: [`/var/tmp/gy-teK30QK: ${baseError!.message}`] } as unknown as ResourceReclaimReport;
   const baseLine = describeReclaim(baseReport)!;
@@ -432,12 +443,12 @@ test('manual:fault-class-resources — GY-1830 reproduces: every pass the old re
   const base = await temporaryDirectory('fault-class-resources-1830-base');
   const stale = await staleSandboxEntry(base, firstAt - 3_600_000);
   const firstError = await rm(stale.entry, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 }).then(() => null, error => error as NodeJS.ErrnoException);
-  assert.match(firstError!.message, /EACCES: permission denied, unlink '.*\/graphyard-sandbox-[^/]+\/repo\/.git\/worktrees\/GY-7-1\/HEAD'$/, 'the base\'s removal primitive fails on the read-only admin directory, as every instance records');
+  assert.match(firstError!.message, sandboxAdminEacces, 'the base\'s removal primitive fails on the read-only admin directory, as every instance records');
   assert.equal(existsSync(stale.entry), true, 'the base frees nothing, so the next pass meets the same entry again');
   const again = await rm(stale.entry, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 }).then(() => null, error => error as NodeJS.ErrnoException);
   assert.equal(again!.code, 'EACCES', 'the second pass fails the same way: one unresolved entry is how four instances accumulated');
   const recorded = describeReclaim({ at: gy1830[1].at, reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: [`${tmpErrorPrefix}/var/tmp/gy-teK30QK: ${firstError!.message}`] } as unknown as ResourceReclaimReport)!;
-  assert.match(recorded, /^Resource reclaim: 1 could not be reclaimed: Tmp reclaim: \/var\/tmp\/gy-teK30QK: EACCES: permission denied, unlink '.*\/graphyard-sandbox-[^/]+\/repo\/.git\/worktrees\/GY-7-1\/HEAD'$/, 'the line instances 1, 2 and 4 record (instance 3 adds the reaped clause in front of the same tail)');
+  assert.match(recorded, recordedAdminEacces, 'the line instances 1, 2 and 4 record (instance 3 adds the reaped clause in front of the same tail)');
 
   // CANDIDATE: the pass as it now runs frees the entry whole at the first of the four instants,
   // without an error, so the passes at the other three instants meet nothing and report nothing —
@@ -451,6 +462,34 @@ test('manual:fault-class-resources — GY-1830 reproduces: every pass the old re
     const next = await reclaimTmpDirectories({ tmpRoot: fresh.tmp, now: Date.parse(instance.at), held: new Set() });
     assert.deepEqual(next.errors, [], `the pass at ${instance.at} meets nothing: the instance never opens`);
     assert.deepEqual(next.removed, []);
+  }
+});
+
+test('unit:fault-class-resources-order-independent — the EACCES assertions hold whichever entry of the 0555 admin directory the removal meets first: HEAD, index and gitdir unlink, the writable logs directory rmdirs', async () => {
+  // The real fixture carries HEAD, index, gitdir and logs inside the 0555 directory, and which one
+  // the removal meets first is readdir's order, not the fixture's. So one case per possible
+  // failure: each directory holds exactly that one entry, its removal fails on it and nothing
+  // else, and the three assertions above are checked against the failure it produces — whatever
+  // order a filesystem yields, one of the four shapes is the failure the base records, and each
+  // shape matches.
+  for (const first of ['HEAD', 'index', 'gitdir', 'logs']) {
+    const base = await temporaryDirectory(`fault-class-resources-first-${first}`);
+    const sandbox = join(base, 'graphyard-sandbox-5ClynR', 'repo');
+    const admin = join(sandbox, '.git', 'worktrees', 'GY-7-1');
+    await mkdir(admin, { recursive: true });
+    if (first === 'logs') { await mkdir(join(admin, 'logs'), { recursive: true }); await writeFile(join(admin, 'logs', 'HEAD'), 'x'); }
+    else await writeFile(join(admin, first), 'x');
+    await chmod(admin, 0o555);
+    try {
+      const error = await rm(sandbox, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 }).then(() => null, e => e as NodeJS.ErrnoException);
+      assert.equal(error?.code, 'EACCES', `the removal fails on the 0555 directory at ${first}, the entry it met first`);
+      const operation = first === 'logs' ? 'rmdir' : 'unlink';
+      assert.match(error!.message, new RegExp(`EACCES: permission denied, ${operation} '.*\\.git/worktrees/GY-7-1/${first}'$`), `the failure names ${first}, proving the shape this case exercises`);
+      assert.match(error!.message, adminEacces, `the GY-1828 instance 3 assertion holds when ${first} comes first`);
+      assert.match(error!.message, sandboxAdminEacces, `the GY-1830 assertion holds when ${first} comes first`);
+      const recorded = describeReclaim({ at: new Date(instance3At).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: [`${tmpErrorPrefix}/var/tmp/gy-teK30QK: ${error!.message}`] } as unknown as ResourceReclaimReport)!;
+      assert.match(recorded, recordedAdminEacces, `the recorded instance line holds when ${first} comes first`);
+    } finally { await chmod(admin, 0o755); }
   }
 });
 
