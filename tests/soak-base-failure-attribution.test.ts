@@ -101,7 +101,7 @@ let database: EmbeddedPostgres | null = null, store: Store | null = null;
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
 
 test('unit:soak-base-failure-attribution — over a day of hourly heads whose required check fails, a head that failed a criterion proof is never rerun and stays held without churn on every observation, while a shared failure is rerun once per head', async () => {
-  const port = Number(process.env.GRAPHYARD_SOAK_ATTRIBUTION_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1835);
+  const port = Number(process.env.GRAPHYARD_SOAK_ATTRIBUTION_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1837);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('soak-base-failure-attribution'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   const db = store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await db.init(); await recordLegacyMerger(db);
