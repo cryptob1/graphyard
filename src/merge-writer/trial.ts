@@ -9,6 +9,7 @@ import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionChe
 import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
 import { tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 import { failingSummary, trialCutLine } from './shadow.js';
+import type { HostMemoryReading } from '../master-resources.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
 export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
@@ -187,6 +188,32 @@ export function groupTestFiles(files: readonly string[], size = trialTestGroupSi
 /** How many shards of a trial's tests run at once on a host with `cores` CPUs (GY-1832): half of them, never fewer than one, the rest left to the shards' own test files and the host. */
 export const trialShardLanes = (cores: number) => Math.max(1, Math.floor(cores / 2));
 /**
+ * The lanes a trial's shards run in and each runner's test concurrency (GY-1832): `trialShardLanes`
+ * lanes, never more than the shards, each at its share of the cores. A shard's own
+ * `--test-concurrency` overrides tests/helpers/run-tests.ts's memory-derived breadth, so where the
+ * host's memory is read the files in flight across every lane stay within `affordableFiles` (what
+ * that memory affords beyond its floor and recovery margin, `bytesPerSuiteFile` a file): fewer
+ * files per runner first, then fewer lanes, never below one of each. An unread host is sized by
+ * its cores alone.
+ */
+export function trialShardBreadth(cores: number, shards: number, affordableFiles: number | null = null): { lanes: number; breadth: number } {
+  let lanes = Math.max(1, Math.min(trialShardLanes(cores), shards));
+  let breadth = Math.max(1, Math.floor(cores / lanes));
+  if (affordableFiles !== null && Number.isFinite(affordableFiles)) {
+    const files = Math.max(1, Math.floor(affordableFiles));
+    lanes = Math.min(lanes, files);
+    breadth = Math.max(1, Math.min(breadth, Math.floor(files / lanes)));
+  }
+  return { lanes, breadth };
+}
+/** The files the host's memory affords a trial's shards at once (GY-1832), or null when it cannot be read: available memory less the floor and the recovery margin the loop defers launches at, `bytesPerSuiteFile` a file. */
+export async function trialAffordableFiles(read?: () => Promise<HostMemoryReading | null>): Promise<number | null> {
+  const resources = await import('../master-resources.js'), { bytesPerSuiteFile } = await import('../master/verification-slots.js');
+  const reading = await (read ?? resources.readHostMemory)();
+  if (!reading) return null;
+  return Math.floor((reading.availableBytes - resources.hostMemoryFloor(reading.totalBytes) - resources.memoryRecoveryMarginBytes) / bytesPerSuiteFile);
+}
+/**
  * The shards a selection runs in (GY-1832): as many as the lanes, never more than the files, and
  * never fewer than keep every shard within `size` files (one runner process per shard, so none
  * outgrows the capture, GY-1548). Files go longest first, by the merge's own timing baseline
@@ -281,6 +308,8 @@ export interface RunTrialInput {
   groupSize?: number;
   /** The host's CPUs the shards are sized to (GY-1832); `availableParallelism()` unless a test names a count. */
   cores?: number;
+  /** The host's memory the shards' files in flight are bounded by (GY-1832); `readHostMemory` unless a test names a reading. */
+  memory?: () => Promise<HostMemoryReading | null>;
   /** How many times a trial that reached no verdict is tried again; `trialRetries` unless a test names another. */
   retries?: number;
   /** Called as each attempt starts, before it runs anything (GY-1832): a caller keeping attempt-scoped evidence starts it afresh. */
@@ -394,7 +423,8 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
  * release-candidate suites, and the verdict counts the files that ran. The selection runs in
  * parallel shards sized to the host (GY-1832, `shardTestFiles`: `trialShardLanes(cores)` at once,
  * none over `trialTestGroupSize` files), each its own runner process over the same checkout at a
- * test concurrency of its share of the cores, so the files in flight stay near one process's;
+ * test concurrency of its share of the cores, and with the files in flight across them within what
+ * the host's memory affords (`trialShardBreadth`), so they stay near one process's;
  * the verdict's failing files are the union the shards' records name, and `groups` says how each
  * process ended, in shard order. Each phase's time is recorded (`phases`). The checkout is removed
  * afterwards, pass or fail; a removal that fails rejects with TrialCleanupError carrying the
@@ -552,7 +582,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       // shard named one: a named failing test is the merge's, and stays a failing verdict.
       const cores = Math.max(1, Math.floor(input.cores ?? availableParallelism()));
       const shards = input.groupSize === undefined ? shardTestFiles(files, trialShardLanes(cores), await checkoutDurations(worktree)) : groupTestFiles(files, input.groupSize);
-      const lanes = Math.min(trialShardLanes(cores), shards.length), breadth = Math.max(1, Math.floor(cores / lanes));
+      const { lanes, breadth } = trialShardBreadth(cores, shards.length, await trialAffordableFiles(input.memory));
       const settledShards: ({ group: TrialGroup; entries: string[]; unattributed: TrialRunnerError | null } | undefined)[] = [];
       let next = 0, stopped: unknown = null;
       const lane = async () => {

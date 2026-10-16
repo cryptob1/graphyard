@@ -7,7 +7,9 @@ import type { FilesystemProbe } from '../src/install/worktree-root.js';
 import type { Work } from '../src/model.js';
 import { mergeOne, runMergeTrial, type MergePorts, type MergeRecordEvent, type MergeTrialInput } from '../src/merge-writer/executor.js';
 import { mergeRecordBodySchema } from '../src/server/merge-record.js';
-import { runTrial, shardTestFiles, trialAttempts, trialNoVerdict, trialPhases, trialRetries, trialShardLanes, trialTestGroupSize, TrialRunnerError, TrialTimeoutError } from '../src/merge-writer/trial.js';
+import { hostMemoryFloor, memoryRecoveryMarginBytes } from '../src/master-resources.js';
+import { bytesPerSuiteFile } from '../src/master/verification-slots.js';
+import { runTrial, shardTestFiles, trialAffordableFiles, trialAttempts, trialNoVerdict, trialPhases, trialRetries, trialShardBreadth, trialShardLanes, trialTestGroupSize, TrialRunnerError, TrialTimeoutError } from '../src/merge-writer/trial.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1832: the control plane's own trial of a merged tree is fast and conclusive — its tests run in
@@ -130,6 +132,22 @@ test('unit:trial-sharded-verdict-equal — runTrial runs the selected files in p
     assert.equal(malformed.seen.attempts, 1, `${baselineText}: one attempt`);
     assert.equal(answered.retried, undefined, `${baselineText}: no retry`);
     assert.deepEqual(verdict(answered), verdict(alone), `${baselineText}: the single process's verdict`);
+  }
+
+  // A host whose memory affords fewer files than its cores: each shard's own --test-concurrency overrides the runner's memory-derived
+  // breadth, so the files in flight across every lane stay within what that memory affords — fewer per runner, then fewer lanes — and the verdict is unchanged.
+  const totalBytes = 64 * 2 ** 30, affording = (files: number) => async () => ({ totalBytes, availableBytes: hostMemoryFloor(totalBytes) + memoryRecoveryMarginBytes + files * bytesPerSuiteFile });
+  assert.equal(await trialAffordableFiles(affording(6)), 6);
+  assert.equal(await trialAffordableFiles(async () => null), null, 'an unread host is sized by its cores alone');
+  assert.deepEqual([trialShardBreadth(16, 8), trialShardBreadth(16, 8, 100), trialShardBreadth(16, 8, 12), trialShardBreadth(16, 8, 6), trialShardBreadth(16, 8, -3), trialShardBreadth(1, 1, 0)],
+    [{ lanes: 8, breadth: 2 }, { lanes: 8, breadth: 2 }, { lanes: 8, breadth: 1 }, { lanes: 6, breadth: 1 }, { lanes: 1, breadth: 1 }, { lanes: 1, breadth: 1 }]);
+  for (const afforded of [12, 6, 3, 0]) {
+    const tight = repository(files, { failing, baseline });
+    const bounded = await runMergeTrial(await input(tight, { cores: 16, memory: affording(afforded) }));
+    const perRunner = Math.max(...tight.seen.concurrency.map(flag => Number(flag.split('=')[1])));
+    assert.ok(tight.seen.maxInFlight * perRunner <= Math.max(1, afforded), `${afforded} files afforded: ${tight.seen.maxInFlight} runners at ${perRunner}`);
+    assert.deepEqual(tight.seen.lists.flat().sort(), files, `${afforded} files afforded: every selected file runs once`);
+    assert.deepEqual(verdict(bounded), verdict(alone), `${afforded} files afforded: the single process's verdict`);
   }
 
   // A retry's verdict counts only its own attempt: the first attempt ran its tests and timed out, the retry failed its build before any test ran,
