@@ -11,6 +11,7 @@ import { foldDecisions, heldByLiveAttempt, liveLeaseRevisionRefusal, quarantined
 import { approvalStep, approvalWatchSchema } from '../src/master-daemon.js';
 import { terminalDecisions } from '../src/cli/decision-report.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-10-11 base only yields relative event stamps that foldDecisions and approvalStep read with an explicit now from the same base; Date.now() serves the live DB tests.
 
 // GY-1687. A non-widening requirements revision must not change the document under a worker's feet, so
@@ -73,7 +74,7 @@ async function start() {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1687;
   const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('decision-held'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('held_test');
-  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/held_test`); await store.init();
+  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/held_test`); await store.init(); await recordLegacyMerger(store);
   const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   const http = server(engine, credentials);
   teardown = async () => { http.close(); await store.close(); await database.stop(); };

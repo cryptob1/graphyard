@@ -1,0 +1,349 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import type { ChildRun } from '../src/child-runner.js';
+import type { FilesystemProbe } from '../src/install/worktree-root.js';
+import type { Work } from '../src/model.js';
+import { mergeOne, runMergeTrial, type MergePorts, type MergeRecordEvent, type MergeTrialInput } from '../src/merge-writer/executor.js';
+import { mergeRecordBodySchema } from '../src/server/merge-record.js';
+import { hostMemoryFloor, memoryRecoveryMarginBytes } from '../src/master-resources.js';
+import { acquireVerificationSlot, bytesPerSuiteFile, heldSlots, othersDeclaredFiles, verificationSlotsDirectory } from '../src/master/verification-slots.js';
+import { declareTrialFiles, runTrial, shardTestFiles, trialAffordableFiles, trialAttempts, trialNoVerdict, trialPhases, trialRetries, trialShardBreadth, trialShardLanes, trialTestGroupSize, TrialRunnerError, TrialTimeoutError } from '../src/merge-writer/trial.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
+
+// GY-1832: the control plane's own trial of a merged tree is fast and conclusive — its tests run in
+// parallel shards sized to the host, each phase's time is recorded, and an attempt that reaches no
+// verdict names its outcome, phase and reason and is tried once more.
+
+const mergeSha = 'a'.repeat(40);
+const durable: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: null });
+const failure = (fields: { status?: number | null; signal?: string | null; timedOut?: boolean; cause?: unknown; stdout?: string }) =>
+  Object.assign(new Error('Command failed'), { status: null, signal: null, stdout: '', stderr: '', ...fields });
+const proofsOf = (index: number) => index % 3 === 0 ? ['unit:alpha-works'] : index % 3 === 1 ? ['unit:alpha-works', 'integration:beta-holds'] : [];
+
+/**
+ * A repository's trial children, answered without a checkout: the checkout and install answer at
+ * once, the selection lists `files`, and each runner process reads its list and answers, per file,
+ * TAP cases for that file's proofs and a duration record, failing the files `failing` names. The
+ * clock advances by each phase's cost, and the runner processes in flight are counted.
+ */
+function repository(files: string[], options: { failing?: string[]; baseline?: Record<string, number>; baselineText?: string; runner?: (attempt: number, list: string[]) => Error | null; build?: (attempt: number) => Error | null; checkout?: (attempt: number) => Error | null; selection?: (attempt: number) => Error | null; packageJson?: string } = {}) {
+  let clock = Date.parse('2030-03-01T00:00:00Z'), inFlight = 0;
+  const seen = { maxInFlight: 0, lists: [] as string[][], concurrency: [] as string[], attempts: 0, builds: 0 };
+  const failing = new Set(options.failing ?? []);
+  const run: ChildRun = async (command, args) => {
+    if (command === 'git' && args[2] === 'worktree' && args[3] === 'add') {
+      seen.attempts += 1;
+      const refused = options.checkout?.(seen.attempts);
+      if (refused) throw refused;
+      // The merge's own timing baseline, as the checkout holds it.
+      const baselineText = options.baselineText ?? (options.baseline && JSON.stringify({ files: options.baseline }));
+      if (options.packageJson !== undefined) { await mkdir(args[5]!, { recursive: true }); await writeFile(join(args[5]!, 'package.json'), options.packageJson); }
+      if (baselineText !== undefined) { await mkdir(join(args[5]!, 'tests/helpers'), { recursive: true }); await writeFile(join(args[5]!, 'tests/helpers/timing-baseline.json'), baselineText); }
+      return '';
+    }
+    if (command === 'npm' && args[0] === 'ci') { clock += 1000; return ''; }
+    if (command === 'npm' && args[1] === 'build') {
+      clock += 2000; seen.builds += 1;
+      const error = options.build?.(seen.attempts);
+      if (error) throw error;
+      return '';
+    }
+    if (command === 'node' && args[0] === 'scripts/ci-tests.mjs') {
+      clock += 300;
+      const error = options.selection?.(seen.attempts);
+      if (error) throw error;
+      return `affected: ${files.length} test files\n${files.join('\n')}\n`;
+    }
+    if (command === 'node' && args.includes('tests/helpers/run-tests.ts')) {
+      const list = (await readFile(args[args.indexOf('--files-from') + 1]!, 'utf8')).split('\n').filter(Boolean);
+      seen.lists.push(list); seen.concurrency.push(args.find(arg => arg.startsWith('--test-concurrency='))!);
+      inFlight += 1; seen.maxInFlight = Math.max(seen.maxInFlight, inFlight);
+      // Every runner process takes a moment before it answers, so the shards a lane pool starts together are in flight together.
+      await new Promise(resolve => setTimeout(resolve, 25));
+      inFlight -= 1; clock += 5000;
+      const error = options.runner?.(seen.attempts, list);
+      if (error) throw error;
+      const tap = ['TAP version 13'], records: string[] = [];
+      for (const file of list) {
+        const index = files.indexOf(file), bad = failing.has(file);
+        tap.push(`# Subtest: ${file}`, ...proofsOf(index).map((proof, at) => `    ${bad && at === 0 ? 'not ok' : 'ok'} ${at + 1} - ${proof} — case of ${file}`), `${bad ? 'not ok' : 'ok'} ${index + 1} - ${file}`);
+        records.push(JSON.stringify({ file, durationMs: 10, passed: !bad }));
+      }
+      await writeFile(args[args.indexOf('--durations') + 1]!, `${records.join('\n')}\n`);
+      const out = `${tap.join('\n')}\n`;
+      if (list.some(file => failing.has(file))) throw failure({ status: 1, stdout: out });
+      return out;
+    }
+    return '';
+  };
+  return { run, seen, now: () => clock };
+}
+const input = async (repo: ReturnType<typeof repository>, extra: Partial<MergeTrialInput> = {}): Promise<MergeTrialInput> => {
+  const scratch = await temporaryDirectory('merge-trial-speed');
+  return { root: join(scratch, 'coordinator'), base: join(scratch, 'base'), mergeSha, changedFiles: ['src/app.ts'], timeoutMs: 600_000, key: 'GY-1832', run: repo.run, now: repo.now,
+    temporaryRoots: [scratch], probe: durable, proofs: ['unit:alpha-works', 'integration:beta-holds'], proofFiles: [], ...extra };
+};
+
+test('unit:trial-sharded-verdict-equal — runTrial runs the selected files in parallel shards bounded by the host\'s cores (half of them at once, each runner at its share of the cores, none over trialTestGroupSize files, split by the merge\'s timing baseline), and its verdict — passed, failed files, per-proof executed and failed counts — equals a single-process run\'s on the same selection', async () => {
+  // The split: every file once, never more shards than files, never fewer than keep each within the group size, longest first.
+  assert.deepEqual([trialShardLanes(24), trialShardLanes(3), trialShardLanes(1), trialShardLanes(0)], [12, 1, 1, 1]);
+  const many = Array.from({ length: 100 }, (_, index) => `tests/f${String(index).padStart(3, '0')}.test.ts`);
+  for (const [lanes, expected] of [[12, 12], [1, Math.ceil(100 / trialTestGroupSize)], [200, 100]] as const) {
+    const shards = shardTestFiles(many, lanes);
+    assert.equal(shards.length, expected, `${lanes} lanes`);
+    assert.deepEqual(shards.flat().sort(), many, 'every file once');
+    assert.ok(shards.every(shard => shard.length >= 1 && shard.length <= trialTestGroupSize));
+  }
+  const weighted = shardTestFiles(['tests/a.test.ts', 'tests/b.test.ts', 'tests/c.test.ts', 'tests/d.test.ts'], 2, { 'tests/a.test.ts': 10, 'tests/b.test.ts': 90, 'tests/c.test.ts': 50, 'tests/d.test.ts': 40 });
+  assert.deepEqual(weighted, [['tests/b.test.ts', 'tests/a.test.ts'], ['tests/c.test.ts', 'tests/d.test.ts']], 'balanced by the baseline, each shard longest first');
+  assert.deepEqual(shardTestFiles([], 4), []);
+
+  const files = Array.from({ length: 30 }, (_, index) => `tests/s${String(index).padStart(2, '0')}.test.ts`), failing = ['tests/s03.test.ts', 'tests/s04.test.ts', 'tests/s29.test.ts'];
+  const baseline = Object.fromEntries(files.map((file, index) => [file, 100 + index * 37 % 500]));
+  // The same selection on one core (one runner process) and on a 16-core host (eight shards at once).
+  const single = repository(files, { failing, baseline }), sharded = repository(files, { failing, baseline });
+  const alone = await runMergeTrial(await input(single, { cores: 1 }));
+  const parallel = await runMergeTrial(await input(sharded, { cores: 16 }));
+  assert.equal(single.seen.lists.length, 1, 'one core: one runner process over the whole selection');
+  assert.equal(sharded.seen.lists.length, 8, 'sixteen cores: eight shards');
+  assert.equal(sharded.seen.maxInFlight, 8, 'all eight run at once, never more than half the cores');
+  assert.deepEqual(new Set(sharded.seen.concurrency), new Set(['--test-concurrency=2']), 'each runner at its share of the cores');
+  assert.deepEqual(sharded.seen.lists.flat().sort(), files, 'every selected file runs once, in exactly one shard');
+  for (const list of sharded.seen.lists) assert.deepEqual(list, [...list].sort((a, b) => baseline[b]! - baseline[a]! || a.localeCompare(b)), 'each shard runs its longest file first');
+  assert.equal(parallel.groups?.length, 8);
+
+  // The verdict is the single process's: build, passed and failed files, the files counted, the runner's exit, and every proof's cases.
+  const verdict = (run: typeof alone) => ({ build: run.build, tests: { ...run.tests, failed: [...run.tests.failed].sort() }, runnerExit: run.runnerExit, files: [...run.files].sort(), proofs: run.proofs });
+  assert.deepEqual(verdict(parallel), verdict(alone));
+  assert.deepEqual(verdict(alone).tests, { passed: 27, failed: failing, files: 30 });
+  // Ten files carry unit:alpha-works only and ten carry both (one case each); a failing file fails its first case.
+  assert.deepEqual(alone.proofs, { 'unit:alpha-works': { executed: 20, failed: 2 }, 'integration:beta-holds': { executed: 10, failed: 0 } });
+
+  // A selection with no failure is the same pass either way, and a shard's failure is never lost to the others' passes.
+  const clean = await runMergeTrial(await input(repository(files), { cores: 24 })), cleanAlone = await runMergeTrial(await input(repository(files), { cores: 1 }));
+  assert.deepEqual(verdict(clean), verdict(cleanAlone));
+  assert.deepEqual([clean.tests.failed, clean.runnerExit], [[], 0]);
+
+  // A merge whose timing baseline does not parse is sharded by fallback weights, not retried as a host failure: the same verdict, one attempt.
+  for (const baselineText of ['{ not json', 'null', '[1, 2]']) {
+    const malformed = repository(files, { failing, baselineText });
+    const answered = await runMergeTrial(await input(malformed, { cores: 16 }));
+    assert.equal(malformed.seen.attempts, 1, `${baselineText}: one attempt`);
+    assert.equal(answered.retried, undefined, `${baselineText}: no retry`);
+    assert.deepEqual(verdict(answered), verdict(alone), `${baselineText}: the single process's verdict`);
+  }
+
+  // A host whose memory affords fewer files than its cores: each shard's own --test-concurrency overrides the runner's memory-derived
+  // breadth, so the files in flight across every lane stay within what that memory affords — fewer per runner, then fewer lanes — and the verdict is unchanged.
+  const totalBytes = 64 * 2 ** 30, affording = (files: number) => async () => ({ totalBytes, availableBytes: hostMemoryFloor(totalBytes) + memoryRecoveryMarginBytes + files * bytesPerSuiteFile });
+  assert.equal(await trialAffordableFiles(affording(6)), 6);
+  assert.equal(await trialAffordableFiles(async () => null), null, 'an unread host is sized by its cores alone');
+  // Files other runs declared on the host's verification slots are deducted, as run-tests.ts deducts them: they may not have allocated yet.
+  const slotRoot = await temporaryDirectory('merge-trial-slots'), slots = verificationSlotsDirectory(slotRoot);
+  await mkdir(join(slots, 'slot-0'), { recursive: true });
+  await writeFile(join(slots, 'slot-0', 'owner.json'), JSON.stringify({ pid: process.pid + 1, label: 'suite', cwd: slotRoot, at: '2030-03-01T00:00:00Z', files: 4 }));
+  assert.equal(await trialAffordableFiles(affording(6), slots), 2, 'four declared elsewhere leave two of six');
+  assert.equal(await trialAffordableFiles(affording(6), join(slotRoot, 'none')), 6, 'no slots held leaves all six');
+  const declared = repository(files, { failing, baseline });
+  const shared = await runMergeTrial(await input(declared, { cores: 16, memory: affording(6) }).then(async trial => {
+    await mkdir(join(verificationSlotsDirectory(trial.base), 'slot-0'), { recursive: true });
+    await writeFile(join(verificationSlotsDirectory(trial.base), 'slot-0', 'owner.json'), JSON.stringify({ pid: process.pid + 1, label: 'suite', cwd: trial.base, at: '2030-03-01T00:00:00Z', files: 4 }));
+    return trial;
+  }));
+  const sharedPerRunner = Math.max(...declared.seen.concurrency.map(flag => Number(flag.split('=')[1])));
+  assert.ok(declared.seen.maxInFlight * sharedPerRunner <= 2, `the trial runs within the two files the declared slot leaves: ${declared.seen.maxInFlight} runners at ${sharedPerRunner}`);
+  assert.deepEqual(verdict(shared), verdict(alone), 'with files declared elsewhere: the single process\'s verdict');
+  // While its shards run, the trial declares their files on the host's verification slots, so a suite that starts after its memory snapshot deducts them; they go when the shards stop.
+  const during: number[] = [];
+  let announcedSlots = '';
+  const announcing = repository(files, { failing, baseline, runner: () => { during.push(othersDeclaredFiles(announcedSlots, process.pid + 1)); return null; } });
+  const announcingInput = await input(announcing, { cores: 16, memory: affording(6) });
+  announcedSlots = verificationSlotsDirectory(announcingInput.base);
+  await mkdir(announcedSlots, { recursive: true });
+  const announced = await runMergeTrial(announcingInput);
+  const announcedPerRunner = Math.max(...announcing.seen.concurrency.map(flag => Number(flag.split('=')[1])));
+  assert.ok(during.length > 0 && during.every(declared => declared === during[0]), `one declaration while the shards run: ${during}`);
+  assert.ok(during[0]! >= announcing.seen.maxInFlight * announcedPerRunner && during[0]! <= 6, `the shards' files in flight, within the six afforded: ${during[0]}`);
+  assert.equal(othersDeclaredFiles(announcedSlots, process.pid + 1), 0, 'the declaration goes when the shards stop');
+  assert.deepEqual(verdict(announced), verdict(alone), 'declared: the single process\'s verdict');
+  // The declaration is a slot entry past every slot the host hands out: a suite still takes slot 0 at once, and deducts the trial's files.
+  const declaredSlots = verificationSlotsDirectory(await temporaryDirectory('merge-trial-declaration'));
+  await (await declareTrialFiles(declaredSlots, 'GY-0', 3))();
+  assert.equal(existsSync(declaredSlots), false, 'a host whose sessions made no slots directory gets none from the trial');
+  await mkdir(declaredSlots);
+  const release = await declareTrialFiles(declaredSlots, 'GY-1', 3, process.pid + 1, () => true);
+  const suite = await acquireVerificationSlot({ directory: declaredSlots, slots: 2, label: 'suite' });
+  assert.equal(suite.slot, 0, 'a suite never waits on the declaration');
+  suite.release();
+  assert.equal(othersDeclaredFiles(declaredSlots), 3);
+  // A trial declaration whose process no longer runs is removed by the next declaration; a live one stays.
+  const live = await declareTrialFiles(declaredSlots, 'GY-2', 2, process.pid + 2, () => true);
+  await (await declareTrialFiles(declaredSlots, 'GY-3', 1, process.pid, pid => pid !== process.pid + 1))();
+  assert.deepEqual(heldSlots(declaredSlots).map(entry => entry.owner?.label), ['merge trial GY-2'], 'the dead trial\'s declaration is gone, the live one kept');
+  await release(); await live();
+  assert.deepEqual(heldSlots(declaredSlots), []);
+  assert.deepEqual([trialShardBreadth(16, 8), trialShardBreadth(16, 8, 100), trialShardBreadth(16, 8, 12), trialShardBreadth(16, 8, 6), trialShardBreadth(16, 8, -3), trialShardBreadth(1, 1, 0)],
+    [{ lanes: 8, breadth: 2 }, { lanes: 8, breadth: 2 }, { lanes: 8, breadth: 1 }, { lanes: 6, breadth: 1 }, { lanes: 1, breadth: 1 }, { lanes: 1, breadth: 1 }]);
+  for (const afforded of [12, 6, 3, 0]) {
+    const tight = repository(files, { failing, baseline });
+    const bounded = await runMergeTrial(await input(tight, { cores: 16, memory: affording(afforded) }));
+    const perRunner = Math.max(...tight.seen.concurrency.map(flag => Number(flag.split('=')[1])));
+    assert.ok(tight.seen.maxInFlight * perRunner <= Math.max(1, afforded), `${afforded} files afforded: ${tight.seen.maxInFlight} runners at ${perRunner}`);
+    assert.deepEqual(tight.seen.lists.flat().sort(), files, `${afforded} files afforded: every selected file runs once`);
+    assert.deepEqual(verdict(bounded), verdict(alone), `${afforded} files afforded: the single process's verdict`);
+  }
+
+  // A retry's verdict counts only its own attempt: the first attempt ran its tests and timed out, the retry failed its build before any test ran,
+  // so the verdict names no file and counts no proof case, never the first attempt's TAP or selection.
+  const stale = repository(files, { runner: attempt => attempt === 1 ? failure({ timedOut: true, signal: 'SIGKILL' }) : null, build: attempt => attempt === 2 ? failure({ status: 1, stdout: 'tsc: error' }) : null });
+  const rebuilt = await runMergeTrial(await input(stale, { cores: 16 }));
+  assert.equal(stale.seen.attempts, 2);
+  assert.ok(stale.seen.lists.length > 0, 'the first attempt ran its tests');
+  assert.deepEqual([rebuilt.build, rebuilt.files, rebuilt.retried?.map(entry => entry.outcome)], ['fail', [], ['timeout']]);
+  assert.deepEqual(rebuilt.proofs, { 'unit:alpha-works': { executed: 0, failed: 0 }, 'integration:beta-holds': { executed: 0, failed: 0 } });
+
+  // A package.json the merge broke is the merge's failed build on the first attempt, never a host failure retried and requeued (PRRT_kwDOUZby-s6tZsNG).
+  const broken = repository(files, { packageJson: '{ "scripts": { "build": ' });
+  const unparsed = await runMergeTrial(await input(broken, { cores: 16 }));
+  assert.deepEqual([unparsed.build, unparsed.tests, unparsed.retried, broken.seen.attempts, broken.seen.builds, broken.seen.lists.length], ['fail', { passed: 0, failed: [], files: 0 }, undefined, 1, 0, 0]);
+  // One that parses and declares no build script skips the build and still runs its tests.
+  const unbuilt = repository(files, { packageJson: '{ "scripts": {} }' });
+  const skipped = await runMergeTrial(await input(unbuilt, { cores: 16 }));
+  assert.deepEqual([skipped.build, unbuilt.seen.builds, unbuilt.seen.attempts], ['pass', 0, 1]);
+});
+
+test('unit:trial-phases-and-no-pending — every trial records its install, build, selection and test times; an attempt that times out, is cancelled or meets a host failure records a non-pending outcome naming its phase and reason and is retried once, and a verdict is never retried', async () => {
+  const files = ['tests/a.test.ts', 'tests/b.test.ts', 'tests/c.test.ts', 'tests/d.test.ts'];
+  // A passing trial: each phase's time, as the clock the children advanced it.
+  const passing = repository(files);
+  const passed = await runTrial(await input(passing, { cores: 1 }));
+  assert.deepEqual(Object.keys(passed.phases ?? {}), [...trialPhases]);
+  assert.deepEqual(passed.phases, { install: 1000, build: 2000, selection: 300, tests: 5000 }, 'install, build, selection and tests each timed');
+  assert.equal(passed.durationMs, 8300);
+  assert.equal(passed.retried, undefined, 'a first-attempt verdict carries no retry');
+  assert.equal(passing.seen.attempts, 1);
+  // Two shards at once: the test phase spans both runner processes (each moves this fixture's clock by its own cost).
+  const sharded = await runTrial(await input(repository(files), { cores: 4 }));
+  assert.equal(sharded.phases?.tests, 10_000);
+  assert.equal(trialRetries, 1);
+
+  // A failing test is the merge's verdict: recorded, timed and never retried.
+  const failingRepo = repository(files, { failing: ['tests/b.test.ts'] });
+  const failed = await runTrial(await input(failingRepo, { cores: 1 }));
+  assert.deepEqual([failed.tests.failed, failingRepo.seen.attempts, failed.phases?.tests], [['tests/b.test.ts'], 1, 5000]);
+
+  // A timeout on the first attempt and a verdict on the retry: the verdict stands, carrying the first attempt's outcome.
+  const slow = repository(files, { runner: attempt => attempt === 1 ? failure({ timedOut: true, signal: 'SIGKILL' }) : null });
+  const recovered = await runTrial(await input(slow, { cores: 1 }));
+  assert.equal(slow.seen.attempts, 2, 'retried once');
+  assert.deepEqual([recovered.build, recovered.tests.failed], ['pass', []]);
+  assert.deepEqual(recovered.retried?.map(entry => [entry.outcome, entry.phase]), [['timeout', 'tests']]);
+  assert.match(recovered.retried![0]!.reason, /timed out during its tests/);
+  assert.deepEqual(recovered.retried![0]!.phases, { install: 1000, build: 2000, selection: 300, tests: 5000 });
+
+  // Every kind of no-verdict, on both attempts: one retry, then the trial rejects with its outcome, phase and reason for each attempt — never pending.
+  const cases = [
+    { name: 'timeout', options: { runner: () => failure({ timedOut: true, signal: 'SIGKILL' }) }, outcome: 'timeout', phase: 'tests', reason: /timed out during its tests/, error: TrialTimeoutError },
+    { name: 'cancelled', options: { runner: () => failure({ signal: 'SIGTERM' }) }, outcome: 'cancelled', phase: 'tests', reason: /tests runner exited \(signal SIGTERM\)/, error: TrialRunnerError },
+    { name: 'host failure', options: { build: () => failure({ cause: new Error('spawn npm ENOENT') }) }, outcome: 'host-failure', phase: 'build', reason: /build runner exited/, error: TrialRunnerError },
+    { name: 'runner exit naming no test', options: { runner: () => failure({ status: 3 }) }, outcome: 'host-failure', phase: 'tests', reason: /naming no failing test/, error: TrialRunnerError },
+    // The host's failures before any test ran are no verdict either, never a failing build or selection: a checkout git could not make, a selection child the host killed or could not start.
+    { name: 'checkout git could not make', options: { checkout: () => failure({ status: 128, stdout: '' }) }, outcome: 'host-failure', phase: 'install', reason: /Command failed/, error: Error },
+    { name: 'selection killed', options: { selection: () => failure({ signal: 'SIGKILL' }) }, outcome: 'host-failure', phase: 'selection', reason: /selection runner exited \(signal SIGKILL\)/, error: TrialRunnerError },
+    { name: 'selection could not start', options: { selection: () => failure({ cause: new Error('spawn node ENOENT') }) }, outcome: 'host-failure', phase: 'selection', reason: /selection runner exited/, error: TrialRunnerError },
+  ] as const;
+  for (const entry of cases) {
+    const repo = repository(files, entry.options);
+    let caught: unknown;
+    await assert.rejects(runTrial(await input(repo, { cores: 1 })), (error: unknown) => { caught = error; return error instanceof entry.error; }, entry.name);
+    assert.equal(repo.seen.attempts, 2, `${entry.name}: tried once more`);
+    const attempts = trialAttempts(caught);
+    assert.equal(attempts.length, 2, `${entry.name}: both attempts recorded`);
+    for (const attempt of attempts) {
+      assert.notEqual(attempt.outcome as string, 'pending');
+      assert.deepEqual([attempt.outcome, attempt.phase], [entry.outcome, entry.phase], entry.name);
+      assert.match(attempt.reason, entry.reason);
+      assert.deepEqual(Object.keys(attempt.phases), [...trialPhases]);
+      if (entry.phase !== 'install') assert.equal(attempt.phases.install, 1000, `${entry.name}: the phases reached are timed`);
+    }
+    assert.deepEqual(trialNoVerdict(caught), attempts[1], `${entry.name}: the error itself names the last attempt's outcome`);
+  }
+  // A host failure before any child (a managed root that cannot be made) is the install phase's, retried the same way.
+  const unmade = repository(files);
+  let caught: unknown;
+  const blocked = await temporaryDirectory('merge-trial-speed-blocked');
+  await writeFile(join(blocked, 'file'), '');
+  await assert.rejects(runTrial({ ...(await input(unmade, { cores: 1 })), base: join(blocked, 'file', 'base') }), (error: unknown) => { caught = error; return true; });
+  assert.deepEqual(trialAttempts(caught).map(entry => [entry.outcome, entry.phase]), [['host-failure', 'install'], ['host-failure', 'install']]);
+  // A caller that asks for no retry gets one attempt.
+  const once = repository(files, { runner: () => failure({ signal: 'SIGTERM' }) });
+  await assert.rejects(runTrial(await input(once, { cores: 1, retries: 0 })), TrialRunnerError);
+  assert.equal(once.seen.attempts, 1);
+});
+
+test('unit:trial-phases-and-no-pending — the merge writer\'s trial record carries the phases\' times and the attempts that reached no verdict, and a trial that reached none after its retry is recorded with its final outcome, phase and reason before the merge fails, in the shape the coordinator\'s merge-record route accepts', async () => {
+  const files = ['tests/a.test.ts', 'tests/b.test.ts'], head = 'b'.repeat(40), tip = 'c'.repeat(40);
+  const work = { id: 'w1832', key: 'GY-1832', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:alpha-works'] }], plannedFiles: [], mergeLedger: null, submission: { epoch: 1, pr: 1 },
+    candidate: { sha: head, baseSha: tip, pr: 1, branch: 'graphyard/gy-1832-1', author: 'worker' }, observation: { source: 'control-plane', candidate: { sha: head }, files: ['src/app.ts'] } } as unknown as Work;
+  const merging = async (repo: ReturnType<typeof repository>, extra: Partial<MergeTrialInput> = {}) => {
+    const events: MergeRecordEvent[] = [], base = await input(repo, { cores: 1, ...extra });
+    const ports: MergePorts = { baseBranch: 'main', retrials: 0, now: repo.now, fetch: async () => tip, merge: async () => ({ mergeSha, files: ['src/app.ts'] }),
+      trial: async (sha, changed) => runMergeTrial({ ...base, mergeSha: sha, changedFiles: [...changed] }), push: async () => 'pushed', holds: async () => false,
+      record: async (_item, event) => { events.push(event); } };
+    return { events, outcome: await mergeOne(ports, work).catch((error: unknown) => error) };
+  };
+  // A verdict on the retry: the record names every phase's time and the attempt before it that timed out.
+  const retried = await merging(repository(files, { runner: attempt => attempt === 1 ? failure({ timedOut: true, signal: 'SIGKILL' }) : null }));
+  assert.equal((retried.outcome as { outcome?: string }).outcome, 'merged', String(retried.outcome));
+  const verdict = retried.events.find(event => event.kind === 'trial')!;
+  assert.ok(verdict.kind === 'trial' && verdict.outcome === 'verdict');
+  assert.deepEqual(verdict.phases, { install: 1000, build: 2000, selection: 300, tests: 5000 });
+  assert.deepEqual(verdict.attempts.map(entry => [entry.outcome, entry.phase]), [['timeout', 'tests']]);
+  // No verdict after the retry: the merge fails, but only after the trial's record names the final outcome, its phase and reason, and both attempts.
+  const cancelled = await merging(repository(files, { runner: () => failure({ signal: 'SIGTERM' }) }));
+  assert.ok(cancelled.outcome instanceof TrialRunnerError);
+  assert.deepEqual(cancelled.events.map(event => event.kind), ['intent', 'trial'], 'the trial is recorded, nothing pushed');
+  const final = cancelled.events[1]!;
+  assert.ok(final.kind === 'trial' && final.outcome === 'cancelled');
+  assert.equal(final.phase, 'tests');
+  assert.match(final.reason, /signal SIGTERM/);
+  assert.deepEqual(final.attempts.map(entry => entry.outcome), ['cancelled', 'cancelled']);
+  assert.deepEqual(final.phases, { install: 1000, build: 2000, selection: 300, tests: 5000 });
+  assert.equal(final.durationMs, 8300);
+  assert.equal('proofs' in final, false, 'no proofs, so the ledger fold keeps no trial for an attempt that reached no verdict');
+  // Both records are what the coordinator's route accepts, and a no-verdict record never names an outcome of pending.
+  for (const event of [verdict, final]) assert.deepEqual(mergeRecordBodySchema.parse(event), event);
+  assert.throws(() => mergeRecordBodySchema.parse({ ...final, outcome: 'pending' }));
+  assert.throws(() => mergeRecordBodySchema.parse({ ...final, phase: undefined }));
+
+  // The proof files are discovered inside each attempt's selection phase (PRRT_kwDOUZby-s6tZqEw): a git grep the host fails
+  // or times out is that attempt's no-verdict, timed and retried, and the attempt that answers runs the files it found.
+  const grep = (fail: (call: number) => Error | null) => {
+    let calls = 0;
+    return { discoverProofFiles: async (options: { timeoutMs?: number }) => { calls += 1; assert.ok(options.timeoutMs! > 0, 'the discovery is bounded by the attempt\'s deadline'); const error = fail(calls); if (error) throw error; return ['tests/proof.test.ts']; }, calls: () => calls };
+  };
+  const flaky = grep(call => call === 1 ? failure({ status: 128, stdout: 'fatal: unable to read tree' }) : null), flakyRepo = repository(files);
+  const found = await merging(flakyRepo, { discoverProofFiles: flaky.discoverProofFiles });
+  assert.equal((found.outcome as { outcome?: string }).outcome, 'merged', String(found.outcome));
+  assert.deepEqual([flakyRepo.seen.attempts, flaky.calls()], [2, 2], 'the failed discovery is retried with its attempt');
+  const foundTrial = found.events.find(event => event.kind === 'trial')!;
+  assert.ok(foundTrial.kind === 'trial' && foundTrial.outcome === 'verdict');
+  assert.deepEqual(foundTrial.attempts.map(entry => [entry.outcome, entry.phase]), [['host-failure', 'selection']]);
+  assert.match(foundTrial.attempts[0]!.reason, /selection runner exited/);
+  assert.deepEqual(foundTrial.attempts[0]!.phases, { install: 1000, build: 2000, selection: 0, tests: 0 }, 'the phases the failed attempt reached are timed');
+  assert.deepEqual(flakyRepo.seen.lists.at(-1), [...files, 'tests/proof.test.ts'], 'the answering attempt runs the discovered proof file beside the selection');
+  for (const [name, error, outcome] of [['host failure', failure({ status: 128 }), 'host-failure'], ['timeout', failure({ timedOut: true, signal: 'SIGTERM' }), 'timeout']] as const) {
+    const broken = grep(() => error), brokenRepo = repository(files);
+    const failedMerge = await merging(brokenRepo, { discoverProofFiles: broken.discoverProofFiles });
+    assert.ok(failedMerge.outcome instanceof Error, name);
+    assert.deepEqual([brokenRepo.seen.attempts, broken.calls()], [2, 2], `${name}: tried once more`);
+    const record = failedMerge.events.find(event => event.kind === 'trial')!;
+    assert.ok(record.kind === 'trial' && record.outcome === outcome, `${name}: ${JSON.stringify(record)}`);
+    assert.equal(record.phase, 'selection');
+    assert.deepEqual(record.attempts.map(entry => [entry.outcome, entry.phase]), [[outcome, 'selection'], [outcome, 'selection']]);
+    assert.deepEqual(mergeRecordBodySchema.parse(record), record);
+  }
+});

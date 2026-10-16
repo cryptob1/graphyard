@@ -15,6 +15,7 @@ import { observeCiRun, publishCiReport } from '../scripts/publish-acceptance.mjs
 import { planFromControlPlane } from '../scripts/enumerate-ci-proofs.mjs';
 // @ts-expect-error Dependency-free protected workflow script.
 import { contract } from '../scripts/contracts.mjs';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // The control plane's own trust boundary for CI-produced evidence: the CI producer principal,
 // the automatable families, the job GitHub reports for the evidence commit, and attempt order.
@@ -48,7 +49,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_CI_PROOFS_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 19);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('ci-proofs'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('ci_proofs_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/ci_proofs_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/ci_proofs_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, repository);
   http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })), github as any);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

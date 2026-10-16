@@ -38,7 +38,7 @@ test('unit:setup-checklist-control-plane — the Setup checklist passes github-a
   assert.equal(statusControlPlaneMerger(bare('github')), false); assert.equal(statusControlPlaneMerger(bare(null)), false); assert.equal(statusControlPlaneMerger(null), false);
 
   const control = setupChecklist(bare('control-plane'));
-  assert.deepEqual(control.map(item => item.id), ['github-app', 'reviewer-app', 'account:worker', 'account:reviewer', 'branch-protection', 'master-loop'], 'the items stay, in order');
+  assert.deepEqual(control.map(item => item.id), ['github-app', 'reviewer-app', 'account:worker', 'account:reviewer', 'branch-protection', 'master-loop', 'merger'], 'the items stay, in order, with the merger line last (GY-1833)');
   for (const id of notRequired) {
     const item = control.find(entry => entry.id === id)!;
     assert.deepEqual({ done: item.done, line: item.line, action: item.action, human: item.human }, { done: true, line: mergerNotRequired, action: null, human: false }, `${id} reads as passed and asks nothing`);
@@ -52,13 +52,14 @@ test('unit:setup-checklist-control-plane — the Setup checklist passes github-a
 
   for (const merger of ['github', null] as const) {
     const items = setupChecklist(bare(merger));
-    assert.deepEqual(items.map(item => item.id), control.map(item => item.id));
+    // GY-1833: the merger line is judged only once the plane reports a merger.
+    assert.deepEqual(items.map(item => item.id), control.map(item => item.id).filter(id => merger || id !== 'merger'));
     for (const id of notRequired) {
       const item = items.find(entry => entry.id === id)!;
       assert.equal(item.done, false, `${merger ?? 'no'} merger: ${id} is still required`);
       assert.notEqual(item.line, mergerNotRequired); assert.ok(item.action, `${id} still offers its action`);
     }
-    assert.deepEqual(setupChecklist(bare(merger), { merger: 'github' }), items);
+    assert.deepEqual(setupChecklist(bare(merger), { merger: 'github' }).filter(item => merger || item.id !== 'merger'), items);
   }
   const github = setupChecklist(bare('github'));
   assert.equal(github.find(item => item.id === 'github-app')!.line, 'Create the App that lets Graphyard work in your repository, then install it there.');
@@ -76,7 +77,7 @@ test('unit:setup-checklist-control-plane — doctor\'s setup-from-zero checks pr
   assert.equal(control.find(check => check.id === 'control-plane')!.status, 'pass', 'the plane itself is judged as before');
   for (const merger of ['github', null] as const) {
     const checks = await setupFromZeroChecks(input(merger));
-    assert.deepEqual(checks.map(check => check.id), control.map(check => check.id));
+    assert.deepEqual(checks.map(check => check.id), control.map(check => check.id).filter(id => merger || id !== 'merger'));
     assert.deepEqual(checks.filter(check => (notRequired as readonly string[]).includes(check.id)).map(check => [check.id, check.status]), notRequired.map(id => [id, 'fail']), `${merger ?? 'no'} merger: the three prerequisites are still required`);
     assert.match(setupLine(checks.find(check => check.id === 'github-app')!), /^FAIL github-app: the server reports no bound GitHub App \(fix: /);
   }

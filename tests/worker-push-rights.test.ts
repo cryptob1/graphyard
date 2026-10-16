@@ -15,6 +15,7 @@ import { blockerCommands, branchRestoration, buildMasterStatus, sessionHarnessPl
 import { parseLocalScopeDiff } from '../src/sync.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // GY-128: the recovery the control plane authorizes for an ejected or contaminated tip — reset
 // the assigned branch to the reviewed head, sync it onto the base, push — must be executable by
@@ -87,7 +88,7 @@ before(async () => {
   scratch = await temporaryDirectory('push-rights');
   database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, 'owner/push-rights');
   engine.principals = [operator, worker];
   http = server(engine, credentials, null);

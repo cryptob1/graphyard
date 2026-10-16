@@ -23,6 +23,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // GY-1522: the shadow merge gate trial-merges one submitted head per cycle beside GitHub's gate,
 // records the verdict, compares it with what GitHub then did, and writes nothing.
@@ -437,7 +438,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1522;
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('shadow-gate-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('shadow_gate_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/shadow_gate_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/shadow_gate_test`); await store.init(); await recordLegacyMerger(store);
   const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
@@ -657,7 +658,7 @@ test('unit:shadow-failing-files-from-runner — a trial verdict\'s failing files
       await writeFile(args[args.indexOf('--durations') + 1]!, records);
       throw Object.assign(new Error('Command failed'), { status: 1, stdout: printed, stderr: '' });
     };
-    const result = await runTrial({ root: scratch, base: join(scratch, `base-${records.length}`), mergeSha: sha('merge-1641'), changedFiles: ['tests/shadow-gate.test.ts'], timeoutMs: 60_000, key: 'GY-1641', run,
+    const result = await runTrial({ root: scratch, base: join(scratch, `base-${records.length}`), mergeSha: sha('merge-1641'), changedFiles: ['tests/shadow-gate.test.ts'], timeoutMs: 60_000, key: 'GY-1641', run, cores: 2,
       temporaryRoots: [await temporaryDirectory('roots', scratch)], probe: parityDurable, remove: removeCheckout });
     assert.deepEqual(result.tests, { passed: 1, failed: ['tests/shadow-gate.test.ts'], files: 2 }, `records ${JSON.stringify(records)}`);
     assert.deepEqual(result.groups?.map(group => group.failed), [['tests/shadow-gate.test.ts']]);

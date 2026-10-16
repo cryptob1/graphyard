@@ -8,6 +8,7 @@ import { Engine } from '../src/engine.js';
 import { classifyLeaseLapse, leaseLossAutoSettlement, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, standingEscalations, submittedEpoch, type Escalation, type Principal, type Work } from '../src/model.js';
 import { managedInstructions } from '../src/repository-setup.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // Each test is named for the proof it produces, so acceptance evidence maps to
 // one executed case per required proof.
@@ -26,7 +27,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_LEASE_LIFECYCLE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 13);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('lease-lifecycle'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, 'owner/project');
   engine.principals = [operator, worker, replacement];
 });

@@ -7,26 +7,26 @@ Only Graphyard writes to main.
 
 ## Flow
 
-1. **Head submission under a lease.** A worker submits a commit (`complete GY-N EPOCH --head SHA`); the lease ends in the same transaction.
+1. **Head submission under a lease:** `complete GY-N EPOCH --head SHA`; the lease ends in the same transaction.
 2. **One serial merge writer** records merge intent, then pushes the exact tested merge commit with the install's deploy key, leased on the tested tip; between them it trial-merges and runs build and fast tests on the merged tree.
 3. **Candidates every ~10 merges or 15 quiet minutes.** UAT serves it, E2E runs; the exact tested commit is promoted. On E2E failure the newest item related to the failing cases is reverted.
 4. **One independent reviewer per item.** Sensitive diffs get a blocking review before step 2; the rest a non-blocking review after merge.
 
 ## Merge writer
 
-Oldest head first, one in flight: `merge.intent`; trial on the merge commit (affected tests plus proof files; none without `scripts/ci-tests.mjs`, no build without `package.json`; failed probes are runner failures); `git push --force-with-lease` on the tested tip with `run.mergeWriter.deployKeyFile` (`~/.config/graphyard/<install>/deploy-key`) alone; `merge.pushed`; fetch; `merge.reconciled` delivers. A moved tip re-trials (`retrials`, 3); a push rejected on an unmoved tip waits; a failed trial reworks (`mergeWriter.reworks` until confirmed). Reconcile rule: an unpushed intent main's first parent holds delivers, else re-queues. `master status`: `mergeWriter.queue`.
+Oldest head first, one in flight: `merge.intent`; merge-commit trial (affected and proof tests; none without `scripts/ci-tests.mjs`, no build without `package.json`; failed probes: runner failures; host-sized, slot-declared shards; one retry on timeout, cancel or host failure; `merge.trial`: `outcome`, `phase`, `reason`, `phases`, `attempts`); `git push --force-with-lease` on the tested tip with `run.mergeWriter.deployKeyFile` alone; `merge.pushed`; fetch; `merge.reconciled` delivers. A moved tip re-trials (`retrials`, 3); an unmoved-tip rejection waits; a failed trial reworks (`mergeWriter.reworks` until confirmed). Reconcile rule: an unpushed intent main's first parent holds delivers, else re-queues. `master status`: `mergeWriter.queue`.
 
 ## Removed and kept
 
-Removed: GitHub Apps, branch protection, required checks, PR approval, the merge queue, plannedFiles and scope requests, sync-restore, proof-producer sessions, approver agents except for sensitive diffs, docs and module budgets.
+Removed: GitHub Apps, branch protection, required checks, PR approval, the merge queue, plannedFiles and scope requests, sync-restore, proof-producer sessions, approver agents outside sensitive diffs, docs and module budgets.
 
 Kept: leases and epochs, the transactional ledger, two risk lanes, UAT on a pinned commit.
 
 ## The merger setting
 
-`merger` selects the mode per install, `github` (default) or `control-plane`: an admin-only ledger event, never read from graphyard.json. `graphyard master merger [MODE --reason TEXT]`, `/api/status` `mergeWriter`, `GET`/`POST /api/merger` (admin, `reason`, `Idempotency-Key`). Under `control-plane` launches get no push credential or keyring proxy; an unreadable merger refuses launch. Setup and `doctor` pass `github-app`, `reviewer-app` and `branch-protection` as `not required (merger: control-plane)`; AGENTS.md says `complete GY-N EPOCH --head SHA`.
+`merger` selects the mode per install, `github` (legacy, upgrades keep it) or `control-plane` (default): an admin-only ledger event, never read from graphyard.json. `graphyard master merger [MODE --reason TEXT]`, `/api/status` `mergeWriter`, `GET`/`POST /api/merger` (admin, `reason`, `Idempotency-Key`). Under `control-plane` launches get no push credential or keyring proxy; an unreadable merger refuses launch. Setup and `doctor` pass `github-app`, `reviewer-app` and `branch-protection` as `not required (merger: control-plane)`; AGENTS.md says `complete GY-N EPOCH --head SHA`.
 
-`POST /api/work/:id/merge-record` (coordinator only, `Idempotency-Key`) appends one event per step (`intent`, `trial`, `pushed`, `reconciled`, `refused`); `pushed`/`reconciled` name the open intent's merge commit, `reconciled` one main holds, else 409.
+`POST /api/work/:id/merge-record` (coordinator only, `Idempotency-Key`) appends a step event (`intent`, `trial`, `pushed`, `reconciled`, `refused`); `pushed`/`reconciled` name the open intent's merge commit, `reconciled` one main holds, else 409.
 
 ## Rollout
 

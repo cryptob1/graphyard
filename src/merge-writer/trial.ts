@@ -1,14 +1,15 @@
 // Concern: the shadow gate's trial merge — the exact merge commit of a head onto main, and its build and affected tests in a credential-free checkout.
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
-import { constants, tmpdir } from 'node:os';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { availableParallelism, constants, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, verifyWorktreeRoot, type FilesystemProbe } from '../install/worktree-root.js';
 import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
 import { tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 import { failingSummary, trialCutLine } from './shadow.js';
+import type { HostMemoryReading } from '../master-resources.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
 export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
@@ -145,7 +146,29 @@ export const trialTemporaryVariables = (directory: string) => ({ TMPDIR: directo
  * null (or absent, from a trial stub) when no runner ran: a failed install or build, a failed
  * selection, or an empty one.
  */
-export interface TrialRun { build: 'pass' | 'fail'; tests: { passed: number; failed: string[]; files: number }; durationMs: number; logTail: string; runnerExit?: number | null; groups?: TrialGroup[] }
+export interface TrialRun {
+  build: 'pass' | 'fail'; tests: { passed: number; failed: string[]; files: number }; durationMs: number; logTail: string; runnerExit?: number | null; groups?: TrialGroup[];
+  /** How long each phase took (GY-1832), so the slow one is named; absent only from a trial stub. */
+  phases?: TrialPhaseDurations;
+  /** The attempts before this one that reached no verdict (GY-1832): a verdict on the retry carries the first attempt's outcome. */
+  retried?: TrialNoVerdict[];
+}
+/** A trial's phases, in order (GY-1832): the checkout and its install, the build, the test selection, the test run. */
+export const trialPhases = ['install', 'build', 'selection', 'tests'] as const;
+export type TrialPhase = typeof trialPhases[number];
+export type TrialPhaseDurations = Record<TrialPhase, number>;
+/**
+ * How a trial that reached no verdict ended (GY-1832): it outran its deadline, a runner child was
+ * cancelled from outside (`trialCancelSignals`), or the host failed it (a runner exit naming no
+ * test, a child the host could not start, a poisoned temporary root, a checkout that could not be
+ * made or removed). Each names the phase it was in and why, and none is pending.
+ */
+export type TrialNoVerdictOutcome = 'timeout' | 'cancelled' | 'host-failure';
+export interface TrialNoVerdict { outcome: TrialNoVerdictOutcome; phase: TrialPhase; reason: string; phases: TrialPhaseDurations }
+/** The signals that end a runner child as cancelled rather than failed: a stop, an interrupt or a hangup sent from outside the trial. */
+export const trialCancelSignals: readonly string[] = ['SIGTERM', 'SIGINT', 'SIGHUP'];
+/** How many times a trial that reached no verdict is tried again before its outcome is final (GY-1832). */
+export const trialRetries = 1;
 /** One runner process of a trial (GY-1548): the files it ran, how it ended, and the failing files its records or log named. */
 export interface TrialGroup { files: string[]; status: number | null; signal: string | null; failed: string[] }
 /** Whether a verdict's log tail is worth recording: the build did not pass, a test file failed, or the runner did not exit 0. */
@@ -156,12 +179,108 @@ export const trialNeedsLog = (run: Pick<TrialRun, 'build' | 'tests' | 'runnerExi
  * runner was killed with every file passing and the verdict named only tests/helpers/run-tests.ts.
  */
 export const trialTestGroupSize = 40;
-/** The groups a selection runs in: its own order, cut every `size` files, so every file runs once and a failing group is a short list. */
+/** The groups a selection runs in when a caller fixes the group size: its own order, cut every `size` files, so every file runs once and a failing group is a short list. */
 export function groupTestFiles(files: readonly string[], size = trialTestGroupSize): string[][] {
   const bound = Math.max(1, Math.floor(size)), groups: string[][] = [];
   for (let at = 0; at < files.length; at += bound) groups.push(files.slice(at, at + bound));
   return groups;
 }
+/** How many shards of a trial's tests run at once on a host with `cores` CPUs (GY-1832): half of them, never fewer than one, the rest left to the shards' own test files and the host. */
+export const trialShardLanes = (cores: number) => Math.max(1, Math.floor(cores / 2));
+/**
+ * The lanes a trial's shards run in and each runner's test concurrency (GY-1832): `trialShardLanes`
+ * lanes, never more than the shards, each at its share of the cores. A shard's own
+ * `--test-concurrency` overrides tests/helpers/run-tests.ts's memory-derived breadth, so where the
+ * host's memory is read the files in flight across every lane stay within `affordableFiles` (what
+ * that memory affords beyond its floor and recovery margin, `bytesPerSuiteFile` a file): fewer
+ * files per runner first, then fewer lanes, never below one of each. An unread host is sized by
+ * its cores alone.
+ */
+export function trialShardBreadth(cores: number, shards: number, affordableFiles: number | null = null): { lanes: number; breadth: number } {
+  let lanes = Math.max(1, Math.min(trialShardLanes(cores), shards));
+  let breadth = Math.max(1, Math.floor(cores / lanes));
+  if (affordableFiles !== null && Number.isFinite(affordableFiles)) {
+    const files = Math.max(1, Math.floor(affordableFiles));
+    lanes = Math.min(lanes, files);
+    breadth = Math.max(1, Math.min(breadth, Math.floor(files / lanes)));
+  }
+  return { lanes, breadth };
+}
+/**
+ * The files the host's memory affords a trial's shards at once (GY-1832), or null when it cannot be
+ * read: available memory less the floor and the recovery margin the loop defers launches at,
+ * `bytesPerSuiteFile` a file, less the files runs holding the host's verification slots under
+ * `slots` declared and may not yet have allocated — as tests/helpers/run-tests.ts's breadth
+ * deducts them, since the shards' environment carries no slot of their own.
+ */
+export async function trialAffordableFiles(read?: () => Promise<HostMemoryReading | null>, slots?: string): Promise<number | null> {
+  const resources = await import('../master-resources.js'), { bytesPerSuiteFile, othersDeclaredFiles } = await import('../master/verification-slots.js');
+  const reading = await (read ?? resources.readHostMemory)();
+  if (!reading) return null;
+  return Math.floor((reading.availableBytes - resources.hostMemoryFloor(reading.totalBytes) - resources.memoryRecoveryMarginBytes) / bytesPerSuiteFile) - (slots ? othersDeclaredFiles(slots) : 0);
+}
+/** The first slot index a trial declares at: past any bound a host hands out, so no run ever takes or waits on it. */
+export const trialDeclarationSlot = 1000;
+const trialLabel = 'merge trial';
+const running = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; } };
+/**
+ * Declare the shards' `files` on the host's verification slots under `directory` while they run
+ * (GY-1832), so a suite that starts after the trial's memory reading deducts them before they
+ * allocate, as it deducts a slot holder's: a `slot-N` entry from `trialDeclarationSlot` up, whose
+ * owner names the files, which no run takes or waits on, in a directory sessions' launches made. The returned release removes it; a trial
+ * entry whose pid no longer runs is removed by the next declaration. Best-effort: one that cannot
+ * be written leaves the trial as it was.
+ */
+export async function declareTrialFiles(directory: string, key: string, files: number, pid = process.pid, alive: (pid: number) => boolean = running): Promise<() => Promise<void>> {
+  if (!(files >= 1)) return async () => {};
+  try {
+    // Only where sessions' launches made the directory: a host with none runs no bounded suite to tell.
+    const names = await readdir(directory);
+    for (const name of names) {
+      const index = /^slot-(\d+)$/.exec(name)?.[1];
+      if (index === undefined || Number(index) < trialDeclarationSlot) continue;
+      const owner = await readFile(join(directory, name, 'owner.json'), 'utf8').then(text => JSON.parse(text) as { pid?: unknown; label?: unknown }, () => null);
+      if (owner && typeof owner.label === 'string' && owner.label.startsWith(trialLabel) && typeof owner.pid === 'number' && owner.pid !== pid && !alive(owner.pid))
+        await rm(join(directory, name), { recursive: true, force: true });
+    }
+    const writing = join(directory, `.taking-trial-${pid}-${randomUUID()}`);
+    await mkdir(writing);
+    await writeFile(join(writing, 'owner.json'), JSON.stringify({ pid, label: `${trialLabel} ${key}`, cwd: process.cwd(), at: new Date().toISOString(), files: Math.floor(files) }));
+    for (let slot = trialDeclarationSlot; slot < trialDeclarationSlot + 1000; slot++) {
+      const path = join(directory, `slot-${slot}`);
+      try { await rename(writing, path); }
+      catch (error) { if (['EEXIST', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) continue; break; }
+      return async () => { await rm(path, { recursive: true, force: true }).catch(() => {}); };
+    }
+    await rm(writing, { recursive: true, force: true });
+  } catch { /* the trial runs as it would have; only the budget sharing is lost */ }
+  return async () => {};
+}
+/**
+ * The shards a selection runs in (GY-1832): as many as the lanes, never more than the files, and
+ * never fewer than keep every shard within `size` files (one runner process per shard, so none
+ * outgrows the capture, GY-1548). Files go longest first, by the merge's own timing baseline
+ * (`durations`, tests/helpers/timing-baseline.json; a file it lacks counts as its median file),
+ * each onto the shard with the least time so far that has room, as CI's `--shard` does, and each
+ * shard keeps its files longest first. Every file runs once; the split is deterministic.
+ */
+export function shardTestFiles(files: readonly string[], lanes: number, durations: Readonly<Record<string, number>> = {}, size = trialTestGroupSize): string[][] {
+  const unique = [...new Set(files)], bound = Math.max(1, Math.floor(size));
+  if (!unique.length) return [];
+  const count = Math.min(unique.length, Math.max(Math.max(1, Math.floor(lanes)), Math.ceil(unique.length / bound)));
+  const known = Object.values(durations).filter(value => Number.isFinite(value)).sort((a, b) => a - b);
+  const fallback = known.length ? known[Math.floor(known.length / 2)]! : 1000, weight = (file: string) => Number.isFinite(durations[file]) ? durations[file]! : fallback;
+  const shards = Array.from({ length: count }, () => ({ files: [] as string[], durationMs: 0 }));
+  for (const file of unique.sort((a, b) => weight(b) - weight(a) || a.localeCompare(b))) {
+    const lightest = shards.filter(shard => shard.files.length < bound).reduce((best, shard) => shard.durationMs < best.durationMs ? shard : best);
+    lightest.files.push(file); lightest.durationMs += weight(file);
+  }
+  return shards.map(shard => shard.files).filter(shard => shard.length);
+}
+/** The merge's own timing baseline in its checkout, `{}` when it has none or it does not parse. */
+const checkoutDurations = (worktree: string): Promise<Record<string, number>> => readFile(join(worktree, 'tests/helpers/timing-baseline.json'), 'utf8')
+  .then(text => { const files = (JSON.parse(text) as { files?: unknown } | null)?.files; return files && typeof files === 'object' ? files as Record<string, number> : {}; })
+  .catch(() => ({}));
 /** How much of a failing runner child's output its diagnostic record keeps: enough to read the exit, little enough for one daemon action. */
 export const runnerDiagnosticTailLength = 1200;
 /**
@@ -184,7 +303,7 @@ export class TrialTimeoutError extends Error {
  * trial merge sha. The child ran under `trialEnvironment`, so the tail holds no credential.
  */
 export class TrialRunnerError extends Error {
-  constructor(readonly phase: 'install' | 'build' | 'tests', readonly status: number | null, readonly signal: string | null, readonly files: string[], readonly finished: number, readonly outputTail: string, readonly mergeSha: string, readonly durationMs: number) {
+  constructor(readonly phase: 'install' | 'build' | 'selection' | 'tests', readonly status: number | null, readonly signal: string | null, readonly files: string[], readonly finished: number, readonly outputTail: string, readonly mergeSha: string, readonly durationMs: number) {
     super(`The trial's ${phase} runner exited (${signal ? `signal ${signal}` : `status ${status ?? 'unknown'}`}) naming no failing test${files.length ? `; ${finished} of its ${files.length} file(s) finished` : ''}`);
     this.name = 'TrialRunnerError';
   }
@@ -228,8 +347,16 @@ export interface RunTrialInput {
   now?: () => number;
   /** Removes the trial checkout afterwards; the managed-root removal unless a test injects one. */
   remove?: typeof removeSessionCheckout;
-  /** The most files one runner process runs; `trialTestGroupSize` unless a test narrows it. */
+  /** The most files one runner process runs; `trialTestGroupSize` unless a test narrows it. A caller's own size cuts the selection in its order instead of sharding it by the timing baseline. */
   groupSize?: number;
+  /** The host's CPUs the shards are sized to (GY-1832); `availableParallelism()` unless a test names a count. */
+  cores?: number;
+  /** The host's memory the shards' files in flight are bounded by (GY-1832); `readHostMemory` unless a test names a reading. */
+  memory?: () => Promise<HostMemoryReading | null>;
+  /** How many times a trial that reached no verdict is tried again; `trialRetries` unless a test names another. */
+  retries?: number;
+  /** Called as each attempt starts, before it runs anything (GY-1832): a caller keeping attempt-scoped evidence starts it afresh. */
+  onAttempt?: (attempt: number) => void;
   /** Where the trial's temporary directory and short checkout may go; `trialTemporaryRoots()` unless a test names others. */
   temporaryRoots?: readonly string[];
   /** The free space a short checkout's root must have, and how it is measured: the managed worktree root's default and probe unless given. */
@@ -286,22 +413,73 @@ export function runnerRecords(text: string): { file: string; passed: boolean }[]
   });
 }
 
+/** What a failed attempt's error was, beyond its own fields: the phase it ended in and every phase's time so far (GY-1832). */
+const attemptContext = new WeakMap<object, { phase: TrialPhase; phases: TrialPhaseDurations; attempts?: TrialNoVerdict[] }>();
 /**
- * Check the merge commit out detached as a `trial` checkout (in a short directory beside the trial's
+ * The outcome of a trial attempt that rejected (GY-1832): a timeout, a cancelled runner child or a
+ * host failure, with the phase it was in, the reason and the phases' times. A runner child ended
+ * by `trialCancelSignals` is cancelled; every other rejection, whatever its class, is the host's.
+ */
+export function trialNoVerdict(error: unknown): TrialNoVerdict {
+  const context = typeof error === 'object' && error ? attemptContext.get(error) : undefined;
+  const phases = context?.phases ?? { install: 0, build: 0, selection: 0, tests: 0 }, reason = (error instanceof Error ? error.message : String(error)).slice(0, 900);
+  if (error instanceof TrialTimeoutError) return { outcome: 'timeout', phase: error.phase, reason, phases };
+  if (error instanceof TrialRunnerError) return { outcome: error.signal && trialCancelSignals.includes(error.signal) ? 'cancelled' : 'host-failure', phase: error.phase, reason, phases };
+  return { outcome: 'host-failure', phase: context?.phase ?? 'install', reason, phases };
+}
+/** Every attempt of a trial that ended with `error` and reached no verdict, oldest first (GY-1832); one entry for an error no retry wrapped. */
+export const trialAttempts = (error: unknown): TrialNoVerdict[] => (typeof error === 'object' && error ? attemptContext.get(error)?.attempts : undefined) ?? [trialNoVerdict(error)];
+
+/**
+ * The trial of a merge commit (`runTrialAttempt`), tried again once (`trialRetries`) when it
+ * reaches no verdict (GY-1832): a timeout, a cancelled runner child or a host failure measures the
+ * host, not the merge, so a fresh checkout and deadline get one more go. A verdict on the retry
+ * carries the first attempt's outcome as `retried`. When the retry reaches none either, it rejects
+ * with the last attempt's error, whose every attempt (`trialAttempts`) names its outcome, phase,
+ * reason and phase times, so the trial's record is that outcome and never left pending. A checkout
+ * that would not go after a verdict (TrialCleanupError with a verdict) is that verdict, not retried.
+ */
+export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
+  const attempts: TrialNoVerdict[] = [], retries = Math.max(0, Math.floor(input.retries ?? trialRetries));
+  for (let attempt = 0; ; attempt++) {
+    try {
+      input.onAttempt?.(attempt);
+      const verdict = await runTrialAttempt(input);
+      return attempts.length ? { ...verdict, retried: attempts } : verdict;
+    } catch (error) {
+      if (error instanceof TrialCleanupError && error.verdict) { if (attempts.length) error.verdict.retried = attempts; throw error; }
+      attempts.push(trialNoVerdict(error));
+      if (attempt >= retries) {
+        if (typeof error === 'object' && error) attemptContext.set(error, { ...(attemptContext.get(error) ?? { phase: attempts.at(-1)!.phase, phases: attempts.at(-1)!.phases }), attempts });
+        throw error;
+      }
+    }
+  }
+}
+
+/**
+ * One attempt of a trial. Check the merge commit out detached as a `trial` checkout (in a short directory beside the trial's
  * temporary one when a clean root is found), run `npm run build`, then the affected
  * pre-merge selection of scripts/ci-tests.mjs through tests/helpers/run-tests.ts, all under one
  * deadline and `trialEnvironment` with the trial's own empty temporary directory. The runner
  * always gets a selected file list, so a full selection runs every pre-merge file and never the
  * release-candidate suites, and the verdict counts the files that ran. The selection runs in
- * groups of at most `trialTestGroupSize` files, each its own runner process over the same
- * checkout, so a full selection never fills one process; the verdict's failing files are the union the groups' records name, and `groups`
- * says how each process ended. The checkout is removed afterwards, pass or fail; a removal that
- * fails rejects with TrialCleanupError carrying the verdict. Past the deadline it rejects with
- * TrialTimeoutError, and a runner that ends naming no failing test with TrialRunnerError: neither
- * is a verdict against the merge.
+ * parallel shards sized to the host (GY-1832, `shardTestFiles`: `trialShardLanes(cores)` at once,
+ * none over `trialTestGroupSize` files), each its own runner process over the same checkout at a
+ * test concurrency of its share of the cores, and with the files in flight across them within what
+ * the host's memory affords (`trialShardBreadth`), so they stay near one process's;
+ * the verdict's failing files are the union the shards' records name, and `groups` says how each
+ * process ended, in shard order. Each phase's time is recorded (`phases`). The checkout is removed
+ * afterwards, pass or fail; a removal that fails rejects with TrialCleanupError carrying the
+ * verdict. Past the deadline it rejects with TrialTimeoutError, and a runner that ends naming no
+ * failing test with TrialRunnerError: neither is a verdict against the merge.
  */
-export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
+export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   const run = input.run ?? defaultChildRun, now = input.now ?? Date.now, startedAt = now(), deadline = startedAt + input.timeoutMs;
+  const phases: TrialPhaseDurations = { install: 0, build: 0, selection: 0, tests: 0 };
+  let phase: TrialPhase = 'install', phaseAt = startedAt;
+  /** Closes the running phase's time and opens `next`'s; with no `next`, answers every phase's time so far. */
+  const enter = (next: TrialPhase = phase) => { const at = now(); phases[phase] += Math.max(0, at - phaseAt); phase = next; phaseAt = at; return { ...phases }; };
   const checkout = await allocateSessionCheckout(input.base, 'trial', input.key ?? 'trial', input.mergeSha, randomUUID());
   // A fresh, empty temporary directory made for this trial alone, and a short one its checkout goes in on a durable root
   // with room (else the session directory's checkout), each removed with the session and marked as this process's so a
@@ -322,6 +500,7 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
   catch (error) {
     for (const made of [temporary, place]) if (made) await clear(made).catch(() => {});
     await (input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run).catch(() => {});
+    if (typeof error === 'object' && error) attemptContext.set(error, { phase, phases: enter() });
     throw error;
   }
   const env = { ...trialEnvironment(input.environment), ...trialTemporaryVariables(temporary) };
@@ -359,17 +538,19 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
     }
     return { ok: false, out, status, signal, cause: failed.cause };
   };
-  const child = async (phase: TrialTimeoutError['phase'], command: string, args: string[], options: { env?: NodeJS.ProcessEnv } = {}): Promise<Ended> => {
+  // A shard's output goes to its own `entries` while the shards run, so the log keeps shard order whichever finishes first.
+  const child = async (phase: TrialTimeoutError['phase'], command: string, args: string[], options: { env?: NodeJS.ProcessEnv; entries?: string[] } = {}): Promise<Ended> => {
+    const entries = options.entries ?? log;
     let out: string;
     try { out = String(await run(command, args, { cwd: worktree, env: (options.env ?? env) as Record<string, string>, timeoutMs: remaining() })); }
     catch (error) {
       const out = output(error);
       const ended = endedOf(error, out);
-      log.push(`$ ${command} ${args.join(' ')}\n${out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`);
+      entries.push(`$ ${command} ${args.join(' ')}\n${out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`);
       if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError(phase, Math.max(0, now() - startedAt), tail());
       return ended;
     }
-    log.push(`$ ${command} ${args.join(' ')}\n${out}`);
+    entries.push(`$ ${command} ${args.join(' ')}\n${out}`);
     if (now() >= deadline) throw new TrialTimeoutError(phase, Math.max(0, now() - startedAt), tail());
     return { ok: true, out, status: 0, signal: null, cause: undefined };
   };
@@ -377,7 +558,7 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
   const hostEnded = (ended: Ended) => !ended.ok && (ended.signal !== null || ended.cause !== undefined);
   const runnerFailure = (phase: TrialRunnerError['phase'], ended: Ended, files: string[] = [], finished = 0) =>
     new TrialRunnerError(phase, ended.status, ended.signal, files, finished, `${ended.out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`.slice(-runnerDiagnosticTailLength), input.mergeSha, Math.max(0, now() - startedAt));
-  const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[], logTail = tail()): TrialRun => ({ build, tests, durationMs: Math.max(0, now() - startedAt), logTail, runnerExit, ...(groups ? { groups } : {}) });
+  const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[], logTail = tail()): TrialRun => ({ build, tests, durationMs: Math.max(0, now() - startedAt), logTail, runnerExit, ...(groups ? { groups } : {}), phases: enter() });
   const listed = (out: string) => out.split('\n').map(line => line.trim()).filter(line => testFileLine.test(line));
   const trial = async (): Promise<TrialRun> => {
     try {
@@ -411,45 +592,72 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
           if (hostEnded(installed)) throw runnerFailure('install', installed);
           if (!installed.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
         }
-        const scripts = await readFile(join(worktree, 'package.json'), 'utf8').then(text => JSON.parse(text)?.scripts, () => undefined);
-        // An unreadable package.json builds as before; only one that declares no build script skips it.
+        const manifest = await readFile(join(worktree, 'package.json'), 'utf8').catch(() => undefined);
+        // An unreadable package.json builds as before; one the merge broke is its failed build, never the host's (PRRT_kwDOUZby-s6tZsNG); only one that declares no build script skips it.
+        let scripts: { build?: unknown } | undefined;
+        try { scripts = manifest === undefined ? undefined : JSON.parse(manifest)?.scripts; } catch { enter('build'); return finish('fail', { passed: 0, failed: [], files: 0 }); }
         if (scripts === undefined || scripts?.build) {
+          enter('build');
           const built = await child('build', 'npm', ['run', 'build']);
           if (hostEnded(built)) throw runnerFailure('build', built);
           if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
         }
       }
       if (!await holds('scripts/ci-tests.mjs')) return finish('pass', { passed: 0, failed: [], files: 0 });
+      enter('selection');
+      // A selection child the host killed or could not start is no verdict (GY-1832); only one that exits non-zero fails the selection.
       const selection = await child('selection', 'node', ['scripts/ci-tests.mjs', 'affected', ...input.changedFiles]);
+      if (hostEnded(selection)) throw runnerFailure('selection', selection);
       if (!selection.ok) return finish('pass', { passed: 0, failed: ['scripts/ci-tests.mjs affected'], files: 0 });
       let files = listed(selection.out);
       // A merge whose own ci-tests predates GY-1522 lists no files for a full selection; `select` outside Actions lists exactly the pre-merge suite.
       if (!files.length && /^full:/.test(selection.out.trimStart())) {
         const full = await child('selection', 'node', ['scripts/ci-tests.mjs', 'select']);
+        if (hostEnded(full)) throw runnerFailure('selection', full);
         if (!full.ok) return finish('pass', { passed: 0, failed: ['scripts/ci-tests.mjs select'], files: 0 });
         files = listed(full.out);
       }
       // An affected selection of nothing runs nothing.
       if (!files.length) return finish('pass', { passed: 0, failed: [], files: 0 });
-      // Each group is one runner process over the same checkout. Failing per-file records decide which
-      // files failed; the human-readable log is read when those records name none — including a
-      // partial-record run that finished some files and printed a named failure for another (GY-1548).
-      // A group that ends non-zero naming no failing file is a runner failure, unless another group
-      // named one: a named failing test is the merge's, and stays a failing verdict.
-      const groups: TrialGroup[] = [], failingOutput: string[] = [];
-      let unattributed: TrialRunnerError | null = null;
-      for (const [index, group] of groupTestFiles(files, input.groupSize).entries()) {
-        const list = join(checkout.directory, `tests-${index + 1}.txt`), records = join(checkout.directory, `tests-${index + 1}.jsonl`);
-        await writeFile(list, `${group.join('\n')}\n`);
-        const tests = await child('tests', 'node', ['--import', 'tsx', 'tests/helpers/run-tests.ts', '--files-from', list, '--durations', records]);
-        const recorded = runnerRecords(await readFile(records, 'utf8').catch(() => ''));
-        // Only the group's own files count: the records and the log may name a file a test ran or printed itself (GY-1645).
-        const namedByRecords = recorded.filter(record => !record.passed && group.includes(record.file)).map(record => record.file);
-        const failing = [...new Set(namedByRecords.length ? namedByRecords : tests.ok ? [] : failingFilesInLog(tests.out, group))];
-        groups.push({ files: group, status: tests.status, signal: tests.signal, failed: failing });
-        if (failing.length) failingOutput.push(log.at(-1)!);
-        if (!tests.ok && !failing.length) unattributed ??= runnerFailure('tests', tests, group, recorded.filter(record => group.includes(record.file)).length);
-      }
+      enter('tests');
+      // Each shard is one runner process over the same checkout, `lanes` of them at once. Failing per-file
+      // records decide which files failed; the human-readable log is read when those records name none —
+      // including a partial-record run that finished some files and printed a named failure for another
+      // (GY-1548). A shard that ends non-zero naming no failing file is a runner failure, unless another
+      // shard named one: a named failing test is the merge's, and stays a failing verdict.
+      const cores = Math.max(1, Math.floor(input.cores ?? availableParallelism()));
+      const shards = input.groupSize === undefined ? shardTestFiles(files, trialShardLanes(cores), await checkoutDurations(worktree)) : groupTestFiles(files, input.groupSize);
+      const slotsDirectory = (await import('../master/verification-slots.js')).verificationSlotsDirectory(input.base);
+      const { lanes, breadth } = trialShardBreadth(cores, shards.length, await trialAffordableFiles(input.memory, slotsDirectory));
+      const settledShards: ({ group: TrialGroup; entries: string[]; unattributed: TrialRunnerError | null } | undefined)[] = [];
+      let next = 0, stopped: unknown = null;
+      const lane = async () => {
+        // A lane takes the next shard until none is left or another lane's shard ended the trial; a running shard is always awaited, never orphaned.
+        while (stopped === null && next < shards.length) {
+          const index = next++, group = shards[index]!, entries: string[] = [];
+          try {
+            const list = join(checkout.directory, `tests-${index + 1}.txt`), records = join(checkout.directory, `tests-${index + 1}.jsonl`);
+            await writeFile(list, `${group.join('\n')}\n`);
+            const tests = await child('tests', 'node', ['--import', 'tsx', 'tests/helpers/run-tests.ts', '--files-from', list, '--durations', records, `--test-concurrency=${breadth}`], { entries });
+            const recorded = runnerRecords(await readFile(records, 'utf8').catch(() => ''));
+            // Only the shard's own files count: the records and the log may name a file a test ran or printed itself (GY-1645).
+            const namedByRecords = recorded.filter(record => !record.passed && group.includes(record.file)).map(record => record.file);
+            const failing = [...new Set(namedByRecords.length ? namedByRecords : tests.ok ? [] : failingFilesInLog(tests.out, group))];
+            settledShards[index] = { group: { files: group, status: tests.status, signal: tests.signal, failed: failing }, entries,
+              unattributed: !tests.ok && !failing.length ? runnerFailure('tests', tests, group, recorded.filter(record => group.includes(record.file)).length) : null };
+          } catch (error) { log.push(...entries); stopped ??= error; }
+        }
+      };
+      // The shards' files stay declared on the host's verification slots until every shard stops, so a suite that starts meanwhile deducts them before they allocate.
+      const release = await declareTrialFiles(slotsDirectory, input.key ?? input.mergeSha.slice(0, 12), lanes * breadth);
+      try { await Promise.all(Array.from({ length: lanes }, lane)); } finally { await release(); }
+      const ran = settledShards.filter(shard => shard !== undefined);
+      for (const shard of ran) log.push(...shard.entries);
+      // A shard past the deadline ends the trial as a timeout once every shard has stopped, its log holding what the others printed.
+      if (stopped instanceof TrialTimeoutError) throw new TrialTimeoutError('tests', Math.max(0, now() - startedAt), tail());
+      if (stopped !== null) throw stopped;
+      const groups = ran.map(shard => shard.group), failingOutput = ran.filter(shard => shard.group.failed.length).map(shard => shard.entries.at(-1)!);
+      const unattributed = ran.find(shard => shard.unattributed)?.unattributed ?? null;
       const failed = [...new Set(groups.flatMap(group => group.failed))];
       if (!failed.length && unattributed) throw unattributed;
       const worst = groups.find(group => group.status !== 0);
@@ -458,15 +666,18 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
     } catch (error) {
       if (error instanceof TrialTimeoutError || error instanceof TrialRunnerError) throw error;
       log.push(`trial checkout failed: ${error instanceof Error ? error.message : String(error)}`);
-      if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError('install', Math.max(0, now() - startedAt), tail());
-      return finish('fail', { passed: 0, failed: [], files: 0 });
+      if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError(phase, Math.max(0, now() - startedAt), tail());
+      // A checkout git could not make, a list or link the host could not write: the host's failure, not the merge's (GY-1832), so no verdict.
+      throw error;
     }
   };
   // The checkout goes whatever the trial did; a removal that fails is reported, never swallowed.
   let settled: { verdict: TrialRun } | { error: unknown };
   try { settled = { verdict: await trial() }; } catch (error) { settled = { error }; }
+  // An attempt that reached no verdict keeps the phase it ended in and every phase's time (GY-1832).
+  if ('error' in settled && typeof settled.error === 'object' && settled.error) attemptContext.set(settled.error, { phase, phases: enter() });
   // A root that was clean when chosen and is not now may have shadowed the trial's lookups: whatever it answered is no verdict.
-  if (guarded && lookupPoisoned(guarded)) settled = { error: new TrialEnvironmentError(guarded) };
+  if (guarded && lookupPoisoned(guarded)) { settled = { error: new TrialEnvironmentError(guarded) }; attemptContext.set(settled.error as object, { phase, phases: enter() }); }
   // The temporary directory goes with it: a failure to remove any is the cleanup's, naming the directory, and none stops the others.
   // The short checkout's files go first, so the session's removal prunes its registration in the repository.
   const failures: { directory: string; cause: unknown }[] = [];
@@ -475,7 +686,9 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
   const failure = failures[0];
   if (failure) {
     const outcome = 'verdict' in settled ? `the trial itself answered build ${settled.verdict.build}, ${settled.verdict.tests.failed.length} failing test file(s)` : `the trial itself failed: ${settled.error instanceof Error ? settled.error.message : String(settled.error)}`;
-    throw new TrialCleanupError(failure.directory, 'verdict' in settled ? settled.verdict : null, failure.cause, outcome);
+    const cleanup = new TrialCleanupError(failure.directory, 'verdict' in settled ? settled.verdict : null, failure.cause, outcome);
+    attemptContext.set(cleanup, { phase, phases: enter() });
+    throw cleanup;
   }
   if ('error' in settled) throw settled.error;
   return settled.verdict;

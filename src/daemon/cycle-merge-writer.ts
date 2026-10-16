@@ -83,8 +83,9 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
     },
     trial: async (mergeSha, files, item) => {
       const proofs = criterionProofs(item);
-      const proofFiles = await proofTestFiles(run, root, mergeSha, proofs);
-      return (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, proofFiles, timeoutMs: shadow.timeoutMinutes * 60_000, key: item.key, run, environment: options.environment });
+      // Discovered inside each retried attempt (GY-1832), so a git grep that fails or times out is timed and retried like the trial's other reads.
+      const discoverProofFiles = (runOptions: { timeoutMs?: number }) => proofTestFiles(run, root, mergeSha, proofs, runOptions);
+      return (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, proofFiles: [], discoverProofFiles, timeoutMs: shadow.timeoutMinutes * 60_000, key: item.key, run, environment: options.environment });
     },
     // GY-1718: a repository naming a static UAT previews every passing trial whose delta is more than docs or tests.
     preview: async (mergeSha, files) => {

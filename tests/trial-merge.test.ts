@@ -326,7 +326,7 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
   assert.deepEqual(readdirSync(clean), [], 'and nothing of the trials is left in the clean root');
   if (usable) {
     // A root that gains a package.json while the trial runs may have shadowed its lookups: no verdict, every directory removed.
-    const poisoning = await trial({ 'tests/a.test.ts': 'x\n', 'poison-root': '' }, ['tests/a.test.ts'], 'poisons its root');
+    const poisoning = await trial({ 'tests/a.test.ts': 'x\n', 'poison-root': '' }, ['tests/a.test.ts'], 'poisons its root', { retries: 0 });
     await assert.rejects(poisoning.run(), (error: unknown) => error instanceof TrialEnvironmentError && error.root === clean && /gained a node_modules, \.git or package\.json/.test(error.message));
     assert.deepEqual(readdirSync(clean), ['package.json'], 'its directories are removed all the same');
     rmSync(join(clean, 'package.json'));
@@ -434,19 +434,19 @@ test('integration:shadow-trial-failure-diagnostics — a runner that exits non-z
   const repo = await fixture();
   // A named failing test file: the merge's, so a failing verdict, with how the runner ended beside it.
   const named = repo.commitOnBase({ 'tests/bad.test.ts': 'x\n', 'tests/ok.test.ts': 'x\n' }, 'named failure');
-  const verdict = await runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, named), changedFiles: ['tests/bad.test.ts', 'tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-9', environment: planted });
+  const verdict = await runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, named), changedFiles: ['tests/bad.test.ts', 'tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-9', cores: 2, environment: planted });
   assert.deepEqual([verdict.build, verdict.tests, verdict.runnerExit], ['pass', { passed: 1, failed: ['tests/bad.test.ts'], files: 2 }, 1], verdict.logTail);
   assert.deepEqual(verdict.groups, [{ files: ['tests/bad.test.ts', 'tests/ok.test.ts'], status: 1, signal: null, failed: ['tests/bad.test.ts'] }], 'the group record names the failing file and the exit status');
   assert.ok(trialNeedsLog(verdict));
   // A partial-record run: one file finished (passing record), another printed a named failure without a completion record — still the merge's failing verdict, never a runner retry.
   const partial = repo.commitOnBase({ 'tests/ok.test.ts': 'x\n', 'tests/partial.test.ts': 'x\n' }, 'partial records');
-  const partialVerdict = await runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, partial), changedFiles: ['tests/ok.test.ts', 'tests/partial.test.ts'], timeoutMs: 120_000, key: 'GY-9', environment: planted });
+  const partialVerdict = await runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, partial), changedFiles: ['tests/ok.test.ts', 'tests/partial.test.ts'], timeoutMs: 120_000, key: 'GY-9', cores: 2, environment: planted });
   assert.deepEqual([partialVerdict.build, partialVerdict.tests, partialVerdict.runnerExit], ['pass', { passed: 1, failed: ['tests/partial.test.ts'], files: 2 }, 1], partialVerdict.logTail);
   assert.deepEqual(partialVerdict.groups, [{ files: ['tests/ok.test.ts', 'tests/partial.test.ts'], status: 1, signal: null, failed: ['tests/partial.test.ts'] }], 'the log names the failing file when records do not');
   // A runner that exits 3 after every file passed, records and all: no test is named, so no verdict; the record says how it ended and holds no credential.
   const crashed = repo.commitOnBase({ 'tests/crash.test.ts': 'x\n', 'tests/ok.test.ts': 'x\n' }, 'runner exit');
   const crashedMerge = await mergeOf(repo, crashed), crashedBase = await temporaryDirectory('trial-merge-root', tmpdir());
-  await assert.rejects(runTrial({ root: repo.root, base: crashedBase, mergeSha: crashedMerge, changedFiles: ['tests/crash.test.ts', 'tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-9', environment: planted }), (error: unknown) => {
+  await assert.rejects(runTrial({ root: repo.root, base: crashedBase, mergeSha: crashedMerge, changedFiles: ['tests/crash.test.ts', 'tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-9', cores: 2, environment: planted }), (error: unknown) => {
     assert.ok(error instanceof TrialRunnerError, String(error));
     assert.deepEqual([error.phase, error.status, error.signal, error.files, error.finished, error.mergeSha], ['tests', 3, null, ['tests/crash.test.ts', 'tests/ok.test.ts'], 2, crashedMerge]);
     assert.match(error.message, /tests runner exited \(status 3\) naming no failing test; 2 of its 2 file\(s\) finished/);
@@ -459,24 +459,24 @@ test('integration:shadow-trial-failure-diagnostics — a runner that exits non-z
   assert.equal(existsSync(crashedBase) ? readdirSync(crashedBase).length : 0, 0, 'the trial checkout is removed after a runner failure');
   // A signal that ends the runner, as the output cap or the OOM killer does, is the same: the signal is recorded, not a status.
   const killed = repo.commitOnBase({ 'tests/killed.test.ts': 'x\n' }, 'runner killed');
-  await assert.rejects(runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, killed), changedFiles: ['tests/killed.test.ts'], timeoutMs: 120_000, key: 'GY-9', environment: planted }),
+  await assert.rejects(runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, killed), changedFiles: ['tests/killed.test.ts'], timeoutMs: 120_000, key: 'GY-9', cores: 2, environment: planted }),
     (error: unknown) => error instanceof TrialRunnerError && error.phase === 'tests' && error.status === null && error.signal === 'SIGKILL' && error.outputTail.includes('[exit signal SIGKILL]') && error.files.length === 1);
   // A build child a signal ended measures the host too; npm often reports that as status 137 with no signal field — still a runner failure. One that exits non-zero without a signal is still the merge's failed build.
   const buildKilled = repo.commitOnBase({ 'kill-build': '', 'tests/ok.test.ts': 'x\n' }, 'build killed');
-  await assert.rejects(runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, buildKilled), changedFiles: ['tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-9', environment: planted }),
+  await assert.rejects(runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, buildKilled), changedFiles: ['tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-9', cores: 2, environment: planted }),
     (error: unknown) => error instanceof TrialRunnerError && error.phase === 'build' && error.signal === 'SIGKILL' && error.files.length === 0 && error.outputTail.includes('build killed'));
   const npmReportsKill = ((command: string, args: string[], options: unknown) => {
     if (command === 'npm' && args[0] === 'run') throw Object.assign(new Error('Command failed: npm run build'), { status: 137, signal: null, stdout: '', stderr: 'build killed\n' });
     return defaultChildRun(command, args, options as never);
   }) as never;
-  await assert.rejects(runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, buildKilled), changedFiles: ['tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-9', environment: planted, run: npmReportsKill }),
+  await assert.rejects(runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, buildKilled), changedFiles: ['tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-9', cores: 2, environment: planted, run: npmReportsKill }),
     (error: unknown) => error instanceof TrialRunnerError && error.phase === 'build' && error.signal === 'SIGKILL' && error.status === null && error.outputTail.includes('build killed'));
   const buildBroken = repo.commitOnBase({ 'break-build': '', 'tests/ok.test.ts': 'x\n' }, 'build broken');
-  assert.equal((await runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, buildBroken), changedFiles: ['tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-9', environment: planted })).build, 'fail');
+  assert.equal((await runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, buildBroken), changedFiles: ['tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-9', cores: 2, environment: planted })).build, 'fail');
 
   // The loop's record of the runner exit, through the shadow step over this repository: against head, base tip and trial merge sha, with the exit and the tail.
   const run = ((command: string, args: string[], options: unknown) => command === 'git' && args[2] === 'fetch' ? '' : defaultChildRun(command, args, options as never)) as never;
-  const reads = shadowReads(config, repo.root, run, { base: await temporaryDirectory('trial-merge-root', tmpdir()), record: async () => { assert.fail('a runner failure records no verdict'); } });
+  const reads = shadowReads(config, repo.root, run, { base: await temporaryDirectory('trial-merge-root', tmpdir()), record: async () => { assert.fail('a runner failure records no verdict'); }, trial: input => runTrial({ ...input, cores: 2 }) });
   const work = [{ id: 'w1', key: 'GY-1548', description: '', type: 'bug', priority: 1, dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, plannedFiles: [], revision: 1, policyRevision: 1,
     createdAt: iso(start), updatedAt: iso(start), stageEnteredAt: iso(start), ready: true, epoch: 1, lease: null, workspaces: [], submission: { epoch: 1, pr: 1 }, candidate: { sha: crashed, baseSha: repo.base, pr: 1, branch: 'graphyard/gy-1548-1', author: 'w' },
     reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], gates: [], stage: 'build' }] as unknown as Work[];
@@ -504,7 +504,7 @@ test('integration:trial-run-build-and-tests — the trial reads package.json and
   const repo = await fixture();
   // A merge that holds neither file installs, builds and selects nothing: a passing trial of no tests.
   const bare = gitIn(repo.root, 'commit-tree', '4b825dc642cb6eb9a060e54bf8d69288fbee4904', '-m', 'a merge of no Node package');
-  const absent = await runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: bare, changedFiles: ['README.md'], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! } });
+  const absent = await runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: bare, changedFiles: ['README.md'], timeoutMs: 120_000, key: 'GY-9', cores: 2, environment: { PATH: process.env.PATH! } });
   assert.equal(absent.build, 'pass'); assert.deepEqual(absent.tests, { passed: 0, failed: [], files: 0 });
   // A probe that fails — an object store git cannot read — rejects as a runner failure naming the path, and the checkout still goes.
   const head = repo.commitOnBase({ 'tests/bad.test.ts': 'x\n' }, 'head with a failing test');
@@ -513,7 +513,7 @@ test('integration:trial-run-build-and-tests — the trial reads package.json and
     return defaultChildRun(command, args, options as never);
   }) as never;
   const base = await temporaryDirectory('trial-merge-root', tmpdir());
-  await assert.rejects(runTrial({ root: repo.root, base, mergeSha: await mergeOf(repo, head), changedFiles: ['tests/bad.test.ts'], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, run: unreadable }),
+  await assert.rejects(runTrial({ root: repo.root, base, mergeSha: await mergeOf(repo, head), changedFiles: ['tests/bad.test.ts'], timeoutMs: 120_000, key: 'GY-9', cores: 2, environment: { PATH: process.env.PATH! }, run: unreadable }),
     (error: unknown) => error instanceof TrialRunnerError && error.phase === 'install' && error.status === 128 && /unable to read tree/.test(error.outputTail) && /could not read package\.json/.test(error.outputTail));
   assert.equal(existsSync(base) ? readdirSync(base).length : 0, 0, 'the trial checkout is removed after a probe failure');
 });

@@ -55,6 +55,8 @@ interface World {
   onboardingPullRequest: string | null; onboardingMerged: boolean;
   /** The Hetzner server's monthly price is shown but not yet confirmed. */
   priceUnconfirmed: boolean;
+  /** GY-1833: the merger the plane records, and the credential each `master merger` ran with; unrecorded when undefined. */
+  merger?: string; mergerTokens?: (string | null)[];
   /** The plan's Apps still to create in a browser (GY-1442); absent from the plan when undefined. */
   browserApps?: string[];
   /** Turns an install waits on its App page before it pauses (exit 1, resumable); 10,000 when undefined. */
@@ -74,6 +76,7 @@ const status = (w: World) => w.installed ? {
   reviewerApps: w.reviewer ? [{ id: 'claude', appId: 9 }] : [],
   fleet: w.accounts ? { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] } : { roles: [], accounts: [] },
   setup: { protection: w.app ? 'checks' : 'off', loop: w.loop },
+  ...(w.merger ? { mergeWriter: { merger: w.merger } } : {}),
 } : null;
 
 function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<UpDependencies> = {}): UpDependencies {
@@ -99,6 +102,7 @@ function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<
       const joined = args.join(' ');
       if (args[0] === 'goal') w.creates.push(options.env?.GRAPHYARD_REQUEST_ID ?? null);
       for (const prefix of w.failOnce) if (joined.startsWith(prefix)) { w.failOnce.delete(prefix); return { code: 1, stdout: '{"error":"interrupted"}' }; }
+      if (args[0] === 'master' && args[1] === 'merger') { (w.mergerTokens ??= []).push(options.env?.GRAPHYARD_TOKEN ?? null); w.merger = args[2]; }
       if (args[0] === 'install' && args.includes('--plan')) {
         return { code: 0, stdout: JSON.stringify({ installId: 'acme-shop', installDirectory: '/install/acme-shop', ...(w.browserApps ? { browserApps: w.browserApps } : {}), ...(w.host ? { host: { units: [] } } : {}), principals: [{ id: 'acme-shop-operator', role: 'admin', sessionKind: 'human' }, { id: 'acme-shop-master', role: 'coordinator', sessionKind: 'ai' }],
           preflight: [{ name: 'GitHub CLI', ok: true }, ...(w.priceUnconfirmed && !args.includes('--confirm-price') ? [{ name: 'Monthly price', ok: false, detail: 'cx33 (8 GB) at fsn1: 6.49 EUR/month; not confirmed, so nothing will be created' }] : []), ...(w.herdrElsewhere && !args.includes('--no-herdr') && !args.includes('--herdr-instance') ? [{ name: 'Herdr plugin', ok: false, detail: 'bound to https://other.example' }] : [])] }) };
@@ -132,11 +136,11 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
   const result = await runUp(request(), dependencies(fresh, root, events));
   assert.equal(result.exitCode, 0, result.next);
   assert.deepEqual(result.completed, ['preflight', 'control-plane', 'host-supervisor', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop']);
-  assert.deepEqual(fresh.calls.map(args => args.slice(0, 2).join(' ')), ['install --provider', 'install --provider', 'master init', 'master autonomy', 'init --scan', 'init --scan', 'publish-onboarding', 'master registry', 'master harness', 'master restart', 'onboarding-merged?', 'onboarding-merged?'], 'preflight, control plane, host supervisor, master identities, onboarding (applied, then published), accounts, harness, master loop, in order; then the onboarding pull request merges');
+  assert.deepEqual(fresh.calls.map(args => args.slice(0, 2).join(' ')), ['install --provider', 'install --provider', 'master init', 'master merger', 'master autonomy', 'init --scan', 'init --scan', 'publish-onboarding', 'master registry', 'master harness', 'master restart', 'onboarding-merged?', 'onboarding-merged?'], 'preflight, control plane, host supervisor, master identities, onboarding (applied, then published), accounts, harness, master loop, in order; then the onboarding pull request merges');
   // Onboarding is done only once its files are published: init --scan --apply writes them to this checkout alone.
   assert.ok(events.some(event => event.kind === 'step' && event.step === 'onboarding' && event.state === 'done' && /published in https:\/\/github\.com\/acme\/shop\/pull\/1/.test(event.detail ?? '')));
   assert.ok(events.some(event => event.kind === 'note' && /onboarding pull request .* to merge/.test(event.text)), 'it says what it waits on');
-  assert.ok(result.checklist.every(item => item.done), 'the checklist is green');
+  assert.ok(result.checklist.every(item => item.done || item.id === 'merger'), 'the checklist is green but for the legacy merger line (GY-1833)');
   const waits = events.filter(event => event.kind === 'waiting');
   assert.equal(waits.length, 1, 'the Setup address is printed once for the whole run');
   assert.equal(result.prompts, 1);
@@ -195,6 +199,9 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
   assert.ok(!JSON.stringify(hosted).includes(HOST_SECRET) && !hostEvents.some(event => JSON.stringify(event).includes(HOST_SECRET)), 'and no token value appears in the summary or any printed line');
   // GY-1479: the host install provisioned the master's identities on the host, where the admin credential stays; up runs no local autonomy.
   assert.ok(!host.calls.some(args => args[1] === 'autonomy'), 'no local master autonomy for a host install');
+  // GY-1833: the legacy github merger is recorded with that same in-memory credential, so the plane never reads control-plane.
+  assert.equal(host.merger, 'github');
+  assert.deepEqual(host.mergerTokens, [HOST_SECRET]);
   const identities = hostEvents.find(event => event.kind === 'step' && event.step === 'master-autonomy' && event.state === 'done') as { detail?: string } | undefined;
   assert.match(identities?.detail ?? '', /provisioned on graphyard-acme-shop, where its loop runs/);
   assert.deepEqual(requestedView(`#claim=${CODE}&setup`), { view: 'setup', hash: `#claim=${CODE}` });
@@ -226,7 +233,7 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
   assert.match(unconfirmed.next, /operator's consent to its price: cx33 .*6\.49 EUR\/month.*--confirm-price PRICE \(or --max-monthly N\); nothing has been created/);
   assert.equal(installApplies(priced), 0);
   const unconfirmedCalls = priced.calls.length;
-  const consented = upRequestFromArgs(['--repo', 'acme/shop', '--provider', 'hetzner', '--confirm-price', '6.49', '--ssh-key', 'laptop']);
+  const consented = upRequestFromArgs(['--repo', 'acme/shop', '--provider', 'hetzner', '--merger', 'github', '--confirm-price', '6.49', '--ssh-key', 'laptop']);
   assert.equal((await runUp(consented, dependencies(priced, priceRoot, []))).exitCode, 0);
   for (const args of priced.calls.slice(unconfirmedCalls).filter(args => args[0] === 'install')) {
     assert.deepEqual(args.slice(args.indexOf('--confirm-price'), args.indexOf('--confirm-price') + 2), ['--confirm-price', '6.49']);
@@ -276,7 +283,7 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
 
 test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with zero prompts when no device approval is needed, hands off exactly one step when one is, and submits the goal from a file', async () => {
   const { browserAppDriver, recordedAppDriver, runUp, upBrowserProfile, upRequestFromArgs } = await up();
-  assert.deepEqual(upRequestFromArgs(['--repo', 'acme/shop', '--agent', '--goal', 'goal.txt']), { repository: 'acme/shop', provider: 'compose', agent: true, reviewer: 'claude', master: 'claude', goalFile: 'goal.txt', browserProfile: null,
+  assert.deepEqual(upRequestFromArgs(['--repo', 'acme/shop', '--agent', '--goal', 'goal.txt']), { repository: 'acme/shop', provider: 'compose', agent: true, reviewer: 'claude', master: 'claude', goalFile: 'goal.txt', browserProfile: null, merger: 'control-plane',
     install: { confirmPrice: null, maxMonthly: null, sshKey: null, sshHost: null, sshUser: null } });
   assert.throws(() => upRequestFromArgs(['--provider', 'compose']), /--repo OWNER\/NAME/);
 
@@ -289,7 +296,7 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
     driveApp: async () => { quiet.app = true; quiet.reviewer = true; return { state: 'done' }; },
   }));
   assert.equal(result.exitCode, 0, result.next);
-  assert.ok(result.checklist.every(item => item.done), 'green checklist');
+  assert.ok(result.checklist.every(item => item.done || item.id === 'merger'), 'green checklist but for the legacy merger line (GY-1833)');
   assert.equal(result.prompts, 0, 'agent mode never prints the Setup address and waits');
   assert.deepEqual(result.handoffs, [], 'nothing is handed to a person');
   assert.ok(quiet.calls.some(args => args.join(' ') === 'master registry propose --apply'), 'accounts come from login homes on the host');
@@ -557,14 +564,15 @@ test('unit:up-resume-from-state — a resumed up takes --repo and --provider fro
   assert.throws(() => upRequestFromArgs(['--agent'], recordedUp(root)), /--repo OWNER\/NAME/, 'a first run still needs --repo');
   await mkdir(join(root, '.graphyard'), { recursive: true });
   await writeFile(upStateFile(root), JSON.stringify({ version: 1, repository: 'acme/shop', provider: 'hetzner', completed: ['preflight', 'control-plane', 'host-supervisor', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop'], noHerdr: false, goal: null }));
-  assert.deepEqual(recordedUp(root), { repository: 'acme/shop', provider: 'hetzner' });
+  assert.deepEqual(recordedUp(root), { repository: 'acme/shop', provider: 'hetzner', merger: 'github' }, 'a run recorded before the merger field took the github path');
 
   // Resumed without --repo or --provider: both come from the recorded run, which then skips every done step.
   const resumed = upRequestFromArgs(['--agent'], recordedUp(root));
   assert.equal(resumed.repository, 'acme/shop');
   assert.equal(resumed.provider, 'hetzner');
   assert.equal(upRequestFromArgs(['--repo', 'acme/shop', '--agent'], recordedUp(root)).provider, 'hetzner', 'the same --repo, with --provider omitted');
-  const w = world({ app: true, reviewer: true, accounts: true, installed: true, loop: true, onboardingMerged: true });
+  // Its plane held history before GY-1833, so the migration pinned it to github: nothing to record, no admin credential needed.
+  const w = world({ app: true, reviewer: true, accounts: true, installed: true, loop: true, onboardingMerged: true, merger: 'github' });
   const result = await runUp(resumed, dependencies(w, root, [], { driveApp: async () => ({ state: 'done' }) }));
   assert.equal(result.exitCode, 0, result.next);
   assert.equal(w.calls.filter(args => args[0] === 'install').length, 0, 'the recorded run resumes: nothing is installed again');
@@ -615,7 +623,7 @@ const server = createServer((_, response) => response.end('App page')).listen(0,
   const launcher = resolve(import.meta.dirname, '../bin/graphyard.mjs');
   await Promise.all((['SIGINT', 'SIGTERM'] as const).map(async signal => {
     const serving = join(root, `${signal}.json`);
-    const upProcess = spawn(process.execPath, [launcher, 'up', '--repo', 'acme/shop'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'],
+    const upProcess = spawn(process.execPath, [launcher, 'up', '--repo', 'acme/shop', '--merger', 'github'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, GRAPHYARD_CLI: stub, GRAPHYARD_REPOSITORY_ROOT: root, STUB_SERVING: serving } });
     let output = '';
     upProcess.stdout.on('data', chunk => { output += chunk; }); upProcess.stderr.on('data', chunk => { output += chunk; });
@@ -789,11 +797,11 @@ test('unit:up-provisions-master-autonomy — up gives the master its operator-ag
     if (path === 'work' && agents.some(agent => agent.token === bearer && /-operator$/.test(agent.id))) { created.push({ credential: bearer, body }); return answer({ key: 'GY-1', revision: 1 }); }
     return answer({ error: 'forbidden' }, 403);
   };
-  const runInstall = async (label: string, admin: string | null) => {
+  const runInstall = async (label: string, admin: string | null, merger?: string) => {
     const root = await temporaryDirectory(label), credentials = await temporaryDirectory(`${label}-credentials`);
     execFileSync('git', ['init', '-q', root]);
     execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/acme/shop.git'], { cwd: root });
-    const w = world({ app: true, reviewer: true, accounts: true });
+    const w = world({ app: true, reviewer: true, accounts: true, merger });
     const base = dependencies(w, root, [], { operatorToken: async file => file === OPERATOR_TOKEN ? admin : null });
     // `master init` and `master autonomy` are the real commands, against the simulated control plane.
     const cli: UpDependencies['cli'] = async (args, options = {}) => {
@@ -833,7 +841,8 @@ test('unit:up-provisions-master-autonomy — up gives the master its operator-ag
 
   // With no admin credential on this machine, up stops (exit 2) at that step naming the one command, and master create is refused as before.
   agents.length = 0; created.length = 0;
-  const missing = await runInstall('graphyard-up-autonomy-missing', null);
+  // (Its github merger was recorded by an admin elsewhere: GY-1833 stops an unrecorded one first.)
+  const missing = await runInstall('graphyard-up-autonomy-missing', null, 'github');
   assert.equal(missing.result.exitCode, 2, missing.result.next);
   assert.match(missing.result.next, /^master-autonomy: the operator's admin credential is not on this machine .*graphyard master autonomy --admin-token-stdin --apply/);
   assert.deepEqual(missing.result.completed, ['preflight', 'control-plane', 'host-supervisor']);
@@ -1486,7 +1495,8 @@ test('unit:setup-docs-one-command — the one-command line in docs/setup-from-ze
   await writeFile(join(unobserved, '.graphyard/master.json'), JSON.stringify({ repository: 'ELSEWHERE/graphyard', browser: { profile: 'Default' } }));
   await recordProfileLogin(unobserved, 'Default', { browser: null, cli: 'operator' });
   assert.equal(upBrowserProfile(await temporaryDirectory('graphyard-up-docs-fresh'), { ...parsed, repository: 'OWNER/REPO' }, [unobserved], () => 'operator', () => 'operator')?.profile, 'Default');
-  assert.match(section, /only human step: approving a GitHub Mobile prompt/i);
+  // GY-1833: the default control-plane path has none; the legacy App path keeps the Mobile prompt.
+  assert.match(section, /only legacy `--merger github` needs a human \(GitHub Mobile\)/i);
   // Net growth of the page is at most 20 words over its 999 words before GY-1510.
   assert.ok(page.split(/\s+/).filter(Boolean).length <= 999 + 20, 'docs/setup-from-zero.md grew by at most 20 words');
 });
