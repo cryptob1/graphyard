@@ -278,8 +278,8 @@ test('unit:trial-phases-and-no-pending — the merge writer\'s trial record carr
   const files = ['tests/a.test.ts', 'tests/b.test.ts'], head = 'b'.repeat(40), tip = 'c'.repeat(40);
   const work = { id: 'w1832', key: 'GY-1832', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:alpha-works'] }], plannedFiles: [], mergeLedger: null, submission: { epoch: 1, pr: 1 },
     candidate: { sha: head, baseSha: tip, pr: 1, branch: 'graphyard/gy-1832-1', author: 'worker' }, observation: { source: 'control-plane', candidate: { sha: head }, files: ['src/app.ts'] } } as unknown as Work;
-  const merging = async (repo: ReturnType<typeof repository>) => {
-    const events: MergeRecordEvent[] = [], base = await input(repo, { cores: 1 });
+  const merging = async (repo: ReturnType<typeof repository>, extra: Partial<MergeTrialInput> = {}) => {
+    const events: MergeRecordEvent[] = [], base = await input(repo, { cores: 1, ...extra });
     const ports: MergePorts = { baseBranch: 'main', retrials: 0, now: repo.now, fetch: async () => tip, merge: async () => ({ mergeSha, files: ['src/app.ts'] }),
       trial: async (sha, changed) => runMergeTrial({ ...base, mergeSha: sha, changedFiles: [...changed] }), push: async () => 'pushed', holds: async () => false,
       record: async (_item, event) => { events.push(event); } };
@@ -308,4 +308,32 @@ test('unit:trial-phases-and-no-pending — the merge writer\'s trial record carr
   for (const event of [verdict, final]) assert.deepEqual(mergeRecordBodySchema.parse(event), event);
   assert.throws(() => mergeRecordBodySchema.parse({ ...final, outcome: 'pending' }));
   assert.throws(() => mergeRecordBodySchema.parse({ ...final, phase: undefined }));
+
+  // The proof files are discovered inside each attempt's selection phase (PRRT_kwDOUZby-s6tZqEw): a git grep the host fails
+  // or times out is that attempt's no-verdict, timed and retried, and the attempt that answers runs the files it found.
+  const grep = (fail: (call: number) => Error | null) => {
+    let calls = 0;
+    return { discoverProofFiles: async (options: { timeoutMs?: number }) => { calls += 1; assert.ok(options.timeoutMs! > 0, 'the discovery is bounded by the attempt\'s deadline'); const error = fail(calls); if (error) throw error; return ['tests/proof.test.ts']; }, calls: () => calls };
+  };
+  const flaky = grep(call => call === 1 ? failure({ status: 128, stdout: 'fatal: unable to read tree' }) : null), flakyRepo = repository(files);
+  const found = await merging(flakyRepo, { discoverProofFiles: flaky.discoverProofFiles });
+  assert.equal((found.outcome as { outcome?: string }).outcome, 'merged', String(found.outcome));
+  assert.deepEqual([flakyRepo.seen.attempts, flaky.calls()], [2, 2], 'the failed discovery is retried with its attempt');
+  const foundTrial = found.events.find(event => event.kind === 'trial')!;
+  assert.ok(foundTrial.kind === 'trial' && foundTrial.outcome === 'verdict');
+  assert.deepEqual(foundTrial.attempts.map(entry => [entry.outcome, entry.phase]), [['host-failure', 'selection']]);
+  assert.match(foundTrial.attempts[0]!.reason, /selection runner exited/);
+  assert.deepEqual(foundTrial.attempts[0]!.phases, { install: 1000, build: 2000, selection: 0, tests: 0 }, 'the phases the failed attempt reached are timed');
+  assert.deepEqual(flakyRepo.seen.lists.at(-1), [...files, 'tests/proof.test.ts'], 'the answering attempt runs the discovered proof file beside the selection');
+  for (const [name, error, outcome] of [['host failure', failure({ status: 128 }), 'host-failure'], ['timeout', failure({ timedOut: true, signal: 'SIGTERM' }), 'timeout']] as const) {
+    const broken = grep(() => error), brokenRepo = repository(files);
+    const failedMerge = await merging(brokenRepo, { discoverProofFiles: broken.discoverProofFiles });
+    assert.ok(failedMerge.outcome instanceof Error, name);
+    assert.deepEqual([brokenRepo.seen.attempts, broken.calls()], [2, 2], `${name}: tried once more`);
+    const record = failedMerge.events.find(event => event.kind === 'trial')!;
+    assert.ok(record.kind === 'trial' && record.outcome === outcome, `${name}: ${JSON.stringify(record)}`);
+    assert.equal(record.phase, 'selection');
+    assert.deepEqual(record.attempts.map(entry => [entry.outcome, entry.phase]), [[outcome, 'selection'], [outcome, 'selection']]);
+    assert.deepEqual(mergeRecordBodySchema.parse(record), record);
+  }
 });

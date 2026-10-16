@@ -170,10 +170,10 @@ export const criterionProofs = (work: Pick<Work, 'criteria'>) => [...new Set(wor
  * (`git grep` at the commit), so the trial runs the criterion→test bindings whatever the affected
  * selection says. No match is no file, never an error.
  */
-export async function proofTestFiles(run: ChildRun, root: string, mergeSha: string, proofs: readonly string[]): Promise<string[]> {
+export async function proofTestFiles(run: ChildRun, root: string, mergeSha: string, proofs: readonly string[], options?: { timeoutMs?: number }): Promise<string[]> {
   if (!proofs.length) return [];
   let out: string;
-  try { out = String(await run('git', ['-C', root, 'grep', '-l', '-F', ...proofs.flatMap(proof => ['-e', proof]), mergeSha, '--', 'tests/*.test.ts'])); }
+  try { out = String(await run('git', ['-C', root, 'grep', '-l', '-F', ...proofs.flatMap(proof => ['-e', proof]), mergeSha, '--', 'tests/*.test.ts'], options?.timeoutMs === undefined ? undefined : { timeoutMs: options.timeoutMs })); }
   catch (error) {
     // Exit 1 is no match; anything else is a read the trial cannot do without.
     if ((error as { status?: number | null }).status === 1) return [];
@@ -187,6 +187,11 @@ export interface MergeTrialInput extends RunTrialInput {
   proofs: readonly string[];
   /** The test files those proofs' cases live in (`proofTestFiles`), run beside the affected selection. */
   proofFiles: readonly string[];
+  /**
+   * How to discover more of them, run in each attempt's selection phase until one answers (GY-1832),
+   * so a read that fails or times out is that attempt's no-verdict, timed and retried like any host failure.
+   */
+  discoverProofFiles?: (options: { timeoutMs?: number }) => Promise<readonly string[]>;
 }
 const runner = 'tests/helpers/run-tests.ts';
 const listed = (out: string) => out.split('\n').map(line => line.trim()).filter(line => /^tests\/[\w./-]+\.test\.ts$/.test(line));
@@ -203,11 +208,11 @@ const childOutput = (error: unknown) => { const failed = error as { stdout?: unk
 export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialRun> {
   const inner = input.run ?? defaultChildRun;
   let tap = '', files: string[] = [];
-  const widened = (out: string) => {
+  const widened = (out: string, proofFiles: readonly string[]) => {
     const have = listed(out);
     // A `full:` selection that lists nothing hands over to `select`; the files are added to that run instead.
     if (!have.length && /^full:/.test(out.trimStart())) return out;
-    const extra = input.proofFiles.filter(path => !have.includes(path));
+    const extra = proofFiles.filter(path => !have.includes(path));
     files = [...have, ...extra];
     return extra.length ? `${out.replace(/\s+$/, '')}\n${extra.join('\n')}\n` : out;
   };
@@ -215,9 +220,18 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
   // cases are counted over every shard, as one runner process would count them. A retried trial runs
   // in a fresh checkout, and only the attempt that answered is counted: each attempt starts its TAP
   // and files afresh, even one that stops before its tests run, and a runner child of an earlier attempt adds nothing.
-  let epoch = 0;
+  let epoch = 0, discovered: readonly string[] | null = input.discoverProofFiles ? null : input.proofFiles;
+  // A discovery that fails is a host failure of the selection (its `cause` set), never a failing selection: the attempt ends with no verdict and is retried.
+  const proofFiles = async (options: { timeoutMs?: number } | undefined) => {
+    if (discovered || !input.discoverProofFiles) return discovered ?? input.proofFiles;
+    try { const found = await input.discoverProofFiles({ timeoutMs: options?.timeoutMs }); return discovered = [...new Set([...input.proofFiles, ...found])]; }
+    catch (error) {
+      const failed = error as { message?: string; timedOut?: boolean; stdout?: unknown; stderr?: unknown };
+      throw Object.assign(new Error(`could not discover the proof test files: ${String(failed.message ?? error)}`), { status: null, signal: null, timedOut: failed.timedOut, stdout: failed.stdout, stderr: failed.stderr, cause: `could not discover the proof test files: ${String(failed.message ?? error).slice(0, 300)}` });
+    }
+  };
   const run: ChildRun = async (command, args, options) => {
-    if (command === 'node' && args[0] === 'scripts/ci-tests.mjs' && (args[1] === 'affected' || args[1] === 'select')) return widened(String(await inner(command, args, options)));
+    if (command === 'node' && args[0] === 'scripts/ci-tests.mjs' && (args[1] === 'affected' || args[1] === 'select')) { const files = await proofFiles(options); return widened(String(await inner(command, args, options)), files); }
     const at = command === 'node' ? args.indexOf(runner) : -1;
     if (at < 0) return inner(command, args, options);
     const own = epoch;
