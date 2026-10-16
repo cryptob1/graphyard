@@ -650,8 +650,10 @@ const soakVerdict = (conclusion: string) => conclusion === 'success' ? 'passed' 
  * production not serving it is a rollback or a wedged deploy, and stays a fault — and neither is a
  * merge the base branch no longer carries. A quiet pipeline whose last candidate already covers
  * main, left nothing queued and is not in flight is not moving either: the row stalls and files as
- * before. Containment is read over the commits the checkout already holds — the observation that
- * failed just fetched the base branch — and containment that cannot be read answers not carrying.
+ * before. A merge newer than the recorded tip, on the base branch past it, is due: the loop's next
+ * ledger read carries it. Containment is read over the commits the checkout already holds — the
+ * observation that failed just fetched the base branch — and containment that cannot be read
+ * answers not carrying.
  */
 export async function promotionCarryingMerge(state: PromotionState | null, mergeSha: string, root: string, baseBranch: string, run: ChildRun): Promise<boolean> {
   if (!state) return false;
@@ -659,7 +661,16 @@ export async function promotionCarryingMerge(state: PromotionState | null, merge
   if (reason !== null && (reason === promotionOffReason || reason.startsWith(promotionFrozenReasonPrefix) || reason === noLocalPortsReason)) return false;
   if (!state.mainSha) return false;
   const ancestry = localAncestry(root, baseBranch, run);
-  if (await ancestry.containsHeld(mergeSha, state.mainSha) !== true) return false;
+  const recorded = await ancestry.containsHeld(mergeSha, state.mainSha);
+  // A merge that landed after the loop's last ledger read is on the base branch the failed
+  // observation just fetched, ahead of the recorded tip: the loop's next read (within its ledger
+  // window) sees main moved, and the dispatch that carries it is due — unless that branch has moved
+  // off the recorded tip altogether, which is no pipeline this state describes.
+  if (recorded === false) {
+    const tip = `refs/remotes/origin/${baseBranch}`;
+    return await ancestry.containsHeld(mergeSha, tip) === true && await ancestry.containsHeld(state.mainSha, tip) === true;
+  }
+  if (recorded !== true) return false;
   if (state.promotedSha && await ancestry.containsHeld(mergeSha, state.promotedSha) === true) return false;
   // In flight is the loop's own flag: a release candidate run in validation. A soak of the newest
   // candidate is advisory — it never gates promotion — but while it runs the release that carries

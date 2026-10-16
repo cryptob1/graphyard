@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { actionStall, actionRetryAt, actionRetryMaxMs, actionStallThreshold } from '../src/model/action-progress.js';
+import { actionRecordLimit, actionStall, actionRetryAt, actionRetryMaxMs, actionStallThreshold } from '../src/model/action-progress.js';
 import { handoffWaitBound, promotionWaitBoundMs, promotionWaitClause, waitReason } from '../src/model/action-kinds.js';
 import type { ActionRow } from '../src/model/actions.js';
 import { emptyDaemonState, storeAction } from '../src/daemon/state.js';
@@ -270,6 +270,17 @@ for (const { subject, release, merge, attempts, spacing } of stalledGateInstance
   });
 }
 
+test('a promotion wait whose attempts fill the row\'s retained record inside the bound is still a wait: the run is measured from the row\'s request, and stalls once the row has been open the bound', () => {
+  const wait = promotionWait(doesNotCarry('GY-1827', '3100cb653054', 'a'.repeat(12)));
+  const full = failingVerify('GY-1827', wait, actionRecordLimit / 2, 5); // ten attempts, the record full, 46 minutes after the request
+  assert.equal(full.history.length, actionRecordLimit);
+  assert.equal(actionStall(full), null, 'the record filling up inside the bound is not the bound running out (the soak found it stalling at about 55 minutes)');
+  assert.deepEqual(attentionFor('GY-1827', full), []);
+  assert.ok(actionStall(failingVerify('GY-1827', wait, actionRecordLimit / 2, 7)), 'the same full record 64 minutes after the request is a stall');
+  const older = { ...full, requestedAt: stamp(-180) } as ActionRow;
+  assert.ok(actionStall(older), 'a full record on a row open three hours may hide where the run began, so it is read as having outlasted the bound, as before');
+});
+
 test('the three instances the base filed are one recurring stalled-gate class — the filing of GY-1831 itself — and the candidate files none', () => {
   const base = emptyRecord();
   for (const [index, { subject, release, merge, attempts, spacing }] of stalledGateInstances.entries()) {
@@ -349,6 +360,16 @@ test('the recorded promotion state answers in flight while the newest candidate 
   const state = promotionState({ cutSha: candidateSha, candidates: [{ id: 'rc-1', sha: candidateSha.toUpperCase(), cutAt: stamp(2), prs: 1, queued: 0 }],
     soaks: [{ sha: candidateSha, status: 'in_progress', conclusion: null, createdAt: stamp(3), url: null }] });
   assert.equal(await carries(state, [`${mergeSha}>${candidateSha}`, `${mergeSha}>${mainTip}`]), true, 'the soak run is matched by its own case, whatever case the candidate records');
+});
+
+test('a merge newer than the loop\'s last ledger read is due: the base branch the checkout holds carries it past the recorded tip, so the next read sees main moved', async () => {
+  const origin = 'refs/remotes/origin/main';
+  // Quiet as recorded — the last cut covered the recorded tip — but the merge landed after that read.
+  const quiet = promotionState({ cutSha: mainTip, candidates: [{ id: 'rc-1', sha: mainTip, cutAt: stamp(1), prs: 1, queued: 0 }] });
+  assert.equal(await carries(quiet, [`${mergeSha}>${origin}`, `${mainTip}>${origin}`]), true, 'main moved past the recorded tip with the merge on it: the dispatch carrying it is due');
+  assert.equal(await carries(quiet, [`${mergeSha}>${origin}`]), false, 'a base branch that no longer descends from the recorded tip is no pipeline this state describes');
+  assert.equal(await carries(quiet, [`${mainTip}>${origin}`]), false, 'a merge the base branch does not hold is not in flight');
+  assert.equal(await carries(promotionState({ reason: promotionOffReason }), [`${mergeSha}>${origin}`, `${mainTip}>${origin}`]), false, 'the gates still hold first');
 });
 
 test('the recorded promotion state answers not in flight once the promotion record covers the merge, when the base branch does not carry it, and while the pipeline sits quiet', async () => {
