@@ -15,6 +15,7 @@ import { buildMasterStatus } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import type { MasterConfig } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // Each test is named for the proof it produces, so acceptance evidence maps to one executed
 // case per required proof.
@@ -162,7 +163,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_AUTO_REBASE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 24);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('auto-rebase'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.controlPlaneAppId = 1234;
   // The producer's environment authority is what makes the required proofs producible; without it
   // every item reports a proof-authority gap and the attention assertions below measure that instead.

@@ -13,6 +13,7 @@ import { currentEvidence, type Observation, type Principal, type Work } from '..
 import { server } from '../src/server.js';
 import { attributionDrilldown, candidateManifest, compatibilitySignature, computeAttribution, digestHash, manifestHash, readAttribution, releaseManifest, signatureDifferences, targetIdentity, windowIdentity, type AttributionRecord } from '../src/attribution.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 /**
  * GY-39: candidate/deployment attribution integrity, safe re-anchoring and analytics. One
@@ -46,7 +47,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_ATTRIBUTION_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 15);
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('attribution'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('attribution_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/attribution_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/attribution_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository'); delivery = new Delivery(validation);
   const configured = process.env.GRAPHYARD_MAX_REVIEWERS; process.env.GRAPHYARD_MAX_REVIEWERS = '8';
   try { http = server(engine, principals.map(p => ({ ...p, token: tokens[p.id] }))); }

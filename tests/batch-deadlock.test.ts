@@ -9,6 +9,7 @@ import { GitHub, processJob } from '../src/github.js';
 import { diagnose } from '../src/coordination.js';
 import { buildMasterStatus } from '../src/master/status.js';
 import { CHECK_NAME, Refusal, ReconciliationRetry, type Principal, type Work } from '../src/model.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-09-22 created_at is a past, fixed field of the stub GitHub pull payload; Date.now() only measures how long a retry streak takes and new Date() stamps stub reviews' submitted_at.
 
 // GY-506: the merge-queue deadlock. Every test is named for the proof it produces.
@@ -117,7 +118,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 506;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('batch-deadlock'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.controlPlaneAppId = 1234;
   engine.principals = [operator, worker, producer];
 });

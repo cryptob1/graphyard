@@ -12,6 +12,7 @@ import { GitHub } from '../src/github.js';
 import { BoundedCache, EtagCache, blobContentBytes, etagCacheBytes, etagCacheEntries } from '../src/github-response-cache.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { standingEscalations, type Observation, type Principal, type Work } from '../src/model.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // GY-975: the production server's heap climbed to its 4 GB limit every ten to fifteen minutes. What
 // retained it was the GitHub adapter's conditional-request cache: 4096 entries of parsed answers and
@@ -48,7 +49,7 @@ before(async () => {
   scratch = await temporaryDirectory('heap');
   database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('heap_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/heap_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/heap_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   github = new GitHub({ repository, base: 'main', appId: 1234, installationId: 7, privateKey: 'not-used' });
   Object.assign(github as any, { token: 'installation-token', expires: Date.now() + 3600_000, permissions: { pull_requests: 'write', issues: 'write', checks: 'write', contents: 'write' } });

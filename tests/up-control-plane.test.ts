@@ -16,6 +16,7 @@ import { fakeTransport, type Transport } from '../src/install/transport.js';
 import type { UpDependencies, UpEvent, UpRequest } from '../src/up.js';
 import { appKey, temporaryRepository } from './install-harness.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 const execFile = promisify(execFileCallback);
 
@@ -52,7 +53,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_INSTALL_TEST_PORT ?? 0) || await freePort();
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('no-app-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: (message: unknown) => console.error('postgres:', String(message)), postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_no_app');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_no_app`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_no_app`); await store.init(); await recordLegacyMerger(store);
   const engine = new Engine(store, [15368], 120, 'owner/project');
   // The server exactly as src/server/main.ts starts it without GITHUB_APP_ID: githubFromEnv() is null.
   http = server(engine, principals.map(principal => ({ ...principal, token: tokens.get(principal.id)! })), null);
@@ -365,8 +366,9 @@ test('unit:up-github-steps-unchanged — without --merger control-plane the step
   assert.ok(!upSteps.includes('deploy-key' as never) && !upSteps.includes('merger-setting' as never), 'github-mode list has no deploy-key or merger-setting');
   assert.notDeepEqual([...upSteps], [...upControlPlaneSteps], 'control-plane inserts the two merger steps');
 
-  const github = upRequestFromArgs(['--repo', 'owner/project', '--provider', 'compose']);
-  assert.equal(github.merger, undefined);
+  // GY-1833: a bare up is control-plane; the github-mode list is the legacy --merger github path.
+  const github = upRequestFromArgs(['--repo', 'owner/project', '--provider', 'compose', '--merger', 'github']);
+  assert.equal(github.merger, 'github');
   assert.equal(upMergerControlPlane(github), false);
   assert.deepEqual([...upStepsFor(github)], [...upSteps]);
 

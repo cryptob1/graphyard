@@ -6,7 +6,7 @@ import { protectionPlan, protectionRun, readProtection, type ProtectionRun } fro
 import { checkAgentEnvironment, discoverAgentEnvironments } from './master/environments.js';
 import type { AgentEnvironment } from './master/profiles.js';
 import { sharedGitPaths, workerPaths } from './worker-sandbox.js';
-import { mergerNotRequired, statusControlPlaneMerger } from './model/setup-checklist.js';
+import { controlPlaneMergerLine, legacyMergerReason, mergerMigrationCommand, mergerNotRequired, statusControlPlaneMerger, statusSupervised } from './model/setup-checklist.js';
 import { followUpFilingExcess, followUpFilingRefusal } from './release-candidate.js';
 
 /**
@@ -22,6 +22,7 @@ export const setupSteps = {
   environments: 'docs/setup-from-zero.md step 8 (agent environments)',
   sandbox: 'docs/setup-from-zero.md step 9 (worker sandbox)',
   releaseFiling: 'docs/delivery.md#release-filing-credential',
+  merger: `run ${mergerMigrationCommand} (docs/setup-from-zero.md step 4)`,
 } as const;
 
 export interface SetupCheck { id: string; status: 'pass' | 'fail'; detail: string; step: string }
@@ -227,5 +228,10 @@ export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<Se
   lines.push(await sandboxCheck(input.root, input.sandbox ?? bubblewrapProbe));
   const releaseFiling = input.releaseFiling ?? await readReleaseFiling(input.root, env);
   if (releaseFiling) lines.push(releaseFilingCheck(releaseFiling, status?.repository ?? null));
+  // GY-1833: github merging is the legacy mode; its FAIL names the one command that migrates it.
+  // Supervised installs merge on GitHub by design, and a plane that reports no merger is not judged.
+  if (status?.mergeWriter && !statusSupervised(status)) lines.push(statusControlPlaneMerger(status)
+    ? { id: 'merger', status: 'pass', detail: controlPlaneMergerLine, step: setupSteps.merger }
+    : { id: 'merger', status: 'fail', detail: legacyMergerReason, step: setupSteps.merger });
   return lines;
 }

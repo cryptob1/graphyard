@@ -10,6 +10,7 @@ import { server } from '../src/server/index.js';
 import { CHECK_NAME, GitHub, baseRefCycleMs, billableBudgetShare, observationThroughputStatus, processJob, protectionShareMs } from '../src/github.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-09-26 instants are the clock handed to github.clock and the charge ledger, plus PR created_at fixtures; Date.now() sets token expiry and rate-limit reset ahead of that clock and stamps rows.
 
 // GY-806: GitHub API use fits the rate limit. Each test is named for the proof it produces:
@@ -244,7 +245,7 @@ before(async () => {
 });
 const replicas: Store[] = [];
 after(async () => { if (http) await new Promise(resolve => http.close(resolve)); if (store) await store.close(); for (const replica of replicas) await replica.close(); if (postgres) await postgres.stop(); });
-const openStore = async () => { const opened = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await opened.init(); return opened; };
+const openStore = async () => { const opened = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await opened.init(); await recordLegacyMerger(opened); return opened; };
 /** A second store on the shared database, as another replica holds it. */
 async function replicaStore() { const opened = await openStore(); replicas.push(opened); return opened; }
 async function database() { return store ??= await openStore(); }

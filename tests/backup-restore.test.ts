@@ -19,6 +19,7 @@ import { backupDigest, backupSchema, createBackup, ledgerCounts, restoreBackup, 
 import { ledgerSeeded } from '../src/store.js';
 import { schemaVersion } from '../src/release.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 const run = promisify(execFile);
 const operator: Principal = { id: 'operator', role: 'admin' };
@@ -151,7 +152,7 @@ async function snapshot(store: Store) {
 }
 
 test('the documented backup and restore exercise preserves assignments, history, scenario revisions and pending requests, and the restored ledger keeps ordering', async () => {
-  const source = new Store(url('source')); await source.init();
+  const source = new Store(url('source')); await source.init(); await recordLegacyMerger(source);
   const seeded = await populate(source);
   // The flow projection has folded the ledger so far: durable facts plus the checkpoint
   // row the migration seeds and the projection advances.
@@ -237,7 +238,7 @@ test('the documented backup and restore exercise preserves assignments, history,
 });
 
 test('a target the release already started against refuses a restore, because its seeded proof authority would sit beside the backup\'s', async () => {
-  const source = new Store(url('authority')); await source.init();
+  const source = new Store(url('authority')); await source.init(); await recordLegacyMerger(source);
   await populate(source);
   const backup = await createBackup(source.pool);
   const seeded = new Store(url('seeded')); await seeded.init();
@@ -249,7 +250,7 @@ test('a target the release already started against refuses a restore, because it
 });
 
 test('a tampered, truncated or newer-schema backup refuses, and a newer-schema database refuses this release', async () => {
-  const source = new Store(url('occupied')); await source.init();
+  const source = new Store(url('occupied')); await source.init(); await recordLegacyMerger(source);
   await populate(source);
   const backup = await createBackup(source.pool);
   const edited = { ...backup, tables: backup.tables.map(t => t.name === 'events' ? { ...t, rows: t.rows.slice(1) } : t) };
@@ -261,7 +262,7 @@ test('a tampered, truncated or newer-schema backup refuses, and a newer-schema d
   assert.throws(() => verifyBackup({ ...backup, format: 'graphyard-backup-v0' }));
   assert.throws(() => backupSchema.parse({ ...backup, tables: [...backup.tables, { name: 'pg_authid', rows: [] }] }));
   await assert.rejects(restoreBackup(source.pool, backup), /Restore requires an empty database/);
-  const newer = new Store(url('newer')); await newer.init();
+  const newer = new Store(url('newer')); await newer.init(); await recordLegacyMerger(newer);
   await newer.pool.query("INSERT INTO graphyard_schema(version, graphyard_version) VALUES($1, '9.9.9')", [schemaVersion + 1]);
   await assert.rejects(newer.init(), /newer than this release supports/);
   await assert.rejects(createBackup(newer.pool), /differs from this release/);
@@ -291,7 +292,7 @@ test('the shipped db backup, verify and restore commands perform the exercise en
 });
 
 test('db fence ends every open writer and leaves the database read-only for new sessions, still backed up, until --release', async () => {
-  const store = new Store(url('fenced')); await store.init();
+  const store = new Store(url('fenced')); await store.init(); await recordLegacyMerger(store);
   await populate(store);
   await store.close();
   const { default: pgModule } = await import('pg');

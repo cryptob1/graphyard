@@ -10,6 +10,7 @@ import { server } from '../src/server.js';
 import { directMergeFromEnv, directMergeStatus } from '../src/direct-merge.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): every absolute instant (the 2024-2026 `since` windows and mergedAt values) is past and compared only with the others; the new Date() merge follows off closing the window.
 
 /**
@@ -34,7 +35,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 153;
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('direct-merge'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('direct_merge_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/direct_merge_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/direct_merge_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

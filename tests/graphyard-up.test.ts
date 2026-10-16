@@ -132,11 +132,11 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
   const result = await runUp(request(), dependencies(fresh, root, events));
   assert.equal(result.exitCode, 0, result.next);
   assert.deepEqual(result.completed, ['preflight', 'control-plane', 'host-supervisor', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop']);
-  assert.deepEqual(fresh.calls.map(args => args.slice(0, 2).join(' ')), ['install --provider', 'install --provider', 'master init', 'master autonomy', 'init --scan', 'init --scan', 'publish-onboarding', 'master registry', 'master harness', 'master restart', 'onboarding-merged?', 'onboarding-merged?'], 'preflight, control plane, host supervisor, master identities, onboarding (applied, then published), accounts, harness, master loop, in order; then the onboarding pull request merges');
+  assert.deepEqual(fresh.calls.map(args => args.slice(0, 2).join(' ')), ['install --provider', 'install --provider', 'master init', 'master merger', 'master autonomy', 'init --scan', 'init --scan', 'publish-onboarding', 'master registry', 'master harness', 'master restart', 'onboarding-merged?', 'onboarding-merged?'], 'preflight, control plane, host supervisor, master identities, onboarding (applied, then published), accounts, harness, master loop, in order; then the onboarding pull request merges');
   // Onboarding is done only once its files are published: init --scan --apply writes them to this checkout alone.
   assert.ok(events.some(event => event.kind === 'step' && event.step === 'onboarding' && event.state === 'done' && /published in https:\/\/github\.com\/acme\/shop\/pull\/1/.test(event.detail ?? '')));
   assert.ok(events.some(event => event.kind === 'note' && /onboarding pull request .* to merge/.test(event.text)), 'it says what it waits on');
-  assert.ok(result.checklist.every(item => item.done), 'the checklist is green');
+  assert.ok(result.checklist.every(item => item.done || item.id === 'merger'), 'the checklist is green but for the legacy merger line (GY-1833)');
   const waits = events.filter(event => event.kind === 'waiting');
   assert.equal(waits.length, 1, 'the Setup address is printed once for the whole run');
   assert.equal(result.prompts, 1);
@@ -226,7 +226,7 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
   assert.match(unconfirmed.next, /operator's consent to its price: cx33 .*6\.49 EUR\/month.*--confirm-price PRICE \(or --max-monthly N\); nothing has been created/);
   assert.equal(installApplies(priced), 0);
   const unconfirmedCalls = priced.calls.length;
-  const consented = upRequestFromArgs(['--repo', 'acme/shop', '--provider', 'hetzner', '--confirm-price', '6.49', '--ssh-key', 'laptop']);
+  const consented = upRequestFromArgs(['--repo', 'acme/shop', '--provider', 'hetzner', '--merger', 'github', '--confirm-price', '6.49', '--ssh-key', 'laptop']);
   assert.equal((await runUp(consented, dependencies(priced, priceRoot, []))).exitCode, 0);
   for (const args of priced.calls.slice(unconfirmedCalls).filter(args => args[0] === 'install')) {
     assert.deepEqual(args.slice(args.indexOf('--confirm-price'), args.indexOf('--confirm-price') + 2), ['--confirm-price', '6.49']);
@@ -276,7 +276,7 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
 
 test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with zero prompts when no device approval is needed, hands off exactly one step when one is, and submits the goal from a file', async () => {
   const { browserAppDriver, recordedAppDriver, runUp, upBrowserProfile, upRequestFromArgs } = await up();
-  assert.deepEqual(upRequestFromArgs(['--repo', 'acme/shop', '--agent', '--goal', 'goal.txt']), { repository: 'acme/shop', provider: 'compose', agent: true, reviewer: 'claude', master: 'claude', goalFile: 'goal.txt', browserProfile: null,
+  assert.deepEqual(upRequestFromArgs(['--repo', 'acme/shop', '--agent', '--goal', 'goal.txt']), { repository: 'acme/shop', provider: 'compose', agent: true, reviewer: 'claude', master: 'claude', goalFile: 'goal.txt', browserProfile: null, merger: 'control-plane',
     install: { confirmPrice: null, maxMonthly: null, sshKey: null, sshHost: null, sshUser: null } });
   assert.throws(() => upRequestFromArgs(['--provider', 'compose']), /--repo OWNER\/NAME/);
 
@@ -289,7 +289,7 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
     driveApp: async () => { quiet.app = true; quiet.reviewer = true; return { state: 'done' }; },
   }));
   assert.equal(result.exitCode, 0, result.next);
-  assert.ok(result.checklist.every(item => item.done), 'green checklist');
+  assert.ok(result.checklist.every(item => item.done || item.id === 'merger'), 'green checklist but for the legacy merger line (GY-1833)');
   assert.equal(result.prompts, 0, 'agent mode never prints the Setup address and waits');
   assert.deepEqual(result.handoffs, [], 'nothing is handed to a person');
   assert.ok(quiet.calls.some(args => args.join(' ') === 'master registry propose --apply'), 'accounts come from login homes on the host');
@@ -557,7 +557,7 @@ test('unit:up-resume-from-state — a resumed up takes --repo and --provider fro
   assert.throws(() => upRequestFromArgs(['--agent'], recordedUp(root)), /--repo OWNER\/NAME/, 'a first run still needs --repo');
   await mkdir(join(root, '.graphyard'), { recursive: true });
   await writeFile(upStateFile(root), JSON.stringify({ version: 1, repository: 'acme/shop', provider: 'hetzner', completed: ['preflight', 'control-plane', 'host-supervisor', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop'], noHerdr: false, goal: null }));
-  assert.deepEqual(recordedUp(root), { repository: 'acme/shop', provider: 'hetzner' });
+  assert.deepEqual(recordedUp(root), { repository: 'acme/shop', provider: 'hetzner', merger: 'github' }, 'a run recorded before the merger field took the github path');
 
   // Resumed without --repo or --provider: both come from the recorded run, which then skips every done step.
   const resumed = upRequestFromArgs(['--agent'], recordedUp(root));
@@ -615,7 +615,7 @@ const server = createServer((_, response) => response.end('App page')).listen(0,
   const launcher = resolve(import.meta.dirname, '../bin/graphyard.mjs');
   await Promise.all((['SIGINT', 'SIGTERM'] as const).map(async signal => {
     const serving = join(root, `${signal}.json`);
-    const upProcess = spawn(process.execPath, [launcher, 'up', '--repo', 'acme/shop'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'],
+    const upProcess = spawn(process.execPath, [launcher, 'up', '--repo', 'acme/shop', '--merger', 'github'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, GRAPHYARD_CLI: stub, GRAPHYARD_REPOSITORY_ROOT: root, STUB_SERVING: serving } });
     let output = '';
     upProcess.stdout.on('data', chunk => { output += chunk; }); upProcess.stderr.on('data', chunk => { output += chunk; });
@@ -1486,7 +1486,8 @@ test('unit:setup-docs-one-command — the one-command line in docs/setup-from-ze
   await writeFile(join(unobserved, '.graphyard/master.json'), JSON.stringify({ repository: 'ELSEWHERE/graphyard', browser: { profile: 'Default' } }));
   await recordProfileLogin(unobserved, 'Default', { browser: null, cli: 'operator' });
   assert.equal(upBrowserProfile(await temporaryDirectory('graphyard-up-docs-fresh'), { ...parsed, repository: 'OWNER/REPO' }, [unobserved], () => 'operator', () => 'operator')?.profile, 'Default');
-  assert.match(section, /only human step: approving a GitHub Mobile prompt/i);
+  // GY-1833: the default control-plane path has none; the legacy App path keeps the Mobile prompt.
+  assert.match(section, /only legacy `--merger github` needs a human \(GitHub Mobile\)/i);
   // Net growth of the page is at most 20 words over its 999 words before GY-1510.
   assert.ok(page.split(/\s+/).filter(Boolean).length <= 999 + 20, 'docs/setup-from-zero.md grew by at most 20 words');
 });
