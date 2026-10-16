@@ -14,7 +14,7 @@ import type { Cycle } from '../src/daemon/cycle.js';
 import type { DaemonEffects } from '../src/daemon/effects.js';
 import { baseFailureStep } from '../src/daemon/cycle-base-failures.js';
 import { flakeStep } from '../src/daemon/cycle-flakes.js';
-import { attributeFailures, baseFailurePrefix, baseFailureHoldMs, mergeOne, mergeQueue, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
+import { attributeFailures, baseFailurePrefix, baseFailureReason, failureIsBase, parseBaseFailureReason, baseFailureHoldMs, mergeOne, mergeQueue, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
 import { applyMainGuardRevert, runMainGuard, type CheckRun, type CommitVerdict, type FileChange, type MainCommit, type MainGuardPorts } from '../src/main-guard.js';
 import { trialFailurePrefix } from '../src/model/rework-ground.js';
 import { foldMergeLedger, type MergeLedgerEvent } from '../src/model/merge-ledger.js';
@@ -100,7 +100,7 @@ test('unit:failure-attributed-to-base-or-flake — a head whose failing tests al
   const rerun = retest({ failed: [shared], names: [sharedName] }, { failed: [shared], names: [sharedName] });
   const run = await attributeFailures(first([shared]), tap(sharedName), input, git, rerun.fn);
   assert.deepEqual(rerun.calls, [{ sha: mergeSha, files: [shared] }, { sha: tip, files: [shared] }], 'rerun on the same merge commit, then on the base tip (its first parent)');
-  assert.deepEqual(run.base, { tip, files: [shared], tests: [sharedName] });
+  assert.deepEqual(run.base, { tip, files: [shared], tests: [sharedName], cases: [sharedName] });
 
   const work = item(), fake = ports(run);
   const outcome = await mergeOne(fake.merge, work);
@@ -135,6 +135,24 @@ test('unit:failure-attributed-to-base-or-flake — a head whose failing tests al
   assert.equal(own.base, undefined);
   const refused = await mergeOne(ports(own).merge, item());
   assert.ok(refused.outcome === 'refused' && refused.reason.startsWith(trialFailurePrefix));
+
+  // Attributed by test, not by file: the rerun fails case A of the file while the base fails only case B of it, so A is the head's.
+  const caseB = 'unit:reconcile-lock-other — another case';
+  const byFile = await attributeFailures(first([shared]), tap(sharedName), input, git, retest({ failed: [shared], names: [sharedName] }, { failed: [shared], names: [caseB] }).fn);
+  assert.equal(byFile.base, undefined, 'case A passes on the base: the head is not held as a base failure');
+  const caseRefused = await mergeOne(ports(byFile).merge, item());
+  assert.ok(caseRefused.outcome === 'refused' && caseRefused.reason.startsWith(trialFailurePrefix), 'and its rework follows');
+  assert.equal(failureIsBase({ build: 'pass', tests: { passed: 9, failed: [shared], files: 10 }, base: { tip, files: [shared], tests: [caseB], cases: [sharedName] } }), false, 'a recorded base run judges cases too');
+  // A rerun that names no failing case attributes nothing to the base.
+  const unnamed = await attributeFailures(first([shared]), tap(sharedName), input, git, retest({ failed: [shared] }, { failed: [shared], names: [sharedName] }).fn);
+  assert.equal(unnamed.base, undefined);
+
+  // Long paths never cut the base tip or the test names: the reason still parses and its fix item is filed.
+  const longFiles = Array.from({ length: 20 }, (_, index) => `tests/${'deeply-nested/'.repeat(12)}case-${index}.test.ts`);
+  const longReason = baseFailureReason({ tip, files: longFiles, tests: [sharedName] });
+  assert.ok(longReason.length <= 2000);
+  const parsed = parseBaseFailureReason(longReason);
+  assert.ok(parsed && parsed.tip === tip && parsed.tests.includes(sharedName) && parsed.files.length > 0 && parsed.files.every(file => longFiles.includes(file)), 'tip and tests survive; only whole paths are kept');
 });
 
 test('unit:failure-attributed-to-base-or-flake — a failing test that passes on an immediate rerun of the same head is judged on the rerun and its first flake files one fix item', async () => {

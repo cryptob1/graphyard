@@ -82,8 +82,12 @@ export interface MergeTrialRun extends TrialRun {
    * the item's proofs: the verdict's failures are the rerun's.
    */
   flaked?: { files: string[]; tests: string[] };
-  /** GY-1834: the files still failing after the rerun that fail on the base tip (the merge's first parent) too, with the test names the base run reported. */
-  base?: { tip: string; files: string[]; tests: string[] };
+  /**
+   * GY-1834: the files still failing after the rerun that fail on the base tip (the merge's first parent) too,
+   * with the test names the base run reported and the cases that failed the rerun: the failure is the base's
+   * only when every such case fails on the base too (`failureIsBase`), not merely its file.
+   */
+  base?: { tip: string; files: string[]; tests: string[]; cases: string[] };
 }
 /** GY-1834: the flake a trial record carries, bounded as the record's schema bounds it: every name `parseFailedTests` keeps (≤ 500 characters) fits. */
 export const trialFlaked = (flaked: { files: readonly string[]; tests: readonly string[] }, at: string): TrialFlaked =>
@@ -127,19 +131,39 @@ export function trialFailureReason(trial: { conflict?: readonly string[]; run?: 
  */
 export const baseFailurePrefix = 'base failure';
 export const baseFailureHoldMs = 30 * 60_000;
-export const baseFailureReason = (base: { tip: string; files: readonly string[]; tests: readonly string[] }) =>
-  `${baseFailurePrefix}: tests ${base.files.slice(0, 20).join(', ')} fail on the base tip ${base.tip} too${base.tests.length ? `: ${base.tests.slice(0, 20).join('; ')}` : ''}`.slice(0, 2000);
+/** Up to 20 of `entries` joined by `separator` within `budget` characters: whole entries only, the first cut to the budget when it alone exceeds it. */
+function boundedList(entries: readonly string[], separator: string, budget: number): string {
+  const kept: string[] = [];
+  let length = 0;
+  for (const entry of entries.slice(0, 20)) {
+    const next = length + (kept.length ? separator.length : 0) + entry.length;
+    if (next > budget) break;
+    kept.push(entry); length = next;
+  }
+  return kept.length || !entries.length ? kept.join(separator) : entries[0]!.slice(0, budget);
+}
+/**
+ * The reason stays within 2,000 characters by bounding its file and test lists, never by cutting the
+ * whole string: the base tip and the `too` that `parseBaseFailureReason` reads always survive.
+ */
+export const baseFailureReason = (base: { tip: string; files: readonly string[]; tests: readonly string[] }) => {
+  const files = boundedList(base.files, ', ', 900), tests = boundedList(base.tests, '; ', 900);
+  return `${baseFailurePrefix}: tests ${files} fail on the base tip ${base.tip} too${tests ? `: ${tests}` : ''}`;
+};
 /** The base tip, failing files and test names a `baseFailureReason` names, or null for any other reason. */
 export function parseBaseFailureReason(reason: string): { tip: string; files: string[]; tests: string[] } | null {
   const match = /^base failure: tests (.+?) fail on the base tip ([0-9a-f]{40}) too(?:: (.*))?$/s.exec(reason);
   return match ? { tip: match[2]!, files: match[1]!.split(', '), tests: match[3] ? match[3].split('; ') : [] } : null;
 }
 /**
- * GY-1834: whether a trial's failure is the base's: build and merge passed, and every failing test
- * file failed again on its rerun and on the base tip. A failing proof file never is: it is always the head's.
+ * GY-1834: whether a trial's failure is the base's: build and merge passed, every failing test file
+ * failed again on its rerun and on the base tip, and every case that failed the rerun failed on the
+ * base tip too: a file whose rerun fails case A while the base fails only case B of it is the head's.
+ * A failing proof file never is: it is always the head's.
  */
 export const failureIsBase = (run: Pick<MergeTrialRun, 'build' | 'tests' | 'base'>) =>
-  run.build === 'pass' && run.tests.failed.length > 0 && !!run.base && run.tests.failed.every(file => run.base!.files.includes(file));
+  run.build === 'pass' && run.tests.failed.length > 0 && !!run.base && run.tests.failed.every(file => run.base!.files.includes(file))
+  && run.base.cases.length > 0 && run.base.cases.every(test => run.base!.tests.includes(test));
 
 /** The refusal of a head whose push the base tip moved under `times` times (AC-3); it leaves the head queued. */
 export const baseMovedReason = (times: number) => `base moved ${times} times`;
@@ -279,7 +303,7 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
  * that passes there is a flake, the verdict is the rerun's, and the cases that failed only once,
  * none of them the item's proofs, are the flake the trial record carries to the flake ledger. Unless
  * a file is held or the rerun failed a proof case, files that fail again are run on the base tip, the merge commit's first parent;
- * those that fail there too are the base's (`failureIsBase`). Nothing is skipped: a file that fails
+ * those that fail there too, with every case the rerun failed failing there too, are the base's (`failureIsBase`). Nothing is skipped: a file that fails
  * on the head and passes on the base stays the head's failure, and a rerun or base run that could
  * not reach a verdict attributes nothing.
  */
@@ -317,7 +341,10 @@ export async function attributeFailures(first: MergeTrialRun, firstTap: string, 
   const onBase = await retest(tip, still).catch(() => null);
   if (!onBase || onBase.run.build !== 'pass') return result;
   const files = still.filter(file => onBase.run.tests.failed.includes(file));
-  return files.length ? { ...result, base: { tip, files, tests: parseFailedTests(onBase.tap).filter(test => !own(test)) } } : result;
+  // Attributed by case, not by file: every case the rerun failed must fail on the base tip too, and a rerun that named no case attributes nothing.
+  const cases = [...again], onBaseTests = parseFailedTests(onBase.tap).filter(test => !own(test));
+  if (!files.length || !cases.length || !cases.every(test => onBaseTests.includes(test))) return result;
+  return { ...result, base: { tip, files, tests: onBaseTests, cases } };
 }
 
 // ---- One merge, step by step against the ledger ------------------------------------------------------
