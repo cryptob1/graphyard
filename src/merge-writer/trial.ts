@@ -1,7 +1,7 @@
 // Concern: the shadow gate's trial merge — the exact merge commit of a head onto main, and its build and affected tests in a credential-free checkout.
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { availableParallelism, constants, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
@@ -218,6 +218,43 @@ export async function trialAffordableFiles(read?: () => Promise<HostMemoryReadin
   const reading = await (read ?? resources.readHostMemory)();
   if (!reading) return null;
   return Math.floor((reading.availableBytes - resources.hostMemoryFloor(reading.totalBytes) - resources.memoryRecoveryMarginBytes) / bytesPerSuiteFile) - (slots ? othersDeclaredFiles(slots) : 0);
+}
+/** The first slot index a trial declares at: past any bound a host hands out, so no run ever takes or waits on it. */
+export const trialDeclarationSlot = 1000;
+const trialLabel = 'merge trial';
+const running = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; } };
+/**
+ * Declare the shards' `files` on the host's verification slots under `directory` while they run
+ * (GY-1832), so a suite that starts after the trial's memory reading deducts them before they
+ * allocate, as it deducts a slot holder's: a `slot-N` entry from `trialDeclarationSlot` up, whose
+ * owner names the files, which no run takes or waits on, in a directory sessions' launches made. The returned release removes it; a trial
+ * entry whose pid no longer runs is removed by the next declaration. Best-effort: one that cannot
+ * be written leaves the trial as it was.
+ */
+export async function declareTrialFiles(directory: string, key: string, files: number, pid = process.pid, alive: (pid: number) => boolean = running): Promise<() => Promise<void>> {
+  if (!(files >= 1)) return async () => {};
+  try {
+    // Only where sessions' launches made the directory: a host with none runs no bounded suite to tell.
+    const names = await readdir(directory);
+    for (const name of names) {
+      const index = /^slot-(\d+)$/.exec(name)?.[1];
+      if (index === undefined || Number(index) < trialDeclarationSlot) continue;
+      const owner = await readFile(join(directory, name, 'owner.json'), 'utf8').then(text => JSON.parse(text) as { pid?: unknown; label?: unknown }, () => null);
+      if (owner && typeof owner.label === 'string' && owner.label.startsWith(trialLabel) && typeof owner.pid === 'number' && owner.pid !== pid && !alive(owner.pid))
+        await rm(join(directory, name), { recursive: true, force: true });
+    }
+    const writing = join(directory, `.taking-trial-${pid}-${randomUUID()}`);
+    await mkdir(writing);
+    await writeFile(join(writing, 'owner.json'), JSON.stringify({ pid, label: `${trialLabel} ${key}`, cwd: process.cwd(), at: new Date().toISOString(), files: Math.floor(files) }));
+    for (let slot = trialDeclarationSlot; slot < trialDeclarationSlot + 1000; slot++) {
+      const path = join(directory, `slot-${slot}`);
+      try { await rename(writing, path); }
+      catch (error) { if (['EEXIST', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) continue; break; }
+      return async () => { await rm(path, { recursive: true, force: true }).catch(() => {}); };
+    }
+    await rm(writing, { recursive: true, force: true });
+  } catch { /* the trial runs as it would have; only the budget sharing is lost */ }
+  return async () => {};
 }
 /**
  * The shards a selection runs in (GY-1832): as many as the lanes, never more than the files, and
@@ -588,7 +625,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       // shard named one: a named failing test is the merge's, and stays a failing verdict.
       const cores = Math.max(1, Math.floor(input.cores ?? availableParallelism()));
       const shards = input.groupSize === undefined ? shardTestFiles(files, trialShardLanes(cores), await checkoutDurations(worktree)) : groupTestFiles(files, input.groupSize);
-      const slots = await import('../master/verification-slots.js'), slotsDirectory = slots.verificationSlotsDirectory(input.base);
+      const slotsDirectory = (await import('../master/verification-slots.js')).verificationSlotsDirectory(input.base);
       const { lanes, breadth } = trialShardBreadth(cores, shards.length, await trialAffordableFiles(input.memory, slotsDirectory));
       const settledShards: ({ group: TrialGroup; entries: string[]; unattributed: TrialRunnerError | null } | undefined)[] = [];
       let next = 0, stopped: unknown = null;
@@ -610,8 +647,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         }
       };
       // The shards' files stay declared on the host's verification slots until every shard stops, so a suite that starts meanwhile deducts them before they allocate.
-      const release = slots.declareFiles(slotsDirectory, `merge trial ${input.key ?? input.mergeSha.slice(0, 12)}`, lanes * breadth);
-      try { await Promise.all(Array.from({ length: lanes }, lane)); } finally { release(); }
+      const release = await declareTrialFiles(slotsDirectory, input.key ?? input.mergeSha.slice(0, 12), lanes * breadth);
+      try { await Promise.all(Array.from({ length: lanes }, lane)); } finally { await release(); }
       const ran = settledShards.filter(shard => shard !== undefined);
       for (const shard of ran) log.push(...shard.entries);
       // A shard past the deadline ends the trial as a timeout once every shard has stopped, its log holding what the others printed.
