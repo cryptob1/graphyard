@@ -157,7 +157,7 @@ class SlotUndeclared extends Error { constructor(message, exitCode) { super(mess
  */
 export function controlPlaneEffects(modules, context) {
   const { master: m, daemon: d, reviewer: r, producer: pr, executor: x } = modules;
-  const { root, current, run, snapshot, mutate, read, log = line => console.error(line) } = context;
+  const { root, current, run, snapshot, mutate, read, log = line => console.error(line), clock = () => Date.now() } = context;
   return {
     snapshot, mutate,
     // GY-1831: the handlers' own diagnostics (an unreadable promotion state) go where this executor logs.
@@ -179,11 +179,11 @@ export function controlPlaneEffects(modules, context) {
     // names the gates that stop every dispatch (promotion off, the main watch's freeze, a
     // control-plane merger without ports), so a row only ever waits on a pipeline the loop is
     // driving; anywhere else — an unreadable state included — the failure stands as it was, and
-    // the stall it earns is what it was.
+    // the stall it earns is what it was. The clock measures the deployment handoff after a recorded promotion.
     promotionCarryingMerge: async mergeSha => {
       const config = current();
       const state = await d.readDaemonState(root, config);
-      return d.promotionCarryingMerge(state.promotion ?? null, mergeSha, root, config.baseBranch, run);
+      return d.promotionCarryingMerge(state.promotion ?? null, mergeSha, root, config.baseBranch, run, clock());
     },
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
     // GY-1660: the one call made beyond the coordinator credential, as the loop files its follow-ups:

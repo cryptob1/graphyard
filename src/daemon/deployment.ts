@@ -646,16 +646,19 @@ const soakVerdict = (conclusion: string) => conclusion === 'success' ? 'passed' 
  * never touches the promotion ledger's pin. The gates that stop every dispatch — promotion off,
  * the main watch's freeze, a control-plane merger whose local ports the loop lacks — are read from
  * the same state, so a row only ever waits on a pipeline the loop is driving; anywhere else a
- * failure stands as it was. A merge the promotion record already covers is not in flight —
- * production not serving it is a rollback or a wedged deploy, and stays a fault — and neither is a
- * merge the base branch no longer carries. A quiet pipeline whose last candidate already covers
- * main, left nothing queued and is not in flight is not moving either: the row stalls and files as
+ * failure stands as it was. A merge the promotion record already covers is still in flight for
+ * `promotionHandoffMs` after that promotion — the workflow records the promotion before production
+ * finishes deploying it — and past that handoff production not serving it is a rollback or a wedged
+ * deploy, and stays a fault; a merge the base branch no longer carries is not in flight. A soak is
+ * advisory and carries nothing to production, so it is never a flight of its own. A quiet pipeline
+ * whose last candidate already covers main, left nothing queued and is not in flight — a failed
+ * candidate whose soak still runs included — is not moving either: the row stalls and files as
  * before. A merge newer than the recorded tip, on the base branch past it, is due: the loop's next
  * ledger read carries it. Containment is read over the commits the checkout already holds — the
  * observation that failed just fetched the base branch — and containment that cannot be read
  * answers not carrying.
  */
-export async function promotionCarryingMerge(state: PromotionState | null, mergeSha: string, root: string, baseBranch: string, run: ChildRun): Promise<boolean> {
+export async function promotionCarryingMerge(state: PromotionState | null, mergeSha: string, root: string, baseBranch: string, run: ChildRun, now: number): Promise<boolean> {
   if (!state) return false;
   const reason = state.reason;
   if (reason !== null && (reason === promotionOffReason || reason.startsWith(promotionFrozenReasonPrefix) || reason === noLocalPortsReason)) return false;
@@ -671,20 +674,30 @@ export async function promotionCarryingMerge(state: PromotionState | null, merge
     return await ancestry.containsHeld(mergeSha, tip) === true && await ancestry.containsHeld(state.mainSha, tip) === true;
   }
   if (recorded !== true) return false;
-  if (state.promotedSha && await ancestry.containsHeld(mergeSha, state.promotedSha) === true) return false;
-  // In flight is the loop's own flag: a release candidate run in validation. A soak of the newest
-  // candidate is advisory — it never gates promotion — but while it runs the release that carries
-  // the merge is still being made, and the wait is the pipeline's ordinary pace, bounded by the
-  // promotion wait bound.
+  // Promoted: the deployment that serves it follows the record, so the wait holds through that
+  // handoff; a promotion recorded longer ago than the handoff that production still does not serve
+  // is no pace of the pipeline's.
+  if (state.promotedSha && await ancestry.containsHeld(mergeSha, state.promotedSha) === true) {
+    const promotedAt = state.promotedAt ? Date.parse(state.promotedAt) : Number.NaN;
+    return Number.isFinite(promotedAt) && now - promotedAt >= 0 && now - promotedAt < promotionHandoffMs;
+  }
+  // In flight is the loop's own flag: a release candidate run in validation.
   if (state.inFlight) return true;
   const newest = state.candidates?.[0] ?? null;
-  if (newest && (state.soaks ?? []).some(entry => entry.sha === newest.sha.toLowerCase() && runningStates.has(entry.status))) return true;
   // Due: nothing is in flight, and main has moved past the cut the last candidate made — or that
   // candidate left merges queued behind it — so the next dispatch carries main: `promotionCycle`
   // dispatches exactly then, and the queued rule is its own (GY-1513, GY-1491).
   const queued = !!newest && state.candidateAtDispatch !== undefined && newest.id !== state.candidateAtDispatch && newest.sha !== state.mainSha && (newest.queued ?? 0) > 0;
   return !state.cutSha || state.cutSha !== state.mainSha || queued;
 }
+
+/**
+ * How long after a promotion is recorded production may still be deploying it (GY-1831): the
+ * release-candidate workflow records the promotion before the production deploy it starts has
+ * finished, and a deploy whose healthcheck alone allows two minutes lands well inside this. Past it,
+ * production not serving the promoted release is a rollback or a wedged deploy.
+ */
+export const promotionHandoffMs = 20 * 60_000;
 
 /** The promotion reads over the managed checkout and GitHub; null when the repository has no release-candidate workflow to dispatch and no local ports (GY-1526). */
 export function promotionReads(config: MasterConfig, root: string, run: ChildRun, workflowExists: boolean, soakExists = existsSync(join(root, '.github', 'workflows', soakWorkflow)),

@@ -14,7 +14,7 @@ import { blockerClassMeaning, classifyBlocker, needsSomeone } from '../src/model
 import { workAttentionOwner } from '../src/master/attention.js';
 import { doctorPrompt } from '../src/daemon/doctor.js';
 import { stalledActionAttention } from '../src/cli/stalled-actions.js';
-import { noLocalPortsReason, promotionCarryingMerge, promotionFrozenReason, promotionOffReason } from '../src/daemon/deployment.js';
+import { noLocalPortsReason, promotionCarryingMerge, promotionFrozenReason, promotionHandoffMs, promotionOffReason } from '../src/daemon/deployment.js';
 import { controlPlaneHandlers } from '../src/executor.js';
 import { recurringClasses } from '../src/model/fault-class-recurrence.js';
 import { faultClassPolicyFromEnv } from '../src/model/fault-classes.js';
@@ -329,8 +329,8 @@ const promotionState = (over: Partial<PromotionState> = {}): PromotionState => (
   candidates: [{ id: 'rc-1', sha: olderCut, cutAt: stamp(1), prs: 1, queued: 0 }], nextDueAt: null, reason: quietReason, ...over,
 });
 
-const carries = async (state: PromotionState | null, edges: readonly string[] = [`${mergeSha}>${mainTip}`], calls: string[] = []) =>
-  promotionCarryingMerge(state, mergeSha, '.', 'main', ancestryRun(edges, calls));
+const carries = async (state: PromotionState | null, edges: readonly string[] = [`${mergeSha}>${mainTip}`], calls: string[] = [], now = stampMs(5)) =>
+  promotionCarryingMerge(state, mergeSha, '.', 'main', ancestryRun(edges, calls), now);
 
 test('the recorded promotion state answers in flight while a candidate carrying the merge is building', async () => {
   const calls: string[] = [];
@@ -356,10 +356,14 @@ test('the recorded promotion state answers in flight while the last candidate le
   assert.equal(await carries(state, [`${mergeSha}>${mainTip}`, `${mergeSha}>${olderCut}`]), true);
 });
 
-test('the recorded promotion state answers in flight while the newest candidate soaks', async () => {
-  const state = promotionState({ cutSha: candidateSha, candidates: [{ id: 'rc-1', sha: candidateSha.toUpperCase(), cutAt: stamp(2), prs: 1, queued: 0 }],
-    soaks: [{ sha: candidateSha, status: 'in_progress', conclusion: null, createdAt: stamp(3), url: null }] });
-  assert.equal(await carries(state, [`${mergeSha}>${candidateSha}`, `${mergeSha}>${mainTip}`]), true, 'the soak run is matched by its own case, whatever case the candidate records');
+test('a soak is advisory and carries nothing: a candidate that failed for main\'s tip, its soak still running, is a quiet pipeline and the row stalls as before', async () => {
+  // PRRT_kwDOUZby-s6tFAey: promotionCycle leaves nothing in flight and dispatches nothing until main moves past the failed cut.
+  const failed = promotionState({ cutSha: mainTip, candidates: [{ id: 'rc-1', sha: mainTip.toUpperCase(), cutAt: stamp(2), prs: 1, queued: 0 }],
+    soaks: [{ sha: mainTip, status: 'in_progress', conclusion: null, createdAt: stamp(3), url: null }] });
+  assert.equal(await carries(failed), false, 'the running soak of the failed candidate names no release that will carry the merge');
+  // A soak of a candidate that promoted is answered by the promotion's own handoff, never by the soak.
+  const promoted = promotionState({ ...failed, promotedSha: mainTip, promotedAt: stamp(2) });
+  assert.equal(await carries(promoted, [`${mergeSha}>${mainTip}`], [], stampMs(2) + promotionHandoffMs), false, 'past the handoff the running soak holds nothing');
 });
 
 test('a merge newer than the loop\'s last ledger read is due: the base branch the checkout holds carries it past the recorded tip, so the next read sees main moved', async () => {
@@ -372,9 +376,21 @@ test('a merge newer than the loop\'s last ledger read is due: the base branch th
   assert.equal(await carries(promotionState({ reason: promotionOffReason }), [`${mergeSha}>${origin}`, `${mainTip}>${origin}`]), false, 'the gates still hold first');
 });
 
+test('the wait holds through the deployment handoff: a promotion recorded before production finishes deploying it is the pipeline\'s pace until the handoff bound', async () => {
+  // PRRT_kwDOUZby-s6tEZw7: the workflow records rc-production, then production deploys it; an attempt in between is no fault.
+  const state = promotionState({ promotedSha, promotedAt: stamp(1), cutSha: mainTip, candidates: [{ id: 'rc-1', sha: promotedSha, cutAt: stamp(0), prs: 1, queued: 0 }] });
+  const edges = [`${mergeSha}>${mainTip}`, `${mergeSha}>${promotedSha}`];
+  assert.equal(await carries(state, edges, [], stampMs(1)), true, 'the moment the promotion is recorded');
+  assert.equal(await carries(state, edges, [], stampMs(1) + promotionHandoffMs - 1), true, 'until the handoff bound');
+  assert.equal(await carries(state, edges, [], stampMs(1) + promotionHandoffMs), false, 'past it, production not serving the promoted release is a rollback or a wedged deploy');
+  assert.equal(await carries(state, edges, [], stampMs(0)), false, 'a promotion recorded ahead of the clock is not read as a handoff');
+  assert.ok(promotionHandoffMs < promotionWaitBoundMs, 'the handoff ends inside the wait bound, so a wedged deploy still stalls within it');
+});
+
 test('the recorded promotion state answers not in flight once the promotion record covers the merge, when the base branch does not carry it, and while the pipeline sits quiet', async () => {
   // Production not serving a merge the promotion record already covers is a rollback or a wedged deploy: a fault, not a wait.
-  assert.equal(await carries(promotionState({ promotedSha, promotedAt: stamp(1) }), [`${mergeSha}>${mainTip}`, `${mergeSha}>${promotedSha}`]), false);
+  assert.equal(await carries(promotionState({ promotedSha, promotedAt: stamp(1) }), [`${mergeSha}>${mainTip}`, `${mergeSha}>${promotedSha}`], [], stampMs(1) + promotionHandoffMs), false);
+  assert.equal(await carries(promotionState({ promotedSha, promotedAt: null }), [`${mergeSha}>${mainTip}`, `${mergeSha}>${promotedSha}`]), false, 'a promotion with no recorded instant has no handoff to wait through');
   // A merge the base branch no longer carries is nothing the pipeline can serve.
   assert.equal(await carries(promotionState({ inFlight: true, reason: inFlightReason }), []), false);
   // A quiet pipeline whose last candidate already covers main and left nothing queued is not moving: the row stalls as before.

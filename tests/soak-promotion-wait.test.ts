@@ -5,9 +5,9 @@ import { execFileSync } from 'node:child_process';
 import type { Work } from '../src/model.js';
 import type { ActionRow } from '../src/model/actions.js';
 import { claimAction, settleAction } from '../src/model/actions.js';
-import { actionRetryMaxMs, actionStallThreshold } from '../src/model/action-progress.js';
+import { actionRetryMaxMs, actionRetryMinMs, actionStallThreshold } from '../src/model/action-progress.js';
 import { promotionWaitBoundMs, promotionWaitClause } from '../src/model/action-kinds.js';
-import { defaultPromoteEveryMinutes, promotionCandidatesListed, promotionCycle, type PromotionReads } from '../src/daemon/deployment.js';
+import { defaultPromoteEveryMinutes, promotionCandidatesListed, promotionCycle, promotionHandoffMs, type PromotionReads } from '../src/daemon/deployment.js';
 import { emptyDaemonState, writeDaemonState, type PromotionState } from '../src/daemon/state.js';
 import { masterConfigSchema } from '../src/master.js';
 import { stalledActionAttention } from '../src/cli/stalled-actions.js';
@@ -28,20 +28,25 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * is (controlPlaneEffects over the cursor, controlPlaneHandlers' verify-deployment), claims and
  * settles each row through the real action queue (claimAction, settleAction), and the loop's
  * stalled-action attention path (stalledActionAttention, classifyAttention, trackFaults) files
- * what it would file. Two quiet stretches end on a failing candidate, so the merges it carried have
- * nothing in flight. The same days run without the promotion read, as the base ran them.
+ * what it would file. Production deploys each promotion minutes after the workflow records it, and
+ * every candidate runs an advisory soak that outlives its validation, failed candidates' included.
+ * Two quiet stretches end on a failing candidate, so the merges it carried have nothing in flight. The same days run without the promotion read, as the base ran them.
  *
  * Invariants: every row ends delivered or stalled within the promotion wait bound (plus the stall
  * threshold's retries at the backoff ceiling) of its merge or of the last release production started serving, and
  * never later than two bounds after its merge; a row whose release was served within the bound files no stalled-action
  * instance; a row left on a quiet pipeline stalls and files as before; each row's attempts are
- * bounded; the cursor stays bounded; once merges resume every row is delivered. Instants are epoch
+ * bounded; the cursor stays bounded; once merges resume every row is delivered; an attempt while
+ * production is still deploying a recorded promotion names the wait, and one on a quiet pipeline —
+ * its failed candidate's soak still running — never does. Instants are epoch
  * milliseconds, never a wall-clock reading.
  */
 
 const minute = 60_000, hour = 60 * minute, t0 = 1_760_000_000_000, iso = (ms: number) => new Date(ms).toISOString();
 const sha = (label: string) => createHash('sha1').update(label).digest('hex');
-const intervalMs = minute, validationMs = 20 * minute, deployLagMs = 3 * minute, mergeEveryMs = 17 * minute;
+const intervalMs = minute, validationMs = 20 * minute, mergeEveryMs = 17 * minute, soakMs = 50 * minute;
+/** Production deploys a promotion this long after the workflow records it, cycling through a quick, an ordinary and a slow deploy. */
+const deployLags = [3 * minute, 8 * minute, 15 * minute];
 const days = 2, mergingUntil = days * 24 * hour - 3 * hour, endsAt = days * 24 * hour;
 /** The quiet stretches: no merge lands, and every candidate dispatched in the hour before one closes fails. */
 const quiet = [[9 * hour, 13 * hour], [30 * hour, 35 * hour]] as const;
@@ -60,7 +65,7 @@ async function simulate(waits: boolean) {
   const contains = (ancestor: string, descendant: string) => index.has(ancestor) && index.has(descendant) ? index.get(ancestor)! <= index.get(descendant)! : null;
   let now = t0;
   const dispatches: { at: number; cut: string; id: string; fails: boolean; concluded: boolean; prs: number }[] = [];
-  let promoted: { sha: string; at: number } | null = null;
+  let promoted: { sha: string; at: number; lag: number } | null = null, promotions = 0;
   const production = { sha: mainline[0], changes: [] as number[] };
   const violations: string[] = [];
   const reads: PromotionReads = {
@@ -71,6 +76,8 @@ async function simulate(waits: boolean) {
     },
     runs: async () => dispatches.filter(run => now - run.at >= 30_000).reverse()
       .map(run => ({ status: now < run.at + validationMs ? 'in_progress' : 'completed', createdAt: iso(run.at), event: 'workflow_dispatch', headSha: run.cut })),
+    soaks: async () => dispatches.filter(run => now - run.at >= 2 * minute).reverse()
+      .map(run => ({ sha: run.cut, status: now < run.at + soakMs ? 'in_progress' : 'completed', conclusion: now < run.at + soakMs ? null : 'success', createdAt: iso(run.at + 2 * minute), url: null })),
     dispatch: async () => {
       const tip = mainline.at(-1)!, last = dispatches.at(-1);
       if (last && now < last.at + validationMs) violations.push(`+${Math.round((now - t0) / minute)} min: dispatched while ${last.id} validates`);
@@ -95,7 +102,7 @@ async function simulate(waits: boolean) {
   const works: Work[] = [], rows = new Map<string, Row>(), logs: string[] = [];
   const open = () => works.filter(work => work.actionQueue!.actions.length);
   const effects = controlPlaneEffects({ master: {}, daemon: await import('../src/master-daemon.js'), reviewer: {}, producer: {}, executor: {} } as never, {
-    root, current: () => config, run, log: (line: string) => logs.push(line),
+    root, current: () => config, run, log: (line: string) => logs.push(line), clock: () => now,
     snapshot: async () => ({ work: open(), now: iso(now) }),
     mutate: async (path: string) => { const key = works.find(work => path === `work/${work.id}/deployment`)?.key; if (key) rows.get(key)!.deliveredAt = now; return {}; },
   });
@@ -109,7 +116,7 @@ async function simulate(waits: boolean) {
   })['verify-deployment']!;
   const executor = { id: 'soak-executor', host: 'soak-host', principal: 'coordinator' };
 
-  let promotion: PromotionState | null = null, merges = 0, attempts = 0;
+  let promotion: PromotionState | null = null, merges = 0, attempts = 0, handoffs = 0, strandedSoaking = 0;
   const record = { instances: [] as never[], open: {} as Record<string, string>, failing: {} as Record<string, string> };
   const filed: { subject: string; at: number; text: string }[] = [];
   for (; now <= t0 + endsAt; now += intervalMs) {
@@ -127,9 +134,9 @@ async function simulate(waits: boolean) {
     // The pipeline: a run concludes at the end of its validation, promoting its cut unless it fails; production serves a promotion a few minutes later.
     for (const run of dispatches) if (!run.concluded && now >= run.at + validationMs) {
       run.concluded = true;
-      if (!run.fails && (!promoted || index.get(run.cut)! > index.get(promoted.sha)!)) promoted = { sha: run.cut, at: run.at + validationMs };
+      if (!run.fails && (!promoted || index.get(run.cut)! > index.get(promoted.sha)!)) promoted = { sha: run.cut, at: run.at + validationMs, lag: deployLags[promotions++ % deployLags.length] };
     }
-    if (promoted && now >= promoted.at + deployLagMs && production.sha !== promoted.sha) {
+    if (promoted && now >= promoted.at + promoted.lag && production.sha !== promoted.sha) {
       production.sha = promoted.sha; production.changes.push(now);
       for (const row of rows.values()) if (row.servedAt === null && contains(row.merge, production.sha)) row.servedAt = now;
     }
@@ -144,6 +151,15 @@ async function simulate(waits: boolean) {
       const row = rows.get(claim.work.key)!;
       if (outcome.result === 'failed' && contains(row.merge, production.sha)) violations.push(`${row.key}: failed while production serves its merge: ${outcome.reason}`);
       if (outcome.reason.includes(promotionWaitClause) && !waits) violations.push(`${row.key}: named the promotion wait with no promotion read`);
+      // The deployment handoff: promoted, not served yet — the pipeline's pace, so the failure names the wait.
+      const handoff = !!promoted && contains(row.merge, promoted.sha) === true && now - promoted.at < promotionHandoffMs;
+      if (waits && outcome.result === 'failed' && handoff && !outcome.reason.includes(promotionWaitClause)) violations.push(`${row.key}: failed plainly while production deploys the promotion carrying it: ${outcome.reason}`);
+      // Quiet: the newest candidate cut main's tip and failed, nothing carries the merge, and its soak may still run.
+      const last = dispatches.at(-1);
+      const stranded = !!last && last.concluded && last.fails && last.cut === mainline.at(-1) && !handoff && contains(row.merge, production.sha) !== true;
+      if (stranded && outcome.reason.includes(promotionWaitClause)) violations.push(`${row.key}: named the promotion wait on a quiet pipeline${now < last!.at + soakMs ? ' while its failed candidate soaks' : ''}`);
+      if (handoff && contains(row.merge, production.sha) !== true) handoffs++;
+      if (stranded && now < last!.at + soakMs) strandedSoaking++;
       settleAction(claim.work, claim.row.id, { executor: executor.id, principal: executor.principal }, outcome.result, outcome.reason, new Date(now));
       if (outcome.result === 'done') {
         row.attemptsAtEnd ??= claim.row.attempts;
@@ -158,7 +174,7 @@ async function simulate(waits: boolean) {
       if (instance.kind === 'stalled-action' && rows.has(instance.subject)) rows.get(instance.subject)!.filed++;
     }
   }
-  return { rows: [...rows.values()], filed, violations, logs, attempts, dispatches, changes: production.changes };
+  return { rows: [...rows.values()], filed, violations, logs, attempts, dispatches, changes: production.changes, handoffs, strandedSoaking };
 }
 
 test('unit:soak-invariants-hold — GY-1831: two simulated days of merges riding release candidates that promote, fail and are re-cut behind a moving main, and two quiet stretches: every verify-deployment row ends delivered or stalled within the promotion wait bound, a row its release served within the bound files no stalled-action instance, a row left on a quiet pipeline stalls and files as before, attempts stay bounded and every row is delivered once merges resume', { timeout: 600_000 }, async () => {
@@ -168,6 +184,8 @@ test('unit:soak-invariants-hold — GY-1831: two simulated days of merges riding
   if (process.env.SOAK_TRACE) console.error(JSON.stringify({ rows: rows.length, attempts: day.attempts, dispatches: dispatches.map(run => `${run.id}@${at(run.at)}${run.fails ? ' fails' : ''}`), filed: filed.map(entry => `${entry.subject}@${at(entry.at)}`) }));
   assert.deepEqual(violations, [], 'no row fails once production serves its merge, no dispatch while a candidate validates, and the cursor stays bounded');
   assert.deepEqual(logs, [], 'the cursor was readable all day');
+  assert.ok(day.handoffs >= 10, `attempts fell inside a deployment handoff and named the wait: ${day.handoffs}`);
+  assert.ok(day.strandedSoaking >= 1, `attempts fell on a quiet pipeline while its failed candidate soaked and stood plain: ${day.strandedSoaking}`);
   assert.ok(rows.length >= 120, `merges landed all day: ${rows.length}`);
   assert.ok(dispatches.filter(run => run.fails).length >= 10 && dispatches.filter(run => !run.fails).length >= 30, `candidates promoted and failed and were re-cut: ${dispatches.length}`);
 
@@ -197,7 +215,10 @@ test('unit:soak-invariants-hold — GY-1831: two simulated days of merges riding
 
   // Bounded: the attempts a row makes before it ends, and every row delivered by the day's end.
   const most = Math.max(...rows.map(row => row.attemptsAtEnd ?? 0));
-  assert.ok(most <= 14, `a row makes at most 14 attempts before it is delivered or stalled: ${most}`);
+  // The ceiling is what the widening backoff fits into the two-bound limit asserted above, plus the claim at each end.
+  let ceiling = 1;
+  for (let spent = 0, delay = actionRetryMinMs; spent + delay <= settleBoundMs + promotionWaitBoundMs; spent += delay, delay = Math.min(delay * 2, actionRetryMaxMs)) ceiling++;
+  assert.ok(most <= ceiling, `a row makes at most ${ceiling} attempts, the backoff's fill of two bounds, before it is delivered or stalled: ${most}`);
   assert.ok(day.attempts <= rows.length * 20, `attempts over the days stay bounded per row: ${day.attempts} for ${rows.length} rows`);
   assert.deepEqual(rows.filter(row => row.deliveredAt === null).map(row => row.key), [], 'every row is delivered by the end of the days');
 });
