@@ -321,20 +321,35 @@ async function staleSandboxEntry(base: string, now: number) {
   return { tmp, entry, admin };
 }
 
+/**
+ * The base's recursive rm inside the 0555 admin directory fails with EACCES on whichever entry
+ * readdir returns first — unlink HEAD, index or gitdir, or rmdir logs after emptying it — and stops
+ * there. Which entry that is, is the filesystem's directory order, which the test does not control
+ * (GY-1837: the recorded instances name HEAD, gitdir and logs across hosts), so the reproduction
+ * asserts the failure the behaviour names — the code, and the met entry inside GY-7-1 — never one
+ * child's name.
+ */
+function assertAdminEacces(error: NodeJS.ErrnoException | null, message: string) {
+  assert.ok(error, message);
+  assert.equal(error!.code, 'EACCES', message);
+  assert.match(error!.message, /^EACCES: permission denied, (?:unlink|rmdir) '.*\.git\/worktrees\/GY-7-1\/[^/]+'$/, message);
+}
+
 test('manual:fault-class-resources — GY-1828 instance 3 reproduces: the base pass reports the entry EACCES and frees nothing; the candidate frees it whole and the action records done', async () => {
   const base = await temporaryDirectory('fault-class-resources-readonly');
   const now = instance3At - 3_600_000;
   const { tmp, entry } = await staleSandboxEntry(base, now);
 
   // REPRODUCE against the base: the removal the base's pass runs fails exactly as the item
-  // recorded — `EACCES: permission denied, unlink` on the first file inside the 0555 directory —
-  // and the entry stays, so the pass reports the error the action record carried as a fault.
+  // recorded — `EACCES: permission denied` on whichever entry inside the 0555 directory readdir
+  // returns first, unlink or rmdir — and the entry stays, so the pass reports the error the action
+  // record carried as a fault.
   const baseError = await rm(entry, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 }).then(() => null, error => error as NodeJS.ErrnoException);
-  assert.match(baseError!.message, /EACCES: permission denied, unlink '.*\.git\/worktrees\/GY-7-1\/HEAD'$/, 'the base\'s removal primitive fails on the read-only admin directory');
+  assertAdminEacces(baseError, 'the base\'s removal primitive fails on the read-only admin directory, on whichever of its entries readdir returns first');
   assert.equal(existsSync(entry), true, 'the base frees nothing: the entry stands');
   const baseReport = { at: new Date(instance3At).toISOString(), reaped: { review: 1, producer: 0 }, closed: [], released: [], tmp: { removed: 1, bytes: 38_973_291 }, errors: [`/var/tmp/gy-teK30QK: ${baseError!.message}`] } as unknown as ResourceReclaimReport;
   const baseLine = describeReclaim(baseReport)!;
-  assert.match(baseLine, /^Resource reclaim: reaped 1 review and 0 producer ledger record\(s\); freed 39 MB from 1 stale \/tmp entry; 1 could not be reclaimed: \/var\/tmp\/gy-teK30QK: EACCES: permission denied, unlink/);
+  assert.match(baseLine, /^Resource reclaim: reaped 1 review and 0 producer ledger record\(s\); freed 39 MB from 1 stale \/tmp entry; 1 could not be reclaimed: \/var\/tmp\/gy-teK30QK: EACCES: permission denied, (?:unlink|rmdir)/);
   assert.equal(baseLine.includes('could not be reclaimed'), true, 'the loop records the reclaim action failed on this report: the action:reclaim fault the item lists');
 
   // CANDIDATE: the same tree, the pass as it now runs — owner-held directories are made writable
@@ -426,18 +441,18 @@ test('manual:fault-class-resources — GY-1830 reproduces: every pass the old re
   const firstAt = Date.parse(gy1830[0].at);
 
   // REPRODUCE against the base: the removal the base's passes ran failed on every one of them with
-  // the error the instances record — the same entry, the same unlink, four times in sixteen minutes
-  // (the recorded lines name /var/tmp/gy-teK30QK on the host; the fixture builds the same tree in
-  // its own temporary root).
+  // the error the instances record — the same entry, the same EACCES on the first met entry, four
+  // times in sixteen minutes (the recorded lines name /var/tmp/gy-teK30QK on the host; the fixture
+  // builds the same tree in its own temporary root).
   const base = await temporaryDirectory('fault-class-resources-1830-base');
   const stale = await staleSandboxEntry(base, firstAt - 3_600_000);
   const firstError = await rm(stale.entry, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 }).then(() => null, error => error as NodeJS.ErrnoException);
-  assert.match(firstError!.message, /EACCES: permission denied, unlink '.*\/graphyard-sandbox-[^/]+\/repo\/.git\/worktrees\/GY-7-1\/HEAD'$/, 'the base\'s removal primitive fails on the read-only admin directory, as every instance records');
+  assertAdminEacces(firstError, 'the base\'s removal primitive fails on the read-only admin directory, as every instance records');
   assert.equal(existsSync(stale.entry), true, 'the base frees nothing, so the next pass meets the same entry again');
   const again = await rm(stale.entry, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 }).then(() => null, error => error as NodeJS.ErrnoException);
   assert.equal(again!.code, 'EACCES', 'the second pass fails the same way: one unresolved entry is how four instances accumulated');
   const recorded = describeReclaim({ at: gy1830[1].at, reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: [`${tmpErrorPrefix}/var/tmp/gy-teK30QK: ${firstError!.message}`] } as unknown as ResourceReclaimReport)!;
-  assert.match(recorded, /^Resource reclaim: 1 could not be reclaimed: Tmp reclaim: \/var\/tmp\/gy-teK30QK: EACCES: permission denied, unlink '.*\/graphyard-sandbox-[^/]+\/repo\/.git\/worktrees\/GY-7-1\/HEAD'$/, 'the line instances 1, 2 and 4 record (instance 3 adds the reaped clause in front of the same tail)');
+  assert.match(recorded, /^Resource reclaim: 1 could not be reclaimed: Tmp reclaim: \/var\/tmp\/gy-teK30QK: EACCES: permission denied, (?:unlink|rmdir) '.*\/graphyard-sandbox-[^/]+\/repo\/.git\/worktrees\/GY-7-1\/[^/]+'$/, 'the line instances 1, 2 and 4 record (instance 3 adds the reaped clause in front of the same tail)');
 
   // CANDIDATE: the pass as it now runs frees the entry whole at the first of the four instants,
   // without an error, so the passes at the other three instants meet nothing and report nothing —
@@ -452,6 +467,20 @@ test('manual:fault-class-resources — GY-1830 reproduces: every pass the old re
     assert.deepEqual(next.errors, [], `the pass at ${instance.at} meets nothing: the instance never opens`);
     assert.deepEqual(next.removed, []);
   }
+});
+
+test('unit:fault-class-resources-order-independent — the EACCES the reproductions accept is order-independent: the gitdir unlink and the logs rmdir the recorded instances name pass the same assertion, a wrong code or a met entry outside GY-7-1 never does', () => {
+  // The two failures CI recorded beside HEAD, chosen by readdir order on hosts the fixture does not
+  // control: on one runner rm met gitdir before HEAD, on another it emptied logs and failed to
+  // remove the directory. Whichever entry the base's rm meets first, the same assertion accepts it —
+  assertAdminEacces({ code: 'EACCES', message: "EACCES: permission denied, unlink '/var/tmp/gy-teK30QK/graphyard-sandbox-5ClynR/repo/.git/worktrees/GY-7-1/gitdir'" } as NodeJS.ErrnoException, 'the gitdir unlink the recorded instances name');
+  assertAdminEacces({ code: 'EACCES', message: "EACCES: permission denied, rmdir '/var/tmp/gy-teK30QK/graphyard-sandbox-5ClynR/repo/.git/worktrees/GY-7-1/logs'" } as NodeJS.ErrnoException, 'the logs rmdir the recorded instances name');
+  assertAdminEacces({ code: 'EACCES', message: "EACCES: permission denied, unlink '/var/tmp/gy-teK30QK/graphyard-sandbox-5ClynR/repo/.git/worktrees/GY-7-1/index'" } as NodeJS.ErrnoException, 'any child of the admin directory: the index unlink too');
+  // …and it still refuses what no pass inside the 0555 admin directory produces: another code, or a
+  // met entry the admin directory does not hold.
+  assert.throws(() => assertAdminEacces({ code: 'EPERM', message: "EPERM: operation not permitted, unlink '/var/tmp/gy-teK30QK/graphyard-sandbox-5ClynR/repo/.git/worktrees/GY-7-1/HEAD'" } as NodeJS.ErrnoException, 'x'), 'a pass that met the directory at all failed EACCES');
+  assert.throws(() => assertAdminEacces({ code: 'EACCES', message: "EACCES: permission denied, unlink '/var/tmp/gy-teK30QK/HEAD'" } as NodeJS.ErrnoException, 'x'), 'the met entry stands inside .git/worktrees/GY-7-1');
+  assert.throws(() => assertAdminEacces(null, 'x'), 'the removal must have failed: the base frees nothing');
 });
 
 /** The delivered GY-1828 record: with the deployment observation the restarted loop recorded, and without it — the base read the merge alone. */
