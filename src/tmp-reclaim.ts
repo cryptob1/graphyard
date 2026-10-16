@@ -16,7 +16,7 @@
 // gone" checkable rather than guessed from a modification time.
 
 import { existsSync, readFileSync, type Dirent, type Stats } from 'node:fs';
-import { lstat, opendir, readdir, readFile, readlink, realpath, rm, stat, statfs, writeFile } from 'node:fs/promises';
+import { chmod, lstat, opendir, readdir, readFile, readlink, realpath, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 
@@ -632,12 +632,43 @@ function took(report: TmpReclaimReport, kind: TmpReclaimClass, path: string, byt
   report.bytes += bytes;
   if (report.classes) report.classes[kind] = (report.classes[kind] ?? 0) + 1;
 }
-/** Remove `path` recursively, retrying while its tree refills or is still being released, for at most `retryMs`. */
-async function removeTree(path: string, retryMs: number) {
+/**
+ * Adds the owner-write bit to every directory under `path` that `uid` owns, following no symlink
+ * (GY-1828): a stale entry holding a sandbox repository keeps `.git/worktrees/<name>` mode 0555,
+ * and `rm` reports `EACCES: permission denied, unlink` for the first file inside it however often
+ * a pass retries — the instance the resources class recorded stayed and every later pass reported
+ * the error again. Returns whether any mode was changed, so a retry is worth the tree's read.
+ * A directory another user owns is never touched — on a sticky world-writable root it is theirs,
+ * and `chmod` would refuse it anyway — and nothing else is: unlinking a file needs no write bit
+ * of its own, and a symlink is taken as the link alone.
+ */
+async function makeOwnerWritable(path: string, uid: number | undefined): Promise<boolean> {
+  let changed = false;
+  const stack = [path];
+  while (stack.length) {
+    const directory = stack.pop()!;
+    let info: Stats | null = null;
+    try { info = await lstat(directory); } catch { continue; }
+    if (!info.isDirectory() || (uid !== undefined && info.uid !== uid)) continue;
+    if (!(info.mode & 0o200)) { try { await chmod(directory, info.mode | 0o200); changed = true; } catch { /* the removal's own error stands when the retry still fails */ } }
+    for (const entry of await readdir(directory, { withFileTypes: true }).catch(() => [] as Dirent[])) stack.push(join(directory, entry.name));
+  }
+  return changed;
+}
+/**
+ * Remove `path` recursively, retrying while its tree refills or is still being released, for at
+ * most `retryMs`. A refusal its owner's own read-only directories cause (`EACCES`, or the `EPERM`
+ * some filesystems report) makes those directories writable first and retries inside the window,
+ * so an entry the pass owns is freed this pass instead of reported for every pass to come
+ * (GY-1828); one whose read-only directories are another user's changes nothing and fails as before.
+ */
+async function removeTree(path: string, retryMs: number, uid: number | undefined) {
   const until = Date.now() + retryMs;
   for (;;) {
     try { return await rm(path, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 }); } catch (error) {
-      if (!retryable.has((error as NodeJS.ErrnoException).code ?? '') || Date.now() >= until) throw error;
+      const code = (error as NodeJS.ErrnoException).code ?? '';
+      const writable = code === 'EACCES' || code === 'EPERM' ? await makeOwnerWritable(path, uid) : false;
+      if ((!retryable.has(code) && !writable) || Date.now() >= until) throw error;
       await new Promise(done => setTimeout(done, 10));
     }
   }
@@ -727,7 +758,7 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
       // checkout's .git file with it, and a failed registration removal must outlive the checkout's path.
       const registration = await worktreeRegistration(path);
       if (registration) pass.registrations.set(registration, path);
-      await removeTree(path, pass.retryMs);
+      await removeTree(path, pass.retryMs, pass.uid);
       for (const [pending, checkout] of pass.registrations) if (checkout === path) { await rm(pending, { recursive: true, force: true }); pass.registrations.delete(pending); }
       await rm(tempOwnerMarker(path), { force: true });
       pass.unfinished.delete(path);
@@ -885,7 +916,7 @@ async function reclaimCompileCaches(root: string, real: string, pass: PassState,
     if (!await treeOnDevice(path, device, pass.mounts)) { report.kept++; continue; }
     try {
       const bytes = await sizeOf(path);
-      await removeTree(path, pass.retryMs);
+      await removeTree(path, pass.retryMs, pass.uid);
       pass.unfinished.delete(path);
       took(report, 'compileCache', path, bytes);
     } catch (error) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
@@ -963,7 +994,7 @@ async function reclaimRuntimeScratch(root: string, real: string, pass: PassState
       if (!await treeOnDevice(path, device, pass.mounts)) { report.kept++; continue; }
       try {
         const bytes = await sizeOf(path);
-        await removeTree(path, pass.retryMs);
+        await removeTree(path, pass.retryMs, pass.uid);
         pass.unfinished.delete(path); pass.written.delete(path);
         took(report, 'runtimeScratch', path, bytes);
       } catch (error) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }

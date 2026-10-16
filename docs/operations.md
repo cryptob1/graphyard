@@ -33,7 +33,7 @@ Never attest a stop you have not confirmed. Outside its namespace, `master statu
 
 ## Worker host keyring proxy
 
-Confined masters/approvers/producers (not workers/reviewers) read GitHub login via a keyring-only D-Bus proxy: copy `deploy/systemd/graphyard-secrets-bus*`, `systemctl --user enable --now graphyard-secrets-bus.socket` (`$XDG_RUNTIME_DIR/graphyard-secrets-bus` or `GRAPHYARD_SECRETS_BUS`); absent, sessions push `GH_TOKEN`.
+Confined masters/approvers/producers (not workers/reviewers) read GitHub login via a keyring-only D-Bus proxy: copy `deploy/systemd/graphyard-secrets-bus*`, `systemctl --user enable --now graphyard-secrets-bus.socket` (`GRAPHYARD_SECRETS_BUS`); absent, sessions push `GH_TOKEN`.
 
 ## Safety facts that never change
 
@@ -48,7 +48,7 @@ Confined masters/approvers/producers (not workers/reviewers) read GitHub login v
 
 ## Resources and disk
 
-`resourceRegistry` bounds resources ([remedies](operations-reference.md#control-plane-resources)); worktrees reclaimed after `run.reclaimIdleHours` (never dirty/unpushed), idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed); `disk` attention under `run.diskThresholdGb` is answered (reported, faultless) while the latest worktree-reclaim pass is ≤30 min old and drained (nothing removed; nothing disposable now; no fault standing); ≤ half the threshold, or ENOSPC/EDQUOT, always raises; a standing low reading holds to a tenth of the threshold above it, whatever the pass answers. Clean detached verified-release descendant self-recovers (`upgrade:recovered`); otherwise `escalation:dirty-checkout`. Dirty checkout: loop (executors on loaded code) restarts via a `.graphyard/held-cli` snapshot's launcher (unit rewrite refused: `upgrade:unit`), though commands run its `bin/graphyard.mjs` (return it to HEAD); lifting the pin needs the checkout moved onto its commit clean, not merely clean paths. `master checkout-restore` serves a snapshot; moved: `adopted`; diverged: `refs/graphyard/checkout-restore/diverged-*`; stale: `handoff`.
+`resourceRegistry` bounds resources ([remedies](operations-reference.md#control-plane-resources)); worktrees reclaimed after `run.reclaimIdleHours` (never dirty/unpushed), idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed); `disk` attention under `run.diskThresholdGb` is answered (reported, faultless) while the latest worktree-reclaim pass is ≤30 min old and out of reach (nothing disposable now, no backlog or error, its removals included; no fault standing); ≤ half the threshold, or ENOSPC/EDQUOT, always raises; a standing low reading holds to a tenth of the threshold above it, whatever the pass answers. Clean detached verified-release descendant self-recovers (`upgrade:recovered`); otherwise `escalation:dirty-checkout`. Dirty checkout: loop (executors on loaded code) restarts via a `.graphyard/held-cli` snapshot's launcher though commands run its `bin/graphyard.mjs` (return it to HEAD); lifting the pin needs the checkout moved onto its commit clean, not merely clean paths. `master checkout-restore` serves a snapshot; moved: `adopted`; diverged: `refs/graphyard/checkout-restore/diverged-*`; stale: `handoff`.
 
 Main guard revert approver ([provisioning](deployment.md#manual-fallback)): redeploy; verify `mainGuard.revertApprover`, empty `mainGuard.attention`, `doctor`.
 
