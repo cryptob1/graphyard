@@ -206,12 +206,18 @@ export function trialShardBreadth(cores: number, shards: number, affordableFiles
   }
   return { lanes, breadth };
 }
-/** The files the host's memory affords a trial's shards at once (GY-1832), or null when it cannot be read: available memory less the floor and the recovery margin the loop defers launches at, `bytesPerSuiteFile` a file. */
-export async function trialAffordableFiles(read?: () => Promise<HostMemoryReading | null>): Promise<number | null> {
-  const resources = await import('../master-resources.js'), { bytesPerSuiteFile } = await import('../master/verification-slots.js');
+/**
+ * The files the host's memory affords a trial's shards at once (GY-1832), or null when it cannot be
+ * read: available memory less the floor and the recovery margin the loop defers launches at,
+ * `bytesPerSuiteFile` a file, less the files runs holding the host's verification slots under
+ * `slots` declared and may not yet have allocated — as tests/helpers/run-tests.ts's breadth
+ * deducts them, since the shards' environment carries no slot of their own.
+ */
+export async function trialAffordableFiles(read?: () => Promise<HostMemoryReading | null>, slots?: string): Promise<number | null> {
+  const resources = await import('../master-resources.js'), { bytesPerSuiteFile, othersDeclaredFiles } = await import('../master/verification-slots.js');
   const reading = await (read ?? resources.readHostMemory)();
   if (!reading) return null;
-  return Math.floor((reading.availableBytes - resources.hostMemoryFloor(reading.totalBytes) - resources.memoryRecoveryMarginBytes) / bytesPerSuiteFile);
+  return Math.floor((reading.availableBytes - resources.hostMemoryFloor(reading.totalBytes) - resources.memoryRecoveryMarginBytes) / bytesPerSuiteFile) - (slots ? othersDeclaredFiles(slots) : 0);
 }
 /**
  * The shards a selection runs in (GY-1832): as many as the lanes, never more than the files, and
@@ -582,7 +588,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       // shard named one: a named failing test is the merge's, and stays a failing verdict.
       const cores = Math.max(1, Math.floor(input.cores ?? availableParallelism()));
       const shards = input.groupSize === undefined ? shardTestFiles(files, trialShardLanes(cores), await checkoutDurations(worktree)) : groupTestFiles(files, input.groupSize);
-      const { lanes, breadth } = trialShardBreadth(cores, shards.length, await trialAffordableFiles(input.memory));
+      const { lanes, breadth } = trialShardBreadth(cores, shards.length, await trialAffordableFiles(input.memory, (await import('../master/verification-slots.js')).verificationSlotsDirectory(input.base)));
       const settledShards: ({ group: TrialGroup; entries: string[]; unattributed: TrialRunnerError | null } | undefined)[] = [];
       let next = 0, stopped: unknown = null;
       const lane = async () => {

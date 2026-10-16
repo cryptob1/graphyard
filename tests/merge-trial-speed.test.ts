@@ -8,7 +8,7 @@ import type { Work } from '../src/model.js';
 import { mergeOne, runMergeTrial, type MergePorts, type MergeRecordEvent, type MergeTrialInput } from '../src/merge-writer/executor.js';
 import { mergeRecordBodySchema } from '../src/server/merge-record.js';
 import { hostMemoryFloor, memoryRecoveryMarginBytes } from '../src/master-resources.js';
-import { bytesPerSuiteFile } from '../src/master/verification-slots.js';
+import { bytesPerSuiteFile, verificationSlotsDirectory } from '../src/master/verification-slots.js';
 import { runTrial, shardTestFiles, trialAffordableFiles, trialAttempts, trialNoVerdict, trialPhases, trialRetries, trialShardBreadth, trialShardLanes, trialTestGroupSize, TrialRunnerError, TrialTimeoutError } from '../src/merge-writer/trial.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -139,6 +139,21 @@ test('unit:trial-sharded-verdict-equal — runTrial runs the selected files in p
   const totalBytes = 64 * 2 ** 30, affording = (files: number) => async () => ({ totalBytes, availableBytes: hostMemoryFloor(totalBytes) + memoryRecoveryMarginBytes + files * bytesPerSuiteFile });
   assert.equal(await trialAffordableFiles(affording(6)), 6);
   assert.equal(await trialAffordableFiles(async () => null), null, 'an unread host is sized by its cores alone');
+  // Files other runs declared on the host's verification slots are deducted, as run-tests.ts deducts them: they may not have allocated yet.
+  const slotRoot = await temporaryDirectory('merge-trial-slots'), slots = verificationSlotsDirectory(slotRoot);
+  await mkdir(join(slots, 'slot-0'), { recursive: true });
+  await writeFile(join(slots, 'slot-0', 'owner.json'), JSON.stringify({ pid: process.pid + 1, label: 'suite', cwd: slotRoot, at: '2030-03-01T00:00:00Z', files: 4 }));
+  assert.equal(await trialAffordableFiles(affording(6), slots), 2, 'four declared elsewhere leave two of six');
+  assert.equal(await trialAffordableFiles(affording(6), join(slotRoot, 'none')), 6, 'no slots held leaves all six');
+  const declared = repository(files, { failing, baseline });
+  const shared = await runMergeTrial(await input(declared, { cores: 16, memory: affording(6) }).then(async trial => {
+    await mkdir(join(verificationSlotsDirectory(trial.base), 'slot-0'), { recursive: true });
+    await writeFile(join(verificationSlotsDirectory(trial.base), 'slot-0', 'owner.json'), JSON.stringify({ pid: process.pid + 1, label: 'suite', cwd: trial.base, at: '2030-03-01T00:00:00Z', files: 4 }));
+    return trial;
+  }));
+  const sharedPerRunner = Math.max(...declared.seen.concurrency.map(flag => Number(flag.split('=')[1])));
+  assert.ok(declared.seen.maxInFlight * sharedPerRunner <= 2, `the trial runs within the two files the declared slot leaves: ${declared.seen.maxInFlight} runners at ${sharedPerRunner}`);
+  assert.deepEqual(verdict(shared), verdict(alone), 'with files declared elsewhere: the single process\'s verdict');
   assert.deepEqual([trialShardBreadth(16, 8), trialShardBreadth(16, 8, 100), trialShardBreadth(16, 8, 12), trialShardBreadth(16, 8, 6), trialShardBreadth(16, 8, -3), trialShardBreadth(1, 1, 0)],
     [{ lanes: 8, breadth: 2 }, { lanes: 8, breadth: 2 }, { lanes: 8, breadth: 1 }, { lanes: 6, breadth: 1 }, { lanes: 1, breadth: 1 }, { lanes: 1, breadth: 1 }]);
   for (const afforded of [12, 6, 3, 0]) {
