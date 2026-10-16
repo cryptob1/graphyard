@@ -13,7 +13,6 @@ import { pinningVerify, retryPendingPin } from '../master/known-good.js';
 import { installDirectory } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
 import { boundDeployment, type ContainmentRetention, type DeploymentObservation, deploymentObservationSchema, message, type PromotionState, retainedContainments } from './state.js';
-import { staleContainmentReasonPrefix } from '../model/action-kinds.js';
 
 export function deploymentDetail(observation: DeploymentObservation) {
   if (observation.source === 'unavailable') return `Deployment SHA is unverified: ${observation.reason ?? 'no deployment observation is configured or available'}`;
@@ -53,25 +52,16 @@ export function localAncestry(root: string, baseBranch: string, run: ChildRun) {
     catch (error) { fetched = message(error).split('\n')[0]; }
     return fetched;
   };
-  const held = async (ancestor: string, descendant: string): Promise<boolean | null> => {
-    try { await git('merge-base', '--is-ancestor', ancestor, descendant); return true; }
-    // Exit 1 is git's "not an ancestor". Anything else — a commit this checkout does not hold,
-    // a broken repository — is unknown, and unknown containment is never read as deployed.
-    catch (error: any) { return error?.status === 1 ? false : null; }
-  };
   return {
     get fetchFailure() { return fetched || null; },
     /** `true`/`false` when git could answer, `null` when this checkout does not hold both commits. */
     async contains(ancestor: string, descendant: string): Promise<boolean | null> {
       if (ancestor === descendant) return true;
       await fetchBase();
-      return held(ancestor, descendant);
-    },
-    /** GY-1831: `contains` over the commits the checkout already holds, fetching nothing — the
-     * caller has just read a release whose observation fetched the base branch, or answers null. */
-    containsHeld(ancestor: string, descendant: string): Promise<boolean | null> {
-      if (ancestor === descendant) return Promise.resolve(true);
-      return held(ancestor, descendant);
+      try { await git('merge-base', '--is-ancestor', ancestor, descendant); return true; }
+      // Exit 1 is git's "not an ancestor". Anything else — a commit this checkout does not hold,
+      // a broken repository — is unknown, and unknown containment is never read as deployed.
+      catch (error: any) { return error?.status === 1 ? false : null; }
     },
   };
 }
@@ -311,7 +301,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
   // A base branch this checkout could not fetch is said out loud: containment was then derived
   // from whatever objects are here, and a delivery git could not place stays pending, never deployed.
   const stale = ancestry.fetchFailure;
-  const reasons = [inactive, stale ? `${staleContainmentReasonPrefix}${stale}` : null].filter(Boolean);
+  const reasons = [inactive, stale ? `Containment was derived without a fresh base branch: ${stale}` : null].filter(Boolean);
   return deploymentObservationSchema.parse({ source, sha, at, reason: reasons.length ? reasons.join('; ') : null, deployed: deployed.slice(-200), pending: pending.slice(-200),
     requests, derived, retained: retainedCount, containment: { release: sha, settled: Object.fromEntries(keep) } });
 }
@@ -489,11 +479,7 @@ export async function promotionMode(reads: Pick<PromotionReads, 'merger'>): Prom
  */
 export interface PromotionOptions { now: number; everyMinutes: number; intervalMs?: number; frozen?: { sha: string; since: string } | null; watchedTip?: string | null }
 export const promotionFrozenReason = (frozen: { sha: string; since: string }) =>
-  `${promotionFrozenReasonPrefix}${frozen.since}: commit ${frozen.sha} on the base branch is explained by no merge ledger entry, delivery, revert or direct-merge window; an admin lifts it with graphyard master main-watch acknowledge ${frozen.sha} --reason TEXT --admin-token-stdin`;
-/** What a recorded promotion reason starts with while the main watch's freeze holds every dispatch (GY-1831's gate reading). */
-export const promotionFrozenReasonPrefix = 'Promotion is frozen since ';
-/** The reason a recorded promotion state names while `run.promoteEveryMinutes` is 0 and nothing is ever dispatched (GY-1831's gate reading). */
-export const promotionOffReason = 'Promotion by the loop is off (run.promoteEveryMinutes is 0)';
+  `Promotion is frozen since ${frozen.since}: commit ${frozen.sha} on the base branch is explained by no merge ledger entry, delivery, revert or direct-merge window; an admin lifts it with graphyard master main-watch acknowledge ${frozen.sha} --reason TEXT --admin-token-stdin`;
 
 const later = (...times: (string | null | undefined)[]) => times.filter((time): time is string => !!time && Number.isFinite(Date.parse(time)))
   .sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? null;
@@ -528,7 +514,7 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
   const carried = { ...(previous?.soaks ? { soaks: previous.soaks } : {}), ...(previous?.soaksReadAt ? { soaksReadAt: previous.soaksReadAt } : {}), inFlight: previous?.inFlight ?? false, runsReadAt: previous?.runsReadAt ?? null, dispatchedAt: previous?.dispatchedAt ?? null, lastDispatchAt: previous?.lastDispatchAt ?? null, cutSha: previous?.cutSha ?? null,
     ...(previous?.candidateAtDispatch !== undefined ? { candidateAtDispatch: previous.candidateAtDispatch } : {}) };
   // Off reads nothing at all: no fetch, no GitHub request.
-  if (options.everyMinutes <= 0) return done({ checkedAt: at, ...kept, ...carried }, promotionOffReason, false);
+  if (options.everyMinutes <= 0) return done({ checkedAt: at, ...kept, ...carried }, 'Promotion by the loop is off (run.promoteEveryMinutes is 0)', false);
   // GY-1526: under a control-plane merger the loop runs the candidate itself through its local ports; the workflow is neither read nor dispatched.
   if (await promotionMode(reads) === 'control-plane') {
     if (!reads.local) return done({ checkedAt: at, ...kept, ...carried }, noLocalPortsReason, false);
@@ -636,69 +622,6 @@ function soakOf(soaks: PromotionState['soaks'], candidate: PromotionCandidate) {
 }
 /** A soak run's conclusion in the record's words: success is passed, failure failed; the rest stand. */
 const soakVerdict = (conclusion: string) => conclusion === 'success' ? 'passed' : conclusion === 'failure' ? 'failed' : conclusion;
-
-/**
- * GY-1831: whether the promotion pipeline has a delivered merge in flight — a release candidate
- * carrying it is being built or its soak is running, or the dispatch that will carry it is due — so
- * a `verify-deployment` attempt that fails only because the running release does not serve the
- * merge yet is naming the pipeline's ordinary pace, not a fault. Answered from the promotion state
- * the loop already reads and records on its cursor, at the cadence its own read windows set: the
- * executor asking this at a failed attempt runs no fetch and no GitHub request of its own, and
- * never touches the promotion ledger's pin. The gates that stop every dispatch — promotion off,
- * the main watch's freeze, a control-plane merger whose local ports the loop lacks — are read from
- * the same state, so a row only ever waits on a pipeline the loop is driving; anywhere else a
- * failure stands as it was. A merge the promotion record already covers is still in flight for
- * `promotionHandoffMs` after that promotion — the workflow records the promotion before production
- * finishes deploying it — and past that handoff production not serving it is a rollback or a wedged
- * deploy, and stays a fault; a merge the base branch no longer carries is not in flight. A soak is
- * advisory and carries nothing to production, so it is never a flight of its own. A quiet pipeline
- * whose last candidate already covers main, left nothing queued and is not in flight — a failed
- * candidate whose soak still runs included — is not moving either: the row stalls and files as
- * before. A merge newer than the recorded tip, on the base branch past it, is due: the loop's next
- * ledger read carries it. Containment is read over the commits the checkout already holds — the
- * observation that failed just fetched the base branch — and containment that cannot be read
- * answers not carrying.
- */
-export async function promotionCarryingMerge(state: PromotionState | null, mergeSha: string, root: string, baseBranch: string, run: ChildRun, now: number): Promise<boolean> {
-  if (!state) return false;
-  const reason = state.reason;
-  if (reason !== null && (reason === promotionOffReason || reason.startsWith(promotionFrozenReasonPrefix) || reason === noLocalPortsReason)) return false;
-  if (!state.mainSha) return false;
-  const ancestry = localAncestry(root, baseBranch, run);
-  const recorded = await ancestry.containsHeld(mergeSha, state.mainSha);
-  // A merge that landed after the loop's last ledger read is on the base branch the failed
-  // observation just fetched, ahead of the recorded tip: the loop's next read (within its ledger
-  // window) sees main moved, and the dispatch that carries it is due — unless that branch has moved
-  // off the recorded tip altogether, which is no pipeline this state describes.
-  if (recorded === false) {
-    const tip = `refs/remotes/origin/${baseBranch}`;
-    return await ancestry.containsHeld(mergeSha, tip) === true && await ancestry.containsHeld(state.mainSha, tip) === true;
-  }
-  if (recorded !== true) return false;
-  // Promoted: the deployment that serves it follows the record, so the wait holds through that
-  // handoff; a promotion recorded longer ago than the handoff that production still does not serve
-  // is no pace of the pipeline's.
-  if (state.promotedSha && await ancestry.containsHeld(mergeSha, state.promotedSha) === true) {
-    const promotedAt = state.promotedAt ? Date.parse(state.promotedAt) : Number.NaN;
-    return Number.isFinite(promotedAt) && now - promotedAt >= 0 && now - promotedAt < promotionHandoffMs;
-  }
-  // In flight is the loop's own flag: a release candidate run in validation.
-  if (state.inFlight) return true;
-  const newest = state.candidates?.[0] ?? null;
-  // Due: nothing is in flight, and main has moved past the cut the last candidate made — or that
-  // candidate left merges queued behind it — so the next dispatch carries main: `promotionCycle`
-  // dispatches exactly then, and the queued rule is its own (GY-1513, GY-1491).
-  const queued = !!newest && state.candidateAtDispatch !== undefined && newest.id !== state.candidateAtDispatch && newest.sha !== state.mainSha && (newest.queued ?? 0) > 0;
-  return !state.cutSha || state.cutSha !== state.mainSha || queued;
-}
-
-/**
- * How long after a promotion is recorded production may still be deploying it (GY-1831): the
- * release-candidate workflow records the promotion before the production deploy it starts has
- * finished, and a deploy whose healthcheck alone allows two minutes lands well inside this. Past it,
- * production not serving the promoted release is a rollback or a wedged deploy.
- */
-export const promotionHandoffMs = 20 * 60_000;
 
 /** The promotion reads over the managed checkout and GitHub; null when the repository has no release-candidate workflow to dispatch and no local ports (GY-1526). */
 export function promotionReads(config: MasterConfig, root: string, run: ChildRun, workflowExists: boolean, soakExists = existsSync(join(root, '.github', 'workflows', soakWorkflow)),

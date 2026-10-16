@@ -120,13 +120,11 @@ export function actionStall(row: ActionRow): ActionStall | null {
   // A reason naming a handoff in progress (`handoffWaitBound`) repeats because the effect has not
   // landed yet, not because the attempt cannot succeed: it is a stall only once the run outlasts
   // the bound the component delivering it keeps (GY-1090). A run that fills the row's whole
-  // retained record may have begun before it, so it is measured from the row's request, the
-  // earliest it can have begun: the record's trimming never hides a wait that stopped being one,
-  // and a wait whose attempts merely fill the record inside its bound is not cut short (GY-1831).
+  // retained record began before it, so it is read as having outlasted the bound: the record's
+  // trimming never hides a wait that stopped being one.
   const bound = handoffWaitBound(run[0].reason);
   const beyondRecord = !progressed && run.length === failures.length && row.history.length >= actionRecordLimit;
-  const since = beyondRecord ? Math.min(Date.parse(row.requestedAt), Date.parse(run[run.length - 1].at)) : Date.parse(run[run.length - 1].at);
-  if (bound !== null && Date.parse(run[0].at) - since < bound) return null;
+  if (bound !== null && !beyondRecord && Date.parse(run[0].at) - Date.parse(run[run.length - 1].at) < bound) return null;
   return { reason: run[0].reason, failures: run.length, attempts: row.attempts, since: run[run.length - 1].at };
 }
 
