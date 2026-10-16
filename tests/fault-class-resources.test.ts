@@ -245,7 +245,8 @@ const volumeReading = (overrides: Record<string, unknown> = {}) => ({
 const diskLine = (worktreeReclaimable: number | null | undefined) => {
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/credentials/coordinator.token', cliPath: 'graphyard', repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'vishrog', masterAgentName: 'graphyard-master-project', workers: [], run: { intervalSeconds: 20, diskThresholdGb: 10 } }) as MasterConfig;
   const state = emptyDaemonState(config);
-  state.reclaim = { ...instancePass, scanned: 241, kept: 240, freedBytes: 0, checkoutsOffVolume: 0, rootFreeBytes: freeAtInstance } as typeof state.reclaim;
+  // The cursor's summary carries the pass's errors as strings; this pass met none.
+  state.reclaim = { ...instancePass, errors: [], scanned: 241, kept: 240, freedBytes: 0, checkoutsOffVolume: 0, rootFreeBytes: freeAtInstance } as typeof state.reclaim;
   return cycleFaults(state, [], instance1At, { config, worktreeReclaimable }).filter(fault => fault.subject === 'disk');
 };
 
