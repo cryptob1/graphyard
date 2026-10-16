@@ -9,6 +9,7 @@ import { server } from '../src/server.js';
 import { buildMasterStatus } from '../src/master.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 /**
  * GY-94, as GitHub delivers (GY-1235): the record a merge is judged against is the last snapshot
@@ -38,7 +39,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 25;
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('reconciliation-snapshot'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('reconciliation_snapshot_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/reconciliation_snapshot_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/reconciliation_snapshot_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

@@ -16,6 +16,7 @@ import { emptyDaemonState, failedCheckRework, runCycle, type DaemonEffects } fro
 import { nameBaseBreaks } from '../src/cli/status-attention.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { baseBreakHold, baseBreakRefreshNeeded, describeBaseBreak, failedTestsAnnotation, failedTestsFromLog, judgeBaseBreak, parseFailedTests, wakeOwnObservation, type BaseBreak } from '../src/master/base-break-refresh.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-09-26 `at` is passed to judgeBaseBreak as its explicit observation time and echoed back; new Date()/Date.now() stamp live observations in separate tests.
 
 // GY-793. On 2026-09-26 main was briefly broken; every candidate whose CI ran in that window failed
@@ -138,7 +139,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_BASE_BREAK_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 793);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('base-break'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.controlPlaneAppId = 1234;
   engine.principals = [operator, worker, producer];
 });

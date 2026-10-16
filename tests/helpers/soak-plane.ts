@@ -21,6 +21,7 @@ import { temporaryDirectory } from './temp-dirs.js';
 import { expandTypedCommand } from './launch-shell.js';
 import { type BlockerClass } from '../../src/model/blocker-class.js';
 import { SimulatedHerdr, clock, clockSql, hour, minute } from './soak-world.js';
+import { recordLegacyMerger } from './legacy-merger.js';
 
 /**
  * The soak's control planes and the scenario every suite stages (GY-404, split per concern by
@@ -465,7 +466,7 @@ export async function controlPlane(database: string) {
   await setup.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]);
   await setup.query(`ALTER DATABASE ${database} SET search_path = public, pg_catalog`);
   await setup.end();
-  store = new Store(connection); await store.init();
+  store = new Store(connection); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   engine.principals = everyone; engine.reviewerApps = reviewerApps; engine.controlPlaneAppId = 1234;
   http = server(engine, credentials);

@@ -15,6 +15,7 @@ import { refusalAction } from '../src/model/refusal-mapping.js';
 import { checkRerunVisibilityMs, reconcileCheckReruns, rerunFailedChecksEvent } from '../src/merge-queue.js';
 import { defaultRerunFailedChecks, masterConfigSchema, maxRerunFailedChecks, rerunFailedChecks } from '../src/master/profiles.js';
 import { evaluate, type Observation, type Principal, type Work } from '../src/model.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // GY-516: a single infrastructure flake on a merge-queue tip ejected the validated head and cost the
 // whole queue a review, proof and CI round. A failed required check is rerun once on the same sha
@@ -31,7 +32,7 @@ before(async () => {
   const databaseDir = await temporaryDirectory('tip-flake');
   database = new EmbeddedPostgres({ databaseDir, user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.controlPlaneAppId = 1234;
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });

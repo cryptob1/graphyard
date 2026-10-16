@@ -1,12 +1,12 @@
 import { parseArgs } from 'node:util';
 import { randomUUID } from 'node:crypto';
-import { mergerModes } from '../merger-mode.js';
+import { defaultMergerMode, mergerModes } from '../merger-mode.js';
 import { defineCommands } from './registry.js';
 import { openMasterSession, unhandled, type MasterSession } from './master/session.js';
 
 /** The one line `graphyard doctor` prints for the merger setting (src/merger-mode.ts), from /api/status `mergeWriter`. */
 export const mergerDoctorLine = (mergeWriter: { merger: string; since: string | null; setBy: string | null } | null | undefined) =>
-  !mergeWriter || !mergeWriter.setBy ? 'merger: github (default)' : `merger: ${mergeWriter.merger} (set by ${mergeWriter.setBy} at ${mergeWriter.since})`;
+  !mergeWriter || !mergeWriter.setBy ? `merger: ${mergeWriter?.merger ?? defaultMergerMode} (default)` : `merger: ${mergeWriter.merger} (set by ${mergeWriter.setBy} at ${mergeWriter.since})`;
 
 /** `master merger` prints the setting and its history; `master merger github|control-plane --reason TEXT` sets it (admin credential). */
 export async function mergerCommand(session: MasterSession, env: NodeJS.ProcessEnv = process.env): Promise<unknown> {

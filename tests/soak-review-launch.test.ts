@@ -8,6 +8,7 @@ import { processJob, type GitHub } from '../src/github.js';
 import { blockedAutoMergeProbeMs, blockedMergeStallMs, mergeQueueAction, mergeStalls, type GitHubMergeQueueState } from '../src/merge-queue.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 /**
  * GY-1331. The release-candidate soak's simulated items stopped getting their reviewer approval
@@ -31,7 +32,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1331;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('soak-review-launch'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, 'owner/project');
   engine.reviewerApps = reviewerApps; engine.controlPlaneAppId = 1234;
 });

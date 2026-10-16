@@ -18,6 +18,7 @@ import { nextAction } from '../src/model/next-action.js';
 import { humanNeeded } from '../src/model/concerns.js';
 import { terminalDecisions } from '../src/cli/decision-report.js';
 import { refusedOnOtherGrounds } from '../src/daemon/rework-grounds.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2030-01-01 clock drives the pure loop tests through `() => clock` over fixtures derived from it; the new Date() readings stamp observations for the engine-backed tests on the real clock.
 
 // GY-1579, observed on GY-1522 at 2026-10-08T11:38:06Z: the master requested rework bd40dc45 by hand,
@@ -135,7 +136,7 @@ test('integration:held-rework-request-refused-mechanically — a rework request 
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1579;
   const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('held-rework'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('held_rework_test');
-  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/held_rework_test`); await store.init();
+  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/held_rework_test`); await store.init(); await recordLegacyMerger(store);
   const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   const http = server(engine, credentials);
   teardown = async () => { http.close(); await store.close(); await database.stop(); };

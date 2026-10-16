@@ -6,16 +6,18 @@ import type { Store } from './store.js';
 import { unexplainedShadowDisagreements } from './server/shadow-verdict.js';
 
 /**
- * The merger setting: which writer lands heads on the base branch, `github` (the default) or the
- * `control-plane`. Like direct-merge mode it lives on the append-only ledger (`policy.merger.set`,
- * no work item), is set only with an admin credential, and is never read from graphyard.json or the
- * environment. Switching to `control-plane` is refused while any shadow-only-fail or shadow-missed
+ * The merger setting: which writer lands heads on the base branch, the `control-plane` (the shipped
+ * default since GY-1833) or `github`, the legacy mode the setup checklist flags. A database that held
+ * history before the default changed was pinned to `github` by its migration
+ * (src/store/tables/merger-default.ts), so no install changes merger without the event below.
+ * Like direct-merge mode it lives on the append-only ledger (`policy.merger.set`, no work item), is
+ * set only with an admin credential, and is never read from graphyard.json or the environment. Switching to `control-plane` is refused while any shadow-only-fail or shadow-missed
  * verdict stands unexplained (GY-1560); setting `github` is never refused for that reason.
  */
 export const mergerModes = ['github', 'control-plane'] as const;
 export type MergerMode = typeof mergerModes[number];
 export const mergerEventKind = 'policy.merger.set';
-export const defaultMergerMode: MergerMode = 'github';
+export const defaultMergerMode: MergerMode = 'control-plane';
 
 export interface MergerSetting { merger: MergerMode; since: string | null; setBy: string | null; reason: string | null; event: string | null }
 type Queryable = Pick<pg.PoolClient, 'query'>;
@@ -27,7 +29,7 @@ const settingOf = (row: any): MergerSetting => ({ merger: row.payload.merger, si
 export async function mergerHistory(db: Queryable): Promise<MergerSetting[]> {
   return (await db.query(`SELECT seq, actor, payload, created_at FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq`, [mergerEventKind])).rows.map(settingOf);
 }
-/** The newest recorded setting, or the `github` default when none is recorded. */
+/** The newest recorded setting, or the control-plane default when none is recorded. */
 export async function recordedMergerMode(db: Queryable): Promise<MergerSetting> {
   const row = (await db.query(`SELECT seq, actor, payload, created_at FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1`, [mergerEventKind])).rows[0];
   return row ? settingOf(row) : { merger: defaultMergerMode, since: null, setBy: null, reason: null, event: null };

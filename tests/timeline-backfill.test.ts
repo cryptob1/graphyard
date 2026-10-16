@@ -13,6 +13,7 @@ import { mergeTimeline, pipelineSpeed, pipelineSpeedSummary, type PipelineTimeli
 import { backfillLimits, backfillPipelineTimelines, catchUpPipelineTimelines, pipelineBackfillState, resetPipelineBackfillState } from '../src/pipeline-backfill.js';
 import { readFlow } from '../src/flow-analytics.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-09-01 attempt instants are pure mergeTimeline inputs no clock judges; Date.now() stamps live DB deliveries and reads the summary/backfill at wall-clock-relative instants.
 
 const operator: Principal = { id: 'operator', role: 'admin' };
@@ -29,7 +30,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('backfill'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_backfill');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_backfill`);
-  await store.init();
+  await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, 'owner/project');
   http = server(engine, [{ ...operator, token: tokens.operator }, { ...worker, token: tokens.worker }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

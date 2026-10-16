@@ -9,6 +9,7 @@ import type { Observation, Principal, Work } from '../src/model.js';
 
 type Review = Observation['reviews'][number];
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // GY-1425: GY-1394's first PR #866 merged and was reverted, so the item relanded as PR #887. The
 // formal-review baseline still named #866, and exactApproval counts an approval only under a
@@ -24,7 +25,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1425;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('formal-review-baseline'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('formal_review_baseline_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/formal_review_baseline_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/formal_review_baseline_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, 'owner/baseline'); engine.submissionObserver = null;
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
