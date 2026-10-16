@@ -11,6 +11,7 @@ import { buildMasterStatus, masterConfigSchema, mergedWithoutAuthorization, type
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { type Observation, type Principal, type Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-09-20 merge instant is a recorded observation the status only renders; every stamp and the status `now` come from the real clock relative to itself.
 
 /**
@@ -36,7 +37,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 22;
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('merge-executor'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('merge_executor_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/merge_executor_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/merge_executor_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.submissionObserver = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

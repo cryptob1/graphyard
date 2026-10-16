@@ -13,6 +13,7 @@ import { withRetroStanding } from '../src/cli/work.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { advisoryLocks } from '../src/store/locks.js';
 import { events } from '../src/store/tables/work.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-09-30 signals are judged against `now = at(0)` handed explicitly to detectRecurringCauses and stamped into events; Date.now() only bounds the test's own waits and stamps failures.
 
 // GY-970: repeated refusal and rework causes are drafted into prevention artefacts for independent
@@ -40,7 +41,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_RETRO_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 970);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('retro'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('retro_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/retro_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/retro_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   http = server(engine, credentials, null, undefined, { env: { ...process.env, GRAPHYARD_INTERVENTION_PATTERN_THRESHOLD: '3', GRAPHYARD_INTERVENTION_PATTERN_WINDOW_DAYS: '7' } });
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

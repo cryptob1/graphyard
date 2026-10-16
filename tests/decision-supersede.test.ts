@@ -13,6 +13,7 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { approverSessionName, type MasterConfig } from '../src/master.js';
 import type { Observation, Work } from '../src/model/work.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // GY-1297: an approved decision whose application never recorded an outcome stood approved for
 // good, and the control plane holds one standing decision of an action at a time, so it refused
@@ -49,7 +50,7 @@ async function start() {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1297;
   const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('decision-supersede'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('supersede_test');
-  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/supersede_test`); await store.init();
+  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/supersede_test`); await store.init(); await recordLegacyMerger(store);
   const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   const http = server(engine, credentials);
   teardown = async () => { http.close(); await store.close(); await database.stop(); };

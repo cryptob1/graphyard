@@ -16,6 +16,7 @@ import { GitHubCacheStore } from '../src/github-cache.js';
 import { baseChangeFiles, baseMoveWakes } from '../src/observation-priority.js';
 import { simulateObservationScheduler } from '../src/observation-simulation.js';
 import { baseMoveSubjects, webhookSubjects } from '../src/server/routes/github.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // GY-117. Each test is named for the proof it produces: unit:github-budget-tracked,
 // integration:observation-cadence-by-state, integration:merge-path-reserve-held,
@@ -288,7 +289,7 @@ async function serve(github: GitHub) {
   if (store) await store.close();
   const name = `graphyard_test_${++databases}`;
   await database.createDatabase(name);
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/${name}`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/${name}`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [CI], 120, REPOSITORY); engine.controlPlaneAppId = APP;
   engine.principals = [operator, worker, producer];
   engine.submissionObserver = null;

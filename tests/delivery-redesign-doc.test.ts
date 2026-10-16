@@ -41,7 +41,7 @@ const STATEMENTS: [string, RegExp][] = [
   ['step 4: one independent reviewer per item, blocking only for sensitive diffs', /^4\. .*One independent reviewer per item.*Sensitive diffs.*blocking review before step 2; the rest a non-blocking review after merge/m],
   ['the removed list', /^Removed: GitHub Apps, branch protection, required checks/m],
   ['the kept list', /^Kept: leases and epochs, the transactional ledger/m],
-  ['the merger setting and its two values', /`merger` selects the mode per install, `github` \(default\) or `control-plane`/],
+  ['the merger setting and its two values', /`merger` selects the mode per install, `github` \(legacy, .*\) or `control-plane` \(default\)/],
   ['the setting is an admin-only ledger event never read from graphyard.json', /admin-only ledger event, never read from graphyard\.json/],
   ['the shadow-mode switch criterion', /Switch criterion: two weeks with no shadow-passed head reverted by the main guard and every shadow-only failure explained/],
   ['the three weekly measures', /Weekly: defects reaching production \(escapes\), merge-queue wait, human touches/],

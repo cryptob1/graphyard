@@ -12,6 +12,7 @@ import { mergeAuthorized, mergeQueueAction } from '../src/merge-queue.js';
 import { reviewNeed } from '../src/model/dispatch.js';
 import { operationsCommand } from '../src/cli/master/operations.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-10-04T12:30Z now is handed to evaluate, mergeQueueAction and reviewNeed with observations stamped from it; the engine case stamps its observation with new Date() and reads the database clock.
 
 // GitHub delivery is the only delivery (GY-1235): a candidate whose build, review and required
@@ -86,7 +87,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1235;
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('github-delivery'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('github_delivery_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/github_delivery_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/github_delivery_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, ciAppIds, 120, 'test/repository');
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });

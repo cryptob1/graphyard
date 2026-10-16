@@ -8,6 +8,7 @@ import type { Principal, Work } from '../src/model.js';
 import { submittedBranchMoved } from '../src/model/assignment.js';
 import { submittedBranchRefusal } from '../src/master/worktrees.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // GY-1286 names this file, beside tests/loop-faults.test.ts, for its proof: manual:fault-class-loop.
 // The instance it replays needs the control plane's own store, so it runs against a real Postgres.
@@ -31,7 +32,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1286;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('dispatch-wake'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, 'owner/project');
   engine.submissionObserver = null;
   engine.principals = [operator, worker, coordinator];

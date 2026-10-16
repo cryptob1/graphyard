@@ -9,6 +9,7 @@ import { Engine } from '../src/engine.js';
 import { boundLockedCache, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, type Queryable } from '../src/store/locked-read.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 /**
  * GY-1042: the follow-ups from the approved reviews of GY-1027 (PR #533). The first case records how
@@ -74,7 +75,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_FOLLOWUPS_1042_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1042);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('followups-1042'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('followups_1042');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/followups_1042`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/followups_1042`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, 'owner/followups');
   engine.principals = [operator, worker];
 });
