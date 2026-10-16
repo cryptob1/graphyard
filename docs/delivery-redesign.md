@@ -8,13 +8,13 @@ Only Graphyard writes to main.
 ## Flow
 
 1. **Head submission under a lease.** A worker submits a commit (`complete GY-N EPOCH --head SHA`); the lease ends in the same transaction.
-2. **One serial merge writer** records merge intent, then pushes the exact tested merge commit with the install's deploy key, leased on the tested tip; between them it trial-merges and runs build and fast tests on the merged tree.
-3. **Candidates every ~10 merges or 15 quiet minutes.** UAT serves it, E2E runs; the exact tested commit is promoted. On E2E failure the newest item related to the failing cases is reverted.
-4. **One independent reviewer per item.** Sensitive diffs get a blocking review before step 2; the rest a non-blocking review after merge.
+2. **One serial merge writer** builds and fast-tests the merged tree, then pushes that exact commit leased on the tested tip.
+3. **Candidates every ~10 merges or 15 quiet minutes.** UAT serves it, E2E runs; the exact tested commit is promoted. E2E failure reverts the newest item related to the failing cases.
+4. **One independent reviewer per item.** Sensitive diffs: a blocking review before step 2; the rest non-blocking after merge.
 
 ## Merge writer
 
-Oldest head first, one in flight: `merge.intent`; trial on the merge commit (affected tests plus proof files; none without `scripts/ci-tests.mjs`, no build without `package.json`; failed probes are runner failures); `git push --force-with-lease` on the tested tip with `run.mergeWriter.deployKeyFile` (`~/.config/graphyard/<install>/deploy-key`) alone; `merge.pushed`; fetch; `merge.reconciled` delivers. A moved tip re-trials (`retrials`, 3); a push rejected on an unmoved tip waits; a failed trial reworks (`mergeWriter.reworks` until confirmed). Reconcile rule: an unpushed intent main's first parent holds delivers, else re-queues. `master status`: `mergeWriter.queue`.
+Oldest head first, one in flight: `merge.intent`; trial on the merge commit (affected tests plus proof files; none without `scripts/ci-tests.mjs`, no build without `package.json`; failed probes are runner failures; tests in parallel shards on half the cores; `phases` times each phase; a timeout, cancel or host failure retries once, then records phase and reason); `git push --force-with-lease` on the tested tip with `run.mergeWriter.deployKeyFile` (`~/.config/graphyard/<install>/deploy-key`) alone; `merge.pushed`; fetch; `merge.reconciled` delivers. A moved tip re-trials (`retrials`, 3); a push rejected on an unmoved tip waits; a failed trial reworks (`mergeWriter.reworks` until confirmed). Reconcile rule: an unpushed intent main's first parent holds delivers, else re-queues. `master status`: `mergeWriter.queue`.
 
 ## Removed and kept
 
@@ -37,4 +37,4 @@ Kept: leases and epochs, the transactional ledger, two risk lanes, UAT on a pinn
 
 ## Measures
 
-Weekly: defects reaching production (escapes), merge-queue wait, human touches. Deferred until one demands it: pre-merge review for medium risk, batched merge validation, a per-test flake ledger.
+Weekly: defects reaching production, merge-queue wait, human touches. Deferred until needed: pre-merge review for medium risk, batched merge validation, a per-test flake ledger.

@@ -190,8 +190,8 @@ const childOutput = (error: unknown) => { const failed = error as { stdout?: unk
  * widened to the files carrying the item's proofs and the run reported as TAP, so the verdict counts
  * each proof's executed and failed cases (AC-2). The child runner is decorated, never the trial:
  * the affected selection (`scripts/ci-tests.mjs affected`, or the `select` fallback an older merge
- * needs) gains the proof files it lacks, and the test run gets the TAP reporter on stdout, which
- * `runTrial` still reads its failing files from.
+ * needs) gains the proof files it lacks, and every shard's test run gets the TAP reporter on stdout,
+ * which `runTrial` still reads its failing files from; the proofs are counted over all the shards.
  */
 export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialRun> {
   const inner = input.run ?? defaultChildRun;
@@ -204,12 +204,18 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
     files = [...have, ...extra];
     return extra.length ? `${out.replace(/\s+$/, '')}\n${extra.join('\n')}\n` : out;
   };
+  // The trial's shards run beside each other (GY-1832), so their TAP streams are joined: each proof's
+  // cases are counted over every shard, as one runner process would count them. A retried trial runs
+  // in a fresh checkout, and only the attempt that answered (the last checkout run in) is counted.
+  let attempt: string | undefined;
   const run: ChildRun = async (command, args, options) => {
     if (command === 'node' && args[0] === 'scripts/ci-tests.mjs' && (args[1] === 'affected' || args[1] === 'select')) return widened(String(await inner(command, args, options)));
     const at = command === 'node' ? args.indexOf(runner) : -1;
     if (at < 0) return inner(command, args, options);
-    try { const out = String(await inner(command, [...args.slice(0, at + 1), '--test-reporter=tap', '--test-reporter-destination=stdout', ...args.slice(at + 1)], options)); tap = out; return out; }
-    catch (error) { tap = childOutput(error); throw error; }
+    if (options?.cwd !== attempt) { attempt = options?.cwd; tap = ''; }
+    const own = attempt;
+    try { const out = String(await inner(command, [...args.slice(0, at + 1), '--test-reporter=tap', '--test-reporter-destination=stdout', ...args.slice(at + 1)], options)); if (own === attempt) tap += `${out}\n`; return out; }
+    catch (error) { if (own === attempt) tap += `${childOutput(error)}\n`; throw error; }
   };
   const counted = (): ProofCounts => Object.fromEntries(input.proofs.map(proof => { const { executed, failed } = countProofCases(tap, proof); return [proof, { executed, failed }]; }));
   let verdict: TrialRun;

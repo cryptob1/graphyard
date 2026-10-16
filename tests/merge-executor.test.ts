@@ -269,7 +269,7 @@ test('unit:executor-trial-runs-criterion-tests — the trial\'s selection is the
     }
     return '';
   });
-  const verdict = await runMergeTrial({ root: '/coordinator', base, mergeSha, changedFiles: ['src/app.ts'], proofs: ['unit:alpha-works', 'integration:beta-holds', 'unit:never-ran'], proofFiles: ['tests/a.test.ts', 'tests/proof.test.ts'], timeoutMs: 60_000, key: 'GY-1', run: runner.run, remove: async () => {} });
+  const verdict = await runMergeTrial({ root: '/coordinator', base, mergeSha, changedFiles: ['src/app.ts'], proofs: ['unit:alpha-works', 'integration:beta-holds', 'unit:never-ran'], proofFiles: ['tests/a.test.ts', 'tests/proof.test.ts'], timeoutMs: 60_000, key: 'GY-1', run: runner.run, remove: async () => {}, cores: 2 });
   assert.deepEqual(listed, ['tests/a.test.ts', 'tests/proof.test.ts'], 'the affected file once, plus the proof file the selection lacked');
   assert.deepEqual(runnerArgs.slice(runnerArgs.indexOf('tests/helpers/run-tests.ts') + 1, runnerArgs.indexOf('--files-from')), ['--test-reporter=tap', '--test-reporter-destination=stdout'], 'the run is read as TAP');
   assert.deepEqual(verdict.proofs, { 'unit:alpha-works': { executed: 2, failed: 0 }, 'integration:beta-holds': { executed: 1, failed: 1 }, 'unit:never-ran': { executed: 0, failed: 0 } }, 'cases are attributed by title prefix, a proof whose name is a prefix of another counts only its own');
