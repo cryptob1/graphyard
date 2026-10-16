@@ -142,6 +142,27 @@ export const observationWaitBoundMs = 30 * 60_000;
 export const workerSlotWaitBoundMs = 30 * 60_000;
 
 /**
+ * GY-1831: the clause a `verify-deployment` attempt appends when the only reason it failed is that
+ * the running release does not carry the merge yet while the promotion pipeline has the merge in
+ * flight — a release candidate carrying it is being built or promoted, or the dispatch that will
+ * carry it is due. The clause is constant, with no candidate id, run or count in it, so the
+ * unchanged run accumulates across attempts and the wait below can bound it: a run that outlasts
+ * the bound is a stall again, and one that never names the clause stalls as before.
+ */
+/** What a deployment observation's reason starts with when its containment was derived without a fresh base branch, the one reason that leaves its pending deliveries unreliable (GY-1831). */
+export const staleContainmentReasonPrefix = 'Containment was derived without a fresh base branch: ';
+export const promotionWaitClause = 'a release candidate carrying the merge is in the promotion pipeline, so the deployment observation waits for the promotion to land';
+/**
+ * How long a `verify-deployment` row may wait for the promotion pipeline to land the release that
+ * serves its merge before it is stalled rather than waiting (GY-1831).
+ *
+ * The three stalled-gate filings this bound answers each saw a promotion land about 20 minutes
+ * after its merge, and the pipeline's own cadence is a 10-minute dispatch gap; an hour covers both
+ * with room and still raises the stall inside the hour a wedged pipeline deserves.
+ */
+export const promotionWaitBoundMs = 60 * 60_000;
+
+/**
  * Whether a dispatch refusal names a wait for a worker profile to free (GY-1108).
  *
  * When every healthy profile is reserved by another dispatch, or configured launch profiles are busy
@@ -181,6 +202,7 @@ export function workerSlotWait(reason: string): boolean {
 export function handoffWaitBound(reason: string): number | null {
   if (reason.includes(`${resyncUnobservedPrefix}; ${observationJobScheduled};`)) return observationWaitBoundMs;
   if (workerSlotWait(reason)) return workerSlotWaitBoundMs;
+  if (reason.includes(promotionWaitClause)) return promotionWaitBoundMs;
   return null;
 }
 

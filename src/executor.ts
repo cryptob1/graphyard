@@ -6,7 +6,7 @@ import type { Work } from './model.js';
 import type { ActionRow } from './model/actions.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { actionJudgment, type NextActionKind } from './model/next-action.js';
-import { describeObservationJob, resyncUnobservedPrefix } from './model/action-kinds.js';
+import { describeObservationJob, promotionWaitClause, resyncUnobservedPrefix, staleContainmentReasonPrefix } from './model/action-kinds.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { registeredLaunch } from './model/session-state.js';
 import { answeredByPendingSession, independentProducerProfiles } from './producer.js';
@@ -68,6 +68,17 @@ export interface ControlPlaneEffects {
   launchReview: (work: Work, request: DispatchRequest, agents: HerdrAgent[], observedAt: string) => Promise<any>;
   launchProducer: (work: Work, request: DispatchRequest, profile: ProducerProfile, agents: HerdrAgent[], observedAt: string) => Promise<any>;
   observeDeployment: (delivered: Work[]) => Promise<DeploymentObservation>;
+  /**
+   * GY-1831: whether the promotion pipeline has `mergeSha` in flight — a release candidate carrying
+   * it is being built or promoted, or the dispatch that will carry it is due — answered from the
+   * promotion state the loop already records on its cursor, read at the failed attempt. Absent,
+   * false, or reading false, a `verify-deployment` failure that the running release does not carry
+   * the merge keeps its plain reason and stalls as before; the wiring fails it closed the same way
+   * when the state cannot be read.
+   */
+  promotionCarryingMerge?: (mergeSha: string) => Promise<boolean>;
+  /** Where the handler's own diagnostics go; absent, a failed promotion read is logged nowhere. */
+  log?: (line: string) => void;
   /**
    * `POST work` as the master's operator-agent identity, the one that may create work (GY-1660): files
    * the follow-up a delivered item's unobserved post-deploy verification owes. The coordinator
@@ -452,7 +463,21 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       if (action.inputs.kind !== 'verify-deployment') throw new Error('unreachable');
       const observation = await effects.observeDeployment([work]);
       if (observation.source === 'unavailable' || !observation.sha) throw new Error(observation.reason ?? `no deployment could be read for ${work.key}`);
-      if (!observation.deployed.includes(work.key)) throw new Error(observation.reason ?? `the running release ${observation.sha.slice(0, 12)} does not carry ${work.key}'s merge ${action.inputs.mergeSha.slice(0, 12)} yet`);
+      if (!observation.deployed.includes(work.key)) {
+        const plain = observation.reason ?? `the running release ${observation.sha.slice(0, 12)} does not carry ${work.key}'s merge ${action.inputs.mergeSha.slice(0, 12)} yet`;
+        // GY-1831: a release the promotion pipeline is about to serve is the pipeline's ordinary
+        // pace, not a fault. Naming the wait bounds the row by the promotion wait bound instead of
+        // the stall threshold, so the retries land within minutes of the promotion. Containment
+        // derived without a fresh base branch is not this shape, since its pending list is not
+        // reliable; an informational reason (an inactive release production still serves) is. A
+        // state that cannot be read stands as not carrying — logged, so an unreadable pipeline is
+        // diagnosable — and the plain reason and the stall are what they were.
+        const waiting = !observation.reason?.includes(staleContainmentReasonPrefix) && await Promise.resolve(effects.promotionCarryingMerge?.(action.inputs.mergeSha)).catch(error => {
+          effects.log?.(`[graphyard-executor] the promotion state could not be read for ${work.key}, so the failure stands as it was: ${error instanceof Error ? error.message : String(error)}`);
+          return false;
+        });
+        throw new Error(waiting ? `${plain}; ${promotionWaitClause}` : plain);
+      }
       // GY-1660: the release just observed checks the item's declared post-deploy verifications, and an
       // owed one files its follow-up before the observation is recorded: a filing that fails fails the
       // action, which retries it, where a recorded observation would refuse every retry.

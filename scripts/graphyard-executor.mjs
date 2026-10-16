@@ -157,9 +157,11 @@ class SlotUndeclared extends Error { constructor(message, exitCode) { super(mess
  */
 export function controlPlaneEffects(modules, context) {
   const { master: m, daemon: d, reviewer: r, producer: pr, executor: x } = modules;
-  const { root, current, run, snapshot, mutate, read } = context;
+  const { root, current, run, snapshot, mutate, read, log = line => console.error(line), clock = () => Date.now() } = context;
   return {
     snapshot, mutate,
+    // GY-1831: the handlers' own diagnostics (an unreadable promotion state) go where this executor logs.
+    log,
     // GY-1698: a windowed post-deploy follow-up takes its observation instant from the intervention report's projection.
     ...(read ? { readPattern: x.patternReader(read) } : {}),
     agents: async () => { const runtime = await m.observeHerdrAgents(run); return runtime.available ? runtime.agents : null; },
@@ -169,6 +171,20 @@ export function controlPlaneEffects(modules, context) {
     launchReview: (work, review, agents, observedAt) => r.launchReview(root, work, current().run.reviewerProfile, agents, observedAt, { run, requestId: review.id }),
     launchProducer: (work, producerRequest, profile, agents, observedAt) => pr.launchProducer(root, work, producerRequest, profile, agents, observedAt, { run }),
     observeDeployment: delivered => d.observeDeployment(current(), delivered, run, fetch, () => Date.now(), { root }),
+    // GY-1831: a verify-deployment failure that only says the running release does not carry the
+    // merge yet is a promotion wait while the loop's recorded promotion state has the merge in
+    // flight. The predicate reads the promotion state the loop already records on its cursor, at
+    // the cadence the loop's own read windows set: this executor runs no fetch and no GitHub
+    // request of its own, and never touches the promotion ledger's pin. The state's own reason
+    // names the gates that stop every dispatch (promotion off, the main watch's freeze, a
+    // control-plane merger without ports), so a row only ever waits on a pipeline the loop is
+    // driving; anywhere else — an unreadable state included — the failure stands as it was, and
+    // the stall it earns is what it was. The clock measures the deployment handoff after a recorded promotion.
+    promotionCarryingMerge: async mergeSha => {
+      const config = current();
+      const state = await d.readDaemonState(root, config);
+      return d.promotionCarryingMerge(state.promotion ?? null, mergeSha, root, config.baseBranch, run, clock());
+    },
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
     // GY-1660: the one call made beyond the coordinator credential, as the loop files its follow-ups:
     // the follow-up an unobserved post-deploy verification owes, created as the master's operator agent.

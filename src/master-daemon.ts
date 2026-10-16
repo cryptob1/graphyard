@@ -19,6 +19,6 @@ export { cycleFaults, baseConflictInMotion, timingFaultAttention, onceAnnotation
 export { automaticScopeGrounds, successorStep } from './daemon/cycle-scope.js';
 export { closeEndedWorkerPanes } from './daemon/cycle-reclaim.js';
 export { wakeObservationJob } from './daemon/cycle-delivery.js';
-export { deploymentPageSize, deploymentListingPages, maxDeploymentRequests, productionEnvironmentRecord, observeDeployment } from './daemon/deployment.js';
+export { deploymentPageSize, deploymentListingPages, maxDeploymentRequests, productionEnvironmentRecord, observeDeployment, promotionWorkflow, promotionReads, promotionCarryingMerge } from './daemon/deployment.js';
 export { daemonSummary, noteConfigReload, noteWatchdog, runDaemon } from './daemon/run.js';
 export { baseFailureStep, baseFailureAttention } from './daemon/cycle-base-failures.js';
