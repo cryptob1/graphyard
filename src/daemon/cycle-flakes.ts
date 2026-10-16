@@ -1,12 +1,12 @@
 // Concern: the flake ledger (GY-1498) — the loop's step, beside the base-failure step. Each new
 // pass-on-rerun (a PR check rerun that ended passed, a main guard flake) has its failed job's log
-// read once through the failedTests effect, and each merge trial flake the writer judged (GY-1834)
+// read once through the failedTests effect, and each merge trial flake the writer recorded on an item's merge ledger (GY-1834)
 // is taken with its tests named; its tests are kept in the bounded ledger file, and a test gets one
 // fix item — on its first flake when it is no criterion proof of its item, else once it flakes repeatedly — filed as the operator-agent through
 // fileFaultClass as the docs trim item is. It only reads the items: no rerun count, revert or gate
 // reads the ledger. The pure half is model/flake-ledger.ts, the file flake-ledger.ts.
 import { createHash } from 'node:crypto';
-import { flakeSources, flakyItem, flakyItemTitle, flakyTests, mayFile, noteClosedFlakyItems, openFlakyItem, recordFlake, recordTrialFlake, takeTrialFlakes, unreadSources, type FlakeLedger } from '../model/flake-ledger.js';
+import { flakeSources, flakyItem, flakyItemTitle, flakyTests, mayFile, noteClosedFlakyItems, openFlakyItem, recordFlake, recordTrialFlake, trialFlakes, unreadSources, type FlakeLedger } from '../model/flake-ledger.js';
 import type { FlakeLedgerStore } from '../flake-ledger.js';
 import { readyToRetry } from './sessions.js';
 import { message } from './state.js';
@@ -50,8 +50,8 @@ export async function flakeStep(cycle: Cycle) {
     recordFlake(ledger, source, tests, clock);
     changed = true;
   }
-  // The merge writer's trial flakes (GY-1834) name their tests already: each merge commit is recorded once.
-  for (const flake of takeTrialFlakes()) if (recordTrialFlake(ledger, flake, clock)) changed = true;
+  // The merge writer's trial flakes (GY-1834), kept on each item's merge ledger, name their tests already: each merge commit is recorded once.
+  for (const flake of trialFlakes(snapshot.work)) if (recordTrialFlake(ledger, flake, clock)) changed = true;
 
   // 2. A filed item the snapshot shows closed starts its quiet period; an open one the ledger lost is adopted.
   if (noteClosedFlakyItems(ledger, snapshot.work, clock)) changed = true;

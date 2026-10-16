@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal, type Work } from '../model.js';
-import { foldMergeLedger, mergeLedgerKinds, mergeTrialKind, previewVerdictSchema, type MergeLedgerState } from '../model/merge-ledger.js';
+import { foldMergeLedger, mergeLedgerKinds, mergeTrialKind, previewVerdictSchema, trialFlakedSchema, type MergeLedgerState } from '../model/merge-ledger.js';
 import { settleDelivered } from '../model/actions.js';
 import { deliverSplitParent } from '../decomposition.js';
 import { reconciliationRefusalPrefix, unauthorizedMergeViolation } from '../merge-queue.js';
@@ -34,7 +34,7 @@ const tests = z.object({ passed: z.number().int().min(0), failed: z.array(z.stri
 export const mergeRecordBodySchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('intent'), head: sha, baseTip: sha, mergeSha: sha, risk: z.string().min(1).max(40), at: instant }).strict(),
   z.object({ kind: z.literal('trial'), head: sha, baseTip: sha, mergeSha: sha, build: z.enum(['pass', 'fail']), tests, files: z.array(z.string().max(500)).max(1000),
-    proofs: z.record(z.string().max(200), z.object({ executed: z.number().int().min(0), failed: z.number().int().min(0) }).strict()), durationMs: z.number().int().min(0), preview: previewVerdictSchema.optional() }).strict(),
+    proofs: z.record(z.string().max(200), z.object({ executed: z.number().int().min(0), failed: z.number().int().min(0) }).strict()), durationMs: z.number().int().min(0), preview: previewVerdictSchema.optional(), flaked: trialFlakedSchema.optional() }).strict(),
   z.object({ kind: z.literal('pushed'), mergeSha: sha, pushedAt: instant }).strict(),
   z.object({ kind: z.literal('reconciled'), mergeSha: sha, observedTip: sha }).strict(),
   z.object({ kind: z.literal('refused'), head: sha, reason: z.string().min(1).max(2000) }).strict(),

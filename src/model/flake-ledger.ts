@@ -11,6 +11,7 @@ import { z } from 'zod';
 import type { Work } from './work.js';
 import type {} from '../merge-queue.js';
 import type {} from '../main-guard.js';
+import type {} from './merge-ledger.js';
 import { proofTestFile } from './scope-companions.js';
 
 /** At most this many entries are kept, the newest. */
@@ -101,13 +102,20 @@ export function recordFlake(ledger: FlakeLedger, source: FlakeSource, tests: rea
 /**
  * GY-1834: a merge trial's flake — the test files of `key`'s trial on `mergeSha` that failed and
  * passed on their immediate rerun of the same commit, the head judged on that rerun. `tests` are the
- * failing test names the first run reported, or the files when it named none; `proofs` the item's
- * criterion proofs, none of which a trial ever sets aside as a flake.
+ * failing test names the first run reported and the rerun did not, or the files when it named none;
+ * `proofs` the item's criterion proofs, none of which a trial ever sets aside as a flake.
  */
-export interface TrialFlake { key: string; mergeSha: string; tests: string[]; proofs: string[]; at: string }
+export interface TrialFlake { key: string; mergeSha: string; tests: string[]; proofs: string[] | null; at: string }
 /** The read key of a trial flake: one merge commit is read once. */
 export const trialReadKey = (mergeSha: string) => `trial:${mergeSha.toLowerCase()}`;
-/** Records one trial flake, read once by its merge commit. Mutates `ledger`; false when it was read already. */
+/**
+ * Every trial flake the items' merge ledgers keep (`MergeLedgerState.flakes`): the merge writer
+ * records each on its trial record before it pushes or refuses, so a flake survives any restart
+ * and is read here from durable state, never handed over in memory.
+ */
+export const trialFlakes = (work: readonly Work[]): TrialFlake[] => work.flatMap(item => (item.mergeLedger?.flakes ?? [])
+  .map(flake => ({ key: item.key, mergeSha: flake.mergeSha, tests: flake.tests.length ? flake.tests : flake.files, proofs: itemProofs(item), at: flake.at })));
+/** Records one trial flake, read once by its merge commit. Mutates `ledger`; false when it was read already or is older than the ledger keeps. */
 export function recordTrialFlake(ledger: FlakeLedger, flake: TrialFlake, now: number) {
   const key = trialReadKey(flake.mergeSha);
   if (ledger.read[key] !== undefined || now - Date.parse(flake.at) >= flakeRetentionMs) return false;
@@ -117,16 +125,6 @@ export function recordTrialFlake(ledger: FlakeLedger, flake: TrialFlake, now: nu
   pruneFlakeLedger(ledger, now);
   return true;
 }
-/**
- * The trial flakes the merge writer judged in this process and the flake step has not taken yet:
- * the writer and the step run in the same loop, and the writer's trial has no CI job to read back.
- * Bounded; the oldest are dropped first.
- */
-const pendingTrialFlakes: TrialFlake[] = [];
-export const trialFlakeLimit = 100;
-export function noteTrialFlake(flake: TrialFlake) { pendingTrialFlakes.push(flake); pendingTrialFlakes.splice(0, Math.max(0, pendingTrialFlakes.length - trialFlakeLimit)); }
-/** Takes every pending trial flake, oldest first. */
-export const takeTrialFlakes = () => pendingTrialFlakes.splice(0, pendingTrialFlakes.length);
 
 /** Keeps the newest `flakeLedgerLimit` entries of the last `flakeRetentionMs`, and the reads of that window. Mutates `ledger`. */
 export function pruneFlakeLedger(ledger: FlakeLedger, now: number) {

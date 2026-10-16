@@ -49,6 +49,16 @@ export type MergeLedgerPreview = z.infer<typeof previewVerdictSchema>;
 export const mergeTrialSchema = z.object({ head: sha, mergeSha: sha, proofs: proofCounts }).passthrough();
 /** The newest trial the fold kept: the head it tried, the merge commit, each proof's counts and the preview's verdict (GY-1718). */
 export interface MergeLedgerTrial { head: string; mergeSha: string; proofs: Record<string, { executed: number; failed: number }>; preview?: MergeLedgerPreview | null }
+/**
+ * GY-1834: a trial's flake — the failing test files that passed on their immediate rerun of the same
+ * merge commit, and the failing cases the rerun did not repeat, none of them the item's proofs.
+ */
+export const trialFlakedSchema = z.object({ files: z.array(z.string().max(500)).max(100), tests: z.array(z.string().max(300)).max(100), at: instant }).strict();
+export type TrialFlaked = z.infer<typeof trialFlakedSchema>;
+/** A trial flake as the fold keeps it: the head and merge commit it flaked on. */
+export interface MergeLedgerFlake extends TrialFlaked { head: string; mergeSha: string }
+/** How many trial flakes an item's state keeps, newest last, across its intents. */
+export const mergeLedgerFlakeLimit = 20;
 
 /** One ledger row as the fold reads it: its kind and payload, and the item key it was written under when it was. */
 export interface MergeLedgerEvent { kind: string; payload: unknown; work?: string | null; at?: string | null; seq?: string | number | null }
@@ -67,6 +77,8 @@ export interface MergeLedgerState {
   refusal: { kind: 'merge' | 'revert'; reason: string } | null;
   /** The newest `merge.trial` of this state's intent (GY-1528); absent when none was folded. */
   trial?: MergeLedgerTrial | null;
+  /** GY-1834: every trial flake of the item, kept across its intents (bounded) so the flake ledger reads each after any restart. */
+  flakes?: MergeLedgerFlake[];
   /** How many ledger rows folded into this state. */
   events: number;
 }
@@ -100,7 +112,8 @@ export function foldMergeLedger(events: readonly MergeLedgerEvent[]): Record<str
       const intent = parsed(mergeIntentSchema, event.payload);
       if (!intent) continue;
       const previous = states[intent.key];
-      states[intent.key] = { key: intent.key, state: 'intent', head: intent.head, baseTip: intent.baseTip, mergeSha: intent.mergeSha, risk: intent.risk, intentAt: intent.at, pushedAt: null, observedTip: null, refusal: null, events: (previous?.events ?? 0) + 1 };
+      states[intent.key] = { key: intent.key, state: 'intent', head: intent.head, baseTip: intent.baseTip, mergeSha: intent.mergeSha, risk: intent.risk, intentAt: intent.at, pushedAt: null, observedTip: null, refusal: null, events: (previous?.events ?? 0) + 1,
+        ...(previous?.flakes?.length ? { flakes: previous.flakes } : {}) };
       byMerge.set(intent.mergeSha, intent.key); byHead.set(intent.head, intent.key);
     } else if (event.kind === mergeLedgerKinds.pushed) {
       const pushed = parsed(mergePushedSchema, event.payload);
@@ -126,6 +139,8 @@ export function foldMergeLedger(events: readonly MergeLedgerEvent[]): Record<str
       if (!trial || !state) continue;
       const preview = previewVerdictSchema.safeParse((event.payload as { preview?: unknown }).preview);
       state.trial = { head: trial.head, mergeSha: trial.mergeSha, proofs: Object.fromEntries(Object.entries(trial.proofs).map(([proof, counts]) => [proof, { executed: counts.executed, failed: counts.failed }])), ...(preview.success ? { preview: preview.data } : {}) };
+      const flaked = trialFlakedSchema.safeParse((event.payload as { flaked?: unknown }).flaked);
+      if (flaked.success) state.flakes = [...(state.flakes ?? []).filter(flake => flake.mergeSha !== trial.mergeSha), { head: trial.head, mergeSha: trial.mergeSha, ...flaked.data }].slice(-mergeLedgerFlakeLimit);
     }
   }
   return states;

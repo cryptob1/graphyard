@@ -1,6 +1,13 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import EmbeddedPostgres from 'embedded-postgres';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { Store } from '../src/store.js';
+import { Engine } from '../src/engine.js';
+import { processJob, type GitHub } from '../src/github.js';
+import { proofFailureRefusal } from '../src/merge-queue.js';
+import { failedTestsMarker } from '../src/master/base-break-refresh.js';
 import { emptyDaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Cycle } from '../src/daemon/cycle.js';
@@ -11,10 +18,10 @@ import { attributeFailures, baseFailurePrefix, baseFailureHoldMs, mergeOne, merg
 import { applyMainGuardRevert, runMainGuard, type CheckRun, type CommitVerdict, type FileChange, type MainCommit, type MainGuardPorts } from '../src/main-guard.js';
 import { trialFailurePrefix } from '../src/model/rework-ground.js';
 import { foldMergeLedger, type MergeLedgerEvent } from '../src/model/merge-ledger.js';
-import type { FlakeLedger, TrialFlake } from '../src/model/flake-ledger.js';
+import type { FlakeLedger } from '../src/model/flake-ledger.js';
 import type { FlakeLedgerStore } from '../src/flake-ledger.js';
 import type { TrialRun } from '../src/merge-writer/trial.js';
-import type { Work } from '../src/model.js';
+import type { Observation, Principal, Work } from '../src/model.js';
 
 // GY-1834. In the 30 CI runs before 2026-10-16T07:00Z about half failed, almost all on tests that
 // were not the change's: GY-1831 and GY-1824 took six runs each, every one a full rework round, and
@@ -57,8 +64,8 @@ function retest(onHead: { failed: string[]; names?: string[] }, onBase: { failed
 const git = (async (_command: string, args: string[]) => args.includes(`${mergeSha}^1`) ? `${tip}\n` : '') as never;
 const input = { root: '/repo', base: '/managed', mergeSha, changedFiles: [], timeoutMs: 60_000, proofs: [ownProof], proofFiles: [proofFile] };
 
-/** Ports whose trial answers `run`; pushes land. */
-function ports(run: MergeTrialRun, flakes: TrialFlake[] = []) {
+/** Ports whose trial answers `run`; pushes land. The records fold as the coordinator folds them. */
+function ports(run: MergeTrialRun) {
   const events: MergeLedgerEvent[] = [], recorded: MergeRecordEvent[] = [];
   const merge: MergePorts = {
     baseBranch: 'main', retrials: 1, now: () => clock, fetch: async () => tip,
@@ -71,9 +78,8 @@ function ports(run: MergeTrialRun, flakes: TrialFlake[] = []) {
         : event.kind === 'refused' ? { head: event.head, reason: event.reason, kind: 'merge' } : event;
       events.push({ kind, payload, work: target.key });
     },
-    flaked: flake => { flakes.push(flake); },
   };
-  return { merge, events, recorded, flakes };
+  return { merge, events, recorded, ledger: () => foldMergeLedger(events)['GY-1'] ?? null };
 }
 function cycleOf(work: Work[], effects: Partial<DaemonEffects>, state = emptyDaemonState(config), at = clock): Cycle {
   return { config, state, effects: { persist: async () => {}, ...effects } as DaemonEffects, snapshot: { work, now: iso(at) }, clock: at, now: () => at, performed: [], open: work.filter(entry => entry.stage !== 'done'),
@@ -116,6 +122,13 @@ test('unit:failure-attributed-to-base-or-flake — a head whose failing tests al
   assert.equal(filed.length, 1);
   assert.match(filed[0].title, /^Base branch main fails trial test: unit:reconcile-lock-hold-bounded/);
   assert.ok(filed[0].description.includes(tip) && filed[0].description.includes('GY-1'));
+  // Test A fixed, test B of the same file broken on a later tip, same head: a new failure, filed afresh, never the stale one's item.
+  const otherName = 'unit:reconcile-lock-other — another case', later = sha('later');
+  work.mergeLedger = { ...work.mergeLedger!, refusal: { kind: 'merge', reason: `${baseFailurePrefix}: tests ${shared} fail on the base tip ${later} too: ${otherName}` } };
+  await baseFailureStep(cycleOf([work], { fileBaseFailure: file as never }, state, clock + 120_000));
+  assert.equal(filed.length, 2);
+  assert.match(filed[1].title, /unit:reconcile-lock-other/);
+  assert.ok(filed[1].description.includes(later));
 
   // A file that fails on the head and passes on the base is the head's: refused, and the rework it grounds follows.
   const own = await attributeFailures(first([shared]), tap(sharedName), input, git, retest({ failed: [shared] }, { failed: [] }).fn);
@@ -131,20 +144,39 @@ test('unit:failure-attributed-to-base-or-flake — a failing test that passes on
   assert.deepEqual(run.tests.failed, [], 'the verdict is the rerun\'s');
   assert.deepEqual(run.flaked, { files: [flaky], tests: [flakyName] });
 
-  const fake = ports(run);
-  const outcome = await mergeOne(fake.merge, item());
+  const fake = ports(run), landed = item();
+  const outcome = await mergeOne(fake.merge, landed);
   assert.equal(outcome.outcome, 'merged', 'the head lands on its rerun');
-  assert.deepEqual(fake.flakes.map(flake => [flake.key, flake.mergeSha, flake.tests]), [['GY-1', mergeSha, [flakyName]]]);
+  // The flake rides on the trial record, before the push: the item's merge ledger keeps it, durable across any restart.
+  assert.ok(fake.recorded.findIndex(event => event.kind === 'trial' && event.flaked) < fake.recorded.findIndex(event => event.kind === 'pushed'));
+  landed.mergeLedger = fake.ledger();
+  assert.deepEqual(landed.mergeLedger!.flakes!.map(flake => [flake.mergeSha, flake.tests]), [[mergeSha, [flakyName]]]);
 
-  // The flake ledger takes the trial flake and files the fix item on its first flake: the test is no proof of GY-1.
+  // The flake ledger reads it from the item and files the fix item on its first flake: the test is no proof of GY-1.
+  // Each step runs on a fresh store, as a loop restarted after the merge would: the record is the item's, not the process's.
   const store = memoryStore(), { filed, file } = filer();
-  const { noteTrialFlake } = await import('../src/model/flake-ledger.js');
-  for (const flake of fake.flakes) noteTrialFlake(flake);
-  await flakeStep(cycleOf([], { flakeLedger: store, fileFaultClass: file as never }));
+  await flakeStep(cycleOf([landed], { flakeLedger: store, fileFaultClass: file as never }));
   assert.deepEqual(filed.map(entry => entry.title), [`Flaky test: ${flakyName}`]);
   assert.match(filed[0].description, /first flake/);
-  await flakeStep(cycleOf([], { flakeLedger: store, fileFaultClass: file as never }, emptyDaemonState(config), clock + 60_000));
-  assert.equal(filed.length, 1, 'one fix item');
+  const restarted = memoryStore();
+  restarted.ledger = structuredClone(store.ledger);
+  await flakeStep(cycleOf([landed], { flakeLedger: restarted, fileFaultClass: file as never }, emptyDaemonState(config), clock + 60_000));
+  assert.equal(filed.length, 1, 'one fix item, read once by its merge commit');
+
+  // A flake beside a failure that still holds the head is kept too: the refused trial's record carries it.
+  const beside = await attributeFailures(first([shared, flaky]), tap(sharedName, flakyName), input, git, retest({ failed: [shared], names: [sharedName] }, { failed: [] }).fn);
+  assert.deepEqual([beside.tests.failed, beside.flaked], [[shared], { files: [flaky], tests: [flakyName] }]);
+  const held = ports(beside), refusedItem = item();
+  assert.equal((await mergeOne(held.merge, refusedItem)).outcome, 'refused');
+  refusedItem.mergeLedger = held.ledger();
+  const besideFiled = filer();
+  await flakeStep(cycleOf([refusedItem], { flakeLedger: memoryStore(), fileFaultClass: besideFiled.file as never }));
+  assert.deepEqual(besideFiled.filed.map(entry => entry.title), [`Flaky test: ${flakyName}`]);
+
+  // A proof file whose failing case is not one of the item's proofs is attributed like any other file: rerun, and excused when it passes.
+  const unrelated = 'unit:item-works-elsewhere-helper — an unrelated case in the proof file';
+  const loose = await attributeFailures(first([proofFile]), tap(unrelated), { ...input, proofs: [ownProof] }, git, retest({ failed: [] }, { failed: [] }).fn);
+  assert.deepEqual([loose.tests.failed, loose.flaked], [[], { files: [proofFile], tests: [unrelated] }]);
 
   // A PR check rerun that passed: the first flake of a test that is no proof of its item files too; a flake of the item's own proof waits for the threshold.
   const rerunOf = (n: number, proofs: string[]) => ({ ...item({ id: `w${n}`, key: `GY-${n}`, criteria: [{ id: 'AC-1', text: 'Works', proofs }], submission: { epoch: 1, pr: n } }),
@@ -159,7 +191,7 @@ test('unit:failure-attributed-to-base-or-flake — a failing test that is a crit
   // The proof file passes on its rerun and fails on the base: neither sets it aside.
   const rerun = retest({ failed: [] }, { failed: [proofFile] });
   const run = await attributeFailures(first([proofFile]), tap(`${ownProof} — works`), input, git, rerun.fn);
-  assert.deepEqual(rerun.calls, [], 'a proof file is never rerun to excuse it');
+  assert.deepEqual(rerun.calls, [], 'a proof file whose proof case failed is never rerun to excuse it');
   assert.deepEqual(run.tests.failed, [proofFile]);
   assert.equal(run.flaked, undefined);
   assert.equal(run.base, undefined);
@@ -169,6 +201,10 @@ test('unit:failure-attributed-to-base-or-flake — a failing test that is a crit
   // With a flaky non-proof file beside it, the flake is excused but the proof still holds the head.
   const mixed = await attributeFailures(first([proofFile, flaky]), tap(`${ownProof} — works`, flakyName), input, git, retest({ failed: [] }, { failed: [] }).fn);
   assert.deepEqual(mixed.tests.failed, [proofFile]);
+  assert.deepEqual(mixed.flaked, { files: [flaky], tests: [flakyName] }, 'the proof case is never named a flake');
+  // A file that fails again with one of the item's proofs on its rerun is the head's, wherever else it fails.
+  const proofAgain = await attributeFailures(first([shared]), tap(sharedName), input, git, retest({ failed: [shared], names: [`${ownProof} — works`] }, { failed: [shared] }).fn);
+  assert.deepEqual([proofAgain.tests.failed, proofAgain.base], [[shared], undefined]);
   assert.equal((await mergeOne(ports(mixed).merge, item())).outcome, 'refused');
 
   // Under GitHub delivery, a base failure that names the candidate's own proof is never set aside.
@@ -179,6 +215,57 @@ test('unit:failure-attributed-to-base-or-flake — a failing test that is a crit
   assert.equal(setAside.has(observed.id), false, 'the failure stays the candidate\'s: its rework proceeds');
   const other = { ...effects, failedTests: async () => [sharedName], baseCheck: async () => ({ check: 'test', baseSha: tip, state: 'failed' as const, jobId: 80, url: null, tests: [sharedName] }) };
   assert.deepEqual([...(await baseFailureStep(cycleOf([observed], other as never))).get(observed.id) ?? []], ['test'], 'a shared failure of a non-proof test is set aside as before');
+});
+
+// ---- AC-1 under GitHub delivery: the PR gate's one rerun -------------------------------------------
+
+let database: EmbeddedPostgres | null = null, store: Store | null = null;
+after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+async function engineOnPostgres() {
+  const port = Number(process.env.GRAPHYARD_FLAKE_ATTRIBUTION_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1834);
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('flake-attribution'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  const engine = new Engine(store, [15368], 120, 'owner/project'); engine.controlPlaneAppId = 1234;
+  return engine;
+}
+
+test('unit:failure-attributed-to-base-or-flake — under GitHub delivery a failed check that failed a criterion proof is never rerun past: the failure stands as the head\'s, while any other failure is rerun once', async () => {
+  assert.match(proofFailureRefusal(item(), { check: 'test', failedRunId: 41 }, [`${ownProof} — works`, sharedName]) ?? '', /criterion proof unit:item-works — works/);
+  assert.equal(proofFailureRefusal(item(), { check: 'test', failedRunId: 41 }, [sharedName]), null);
+
+  const engine = await engineOnPostgres(), db = store!;
+  const operator: Principal = { id: 'operator', role: 'admin' }, worker: Principal = { id: 'agent-a', role: 'worker' };
+  const at = (label: string) => label.padEnd(40, '0');
+  let number = 1833;
+  async function submitted() {
+    let work = await engine.execute(operator, 'create', null, { title: `Head ${number}`, plannedFiles: ['src/app.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: [ownProof] }] }, randomUUID());
+    work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
+    work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
+    work = await engine.execute(worker, 'workspace', work.id, { epoch: 1, host: 'machine-a', path: `/tmp/attribution/${work.id}`, branch: `graphyard/${work.key.toLowerCase()}-1` }, randomUUID());
+    return engine.execute(worker, 'submit', work.id, { epoch: 1, pr: ++number }, randomUUID());
+  }
+  const seen = (work: Work, candidate: { sha: string; baseSha: string }): Observation => ({ clockOffset: { min: 0, max: 0 }, candidate: { ...candidate, pr: work.submission!.pr, branch: work.workspaces[0].branch, author: 'implementer' },
+    checks: [{ name: 'test', result: 'failure', appId: 15368, id: 41 }], reviews: [{ id: 41, reviewer: 'graphyard-reviewer[bot]', sha: candidate.sha, state: 'APPROVED' }], protected: true, mergeable: true,
+    merged: false, mergeSha: null, prState: 'open', draft: false, baseTip: candidate.baseSha, baseTree: at('7'), baseTipContained: true, files: ['src/app.ts'], scopeFiles: [], at: iso(clock) } as Observation);
+  async function reconcile(failed: string[]) {
+    let work = await submitted();
+    const candidate = { sha: at(`a${number}`), baseSha: at('b') };
+    work = await engine.observe(work.id, work.revision, seen(work, candidate));
+    assert.deepEqual(work.checkReruns!.map(entry => entry.state), ['owed']);
+    await db.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
+    await db.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [work.id]);
+    const reruns: number[] = [];
+    await processJob(engine, { observe: async (target: Work) => seen(target, candidate), rerunFailedJobs: async (id: number) => { reruns.push(id); return { runId: 9001 }; },
+      checkRunAnnotations: async () => [{ message: `${failedTestsMarker}${JSON.stringify({ failed })}` }], requestCodex: async () => { throw new Error('no review request expected'); }, publish: async () => {} } as unknown as GitHub);
+    return { reruns, work: (await db.list()).find(entry => entry.id === work.id)! };
+  }
+  const proof = await reconcile([`${proofFile} › ${ownProof} — works`]);
+  assert.deepEqual(proof.reruns, [], 'the failed proof is never rerun');
+  assert.equal(proof.work.checkReruns!.at(-1)!.state, 'refused');
+  assert.match(proof.work.checkReruns!.at(-1)!.detail ?? '', /criterion proof tests\/item-works.test.ts › unit:item-works/);
+  const other = await reconcile([`${shared} › ${sharedName}`]);
+  assert.deepEqual(other.reruns, [41], 'a failure of no proof is rerun once, as before');
 });
 
 // ---- AC-2: the main guard ----------------------------------------------------------------------

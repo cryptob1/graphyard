@@ -45,7 +45,8 @@ function recordedBaseFailures(state: Cycle['state'], work: readonly Work[], stam
   for (const item of work) {
     const ledger = item.mergeLedger, held = ledger?.state === 'refused' && ledger.head && item.candidate?.sha.toLowerCase() === ledger.head && item.stage !== 'done' ? parseBaseFailureReason(ledger.refusal?.reason ?? '') : null;
     if (held) {
-      const key = trialKey(item, held.files);
+      // The failing cases name the failure; the files only when the base run named none.
+      const key = trialKey(item, held.tests.length ? held.tests : held.files);
       live.add(key);
       state.baseFailures[key] ??= { test: (held.tests.length ? held.tests : held.files).join(', ').slice(0, 500), check: trialCheck, baseSha: held.tip, jobId: null, url: null, raisedAt: stamp,
         blocks: [{ key: item.key, id: item.id, sha: ledger!.head!, jobId: null, url: null }], item: null, cleared: null };
