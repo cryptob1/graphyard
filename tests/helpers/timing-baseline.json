@@ -918,6 +918,8 @@
     "tests/worktree-reclaim.test.ts": 3054,
     "tests/zero-touch-control-plane.test.ts": 4000,
     "tests/zero-touch-onboarding.test.ts": 5900,
-    "tests/park-requirements-bare-noun.test.ts": 196
+    "tests/park-requirements-bare-noun.test.ts": 196,
+    "tests/github-polling-control-plane.test.ts": 2000,
+    "tests/soak-control-plane-observation-job.test.ts": 1500
   }
 }

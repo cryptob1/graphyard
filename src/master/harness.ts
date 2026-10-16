@@ -501,6 +501,15 @@ export const scopeGuardHook = (cliPath: string, key: string, epoch: number): Har
   why: 'Deny an edit outside plannedFiles when it happens, naming scope-request, instead of at complete; complete stays the authority.' });
 export function workerHarnessPlan(input: { cliPath: string; branch: string; baseBranch: string; credentialHome: string; key?: string; epoch?: number; mergeWriter?: MergerMode }): HarnessPlan {
   const cli = `node ${input.cliPath}`;
+  // GY-1835: under the control-plane merger the session opens no pull request — it pushes its
+  // branch and submits the head with `complete GY-N EPOCH --head` — so its harness allows no `gh
+  // pr` command: nothing polls GitHub for a pull request the item does not have. With GitHub as
+  // the merge writer the rules stand as before.
+  const pullRequest = input.mergeWriter === 'control-plane' ? [] : [
+    { rule: 'Bash(gh pr create:*)', why: 'Open the pull request the worker submits with complete.' },
+    { rule: 'Bash(gh pr view:*)', why: 'Read the pull request number and state before submitting.' },
+    { rule: 'Bash(gh pr checks:*)', why: 'Read CI results for the worker\'s own candidate.' },
+  ];
   const allow: HarnessRule[] = [
     ...['status', 'sync', 'restore-branch', 'complete', 'blocked', 'heartbeat', 'events', 'diagnose'].map(command => ({ rule: `Bash(${cli} ${command}:*)`, why: `The worker's own ${command} command on its claimed item; the server checks the lease epoch.` })),
     { rule: `Bash(git push origin ${input.branch})`, why: 'Push the assigned branch; Graphyard observes it as the candidate head.' },
@@ -508,9 +517,7 @@ export function workerHarnessPlan(input: { cliPath: string; branch: string; base
     { rule: `Bash(git push origin HEAD:${input.branch})`, why: 'Push the current head to the assigned branch.' },
     { rule: 'Bash(git fetch origin)', why: 'Read the remote tips restore-branch and sync compare against.' },
     { rule: 'Bash(git reset --hard *)', why: 'Move the assigned branch back to the reviewed head before sync; it changes only this worktree.' },
-    { rule: 'Bash(gh pr create:*)', why: 'Open the pull request the worker submits with complete.' },
-    { rule: 'Bash(gh pr view:*)', why: 'Read the pull request number and state before submitting.' },
-    { rule: 'Bash(gh pr checks:*)', why: 'Read CI results for the worker\'s own candidate.' },
+    ...pullRequest,
     { rule: `Bash(git merge origin/${input.baseBranch})`, why: 'sync merges the base branch; the worker never rebases.' },
   ];
   // Every rewrite, in each spelling a rule can name: `--force`, `--force-with-lease` (bare or

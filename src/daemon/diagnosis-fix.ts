@@ -1,14 +1,17 @@
-// Concern: what a diagnosis outcome leaves behind — the record key, the no-run cause kind and the lost-run grace — and the fix item the loop files from it.
+// Concern: what a diagnosis session is given and leaves behind — the evidence it reads and the prompt it is launched with (GY-1835's merger-aware read list included), and the record key, no-run cause kind, lost-run grace and fix item the loop files from its outcome.
 import { createHash } from 'node:crypto';
-import { createSchema } from '../model.js';
+import { createSchema, type Work } from '../model.js';
+import { isClosed } from '../model/closure.js';
 import { namedPaths } from '../model/scope.js';
 import { scopeExists } from '../model/planned-files.js';
 import { guardBroadScope } from '../master/autonomy.js';
 import { baseTree } from '../cli/planned-files-intent.js';
 import { derivePlannedFiles, plannedFilesRefusal, type PlannedFilesDerivation } from '../model/planned-files.js';
-import { type DiagnosisPayload, type DiagnosisRecord } from '../runner/payloads.js';
+import { graphyardTools, type DiagnosisPayload, type DiagnosisRecord } from '../runner/payloads.js';
+import { faultClassMeaning } from '../model/fault-classes.js';
 import type { FaultKind } from '../model/fault-classes.js';
-import { clip, type DiagnosticianEffects, type FixInput } from './diagnosis.js';
+import type { MergerMode } from '../merger-mode.js';
+import type { DiagnosisContext, DiagnosisSubject, DiagnosticianEffects, FixInput } from './diagnosis.js';
 
 export const iso = (at: number) => new Date(at).toISOString();
 /**
@@ -115,3 +118,61 @@ export function fixItem(entry: Pick<DiagnosisRecord, 'subject' | 'kind' | 'work'
   const reason = guardBroadScope(input, `The diagnostician found the root cause of ${answers}: ${clip(diagnosis.cause, 1500)}`, { allow: false, command: 'master create' });
   return { ...input, reason };
 }
+
+export const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+/** The last lines of an excerpt that fit `budget` characters, each clipped. */
+export function excerpt(lines: readonly string[], budget: number, lineLimit = 400) {
+  const kept: string[] = [];
+  let used = 0;
+  for (const line of [...lines].reverse()) {
+    const clipped = clip(line, lineLimit);
+    if (used + clipped.length + 1 > budget) break;
+    kept.unshift(clipped); used += clipped.length + 1;
+  }
+  return kept;
+}
+
+/** The pull requests the subject names: `#N` or `PR N` in its instances, and the candidates of the items its instances are on. */
+export function namedPullRequests(subject: DiagnosisSubject, work: readonly Work[], limit = 5) {
+  const numbers = new Set<number>();
+  for (const instance of subject.instances) {
+    for (const match of `${instance.subject} ${instance.text}`.matchAll(/(?:#|\bPR\s*#?|pull request\s*#?)(\d{1,7})\b/gi)) numbers.add(Number(match[1]));
+    const item = work.find(entry => entry.key === instance.subject);
+    const pr = item?.candidate?.pr ?? item?.submission?.pr;
+    if (pr) numbers.add(pr);
+  }
+  return [...numbers].slice(0, limit);
+}
+
+/** Everything the diagnostician is given, bounded so the prompt stays one argument. */
+export function diagnosisInput(subject: DiagnosisSubject, context: DiagnosisContext, work: readonly Work[]) {
+  const open = work.filter(item => item.stage !== 'done' && !isClosed(item) && item.key !== subject.work?.key);
+  return {
+    subject: subject.id, kind: subject.kind, faultClass: subject.faultClass, meaning: faultClassMeaning[subject.faultClass],
+    item: subject.work ? { key: subject.work.key, title: subject.work.title, description: clip(subject.work.description ?? '', 6000) } : null,
+    instances: subject.instances.slice(-40).map(entry => ({ at: entry.at, lastSeenAt: entry.lastSeenAt, kind: entry.kind, subject: entry.subject, text: clip(entry.text, 300) })),
+    journal: excerpt(context.journal, 24_000),
+    serverLog: excerpt(context.serverLog, 16_000),
+    pullRequests: context.pullRequests.slice(0, 5).map(entry => ({ number: entry.number, state: clip(JSON.stringify(entry.state ?? null), 2000) })),
+    openItems: excerpt(open.map(item => `${item.key} [${item.stage}${item.ready ? ', ready' : ''}] ${item.title}`), 8_000, 200),
+  };
+}
+export type DiagnosisInput = ReturnType<typeof diagnosisInput>;
+
+export function diagnosisPrompt(config: { repository: string; cliPath: string; merger?: MergerMode }, input: DiagnosisInput) {
+  const cli = `node ${config.cliPath}`;
+  const what = input.kind === 'recurring'
+    ? `the recurring-fault item ${input.item!.key} ("${input.item!.title}"), which the master loop filed because the ${input.faultClass} fault class (${input.meaning}) recurred`
+    : `the invariant violation ${input.subject}, which has stood past its bound`;
+  // GY-1835: under a control-plane merger the item's head, merge and verdicts are the control
+  // plane's own records, so the read list names `graphyard status GY-N` and `master status` and no
+  // `gh pr view`; with GitHub the recorded merger it names the pull-request read as before.
+  const reads = config.merger === 'control-plane' ? `${cli} status GY-N, ${cli} master status` : `${cli} status GY-N, ${cli} master status, gh pr view N`;
+  return `You are the Graphyard diagnostician for ${config.repository}. Diagnose ${what}. Find the one root cause its instances share, as a senior engineer on this codebase would: read the evidence below, the repository in this checkout, and the control plane (${reads}). `
+    + 'This session is read-only: never edit, commit, push, claim, release, close, merge or decide anything, and never ask anyone anything. '
+    + `Then call the ${graphyardTools.diagnose} tool exactly once with subject "${input.subject}", the cause, the evidence it rests on (log lines quoted exactly, and the commands you ran with what they showed), the fault class the cause belongs to, and exactly one answer: `
+    + 'covering, the key of an existing open item (listed below) that already covers this cause, when one does; otherwise fix, the root-cause item to file — a title, a description stating the cause and evidence, the priority to release it at (0 highest to 4), testable criteria each with its proofs (each a bare id such as unit:tmp-reclaim-retry — unit:, integration:, e2e: or manual: then letters, digits and ._/- only, no spaces or prose), and the narrow plannedFiles the fix changes. Stop after the call.\n\n'
+    + `The evidence, as JSON:\n${clip(JSON.stringify(input), diagnosisEvidenceMax)}`;
+}
+/** The evidence's bound in the prompt: the prompt is one process argument, which Linux caps at 128 KiB. */
+export const diagnosisEvidenceMax = 100_000;
