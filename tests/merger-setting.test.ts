@@ -54,7 +54,7 @@ test('integration:merger-setting-admin-only — only an admin credential changes
   assert.equal((await setRows()).length, 0);
   for (const credential of [token(operator), token(coordinator), token(reader), agent.token]) {
     const read = await request(credential, 'merger');
-    assert.equal(read.status, 200, JSON.stringify(read.body)); assert.equal(read.body.merger, 'github'); assert.equal(read.body.setBy, null);
+    assert.equal(read.status, 200, JSON.stringify(read.body)); assert.equal(read.body.merger, 'control-plane', 'GY-1833: no recorded event reads the control-plane default'); assert.equal(read.body.setBy, null);
   }
   assert.equal((await request(token(worker), 'merger')).status, 403);
   assert.equal((await request(token(operator), 'merger', { merger: 'bogus', reason: 'bad mode' })).status, 400);
@@ -62,30 +62,29 @@ test('integration:merger-setting-admin-only — only an admin credential changes
 });
 
 test('integration:merger-setting-recorded-and-idempotent — the newest policy.merger.set event wins, a retry with the same key replays, a reused key with other input and setting the mode in force are refused', async () => {
-  assert.equal((await recordedMergerMode(store.pool)).merger, 'github');
-  assert.equal((await request(token(operator), 'merger', { merger: 'github', reason: 'already the default' })).status, 409);
+  assert.equal((await recordedMergerMode(store.pool)).merger, 'control-plane');
+  assert.equal((await request(token(operator), 'merger', { merger: 'control-plane', reason: 'already the default' })).status, 409);
   const key = randomUUID();
-  const first = await request(token(operator), 'merger', { merger: 'control-plane', reason: 'Shadow mode passed' }, key);
-  assert.equal(first.status, 200, JSON.stringify(first.body)); assert.equal(first.body.merger, 'control-plane'); assert.equal(first.body.setBy, operator.id); assert.equal(first.body.reason, 'Shadow mode passed');
-  const replay = await request(token(operator), 'merger', { merger: 'control-plane', reason: 'Shadow mode passed' }, key);
+  const first = await request(token(operator), 'merger', { merger: 'github', reason: 'Keep the legacy writer' }, key);
+  assert.equal(first.status, 200, JSON.stringify(first.body)); assert.equal(first.body.merger, 'github'); assert.equal(first.body.setBy, operator.id); assert.equal(first.body.reason, 'Keep the legacy writer');
+  const replay = await request(token(operator), 'merger', { merger: 'github', reason: 'Keep the legacy writer' }, key);
   assert.equal(replay.status, 200); assert.deepEqual(replay.body, first.body);
   assert.equal((await setRows()).length, 1, 'the retry recorded nothing');
-  assert.equal((await request(token(operator), 'merger', { merger: 'github', reason: 'different' }, key)).status, 409);
-  assert.equal((await request(token(operator), 'merger', { merger: 'control-plane', reason: 'again' })).status, 409);
-  assert.equal((await recordedMergerMode(store.pool)).merger, 'control-plane');
-  const back = await request(token(operator), 'merger', { merger: 'github', reason: 'Roll back' });
-  assert.equal(back.status, 200); assert.equal(back.body.history.length, 2); assert.equal(back.body.merger, 'github');
-  assert.deepEqual((await setRows()).map(row => row.payload.merger), ['control-plane', 'github']);
+  assert.equal((await request(token(operator), 'merger', { merger: 'control-plane', reason: 'different' }, key)).status, 409);
+  assert.equal((await request(token(operator), 'merger', { merger: 'github', reason: 'again' })).status, 409);
+  assert.equal((await recordedMergerMode(store.pool)).merger, 'github');
+  const back = await request(token(operator), 'merger', { merger: 'control-plane', reason: 'Shadow mode passed' });
+  assert.equal(back.status, 200); assert.equal(back.body.history.length, 2); assert.equal(back.body.merger, 'control-plane');
+  assert.deepEqual((await setRows()).map(row => row.payload.merger), ['github', 'control-plane']);
 });
 
 test('integration:merger-setting-status-field — /api/status carries mergeWriter, with a line only while the control plane merges', async () => {
-  const github = (await request(token(coordinator), 'status')).body.mergeWriter;
-  assert.equal(github.merger, 'github'); assert.equal(github.line, null); assert.equal(github.setBy, operator.id);
-  assert.equal((await request(token(operator), 'merger', { merger: 'control-plane', reason: 'Switch' })).status, 200);
   const control = (await request(token(coordinator), 'status')).body.mergeWriter;
   assert.deepEqual(Object.keys(control).filter(key => ['merger', 'since', 'setBy', 'reason', 'line'].includes(key)).sort(), ['line', 'merger', 'reason', 'setBy', 'since']);
-  assert.equal(control.merger, 'control-plane'); assert.equal(control.reason, 'Switch'); assert.match(control.line, /^The control plane is the merge writer since .*, set by human-operator \(Switch\)$/);
+  assert.equal(control.merger, 'control-plane'); assert.equal(control.reason, 'Shadow mode passed'); assert.match(control.line, /^The control plane is the merge writer since .*, set by human-operator \(Shadow mode passed\)$/);
   assert.equal((await request(token(operator), 'merger', { merger: 'github', reason: 'Back' })).status, 200);
+  const github = (await request(token(coordinator), 'status')).body.mergeWriter;
+  assert.equal(github.merger, 'github'); assert.equal(github.line, null); assert.equal(github.setBy, operator.id);
 });
 
 /** One item from creation to an observed open pull request; the parts of the result that must not depend on the setting. */
@@ -151,8 +150,8 @@ test('unit:merger-status-line — master status leads with a mergeWriter sentenc
   assert.deepEqual(mergeWriterLine({ mergeWriter: { merger: 'control-plane', line: 'The control plane is the merge writer since T, set by a (r)' } }), { mergeWriter: 'The control plane is the merge writer since T, set by a (r)' });
 });
 
-test('unit:merger-doctor-line — doctor prints `merger: MODE (set by ACTOR at TIME)` or `merger: github (default)`', () => {
-  assert.equal(mergerDoctorLine({ merger: 'github', since: null, setBy: null }), 'merger: github (default)');
-  assert.equal(mergerDoctorLine(null), 'merger: github (default)');
+test('unit:merger-doctor-line — doctor prints `merger: MODE (set by ACTOR at TIME)` or `merger: control-plane (default)`', () => {
+  assert.equal(mergerDoctorLine({ merger: 'control-plane', since: null, setBy: null }), 'merger: control-plane (default)');
+  assert.equal(mergerDoctorLine(null), 'merger: control-plane (default)');
   assert.equal(mergerDoctorLine({ merger: 'control-plane', since: '2026-10-08T07:00:00.000Z', setBy: 'human-operator' }), 'merger: control-plane (set by human-operator at 2026-10-08T07:00:00.000Z)');
 });

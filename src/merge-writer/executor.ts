@@ -8,7 +8,7 @@ import { leadingProof } from '../model/flake-ledger.js';
 import type { TrialFlaked } from '../model/merge-ledger.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { submittedAtOf } from './shadow.js';
-import { runTrial, TrialCleanupError, type RunTrialInput, type TrialRun } from './trial.js';
+import { runTrial, trialAttempts, TrialCleanupError, type RunTrialInput, type TrialNoVerdict, type TrialNoVerdictOutcome, type TrialPhase, type TrialPhaseDurations, type TrialRun } from './trial.js';
 import { previewFailureReason, type PreviewVerdict } from './preview.js';
 
 /**
@@ -95,9 +95,16 @@ export const trialFlaked = (flaked: { files: readonly string[]; tests: readonly 
 /** What `POST /api/work/:id/merge-record` takes: one of the five steps, with its ledger payload. */
 export type MergeRecordEvent =
   | { kind: 'intent'; head: string; baseTip: string; mergeSha: string; risk: string; at: string }
-  | { kind: 'trial'; head: string; baseTip: string; mergeSha: string; build: 'pass' | 'fail'; tests: TrialRun['tests']; files: string[]; proofs: ProofCounts; durationMs: number;
+  | { kind: 'trial'; head: string; baseTip: string; mergeSha: string; outcome: 'verdict'; build: 'pass' | 'fail'; tests: TrialRun['tests']; files: string[]; proofs: ProofCounts; durationMs: number;
+    /** Each phase's time (GY-1832), and the attempts before the verdict that reached none, oldest first. */ phases?: TrialPhaseDurations; attempts: TrialNoVerdict[];
     /** The preview's verdict (GY-1718), when the passing trial was previewed. */ preview?: PreviewVerdict;
     /** GY-1834: the trial's flake, kept on the item's merge ledger so the flake ledger reads it after any restart. */ flaked?: TrialFlaked }
+  /**
+   * A trial that reached no verdict on its retry either (GY-1832): its final outcome, the phase and
+   * reason, the phases' times and every attempt. It carries no proofs, so the ledger fold keeps no
+   * trial for it; the intent it leaves open is refused and the head queued again by the next cycle.
+   */
+  | { kind: 'trial'; head: string; baseTip: string; mergeSha: string; outcome: TrialNoVerdictOutcome; phase: TrialPhase; reason: string; phases: TrialPhaseDurations; attempts: TrialNoVerdict[]; durationMs: number }
   | { kind: 'pushed'; mergeSha: string; pushedAt: string }
   | { kind: 'reconciled'; mergeSha: string; observedTip: string }
   | { kind: 'refused'; head: string; reason: string };
@@ -227,10 +234,10 @@ export const criterionProofs = (work: Pick<Work, 'criteria'>) => [...new Set(wor
  * (`git grep` at the commit), so the trial runs the criterion→test bindings whatever the affected
  * selection says. No match is no file, never an error.
  */
-export async function proofTestFiles(run: ChildRun, root: string, mergeSha: string, proofs: readonly string[]): Promise<string[]> {
+export async function proofTestFiles(run: ChildRun, root: string, mergeSha: string, proofs: readonly string[], options?: { timeoutMs?: number }): Promise<string[]> {
   if (!proofs.length) return [];
   let out: string;
-  try { out = String(await run('git', ['-C', root, 'grep', '-l', '-F', ...proofs.flatMap(proof => ['-e', proof]), mergeSha, '--', 'tests/*.test.ts'])); }
+  try { out = String(await run('git', ['-C', root, 'grep', '-l', '-F', ...proofs.flatMap(proof => ['-e', proof]), mergeSha, '--', 'tests/*.test.ts'], options?.timeoutMs === undefined ? undefined : { timeoutMs: options.timeoutMs })); }
   catch (error) {
     // Exit 1 is no match; anything else is a read the trial cannot do without.
     if ((error as { status?: number | null }).status === 1) return [];
@@ -246,6 +253,11 @@ export interface MergeTrialInput extends RunTrialInput {
   proofFiles: readonly string[];
   /** GY-1834: false skips the rerun of failing files and their run on the base tip; on by default. */
   attribute?: boolean;
+  /**
+   * How to discover more of them, run in each attempt's selection phase until one answers (GY-1832),
+   * so a read that fails or times out is that attempt's no-verdict, timed and retried like any host failure.
+   */
+  discoverProofFiles?: (options: { timeoutMs?: number }) => Promise<readonly string[]>;
 }
 const runner = 'tests/helpers/run-tests.ts';
 const listed = (out: string) => out.split('\n').map(line => line.trim()).filter(line => /^tests\/[\w./-]+\.test\.ts$/.test(line));
@@ -256,32 +268,48 @@ const childOutput = (error: unknown) => { const failed = error as { stdout?: unk
  * widened to the files carrying the item's proofs and the run reported as TAP, so the verdict counts
  * each proof's executed and failed cases (AC-2). The child runner is decorated, never the trial:
  * the affected selection (`scripts/ci-tests.mjs affected`, or the `select` fallback an older merge
- * needs) gains the proof files it lacks, and the test run gets the TAP reporter on stdout, which
- * `runTrial` still reads its failing files from.
+ * needs) gains the proof files it lacks, and every shard's test run gets the TAP reporter on stdout,
+ * which `runTrial` still reads its failing files from; the proofs are counted over all the shards.
  */
 export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialRun> {
   const inner = input.run ?? defaultChildRun;
-  let tap = '', files: string[] = [], only: string[] | null = null, phaseTap = '';
-  const widened = (out: string) => {
+  let tap = '', files: string[] = [], only: string[] | null = null;
+  const widened = (out: string, proofFiles: readonly string[]) => {
     // GY-1834: a rerun, or the run on the base tip, runs exactly the failing files.
     if (only) return `${only.join('\n')}\n`;
     const have = listed(out);
     // A `full:` selection that lists nothing hands over to `select`; the files are added to that run instead.
     if (!have.length && /^full:/.test(out.trimStart())) return out;
-    const extra = input.proofFiles.filter(path => !have.includes(path));
+    const extra = proofFiles.filter(path => !have.includes(path));
     files = [...have, ...extra];
     return extra.length ? `${out.replace(/\s+$/, '')}\n${extra.join('\n')}\n` : out;
   };
+  // The trial's shards run beside each other (GY-1832), so their TAP streams are joined: each proof's
+  // cases are counted over every shard, as one runner process would count them. A retried trial runs
+  // in a fresh checkout, and only the attempt that answered is counted: each attempt starts its TAP
+  // and files afresh, even one that stops before its tests run, and a runner child of an earlier attempt adds nothing.
+  let epoch = 0, discovered: readonly string[] | null = input.discoverProofFiles ? null : input.proofFiles;
+  // A discovery that fails is a host failure of the selection (its `cause` set), never a failing selection: the attempt ends with no verdict and is retried.
+  const proofFiles = async (options: { timeoutMs?: number } | undefined) => {
+    if (discovered || !input.discoverProofFiles) return discovered ?? input.proofFiles;
+    try { const found = await input.discoverProofFiles({ timeoutMs: options?.timeoutMs }); return discovered = [...new Set([...input.proofFiles, ...found])]; }
+    catch (error) {
+      const failed = error as { message?: string; timedOut?: boolean; stdout?: unknown; stderr?: unknown };
+      throw Object.assign(new Error(`could not discover the proof test files: ${String(failed.message ?? error)}`), { status: null, signal: null, timedOut: failed.timedOut, stdout: failed.stdout, stderr: failed.stderr, cause: `could not discover the proof test files: ${String(failed.message ?? error).slice(0, 300)}` });
+    }
+  };
   const run: ChildRun = async (command, args, options) => {
-    if (command === 'node' && args[0] === 'scripts/ci-tests.mjs' && (args[1] === 'affected' || args[1] === 'select')) return widened(String(await inner(command, args, options)));
+    if (command === 'node' && args[0] === 'scripts/ci-tests.mjs' && (args[1] === 'affected' || args[1] === 'select')) { const files = await proofFiles(options); return widened(String(await inner(command, args, options)), files); }
     const at = command === 'node' ? args.indexOf(runner) : -1;
     if (at < 0) return inner(command, args, options);
-    try { const out = String(await inner(command, [...args.slice(0, at + 1), '--test-reporter=tap', '--test-reporter-destination=stdout', ...args.slice(at + 1)], options)); tap = out; phaseTap += `${out}\n`; return out; }
-    catch (error) { tap = childOutput(error); phaseTap += `${tap}\n`; throw error; }
+    const own = epoch;
+    try { const out = String(await inner(command, [...args.slice(0, at + 1), '--test-reporter=tap', '--test-reporter-destination=stdout', ...args.slice(at + 1)], options)); if (own === epoch) tap += `${out}\n`; return out; }
+    catch (error) { if (own === epoch) tap += `${childOutput(error)}\n`; throw error; }
   };
   const counted = (): ProofCounts => Object.fromEntries(input.proofs.map(proof => { const { executed, failed } = countProofCases(tap, proof); return [proof, { executed, failed }]; }));
   let verdict: TrialRun, leftover: string | undefined;
-  try { verdict = await runTrial({ ...input, run }); }
+  const onAttempt = (index: number) => { epoch++; tap = ''; files = []; input.onAttempt?.(index); };
+  try { verdict = await runTrial({ ...input, run, onAttempt }); }
   catch (error) {
     // A checkout that would not go is reported beside the verdict it reached, not in place of it.
     if (error instanceof TrialCleanupError && error.verdict) { verdict = error.verdict; leftover = error.message; }
@@ -289,10 +317,12 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
   }
   const first: MergeTrialRun = { ...verdict, files, proofs: counted(), ...(leftover ? { leftover } : {}) };
   if (input.attribute === false) return first;
-  return attributeFailures(first, phaseTap, input, inner, async (sha, failing) => {
-    only = failing; phaseTap = '';
-    try { return { run: await runTrial({ ...input, mergeSha: sha, changedFiles: failing, run }), tap: phaseTap }; }
-    catch (error) { return error instanceof TrialCleanupError && error.verdict ? { run: error.verdict, tap: phaseTap } : null; }
+  // A rerun's attempts start their TAP afresh like the trial's, so each run reads only its own answering attempt.
+  const rerunAttempt = () => { epoch++; tap = ''; };
+  return attributeFailures(first, tap, input, inner, async (sha, failing) => {
+    only = failing;
+    try { const rerun = await runTrial({ ...input, mergeSha: sha, changedFiles: failing, run, onAttempt: rerunAttempt }); return { run: rerun, tap }; }
+    catch (error) { return error instanceof TrialCleanupError && error.verdict ? { run: error.verdict, tap } : null; }
   });
 }
 
@@ -428,7 +458,15 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     const { mergeSha } = merged;
     // The intent first (AC-2): a crash from here on is reconciled against the base, never repeated blindly.
     await ports.record(item, { kind: 'intent', head, baseTip, mergeSha, risk: riskOf(item).risk, at: at() });
-    const run = await ports.trial(mergeSha, merged.files, item);
+    let run: MergeTrialRun;
+    try { run = await ports.trial(mergeSha, merged.files, item); }
+    catch (error) {
+      // No verdict after the retry (GY-1832): the trial's record is its final outcome, never left pending.
+      const attempts = trialAttempts(error), last = attempts.at(-1)!;
+      await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: last.outcome, phase: last.phase, reason: last.reason, phases: last.phases, attempts,
+        durationMs: Math.round(Object.values(last.phases).reduce((sum, value) => sum + value, 0)) });
+      throw error;
+    }
     // GY-1834: a failure every file of which fails on the base tip too is the base's: held, never reworked.
     const baseHeld = failureIsBase(run) ? baseFailureReason(run.base!) : null;
     const trialFailure = baseHeld ?? trialFailureReason({ run });
@@ -437,7 +475,8 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
       ({ result: 'error', mergeSha, cases: [], failed: [], detail: (error instanceof Error ? error.message : String(error)).slice(0, 900), durationMs: 0 })) : null;
     // GY-1834: a flake rides on the trial record, refused or not, so it is durable before anything else happens.
     const flaked = run.flaked ? trialFlaked(run.flaked, at()) : null;
-    await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, build: run.build, tests: run.tests, files: run.files, proofs: run.proofs, durationMs: run.durationMs, ...(preview ? { preview } : {}), ...(flaked ? { flaked } : {}) });
+    await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: 'verdict', build: run.build, tests: run.tests, files: run.files, proofs: run.proofs, durationMs: run.durationMs,
+      ...(run.phases ? { phases: run.phases } : {}), attempts: run.retried ?? [], ...(preview ? { preview } : {}), ...(flaked ? { flaked } : {}) });
     const failure = trialFailure ?? previewFailureReason(preview, trialFailurePrefix);
     if (failure) {
       await ports.record(item, { kind: 'refused', head, reason: failure });

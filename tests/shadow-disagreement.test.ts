@@ -20,6 +20,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 /**
  * GY-1560: explain shadow-gate disagreements from the record and refuse the control-plane merger
@@ -56,7 +57,7 @@ before(async () => {
     port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'],
   });
   await pg.initialise(); await pg.start(); await pg.createDatabase('shadow_disagreement_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/shadow_disagreement_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/shadow_disagreement_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

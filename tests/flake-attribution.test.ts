@@ -166,7 +166,7 @@ test('unit:failure-attributed-to-base-or-flake — a failing test that passes on
   const outcome = await mergeOne(fake.merge, landed);
   assert.equal(outcome.outcome, 'merged', 'the head lands on its rerun');
   // The flake rides on the trial record, before the push: the item's merge ledger keeps it, durable across any restart.
-  assert.ok(fake.recorded.findIndex(event => event.kind === 'trial' && event.flaked) < fake.recorded.findIndex(event => event.kind === 'pushed'));
+  assert.ok(fake.recorded.findIndex(event => event.kind === 'trial' && event.outcome === 'verdict' && event.flaked) < fake.recorded.findIndex(event => event.kind === 'pushed'));
   landed.mergeLedger = fake.ledger();
   assert.deepEqual(landed.mergeLedger!.flakes!.map(flake => [flake.mergeSha, flake.tests]), [[mergeSha, [flakyName]]]);
 

@@ -11,6 +11,7 @@ import { configuredResponder, responderConfigSchema, type Responder, type Respon
 import { accuracyStudy, type StudyCase } from '../src/model/closed-question.js';
 import { httpClosedQuestionJudge, judgeClosedQuestions } from '../src/producer.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // GY-109: a mechanical criterion is judged by a calibrated typed answer instead of a producer
 // session. The control plane binds the declared state to the exact candidate, asks the configured
@@ -93,7 +94,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_CLOSED_QUESTION_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 109);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('closed-question'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('closed_question_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/closed_question_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/closed_question_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null;
   http = server(engine, credentials, github as any, undefined, { responder });
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
