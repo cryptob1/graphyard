@@ -274,17 +274,22 @@ test('unit:failure-attributed-to-base-or-flake — under GitHub delivery a faile
   const seen = (work: Work, candidate: { sha: string; baseSha: string }): Observation => ({ clockOffset: { min: 0, max: 0 }, candidate: { ...candidate, pr: work.submission!.pr, branch: work.workspaces[0].branch, author: 'implementer' },
     checks: [{ name: 'test', result: 'failure', appId: 15368, id: 41 }], reviews: [{ id: 41, reviewer: 'graphyard-reviewer[bot]', sha: candidate.sha, state: 'APPROVED' }], protected: true, mergeable: true,
     merged: false, mergeSha: null, prState: 'open', draft: false, baseTip: candidate.baseSha, baseTree: at('7'), baseTipContained: true, files: ['src/app.ts'], scopeFiles: [], at: iso(clock) } as Observation);
-  async function reconcile(failed: string[]) {
+  // `failed` null is a run whose failed tests cannot be read: it published no record, or (`'throws'`) the read fails.
+  async function reconcile(failed: string[] | null | 'throws', observations = 1) {
     let work = await submitted();
     const candidate = { sha: at(`a${number}`), baseSha: at('b') };
     work = await engine.observe(work.id, work.revision, seen(work, candidate));
     assert.deepEqual(work.checkReruns!.map(entry => entry.state), ['owed']);
-    await db.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
-    await db.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [work.id]);
     const reruns: number[] = [];
-    await processJob(engine, { observe: async (target: Work) => seen(target, candidate), rerunFailedJobs: async (id: number) => { reruns.push(id); return { runId: 9001 }; },
-      checkRunAnnotations: async () => [{ message: `${failedTestsMarker}${JSON.stringify({ failed })}` }], requestCodex: async () => { throw new Error('no review request expected'); }, publish: async () => {} } as unknown as GitHub);
-    return { reruns, work: (await db.list()).find(entry => entry.id === work.id)! };
+    let reads = 0;
+    for (let pass = 0; pass < observations; pass++) {
+      await db.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
+      await db.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [work.id]);
+      await processJob(engine, { observe: async (target: Work) => seen(target, candidate), rerunFailedJobs: async (id: number) => { reruns.push(id); return { runId: 9001 }; },
+        checkRunAnnotations: async () => { reads++; if (failed === 'throws') throw new Error('annotations unavailable'); return failed ? [{ message: `${failedTestsMarker}${JSON.stringify({ failed })}` }] : [{ message: 'Process completed with exit code 1.' }]; },
+        requestCodex: async () => { throw new Error('no review request expected'); }, publish: async () => {} } as unknown as GitHub);
+    }
+    return { reruns, reads, work: (await db.list()).find(entry => entry.id === work.id)! };
   }
   const proof = await reconcile([`${proofFile} › ${ownProof} — works`]);
   assert.deepEqual(proof.reruns, [], 'the failed proof is never rerun');
@@ -292,6 +297,14 @@ test('unit:failure-attributed-to-base-or-flake — under GitHub delivery a faile
   assert.match(proof.work.checkReruns!.at(-1)!.detail ?? '', /criterion proof tests\/item-works.test.ts › unit:item-works/);
   const other = await reconcile([`${shared} › ${sharedName}`]);
   assert.deepEqual(other.reruns, [41], 'a failure of no proof is rerun once, as before');
+  // A run whose failed tests cannot be read may have failed a proof: on every observation it stays owed,
+  // never rerun, holding the failure until the owed rerun lapses and the failure stands as the head's.
+  for (const unreadable of [null, 'throws'] as const) {
+    const unknown = await reconcile(unreadable, 3);
+    assert.deepEqual(unknown.reruns, [], `an unreadable failed run (${unreadable ?? 'no record'}) is never rerun`);
+    assert.equal(unknown.reads, 3, 'each observation reads the failed tests again');
+    assert.deepEqual(unknown.work.checkReruns!.map(entry => entry.state), ['owed'], 'the rerun stays owed, holding the failure');
+  }
 });
 
 // ---- AC-2: the main guard ----------------------------------------------------------------------
