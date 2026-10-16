@@ -1,4 +1,4 @@
-// Concern: disk pressure, worktree dependency reclamation, managed checkouts and shared installs.
+// Concern: disk pressure, worktree dependency reclamation, managed checkouts and shared installs, and preparing assignment worktrees: the dispatch cycle's one shared base fetch and the preparation time it measures.
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { statfs, readdir, lstat, realpath, rm, mkdir, symlink, writeFile, readFile, rename, appendFile, unlink, rmdir, open, cp } from 'node:fs/promises';
@@ -552,6 +552,86 @@ async function compatibleInstall(installed: string, worktree: string): Promise<t
     if (createHash('sha256').update(a).digest('hex') !== createHash('sha256').update(b).digest('hex')) return `${name} differs from the install at ${installed}, so this head installs its own dependencies`;
   }
   return true;
+}
+
+/*
+ * GY-1836: preparing an attempt worktree is host work beside the coordinator; the one network round
+ * trip in it — a fetch of the managed base branch — is the dispatcher cycle's to make once. Every
+ * preparation of one dispatch snapshot (the loop's cycle, an executor tick) shares the tip of a
+ * single fetch and creates its worktree from the coordinator's object store at that tip, and the
+ * time each preparation took is recorded beside the other dispatch facts, so `master status` can
+ * rank the day's preparations. What branch, base or candidate a worktree holds never changes.
+ */
+/** The child runner a preparation runs its git through: `workerCommand`'s shape. */
+export type PrepareRun = (command: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv; stdio?: ('ignore' | 'pipe' | 'inherit')[] }) => string | Buffer | Promise<string | Buffer>;
+/** How many recent cycles' shared fetches are kept: a queued launch prepares after later cycles began. */
+export const retainedCycleFetches = 8;
+const cycleBaseFetches = new Map<string, Promise<string>>();
+/**
+ * The tip of `baseBranch` that one fetch of origin holds. A preparation without a cycle fetches
+ * for itself, exactly as it always did (a hand dispatch is its own cycle). On a dispatcher's
+ * snapshot instant, the cycle's first preparation fetches and the rest await the same promise — one
+ * fetch of origin for every worktree that cycle prepares, each created from the object store at
+ * that tip. A fetch that failed is not kept: the branch it left unheld is fetched once more, by the
+ * next preparation that needs it, instead of every launch of the cycle failing on one outage.
+ */
+export function cycleBaseTip(root: string, baseBranch: string, cycle: string | undefined, run: PrepareRun, env?: NodeJS.ProcessEnv): Promise<string> {
+  const fetch = async () => {
+    await Promise.resolve(run('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`], { cwd: root, env, stdio: ['ignore', 'ignore', 'inherit'] }));
+    const base = String(await Promise.resolve(run('git', ['rev-parse', '--verify', `refs/remotes/origin/${baseBranch}`], { cwd: root, env }))).trim();
+    if (!/^[0-9a-f]{40}$/i.test(base)) throw new Error('Worker launcher could not resolve the current managed base branch');
+    return base;
+  };
+  if (!cycle) return fetch();
+  const key = `${resolve(root)}\n${baseBranch}\n${cycle}`;
+  const held = cycleBaseFetches.get(key);
+  if (held) return held;
+  const shared: Promise<string> = fetch().catch(error => { if (cycleBaseFetches.get(key) === shared) cycleBaseFetches.delete(key); throw error; });
+  cycleBaseFetches.set(key, shared);
+  while (cycleBaseFetches.size > retainedCycleFetches) cycleBaseFetches.delete(cycleBaseFetches.keys().next().value!);
+  return shared;
+}
+
+/** The window `master status` ranks worktree preparation times over (GY-1836): one day. */
+export const worktreePrepareWindowMs = 24 * 60 * 60_000;
+/** A recorded preparation prunes what no percentile of the window can read again: twice the window. */
+export const worktreePrepareRetentionMs = 2 * worktreePrepareWindowMs;
+/** The dispatch log one line per prepared worktree appends to, beside the launch records it belongs to. */
+export const worktreePrepareFile = (root: string) => resolve(root, '.graphyard/dispatch/worktree-prepare.jsonl');
+export interface WorktreePrepareRecord { at: string; key: string; epoch: number; profile: string; ms: number }
+const prepareRecord = (value: unknown): WorktreePrepareRecord | null => {
+  const record = value as Partial<WorktreePrepareRecord> | null;
+  const { at, key, epoch, profile, ms } = record ?? {};
+  return typeof at === 'string' && typeof key === 'string' && typeof epoch === 'number' && Number.isSafeInteger(epoch) && epoch > 0
+    && typeof profile === 'string' && typeof ms === 'number' && Number.isSafeInteger(ms) && ms >= 0
+    ? { at, key, epoch, profile, ms } : null;
+};
+/** Records one dispatch's preparation time, pruning entries past the retention. A failed recording never fails the dispatch it measured. */
+export async function recordWorktreePrepare(root: string, entry: WorktreePrepareRecord, now = Date.now()): Promise<void> {
+  const file = worktreePrepareFile(root);
+  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+  const lines = await readFile(file, 'utf8').then(text => text.split('\n'), () => [] as string[]);
+  const kept = lines.map(line => { try { return prepareRecord(JSON.parse(line)); } catch { return null; } })
+    .filter((record): record is WorktreePrepareRecord => record !== null && now - Date.parse(record.at) < worktreePrepareRetentionMs);
+  kept.push(entry);
+  const temporary = `${file}.${process.pid}.tmp`;
+  await writeFile(temporary, `${kept.map(record => JSON.stringify(record)).join('\n')}\n`, { mode: 0o600 });
+  await rename(temporary, file);
+}
+/** Every preparation record still on file, in the order they were recorded. */
+export async function readWorktreePrepares(root: string): Promise<WorktreePrepareRecord[]> {
+  const lines = await readFile(worktreePrepareFile(root), 'utf8').then(text => text.split('\n'), () => [] as string[]);
+  return lines.map(line => { try { return prepareRecord(JSON.parse(line)); } catch { return null; } }).filter((record): record is WorktreePrepareRecord => record !== null);
+}
+/** The count, p50 and p90 of the preparations of the last `windowMs` — the daemon metrics' rank rule — and null percentiles when none stand in it. */
+export function worktreePreparePercentiles(records: WorktreePrepareRecord[], now: number, windowMs = worktreePrepareWindowMs): { count: number; p50Ms: number | null; p90Ms: number | null; windowMs: number } {
+  const within = records.filter(record => { const age = now - Date.parse(record.at); return age >= 0 && age < windowMs; }).map(record => record.ms);
+  const rank = (p: number) => { const sorted = [...within].sort((a, b) => a - b); return sorted.length ? sorted[Math.min(sorted.length - 1, Math.ceil(p / 100 * sorted.length) - 1)] : null; };
+  return { count: within.length, p50Ms: rank(50), p90Ms: rank(90), windowMs };
+}
+/** What `master status` reports of worktree preparation, on the host's own clock. */
+export async function worktreePrepareSummary(root: string, now = Date.now()) {
+  return worktreePreparePercentiles(await readWorktreePrepares(root), now);
 }
 
 // A stale attempt worktree holding the item's branch (GY-860) is released in ./branch-release.ts;

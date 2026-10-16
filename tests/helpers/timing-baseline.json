@@ -911,6 +911,7 @@
     "tests/worktree-branch-lock.test.ts": 3289,
     "tests/worktree-hold-followups.test.ts": 1952,
     "tests/worktree-inventory-unreadable-cache.test.ts": 300,
+    "tests/worktree-prepare.test.ts": 800,
     "tests/worktree-preserved-aside.test.ts": 1442,
     "tests/worktree-reclaim.test.ts": 3054,
     "tests/zero-touch-control-plane.test.ts": 4000,
