@@ -658,7 +658,7 @@ test('unit:shadow-failing-files-from-runner — a trial verdict\'s failing files
       await writeFile(args[args.indexOf('--durations') + 1]!, records);
       throw Object.assign(new Error('Command failed'), { status: 1, stdout: printed, stderr: '' });
     };
-    const result = await runTrial({ root: scratch, base: join(scratch, `base-${records.length}`), mergeSha: sha('merge-1641'), changedFiles: ['tests/shadow-gate.test.ts'], timeoutMs: 60_000, key: 'GY-1641', run,
+    const result = await runTrial({ root: scratch, base: join(scratch, `base-${records.length}`), mergeSha: sha('merge-1641'), changedFiles: ['tests/shadow-gate.test.ts'], timeoutMs: 60_000, key: 'GY-1641', run, cores: 2,
       temporaryRoots: [await temporaryDirectory('roots', scratch)], probe: parityDurable, remove: removeCheckout });
     assert.deepEqual(result.tests, { passed: 1, failed: ['tests/shadow-gate.test.ts'], files: 2 }, `records ${JSON.stringify(records)}`);
     assert.deepEqual(result.groups?.map(group => group.failed), [['tests/shadow-gate.test.ts']]);

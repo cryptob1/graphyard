@@ -125,7 +125,7 @@ test('unit:executor-intent-recorded-before-push — mergeOne records intent, tri
   assert.deepEqual(clean.events.map(event => event.kind), ['intent', 'trial', 'pushed', 'reconciled']);
   assert.deepEqual(clean.events[0], { kind: 'intent', head: sha('head1'), baseTip: tip, mergeSha, risk: 'normal', at: iso(start) });
   const trial = clean.events[1]!;
-  assert.ok(trial.kind === 'trial' && trial.proofs['unit:item-works']?.executed === 1 && trial.files.length === 2, 'the trial record carries the per-proof counts and the files it ran');
+  assert.ok(trial.kind === 'trial' && trial.outcome === 'verdict' && trial.proofs['unit:item-works']?.executed === 1 && trial.files.length === 2, 'the trial record carries the per-proof counts and the files it ran');
   assert.deepEqual(clean.events[2], { kind: 'pushed', mergeSha, pushedAt: iso(start) });
   assert.deepEqual(clean.events[3], { kind: 'reconciled', mergeSha, observedTip: tip });
   // A sensitive delta is intended as such.
@@ -270,7 +270,7 @@ test('unit:executor-trial-runs-criterion-tests — the trial\'s selection is the
     }
     return '';
   });
-  const verdict = await runMergeTrial({ root: '/coordinator', base, mergeSha, changedFiles: ['src/app.ts'], proofs: ['unit:alpha-works', 'integration:beta-holds', 'unit:never-ran'], proofFiles: ['tests/a.test.ts', 'tests/proof.test.ts'], timeoutMs: 60_000, key: 'GY-1', run: runner.run, remove: async () => {} });
+  const verdict = await runMergeTrial({ root: '/coordinator', base, mergeSha, changedFiles: ['src/app.ts'], proofs: ['unit:alpha-works', 'integration:beta-holds', 'unit:never-ran'], proofFiles: ['tests/a.test.ts', 'tests/proof.test.ts'], timeoutMs: 60_000, key: 'GY-1', run: runner.run, remove: async () => {}, cores: 2 });
   assert.deepEqual(listed, ['tests/a.test.ts', 'tests/proof.test.ts'], 'the affected file once, plus the proof file the selection lacked');
   assert.deepEqual(runnerArgs.slice(runnerArgs.indexOf('tests/helpers/run-tests.ts') + 1, runnerArgs.indexOf('--files-from')), ['--test-reporter=tap', '--test-reporter-destination=stdout'], 'the run is read as TAP');
   assert.deepEqual(verdict.proofs, { 'unit:alpha-works': { executed: 2, failed: 0 }, 'integration:beta-holds': { executed: 1, failed: 1 }, 'unit:never-ran': { executed: 0, failed: 0 } }, 'cases are attributed by title prefix, a proof whose name is a prefix of another counts only its own');
@@ -530,7 +530,7 @@ const record: MergePorts['record'] = async (work, event) => {
 function fixtureReads(options: { record?: MergePorts['record']; trial?: (input: Parameters<typeof runMergeTrial>[0]) => Promise<MergeTrialRun> } = {}) {
   const pushes: { args: string[]; env?: NodeJS.ProcessEnv }[] = [], trials: Parameters<typeof runMergeTrial>[0][] = [];
   const run: ChildRun = (command, args, runOptions) => { if (command === 'git' && args.includes('push')) pushes.push({ args, env: runOptions?.env }); return defaultChildRun(command, args, runOptions); };
-  const trial = options.trial ?? (async (input: Parameters<typeof runMergeTrial>[0]): Promise<MergeTrialRun> => { trials.push(input); return { build: 'pass', tests: { passed: input.proofFiles.length, failed: [], files: input.proofFiles.length }, durationMs: 5, logTail: 'ok', files: [...input.proofFiles], proofs: Object.fromEntries(input.proofs.map(proof => [proof, { executed: 1, failed: 0 }])) }; });
+  const trial = options.trial ?? (async (given: Parameters<typeof runMergeTrial>[0]): Promise<MergeTrialRun> => { const input = { ...given, proofFiles: [...given.proofFiles, ...(await given.discoverProofFiles?.({}) ?? [])] }; trials.push(input); return { build: 'pass', tests: { passed: input.proofFiles.length, failed: [], files: input.proofFiles.length }, durationMs: 5, logTail: 'ok', files: [...input.proofFiles], proofs: Object.fromEntries(input.proofs.map(proof => [proof, { executed: 1, failed: 0 }])) }; });
   const fixtureConfig = masterConfigSchema.parse({ ...config, run: { mergeWriter: { deployKeyFile: join(fixtureRoot, 'deploy-key'), retrials: 3 } } });
   const reads = mergeWriterReads(fixtureConfig, checkout, run, { base: worktreeBase, record: options.record ?? record, merger: async () => 'control-plane', trial });
   return { reads, pushes, trials };
