@@ -29,7 +29,7 @@ const proofsOf = (index: number) => index % 3 === 0 ? ['unit:alpha-works'] : ind
  * TAP cases for that file's proofs and a duration record, failing the files `failing` names. The
  * clock advances by each phase's cost, and the runner processes in flight are counted.
  */
-function repository(files: string[], options: { failing?: string[]; baseline?: Record<string, number>; baselineText?: string; runner?: (attempt: number, list: string[]) => Error | null; build?: (attempt: number) => Error | null; checkout?: (attempt: number) => Error | null; selection?: (attempt: number) => Error | null } = {}) {
+function repository(files: string[], options: { failing?: string[]; baseline?: Record<string, number>; baselineText?: string; runner?: (attempt: number, list: string[]) => Error | null; build?: (attempt: number) => Error | null; checkout?: (attempt: number) => Error | null; selection?: (attempt: number) => Error | null; packageJson?: string } = {}) {
   let clock = Date.parse('2030-03-01T00:00:00Z'), inFlight = 0;
   const seen = { maxInFlight: 0, lists: [] as string[][], concurrency: [] as string[], attempts: 0, builds: 0 };
   const failing = new Set(options.failing ?? []);
@@ -40,6 +40,7 @@ function repository(files: string[], options: { failing?: string[]; baseline?: R
       if (refused) throw refused;
       // The merge's own timing baseline, as the checkout holds it.
       const baselineText = options.baselineText ?? (options.baseline && JSON.stringify({ files: options.baseline }));
+      if (options.packageJson !== undefined) { await mkdir(args[5]!, { recursive: true }); await writeFile(join(args[5]!, 'package.json'), options.packageJson); }
       if (baselineText !== undefined) { await mkdir(join(args[5]!, 'tests/helpers'), { recursive: true }); await writeFile(join(args[5]!, 'tests/helpers/timing-baseline.json'), baselineText); }
       return '';
     }
@@ -203,6 +204,15 @@ test('unit:trial-sharded-verdict-equal — runTrial runs the selected files in p
   assert.ok(stale.seen.lists.length > 0, 'the first attempt ran its tests');
   assert.deepEqual([rebuilt.build, rebuilt.files, rebuilt.retried?.map(entry => entry.outcome)], ['fail', [], ['timeout']]);
   assert.deepEqual(rebuilt.proofs, { 'unit:alpha-works': { executed: 0, failed: 0 }, 'integration:beta-holds': { executed: 0, failed: 0 } });
+
+  // A package.json the merge broke is the merge's failed build on the first attempt, never a host failure retried and requeued (PRRT_kwDOUZby-s6tZsNG).
+  const broken = repository(files, { packageJson: '{ "scripts": { "build": ' });
+  const unparsed = await runMergeTrial(await input(broken, { cores: 16 }));
+  assert.deepEqual([unparsed.build, unparsed.tests, unparsed.retried, broken.seen.attempts, broken.seen.builds, broken.seen.lists.length], ['fail', { passed: 0, failed: [], files: 0 }, undefined, 1, 0, 0]);
+  // One that parses and declares no build script skips the build and still runs its tests.
+  const unbuilt = repository(files, { packageJson: '{ "scripts": {} }' });
+  const skipped = await runMergeTrial(await input(unbuilt, { cores: 16 }));
+  assert.deepEqual([skipped.build, unbuilt.seen.builds, unbuilt.seen.attempts], ['pass', 0, 1]);
 });
 
 test('unit:trial-phases-and-no-pending — every trial records its install, build, selection and test times; an attempt that times out, is cancelled or meets a host failure records a non-pending outcome naming its phase and reason and is retried once, and a verdict is never retried', async () => {

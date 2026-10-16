@@ -592,8 +592,10 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           if (hostEnded(installed)) throw runnerFailure('install', installed);
           if (!installed.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
         }
-        const scripts = await readFile(join(worktree, 'package.json'), 'utf8').then(text => JSON.parse(text)?.scripts, () => undefined);
-        // An unreadable package.json builds as before; only one that declares no build script skips it.
+        const manifest = await readFile(join(worktree, 'package.json'), 'utf8').catch(() => undefined);
+        // An unreadable package.json builds as before; one the merge broke is its failed build, never the host's (PRRT_kwDOUZby-s6tZsNG); only one that declares no build script skips it.
+        let scripts: { build?: unknown } | undefined;
+        try { scripts = manifest === undefined ? undefined : JSON.parse(manifest)?.scripts; } catch { enter('build'); return finish('fail', { passed: 0, failed: [], files: 0 }); }
         if (scripts === undefined || scripts?.build) {
           enter('build');
           const built = await child('build', 'npm', ['run', 'build']);
