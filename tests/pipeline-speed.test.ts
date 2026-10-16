@@ -28,6 +28,7 @@ import { readMasterGuide } from './helpers/master-guide.js';
 // A namespace import, so a proof run against code without the stage breakdown fails in its test case, not at load.
 import * as flowAnalytics from '../src/flow-analytics.js';
 import type { DeliveryStage, DeliveryStageMove } from '../src/flow-analytics.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-09-20/21 instants are past claim/merge fixtures judged against an explicit `now` of the same day; Date.now()/new Date() only stamp and judge the DB-backed items the engine creates.
 
 // GY-54: pipeline speed. Each test is named for the proof it produces — integration:speed-regression-guard
@@ -55,7 +56,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_PIPELINE_SPEED_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 20);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('pipeline-speed'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, 'owner/project');
   engine.submissionObserver = null;
   process.env.GITHUB_WEBHOOK_SECRET = 'pipeline-speed-webhook-secret';

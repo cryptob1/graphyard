@@ -10,6 +10,7 @@ import { nextAction } from '../src/model/next-action.js';
 import { observationConcurrency, observationWorkers } from '../src/server/main.js';
 import { observationThroughputStatus } from '../src/cli/master-status.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-09-21 PR created_at is fixture data the observer never compares with a clock; every due/age instant is derived from Date.now() itself.
 
 // GY-492. Each test is named for the proof it produces: unit:job-claim-priority,
@@ -108,7 +109,7 @@ async function freshStore() {
   if (store) await store.close();
   const name = `graphyard_test_${++databases}`;
   await database.createDatabase(name);
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/${name}`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/${name}`); await store.init(); await recordLegacyMerger(store);
   return store;
 }
 const insert = async (works: Work[]) => {
