@@ -85,9 +85,9 @@ export interface MergeTrialRun extends TrialRun {
   /** GY-1834: the files still failing after the rerun that fail on the base tip (the merge's first parent) too, with the test names the base run reported. */
   base?: { tip: string; files: string[]; tests: string[] };
 }
-/** GY-1834: the flake a trial record carries, bounded as the record's schema bounds it. */
+/** GY-1834: the flake a trial record carries, bounded as the record's schema bounds it: every name `parseFailedTests` keeps (≤ 500 characters) fits. */
 export const trialFlaked = (flaked: { files: readonly string[]; tests: readonly string[] }, at: string): TrialFlaked =>
-  ({ files: flaked.files.slice(0, 100), tests: flaked.tests.filter(test => test.length <= 300).slice(0, 100), at });
+  ({ files: flaked.files.slice(0, 100), tests: flaked.tests.slice(0, 100), at });
 /** What `POST /api/work/:id/merge-record` takes: one of the five steps, with its ledger payload. */
 export type MergeRecordEvent =
   | { kind: 'intent'; head: string; baseTip: string; mergeSha: string; risk: string; at: string }
@@ -293,7 +293,8 @@ export async function attributeFailures(first: MergeTrialRun, firstTap: string, 
   // an unrelated case failing beside the proofs is attributed like any other file's.
   const proofFailed = !named.length || named.some(own);
   const held = proofFailed ? failed.filter(file => input.proofFiles.includes(file)) : [];
-  if (held.length === failed.length) return first;
+  // Every file held: the rerun is still owed when a case that is none of the item's proofs failed beside them, so its flake is filed while the head stays held.
+  if (held.length === failed.length && !named.some(test => !own(test))) return first;
   // Every failing file reruns, held ones too, so the rerun names each case that failed only once.
   const rerun = await retest(input.mergeSha, failed).catch(() => null);
   if (!rerun || rerun.run.build !== 'pass') return first;

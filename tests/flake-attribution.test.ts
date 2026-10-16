@@ -178,6 +178,18 @@ test('unit:failure-attributed-to-base-or-flake — a failing test that passes on
   const loose = await attributeFailures(first([proofFile]), tap(unrelated), { ...input, proofs: [ownProof] }, git, retest({ failed: [] }, { failed: [] }).fn);
   assert.deepEqual([loose.tests.failed, loose.flaked], [[], { files: [proofFile], tests: [unrelated] }]);
 
+  // A supported test name longer than 300 characters keeps its name through the trial record, so its first flake files its fix item.
+  const longName = `unit:fleet-panel-long — ${'the fleet panel renders every row of a long list '.repeat(8)}`.trim();
+  assert.ok(longName.length > 301 && longName.length <= 500);
+  const long = await attributeFailures(first([flaky]), tap(longName), input, git, retest({ failed: [] }, { failed: [] }).fn);
+  const longPorts = ports(long), longItem = item();
+  assert.equal((await mergeOne(longPorts.merge, longItem)).outcome, 'merged');
+  longItem.mergeLedger = longPorts.ledger();
+  assert.deepEqual(longItem.mergeLedger!.flakes!.map(flake => flake.tests), [[longName]], 'the long name is kept on the merge ledger, never dropped to its file path');
+  const longFiled = filer();
+  await flakeStep(cycleOf([longItem], { flakeLedger: memoryStore(), fileFaultClass: longFiled.file as never }));
+  assert.deepEqual(longFiled.filed.map(entry => entry.title), [`Flaky test: ${longName}`.slice(0, 200)]);
+
   // A PR check rerun that passed: the first flake of a test that is no proof of its item files too; a flake of the item's own proof waits for the threshold.
   const rerunOf = (n: number, proofs: string[]) => ({ ...item({ id: `w${n}`, key: `GY-${n}`, criteria: [{ id: 'AC-1', text: 'Works', proofs }], submission: { epoch: 1, pr: n } }),
     checkReruns: [{ sha: sha(`h${n}`), check: 'test', failedRunId: 500 + n, state: 'passed', at: iso(clock - 120_000), rerunId: 600 + n, resolvedAt: iso(clock - 60_000) }] }) as unknown as Work;
@@ -202,6 +214,20 @@ test('unit:failure-attributed-to-base-or-flake — a failing test that is a crit
   const mixed = await attributeFailures(first([proofFile, flaky]), tap(`${ownProof} — works`, flakyName), input, git, retest({ failed: [] }, { failed: [] }).fn);
   assert.deepEqual(mixed.tests.failed, [proofFile]);
   assert.deepEqual(mixed.flaked, { files: [flaky], tests: [flakyName] }, 'the proof case is never named a flake');
+  // A proof file whose proof case failed beside an unrelated case: still rerun, so the head stays held for the
+  // proof while the unrelated case that passed on its rerun is the flake whose first fix item is filed.
+  const unrelatedCase = 'unit:fleet-panel-helper — an unrelated case beside the proof';
+  const both = retest({ failed: [proofFile], names: [`${ownProof} — works`] }, { failed: [proofFile] });
+  const besideProof = await attributeFailures(first([proofFile]), tap(`${ownProof} — works`, unrelatedCase), input, git, both.fn);
+  assert.deepEqual(both.calls, [{ sha: mergeSha, files: [proofFile] }], 'rerun on the same merge commit, never on the base');
+  assert.deepEqual([besideProof.tests.failed, besideProof.flaked, besideProof.base], [[proofFile], { files: [], tests: [unrelatedCase] }, undefined]);
+  const proofHeld = ports(besideProof), heldItem = item();
+  const heldOutcome = await mergeOne(proofHeld.merge, heldItem);
+  assert.ok(heldOutcome.outcome === 'refused' && heldOutcome.reason.startsWith(trialFailurePrefix), 'the proof still holds the head');
+  heldItem.mergeLedger = proofHeld.ledger();
+  const besideFiled = filer();
+  await flakeStep(cycleOf([heldItem], { flakeLedger: memoryStore(), fileFaultClass: besideFiled.file as never }));
+  assert.deepEqual(besideFiled.filed.map(entry => entry.title), [`Flaky test: ${unrelatedCase}`]);
   // A file that fails again with one of the item's proofs on its rerun is the head's, wherever else it fails.
   const proofAgain = await attributeFailures(first([shared]), tap(sharedName), input, git, retest({ failed: [shared], names: [`${ownProof} — works`] }, { failed: [shared] }).fn);
   assert.deepEqual([proofAgain.tests.failed, proofAgain.base], [[shared], undefined]);

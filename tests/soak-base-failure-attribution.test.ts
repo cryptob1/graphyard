@@ -1,10 +1,18 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import EmbeddedPostgres from 'embedded-postgres';
+import { Store } from '../src/store.js';
+import { Engine } from '../src/engine.js';
+import { processJob, type GitHub } from '../src/github.js';
+import { checkRerunLimit } from '../src/merge-queue.js';
+import { failedTestsMarker } from '../src/master/base-break-refresh.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
 import { baseFailureReason } from '../src/merge-writer/executor.js';
 import type { MainGuardRevert } from '../src/main-guard.js';
-import type { Work } from '../src/model.js';
+import type { Observation, Principal, Work } from '../src/model.js';
 
 // GY-1834. A day of five-minute loop cycles over the base failures the merge writer and the main
 // guard prove. Four items are held 'base failure' on every cycle's new base tip — the same tests for
@@ -80,4 +88,67 @@ test('unit:soak-base-failure-attribution — over a day of loop cycles each base
   assert.deepEqual(Object.keys(state.baseFailures).filter(key => key.startsWith('main-guard:')), [], 'the cleared main failure leaves no record');
   assert.equal(Object.keys(state.baseFailures).filter(key => key.startsWith('trial:')).length, held.length, 'only the failures the items still show are kept');
   assert.ok(held.every(entry => !entry.reworkRequested), 'nothing is sent to rework');
+});
+
+// GY-1834 under GitHub delivery: a day of hourly heads pushed to one pull request, each observed by
+// the GitHub job every five minutes with its required check failed. Three heads in four fail one of
+// the item's criterion proofs; every fourth fails only a shared test. The proof-aware decision runs
+// on each head's owed rerun: a proof failure is never rerun and stands as the head's at once, its
+// failed tests read once, and the repeated job on the same head adds nothing; a shared failure is
+// rerun exactly once. The job requests no rework itself and the rerun record stays in its bound.
+let database: EmbeddedPostgres | null = null, store: Store | null = null;
+after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+
+test('unit:soak-base-failure-attribution — over a day of hourly heads whose required check fails, a head that failed a criterion proof is never rerun and stays held without churn on every observation, while a shared failure is rerun once per head', async () => {
+  const port = Number(process.env.GRAPHYARD_SOAK_ATTRIBUTION_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1835);
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('soak-base-failure-attribution'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
+  const db = store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await db.init();
+  const engine = new Engine(db, [15368], 120, 'owner/project'); engine.controlPlaneAppId = 1234;
+  const operator: Principal = { id: 'operator', role: 'admin' }, worker: Principal = { id: 'agent-a', role: 'worker' };
+  const proof = 'unit:item-works', proofFailure = [`tests/item-works.test.ts › ${proof} — works`], shared = ['tests/locked-read.test.ts › unit:reconcile-lock-hold-bounded — bounded'];
+  let work = await engine.execute(operator, 'create', null, { title: 'Held head', plannedFiles: ['src/app.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: [proof] }] }, randomUUID());
+  work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
+  work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
+  work = await engine.execute(worker, 'workspace', work.id, { epoch: 1, host: 'machine-a', path: `/tmp/soak-attribution/${work.id}`, branch: 'graphyard/gy-1-1' }, randomUUID());
+  work = await engine.execute(worker, 'submit', work.id, { epoch: 1, pr: 1834 }, randomUUID());
+  const id = work.id, branch = work.workspaces[0].branch;
+
+  const heads = 24, perHead = 60 / 5;
+  const reruns: number[] = [], reads: number[] = [];
+  let candidate = { sha: sha(0), baseSha: sha(1) }, runId = 0, failing = proofFailure, now = start;
+  const seen = (): Observation => ({ clockOffset: { min: 0, max: 0 }, candidate: { ...candidate, pr: 1834, branch, author: 'implementer' },
+    checks: [{ name: 'test', result: 'failure', appId: 15368, id: runId }], reviews: [{ id: runId, reviewer: 'graphyard-reviewer[bot]', sha: candidate.sha, state: 'APPROVED' }], protected: true, mergeable: true,
+    merged: false, mergeSha: null, prState: 'open', draft: false, baseTip: candidate.baseSha, baseTree: sha(2), baseTipContained: true, files: ['src/app.ts'], scopeFiles: [], at: iso(now) } as Observation);
+  const github = { observe: async () => seen(), rerunFailedJobs: async (job: number) => { reruns.push(job); return { runId: job + 1_000_000 }; },
+    checkRunAnnotations: async (job: number) => { reads.push(job); return [{ message: `${failedTestsMarker}${JSON.stringify({ failed: failing })}` }]; },
+    requestCodex: async () => { throw new Error('no review request expected'); }, publish: async () => {} } as unknown as GitHub;
+  const expected = { refused: 0, rerun: 0 };
+
+  for (let h = 0; h < heads; h++) {
+    // A new head, its own failed check run; every fourth fails only the shared test.
+    candidate = { sha: sha(10_000 + h), baseSha: sha(1) }; runId = 5_000 + h;
+    const ownProof = h % 4 !== 3; failing = ownProof ? proofFailure : shared;
+    if (ownProof) expected.refused += 1; else expected.rerun += 1;
+    let settled: string | null = null;
+    for (let n = 0; n < perHead; n++) {
+      now = start + (h * perHead + n) * interval;
+      await db.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [id]);
+      await processJob(engine, github);
+      const current = (await db.list()).find(entry => entry.id === id)!;
+      const entry = current.checkReruns!.find(rerun => rerun.sha === candidate.sha);
+      assert.ok(entry, `head ${h}: its failed check is recorded once`);
+      assert.equal(current.checkReruns!.filter(rerun => rerun.sha === candidate.sha).length, 1, `head ${h}: one rerun record however often it is observed`);
+      assert.ok(current.checkReruns!.length <= checkRerunLimit, 'the rerun record stays in its bound');
+      assert.equal(current.reworkRequested, false, 'the job never requests rework itself');
+      assert.equal(current.gates.find(gate => gate.name === 'test')?.passed, false, `head ${h}: held by its failed check`);
+      const state = `${entry!.state}:${entry!.detail ?? ''}`;
+      if (settled) assert.equal(state, settled, `head ${h}: its settled rerun record never churns on a later observation`);
+      else if (entry!.state !== 'owed') settled = state;
+      if (ownProof) assert.match(state, /^refused:.*criterion proof tests\/item-works\.test\.ts › unit:item-works/, `head ${h}: a proof failure stands as the head's at once`);
+    }
+  }
+  assert.equal(reruns.length, expected.rerun, 'only the shared failures are rerun, once per head');
+  assert.ok(reruns.every(job => (job - 5_000) % 4 === 3), 'never the run of a head that failed a proof');
+  assert.equal(reads.filter(job => (job - 5_000) % 4 !== 3).length, expected.refused, 'a proof-failing head\'s failed tests are read once');
 });

@@ -53,7 +53,7 @@ export interface MergeLedgerTrial { head: string; mergeSha: string; proofs: Reco
  * GY-1834: a trial's flake — the failing test files that passed on their immediate rerun of the same
  * merge commit, and the failing cases the rerun did not repeat, none of them the item's proofs.
  */
-export const trialFlakedSchema = z.object({ files: z.array(z.string().max(500)).max(100), tests: z.array(z.string().max(300)).max(100), at: instant }).strict();
+export const trialFlakedSchema = z.object({ files: z.array(z.string().max(500)).max(100), tests: z.array(z.string().max(500)).max(100), at: instant }).strict();
 export type TrialFlaked = z.infer<typeof trialFlakedSchema>;
 /** A trial flake as the fold keeps it: the head and merge commit it flaked on. */
 export interface MergeLedgerFlake extends TrialFlaked { head: string; mergeSha: string }
