@@ -588,7 +588,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       // shard named one: a named failing test is the merge's, and stays a failing verdict.
       const cores = Math.max(1, Math.floor(input.cores ?? availableParallelism()));
       const shards = input.groupSize === undefined ? shardTestFiles(files, trialShardLanes(cores), await checkoutDurations(worktree)) : groupTestFiles(files, input.groupSize);
-      const { lanes, breadth } = trialShardBreadth(cores, shards.length, await trialAffordableFiles(input.memory, (await import('../master/verification-slots.js')).verificationSlotsDirectory(input.base)));
+      const slots = await import('../master/verification-slots.js'), slotsDirectory = slots.verificationSlotsDirectory(input.base);
+      const { lanes, breadth } = trialShardBreadth(cores, shards.length, await trialAffordableFiles(input.memory, slotsDirectory));
       const settledShards: ({ group: TrialGroup; entries: string[]; unattributed: TrialRunnerError | null } | undefined)[] = [];
       let next = 0, stopped: unknown = null;
       const lane = async () => {
@@ -608,7 +609,9 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           } catch (error) { log.push(...entries); stopped ??= error; }
         }
       };
-      await Promise.all(Array.from({ length: lanes }, lane));
+      // The shards' files stay declared on the host's verification slots until every shard stops, so a suite that starts meanwhile deducts them before they allocate.
+      const release = slots.declareFiles(slotsDirectory, `merge trial ${input.key ?? input.mergeSha.slice(0, 12)}`, lanes * breadth);
+      try { await Promise.all(Array.from({ length: lanes }, lane)); } finally { release(); }
       const ran = settledShards.filter(shard => shard !== undefined);
       for (const shard of ran) log.push(...shard.entries);
       // A shard past the deadline ends the trial as a timeout once every shard has stopped, its log holding what the others printed.

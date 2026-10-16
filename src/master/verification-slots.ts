@@ -83,9 +83,40 @@ export function declareSlotFiles(held: HeldSlot, files: number, pid: number = pr
   } catch { /* the slot still holds the run; only the budget sharing is lost */ }
 }
 
-/** The suite files runs on other pids declared in `directory`: what this run's breadth is deducted by. */
-export function othersDeclaredFiles(directory: string, pid: number = process.pid): number {
-  return heldSlots(directory).reduce((sum, entry) => entry.owner && entry.owner.pid !== pid ? sum + Math.max(0, entry.owner.files ?? 0) : sum, 0);
+/** A declaration's directory: `declared-<pid>-<n>`, beside the slots and never one of them. */
+const declarationName = /^declared-(\d+)-\d+$/;
+let declarations = 0;
+/**
+ * Declare `files` suite files this process runs without holding a slot (GY-1832: the merge trial's
+ * shards, which must not wait behind sessions' suites), so a run that starts later deducts them as it
+ * deducts a slot holder's. The returned release removes it; a declaration whose pid no longer runs
+ * counts for nothing and the next declaration removes it. Best-effort, as `declareSlotFiles` is.
+ */
+export function declareFiles(directory: string, label: string, files: number, pid: number = process.pid, alive: (pid: number) => boolean = processAlive): () => void {
+  if (!(files >= 1)) return () => {};
+  let path: string;
+  try {
+    mkdirSync(directory, { recursive: true });
+    for (const name of readdirSync(directory)) {
+      const match = declarationName.exec(name);
+      if (match && Number(match[1]) !== pid && !alive(Number(match[1]))) rmSync(join(directory, name), { recursive: true, force: true });
+    }
+    path = join(directory, `declared-${pid}-${++declarations}`);
+    const writing = `${path}.writing`;
+    mkdirSync(writing);
+    writeFileSync(join(writing, 'owner.json'), JSON.stringify({ pid, label, cwd: process.cwd(), at: new Date().toISOString(), files: Math.floor(files) } satisfies SlotOwner));
+    renameSync(writing, path);
+  } catch { return () => {}; }
+  return () => { try { rmSync(path, { recursive: true, force: true }); } catch { /* the pid check retires it */ } };
+}
+
+/** The suite files runs on other pids declared in `directory` — on held slots, and in live declarations — what this run's breadth is deducted by. */
+export function othersDeclaredFiles(directory: string, pid: number = process.pid, alive: (pid: number) => boolean = processAlive): number {
+  const held = heldSlots(directory).reduce((sum, entry) => entry.owner && entry.owner.pid !== pid ? sum + Math.max(0, entry.owner.files ?? 0) : sum, 0);
+  let names: string[] = [];
+  try { names = readdirSync(directory); } catch { return held; }
+  return names.filter(name => declarationName.test(name)).map(name => readOwner(join(directory, name)))
+    .reduce((sum, owner) => owner && owner.pid !== pid && alive(owner.pid) ? sum + Math.max(0, owner.files ?? 0) : sum, held);
 }
 
 /** Take a slot back from an owner that no longer runs. Renamed first, so two waiters never both reclaim it. */

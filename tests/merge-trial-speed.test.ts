@@ -8,7 +8,7 @@ import type { Work } from '../src/model.js';
 import { mergeOne, runMergeTrial, type MergePorts, type MergeRecordEvent, type MergeTrialInput } from '../src/merge-writer/executor.js';
 import { mergeRecordBodySchema } from '../src/server/merge-record.js';
 import { hostMemoryFloor, memoryRecoveryMarginBytes } from '../src/master-resources.js';
-import { bytesPerSuiteFile, verificationSlotsDirectory } from '../src/master/verification-slots.js';
+import { bytesPerSuiteFile, declareFiles, othersDeclaredFiles, verificationSlotsDirectory } from '../src/master/verification-slots.js';
 import { runTrial, shardTestFiles, trialAffordableFiles, trialAttempts, trialNoVerdict, trialPhases, trialRetries, trialShardBreadth, trialShardLanes, trialTestGroupSize, TrialRunnerError, TrialTimeoutError } from '../src/merge-writer/trial.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -154,6 +154,25 @@ test('unit:trial-sharded-verdict-equal — runTrial runs the selected files in p
   const sharedPerRunner = Math.max(...declared.seen.concurrency.map(flag => Number(flag.split('=')[1])));
   assert.ok(declared.seen.maxInFlight * sharedPerRunner <= 2, `the trial runs within the two files the declared slot leaves: ${declared.seen.maxInFlight} runners at ${sharedPerRunner}`);
   assert.deepEqual(verdict(shared), verdict(alone), 'with files declared elsewhere: the single process\'s verdict');
+  // While its shards run, the trial declares their files on the host's verification slots, so a suite that starts after its memory snapshot deducts them; they go when the shards stop.
+  const during: number[] = [];
+  let announcedSlots = '';
+  const announcing = repository(files, { failing, baseline, runner: () => { during.push(othersDeclaredFiles(announcedSlots, process.pid + 1)); return null; } });
+  const announcingInput = await input(announcing, { cores: 16, memory: affording(6) });
+  announcedSlots = verificationSlotsDirectory(announcingInput.base);
+  const announced = await runMergeTrial(announcingInput);
+  const announcedPerRunner = Math.max(...announcing.seen.concurrency.map(flag => Number(flag.split('=')[1])));
+  assert.ok(during.length > 0 && during.every(declared => declared === during[0]), `one declaration while the shards run: ${during}`);
+  assert.ok(during[0]! >= announcing.seen.maxInFlight * announcedPerRunner && during[0]! <= 6, `the shards' files in flight, within the six afforded: ${during[0]}`);
+  assert.equal(othersDeclaredFiles(announcedSlots, process.pid + 1), 0, 'the declaration goes when the shards stop');
+  assert.deepEqual(verdict(announced), verdict(alone), 'declared: the single process\'s verdict');
+  // A declaration whose process no longer runs counts for nothing, and the next declaration removes it.
+  const release = declareFiles(announcedSlots, 'gone', 3, process.pid + 1);
+  assert.equal(othersDeclaredFiles(announcedSlots, process.pid, () => true), 3);
+  assert.equal(othersDeclaredFiles(announcedSlots, process.pid, () => false), 0);
+  declareFiles(announcedSlots, 'next', 1, process.pid, pid => pid === process.pid)();
+  assert.equal(othersDeclaredFiles(announcedSlots, process.pid, () => true), 0, 'the dead declaration was removed');
+  release();
   assert.deepEqual([trialShardBreadth(16, 8), trialShardBreadth(16, 8, 100), trialShardBreadth(16, 8, 12), trialShardBreadth(16, 8, 6), trialShardBreadth(16, 8, -3), trialShardBreadth(1, 1, 0)],
     [{ lanes: 8, breadth: 2 }, { lanes: 8, breadth: 2 }, { lanes: 8, breadth: 1 }, { lanes: 6, breadth: 1 }, { lanes: 1, breadth: 1 }, { lanes: 1, breadth: 1 }]);
   for (const afforded of [12, 6, 3, 0]) {
