@@ -821,6 +821,7 @@
     "tests/soak-worker-fast-gates.test.ts": 33323,
     "tests/soak-worktree-disk.test.ts": 1373,
     "tests/soak-worktree-inventory-unreadable.test.ts": 1000,
+    "tests/soak-worktree-prepare-cycles.test.ts": 1400,
     "tests/speed-metric.test.ts": 4808,
     "tests/stable-json.test.ts": 217,
     "tests/stale-close-convergence.test.ts": 1902,

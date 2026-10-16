@@ -9,7 +9,7 @@ import { dispatchWork, loadMasterConfig, prepareWorkerLaunch, saveWorkerProfile,
 import { readProfileLaunchRecords, workerLaunchRows, workerLaunchStatus } from '../src/master/dispatch.js';
 import { profileLaunchedFile } from '../src/master/dispatch-reservation.js';
 import type { WorkerProfile } from '../src/master/profiles.js';
-import { readWorktreePrepares, recordWorktreePrepare, worktreePreparePercentiles, worktreePrepareFile, worktreePrepareWindowMs, type WorktreePrepareRecord } from '../src/master/worktrees.js';
+import { holdCycleBase, readWorktreePrepares, recordWorktreePrepare, worktreePreparePercentiles, worktreePrepareFile, worktreePrepareWindowMs, type WorktreePrepareRecord } from '../src/master/worktrees.js';
 import type { Work } from '../src/model.js';
 import { clock, hour, minute } from './helpers/soak-world.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -171,7 +171,7 @@ test('unit:worktree-prepare-time-recorded — each dispatch names its worktree p
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
 });
 
-test('unit:soak-prepare-cycles — over simulated cycles and days the real dispatch path fetches origin at most once per cycle (a queued launch from an older snapshot prepares from its own cycle\'s tip while the cache holds it, and fetches once for itself only once the bound evicted that entry), retries a failed fetch instead of caching it, never builds a worktree from a tip older than its own cycle\'s fetch, keeps the preparation log within its retention across the days, and ranks only the last day', { timeout: 300_000 }, async () => {
+test('unit:soak-prepare-cycles — over simulated cycles and days the real dispatch path fetches origin at most once per cycle (a launch queued on an older snapshot prepares from its own cycle\'s tip however many cycles later it runs, the bound never dropping a cycle a queued launch holds, and a preparation on that instant fetches for itself once its launches settled), retries a failed fetch instead of caching it, never builds a worktree from a tip older than its own cycle\'s fetch, keeps the preparation log within its retention across the days, and ranks only the last day', { timeout: 300_000 }, async () => {
   // The review round on 7460f0e68d asked for this soak: the day's launches through the real
   // dispatch path — dispatchWork with its own prepareWorkerLaunch, so the real child runner, the
   // cycle's shared fetch (cycleBaseTip) and the preparation log — across several of the loop's
@@ -293,6 +293,9 @@ if (command === 'claim') {
     };
     // Day 1: five cycles, five minutes apart, each advancing the origin and dispatching through the real path.
     const day1: string[][] = [['GY-9101', 'GY-9102'], ['GY-9103'], ['GY-9104'], ['GY-9105'], ['GY-9106']];
+    // Cycle 1 queues two launches the launcher runs only cycles later: the loop's dispatch step
+    // holds the cycle's fetch for them from the moment it queues them (holdCycleBase).
+    const queuedOnC1 = [holdCycleBase(at(5 * minute)), holdCycleBase(at(5 * minute))];
     for (const [index, keys] of day1.entries()) {
       const number = index + 1;
       markCycle(`C${number}`);
@@ -314,18 +317,19 @@ if (command === 'claim') {
     assert.deepEqual([1, 2, 3, 4, 5].map(number => day1Fetches.counts.get(`C${number}`)), [1, 1, 1, 2, 1], 'each cycle fetched origin once, the fourth once more because its first fetch failed and was retried');
     assert.deepEqual([...day1Fetches.failed], [['C4', 1]], 'the failed fetch was retried, not cached, and never failed twice');
 
-    // A launch queued from cycle 1's snapshot, prepared after five later cycles ran, still reads
+    // A launch queued from cycle 1's snapshot, prepared after four later cycles ran, still reads
     // its own cycle's held fetch: no fetch of its own, and the tip cycle 1 fetched — never older,
     // never a newer cycle's.
     markCycle('C1-queued');
     await dispatchSuccessfully('GY-9107', at(5 * minute), 1);
+    queuedOnC1[0]();
     assert.equal((await fetchesByCycle()).counts.get('C1-queued'), undefined, 'the queued launch made no fetch: it read its cycle\'s held one');
 
-    // Eight more cycles fetch, the bound holds eight entries, and cycle 1's is the oldest: the
-    // bound evicts it, so the same queued launch, prepared now, fetches once for itself and
-    // prepares from the tip that fetch holds — newer than its snapshot was, never older than its
-    // own cycle fetched.
-    for (const [index, key] of ['GY-9108', 'GY-9109', 'GY-9110', 'GY-9111'].entries()) {
+    // Five more cycles fetch, ten in all, past the eight the bound keeps, and cycle 1's is the
+    // oldest: the bound drops cycle 2's instead while cycle 1's second queued launch holds it, so
+    // that launch, prepared now with origin moved on, makes no fetch and prepares from the tip
+    // cycle 1 fetched.
+    for (const [index, key] of ['GY-9108', 'GY-9109', 'GY-9110', 'GY-9111', 'GY-9116'].entries()) {
       const number = 6 + index;
       markCycle(`C${number}`);
       advanceOrigin(number);
@@ -333,25 +337,33 @@ if (command === 'claim') {
     }
     markCycle('C1-queued-2');
     advanceOrigin(90);
-    await dispatchSuccessfully('GY-9112', at(5 * minute), 90);
-    assert.equal((await fetchesByCycle()).counts.get('C1-queued-2'), 1, 'past the bound the queued launch fetches once for itself');
+    await dispatchSuccessfully('GY-9112', at(5 * minute), 1);
+    assert.equal((await fetchesByCycle()).counts.get('C1-queued-2'), undefined, 'past the bound the held cycle\'s queued launch still reads its cycle\'s tip, with no fetch of its own');
+    // Its last launch settled, cycle 1 holds nothing and the bound drops it: a preparation on that
+    // instant now — nothing queued on it — fetches for itself, from the tip origin holds.
+    // Given back twice, as a settle and a refused hand-over both might: the hold counts once.
+    queuedOnC1[1]();
+    queuedOnC1[1]();
+    markCycle('C1-released');
+    await dispatchSuccessfully('GY-9115', at(5 * minute), 90);
+    assert.equal((await fetchesByCycle()).counts.get('C1-released'), 1, 'once its launches settled the cycle\'s fetch is no longer held');
 
     // The day's log holds one record per prepared worktree, and master status ranks them all.
-    assert.equal(results.length, 12);
+    assert.equal(results.length, 14);
     const day1Records = await readWorktreePrepares(root);
     assert.deepEqual(day1Records.map(entry => entry.key), results.map(result => result.key), 'each prepared worktree recorded its preparation time, in the order they were prepared');
     assert.ok(day1Records.every(entry => Date.parse(entry.at) >= start && Date.parse(entry.at) < start + 90 * minute), 'every record is dated the cycle that prepared it');
-    assert.equal((await workerLaunchStatus(root, await loadMasterConfig(root))).prepare.count, 12, 'master status ranks the day\'s preparations');
+    assert.equal((await workerLaunchStatus(root, await loadMasterConfig(root))).prepare.count, 14, 'master status ranks the day\'s preparations');
     // A slow preparation from day 1 joins the log, inside the window it stands in.
     await recordWorktreePrepare(root, { at: at(20 * minute), key: 'GY-9110', epoch: 1, profile: profile.name, ms: 900_000 });
-    assert.equal((await readWorktreePrepares(root)).length, 13);
+    assert.equal((await readWorktreePrepares(root)).length, 15);
 
     // Three days on, two more cycles dispatch: the first record past the retention prunes day 1,
     // so the log stays bounded across the days, and the percentiles rank only the last day — the
     // day-1 records, the 900_000 ms one included, read in none of them.
     clock.advance(3 * 24 * hour);
     for (const [index, key] of ['GY-9113', 'GY-9114'].entries()) {
-      const number = 10 + index;
+      const number = 12 + index;
       markCycle(`C${number}`);
       advanceOrigin(number);
       await dispatchSuccessfully(key, at(3 * 24 * hour + number * 5 * minute), number);

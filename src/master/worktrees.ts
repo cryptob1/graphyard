@@ -564,16 +564,44 @@ async function compatibleInstall(installed: string, worktree: string): Promise<t
  */
 /** The child runner a preparation runs its git through: `workerCommand`'s shape. */
 export type PrepareRun = (command: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv; stdio?: ('ignore' | 'pipe' | 'inherit')[] }) => string | Buffer | Promise<string | Buffer>;
-/** How many recent cycles' shared fetches are kept: a queued launch prepares after later cycles began. */
+/** How many recent cycles' shared fetches are kept beyond those a queued launch still holds (holdCycleBase). */
 export const retainedCycleFetches = 8;
-const cycleBaseFetches = new Map<string, Promise<string>>();
+const cycleBaseFetches = new Map<string, { cycle: string; tip: Promise<string> }>();
+const cycleHolds = new Map<string, number>();
+/** Drops the oldest fetches no queued launch holds until the bound is met; a held cycle's tip is never dropped. */
+function trimCycleFetches() {
+  let unheld = [...cycleBaseFetches.values()].filter(entry => !cycleHolds.has(entry.cycle)).length;
+  for (const [key, entry] of cycleBaseFetches) {
+    if (unheld <= retainedCycleFetches) return;
+    if (!cycleHolds.has(entry.cycle)) { cycleBaseFetches.delete(key); unheld -= 1; }
+  }
+}
+/**
+ * Holds a dispatch cycle's fetched tip for a launch queued on it: the loop's launcher runs launches
+ * after the cycle that chose them, cycles later under load, and every launch a cycle queued must
+ * prepare from the tip that cycle fetched, never fetch again for a newer one. Taken when the launch
+ * is queued and given back, once, by the function it returns when the launch settles; while any
+ * launch holds the cycle, the bound never drops its fetch.
+ */
+export function holdCycleBase(cycle: string): () => void {
+  cycleHolds.set(cycle, (cycleHolds.get(cycle) ?? 0) + 1);
+  let held = true;
+  return () => {
+    if (!held) return;
+    held = false;
+    const left = (cycleHolds.get(cycle) ?? 1) - 1;
+    if (left > 0) cycleHolds.set(cycle, left); else cycleHolds.delete(cycle);
+    trimCycleFetches();
+  };
+}
 /**
  * The tip of `baseBranch` that one fetch of origin holds. A preparation without a cycle fetches
  * for itself, exactly as it always did (a hand dispatch is its own cycle). On a dispatcher's
  * snapshot instant, the cycle's first preparation fetches and the rest await the same promise — one
  * fetch of origin for every worktree that cycle prepares, each created from the object store at
- * that tip. A fetch that failed is not kept: the branch it left unheld is fetched once more, by the
- * next preparation that needs it, instead of every launch of the cycle failing on one outage.
+ * that tip, however many cycles later a queued launch prepares (holdCycleBase). A fetch that failed
+ * is not kept: the branch it left unheld is fetched once more, by the next preparation that needs
+ * it, instead of every launch of the cycle failing on one outage.
  */
 export function cycleBaseTip(root: string, baseBranch: string, cycle: string | undefined, run: PrepareRun, env?: NodeJS.ProcessEnv): Promise<string> {
   const fetch = async () => {
@@ -585,10 +613,10 @@ export function cycleBaseTip(root: string, baseBranch: string, cycle: string | u
   if (!cycle) return fetch();
   const key = `${resolve(root)}\n${baseBranch}\n${cycle}`;
   const held = cycleBaseFetches.get(key);
-  if (held) return held;
-  const shared: Promise<string> = fetch().catch(error => { if (cycleBaseFetches.get(key) === shared) cycleBaseFetches.delete(key); throw error; });
-  cycleBaseFetches.set(key, shared);
-  while (cycleBaseFetches.size > retainedCycleFetches) cycleBaseFetches.delete(cycleBaseFetches.keys().next().value!);
+  if (held) return held.tip;
+  const shared: Promise<string> = fetch().catch(error => { if (cycleBaseFetches.get(key)?.tip === shared) cycleBaseFetches.delete(key); throw error; });
+  cycleBaseFetches.set(key, { cycle, tip: shared });
+  trimCycleFetches();
   return shared;
 }
 
