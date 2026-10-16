@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { classifyAttention, faultClassOf, faultClassPolicyDefaults, predateLanding, recurringClasses, releaseOvertakenLinks, trackFaults } from '../src/model/fault-classes.js';
+import { classifyAttention, faultClassOf, faultClassPolicyDefaults, landedAt, predateLanding, recurringClasses, releaseOvertakenLinks, trackFaults } from '../src/model/fault-classes.js';
 import { hostMemoryAttention, hostMemoryFloor, judgeHostMemory, memoryRecoveryMarginBytes, nameReclaimBoundMs, readReclaimState, readResources, reclaimResources, resourceAttention, describeReclaim, tmpErrorPrefix, type ResourceInputs, type ResourceReclaimReport } from '../src/master-resources.js';
 import { diskThresholdBytes, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { cycleFaults, emptyDaemonState } from '../src/master-daemon.js';
@@ -512,4 +512,20 @@ test('unit:fault-class-cover-from-running-fix — the GY-1828 timeline: the inst
   const refiled = recurringClasses([...gy1830Instances.map(entry => ({ ...entry, linkedTo: 'GY-1828' })), ...after], [gy1828(true)], policy, gy1830DetectedAt);
   assert.deepEqual(refiled.map(recurrence => [recurrence.faultClass, recurrence.file, recurrence.item?.key ?? null]), [['resources', true, null]], 'a recurrence past the threshold after the fix is running files a new item, as before');
   assert.deepEqual(refiled[0].recent.map(entry => entry.at), after.map(entry => entry.at), 'the new filing carries the post-running instances, never the pre-running ones');
+
+  // The boundary between the observation and the record's write stamp: the restarted loop passes the
+  // instant it saw the release serving as observedAt (02:16:20.633) and the server stamps the
+  // record's write later as `at` (02:16:21.769). An instance first seen in between postdates the
+  // landing — the fix is already known running — so it still files; a landing read from the write
+  // stamp would call the same instant predating and swallow the real recurrence.
+  const observed = gy1828(true), serving = observed.delivery!.deployment!;
+  const boundary = '2026-10-16T02:16:21.000Z';
+  assert.ok(Date.parse(serving.observedAt) < Date.parse(boundary) && Date.parse(boundary) < Date.parse(serving.at), 'the boundary instant sits between the observed serving and the record\'s write stamp');
+  const gap = { ...gy1830Instances[0], id: `action:reclaim|reclaim:resources:boundary|${boundary}`, subject: 'reclaim:resources:boundary', at: boundary, lastSeenAt: boundary, linkedTo: null };
+  assert.equal(predateLanding([gap], landedAt(observed)!), false, 'against the observed serving the boundary instance postdates the running fix');
+  assert.equal(predateLanding([gap], Date.parse(serving.at)), true, 'read from the write stamp, the same instant counts as predating — the recurrence this landing keeps');
+  const boundaryInstances = [0, 1, 2].map(index => ({ ...gap, id: `action:reclaim|reclaim:resources:boundary-${index}|${boundary}`, subject: `reclaim:resources:boundary-${index}` }));
+  const refiledBoundary = recurringClasses([...gy1830Instances.map(entry => ({ ...entry, linkedTo: 'GY-1828' })), ...boundaryInstances], [observed], policy, gy1830DetectedAt);
+  assert.deepEqual(refiledBoundary.map(recurrence => [recurrence.faultClass, recurrence.file, recurrence.item?.key ?? null]), [['resources', true, null]], 'an instance first seen between the observation and the write stamp files as before');
+  assert.deepEqual(refiledBoundary[0].recent.map(entry => entry.at), boundaryInstances.map(entry => entry.at), 'the boundary filing carries the instances the write stamp would have swallowed');
 });
