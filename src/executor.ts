@@ -70,7 +70,7 @@ export interface ControlPlaneEffects {
   observeDeployment: (delivered: Work[]) => Promise<DeploymentObservation>;
   /**
    * GY-1831: whether the promotion pipeline has `mergeSha` in flight — a release candidate carrying
-   * it is being built or soaked, or the dispatch that will carry it is due — answered from the
+   * it is being built or promoted, or the dispatch that will carry it is due — answered from the
    * promotion state the loop already records on its cursor, read at the failed attempt. Absent,
    * false, or reading false, a `verify-deployment` failure that the running release does not carry
    * the merge keeps its plain reason and stalls as before; the wiring fails it closed the same way

@@ -144,7 +144,7 @@ export const workerSlotWaitBoundMs = 30 * 60_000;
 /**
  * GY-1831: the clause a `verify-deployment` attempt appends when the only reason it failed is that
  * the running release does not carry the merge yet while the promotion pipeline has the merge in
- * flight — a release candidate carrying it is being built or soaked, or the dispatch that will
+ * flight — a release candidate carrying it is being built or promoted, or the dispatch that will
  * carry it is due. The clause is constant, with no candidate id, run or count in it, so the
  * unchanged run accumulates across attempts and the wait below can bound it: a run that outlasts
  * the bound is a stall again, and one that never names the clause stalls as before.
