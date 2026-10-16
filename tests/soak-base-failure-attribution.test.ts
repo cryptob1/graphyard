@@ -59,7 +59,7 @@ test('unit:soak-base-failure-attribution — over a day of loop cycles each base
     for (const [index, entry] of held.entries()) {
       // Each phase is a new head of each item; within it, the head is held again on every new tip.
       const head = sha(100 * (phase + 1) + index);
-      entry.candidate = { sha: head, baseSha: tip };
+      entry.candidate = { sha: head, baseSha: tip, pr: index + 1, branch: `graphyard/gy-${index + 1}-1`, author: 'implementer' };
       entry.mergeLedger = { key: entry.key, state: 'refused', head, baseTip: tip, mergeSha: sha(5_000 + n), risk: 'medium', intentAt: iso(now - 60_000), pushedAt: null, observedTip: null,
         refusal: { kind: 'merge', reason: baseFailureReason({ tip, files: ['tests/some.test.ts'], tests: sets[phase]! }) }, events: n + 1 };
     }
