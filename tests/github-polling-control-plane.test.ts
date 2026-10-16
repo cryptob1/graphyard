@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { MergerSettings } from '../src/merger-mode.js';
+import { MergerSettings, recordedMergerMode } from '../src/merger-mode.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import { CHECK_NAME, GitHub, observationThroughputStatus, processJob } from '../src/github.js';
 import { diagnosticianEffects, diagnosisPrompt } from '../src/daemon/diagnosis.js';
@@ -148,6 +148,10 @@ const due = async (...ids: string[]) => {
 };
 const workOf = async (id: string) => (await store.workDocument(id))!;
 const setMerger = (merger: 'github' | 'control-plane', reason: string) => new MergerSettings(store).change(operator, { merger, reason }, randomUUID());
+/** Control-plane is the shipped default (GY-1833): a set to the recorded mode is refused, so set it only when it differs. */
+const setMergerUnlessRecorded = async (merger: 'github' | 'control-plane', reason: string) => {
+  if ((await recordedMergerMode(store.pool)).merger !== merger) await setMerger(merger, reason);
+};
 
 before(async () => {
   fixtureRoot = await realpath(await temporaryDirectory('github-polling-control-plane'));
@@ -163,7 +167,7 @@ before(async () => {
   engine = new Engine(store, [CI], 120, REPOSITORY);
   engine.submissionObserver = null; engine.directMergeEnvironment = null;
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
-  await setMerger('control-plane', 'the control plane is the merge writer');
+  await setMergerUnlessRecorded('control-plane', 'the control plane is the merge writer');
   api = new Api();
 });
 after(async () => { if (store) await store.close(); if (postgres) await postgres.stop(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });

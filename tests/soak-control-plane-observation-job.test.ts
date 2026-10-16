@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { MergerSettings } from '../src/merger-mode.js';
+import { MergerSettings, recordedMergerMode } from '../src/merger-mode.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import { CHECK_NAME, GitHub, processJob } from '../src/github.js';
 import type { Observation } from '../src/model.js';
@@ -129,6 +129,10 @@ const workOf = async (id: string) => (await store.workDocument(id))!;
 const revisionOf = async (id: string) => (await workOf(id))!.revision;
 const jobs = async () => (await store.pool.query('SELECT work_id::text, error, deferred_reason, available_at > now() AS later FROM jobs ORDER BY work_id')).rows as { work_id: string; error: string | null; deferred_reason: string | null; later: boolean }[];
 const setMerger = (merger: 'github' | 'control-plane', reason: string) => new MergerSettings(store).change(operator, { merger, reason }, randomUUID());
+/** Control-plane is the shipped default (GY-1833): a set to the recorded mode is refused, so set it only when it differs. */
+const setMergerUnlessRecorded = async (merger: 'github' | 'control-plane', reason: string) => {
+  if ((await recordedMergerMode(store.pool)).merger !== merger) await setMerger(merger, reason);
+};
 /** One observation cycle: the worker claims due jobs until none is due, and no job is claimed twice. */
 async function cycle(github: ReturnType<Api['client']>, bound = 12) {
   await due();
@@ -153,7 +157,7 @@ before(async () => {
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
   // The person-opened pull request merges straight to main: the window owns that merge.
   engine.directMergeEnvironment = { since: new Date(Date.now() - 86_400_000).toISOString(), until: null, reason: 'test repository merges straight into main', setBy: 'environment', enabledAt: new Date(Date.now() - 86_400_000).toISOString(), source: 'environment', event: null };
-  await setMerger('control-plane', 'the soak runs the control plane as the merge writer');
+  await setMergerUnlessRecorded('control-plane', 'the soak runs the control plane as the merge writer');
   api = new Api();
 });
 after(async () => { if (store) await store.close(); if (postgres) await postgres.stop(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });
