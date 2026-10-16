@@ -134,10 +134,13 @@ export function pruneFlakeLedger(ledger: FlakeLedger, now: number) {
   for (const [test, filed] of Object.entries(ledger.filed)) if (filed.closedAt && now - Date.parse(filed.closedAt) >= flakyQuietMs) delete ledger.filed[test];
 }
 
-/** The proof id a test's name leads with (`unit:base-failure-no-rework — …`), or null. A `FILE › NAME` name is read from its NAME. */
+/**
+ * The proof id a test's name leads with (`unit:base-failure-no-rework — …`), or null. A `FILE › NAME` name is read from its NAME.
+ * The id is read in the proof grammar's own alphabet (`proofSchema`), `/` included, so `unit:guard/retry` is never cut to `unit:guard`.
+ */
 export function leadingProof(test: string) {
   const name = test.includes(' › ') ? test.slice(test.lastIndexOf(' › ') + 3) : test;
-  return /^((?:unit|integration):[\w.-]+)/.exec(name.trim())?.[1] ?? null;
+  return /^((?:unit|integration):[a-zA-Z0-9._/-]+)/.exec(name.trim())?.[1] ?? null;
 }
 
 /** A test that flaked often enough to fix: its flakes and shas in the window, and the proof it names. */

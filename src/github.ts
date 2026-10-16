@@ -3253,7 +3253,7 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
           let failedTests: string[] | null;
           try { failedTests = parseFailedTests(await github.checkRunAnnotations(owed.failedRunId)); }
           catch (error) { console.error(`Graphyard could not read the failed tests of ${owed.check} run ${owed.failedRunId} of ${work.key} before rerunning it: ${error instanceof Error ? error.message : String(error)}`); continue; }
-          if (!failedTests) { console.error(`Graphyard keeps the ${owed.check} rerun of ${work.key} owed: run ${owed.failedRunId} named no failed tests, so it cannot be shown to spare the item's criterion proofs`); continue; }
+          if (!failedTests?.length) { console.error(`Graphyard keeps the ${owed.check} rerun of ${work.key} owed: run ${owed.failedRunId} named no failed tests, so it cannot be shown to spare the item's criterion proofs`); continue; }
           proofFailure = proofFailureRefusal(work, owed, failedTests);
         }
         if (proofFailure) outcome = { state: 'refused', detail: proofFailure };

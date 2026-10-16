@@ -21,7 +21,7 @@ import { attributeFailures, runMergeTrial, baseFailurePrefix, baseFailureReason,
 import { applyMainGuardRevert, runMainGuard, type CheckRun, type CommitVerdict, type FileChange, type MainCommit, type MainGuardPorts } from '../src/main-guard.js';
 import { trialFailurePrefix } from '../src/model/rework-ground.js';
 import { foldMergeLedger, type MergeLedgerEvent } from '../src/model/merge-ledger.js';
-import type { FlakeLedger } from '../src/model/flake-ledger.js';
+import { isOwnProof, leadingProof, type FlakeLedger } from '../src/model/flake-ledger.js';
 import type { FlakeLedgerStore } from '../src/flake-ledger.js';
 import type { TrialRun } from '../src/merge-writer/trial.js';
 import type { Observation, Principal, Work } from '../src/model.js';
@@ -310,6 +310,13 @@ async function engineOnPostgres() {
 test('unit:failure-attributed-to-base-or-flake — under GitHub delivery a failed check that failed a criterion proof is never rerun past: the failure stands as the head\'s, while any other failure is rerun once', async () => {
   assert.match(proofFailureRefusal(item(), { check: 'test', failedRunId: 41 }, [`${ownProof} — works`, sharedName]) ?? '', /criterion proof unit:item-works — works/);
   assert.equal(proofFailureRefusal(item(), { check: 'test', failedRunId: 41 }, [sharedName]), null);
+  // A proof id is read in the proof grammar's whole alphabet, `/` included: a failing `unit:guard/retry` case is the
+  // proof `unit:guard/retry`, never cut to `unit:guard`, so it is refused a rerun and counted the item's own.
+  const slashed = item({ criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:guard/retry'] }] });
+  assert.equal(leadingProof('tests/guard.test.ts › unit:guard/retry — retries once'), 'unit:guard/retry');
+  assert.equal(isOwnProof('unit:guard/retry — retries once', ['unit:guard/retry']), true);
+  assert.match(proofFailureRefusal(slashed, { check: 'test', failedRunId: 41 }, ['unit:guard/retry — retries once']) ?? '', /criterion proof unit:guard\/retry/);
+  assert.equal(proofFailureRefusal(slashed, { check: 'test', failedRunId: 41 }, ['unit:guard — another case']), null);
 
   const engine = await engineOnPostgres(), db = store!;
   const operator: Principal = { id: 'operator', role: 'admin' }, worker: Principal = { id: 'agent-a', role: 'worker' };
@@ -325,8 +332,8 @@ test('unit:failure-attributed-to-base-or-flake — under GitHub delivery a faile
   const seen = (work: Work, candidate: { sha: string; baseSha: string }): Observation => ({ clockOffset: { min: 0, max: 0 }, candidate: { ...candidate, pr: work.submission!.pr, branch: work.workspaces[0].branch, author: 'implementer' },
     checks: [{ name: 'test', result: 'failure', appId: 15368, id: 41 }], reviews: [{ id: 41, reviewer: 'graphyard-reviewer[bot]', sha: candidate.sha, state: 'APPROVED' }], protected: true, mergeable: true,
     merged: false, mergeSha: null, prState: 'open', draft: false, baseTip: candidate.baseSha, baseTree: at('7'), baseTipContained: true, files: ['src/app.ts'], scopeFiles: [], at: iso(clock) } as Observation);
-  // `failed` null is a run whose failed tests cannot be read: it published no record, or (`'throws'`) the read fails.
-  async function reconcile(failed: string[] | null | 'throws', observations = 1, proofs = [ownProof]) {
+  // `failed` null is a run whose failed tests cannot be read: it published no record, an empty one (`[]`), or (`'throws'`) the read fails.
+  async function reconcile(failed: readonly string[] | null | 'throws', observations = 1, proofs = [ownProof]) {
     let work = await submitted(proofs);
     const candidate = { sha: at(`a${number}`), baseSha: at('b') };
     work = await engine.observe(work.id, work.revision, seen(work, candidate));
@@ -350,9 +357,9 @@ test('unit:failure-attributed-to-base-or-flake — under GitHub delivery a faile
   assert.deepEqual(other.reruns, [41], 'a failure of no proof is rerun once, as before');
   // A run whose failed tests cannot be read may have failed a proof: on every observation it stays owed,
   // never rerun, holding the failure until the owed rerun lapses and the failure stands as the head's.
-  for (const unreadable of [null, 'throws'] as const) {
+  for (const unreadable of [null, 'throws', []] as const) {
     const unknown = await reconcile(unreadable, 3);
-    assert.deepEqual(unknown.reruns, [], `an unreadable failed run (${unreadable ?? 'no record'}) is never rerun`);
+    assert.deepEqual(unknown.reruns, [], `an unreadable failed run (${JSON.stringify(unreadable) ?? 'no record'}) is never rerun`);
     assert.equal(unknown.reads, 3, 'each observation reads the failed tests again');
     assert.deepEqual(unknown.work.checkReruns!.map(entry => entry.state), ['owed'], 'the rerun stays owed, holding the failure');
   }
