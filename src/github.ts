@@ -20,7 +20,7 @@ import { lockedWork } from './store/locked-read.js';
 import { save } from './store/store.js';
 export { CHECK_NAME, LANDABLE_CHECK };
 import { baseBreakRefreshNeeded, parseFailedTests, readBaseBreak, type BaseBreak } from './master/base-break-refresh.js';
-import { alreadyMergeableRefusal, baseRefreshNeeded, requestedBaseRefresh, dismissedVerdict, enqueueRequestCurrent, mergeableNow, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, cancelledRerunLimit, mergeCheckBranch, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
+import { alreadyMergeableRefusal, baseRefreshNeeded, requestedBaseRefresh, dismissedVerdict, enqueueRequestCurrent, mergeableNow, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, proofFailureRefusal, hasCriterionProofs, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, cancelledRerunLimit, mergeCheckBranch, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import type { IntegrationJob } from './coordination.js';
 import { docsSyncAdoption, isDocsPage, overlappingPaths, type DocsSync } from './model/docs-sync.js';
@@ -3244,7 +3244,20 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
         const rerunHold = hold('check-rerun');
         if (rerunHold) { held ??= rerunHold; break; }
         let outcome: Parameters<Engine['recordCheckRerun']>[3];
-        if (typeof github.rerunFailedJobs !== 'function') outcome = { state: 'refused', detail: 'This GitHub adapter cannot rerun failed jobs' };
+        // GY-1834: a failed run that failed one of the item's criterion proofs is never rerun: the failure
+        // stands at once as the head's own. For an item with criterion proofs, a run whose failed tests
+        // cannot be read — the read fails, or the run published no failed-test record — stays owed, never
+        // rerun, and lapses after checkRerunVisibilityMs with its failure standing as the head's.
+        let proofFailure: string | null = null;
+        if (!owed.cancelled && typeof github.checkRunAnnotations === 'function' && hasCriterionProofs(work)) {
+          let failedTests: string[] | null;
+          try { failedTests = parseFailedTests(await github.checkRunAnnotations(owed.failedRunId)); }
+          catch (error) { console.error(`Graphyard could not read the failed tests of ${owed.check} run ${owed.failedRunId} of ${work.key} before rerunning it: ${error instanceof Error ? error.message : String(error)}`); continue; }
+          if (!failedTests?.length) { console.error(`Graphyard keeps the ${owed.check} rerun of ${work.key} owed: run ${owed.failedRunId} named no failed tests, so it cannot be shown to spare the item's criterion proofs`); continue; }
+          proofFailure = proofFailureRefusal(work, owed, failedTests);
+        }
+        if (proofFailure) outcome = { state: 'refused', detail: proofFailure };
+        else if (typeof github.rerunFailedJobs !== 'function') outcome = { state: 'refused', detail: 'This GitHub adapter cannot rerun failed jobs' };
         else try {
           const requested = await github.rerunFailedJobs(owed.failedRunId, owed.waiting && owed.runId !== undefined ? { run: { runId: owed.runId, ...(owed.attempt !== undefined ? { attempt: owed.attempt } : {}) } } : {});
           outcome = { state: 'requested', runId: requested.runId, ...(requested.attempt !== undefined ? { attempt: requested.attempt } : {}) };

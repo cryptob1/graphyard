@@ -4,6 +4,7 @@ import type { QueueCarry, TipMerge } from './model/carry.js';
 import { reviewProviderOf } from './model/review.js';
 import type { BaseBreak } from './master/base-break-refresh.js';
 import type { DocsSync } from './model/docs-sync.js';
+import { leadingProof } from './model/flake-ledger.js';
 
 /** The shas that are an item's own: its head, and the reviewed head a base refresh replaced. */
 export function ownHeads(work: Pick<Work, 'candidate' | 'baseRefresh'>): string[] {
@@ -892,6 +893,25 @@ export function owedCheckReruns(work: Work, ciAppIds: readonly number[]): CheckR
   if (!observation || !candidate || observation.candidate.sha !== candidate.sha || observation.merged) return [];
   return checkReruns(work).filter(entry => entry.sha === candidate.sha && entry.state === 'owed'
     && latestTrusted(observation, entry.check, ciAppIds)?.id === entry.failedRunId);
+}
+/**
+ * GY-1834: why an owed rerun of a failed check is never asked of GitHub — the failed run failed
+ * one of the item's criterion proofs, `tests` being the failed test names its run published. A
+ * failing proof always holds the item as its own failure: rerunning it until it passes would let
+ * a head land on a proof that failed. Null when no failed test is one of its proofs.
+ */
+/**
+ * GY-1834: whether any of the item's criteria names a test-backed proof (`unit:` or `integration:`), so a
+ * failed run's tests must be read before it is rerun. A `manual:` or `e2e:` proof is never a failed test
+ * name of the run, so it holds no rerun.
+ */
+export function hasCriterionProofs(work: Pick<Work, 'criteria'>): boolean {
+  return (work.criteria ?? []).some(criterion => criterion.proofs.some(proof => leadingProof(proof) !== null));
+}
+export function proofFailureRefusal(work: Pick<Work, 'criteria'>, rerun: Pick<CheckRerun, 'check' | 'failedRunId'>, tests: readonly string[]): string | null {
+  const proofs = new Set((work.criteria ?? []).flatMap(criterion => criterion.proofs));
+  const failed = tests.filter(test => { const proof = leadingProof(test); return !!proof && proofs.has(proof); });
+  return failed.length ? `${rerun.check} run ${rerun.failedRunId} failed the item's criterion proof ${failed.slice(0, 5).join('; ')}`.slice(0, 300) + '; a failing criterion proof is never rerun past (GY-1834)' : null;
 }
 /** What asking GitHub for an owed rerun came to (GY-1329): accepted, refused, or held until its workflow run completes. */
 export type OwedRerunOutcome =
