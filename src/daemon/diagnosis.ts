@@ -3,6 +3,7 @@
 // item through the normal two-party decision.
 import { createHash } from 'node:crypto';
 import { createSchema, type Work } from '../model.js';
+import type { MergerMode } from '../merger-mode.js';
 import { headlessTimeoutLimitCharge, providerLimit, type ExhaustionSignal, type LimitRunEvent } from '../model/capacity.js';
 import { isClosed } from '../model/closure.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
@@ -18,8 +19,8 @@ import { piRunner } from '../runner/pi.js';
 // What a diagnosis outcome leaves behind — its record key, cause kind and lost-run grace — and the
 // fix item filed from it live in ./diagnosis-fix.ts; imported for use here and re-exported, so
 // every existing import keeps working.
-import { diagnosisKey, diagnosisLostGraceMs, filingTree, fixItem, iso, noDiagnosisKind } from './diagnosis-fix.js';
-export { diagnosisKey, diagnosisLostGraceMs, deriveDiagnosisFixPlannedFiles, fixItem, noDiagnosisKind } from './diagnosis-fix.js';
+import { clip, diagnosisInput, diagnosisPrompt, diagnosisKey, diagnosisLostGraceMs, filingTree, fixItem, iso, namedPullRequests, noDiagnosisKind } from './diagnosis-fix.js';
+export { clip, diagnosisEvidenceMax, diagnosisInput, diagnosisPrompt, type DiagnosisInput, diagnosisKey, diagnosisLostGraceMs, deriveDiagnosisFixPlannedFiles, excerpt, fixItem, namedPullRequests, noDiagnosisKind } from './diagnosis-fix.js';
 import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import type { Runner } from '../runner/types.js';
 import { type DaemonAction, type DaemonState, message } from './state.js';
@@ -86,14 +87,21 @@ export function standingFaultClassItem(work: readonly Work[], faultClass: FaultC
 
 /** One thing to diagnose: a recurring-fault item with its instances, or one standing invariant violation. */
 export interface DiagnosisSubject { id: string; kind: 'recurring' | 'invariant'; faultClass: FaultClass; work: Work | null; instances: FaultInstance[] }
-/** What the diagnostician reads beside the repository: the excerpts, bounded, and the named pull requests' state. */
-export interface DiagnosisContext { journal: string[]; serverLog: string[]; pullRequests: { number: number; state: unknown }[] }
+/** What the diagnostician reads beside the repository: the excerpts, bounded, the named pull requests' state, and the merger the context read (GY-1835), so the prompt names no second read. */
+export interface DiagnosisContext { journal: string[]; serverLog: string[]; pullRequests: { number: number; state: unknown }[]; merger?: MergerMode }
 /** The runner one attempt uses, what it runs on, the registry account it launched on (GY-1705), and how its registry session (if any) is ended. */
 export interface DiagnosticianRun { runner: Runner; runtime: string; model: string; account?: string | null; release?: (reason: string) => Promise<unknown> }
 export interface DiagnosticianEffects {
   settings: DiagnosticianSettings;
   /** The repository checkout the diagnostician reads: the loop's own. */
   cwd: string;
+  /**
+   * The recorded merger, as the diagnostician's own control-plane calls read it (GY-1835). Under a
+   * `control-plane` merger an item's head, merge and verdicts are the control plane's own records,
+   * so the diagnostician is not sent to GitHub for them: its context makes no `gh pr view` run and
+   * its prompt's read list names `graphyard status GY-N` instead. Absent, github reads stand.
+   */
+  merger?: () => Promise<MergerMode>;
   /**
    * The base branch's tree the fix item's plannedFiles resolve against before filing (GY-1707).
    * Absent, the loop reads `cwd` the way `master create` does (`baseTree`); an unreadable checkout
@@ -122,8 +130,15 @@ export type DiagnosticianPost = (method: 'GET' | 'POST', path: string, body?: un
 export const diagnosticianEffects = (config: MasterConfig, root: string, post: DiagnosticianPost, run: (command: string, args: string[]) => string | Promise<unknown>): DiagnosticianEffects => {
   const settings = diagnosticianSettings(config.run);
   const lines = async (command: string[]) => String(await run(command[0], command.slice(1))).split('\n');
+  // GY-1835: the merger as the operator-agent identity reads it. An unreadable setting (an older
+  // server without the route, a refused call) keeps today's github reads rather than blinding a
+  // diagnostician over a plane hiccup.
+  const merger = async (): Promise<MergerMode> => {
+    try { const status = await post('GET', 'merger') as { merger?: unknown } | undefined; return status?.merger === 'control-plane' ? 'control-plane' : 'github'; }
+    catch { return 'github'; }
+  };
   return {
-    settings, cwd: root,
+    settings, cwd: root, merger,
     runner: async (attempt, subject) => {
       if (attempt === 'primary') {
         const fleet = await selectDiagnosticianFleet(config, subject.work?.key);
@@ -136,13 +151,22 @@ export const diagnosticianEffects = (config: MasterConfig, root: string, post: D
       const model = attempt === 'primary' ? settings.model : settings.fallbackModel;
       return { runner: piRunner({ command: settings.command, model }), runtime: 'pi', model, account: null };
     },
-    context: async (_subject, numbers) => ({
-      journal: await lines(settings.journalCommand).catch(error => [`(the loop journal could not be read with ${settings.journalCommand.join(' ')}: ${message(error)})`]),
-      serverLog: settings.serverLogCommand ? await lines(settings.serverLogCommand).catch(error => [`(the server log could not be read with ${settings.serverLogCommand!.join(' ')}: ${message(error)})`])
-        : ['(no run.diagnostician.serverLogCommand is configured, so no server log excerpt was read)'],
-      pullRequests: await Promise.all(numbers.map(async number => ({ number, state: await Promise.resolve(run('gh', ['pr', 'view', String(number), '--repo', config.repository, '--json', 'number,title,state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,reviewDecision,statusCheckRollup']))
-        .then(output => JSON.parse(String(output)), (error: unknown) => ({ error: message(error) })) }))),
-    }),
+    context: async (_subject, numbers) => {
+      // GY-1835: under a control-plane merger a named pull request is the control plane's own
+      // record, so no `gh pr view` runs for it — the prompt points the session at `graphyard status
+      // GY-N` instead. With GitHub the recorded merger, every named pull request is read as before.
+      // The mode rides the context, so the prompt reads the same one answer, never a second read
+      // (review of 3b7408170110).
+      const mode = await merger();
+      return {
+        merger: mode,
+        journal: await lines(settings.journalCommand).catch(error => [`(the loop journal could not be read with ${settings.journalCommand.join(' ')}: ${message(error)})`]),
+        serverLog: settings.serverLogCommand ? await lines(settings.serverLogCommand).catch(error => [`(the server log could not be read with ${settings.serverLogCommand!.join(' ')}: ${message(error)})`])
+          : ['(no run.diagnostician.serverLogCommand is configured, so no server log excerpt was read)'],
+        pullRequests: mode === 'control-plane' ? [] : await Promise.all(numbers.map(async number => ({ number, state: await Promise.resolve(run('gh', ['pr', 'view', String(number), '--repo', config.repository, '--json', 'number,title,state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,reviewDecision,statusCheckRollup']))
+          .then(output => JSON.parse(String(output)), (error: unknown) => ({ error: message(error) })) }))),
+      };
+    },
     file: (input, key) => post('POST', 'work', input, key) as Promise<Work>,
     decide: (work, action, reason, input) => post('POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }) as Promise<{ id: string }>,
   };
@@ -200,19 +224,6 @@ export async function diagnosesSettled() { await Promise.all([...live.values()])
 /** Test seam: forget every run, outcome and mismatched-standing hold. */
 export function clearDiagnoses() { live.clear(); outcomes.clear(); standingHolds.clear(); }
 
-export const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
-/** The last lines of an excerpt that fit `budget` characters, each clipped. */
-export function excerpt(lines: readonly string[], budget: number, lineLimit = 400) {
-  const kept: string[] = [];
-  let used = 0;
-  for (const line of [...lines].reverse()) {
-    const clipped = clip(line, lineLimit);
-    if (used + clipped.length + 1 > budget) break;
-    kept.unshift(clipped); used += clipped.length + 1;
-  }
-  return kept;
-}
-
 /**
  * What needs a diagnosis now: every open recurring-fault item not yet diagnosed, and every
  * invariant violation standing past the bound, unlinked and not yet diagnosed.
@@ -239,46 +250,11 @@ export function diagnosisSubjects(state: Pick<DaemonState, 'faults' | 'diagnoses
   return subjects;
 }
 
-/** The pull requests the subject names: `#N` or `PR N` in its instances, and the candidates of the items its instances are on. */
-export function namedPullRequests(subject: DiagnosisSubject, work: readonly Work[], limit = 5) {
-  const numbers = new Set<number>();
-  for (const instance of subject.instances) {
-    for (const match of `${instance.subject} ${instance.text}`.matchAll(/(?:#|\bPR\s*#?|pull request\s*#?)(\d{1,7})\b/gi)) numbers.add(Number(match[1]));
-    const item = work.find(entry => entry.key === instance.subject);
-    const pr = item?.candidate?.pr ?? item?.submission?.pr;
-    if (pr) numbers.add(pr);
-  }
-  return [...numbers].slice(0, limit);
-}
-
-/** Everything the diagnostician is given, bounded so the prompt stays one argument. */
-export function diagnosisInput(subject: DiagnosisSubject, context: DiagnosisContext, work: readonly Work[]) {
-  const open = work.filter(item => item.stage !== 'done' && !isClosed(item) && item.key !== subject.work?.key);
-  return {
-    subject: subject.id, kind: subject.kind, faultClass: subject.faultClass, meaning: faultClassMeaning[subject.faultClass],
-    item: subject.work ? { key: subject.work.key, title: subject.work.title, description: clip(subject.work.description ?? '', 6000) } : null,
-    instances: subject.instances.slice(-40).map(entry => ({ at: entry.at, lastSeenAt: entry.lastSeenAt, kind: entry.kind, subject: entry.subject, text: clip(entry.text, 300) })),
-    journal: excerpt(context.journal, 24_000),
-    serverLog: excerpt(context.serverLog, 16_000),
-    pullRequests: context.pullRequests.slice(0, 5).map(entry => ({ number: entry.number, state: clip(JSON.stringify(entry.state ?? null), 2000) })),
-    openItems: excerpt(open.map(item => `${item.key} [${item.stage}${item.ready ? ', ready' : ''}] ${item.title}`), 8_000, 200),
-  };
-}
-export type DiagnosisInput = ReturnType<typeof diagnosisInput>;
-
-export function diagnosisPrompt(config: { repository: string; cliPath: string }, input: DiagnosisInput) {
-  const cli = `node ${config.cliPath}`;
-  const what = input.kind === 'recurring'
-    ? `the recurring-fault item ${input.item!.key} ("${input.item!.title}"), which the master loop filed because the ${input.faultClass} fault class (${input.meaning}) recurred`
-    : `the invariant violation ${input.subject}, which has stood past its bound`;
-  return `You are the Graphyard diagnostician for ${config.repository}. Diagnose ${what}. Find the one root cause its instances share, as a senior engineer on this codebase would: read the evidence below, the repository in this checkout, and the control plane (${cli} status GY-N, ${cli} master status, gh pr view N). `
-    + 'This session is read-only: never edit, commit, push, claim, release, close, merge or decide anything, and never ask anyone anything. '
-    + `Then call the ${graphyardTools.diagnose} tool exactly once with subject "${input.subject}", the cause, the evidence it rests on (log lines quoted exactly, and the commands you ran with what they showed), the fault class the cause belongs to, and exactly one answer: `
-    + 'covering, the key of an existing open item (listed below) that already covers this cause, when one does; otherwise fix, the root-cause item to file — a title, a description stating the cause and evidence, the priority to release it at (0 highest to 4), testable criteria each with its proofs (each a bare id such as unit:tmp-reclaim-retry — unit:, integration:, e2e: or manual: then letters, digits and ._/- only, no spaces or prose), and the narrow plannedFiles the fix changes. Stop after the call.\n\n'
-    + `The evidence, as JSON:\n${clip(JSON.stringify(input), diagnosisEvidenceMax)}`;
-}
-/** The evidence's bound in the prompt: the prompt is one process argument, which Linux caps at 128 KiB. */
-export const diagnosisEvidenceMax = 100_000;
+// What the diagnostician session is given and launched with — the pull requests its subject names
+// (namedPullRequests), the bounded evidence input (diagnosisInput) and the prompt it is launched
+// with, GY-1835's merger-aware read list included — lives in ./diagnosis-fix.ts beside the
+// evidence-shaping it shares with the diagnosis outcome, and is re-exported above, so every
+// existing import keeps working.
 
 /** Run the primary attempt, and the fallback once when the primary returns no valid diagnosis. */
 async function runDiagnosis(diagnostician: DiagnosticianEffects, subject: DiagnosisSubject, prompt: string): Promise<Outcome> {
@@ -386,8 +362,11 @@ async function launch(cycle: Cycle, diagnostician: DiagnosticianEffects, subject
     startedAt: iso(clock), updatedAt: iso(clock), runs: [], diagnosis: null, fix: null, decision: null, answeredBy: null, retryAt: null, refusedAt: null, detail: '' };
   state.diagnoses[subject.id] = entry;
   const context = await diagnostician.context(subject, namedPullRequests(subject, snapshot.work))
-    .catch(error => ({ journal: [`(the excerpts could not be read: ${message(error)})`], serverLog: [], pullRequests: [] }));
-  const prompt = diagnosisPrompt(config, diagnosisInput(subject, context, snapshot.work));
+    .catch(error => ({ journal: [`(the excerpts could not be read: ${message(error)})`], serverLog: [], pullRequests: [], merger: undefined }));
+  // GY-1835: the prompt's read list follows the recorded merger, as the context read it — the
+  // context's own mode, so a diagnosis spends one merger read, never two (review of 3b7408170110).
+  const merger = context.merger ?? await diagnostician.merger?.().catch(() => undefined);
+  const prompt = diagnosisPrompt({ ...config, ...(merger ? { merger } : {}) }, diagnosisInput(subject, context, snapshot.work));
   const running = runDiagnosis(diagnostician, subject, prompt).catch(error => ({ runs: [{ runtime: 'none', model: 'none', startedAt: iso(clock), endedAt: new Date().toISOString(), result: 'exit', detail: clip(message(error), 500) }], diagnosis: null }))
     .then(outcome => { outcomes.set(subject.id, outcome); }).finally(() => live.delete(subject.id));
   live.set(subject.id, running);
