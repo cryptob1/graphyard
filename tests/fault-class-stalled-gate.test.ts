@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { actionRecordLimit, actionStall, actionRetryAt, actionRetryMaxMs, actionStallThreshold } from '../src/model/action-progress.js';
-import { handoffWaitBound, promotionWaitBoundMs, promotionWaitClause, waitReason } from '../src/model/action-kinds.js';
+import { handoffWaitBound, promotionWaitBoundMs, promotionWaitClause, staleContainmentReasonPrefix, waitReason } from '../src/model/action-kinds.js';
 import type { ActionRow } from '../src/model/actions.js';
 import { emptyDaemonState, storeAction } from '../src/daemon/state.js';
 import { assertDispatchable } from '../src/master/dispatch.js';
@@ -477,7 +477,11 @@ test('unit:verify-deployment-awaits-promotion — the handler names the promotio
   await assert.rejects(async () => verifyHandlers(notServing(), { promotion: async () => false })(row, executorIdentity), (error: Error) => error.message === plain);
   await assert.rejects(async () => verifyHandlers(notServing())(row, executorIdentity), (error: Error) => error.message === plain, 'an executor without the promotion read keeps today’s failure');
   await assert.rejects(async () => verifyHandlers(notServing(), { promotion: async () => { throw new Error('the pipeline could not be read'); } })(row, executorIdentity), (error: Error) => error.message === plain, 'an unreadable pipeline reads as not carrying');
-  await assert.rejects(async () => verifyHandlers(notServing('containment could not be derived: the base branch could not be fetched'), { promotion: async () => true })(row, executorIdentity), (error: Error) => error.message === 'containment could not be derived: the base branch could not be fetched', 'a read that carries its own reason is not the release-lag shape');
+  const stale = `${staleContainmentReasonPrefix}git fetch origin main failed`;
+  await assert.rejects(async () => verifyHandlers(notServing(stale), { promotion: async () => true })(row, executorIdentity), (error: Error) => error.message === stale, 'containment derived without a fresh base branch is not the release-lag shape');
+  const inactive = 'production deployment 7 reached success and was later marked inactive with no newer production deployment, so it is the release production serves';
+  await assert.rejects(async () => verifyHandlers(notServing(inactive), { promotion: async () => true })(row, executorIdentity), (error: Error) => error.message === `${inactive}; ${promotionWaitClause}`, 'an informational reason on a valid serving release still names the wait');
+  await assert.rejects(async () => verifyHandlers(notServing(`${inactive}; ${stale}`), { promotion: async () => true })(row, executorIdentity), (error: Error) => error.message === `${inactive}; ${stale}`, 'a stale containment beside it still stands as it was');
 });
 
 test('unit:verify-deployment-awaits-promotion — an unreadable promotion state is logged where the executor’s log goes, and still reads as not carrying', async () => {

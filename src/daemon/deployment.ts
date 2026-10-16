@@ -13,6 +13,7 @@ import { pinningVerify, retryPendingPin } from '../master/known-good.js';
 import { installDirectory } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
 import { boundDeployment, type ContainmentRetention, type DeploymentObservation, deploymentObservationSchema, message, type PromotionState, retainedContainments } from './state.js';
+import { staleContainmentReasonPrefix } from '../model/action-kinds.js';
 
 export function deploymentDetail(observation: DeploymentObservation) {
   if (observation.source === 'unavailable') return `Deployment SHA is unverified: ${observation.reason ?? 'no deployment observation is configured or available'}`;
@@ -310,7 +311,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
   // A base branch this checkout could not fetch is said out loud: containment was then derived
   // from whatever objects are here, and a delivery git could not place stays pending, never deployed.
   const stale = ancestry.fetchFailure;
-  const reasons = [inactive, stale ? `Containment was derived without a fresh base branch: ${stale}` : null].filter(Boolean);
+  const reasons = [inactive, stale ? `${staleContainmentReasonPrefix}${stale}` : null].filter(Boolean);
   return deploymentObservationSchema.parse({ source, sha, at, reason: reasons.length ? reasons.join('; ') : null, deployed: deployed.slice(-200), pending: pending.slice(-200),
     requests, derived, retained: retainedCount, containment: { release: sha, settled: Object.fromEntries(keep) } });
 }

@@ -149,6 +149,8 @@ export const workerSlotWaitBoundMs = 30 * 60_000;
  * unchanged run accumulates across attempts and the wait below can bound it: a run that outlasts
  * the bound is a stall again, and one that never names the clause stalls as before.
  */
+/** What a deployment observation's reason starts with when its containment was derived without a fresh base branch, the one reason that leaves its pending deliveries unreliable (GY-1831). */
+export const staleContainmentReasonPrefix = 'Containment was derived without a fresh base branch: ';
 export const promotionWaitClause = 'a release candidate carrying the merge is in the promotion pipeline, so the deployment observation waits for the promotion to land';
 /**
  * How long a `verify-deployment` row may wait for the promotion pipeline to land the release that
