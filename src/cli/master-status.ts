@@ -79,8 +79,6 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const dispatchItems = dispatchFailureAttention(dispatch);
   const launches = await timedStep('worker launches', () => workerLaunchStatus(root, master)); // GY-417
   dispatchItems.push(...launches.items);
-  // GY-1836: the day's worktree preparation percentiles, beside the launch rows that name their own dispatch's time.
-  const launchReport = { prepare: launches.prepare };
   const containment = await timedStep('containment', () => assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset }));
   // Disk is read from the host: the volume filling stops the loop. The plan is `master reclaim`'s,
   // over the cached inventory (GY-360).
@@ -174,8 +172,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     delivery: delivery.report,
     // The loop's promotion drive (GY-1302): the last promoted SHA, merges production is behind, the next due promotion.
     promotion: promotionStatus('error' in daemonState ? null : daemonState.promotion),
-    // Worker launches (GY-1836): how long the day's worktree preparations took, p50 and p90 over the last day.
-    launches: launchReport,
+    launches: { prepare: launches.prepare }, // GY-1836: the day's worktree preparation p50/p90
     // Every open item the control plane names no action for, with the account it names and how
     // long it has held its failing gate.
     actionless: { bound: stallBoundMs, items: actionless },
