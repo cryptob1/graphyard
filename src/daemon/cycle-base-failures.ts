@@ -2,9 +2,16 @@
 // branch head as well is not the candidate's to fix, so no rework is requested and no approver is
 // launched for it; the fault is raised once against the base, and the candidates it held are
 // rerun and refreshed onto the base once it passes again. The pure half is model/base-failure.ts.
+// GY-1834: a failing test that is one of the candidate's criterion proofs is never set aside, so
+// it always holds the item as its own failure; a merge trial the writer held because its failing
+// files fail on the base tip too, and a revert the main guard closed because its own CI failed the
+// tests main fails, each file their fix item here at once, under the same P0 filing.
+import { createHash } from 'node:crypto';
 import type { Work } from '../model.js';
 import { type BaseCheck, type BaseFailure, baseFailureItem, baseFailureKey, failedRequiredChecks, judgeFailedCheck, runOf, short } from '../model/base-failure.js';
 import { agentOwner, type AttentionItem } from '../master/attention.js';
+import { parseBaseFailureReason } from '../merge-writer/executor.js';
+import { leadingProof } from '../model/flake-ledger.js';
 import { detailChanged } from './decisions.js';
 import { readyToRetry } from './sessions.js';
 import { message } from './state.js';
@@ -15,6 +22,48 @@ import type { Cycle } from './cycle.js';
 export const baseFailureRemedyAttempts = 3;
 /** How long a cleared base failure waits for its candidates to be observed on the repaired base before it is retired regardless. */
 export const baseFailureRetireMs = 24 * 3_600_000;
+/** GY-1834: the check a merge trial's base failure is recorded under; its base is the trial's, not a GitHub check. */
+export const trialCheck = 'trial';
+// Keyed by the failing set, not the tip: a head held again on a newer tip with the same tests names the item already filed.
+const trialKey = (item: Pick<Work, 'id'>, tests: readonly string[]) => `trial:${item.id}:${createHash('sha256').update(tests.join('\n')).digest('hex').slice(0, 16)}`;
+const mainGuardKey = (mergeSha: string, check: string) => `main-guard:${mergeSha}:${check}`;
+/** Whether a failing test is one of the item's criterion proofs: such a failure is never set aside (GY-1834). */
+export const ownProofTest = (item: Pick<Work, 'criteria'>, test: string) => {
+  const proof = leadingProof(test);
+  return !!proof && (item.criteria ?? []).some(criterion => criterion.proofs.includes(proof));
+};
+
+/**
+ * GY-1834: the base failures the merge writer and the main guard proved, raised from the items'
+ * records so one fix item is filed for each at once. A head the writer refused `base failure` is
+ * held on that base tip; a revert the guard abandoned `base-failure` whose shared failure has not
+ * cleared names main's failing tests. Each is one record naming all its tests, and clears when its
+ * item no longer shows it (a new trial, a new head, or main passing again). Mutates `state`.
+ */
+function recordedBaseFailures(state: Cycle['state'], work: readonly Work[], stamp: string) {
+  const live = new Set<string>();
+  for (const item of work) {
+    const ledger = item.mergeLedger, held = ledger?.state === 'refused' && ledger.head && item.candidate?.sha.toLowerCase() === ledger.head && item.stage !== 'done' ? parseBaseFailureReason(ledger.refusal?.reason ?? '') : null;
+    if (held) {
+      const key = trialKey(item, held.files);
+      live.add(key);
+      state.baseFailures[key] ??= { test: (held.tests.length ? held.tests : held.files).join(', ').slice(0, 500), check: trialCheck, baseSha: held.tip, jobId: null, url: null, raisedAt: stamp,
+        blocks: [{ key: item.key, id: item.id, sha: ledger!.head!, jobId: null, url: null }], item: null, cleared: null };
+    }
+    for (const revert of item.mainGuardReverts ?? []) {
+      if (revert.state !== 'abandoned' || revert.cause !== 'base-failure' || !revert.baseFailure || revert.baseFailure.cleared || revert.baseFailure.coveredBy) continue;
+      for (const shared of revert.baseFailure.shared) {
+        if (!shared.tests.length) continue;
+        const key = mainGuardKey(revert.mergeSha, shared.check);
+        live.add(key);
+        state.baseFailures[key] ??= { test: shared.tests.join(', ').slice(0, 500), check: shared.check, baseSha: revert.mergeSha, jobId: shared.run, url: null, raisedAt: stamp,
+          blocks: [{ key: item.key, id: item.id, sha: revert.mergeSha, jobId: shared.revertRun, url: null }], item: null, cleared: null };
+      }
+    }
+  }
+  // A recorded failure its item no longer shows is over: nothing of it is rerun or refreshed, the writer and the guard judge afresh.
+  for (const key of Object.keys(state.baseFailures)) if ((key.startsWith('trial:') || key.startsWith('main-guard:')) && !live.has(key)) delete state.baseFailures[key];
+}
 
 /**
  * Step 3a. Judge every failed required check of an open candidate against the base head's latest
@@ -27,16 +76,18 @@ export const baseFailureRetireMs = 24 * 3_600_000;
 export async function baseFailureStep(cycle: Cycle): Promise<Map<string, Set<string>>> {
   const { config, state, effects, snapshot, now, performed, isolate } = cycle;
   const setAside = new Map<string, Set<string>>();
-  if (!effects.failedTests || !effects.baseCheck) return setAside;
   const stamp = new Date(cycle.clock).toISOString();
+  recordedBaseFailures(state, snapshot.work, stamp);
+  const github = !!effects.failedTests && !!effects.baseCheck;
+  if (!github && !Object.keys(state.baseFailures).length) return setAside;
   const note = (key: string, item: Work | null, kind: 'refresh' | 'fault', outcome: 'done' | 'failed', detail: string) =>
     record(state, key, { kind, work: item?.key ?? null, principal: null, state: outcome, detail, attempts: outcome === 'failed' ? (state.actions[key]?.attempts ?? 0) + 1 : 1, cycle: state.cycle }, now(), effects.persist).then(entry => { performed.push(entry); });
-  const failing = cycle.open.map(item => ({ item, failed: failedRequiredChecks(item) })).filter(entry => entry.failed.length);
+  const failing = github ? cycle.open.map(item => ({ item, failed: failedRequiredChecks(item) })).filter(entry => entry.failed.length) : [];
   const standing = Object.values(state.baseFailures);
-  const checks = [...new Set([...failing.flatMap(entry => entry.failed.map(failed => failed.name)), ...standing.filter(failure => !failure.cleared).map(failure => failure.check)])].sort();
+  const checks = github ? [...new Set([...failing.flatMap(entry => entry.failed.map(failed => failed.name)), ...standing.filter(failure => !failure.cleared && failure.check !== trialCheck).map(failure => failure.check)])].sort() : [];
   if (!checks.length && !standing.length) return setAside;
   const bases = new Map<string, BaseCheck | null>();
-  for (const check of checks) bases.set(check, await effects.baseCheck(check).catch(() => null));
+  for (const check of checks) bases.set(check, await effects.baseCheck!(check).catch(() => null));
 
   // 1. Judge each failed check. A base failure records the candidate it blocks under every test
   //    it shares with the base head; one record per test and base head, however many candidates.
@@ -52,6 +103,8 @@ export async function baseFailureStep(cycle: Cycle): Promise<Map<string, Set<str
       const tests = check.id !== undefined ? await effects.failedTests!(check.id).catch(() => null) : null;
       const judged = judgeFailedCheck(tests, base);
       if (judged.kind === 'own') continue;
+      // A criterion proof's failure is the item's own, wherever else it fails: it is never set aside (GY-1834).
+      if (judged.kind === 'base' && judged.tests.some(test => ownProofTest(item, test))) continue;
       hold();
       if (judged.kind === 'pending') {
         const waitKey = `wait:base-failure:${item.id}`, detail = `${item.key}: required check ${name} failed on ${short(item.candidate!.sha)}; rework waits for the base head ${short(base!.baseSha)}'s own ${name} run to complete with a readable log, which decides whether the failure is the candidate's`;

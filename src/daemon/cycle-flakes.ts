@@ -1,11 +1,12 @@
 // Concern: the flake ledger (GY-1498) — the loop's step, beside the base-failure step. Each new
 // pass-on-rerun (a PR check rerun that ended passed, a main guard flake) has its failed job's log
-// read once through the failedTests effect, its tests are kept in the bounded ledger file, and a
-// test that flakes repeatedly gets one fix item, filed as the operator-agent through
+// read once through the failedTests effect, and each merge trial flake the writer judged (GY-1834)
+// is taken with its tests named; its tests are kept in the bounded ledger file, and a test gets one
+// fix item — on its first flake when it is no criterion proof of its item, else once it flakes repeatedly — filed as the operator-agent through
 // fileFaultClass as the docs trim item is. It only reads the items: no rerun count, revert or gate
 // reads the ledger. The pure half is model/flake-ledger.ts, the file flake-ledger.ts.
 import { createHash } from 'node:crypto';
-import { flakeSources, flakyItem, flakyItemTitle, flakyTests, mayFile, noteClosedFlakyItems, openFlakyItem, recordFlake, unreadSources, type FlakeLedger } from '../model/flake-ledger.js';
+import { flakeSources, flakyItem, flakyItemTitle, flakyTests, mayFile, noteClosedFlakyItems, openFlakyItem, recordFlake, recordTrialFlake, takeTrialFlakes, unreadSources, type FlakeLedger } from '../model/flake-ledger.js';
 import type { FlakeLedgerStore } from '../flake-ledger.js';
 import { readyToRetry } from './sessions.js';
 import { message } from './state.js';
@@ -49,6 +50,8 @@ export async function flakeStep(cycle: Cycle) {
     recordFlake(ledger, source, tests, clock);
     changed = true;
   }
+  // The merge writer's trial flakes (GY-1834) name their tests already: each merge commit is recorded once.
+  for (const flake of takeTrialFlakes()) if (recordTrialFlake(ledger, flake, clock)) changed = true;
 
   // 2. A filed item the snapshot shows closed starts its quiet period; an open one the ledger lost is adopted.
   if (noteClosedFlakyItems(ledger, snapshot.work, clock)) changed = true;
@@ -64,12 +67,13 @@ export async function flakeStep(cycle: Cycle) {
     if (previous?.state === 'failed' && !readyToRetry(previous, state.cycle)) continue;
     const attempts = previous?.state === 'failed' ? previous.attempts + 1 : 1;
     // One key per test and the oldest flake in its window, so a retry after a lost reply returns the item already filed.
-    const idempotency = `flaky-test:${digest(flaky.test)}:${flaky.flakes[0].failedRunId}`;
+    const idempotency = `flaky-test:${digest(flaky.test)}:${flaky.flakes[0].failedRunId || flaky.flakes[0].sha.slice(0, 12)}`;
     try {
       const filed = await effects.fileFaultClass(flakyItem(flaky), idempotency);
       ledger.filed[flaky.test] = { key: filed.key, at: new Date(clock).toISOString(), closedAt: null };
       changed = true;
-      performed.push(await record(state, key, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} (${flakyItemTitle(flaky.test)}): it passed only on rerun ${flaky.flakes.length} times on ${flaky.shas.length} commits within 7 days; nothing more is filed for it while it is open or for 7 days after it closes`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist));
+      const why = flaky.flakes.some(entry => entry.ownProof === false) ? 'it passed only on rerun of a head it is no criterion proof of' : `it passed only on rerun ${flaky.flakes.length} times on ${flaky.shas.length} commits within 7 days`;
+      performed.push(await record(state, key, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} (${flakyItemTitle(flaky.test)}): ${why}; nothing more is filed for it while it is open or for 7 days after it closes`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the fix item for the flaky test "${flaky.test}": ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist));
     }

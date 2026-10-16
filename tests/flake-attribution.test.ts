@@ -1,0 +1,242 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { emptyDaemonState } from '../src/master-daemon.js';
+import { masterConfigSchema } from '../src/master.js';
+import type { Cycle } from '../src/daemon/cycle.js';
+import type { DaemonEffects } from '../src/daemon/effects.js';
+import { baseFailureStep } from '../src/daemon/cycle-base-failures.js';
+import { flakeStep } from '../src/daemon/cycle-flakes.js';
+import { attributeFailures, baseFailurePrefix, baseFailureHoldMs, mergeOne, mergeQueue, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
+import { applyMainGuardRevert, runMainGuard, type CheckRun, type CommitVerdict, type FileChange, type MainCommit, type MainGuardPorts } from '../src/main-guard.js';
+import { trialFailurePrefix } from '../src/model/rework-ground.js';
+import { foldMergeLedger, type MergeLedgerEvent } from '../src/model/merge-ledger.js';
+import type { FlakeLedger, TrialFlake } from '../src/model/flake-ledger.js';
+import type { FlakeLedgerStore } from '../src/flake-ledger.js';
+import type { TrialRun } from '../src/merge-writer/trial.js';
+import type { Work } from '../src/model.js';
+
+// GY-1834. In the 30 CI runs before 2026-10-16T07:00Z about half failed, almost all on tests that
+// were not the change's: GY-1831 and GY-1824 took six runs each, every one a full rework round, and
+// the main guard filed a revert of GY-1831 whose own CI failed the very test main failed. A failure
+// is now charged to who caused it: the base, a flake, or the head — and a criterion's proof always
+// to the head. Nothing is skipped; only who is charged changes.
+
+const clock = Date.parse('2030-02-01T12:00:00Z');
+const iso = (at: number) => new Date(at).toISOString();
+const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
+const head = sha('head'), tip = sha('tip'), mergeSha = sha('merge');
+const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
+  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
+const ownProof = 'unit:item-works';
+const proofFile = 'tests/item-works.test.ts', shared = 'tests/locked-read.test.ts', flaky = 'tests/fleet-panel.test.ts';
+const flakyName = 'unit:fleet-panel-renders — the fleet panel renders', sharedName = 'unit:reconcile-lock-hold-bounded — the lock hold is bounded';
+
+function item(fields: Record<string, unknown> = {}): Work {
+  return { id: 'w1', key: 'GY-1', title: 'Item 1', description: '', type: 'feature', priority: 1, dependencies: [], plannedFiles: ['src/app.ts'],
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: [ownProof] }], policy: { checks: ['test'], review: true }, stage: 'test', ready: true, epoch: 1, lease: null,
+    submission: { epoch: 1, pr: null }, candidate: { sha: head, baseSha: tip }, reworkRequested: false, evidence: [], blocker: null, violations: [],
+    observation: { source: 'control-plane', candidate: { sha: head }, merged: false }, gates: ['ready', 'build', 'review', 'test', 'merge'].map(name => ({ name, passed: name !== 'merge', reasons: [] })),
+    stageEnteredAt: iso(clock - 3_600_000), ...fields } as unknown as Work;
+}
+const tap = (...names: string[]) => names.map((name, index) => `not ok ${index + 1} - ${name}`).join('\n');
+const verdict = (failed: string[]): TrialRun => ({ build: 'pass', tests: { passed: 10 - failed.length, failed, files: 10 }, durationMs: 1000, logTail: '', runnerExit: failed.length ? 1 : 0 });
+const first = (failed: string[]): MergeTrialRun => ({ ...verdict(failed), files: [], proofs: {} });
+
+/** A retest that answers, per commit, the files that fail there and the names its TAP reports. */
+function retest(onHead: { failed: string[]; names?: string[] }, onBase: { failed: string[]; names?: string[] }) {
+  const calls: { sha: string; files: string[] }[] = [];
+  const fn = async (at: string, files: string[]) => {
+    calls.push({ sha: at, files });
+    const side = at === mergeSha ? onHead : onBase;
+    const failed = files.filter(file => side.failed.includes(file));
+    return { run: verdict(failed), tap: tap(...(side.names ?? [])) };
+  };
+  return { fn, calls };
+}
+const git = (async (_command: string, args: string[]) => args.includes(`${mergeSha}^1`) ? `${tip}\n` : '') as never;
+const input = { root: '/repo', base: '/managed', mergeSha, changedFiles: [], timeoutMs: 60_000, proofs: [ownProof], proofFiles: [proofFile] };
+
+/** Ports whose trial answers `run`; pushes land. */
+function ports(run: MergeTrialRun, flakes: TrialFlake[] = []) {
+  const events: MergeLedgerEvent[] = [], recorded: MergeRecordEvent[] = [];
+  const merge: MergePorts = {
+    baseBranch: 'main', retrials: 1, now: () => clock, fetch: async () => tip,
+    merge: async () => ({ mergeSha, files: ['src/app.ts'] }), trial: async () => run,
+    push: async () => 'pushed', holds: async () => true,
+    record: async (target, event) => {
+      recorded.push(event);
+      const kind = ({ intent: 'merge.intent', pushed: 'merge.pushed', reconciled: 'merge.reconciled', refused: 'merge.refused', trial: 'merge.trial' } as const)[event.kind];
+      const payload = event.kind === 'intent' ? { key: target.key, head: event.head, baseTip: event.baseTip, mergeSha: event.mergeSha, risk: event.risk, at: event.at }
+        : event.kind === 'refused' ? { head: event.head, reason: event.reason, kind: 'merge' } : event;
+      events.push({ kind, payload, work: target.key });
+    },
+    flaked: flake => { flakes.push(flake); },
+  };
+  return { merge, events, recorded, flakes };
+}
+function cycleOf(work: Work[], effects: Partial<DaemonEffects>, state = emptyDaemonState(config), at = clock): Cycle {
+  return { config, state, effects: { persist: async () => {}, ...effects } as DaemonEffects, snapshot: { work, now: iso(at) }, clock: at, now: () => at, performed: [], open: work.filter(entry => entry.stage !== 'done'),
+    isolate: async (_kind: unknown, _item: unknown, _name: unknown, body: () => Promise<unknown>) => body() } as unknown as Cycle;
+}
+function filer() {
+  const filed: { title: string; description: string; key: string }[] = [];
+  const file = async (body: { title: string; description: string }, key: string) => { filed.push({ title: body.title, description: body.description, key }); return { key: `GY-${900 + filed.length}` } as Work; };
+  return { filed, file };
+}
+function memoryStore(): FlakeLedgerStore & { ledger: FlakeLedger } {
+  const store = { ledger: { version: 1, entries: [], read: {}, filed: {} } as FlakeLedger, read: async () => structuredClone(store.ledger), write: async (ledger: FlakeLedger) => { store.ledger = structuredClone(ledger); } };
+  return store;
+}
+
+test('unit:failure-attributed-to-base-or-flake — a head whose failing tests also fail on the base tip is held with the base failure named, never sent to rework, and its fix item filed at once', async () => {
+  // The trial fails a test file on the head; it fails again on its rerun and on the base tip.
+  const rerun = retest({ failed: [shared], names: [sharedName] }, { failed: [shared], names: [sharedName] });
+  const run = await attributeFailures(first([shared]), tap(sharedName), input, git, rerun.fn);
+  assert.deepEqual(rerun.calls, [{ sha: mergeSha, files: [shared] }, { sha: tip, files: [shared] }], 'rerun on the same merge commit, then on the base tip (its first parent)');
+  assert.deepEqual(run.base, { tip, files: [shared], tests: [sharedName] });
+
+  const work = item(), fake = ports(run);
+  const outcome = await mergeOne(fake.merge, work);
+  assert.equal(outcome.outcome, 'requeued', 'a base failure is held, not refused: the merge writer requests rework only for a refused outcome');
+  assert.ok(outcome.outcome === 'requeued' && outcome.reason.startsWith(baseFailurePrefix) && !outcome.reason.startsWith(trialFailurePrefix));
+  assert.ok(outcome.outcome === 'requeued' && outcome.reason.includes(tip) && outcome.reason.includes(sharedName), 'the hold names the base tip and the failing test');
+  assert.ok(!fake.recorded.some(event => event.kind === 'pushed'), 'nothing is pushed');
+
+  // The ledger shows the hold; the queue keeps the head out for the hold, then trials it again.
+  work.mergeLedger = foldMergeLedger(fake.events)[work.key];
+  assert.equal(work.mergeLedger!.state, 'refused');
+  assert.equal(mergeQueue([work], { [work.key]: work.mergeLedger! }, clock + 60_000).next, null, 'held: not trialled again on every cycle');
+  assert.equal(mergeQueue([work], { [work.key]: work.mergeLedger! }, clock + baseFailureHoldMs + 1).next?.key, work.key, 'after the hold it is trialled again on the then tip');
+
+  // The loop files the fix item at once, naming the test and the base tip; one item however many cycles.
+  const { filed, file } = filer(), state = emptyDaemonState(config);
+  await baseFailureStep(cycleOf([work], { fileBaseFailure: file as never }, state));
+  await baseFailureStep(cycleOf([work], { fileBaseFailure: file as never }, state, clock + 60_000));
+  assert.equal(filed.length, 1);
+  assert.match(filed[0].title, /^Base branch main fails trial test: unit:reconcile-lock-hold-bounded/);
+  assert.ok(filed[0].description.includes(tip) && filed[0].description.includes('GY-1'));
+
+  // A file that fails on the head and passes on the base is the head's: refused, and the rework it grounds follows.
+  const own = await attributeFailures(first([shared]), tap(sharedName), input, git, retest({ failed: [shared] }, { failed: [] }).fn);
+  assert.equal(own.base, undefined);
+  const refused = await mergeOne(ports(own).merge, item());
+  assert.ok(refused.outcome === 'refused' && refused.reason.startsWith(trialFailurePrefix));
+});
+
+test('unit:failure-attributed-to-base-or-flake — a failing test that passes on an immediate rerun of the same head is judged on the rerun and its first flake files one fix item', async () => {
+  const rerun = retest({ failed: [] }, { failed: [] });
+  const run = await attributeFailures(first([flaky]), tap(flakyName), input, git, rerun.fn);
+  assert.deepEqual(rerun.calls, [{ sha: mergeSha, files: [flaky] }], 'a file that passes on its rerun is never run on the base');
+  assert.deepEqual(run.tests.failed, [], 'the verdict is the rerun\'s');
+  assert.deepEqual(run.flaked, { files: [flaky], tests: [flakyName] });
+
+  const fake = ports(run);
+  const outcome = await mergeOne(fake.merge, item());
+  assert.equal(outcome.outcome, 'merged', 'the head lands on its rerun');
+  assert.deepEqual(fake.flakes.map(flake => [flake.key, flake.mergeSha, flake.tests]), [['GY-1', mergeSha, [flakyName]]]);
+
+  // The flake ledger takes the trial flake and files the fix item on its first flake: the test is no proof of GY-1.
+  const store = memoryStore(), { filed, file } = filer();
+  const { noteTrialFlake } = await import('../src/model/flake-ledger.js');
+  for (const flake of fake.flakes) noteTrialFlake(flake);
+  await flakeStep(cycleOf([], { flakeLedger: store, fileFaultClass: file as never }));
+  assert.deepEqual(filed.map(entry => entry.title), [`Flaky test: ${flakyName}`]);
+  assert.match(filed[0].description, /first flake/);
+  await flakeStep(cycleOf([], { flakeLedger: store, fileFaultClass: file as never }, emptyDaemonState(config), clock + 60_000));
+  assert.equal(filed.length, 1, 'one fix item');
+
+  // A PR check rerun that passed: the first flake of a test that is no proof of its item files too; a flake of the item's own proof waits for the threshold.
+  const rerunOf = (n: number, proofs: string[]) => ({ ...item({ id: `w${n}`, key: `GY-${n}`, criteria: [{ id: 'AC-1', text: 'Works', proofs }], submission: { epoch: 1, pr: n } }),
+    checkReruns: [{ sha: sha(`h${n}`), check: 'test', failedRunId: 500 + n, state: 'passed', at: iso(clock - 120_000), rerunId: 600 + n, resolvedAt: iso(clock - 60_000) }] }) as unknown as Work;
+  const pr = filer(), prStore = memoryStore();
+  const logs: Record<number, string[]> = { 502: ['unit:other-thing — another'], 503: ['unit:own-proof — the item\'s own proof'] };
+  await flakeStep(cycleOf([rerunOf(2, [ownProof]), rerunOf(3, ['unit:own-proof'])], { flakeLedger: prStore, fileFaultClass: pr.file as never, failedTests: async (job: number) => logs[job] ?? [] }));
+  assert.deepEqual(pr.filed.map(entry => entry.title), ['Flaky test: unit:other-thing — another']);
+});
+
+test('unit:failure-attributed-to-base-or-flake — a failing test that is a criterion\'s proof always holds the item, even when it passes on rerun or fails on the base too', async () => {
+  // The proof file passes on its rerun and fails on the base: neither sets it aside.
+  const rerun = retest({ failed: [] }, { failed: [proofFile] });
+  const run = await attributeFailures(first([proofFile]), tap(`${ownProof} — works`), input, git, rerun.fn);
+  assert.deepEqual(rerun.calls, [], 'a proof file is never rerun to excuse it');
+  assert.deepEqual(run.tests.failed, [proofFile]);
+  assert.equal(run.flaked, undefined);
+  assert.equal(run.base, undefined);
+  const outcome = await mergeOne(ports(run).merge, item());
+  assert.ok(outcome.outcome === 'refused' && outcome.reason.startsWith(trialFailurePrefix), 'the head is refused and the rework it grounds follows');
+
+  // With a flaky non-proof file beside it, the flake is excused but the proof still holds the head.
+  const mixed = await attributeFailures(first([proofFile, flaky]), tap(`${ownProof} — works`, flakyName), input, git, retest({ failed: [] }, { failed: [] }).fn);
+  assert.deepEqual(mixed.tests.failed, [proofFile]);
+  assert.equal((await mergeOne(ports(mixed).merge, item())).outcome, 'refused');
+
+  // Under GitHub delivery, a base failure that names the candidate's own proof is never set aside.
+  const observed = item({ submission: { epoch: 1, pr: 7 }, candidate: { sha: head, baseSha: tip },
+    observation: { candidate: { sha: head }, checks: [{ name: 'test', result: 'failure', appId: 15368, id: 70, attempt: 1 }], merged: false, prState: 'open' } });
+  const effects = { failedTests: async () => [`${ownProof} — works`], baseCheck: async () => ({ check: 'test', baseSha: tip, state: 'failed' as const, jobId: 80, url: null, tests: [`${ownProof} — works`] }) };
+  const setAside = await baseFailureStep(cycleOf([observed], effects as never));
+  assert.equal(setAside.has(observed.id), false, 'the failure stays the candidate\'s: its rework proceeds');
+  const other = { ...effects, failedTests: async () => [sharedName], baseCheck: async () => ({ check: 'test', baseSha: tip, state: 'failed' as const, jobId: 80, url: null, tests: [sharedName] }) };
+  assert.deepEqual([...(await baseFailureStep(cycleOf([observed], other as never))).get(observed.id) ?? []], ['test'], 'a shared failure of a non-proof test is set aside as before');
+});
+
+// ---- AC-2: the main guard ----------------------------------------------------------------------
+
+const ci = 15368, required = ['test', 'typecheck'], at = iso(clock);
+const mergeDiff: FileChange[] = [{ filename: 'src/added.ts', status: 'added', patch: '@@ -0,0 +1,1 @@\n+export const a = 1;' }];
+function delivered(key: string, merge: string, pr: number): Work {
+  return { ...item({ id: `id-${key}`, key, stage: 'done', delivery: { mergedAt: at, mergeSha: merge, authorizationRevision: 1 }, submission: { epoch: 1, pr } }) } as Work;
+}
+
+test('unit:revert-closed-when-base-fails — the main guard closes, without landing, a revert whose own CI fails the same tests as main, and one fix item names those tests', async () => {
+  const failing = [`tests/locked-read.test.ts › ${sharedName}`];
+  const [base, A, B] = ['base', 'a', 'b'].map(sha);
+  const history: MainCommit[] = [{ sha: B, parent: A }, { sha: A, parent: base }, { sha: base, parent: null }];
+  const culprit = delivered('GY-2', B, 702), items = [delivered('GY-1', A, 701), culprit];
+  const named = (id: number, tests?: string[]): CheckRun[] => [{ name: 'test', result: tests ? 'failure' : 'success', appId: ci, id }, { name: 'typecheck', result: 'success', appId: ci, id: id + 1 }];
+  const checks = new Map<string, CheckRun[]>([[base, named(100)], [A, named(200)], [B, named(300, failing)]]);
+  const annotations = new Map<number, string[]>([[300, failing]]);
+  const pulls = new Map<number, { merged: boolean; mergeSha: string | null; open: boolean; mergeable: boolean | null; head: string }>();
+  const calls = { opened: [] as string[], merged: [] as number[], closed: [] as number[], approved: [] as number[] };
+  const guard: MainGuardPorts = {
+    reverting: async () => items.filter(work => work.mainGuardReverts?.some(revert => revert.state === 'opened')),
+    culprit: async merge => items.find(work => work.delivery?.mergeSha === merge || work.mainGuardReverts?.some(revert => revert.mergeSha === merge)) ?? null,
+    history: async () => history, checks: async commit => checks.get(commit) ?? [],
+    openRevert: async (_work, merge) => { calls.opened.push(merge); pulls.set(900, { merged: false, mergeSha: null, open: true, mergeable: true, head: sha('revert') }); return { pr: 900, head: sha('revert') }; },
+    pull: async pr => pulls.get(pr)!, mergeChanges: async () => mergeDiff,
+    revertChanges: async () => mergeDiff.map(change => ({ ...change, status: 'removed', patch: change.patch!.replace('+export', '-export') })),
+    approveRevert: async pr => { calls.approved.push(pr); return 'approved'; },
+    mergeRevert: async (_work, revert) => { calls.merged.push(revert.pr); return sha('landed'); },
+    closeRevert: async pr => { calls.closed.push(pr); pulls.set(pr, { ...pulls.get(pr)!, open: false }); },
+    failedTests: async run => annotations.get(run) ?? null,
+    standingBaseFailures: async () => items.flatMap(work => (work.mainGuardReverts ?? []).filter(revert => revert.cause === 'base-failure' && revert.baseFailure && !revert.baseFailure.cleared).map(revert => ({ work, revert }))),
+    record: async (snapshot, revert) => { applyMainGuardRevert(items.find(work => work.id === snapshot.id)!, revert, new Date(at)); },
+  };
+  const options = { required, ciAppIds: [ci], now: new Date(at), verdicts: new Map<string, CommitVerdict>(), reruns: new Map(), runIds: new Map<string, Record<string, number | null>>(), testNames: new Map<number, string[] | null>() };
+
+  await runMainGuard(guard, options);
+  assert.deepEqual(calls.opened, [B], 'B broke main: its revert is opened');
+  // The revert's own CI fails the same test main fails: the failure holds without B, so it is main's.
+  checks.set(sha('revert'), named(400, failing)); annotations.set(400, failing);
+  await runMainGuard(guard, options);
+  const revert = culprit.mainGuardReverts![0];
+  assert.deepEqual(calls.closed, [900], 'the revert is closed');
+  assert.deepEqual(calls.merged, [], 'it never lands');
+  assert.deepEqual(calls.approved, [], 'nor is it approved');
+  assert.equal(revert.state, 'abandoned');
+  assert.equal(revert.cause, 'base-failure');
+  assert.equal(culprit.stage, 'done', 'the merge keeps its delivery: no rework');
+
+  // The loop files one fix item naming those tests, at once, and no second one on later cycles.
+  const { filed, file } = filer(), state = emptyDaemonState(config);
+  for (let n = 0; n < 3; n++) await baseFailureStep(cycleOf(items, { fileBaseFailure: file as never }, state, clock + n * 60_000));
+  assert.equal(filed.length, 1);
+  assert.ok(filed[0].title.includes(failing[0]), filed[0].title);
+  assert.ok(filed[0].description.includes(B) && filed[0].description.includes('GY-2'));
+  // Main passes again: the guard clears the shared failure and the loop drops its record.
+  culprit.mainGuardReverts = [{ ...revert, baseFailure: { ...revert.baseFailure!, cleared: { at, sha: sha('fixed') } } }];
+  await baseFailureStep(cycleOf(items, { fileBaseFailure: file as never }, state, clock + 5 * 60_000));
+  assert.deepEqual(Object.keys(state.baseFailures), []);
+  assert.equal(filed.length, 1);
+});
