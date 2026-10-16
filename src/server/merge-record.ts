@@ -10,6 +10,7 @@ import { save } from '../store.js';
 import { lockedWork } from '../store/locked-read.js';
 import { gitRunnerFor, type GitRunner } from '../merge-writer/local-observation.js';
 import { mergeRecordKinds, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { trialPhases, type TrialPhase } from '../merge-writer/trial.js';
 import { applyCandidateRevert, candidateRevertReason, revertLedgerKind, type CandidateRevert } from '../release-revert.js';
 import type { Engine } from '../engine.js';
 import type { Services } from './routes.js';
@@ -31,10 +32,19 @@ import type { Services } from './routes.js';
 const sha = z.string().regex(/^[0-9a-f]{40}$/i).transform(value => value.toLowerCase());
 const instant = z.string().max(64).refine(value => Number.isFinite(Date.parse(value)), 'an ISO 8601 instant');
 const tests = z.object({ passed: z.number().int().min(0), failed: z.array(z.string().max(300)).max(100), files: z.number().int().min(0) }).strict();
+const trialPhase = z.enum(trialPhases), trialNoVerdictOutcome = z.enum(['timeout', 'cancelled', 'host-failure']);
+const trialPhaseDurations = z.object(Object.fromEntries(trialPhases.map(phase => [phase, z.number().min(0)])) as Record<TrialPhase, z.ZodNumber>).strict();
+const trialAttempts = z.array(z.object({ outcome: trialNoVerdictOutcome, phase: trialPhase, reason: z.string().max(1000), phases: trialPhaseDurations }).strict()).max(10);
 export const mergeRecordBodySchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('intent'), head: sha, baseTip: sha, mergeSha: sha, risk: z.string().min(1).max(40), at: instant }).strict(),
-  z.object({ kind: z.literal('trial'), head: sha, baseTip: sha, mergeSha: sha, build: z.enum(['pass', 'fail']), tests, files: z.array(z.string().max(500)).max(1000),
-    proofs: z.record(z.string().max(200), z.object({ executed: z.number().int().min(0), failed: z.number().int().min(0) }).strict()), durationMs: z.number().int().min(0), preview: previewVerdictSchema.optional() }).strict(),
+  // GY-1832: a trial is a verdict, with its phases' times and the attempts before it that reached none, or a final no-verdict outcome naming its phase and reason.
+  z.discriminatedUnion('outcome', [
+    z.object({ kind: z.literal('trial'), head: sha, baseTip: sha, mergeSha: sha, outcome: z.literal('verdict'), build: z.enum(['pass', 'fail']), tests, files: z.array(z.string().max(500)).max(1000),
+      proofs: z.record(z.string().max(200), z.object({ executed: z.number().int().min(0), failed: z.number().int().min(0) }).strict()), durationMs: z.number().int().min(0),
+      phases: trialPhaseDurations.optional(), attempts: trialAttempts, preview: previewVerdictSchema.optional() }).strict(),
+    z.object({ kind: z.literal('trial'), head: sha, baseTip: sha, mergeSha: sha, outcome: trialNoVerdictOutcome, phase: trialPhase, reason: z.string().min(1).max(1000),
+      phases: trialPhaseDurations, attempts: trialAttempts.min(1), durationMs: z.number().int().min(0) }).strict(),
+  ]),
   z.object({ kind: z.literal('pushed'), mergeSha: sha, pushedAt: instant }).strict(),
   z.object({ kind: z.literal('reconciled'), mergeSha: sha, observedTip: sha }).strict(),
   z.object({ kind: z.literal('refused'), head: sha, reason: z.string().min(1).max(2000) }).strict(),

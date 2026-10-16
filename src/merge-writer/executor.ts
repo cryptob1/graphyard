@@ -5,7 +5,7 @@ import { mergeLedgerKinds, type MergeLedgerState } from '../model/merge-ledger.j
 import { trialFailurePrefix } from '../model/rework-ground.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { submittedAtOf } from './shadow.js';
-import { runTrial, TrialCleanupError, type RunTrialInput, type TrialRun } from './trial.js';
+import { runTrial, trialAttempts, TrialCleanupError, type RunTrialInput, type TrialNoVerdict, type TrialNoVerdictOutcome, type TrialPhase, type TrialPhaseDurations, type TrialRun } from './trial.js';
 import { previewFailureReason, type PreviewVerdict } from './preview.js';
 
 /**
@@ -73,8 +73,15 @@ export interface MergeTrialRun extends TrialRun { files: string[]; proofs: Proof
 /** What `POST /api/work/:id/merge-record` takes: one of the five steps, with its ledger payload. */
 export type MergeRecordEvent =
   | { kind: 'intent'; head: string; baseTip: string; mergeSha: string; risk: string; at: string }
-  | { kind: 'trial'; head: string; baseTip: string; mergeSha: string; build: 'pass' | 'fail'; tests: TrialRun['tests']; files: string[]; proofs: ProofCounts; durationMs: number;
+  | { kind: 'trial'; head: string; baseTip: string; mergeSha: string; outcome: 'verdict'; build: 'pass' | 'fail'; tests: TrialRun['tests']; files: string[]; proofs: ProofCounts; durationMs: number;
+    /** Each phase's time (GY-1832), and the attempts before the verdict that reached none, oldest first. */ phases?: TrialPhaseDurations; attempts: TrialNoVerdict[];
     /** The preview's verdict (GY-1718), when the passing trial was previewed. */ preview?: PreviewVerdict }
+  /**
+   * A trial that reached no verdict on its retry either (GY-1832): its final outcome, the phase and
+   * reason, the phases' times and every attempt. It carries no proofs, so the ledger fold keeps no
+   * trial for it; the intent it leaves open is refused and the head queued again by the next cycle.
+   */
+  | { kind: 'trial'; head: string; baseTip: string; mergeSha: string; outcome: TrialNoVerdictOutcome; phase: TrialPhase; reason: string; phases: TrialPhaseDurations; attempts: TrialNoVerdict[]; durationMs: number }
   | { kind: 'pushed'; mergeSha: string; pushedAt: string }
   | { kind: 'reconciled'; mergeSha: string; observedTip: string }
   | { kind: 'refused'; head: string; reason: string };
@@ -309,12 +316,21 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     const { mergeSha } = merged;
     // The intent first (AC-2): a crash from here on is reconciled against the base, never repeated blindly.
     await ports.record(item, { kind: 'intent', head, baseTip, mergeSha, risk: riskOf(item).risk, at: at() });
-    const run = await ports.trial(mergeSha, merged.files, item);
+    let run: MergeTrialRun;
+    try { run = await ports.trial(mergeSha, merged.files, item); }
+    catch (error) {
+      // No verdict after the retry (GY-1832): the trial's record is its final outcome, never left pending.
+      const attempts = trialAttempts(error), last = attempts.at(-1)!;
+      await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: last.outcome, phase: last.phase, reason: last.reason, phases: last.phases, attempts,
+        durationMs: Math.round(Object.values(last.phases).reduce((sum, value) => sum + value, 0)) });
+      throw error;
+    }
     const trialFailure = trialFailureReason({ run });
     // A preview that throws (a host failure, not the merge's) is recorded and refused as one that could not run, never left as an open intent.
     const preview = !trialFailure && ports.preview ? await ports.preview(mergeSha, merged.files, item).catch((error: unknown): PreviewVerdict =>
       ({ result: 'error', mergeSha, cases: [], failed: [], detail: (error instanceof Error ? error.message : String(error)).slice(0, 900), durationMs: 0 })) : null;
-    await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, build: run.build, tests: run.tests, files: run.files, proofs: run.proofs, durationMs: run.durationMs, ...(preview ? { preview } : {}) });
+    await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: 'verdict', build: run.build, tests: run.tests, files: run.files, proofs: run.proofs, durationMs: run.durationMs,
+      ...(run.phases ? { phases: run.phases } : {}), attempts: run.retried ?? [], ...(preview ? { preview } : {}) });
     const failure = trialFailure ?? previewFailureReason(preview, trialFailurePrefix);
     if (failure) {
       await ports.record(item, { kind: 'refused', head, reason: failure });

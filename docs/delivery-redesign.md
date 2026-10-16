@@ -14,7 +14,7 @@ Only Graphyard writes to main.
 
 ## Merge writer
 
-Oldest head first, one in flight: `merge.intent`; trial on the merge commit (affected tests plus proof files; none without `scripts/ci-tests.mjs`, no build without `package.json`; failed probes are runner failures; tests in parallel shards on half the cores; `phases` times each phase; a timeout, cancel or host failure retries once, then records phase and reason); `git push --force-with-lease` on the tested tip with `run.mergeWriter.deployKeyFile` (`~/.config/graphyard/<install>/deploy-key`) alone; `merge.pushed`; fetch; `merge.reconciled` delivers. A moved tip re-trials (`retrials`, 3); a push rejected on an unmoved tip waits; a failed trial reworks (`mergeWriter.reworks` until confirmed). Reconcile rule: an unpushed intent main's first parent holds delivers, else re-queues. `master status`: `mergeWriter.queue`.
+Oldest head first, one in flight: `merge.intent`; trial on the merge commit (affected tests plus proof files; none without `scripts/ci-tests.mjs`, no build without `package.json`; failed probes are runner failures; tests sharded over half the cores; timeout, cancel or host failure (failed checkout, killed child) retries once; `merge.trial` records `outcome`, `phase`, `reason`, `phases`, `attempts`); `git push --force-with-lease` on the tested tip with `run.mergeWriter.deployKeyFile` (`~/.config/graphyard/<install>/deploy-key`) alone; `merge.pushed`; fetch; `merge.reconciled` delivers. A moved tip re-trials (`retrials`, 3); an unmoved-tip rejection waits; a failed trial reworks (`mergeWriter.reworks` until confirmed). Reconcile rule: an unpushed intent main's first parent holds delivers, else re-queues. `master status`: `mergeWriter.queue`.
 
 ## Removed and kept
 

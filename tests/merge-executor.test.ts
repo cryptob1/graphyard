@@ -124,7 +124,7 @@ test('unit:executor-intent-recorded-before-push — mergeOne records intent, tri
   assert.deepEqual(clean.events.map(event => event.kind), ['intent', 'trial', 'pushed', 'reconciled']);
   assert.deepEqual(clean.events[0], { kind: 'intent', head: sha('head1'), baseTip: tip, mergeSha, risk: 'normal', at: iso(start) });
   const trial = clean.events[1]!;
-  assert.ok(trial.kind === 'trial' && trial.proofs['unit:item-works']?.executed === 1 && trial.files.length === 2, 'the trial record carries the per-proof counts and the files it ran');
+  assert.ok(trial.kind === 'trial' && trial.outcome === 'verdict' && trial.proofs['unit:item-works']?.executed === 1 && trial.files.length === 2, 'the trial record carries the per-proof counts and the files it ran');
   assert.deepEqual(clean.events[2], { kind: 'pushed', mergeSha, pushedAt: iso(start) });
   assert.deepEqual(clean.events[3], { kind: 'reconciled', mergeSha, observedTip: tip });
   // A sensitive delta is intended as such.

@@ -232,7 +232,7 @@ export class TrialTimeoutError extends Error {
  * trial merge sha. The child ran under `trialEnvironment`, so the tail holds no credential.
  */
 export class TrialRunnerError extends Error {
-  constructor(readonly phase: 'install' | 'build' | 'tests', readonly status: number | null, readonly signal: string | null, readonly files: string[], readonly finished: number, readonly outputTail: string, readonly mergeSha: string, readonly durationMs: number) {
+  constructor(readonly phase: 'install' | 'build' | 'selection' | 'tests', readonly status: number | null, readonly signal: string | null, readonly files: string[], readonly finished: number, readonly outputTail: string, readonly mergeSha: string, readonly durationMs: number) {
     super(`The trial's ${phase} runner exited (${signal ? `signal ${signal}` : `status ${status ?? 'unknown'}`}) naming no failing test${files.length ? `; ${finished} of its ${files.length} file(s) finished` : ''}`);
     this.name = 'TrialRunnerError';
   }
@@ -526,12 +526,15 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       }
       if (!await holds('scripts/ci-tests.mjs')) return finish('pass', { passed: 0, failed: [], files: 0 });
       enter('selection');
+      // A selection child the host killed or could not start is no verdict (GY-1832); only one that exits non-zero fails the selection.
       const selection = await child('selection', 'node', ['scripts/ci-tests.mjs', 'affected', ...input.changedFiles]);
+      if (hostEnded(selection)) throw runnerFailure('selection', selection);
       if (!selection.ok) return finish('pass', { passed: 0, failed: ['scripts/ci-tests.mjs affected'], files: 0 });
       let files = listed(selection.out);
       // A merge whose own ci-tests predates GY-1522 lists no files for a full selection; `select` outside Actions lists exactly the pre-merge suite.
       if (!files.length && /^full:/.test(selection.out.trimStart())) {
         const full = await child('selection', 'node', ['scripts/ci-tests.mjs', 'select']);
+        if (hostEnded(full)) throw runnerFailure('selection', full);
         if (!full.ok) return finish('pass', { passed: 0, failed: ['scripts/ci-tests.mjs select'], files: 0 });
         files = listed(full.out);
       }
@@ -581,8 +584,9 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     } catch (error) {
       if (error instanceof TrialTimeoutError || error instanceof TrialRunnerError) throw error;
       log.push(`trial checkout failed: ${error instanceof Error ? error.message : String(error)}`);
-      if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError('install', Math.max(0, now() - startedAt), tail());
-      return finish('fail', { passed: 0, failed: [], files: 0 });
+      if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError(phase, Math.max(0, now() - startedAt), tail());
+      // A checkout git could not make, a list or link the host could not write: the host's failure, not the merge's (GY-1832), so no verdict.
+      throw error;
     }
   };
   // The checkout goes whatever the trial did; a removal that fails is reported, never swallowed.

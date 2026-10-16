@@ -4,7 +4,9 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ChildRun } from '../src/child-runner.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
-import { runMergeTrial, type MergeTrialInput } from '../src/merge-writer/executor.js';
+import type { Work } from '../src/model.js';
+import { mergeOne, runMergeTrial, type MergePorts, type MergeRecordEvent, type MergeTrialInput } from '../src/merge-writer/executor.js';
+import { mergeRecordBodySchema } from '../src/server/merge-record.js';
 import { runTrial, shardTestFiles, trialAttempts, trialNoVerdict, trialPhases, trialRetries, trialShardLanes, trialTestGroupSize, TrialRunnerError, TrialTimeoutError } from '../src/merge-writer/trial.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -24,13 +26,15 @@ const proofsOf = (index: number) => index % 3 === 0 ? ['unit:alpha-works'] : ind
  * TAP cases for that file's proofs and a duration record, failing the files `failing` names. The
  * clock advances by each phase's cost, and the runner processes in flight are counted.
  */
-function repository(files: string[], options: { failing?: string[]; baseline?: Record<string, number>; runner?: (attempt: number, list: string[]) => Error | null; build?: (attempt: number) => Error | null } = {}) {
+function repository(files: string[], options: { failing?: string[]; baseline?: Record<string, number>; runner?: (attempt: number, list: string[]) => Error | null; build?: (attempt: number) => Error | null; checkout?: (attempt: number) => Error | null; selection?: (attempt: number) => Error | null } = {}) {
   let clock = Date.parse('2030-03-01T00:00:00Z'), inFlight = 0;
   const seen = { maxInFlight: 0, lists: [] as string[][], concurrency: [] as string[], attempts: 0, builds: 0 };
   const failing = new Set(options.failing ?? []);
   const run: ChildRun = async (command, args) => {
     if (command === 'git' && args[2] === 'worktree' && args[3] === 'add') {
       seen.attempts += 1;
+      const refused = options.checkout?.(seen.attempts);
+      if (refused) throw refused;
       // The merge's own timing baseline, as the checkout holds it.
       if (options.baseline) { await mkdir(join(args[5]!, 'tests/helpers'), { recursive: true }); await writeFile(join(args[5]!, 'tests/helpers/timing-baseline.json'), JSON.stringify({ files: options.baseline })); }
       return '';
@@ -42,7 +46,12 @@ function repository(files: string[], options: { failing?: string[]; baseline?: R
       if (error) throw error;
       return '';
     }
-    if (command === 'node' && args[0] === 'scripts/ci-tests.mjs') { clock += 300; return `affected: ${files.length} test files\n${files.join('\n')}\n`; }
+    if (command === 'node' && args[0] === 'scripts/ci-tests.mjs') {
+      clock += 300;
+      const error = options.selection?.(seen.attempts);
+      if (error) throw error;
+      return `affected: ${files.length} test files\n${files.join('\n')}\n`;
+    }
     if (command === 'node' && args.includes('tests/helpers/run-tests.ts')) {
       const list = (await readFile(args[args.indexOf('--files-from') + 1]!, 'utf8')).split('\n').filter(Boolean);
       seen.lists.push(list); seen.concurrency.push(args.find(arg => arg.startsWith('--test-concurrency='))!);
@@ -149,6 +158,10 @@ test('unit:trial-phases-and-no-pending — every trial records its install, buil
     { name: 'cancelled', options: { runner: () => failure({ signal: 'SIGTERM' }) }, outcome: 'cancelled', phase: 'tests', reason: /tests runner exited \(signal SIGTERM\)/, error: TrialRunnerError },
     { name: 'host failure', options: { build: () => failure({ cause: new Error('spawn npm ENOENT') }) }, outcome: 'host-failure', phase: 'build', reason: /build runner exited/, error: TrialRunnerError },
     { name: 'runner exit naming no test', options: { runner: () => failure({ status: 3 }) }, outcome: 'host-failure', phase: 'tests', reason: /naming no failing test/, error: TrialRunnerError },
+    // The host's failures before any test ran are no verdict either, never a failing build or selection: a checkout git could not make, a selection child the host killed or could not start.
+    { name: 'checkout git could not make', options: { checkout: () => failure({ status: 128, stdout: '' }) }, outcome: 'host-failure', phase: 'install', reason: /Command failed/, error: Error },
+    { name: 'selection killed', options: { selection: () => failure({ signal: 'SIGKILL' }) }, outcome: 'host-failure', phase: 'selection', reason: /selection runner exited \(signal SIGKILL\)/, error: TrialRunnerError },
+    { name: 'selection could not start', options: { selection: () => failure({ cause: new Error('spawn node ENOENT') }) }, outcome: 'host-failure', phase: 'selection', reason: /selection runner exited/, error: TrialRunnerError },
   ] as const;
   for (const entry of cases) {
     const repo = repository(files, entry.options);
@@ -162,7 +175,7 @@ test('unit:trial-phases-and-no-pending — every trial records its install, buil
       assert.deepEqual([attempt.outcome, attempt.phase], [entry.outcome, entry.phase], entry.name);
       assert.match(attempt.reason, entry.reason);
       assert.deepEqual(Object.keys(attempt.phases), [...trialPhases]);
-      assert.equal(attempt.phases.install, 1000, `${entry.name}: the phases reached are timed`);
+      if (entry.phase !== 'install') assert.equal(attempt.phases.install, 1000, `${entry.name}: the phases reached are timed`);
     }
     assert.deepEqual(trialNoVerdict(caught), attempts[1], `${entry.name}: the error itself names the last attempt's outcome`);
   }
@@ -177,4 +190,40 @@ test('unit:trial-phases-and-no-pending — every trial records its install, buil
   const once = repository(files, { runner: () => failure({ signal: 'SIGTERM' }) });
   await assert.rejects(runTrial(await input(once, { cores: 1, retries: 0 })), TrialRunnerError);
   assert.equal(once.seen.attempts, 1);
+});
+
+test('unit:trial-phases-and-no-pending — the merge writer\'s trial record carries the phases\' times and the attempts that reached no verdict, and a trial that reached none after its retry is recorded with its final outcome, phase and reason before the merge fails, in the shape the coordinator\'s merge-record route accepts', async () => {
+  const files = ['tests/a.test.ts', 'tests/b.test.ts'], head = 'b'.repeat(40), tip = 'c'.repeat(40);
+  const work = { id: 'w1832', key: 'GY-1832', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:alpha-works'] }], plannedFiles: [], mergeLedger: null, submission: { epoch: 1, pr: 1 },
+    candidate: { sha: head, baseSha: tip, pr: 1, branch: 'graphyard/gy-1832-1', author: 'worker' }, observation: { source: 'control-plane', candidate: { sha: head }, files: ['src/app.ts'] } } as unknown as Work;
+  const merging = async (repo: ReturnType<typeof repository>) => {
+    const events: MergeRecordEvent[] = [], base = await input(repo, { cores: 1 });
+    const ports: MergePorts = { baseBranch: 'main', retrials: 0, now: repo.now, fetch: async () => tip, merge: async () => ({ mergeSha, files: ['src/app.ts'] }),
+      trial: async (sha, changed) => runMergeTrial({ ...base, mergeSha: sha, changedFiles: [...changed] }), push: async () => 'pushed', holds: async () => false,
+      record: async (_item, event) => { events.push(event); } };
+    return { events, outcome: await mergeOne(ports, work).catch((error: unknown) => error) };
+  };
+  // A verdict on the retry: the record names every phase's time and the attempt before it that timed out.
+  const retried = await merging(repository(files, { runner: attempt => attempt === 1 ? failure({ timedOut: true, signal: 'SIGKILL' }) : null }));
+  assert.equal((retried.outcome as { outcome?: string }).outcome, 'merged', String(retried.outcome));
+  const verdict = retried.events.find(event => event.kind === 'trial')!;
+  assert.ok(verdict.kind === 'trial' && verdict.outcome === 'verdict');
+  assert.deepEqual(verdict.phases, { install: 1000, build: 2000, selection: 300, tests: 5000 });
+  assert.deepEqual(verdict.attempts.map(entry => [entry.outcome, entry.phase]), [['timeout', 'tests']]);
+  // No verdict after the retry: the merge fails, but only after the trial's record names the final outcome, its phase and reason, and both attempts.
+  const cancelled = await merging(repository(files, { runner: () => failure({ signal: 'SIGTERM' }) }));
+  assert.ok(cancelled.outcome instanceof TrialRunnerError);
+  assert.deepEqual(cancelled.events.map(event => event.kind), ['intent', 'trial'], 'the trial is recorded, nothing pushed');
+  const final = cancelled.events[1]!;
+  assert.ok(final.kind === 'trial' && final.outcome === 'cancelled');
+  assert.equal(final.phase, 'tests');
+  assert.match(final.reason, /signal SIGTERM/);
+  assert.deepEqual(final.attempts.map(entry => entry.outcome), ['cancelled', 'cancelled']);
+  assert.deepEqual(final.phases, { install: 1000, build: 2000, selection: 300, tests: 5000 });
+  assert.equal(final.durationMs, 8300);
+  assert.equal('proofs' in final, false, 'no proofs, so the ledger fold keeps no trial for an attempt that reached no verdict');
+  // Both records are what the coordinator's route accepts, and a no-verdict record never names an outcome of pending.
+  for (const event of [verdict, final]) assert.deepEqual(mergeRecordBodySchema.parse(event), event);
+  assert.throws(() => mergeRecordBodySchema.parse({ ...final, outcome: 'pending' }));
+  assert.throws(() => mergeRecordBodySchema.parse({ ...final, phase: undefined }));
 });
