@@ -11,9 +11,12 @@ import { MergerSettings } from '../src/merger-mode.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import { CHECK_NAME, GitHub, observationThroughputStatus, processJob } from '../src/github.js';
 import { diagnosticianEffects, diagnosisPrompt } from '../src/daemon/diagnosis.js';
+import { doctorEffects, doctorPrompt } from '../src/daemon/doctor.js';
+import { doctorCommandVerdict } from '../integrations/pi/index.js';
 import { diagnosticianSettings } from '../src/runner/payloads.js';
 import { workerHarnessPlan } from '../src/master/harness.js';
 import { masterConfigSchema } from '../src/master/profiles.js';
+import { ReconciliationRetry } from '../src/model.js';
 import type { GitHubBudget } from '../src/github.js';
 import type { DiagnosisInput, DiagnosisSubject } from '../src/daemon/diagnosis.js';
 import type { Observation, Work } from '../src/model.js';
@@ -44,29 +47,43 @@ const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, 
  */
 class Api {
   main = sha('main-1');
-  pulls = new Map<number, { head: string; branch: string }>();
+  pulls = new Map<number, { head: string; branch: string; merged?: string | null }>();
+  /** Ancestor shas the fixture answers `ahead` for, keyed by head: a base the head's history holds. */
+  ancestryOf = new Map<string, Set<string>>();
   requests: { method: string; path: string }[] = [];
-  open(pr: number, head: string, branch: string) { this.pulls.set(pr, { head, branch }); }
+  open(pr: number, head: string, branch: string, merged?: string | null) { this.pulls.set(pr, { head, branch, merged }); }
   private body(method: string, path: string): unknown {
     if (method !== 'GET') return { id: 12 };
     const [route, query = ''] = path.replace(`/repos/${REPOSITORY}`, '').split('?'); const params = new URLSearchParams(query);
     if (route === '/git/ref/heads/main') return { ref: 'refs/heads/main', object: { type: 'commit', sha: this.main } };
+    if (route === '/commits' && params.get('path')) return [];
     if (route === '/commits' && params.get('sha') === 'main') return [{ sha: this.main, parents: [{ sha: sha('root') }], commit: { message: 'base', tree: { sha: sha(`tree-${this.main}`) } } }];
     let match = /^\/pulls\/(\d+)$/.exec(route);
     if (match) {
       const pr = this.pulls.get(Number(match[1])) ?? { head: sha(`unknown-${match[1]}`), branch: 'graphyard/unknown' };
-      return { number: Number(match[1]), state: 'open', draft: false, merged: false, mergeable: true, merge_commit_sha: null, merged_at: null, user: { login: 'implementer', id: 7 },
+      return { number: Number(match[1]), state: pr.merged ? 'closed' : 'open', draft: false, merged: !!pr.merged, mergeable: !pr.merged, merge_commit_sha: pr.merged ?? null, merged_at: pr.merged ? new Date(Date.now() - 3_600_000).toISOString() : null, user: { login: 'implementer', id: 7 },
         head: { sha: pr.head, ref: pr.branch, repo: { full_name: REPOSITORY } }, base: { sha: this.main, ref: 'main', repo: { full_name: REPOSITORY } } };
     }
     if (/^\/pulls\/(\d+)\/reviews$/.test(route)) return [];
     const files = /^\/pulls\/(\d+)\/files$/.exec(route);
-    if (files) return params.get('page') !== '1' ? [] : [{ filename: 'src/person.ts', status: 'modified', sha: sha(`blob-${files[1]}`), additions: 3, deletions: 1, patch: '@@' }];
+    if (files) {
+      // The file's blob is the one the head holds, so the reverted-delivery check (GY-93) finds the
+      // merge's content on the base and asks for no history.
+      const head = this.pulls.get(Number(files[1]))?.head ?? sha(`unknown-${files[1]}`);
+      return params.get('page') !== '1' ? [] : [{ filename: 'src/person.ts', status: 'modified', sha: sha(`blob-src/person.ts-${head}`), additions: 3, deletions: 1, patch: '@@' }];
+    }
     if (/^\/commits\/[a-f0-9]{40}\/check-runs$/.test(route)) return { check_runs: params.get('check_name') ? [] : [{ id: 1, name: 'test', status: 'completed', conclusion: 'success', app: { id: CI } }] };
     if (/^\/commits\/[a-f0-9]{40}\/status$/.test(route)) return { statuses: [], total_count: 0 };
+    if (/^\/contents\/.+/.test(route)) {
+      // A blob read (GY-863's ancestry questions, the reverted-delivery check): the file exists at
+      // every ref this fixture serves, at a stable sha per (path, ref).
+      const ref = new URLSearchParams(query).get('ref') ?? '';
+      return { type: 'file', sha: sha(`blob-${decodeURIComponent(route.slice(10))}-${ref}`), path: decodeURIComponent(route.slice(10)) };
+    }
     match = /^\/commits\/([a-f0-9]{40})$/.exec(route);
     if (match) return { sha: match[1], parents: [], commit: { tree: { sha: sha(`tree-${match[1]}`) }, message: 'change' }, author: { login: 'implementer' } };
     match = /^\/compare\/([a-f0-9]{40})\.\.\.([a-f0-9]{40})$/.exec(route);
-    if (match) return { status: match[1] === match[2] ? 'identical' : 'diverged', ahead_by: 1, total_commits: 1, commits: [{ sha: match[2] }], files: [{ filename: 'src/person.ts', status: 'modified', patch: '@@ -1 +1 @@\n-a\n+b' }] };
+    if (match) return { status: match[1] === match[2] ? 'identical' : this.ancestryOf.get(match[2])?.has(match[1]) ? 'ahead' : 'diverged', ahead_by: 1, total_commits: 1, commits: [{ sha: match[2] }], files: [{ filename: 'src/person.ts', status: 'modified', patch: '@@ -1 +1 @@\n-a\n+b' }] };
     if (route.endsWith('/protection')) return { required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true }, required_status_checks: { strict: false, checks: [{ context: CHECK_NAME, app_id: APP }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
     if (route === '/rules/branches/main') return [];
     if (route === '/check-runs' || /^\/check-runs\/\d+$/.test(route)) return { id: 12 };
@@ -100,6 +117,8 @@ class Api {
 
 let fixtureRoot: string, checkout: string;
 let postgres: InstanceType<typeof EmbeddedPostgres>, store: Store, engine: Engine, api: Api;
+/** The first test's two candidates, by id: the control-plane one and the person-opened one. */
+let controlPlaneItem = '', personItem = '';
 const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1835;
 
 /** One commit in a worktree, as a worker makes it. */
@@ -171,6 +190,7 @@ test('unit:no-github-polling-control-plane — with the merger set to control-pl
   api.open(77, person.head, 'graphyard/gy-2-1');
   await setMerger('control-plane', 'the control plane is the merge writer again');
   const localId = local.w.id, personId = person.w.id;
+  controlPlaneItem = localId; personItem = personId;
   assert.equal((await workOf(localId)).observation?.source, 'control-plane');
   assert.equal((await workOf(personId)).observation?.source ?? null, null, 'the person-opened pull request is GitHub\'s reading');
 
@@ -254,6 +274,38 @@ test('unit:doctor-reads-control-plane — under the control-plane merger the doc
     }
   }
 
+  // The loop doctor follows the merger the same way (B4, review of 3b7408170110): its effects read
+  // the recorded merger as the operator agent, its request names no `gh pr view` under the
+  // control-plane merger, and the session environment narrows its guard's gh reads with it.
+  const doctorConfig = { ...config, operatorAgent: { id: 'operator-agent', credentialFile: '/outside/operator.token' } };
+  for (const merger of ['control-plane', 'github'] as const) {
+    const doctor = doctorEffects(doctorConfig, '/fixture', async (method, path) => {
+      assert.equal(method, 'GET'); assert.equal(path, 'merger');
+      return { merger };
+    });
+    assert.equal(await doctor.merger!(), merger, 'the doctor reads the recorded merger the way the diagnostician does');
+    assert.equal(await doctorEffects(doctorConfig, '/fixture', async () => { throw new Error('refused'); }).merger!(), 'github', 'an unreadable merger keeps the github reads');
+    const prompt = doctorPrompt({ repository: REPOSITORY, cliPath: '/bin/graphyard', merger }, { items: [], faults: [] });
+    const guard = (line: string, env?: Record<string, string>): string => {
+      const verdict = doctorCommandVerdict(line, { cwd: '/fixture', cli: '/bin/graphyard', env: env ?? {} });
+      return verdict.allow ? '' : verdict.reason;
+    };
+    if (merger === 'control-plane') {
+      assert.doesNotMatch(prompt, /gh pr view/, 'the doctor\'s request names no `gh pr view` under the control-plane merger');
+      assert.match(prompt, /the control plane \(node \/bin\/graphyard status GY-N, node \/bin\/graphyard master status, node \/bin\/graphyard master decisions GY-N\)\./, 'the read list is exactly the control-plane reads');
+      for (const line of ['gh pr view 12', 'gh pr list', 'gh pr checks 12', 'gh pr diff 12']) {
+        assert.notEqual(guard(line, { GRAPHYARD_MERGER: 'control-plane' }), '', `\`${line}\` is outside the doctor's allowlist under the control-plane merger`);
+      }
+      assert.equal(guard('gh run view 3', { GRAPHYARD_MERGER: 'control-plane' }), '', 'workflow-run reads stand under the control-plane merger');
+      assert.equal(guard('gh issue view 3', { GRAPHYARD_MERGER: 'control-plane' }), '', 'issue reads stand under the control-plane merger');
+      assert.equal(guard('node /bin/graphyard status GY-7', { GRAPHYARD_MERGER: 'control-plane' }), '', 'the control-plane reads are sanctioned');
+      assert.equal(guard('git log -1', { GRAPHYARD_MERGER: 'control-plane' }), '', 'git reads stand');
+    } else {
+      assert.match(prompt, /master decisions GY-N, gh pr view\)\./, 'the github-mode request keeps the pull-request read');
+      assert.equal(guard('gh pr view 12'), '', 'with GitHub the merger, the pull-request read stands');
+    }
+  }
+
   // master status reports the hour's GitHub request count, so the drop is measurable.
   const status = observationThroughputStatus({ githubBudget: {
     remaining: 4100, limit: 5000, resetAt: new Date(Date.now() + 1_800_000).toISOString(), reserve: 500, belowReserve: false, exhaustsBeforeReset: false,
@@ -272,4 +324,142 @@ test('unit:doctor-reads-control-plane — under the control-plane merger the doc
     assert.ok(githubWorker.allow.some(rule => rule.rule === `Bash(${command}:*)`), `${command} is allowed in github mode`);
     assert.ok(!control.allow.some(rule => rule.rule === `Bash(${command}:*)`), `${command} is not allowed under the control-plane merger`);
   }
+});
+
+test('unit:control-plane-observation-unheld — with a GitHub permission shortfall standing, a control-plane candidate is still observed from the checkout while a person-opened pull request waits on the hold; with GitHub the merger the hold stops the control-plane candidate too (review of 3b7408170110, B1)', async () => {
+  const github = api.client();
+  github.permissionShortfall = () => 'App 1234 installation is suspended; restore it at https://github.com/apps/graphyard';
+  await setMerger('control-plane', 'the control plane is the merge writer');
+  const heldRow = async (id: string) => (await store.pool.query('SELECT held_reason FROM jobs WHERE work_id=$1', [id])).rows[0];
+
+  // The control-plane branch is decided before the GitHub permission hold: the checkout answers
+  // what the suspended App cannot, and the job is not held for a permission it does not need.
+  const before = (await workOf(controlPlaneItem)).observation!.at;
+  await due(controlPlaneItem);
+  await processJob(engine, github);
+  assert.equal((await heldRow(controlPlaneItem)).held_reason, null, 'the control-plane candidate is not held for a permission it does not need');
+  assert.ok(Date.parse((await workOf(controlPlaneItem)).observation!.at) > Date.parse(before), 'it was observed from the checkout despite the shortfall');
+
+  // A pull request GitHub observes is stopped by the same shortfall, as today.
+  await due(personItem);
+  await processJob(engine, github);
+  assert.match((await heldRow(personItem)).held_reason ?? '', /suspended/, 'the person-opened pull request waits on the GitHub permission hold');
+
+  // With GitHub the merger, the hold stops the control-plane candidate as any other read would be.
+  await setMerger('github', 'GitHub merges again');
+  await due(controlPlaneItem);
+  await processJob(engine, github);
+  assert.match((await heldRow(controlPlaneItem)).held_reason ?? '', /suspended/, 'with GitHub the merger the hold stands');
+});
+
+test('unit:control-plane-observation-local-failure — a control-plane observation that fails locally is retried and finished with no GitHub request: the recovery that publishes and dequeues never names the locally allocated number (review of 3b7408170110, B2)', async () => {
+  await setMerger('control-plane', 'the control plane is the merge writer');
+  // The B1 test held this job in github mode; release it, as a released hold would be.
+  await store.pool.query('UPDATE jobs SET held_until=NULL, unobserved=0 WHERE work_id=$1', [controlPlaneItem]);
+  const github = api.client();
+  try {
+    // A concurrent save, the common failure: the bounded no-save retry stands, and GitHub is asked for nothing.
+    const failing = engine as unknown as Record<string, unknown>;
+    failing.observeControlPlaneCandidate = async () => { throw new ReconciliationRetry('Work or job ownership changed before publication; retry', 409); };
+    const requestsBefore = api.requests.length;
+    await due(controlPlaneItem);
+    await processJob(engine, github);
+    assert.equal(api.requests.length, requestsBefore, 'the failed local observation asked GitHub for nothing');
+    const retried = (await store.pool.query('SELECT error, deferred_reason FROM jobs WHERE work_id=$1', [controlPlaneItem])).rows[0];
+    assert.equal(retried.error, null, 'a retry is not an error');
+    assert.match(retried.deferred_reason ?? '', /no observation saved 1 of 3 times/, 'the bounded no-save retry stands');
+
+    // Any other local failure ends on the job record — still without the recovery's publish and dequeue.
+    failing.observeControlPlaneCandidate = async () => { throw new Error('the checkout holds no refs/remotes/origin/main or refs/heads/main'); };
+    await due(controlPlaneItem);
+    await processJob(engine, github);
+    assert.equal(api.requests.length, requestsBefore, 'neither failure asked GitHub for anything');
+    assert.match((await store.pool.query('SELECT error FROM jobs WHERE work_id=$1', [controlPlaneItem])).rows[0].error ?? '', /holds no refs/, 'the failure stands on the job record');
+  } finally { delete (engine as unknown as Record<string, unknown>).observeControlPlaneCandidate; }
+});
+
+test('unit:control-plane-observation-landed-peers — a landed person-opened peer is reconciled from GitHub and delivered, a landed control-plane peer is read from the checkout, and the reconcile asks GitHub for neither (review of 3b7408170110, B3)', async () => {
+  const tip0 = git(checkout, 'rev-parse', 'refs/remotes/origin/main');
+  // A control-plane candidate whose branch a person merges to main themselves: its head is an
+  // ancestor of the tip the next candidates land on, and its item still records it open.
+  const landedLocal = await claimed(3);
+  await engine.execute(worker, 'submit', landedLocal.w.id, { epoch: 1, head: landedLocal.head }, randomUUID());
+  git(checkout, 'merge', '--no-ff', 'graphyard/gy-3-1', '-m', 'land 3');
+  git(checkout, 'push', '-q', 'origin', 'main');
+  const tip1 = git(checkout, 'rev-parse', 'refs/remotes/origin/main');
+  api.main = tip1;
+  api.ancestryOf.set(tip1, new Set([tip0, landedLocal.head]));
+
+  // A person-opened pull request GitHub has merged while its item still records it unlanded —
+  // GY-744's peer, which the reconcile owes a delivery at once. The person merges straight to
+  // main, so the direct-merge window owns that merge.
+  engine.directMergeEnvironment = { since: new Date(Date.now() - 86_400_000).toISOString(), until: null, reason: 'test repository merges straight into main', setBy: 'environment', enabledAt: new Date(Date.now() - 86_400_000).toISOString(), source: 'environment', event: null };
+  await setMerger('github', 'the person merges their pull request while GitHub is the writer');
+  const mergedPerson = await claimed(4);
+  api.open(88, mergedPerson.head, 'graphyard/gy-4-1', tip1);
+  api.ancestryOf.set(mergedPerson.head, new Set([tip0, tip1, landedLocal.head]));
+  // GitHub's merge of pull request 88 puts its head in main's history: the fixture answers the
+  // ancestry questions the merge makes true.
+  api.ancestryOf.set(tip1, new Set([tip0, landedLocal.head, mergedPerson.head]));
+  const openObservation = (head: string, pr: number, branch: string, baseTip: string): Observation => ({
+    source: undefined,
+    candidate: { sha: head, baseSha: tip0, pr, branch, author: 'implementer' },
+    checks: [], reviews: [], prState: 'open', draft: false, merged: false, mergeSha: null, mergeable: true, conflicting: false,
+    protected: false, requiredChecks: [], conversations: { required: false, unresolved: [] },
+    files: ['src/person.ts'], scopeFiles: [], baseTip, baseTree: sha(`tree-${baseTip}`), baseTipContained: false, baseTipAncestor: false,
+    at: new Date().toISOString(),
+  });
+  engine.submissionObserver = async () => openObservation(mergedPerson.head, 88, 'graphyard/gy-4-1', tip0);
+  try { await engine.execute(worker, 'submit', mergedPerson.w.id, { epoch: 1, pr: 88 }, randomUUID()); }
+  finally { engine.submissionObserver = null; }
+  // A pull-request submission binds no observation (the integration pass reads it first): the item's
+  // standing reading is saved the way the loop's first poll would, at the stale tip, so the item
+  // still records it unlanded.
+  const submitted4 = await workOf(mergedPerson.w.id);
+  await engine.observe(mergedPerson.w.id, submitted4.revision, openObservation(mergedPerson.head, 88, 'graphyard/gy-4-1', tip0));
+  assert.equal((await workOf(mergedPerson.w.id)).observation?.merged ?? false, false, 'the merged person-opened pull request is still recorded unlanded');
+
+  // The observing item: a person-opened pull request whose branch carries both heads, so its own
+  // observation's landing names both peers landed.
+  const observing = await (async () => {
+    let w = await engine.execute(operator, 'create', null, { title: 'Observed 5', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
+    w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
+    const pulled = await engine.pullAssignment(worker, { work: w.id }, randomUUID());
+    assert.equal(pulled.assigned?.id, w.id, JSON.stringify(pulled.refused));
+    const branch = 'graphyard/gy-5-1', worktree = join(checkout, '.graphyard', 'worktrees', 'GY-5-1');
+    git(checkout, 'worktree', 'add', '-q', '-b', branch, worktree, mergedPerson.head);
+    git(worktree, 'config', 'user.email', 't@example.com'); git(worktree, 'config', 'user.name', 'T');
+    const head = await commit(worktree, 'src/item-5.ts', 'export const item = 5;\n', 'item 5');
+    w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: worktree, branch }, randomUUID());
+    return { w, head };
+  })();
+  api.open(89, observing.head, 'graphyard/gy-5-1');
+  api.ancestryOf.set(observing.head, new Set([tip0, tip1, landedLocal.head, mergedPerson.head]));
+  engine.submissionObserver = async () => openObservation(observing.head, 89, 'graphyard/gy-5-1', tip1);
+  try { await engine.execute(worker, 'submit', observing.w.id, { epoch: 1, pr: 89 }, randomUUID()); }
+  finally { engine.submissionObserver = null; }
+  await setMerger('control-plane', 'the control plane is the merge writer again');
+
+  // The observing item's job: its landing names both peers landed; the reconcile reads the
+  // control-plane peer from the checkout and the person-opened peer from GitHub.
+  const github = api.client();
+  const number3 = (await workOf(landedLocal.w.id)).candidate!.pr;
+  const revision3 = (await workOf(landedLocal.w.id)).revision;
+  await due(observing.w.id);
+  await processJob(engine, github);
+
+  // The landed person-opened peer: read from GitHub by the reconcile and delivered at once (GY-744).
+  assert.ok(api.count('pulls', 88) >= 2, `the reconcile read the landed person-opened pull request from GitHub: ${JSON.stringify(api.requests.slice(-6))}`);
+  const delivered = await workOf(mergedPerson.w.id);
+  assert.equal(delivered.stage, 'done', `the person-opened peer was delivered by the reconcile: ${JSON.stringify(delivered.gates)}`);
+  assert.equal(delivered.observation?.merged, true);
+  assert.equal(delivered.delivery?.mergeSha, tip1);
+
+  // The landed control-plane peer: read from the checkout. GitHub was asked for its change number
+  // exactly once — the landing check's own landedOn question — and the reconcile added no read.
+  assert.equal(api.count('pulls', number3), 1, 'the reconcile asked GitHub for the control-plane peer no pull request: the one read is the landing check\'s own');
+  const local = await workOf(landedLocal.w.id);
+  assert.equal(local.observation?.source, 'control-plane', 'its observation is still the checkout\'s');
+  assert.equal(local.observation?.baseTip, tip1, 'it advanced to the tip the merge made');
+  assert.equal(local.revision, revision3 + 1, 'one save: the reconcile\'s local reading');
 });

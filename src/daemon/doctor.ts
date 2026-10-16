@@ -21,6 +21,7 @@ import { selectFleetSession } from '../fleet.js';
 import { heldAwareProbe, recordEnvironmentLog, selectionKey } from '../master/environments.js';
 import { registryHeadlessLaunch, registryRunner, runConfinement } from '../runner/roles.js';
 import { piRunner } from '../runner/pi.js';
+import type { MergerMode } from '../merger-mode.js';
 import { doctorActionSchema, doctorFindingsSchema, doctorFiledSchema, doctorRunRecordSchema, type DoctorAction, type DoctorFinding, type DoctorFiled, type DoctorPendingFile, type DoctorRunRecord } from './state.js';
 import { doctorSettingsSchema, type DoctorSettings } from '../master/doctor-settings.js';
 import { z } from 'zod';
@@ -95,8 +96,15 @@ export type OperatorAgentPost = (method: 'GET' | 'POST', path: string, body?: un
  */
 export const doctorEffects = (config: MasterConfig, root: string, post: OperatorAgentPost): DoctorEffects => {
   const settings = doctorSettings(config.run);
+  // GY-1835: the merger as the operator-agent identity reads it. An unreadable setting (an older
+  // server without the route, a refused call) keeps today's github reads rather than blinding a
+  // doctor over a plane hiccup — the same fallback the diagnostician reads with.
+  const merger = async (): Promise<MergerMode> => {
+    try { const status = await post('GET', 'merger') as { merger?: unknown } | undefined; return status?.merger === 'control-plane' ? 'control-plane' : 'github'; }
+    catch { return 'github'; }
+  };
   return {
-    settings, cwd: root,
+    settings, cwd: root, merger,
     env: { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.operatorAgent!.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_DOCTOR_CLI: config.cliPath },
     runner: async attempt => {
       if (attempt === 'primary') {
@@ -139,6 +147,14 @@ export interface DoctorEffects {
   file: (input: DoctorFileInput, key: string) => Promise<Work>;
   /** Posts one run summary to the control plane, so the dashboard's Doctor panel and `master status` show it. */
   recordRun?: (run: DoctorRunRecord) => Promise<unknown>;
+  /**
+   * The recorded merger, as the doctor's own control-plane calls read it (GY-1835, review of
+   * 3b7408170110). Under a `control-plane` merger an item's pull request, reviews and checks are
+   * the control plane's own records, so the doctor is not sent to GitHub for them: its prompt's
+   * read list names no `gh pr view` and the session environment narrows its guard's gh reads to
+   * match. Absent, github reads stand.
+   */
+  merger?: () => Promise<MergerMode>;
 }
 export type DoctorFileInput = ReturnType<typeof createSchema.parse> & { reason: string };
 
@@ -165,8 +181,14 @@ export function doctorDue(state: { doctor: { runs: DoctorRunRecord[] } }, clock:
  * sanctioned commands and nothing else, and the evidence to read. Every bound the module's
  * `doctorBounds` carries is named here, and the test holds the two together.
  */
-export function doctorPrompt(config: { repository: string; cliPath: string }, input: DoctorInput) {
+export function doctorPrompt(config: { repository: string; cliPath: string; merger?: MergerMode }, input: DoctorInput) {
   const cli = config.cliPath.startsWith('node ') ? config.cliPath : `node ${config.cliPath}`, b = doctorBounds;
+  // GY-1835: the read list follows the recorded merger. Under the control-plane merger an item's
+  // pull request, its reviews and its checks are the control plane's own records, so the request
+  // names no `gh pr view`; with GitHub the merger it names the pull-request read as before.
+  const reads = config.merger === 'control-plane'
+    ? `${cli} status GY-N, ${cli} master status, ${cli} master decisions GY-N`
+    : `${cli} status GY-N, ${cli} master status, ${cli} master decisions GY-N, gh pr view`;
   const checklist = [
     `- blocked: an item blocked for more than ${b.blockedMinutes} min; a blocker naming the master-role refusal ('.graphyard/master.json does not exist', 'no master role') is a step only a master-role identity can take: run the master command it names from this checkout yourself — you hold the master role, and checkout-restore is sanctioned — then ${cli} master unblock GY-N with a quoted reason`,
     `- worker: an attempt holding its lease for more than ${b.workerMinutes} min without a submission`,
@@ -181,7 +203,7 @@ export function doctorPrompt(config: { repository: string; cliPath: string }, in
     `- overdue: items overdue in any step, by the stage clocks the evidence shows`,
     `- checkout: escalation:dirty-checkout standing — the loop refuses its own dirty coordinator checkout; run ${cli} master checkout-restore with a quoted reason, which saves every dirty path under a named ref and restarts the loop, discarding nothing; the same request, filed without a human answer, serves an escalation naming a diverged HEAD (neither on the base branch nor a descendant of the commit the loop runs), saving that HEAD under refs/graphyard/checkout-restore/diverged-* and moving the checkout to the serving release`,
   ].join('\n');
-  return `You are the Graphyard pipeline doctor for ${config.repository}. Find stuck and overdue work and fix it through your sanctioned commands, doing what the master would have done by hand. Read the evidence below and the control plane (${cli} status GY-N, ${cli} master status, ${cli} master decisions GY-N, gh pr view). `
+  return `You are the Graphyard pipeline doctor for ${config.repository}. Find stuck and overdue work and fix it through your sanctioned commands, doing what the master would have done by hand. Read the evidence below and the control plane (${reads}). `
     + `Act only where a check below has passed its fault bound; leave what is merely moving. Your sanctioned commands are ${doctorSanctionedCommands.map(name => `${cli} master ${name}`).join(', ')}, as the master's operator-agent identity; every other mutation is refused by your command allowlist — never merge, dispatch, submit evidence or touch a lease — and a refused command is recorded in your report, never retried. Run each command by its bare program name with literal arguments: no variables, command substitution, redirection, wrappers or node options, and read only paths inside this checkout. Put a free-text reason last, enclosed in one pair of quotes: the allowlist judges only the command's grammar, and the reason runs as one prose argument, never read as a command, whatever words, apostrophes or punctuation it holds. A refusal names the rule that denied the command and the word it denied. Never weaken a requirement; never approve a decision you requested yourself (request it, then ${cli} master approver GY-N DECISION for an independent approver). `
     + `A finding you cannot act on — a human-only decision (goals and priorities, money or accounts, credentials for people), or a fault class with no item to act through — mark unactionable; for the latter name the fault item to file, which the loop files at P0/P1 only if no open or delivered cover already accounts for it. `
     + `Then call the ${doctorTool} tool exactly once: one finding per stuck or overdue item under its check, one action entry per sanctioned command you ran and what it changed, and one filed entry per fault item you are asking the loop to file. Stop after the call.\n\nThe checks and their bounds:\n${checklist}\n\nThe evidence, as JSON:\n${JSON.stringify(boundedInput(input))}`;
@@ -197,7 +219,7 @@ export function boundedInput(input: DoctorInput, limit = 100_000): DoctorInput &
 }
 
 /** Run the primary attempt, and the fallback once when the primary returns no valid report. */
-async function runDoctor(effects: DoctorEffects, prompt: string): Promise<{ runs: DoctorRunRecord['runs']; report: DoctorReportPayload | null; limit?: ExhaustionSignal | null; account?: string | null; holds?: { account: string; limit: ExhaustionSignal }[] }> {
+async function runDoctor(effects: DoctorEffects, prompt: string, merger?: MergerMode): Promise<{ runs: DoctorRunRecord['runs']; report: DoctorReportPayload | null; limit?: ExhaustionSignal | null; account?: string | null; holds?: { account: string; limit: ExhaustionSignal }[] }> {
   const runs: DoctorRunRecord['runs'] = [], timed: { result: string; detail: string; events: LimitRunEvent[]; account: string | null }[] = [];
   const timeoutMs = effects.settings.timeoutMinutes * 60_000;
   for (const attempt of ['primary', 'fallback'] as const) {
@@ -208,7 +230,7 @@ async function runDoctor(effects: DoctorEffects, prompt: string): Promise<{ runs
     const attemptAccount = chosen.account ?? null;
     try {
       if (stopping) { runs.push({ runtime: chosen.runtime, model: chosen.model, result: 'cancelled', detail: stopping.slice(0, 500) }); break; }
-      const run = chosen.runner.start(prompt, { cwd: effects.cwd, env: { ...effects.env, GRAPHYARD_PI_ROLE: doctorRole }, tool: doctorTool, timeoutMs,
+      const run = chosen.runner.start(prompt, { cwd: effects.cwd, env: { ...effects.env, GRAPHYARD_PI_ROLE: doctorRole, ...(merger === 'control-plane' ? { GRAPHYARD_MERGER: merger } : {}) }, tool: doctorTool, timeoutMs,
         validate: payload => doctorReportPayloadSchema.parse(payload) });
       active = run;
       const result = await run.result();
@@ -527,8 +549,13 @@ export async function doctorStep(cycle: Cycle) {
         `${item.key} [${item.stage} since ${item.stageEnteredAt}${item.lease ? `, lease ${item.lease.owner} epoch ${item.lease.epoch} until ${item.lease.expiresAt}` : ', unclaimed'}]${item.blocker ? ` blocker: ${item.blocker.slice(0, 200)}` : ''}${item.candidate ? ` candidate ${item.candidate.sha.slice(0, 12)} (PR #${item.candidate.pr})` : ''}`),
     faults: state.faults.instances.slice(-40).reverse().map(instance => `${instance.at} ${instance.kind} on ${instance.subject}: ${instance.text}`),
   };
-  const prompt = doctorPrompt(cycle.config, input);
-  live = runDoctor(doctor, prompt).catch(error => ({ runs: [{ runtime: 'none', model: 'none', result: 'exit', detail: message(error).slice(0, 500) }], report: null as DoctorReportPayload | null, limit: null, account: null, holds: [] as { account: string; limit: ExhaustionSignal }[] }))
+  // GY-1835: the doctor reads the merger its reads serve: under the control-plane merger its
+  // request names no `gh pr view`, and the session environment names the merger too, so the Pi
+  // guard admits no `gh pr` read — an item's pull request, reviews and checks are then the
+  // control plane's own records.
+  const merger = await doctor.merger?.();
+  const prompt = doctorPrompt({ ...cycle.config, ...(merger ? { merger } : {}) }, input);
+  live = runDoctor(doctor, prompt, merger).catch(error => ({ runs: [{ runtime: 'none', model: 'none', result: 'exit', detail: message(error).slice(0, 500) }], report: null as DoctorReportPayload | null, limit: null, account: null, holds: [] as { account: string; limit: ExhaustionSignal }[] }))
     .then(async outcome => {
       const current = state.doctor.runs.find(entry => entry.at === run.at);
       if (!current || current.state !== 'running') return;

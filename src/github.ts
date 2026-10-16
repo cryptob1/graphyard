@@ -3025,6 +3025,20 @@ export function observationThroughputStatus(coordinator: { githubBudget?: ({ thr
   return { ...report, attention: lag.attention };
 }
 /**
+ * The observer a landed-peer reconcile runs under each recorded merger (GY-744, GY-1835, review of
+ * 3b7408170110). A peer the control plane observed itself, under the control-plane merger, is read
+ * from the checkout its own job reads — asking GitHub here would poll a pull request the candidate
+ * does not have, and a read that cannot resolve the peer keeps its standing observation rather
+ * than ask. Every peer whose observation GitHub supplied, a person-opened pull request included,
+ * is read from GitHub, so a landed one is still delivered at once, where a null observer would
+ * have ended the reconcile for every peer.
+ */
+export function landedPeerObserver(engine: Engine, github: GitHub, peers: Work[], merger: MergerMode): (peer: Work) => Promise<Observation> {
+  return peer => peer.observation?.source === 'control-plane' && merger === 'control-plane'
+    ? engine.observeControlPlaneCandidate(peer).then(local => local ?? peer.observation!)
+    : github.observe(peer, peers);
+}
+/**
  * Claim and run one due observation job. `spent`, when given, is told what the job charged the
  * budget (its non-304 requests), which is what the worker returns its paced slot with (GY-567).
  */
@@ -3131,6 +3145,23 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   // why it did not — in the job's error, hold or deferral — and the job's consecutive
   // no-observation count is reset or incremented accordingly, whichever way it ends.
   let observed = false;
+  // The bounded no-save ending one failed observation gets (GY-506, GY-1310): a concurrency retry
+  // comes back within seconds and is not an operator error, but a run that saved no observation
+  // never ends silent, and the retry is bounded. Shared by the outer catch and the control-plane
+  // branch's own catch (GY-1835, review of 3b7408170110), whose failures must never reach the
+  // GitHub recovery that stands between them.
+  const retryWithoutSave = async (error: unknown): Promise<void> => {
+    const message = error instanceof Error ? error.message : 'GitHub reconciliation failed';
+    const retry = error instanceof ReconciliationRetry;
+    if (retry && !observed) {
+      const policy = noSaveRetry(job.unobserved ?? 0, message);
+      await engine.store.retryJob(job.work_id, job.token, policy.reason, observed, policy.delayMs);
+      if (policy.escalating) await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [job.work_id, 'graphyard', 'observation.no-save-escalated',
+        JSON.stringify({ details: { cause: message, finishes: policy.finishes, limit: observationNoSaveLimit, retryMs: observationEscalatedRetryMs, reason: policy.reason } })]);
+      return;
+    }
+    await engine.store.finishJob(job.work_id, job.token, retry ? undefined : message, retry, undefined, observed);
+  };
   // What this job's observation cost and when the next one is due (GY-117). The reserve is decided
   // before the observation, from the state the item starts in; the cadence after it, from the
   // state it produced. The meter counts every request the job makes, the check publication and
@@ -3144,8 +3175,6 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     // freshly published head. The measured cost is recorded either way.
     const { value: settled, requests, uncached } = await metered(async (): Promise<boolean> => {
       if (!work?.submission || work.stage === 'done') return false;
-      held = hold('observation');
-      if (held) { await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn(), observed); return true; }
       const now = new Date();
       // GY-1835: under the control-plane merger a candidate whose latest observation the control
       // plane made itself is observed from the checkout, and GitHub is asked for no pull request,
@@ -3155,11 +3184,25 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       // merge hand-off) is work on a pull request this candidate does not have. A pull request a
       // person opened — an observation GitHub supplied, `source` unset — is still observed from
       // GitHub below, and with GitHub as the recorded merger nothing changes.
+      // The branch is decided before the GitHub permission hold (review of 3b7408170110): it owes
+      // no GitHub permission, so a suspended App or a missing observation permission holds nothing
+      // a readable checkout answers, where the hold below still stops every GitHub-side read.
       if (work.observation?.source === 'control-plane' && await mergerNow() === 'control-plane') {
-        const local = await engine.observeControlPlaneCandidate(work);
-        if (local) { work = await engine.observe(work.id, work.revision, local, job.token); observed = true; }
+        try {
+          const local = await engine.observeControlPlaneCandidate(work);
+          if (local) { work = await engine.observe(work.id, work.revision, local, job.token); observed = true; }
+        } catch (error) {
+          // A failure here is a local one — the checkout, the store, a concurrent save — and is
+          // kept out of the GitHub recovery of the outer catch (review of 3b7408170110): its
+          // publish and dequeue would name whatever pull request shares the locally allocated
+          // number. The same bounded retry-and-finish handling stands, with no GitHub I/O.
+          await retryWithoutSave(error);
+          return true;
+        }
         return false;
       }
+      held = hold('observation');
+      if (held) { await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn(), observed); return true; }
       github.noteFleet?.(openCandidates(all));
       // Below the merge-path reserve, an observation that is neither a merge-gate candidate's nor
       // a webhook wake is rescheduled past the reset rather than spent.
@@ -3182,9 +3225,16 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       observed = true;
       // A peer git shows landed while its item records it unlanded is delivered now (GY-744).
       // Under the control-plane merger the reconcile asks GitHub for no peer the control plane
-      // observed itself: its landing is the merge writer's own record to deliver (GY-1835), and its
-      // job observes it from the checkout; a person-opened pull request is still reconciled here.
-      await engine.reconcileLanded(observation, all, await mergerNow() === 'control-plane' ? null : peer => github.observe(peer, all));
+      // observed itself: its landing is the merge writer's own record to deliver (GY-1835), and
+      // its job observes it from the checkout. A peer whose observation GitHub supplied — a
+      // person-opened pull request — is still read from GitHub here, so a landed one is delivered
+      // at once, where a null observer would have ended the reconcile for every peer (GY-744,
+      // review of 3b7408170110). The merger is read only when a landed peer stands to be
+      // reconciled: with none, the observer is never called, and a GitHub-mode observation spends
+      // no query on the mode, as this item's own comment promises.
+      await engine.reconcileLanded(observation, all, observation.landing?.landed?.length
+        ? landedPeerObserver(engine, github, all, await mergerNow())
+        : peer => github.observe(peer, all));
       schedule.cadence = observationCadence(work, all.map(item => item.id === work!.id ? work! : item), now, previous, github.steadyStateMs?.(now.getTime()));
       // A required check that failed on this candidate is rerun once before it counts (GY-516): the
       // observation recorded the rerun as owed, holding the entry's position; GitHub is asked here,
@@ -3377,19 +3427,8 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     // (the preflight already passes) therefore stays held for the bounded hold, one attempt
     // per hold, instead of being released into the same 403 by every passing preflight.
     if (error instanceof GitHubPermissionRefusal) { await engine.store.refuseJob(job.work_id, job.token, message, permissionRefusalLimit, permissionHoldMs, heldOn()); return true; }
-    const retry = error instanceof ReconciliationRetry;
-    // A concurrency retry comes back within seconds and is not an operator error, but a run that
-    // saved no observation never ends silent: the reason stands on the job record (GY-506).
-    // The retry is bounded (GY-1310): the run that reaches the limit records the fault on the item's
-    // ledger with its cause and policy, and the job then retries at the poll cadence, not every two seconds.
-    if (retry && !observed) {
-      const policy = noSaveRetry(job.unobserved ?? 0, message);
-      await engine.store.retryJob(job.work_id, job.token, policy.reason, observed, policy.delayMs);
-      if (policy.escalating) await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [job.work_id, 'graphyard', 'observation.no-save-escalated',
-        JSON.stringify({ details: { cause: message, finishes: policy.finishes, limit: observationNoSaveLimit, retryMs: observationEscalatedRetryMs, reason: policy.reason } })]);
-      return true;
-    }
-    await engine.store.finishJob(job.work_id, job.token, retry ? undefined : message, retry, undefined, observed);
+    await retryWithoutSave(error);
+    return true;
   } finally {
     // The throughput ledger (GY-492): how long the claimed job took, however it ended, so master
     // status can report what the workers actually achieve.

@@ -87,8 +87,8 @@ export function standingFaultClassItem(work: readonly Work[], faultClass: FaultC
 
 /** One thing to diagnose: a recurring-fault item with its instances, or one standing invariant violation. */
 export interface DiagnosisSubject { id: string; kind: 'recurring' | 'invariant'; faultClass: FaultClass; work: Work | null; instances: FaultInstance[] }
-/** What the diagnostician reads beside the repository: the excerpts, bounded, and the named pull requests' state. */
-export interface DiagnosisContext { journal: string[]; serverLog: string[]; pullRequests: { number: number; state: unknown }[] }
+/** What the diagnostician reads beside the repository: the excerpts, bounded, the named pull requests' state, and the merger the context read (GY-1835), so the prompt names no second read. */
+export interface DiagnosisContext { journal: string[]; serverLog: string[]; pullRequests: { number: number; state: unknown }[]; merger?: MergerMode }
 /** The runner one attempt uses, what it runs on, the registry account it launched on (GY-1705), and how its registry session (if any) is ended. */
 export interface DiagnosticianRun { runner: Runner; runtime: string; model: string; account?: string | null; release?: (reason: string) => Promise<unknown> }
 export interface DiagnosticianEffects {
@@ -151,16 +151,22 @@ export const diagnosticianEffects = (config: MasterConfig, root: string, post: D
       const model = attempt === 'primary' ? settings.model : settings.fallbackModel;
       return { runner: piRunner({ command: settings.command, model }), runtime: 'pi', model, account: null };
     },
-    context: async (_subject, numbers) => ({
-      journal: await lines(settings.journalCommand).catch(error => [`(the loop journal could not be read with ${settings.journalCommand.join(' ')}: ${message(error)})`]),
-      serverLog: settings.serverLogCommand ? await lines(settings.serverLogCommand).catch(error => [`(the server log could not be read with ${settings.serverLogCommand!.join(' ')}: ${message(error)})`])
-        : ['(no run.diagnostician.serverLogCommand is configured, so no server log excerpt was read)'],
+    context: async (_subject, numbers) => {
       // GY-1835: under a control-plane merger a named pull request is the control plane's own
       // record, so no `gh pr view` runs for it — the prompt points the session at `graphyard status
       // GY-N` instead. With GitHub the recorded merger, every named pull request is read as before.
-      pullRequests: await merger().then(mode => mode === 'control-plane' ? [] : Promise.all(numbers.map(async number => ({ number, state: await Promise.resolve(run('gh', ['pr', 'view', String(number), '--repo', config.repository, '--json', 'number,title,state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,reviewDecision,statusCheckRollup']))
-        .then(output => JSON.parse(String(output)), (error: unknown) => ({ error: message(error) })) })))),
-    }),
+      // The mode rides the context, so the prompt reads the same one answer, never a second read
+      // (review of 3b7408170110).
+      const mode = await merger();
+      return {
+        merger: mode,
+        journal: await lines(settings.journalCommand).catch(error => [`(the loop journal could not be read with ${settings.journalCommand.join(' ')}: ${message(error)})`]),
+        serverLog: settings.serverLogCommand ? await lines(settings.serverLogCommand).catch(error => [`(the server log could not be read with ${settings.serverLogCommand!.join(' ')}: ${message(error)})`])
+          : ['(no run.diagnostician.serverLogCommand is configured, so no server log excerpt was read)'],
+        pullRequests: mode === 'control-plane' ? [] : await Promise.all(numbers.map(async number => ({ number, state: await Promise.resolve(run('gh', ['pr', 'view', String(number), '--repo', config.repository, '--json', 'number,title,state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,reviewDecision,statusCheckRollup']))
+          .then(output => JSON.parse(String(output)), (error: unknown) => ({ error: message(error) })) }))),
+      };
+    },
     file: (input, key) => post('POST', 'work', input, key) as Promise<Work>,
     decide: (work, action, reason, input) => post('POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }) as Promise<{ id: string }>,
   };
@@ -356,9 +362,10 @@ async function launch(cycle: Cycle, diagnostician: DiagnosticianEffects, subject
     startedAt: iso(clock), updatedAt: iso(clock), runs: [], diagnosis: null, fix: null, decision: null, answeredBy: null, retryAt: null, refusedAt: null, detail: '' };
   state.diagnoses[subject.id] = entry;
   const context = await diagnostician.context(subject, namedPullRequests(subject, snapshot.work))
-    .catch(error => ({ journal: [`(the excerpts could not be read: ${message(error)})`], serverLog: [], pullRequests: [] }));
-  // GY-1835: the prompt's read list follows the recorded merger, read where the context reads it.
-  const merger = await diagnostician.merger?.().catch(() => undefined);
+    .catch(error => ({ journal: [`(the excerpts could not be read: ${message(error)})`], serverLog: [], pullRequests: [], merger: undefined }));
+  // GY-1835: the prompt's read list follows the recorded merger, as the context read it — the
+  // context's own mode, so a diagnosis spends one merger read, never two (review of 3b7408170110).
+  const merger = context.merger ?? await diagnostician.merger?.().catch(() => undefined);
   const prompt = diagnosisPrompt({ ...config, ...(merger ? { merger } : {}) }, diagnosisInput(subject, context, snapshot.work));
   const running = runDiagnosis(diagnostician, subject, prompt).catch(error => ({ runs: [{ runtime: 'none', model: 'none', startedAt: iso(clock), endedAt: new Date().toISOString(), result: 'exit', detail: clip(message(error), 500) }], diagnosis: null }))
     .then(outcome => { outcomes.set(subject.id, outcome); }).finally(() => live.delete(subject.id));

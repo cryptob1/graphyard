@@ -299,7 +299,22 @@ const gitReads = new Set(['log', 'show', 'diff', 'status', 'rev-parse', 'blame',
 /** The provider CLI's read subcommands, under the groups a doctor reads. */
 /** The environment variables that point gh at another repository or host without a word on the command line. */
 export const doctorGhOverrides = ['GH_REPO', 'GH_HOST'] as const;
-const ghReads = new Map([['pr', new Set(['view', 'list', 'checks', 'diff'])], ['run', new Set(['view', 'list'])], ['issue', new Set(['view', 'list'])]]);
+/** The gh groups a doctor reads, before the recorded merger narrows them (see `ghReads`). */
+const ghReadGroups = new Map([['pr', new Set(['view', 'list', 'checks', 'diff'])], ['run', new Set(['view', 'list'])], ['issue', new Set(['view', 'list'])]]);
+/**
+ * The gh reads the doctor's guard admits, by the recorded merger the session was launched with
+ * (GY-1835, review of 3b7408170110): under the control-plane merger an item's pull request, its
+ * reviews and its checks are the control plane's own records, so the `pr` group is absent and no
+ * `gh pr` read passes the guard — the doctor reads the control plane (`graphyard status GY-N`,
+ * `master status`) instead, as its prompt's read list says. With GitHub the merger, or before a
+ * merger is known, the reads stand as before. The environment is the session's, as for the
+ * ambient `GH_REPO`/`GH_HOST` check: process.env when none is given.
+ */
+const ghReads = (env: NodeJS.ProcessEnv | undefined) => {
+  const groups = new Map(ghReadGroups);
+  if ((env ?? process.env).GRAPHYARD_MERGER === 'control-plane') groups.delete('pr');
+  return groups;
+};
 /** The CLI programs a Graphyard command may be invoked through; the words after it are the CLI's own. */
 const doctorCliPrograms = new Set(['graphyard']);
 
@@ -472,7 +487,7 @@ export function doctorSegmentAllowed(words: ShellWord[], context: DoctorGuardCon
     // -w/--web opens a browser under the coordinator's account: a headless doctor reads, never launches.
     const web = rest.find(word => word.value.startsWith('--web') || /^-[a-zA-Z]*w/.test(word.value));
     if (web) return refuse('gh-headless', `gh ${web.value} (the doctor reads headless; no browser launch)`, web);
-    allowed = ghReads.get(rest[0]?.value ?? '')?.has(rest[1]?.value ?? '') ?? false;
+    allowed = ghReads(context.env).get(rest[0]?.value ?? '')?.has(rest[1]?.value ?? '') ?? false;
   }
   if (!allowed) return refuse('read-programs', `${program}${rest[0] ? ` ${rest[0].value}` : ''}`, reads === undefined && program !== 'git' && program !== 'gh' ? words[0] : rest.find(word => reads?.test(word.value)) ?? rest[0] ?? words[0]);
   const recursive = doctorRecursiveReads.get(program);
