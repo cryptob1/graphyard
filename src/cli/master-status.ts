@@ -172,6 +172,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     delivery: delivery.report,
     // The loop's promotion drive (GY-1302): the last promoted SHA, merges production is behind, the next due promotion.
     promotion: promotionStatus('error' in daemonState ? null : daemonState.promotion),
+    launches: { prepare: launches.prepare }, // GY-1836: the day's worktree preparation p50/p90
     // Every open item the control plane names no action for, with the account it names and how
     // long it has held its failing gate.
     actionless: { bound: stallBoundMs, items: actionless },

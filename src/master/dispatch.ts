@@ -25,7 +25,7 @@ import { closeFailedLaunch, launcherCoordinatorRoot, launchStartMs, prepareConfi
 import { closeHerdrPane, createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
 import { agentOwner, type AttentionItem } from './attention.js';
 import { containmentHold, stopLaunchSupervisor } from './containment.js';
-import { dependencyDirectories, failureText, type SharedDependencies, shareDependencies } from './worktrees.js';
+import { cycleBaseTip, dependencyDirectories, failureText, recordWorktreePrepare, shareDependencies, worktreePrepareSummary, type SharedDependencies } from './worktrees.js';
 import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sessionSlotsGrant, submissionPolicyRule } from './harness.js';
 import { withVerificationPath } from './verification-slots.js';
 import { holdRepeatedLimitAccount, repeatedLimitAccount } from './launch-account.js';
@@ -42,7 +42,8 @@ type WorkerCommand = (command: string, args: string[], options?: { cwd?: string;
 export type PreparedWorker = { epoch: number; path: string; base: string; branch?: string; dependencies?: SharedDependencies; reclaimed?: string[] };
 /** Claims the item and builds its worktree; `claimBy` is a hand dispatch's claim deadline (prepareWorkerLaunch). */
 /** `onClaimed` is called with the epoch the moment the claim is held, before the worktree is built (GY-1373); what it returns stops the keep-alive it started. */
-type WorkerPreparer = (root: string, key: string, profileName: string, run?: WorkerCommand, claimBy?: number, onClaimed?: ClaimedHook) => Promise<PreparedWorker>;
+/** `cycle` is the dispatch snapshot instant whose one fetch of the base branch the preparation shares (GY-1836); absent, a hand dispatch fetches for itself. */
+type WorkerPreparer = (root: string, key: string, profileName: string, run?: WorkerCommand, claimBy?: number, onClaimed?: ClaimedHook, cycle?: string) => Promise<PreparedWorker>;
 type ClaimedHook = (epoch: number) => (() => Promise<void>) | void;
 
 /**
@@ -222,7 +223,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   // (`plannedFiles`), never from its path lane; recorded with the selection it ordered.
   let prefer: 'fast' | 'strong' | null = null;
   let harness: Awaited<ReturnType<typeof installWorkerHarness>> | null = null;
-  let dependencies: PreparedWorker['dependencies'] | null = null, reclaimed: string[] = [];
+  let dependencies: PreparedWorker['dependencies'] | null = null, reclaimed: string[] = [], prepareMs: number | null = null;
   let delivery: RequestDelivery | null = null, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null;
   let started: 'started' | 'awaiting consent' = 'started', consent: { answered: ConsentAnswer[]; awaiting: ConsentHold | null } = { answered: [], awaiting: null };
   let pushCredential: 'minted' | 'none' = 'none';
@@ -305,17 +306,19 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
             try {
               assertClaimDeadline(work.key, options.claimBy);
               let epoch: number;
-              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed, pushCredential } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.supervisor, options.stopSupervisor, credentialMint, options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps, mergeWriter, round));
+              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed, pushCredential, prepareMs } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.supervisor, options.stopSupervisor, credentialMint, options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps, mergeWriter, round, observedAt));
               claimedEpoch = epoch;
               // The epoch this launch claimed outlives the reservation, so a dispatcher still holding the older snapshot is refused cleanly.
               const at = new Date().toISOString();
               await writeFile(dispatchedFile(root, work.key), JSON.stringify({ epoch, at }), { mode: 0o600 }).catch(() => {});
               // The dispatch record names the runtime and account the session runs on, the preference
-              // that ordered the accounts (GY-1772), and every account whose runtime failed to start
+              // that ordered the accounts (GY-1772), every account whose runtime failed to start
               // first, so a slot running one runtime under a profile named for another is on the
-              // record, not a surprise (GY-417).
+              // record, not a surprise (GY-417), and how long the worktree took to prepare (GY-1836).
               await writeFile(profileLaunchedFile(root, profile.name), JSON.stringify({ key: work.key, epoch, agentName: profile.agentName, at,
-                runtime: launch.kind ?? null, account: chosen.account?.name ?? null, prefer, ...(startFailures.length ? { failedAccounts: startFailures } : {}) }), { mode: 0o600 }).catch(() => {});
+                runtime: launch.kind ?? null, account: chosen.account?.name ?? null, prefer, ...(prepareMs !== null ? { prepareMs } : {}), ...(startFailures.length ? { failedAccounts: startFailures } : {}) }), { mode: 0o600 }).catch(() => {});
+              // The preparation time joins the day's sample, which master status ranks (GY-1836).
+              if (prepareMs !== null) await recordWorktreePrepare(root, { at, key: work.key, epoch, profile: profile.name, ms: prepareMs }).catch(() => {});
               // A start on the account clears its own run of consecutive start failures.
               if (chosen.account) await clearAccountStartFailures(config, chosen.account.name).catch(() => {});
               break;
@@ -350,7 +353,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   // and every watcher key by `principal:epoch` must carry the one that was claimed, so the caller
   // re-keys the registration once the claim is known.
   return { work: work.key, epoch: claimedEpoch, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
-    launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery, sandbox, mergeWriter, pushCredential, ...(reclaimed.length ? { reclaimed } : {}), ...(closedAgent ? { closedAgent } : {}),
+    launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery, sandbox, mergeWriter, pushCredential, prepareMs, ...(reclaimed.length ? { reclaimed } : {}), ...(closedAgent ? { closedAgent } : {}),
     // `awaiting consent` is not a started session: the runtime has not read its request (GY-130).
     started, consent: { answered: consent.answered, awaiting: consent.awaiting ? { prompt: consent.awaiting.prompt, kind: consent.awaiting.kind, pane: consent.awaiting.pane, attach: consent.awaiting.attach, releaseAt: consent.awaiting.releaseAt, attention: consentHoldAttention(consent.awaiting) } : null },
     // The selection names the preference that ordered the accounts it chose from (GY-1772).
@@ -424,11 +427,11 @@ export const describeStartFailures = (failures: readonly AccountStartFailure[], 
  * never by the profile's name alone — and, when the preferred account's runtime failed to start,
  * one `fallback` line naming that account and the one launched on.
  */
-export function workerLaunchRows(profiles: { name: string }[], records: Record<string, ProfileLaunchRecord>): Record<string, { runtime: string | null; account: string | null; fallback: string | null }> {
-  const rows: Record<string, { runtime: string | null; account: string | null; fallback: string | null }> = {};
+export function workerLaunchRows(profiles: { name: string }[], records: Record<string, ProfileLaunchRecord>): Record<string, { runtime: string | null; account: string | null; fallback: string | null; prepareMs: number | null }> {
+  const rows: Record<string, { runtime: string | null; account: string | null; fallback: string | null; prepareMs: number | null }> = {};
   for (const profile of profiles) {
     const record = records[profile.name];
-    if (record) rows[profile.name] = { runtime: record.runtime, account: record.account, fallback: record.failedAccounts.length ? describeStartFailures(record.failedAccounts, record.account) : null };
+    if (record) rows[profile.name] = { runtime: record.runtime, account: record.account, fallback: record.failedAccounts.length ? describeStartFailures(record.failedAccounts, record.account) : null, prepareMs: record.prepareMs };
   }
   return rows;
 }
@@ -444,10 +447,11 @@ export function accountStartFailureAttention(failures: AccountStartFailures, cli
     ...agentOwner('master', `Re-check the account with node ${cliPath} master environments --apply and log its runtime in, or drop it from the profiles' account order with node ${cliPath} master config accounts:PROFILE=… until it starts`) }));
 }
 /** What a profile's last worker dispatch recorded, as master status reads it (GY-417). */
-export interface ProfileLaunchRecord { key: string; epoch: number; agentName: string; at: string; runtime: string | null; account: string | null; /** Which runtimes the dispatch tried first (GY-1772); null on a record written before the preference was recorded. */ prefer: 'fast' | 'strong' | null; failedAccounts: AccountStartFailure[] }
+export interface ProfileLaunchRecord { key: string; epoch: number; agentName: string; at: string; runtime: string | null; account: string | null; /** Which runtimes the dispatch tried first (GY-1772); null on a record written before the preference was recorded. */ prefer: 'fast' | 'strong' | null; /** How long the dispatch took to prepare the worktree, claim included (GY-1836); null on a record written before it was measured. */ prepareMs: number | null; failedAccounts: AccountStartFailure[] }
 const profileLaunchRecordSchema = z.object({
   key: z.string().min(1), epoch: z.number().int().min(1), agentName: z.string().min(1), at: z.string().min(1),
   runtime: z.string().nullable().default(null), account: z.string().nullable().default(null), prefer: z.enum(['fast', 'strong']).nullable().default(null),
+  prepareMs: z.number().int().min(0).nullable().default(null),
   failedAccounts: z.array(z.object({ account: z.string().min(1), kind: z.string().min(1), reason: z.string().min(1), at: z.string().min(1) }).strict()).default([]),
 }).strict();
 /** The last dispatch record of each launch profile; a profile never dispatched reads as absent. */
@@ -459,17 +463,17 @@ export async function readProfileLaunchRecords(root: string, profiles: { name: s
   }
   return records;
 }
-/** Everything `master status` shows of worker launches (GY-417): each profile's row fields and the never-starting accounts. */
+/** Everything `master status` shows of worker launches (GY-417): each profile's row fields, the never-starting accounts, and the day's worktree preparation percentiles (GY-1836). */
 export async function workerLaunchStatus(root: string, config: Pick<MasterConfig, 'credentialFile' | 'cliPath' | 'workers'>) {
   const failures = await readAccountStartFailures(config);
-  return { rows: workerLaunchRows(config.workers, await readProfileLaunchRecords(root, config.workers)), items: accountStartFailureAttention(failures, config.cliPath) };
+  return { rows: workerLaunchRows(config.workers, await readProfileLaunchRecords(root, config.workers)), items: accountStartFailureAttention(failures, config.cliPath), prepare: await worktreePrepareSummary(root) };
 }
 
 export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: string, epoch: number, agentName: string, pane: string, awaiting: { prompt: string; kind: ConsentHold['kind']; request?: string | null; named?: boolean }, now = Date.now()): ConsentHold {
   return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };
 }
 
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, supervisor: NonNullable<DispatchOptions['supervisor']> = watchSupervisorRunning, stopSupervisor: NonNullable<DispatchOptions['stopSupervisor']> = stopLaunchSupervisor, credentialMint: CredentialMinter | null = null, coordinatorRoot?: string, renew: LeaseRenewer | null = null, renewIntervalMs?: number, verificationMaps: NonNullable<DispatchOptions['verificationMaps']> = readVerificationMaps, mergeWriter: MergerMode = 'github', round: ReworkRound = { mechanical: null, rework: null }) {
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, supervisor: NonNullable<DispatchOptions['supervisor']> = watchSupervisorRunning, stopSupervisor: NonNullable<DispatchOptions['stopSupervisor']> = stopLaunchSupervisor, credentialMint: CredentialMinter | null = null, coordinatorRoot?: string, renew: LeaseRenewer | null = null, renewIntervalMs?: number, verificationMaps: NonNullable<DispatchOptions['verificationMaps']> = readVerificationMaps, mergeWriter: MergerMode = 'github', round: ReworkRound = { mechanical: null, rework: null }, cycle?: string) {
   // The lease is the launch's to keep alive until the supervisor's first heartbeat (GY-1287), from
   // the claim itself (GY-1373): building the worktree of a large repository on a loaded host took
   // longer than the 120 s lease, which lapsed before the credential was minted ("Lease missing,
@@ -478,8 +482,11 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
   let keepAlive = null as ReturnType<typeof launchLeaseKeepAlive> | null;
   const keep = (epoch: number) => { keepAlive ??= launchLeaseKeepAlive(renew ? () => renew(root, work.key, epoch, profile.name) : null, renewIntervalMs); return () => keepAlive!.stop(); };
   let prepared: PreparedWorker;
-  try { prepared = await prepare(root, work.key, profile.name, undefined, claimBy, keep); }
+  // GY-1836: the dispatch names how long the worktree took to prepare, the claim included.
+  const prepareBeganAt = Date.now();
+  try { prepared = await prepare(root, work.key, profile.name, undefined, claimBy, keep, cycle); }
   catch (error) { await keepAlive?.stop(); throw error; }
+  const prepareMs = Math.max(0, Date.now() - prepareBeganAt);
   keep(prepared.epoch);
   try { return await launchPrepared(); } finally { await keepAlive?.stop(); }
   async function launchPrepared() {
@@ -539,7 +546,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
       const hold = started.awaiting ? consentHold(config, work.key, prepared.epoch, profile.agentName, pane, started.awaiting) : null;
       if (hold) writeConsentHold(started.files.stem, hold);
       return { target: { name: profile.agentName, pane_id: pane, agent_status: hold ? 'blocked' : 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null, delivery: started.delivery, sandbox,
-        started: started.started.state, consent: { answered: started.consent, awaiting: hold }, epoch: prepared.epoch, reclaimed: prepared.reclaimed ?? [], mergeWriter, pushCredential: credential ? 'minted' as const : 'none' as const };
+        started: started.started.state, consent: { answered: started.consent, awaiting: hold }, epoch: prepared.epoch, reclaimed: prepared.reclaimed ?? [], mergeWriter, pushCredential: credential ? 'minted' as const : 'none' as const, prepareMs };
     } catch (error) {
       const malformedTab = (error as any)?.herdrTab as string | undefined;
       const failed = error instanceof Error ? error.message : 'Worker launch failed';
@@ -736,7 +743,7 @@ export const workspaceDispatchFailure = (reason: string) =>
  * immediately before the lease claim, after the credential read, discovery and base fetch, so a
  * backed-off dispatch row the executor may claim by then never meets a second launch at the claim.
  */
-export async function prepareWorkerLaunch(root: string, key: string, profileName: string, run: WorkerCommand = workerCommand, claimBy?: number, onClaimed?: ClaimedHook): Promise<PreparedWorker> {
+export async function prepareWorkerLaunch(root: string, key: string, profileName: string, run: WorkerCommand = workerCommand, claimBy?: number, onClaimed?: ClaimedHook, cycle?: string): Promise<PreparedWorker> {
   const config = await loadMasterConfig(root); const profile = config.workers.find(worker => worker.name === profileName);
   if (!profile || profile.mode !== 'launch' || !profile.kind || !profile.credentialFile) throw new Error('A complete launch profile is required');
   await readWorkerCredential(root, profile.credentialFile);
@@ -744,9 +751,8 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
   if (!detected.repository) throw new Error('Worker launcher requires a recognized GitHub origin');
   assertRepository(detected.repository, config.repository);
   const env = workerEnvironment(config, profile);
-  await run('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:refs/remotes/origin/${config.baseBranch}`], { cwd: root, env, stdio: ['ignore', 'ignore', 'inherit'] });
-  const base = String(await run('git', ['rev-parse', '--verify', `refs/remotes/origin/${config.baseBranch}`], { cwd: root, env })).trim();
-  if (!/^[0-9a-f]{40}$/i.test(base)) throw new Error('Worker launcher could not resolve the current managed base branch');
+  // GY-1836: the cycle's one fetch of origin, shared with every worktree the cycle prepares.
+  const base = await cycleBaseTip(root, config.baseBranch, cycle, run, env);
   assertClaimDeadline(key, claimBy);
   const claim = JSON.parse(String(await run(process.execPath, [config.cliPath, 'claim', key], { cwd: root, env })));
   const claimedEpoch = Number.isSafeInteger(claim.epoch) && claim.epoch > 0 ? claim.epoch as number : null;

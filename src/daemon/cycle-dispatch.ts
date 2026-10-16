@@ -8,6 +8,7 @@ import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human
 import { humanNeededActions } from '../model/next-action.js';
 import { assertDispatchable, dispatchReserved, type ContainmentAssessment, type EscalationSession, type RoleCapacity, roleCapacity } from '../master.js';
 import { workspaceDispatchFailure } from '../master/dispatch.js';
+import { holdCycleBase } from '../master/worktrees.js';
 import { standingEscalations } from '../model/escalation.js';
 import { coordinateAttempts, coordinateRetryMs, registeredLaunch } from '../model/session-state.js';
 import type { SessionHandleInput } from '../model/sessions.js';
@@ -329,7 +330,10 @@ async function dispatchStepWithin(cycle: Cycle, health: ReturnType<typeof profil
     const beside = hotBeside(item, hot);
     // A launch that waits in the launcher's queue claims later than this read, so it reads the history again when it runs.
     const queued = cycle.launcher.pending >= Math.max(1, cycle.launcher.concurrency);
-    cycle.launch('dispatch', item, key, holds, sink => launch(item, key, choice!, free, pick, holds, sink, beside, queued));
+    // GY-1836: the launch prepares from the tip this cycle's snapshot fetched however long it
+    // waits in the queue, so the cycle's fetch is held from now until the launch settles.
+    const releaseBase = holdCycleBase(snapshot.now);
+    if (!cycle.launch('dispatch', item, key, holds, sink => launch(item, key, choice!, free, pick, holds, sink, beside, queued).finally(releaseBase))) releaseBase();
   }) === 'stop') break; });
 
   /** The one wait an item a close stands unapplied on records instead of a dispatch (GY-1439). */
