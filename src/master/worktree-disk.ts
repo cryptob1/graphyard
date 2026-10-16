@@ -11,11 +11,17 @@ import type { WorktreeReclaimCandidate } from './worktrees.js';
  * (0 of 239 worktrees reclaimable, 0 bytes freed). Three rules, shared by the registry reading
  * (master-resources.ts), the `disk` line of master status and the loop's derived fault (daemon/faults.ts):
  *  - answered: while the loop's latest worktree-reclaim pass is current (`worktreePassCurrentMs`) and
- *    drained — it removed nothing, left no reclaimable worktrees, took no unowned managed checkout,
- *    met no error, and nothing is disposable now over the current plan, which the caller computes
- *    beside the reading (a plan it cannot read never answers) — and the reading's own fault does not
- *    stand, a low reading is reported and raises nothing: what holds the volume is outside the loop's
- *    reach, which is the operator's to decide;
+ *    out of reach — nothing is disposable now over the current plan the caller computes beside the
+ *    reading (a plan it cannot read never answers), no reclaimable worktrees wait on the next cycle,
+ *    and the pass met no error — and the reading's own fault does not stand, a low reading is
+ *    reported and raises nothing: what holds the volume is outside the loop's reach, which is the
+ *    operator's to decide. GY-1784 worded this as a pass that had removed nothing; GY-1828 narrows
+ *    it to the reach that is left: a pass that took back the last disposable entries in the same
+ *    breath drained the volume, and its removals are the drain's proof, not reach it still holds —
+ *    judging them as reach raised the worktree-disk and disk lines while the reading itself said
+ *    nothing was reclaimable (two of the resources class's instances). Without a plan read
+ *    (`reclaimable` undefined) the letter stands: only a pass that removed nothing answers, since
+ *    removing nothing is then the only proof there is nothing of the loop's left;
  *  - hard line: at or below the exhaustion floor (`diskExhaustionFloorBytes`, half the warn line) the
  *    reading raises attention whatever the pass answered, as a write failing ENOSPC/EDQUOT always did;
  *  - recovery band: a low reading whose fault stands recovers only `diskRecoveryBandBytes` (a tenth of
@@ -59,7 +65,7 @@ export interface WorktreeDiskJudgement {
   low: boolean; atFloor: boolean; current: boolean; drained: boolean;
   /** What is reclaimable now is nothing (the plan was read and holds nothing disposable, no reclaimable worktrees wait on the next cycle, no error): the remaining holders are outside the loop's reach, whatever the last pass removed. */
   outOfReach: boolean;
-  /** Low, above the floor, and the pass current and drained: reported, raising nothing. */
+  /** Low, above the floor, the pass current, and the loop out of reach — a read plan holding nothing disposable with no backlog and no error (GY-1828), or, without a plan read, a pass that removed nothing: reported, raising nothing. */
   answered: boolean;
   /** Why the reading stands as it does, for the detail of each line; null when it is simply within its line. */
   detail: string | null;
@@ -80,7 +86,8 @@ export function judgeWorktreeDisk(input: WorktreeDiskInputs, now: number): Workt
   const drained = !!pass && input.reclaimable !== null && pass.removed === 0 && pass.trees === 0 && pass.treeBacklog === 0 && pass.checkouts === 0 && pass.errors === 0 && reclaimable === 0;
   const outOfReach = !pass ? input.reclaimable === 0 : input.reclaimable === undefined ? drained : input.reclaimable === 0 && pass.treeBacklog === 0 && pass.errors === 0;
   // A standing fault is never answered: the recovery band is its recovery line, and a fresh drained pass that catches the reading partway into the band closes it only for the next stale pass to open another (GY-1784 review, AC-4).
-  const answered = low && !atFloor && current && drained && !input.standing;
+  // The answer is the out-of-reach judgement, not the letter of drained (GY-1828): a current pass above the floor whose plan holds nothing disposable, with no backlog and no error, has taken the volume back to all the reach the loop has — what it removed in that same pass was the drain, not reach left. Where the caller judges from the pass alone (`reclaimable` undefined) `outOfReach` is `drained`, so the letter stands there.
+  const answered = low && !atFloor && current && outOfReach && !input.standing;
   // The detail every line carries: the band it stands in, the pass's reach, and why it is raised or answered.
   const band = input.standing && free !== null && free >= input.thresholdBytes ? `within the ${gigabytes(bandBytes)} recovery band above the ${gigabytes(input.thresholdBytes)} line, so the low reading whose fault stands is this same one` : null;
   const reach = !pass ? 'the loop has recorded no worktree-reclaim pass'

@@ -1,8 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { classifyAttention, faultClassOf } from '../src/model/fault-classes.js';
-import { hostMemoryAttention, hostMemoryFloor, judgeHostMemory, memoryRecoveryMarginBytes, nameReclaimBoundMs, readReclaimState, readResources, reclaimResources, resourceAttention, type ResourceInputs } from '../src/master-resources.js';
+import { existsSync } from 'node:fs';
+import { chmod, mkdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { classifyAttention, faultClassOf, trackFaults } from '../src/model/fault-classes.js';
+import { hostMemoryAttention, hostMemoryFloor, judgeHostMemory, memoryRecoveryMarginBytes, nameReclaimBoundMs, readReclaimState, readResources, reclaimResources, resourceAttention, describeReclaim, type ResourceInputs, type ResourceReclaimReport } from '../src/master-resources.js';
+import { diskThresholdBytes, masterConfigSchema, type MasterConfig } from '../src/master.js';
+import { cycleFaults, emptyDaemonState } from '../src/master-daemon.js';
+import { judgeWorktreeDisk, worktreePassCurrentMs } from '../src/master/worktree-disk.js';
+import { reclaimTmpDirectories, testTempMinAgeMs } from '../src/tmp-reclaim.js';
 import { acquireVerificationSlot, bytesPerSuiteFile, declareSlotFiles, heldSlots, othersDeclaredFiles } from '../src/master/verification-slots.js';
 import { suiteBreadth } from './helpers/run-tests.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -187,4 +194,200 @@ test('manual:fault-class-resources — the breadth never falls below two files a
   assert.equal(suiteBreadth({ budgetBytes: 0, otherFiles: 1_000, cpus: 24 }), 2);
   assert.equal(suiteBreadth({ budgetBytes: 10 * bytesPerSuiteFile, otherFiles: 0, cpus: 4 }), 3, 'a 4-CPU host keeps node\'s own breadth');
   assert.equal(suiteBreadth({ budgetBytes: 4 * bytesPerSuiteFile, otherFiles: 3, cpus: 24 }), 2, 'three files declared leaves one affordable, clamped at two');
+});
+
+// ---- GY-1828: the class recurred — 3 more resources faults in the next 24 hours ----------------
+//
+// The new instances, replayed the way the ones above are: every one is rebuilt from its own detail
+// line, faults against the base's behaviour, and is shown not to recur against the candidate's.
+//
+// The shared cause, in two mechanisms:
+//   1. The worktree volume sat below its line while the loop's reclaim pass was taking the last
+//      reclaimable thing back: the pass that very minute removed 1 unowned managed checkout, and
+//      the answer rule — GY-1784's letter of "drained: it removed nothing" — judged that pass as
+//      reach it still held, so the registry reading (instance 1, resource-bound on
+//      resource:worktree-disk) and the loop's derived disk line (instance 2, disk-pressure on disk)
+//      both raised on a reading whose own detail said "nothing is reclaimable now ... outside its
+//      reach". The candidate answers the out-of-reach judgement: a current pass above the floor
+//      whose plan holds nothing disposable, with no backlog and no error, is the drain finished,
+//      whatever it removed; without a plan read the letter stands.
+//   2. The loop's /tmp pass could not free an entry it owned: /var/tmp/gy-teK30QK held a sandbox
+//      repository whose .git/worktrees/GY-7-1 directory was mode 0555, and rm reported
+//      "EACCES: permission denied, unlink .../GY-7-1/HEAD" — the action recorded failed (instance
+//      3, action:reclaim) and every later pass reported the same error again, the 39 MB beside it
+//      held for good. The candidate makes the owner-held directories writable before unlinking and
+//      frees the entry; an entry not owned by the pass's uid is never touched, and a kept one's
+//      modes are left exactly as they were.
+
+const instance1At = Date.parse('2026-10-15T23:30:40.457Z');
+const instance3At = Date.parse('2026-10-16T00:15:14.998Z');
+const worktreesVolume = '/home/vish/code/graphyard/.graphyard/worktrees';
+const volumeBytes = 1_022_000_000_000, freeAtInstance = 7_800_000_000, thresholdBytes = 10_000_000_000;
+
+test('manual:fault-class-resources — GY-1828 lists 3 instances, and every one is replayed below', () => {
+  const instances = [
+    { at: instance1At, kind: 'resource-bound', subject: 'resource:worktree-disk' },
+    { at: instance1At, kind: 'disk-pressure', subject: 'disk' },
+    { at: instance3At, kind: 'action:reclaim', subject: 'reclaim:resources:2026-10-16T00:15:14.991Z' },
+  ];
+  assert.equal(instances.length, 3);
+  assert.ok(instances.every(instance => faultClassOf(instance.kind) === 'resources'));
+});
+
+/** The pass summary the item's own detail line quotes: 1 unowned managed checkout taken back, nothing else left. */
+const instancePass = { at: new Date(instance1At).toISOString(), removed: 0, trees: 0, treeBacklog: 0, checkouts: 1, errors: 0, freeBytes: freeAtInstance };
+/** The registry inputs over the volume, as the loop reports them. */
+const volumeReading = (overrides: Record<string, unknown> = {}) => ({
+  now: instance1At, reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, revision: null,
+  profiles: { workers: [], reviewers: [], producers: [] },
+  disk: { path: worktreesVolume, totalBytes: volumeBytes, freeBytes: freeAtInstance, thresholdBytes, pass: instancePass, reclaimable: 0, ...overrides },
+} as ResourceInputs);
+const diskLine = (worktreeReclaimable: number | null | undefined) => {
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/credentials/coordinator.token', cliPath: 'graphyard', repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'vishrog', masterAgentName: 'graphyard-master-project', workers: [], run: { intervalSeconds: 20, diskThresholdGb: 10 } }) as MasterConfig;
+  const state = emptyDaemonState(config);
+  // The cursor's summary carries the pass's errors as strings; this pass met none.
+  state.reclaim = { ...instancePass, errors: [], scanned: 241, kept: 240, freedBytes: 0, checkoutsOffVolume: 0, rootFreeBytes: freeAtInstance } as typeof state.reclaim;
+  return cycleFaults(state, [], instance1At, { config, worktreeReclaimable }).filter(fault => fault.subject === 'disk');
+};
+
+test('manual:fault-class-resources — GY-1828 instances 1 and 2 reproduce: the pass that took back the last checkout is judged as reach left, and both lines raise on a reading its own detail calls out of reach', () => {
+  // The state the item recorded, at the instant both instances carry: the reading is low above the
+  // floor, the pass that just took back 1 unowned managed checkout is current, and the plan over
+  // the inventory holds nothing — the reading's own detail calls what remains out of reach.
+  const judged = judgeWorktreeDisk({ freeBytes: freeAtInstance, thresholdBytes, pass: instancePass, reclaimable: 0 }, instance1At);
+  assert.ok(judged.low && !judged.atFloor && judged.current, 'low above the floor, the pass current');
+  assert.equal(judged.outOfReach, true, 'the plan was read and holds nothing, no backlog, no error');
+  // The base's answer gate was the letter of drained — a pass that removed nothing — and this pass
+  // removed a checkout: the base judged it as reach left and raised, exactly the contradiction the
+  // instances record. The detail is the item's own line, word for word.
+  assert.equal(judged.drained, false);
+  assert.match(judged.detail!, /nothing is reclaimable now \(the loop's latest worktree-reclaim pass at .* took back 1 unowned managed checkouts removed\) \(no disposable dependency directories, reclaimable worktrees or unowned managed checkouts\), so the volume's remaining holders are outside its reach/);
+
+  // Instance 1: the registry line's raise — kind, class and the reading's wording, over the same
+  // volume with reach the base judged the pass to still hold (a state both rules raise on).
+  const [raised] = classifyAttention(resourceAttention(readResources(volumeReading({ reclaimable: 2 })))).filter(entry => entry.subject === 'resource:worktree-disk');
+  assert.equal(raised.kind, 'resource-bound');
+  assert.equal(raised.faultClass, 'resources');
+  assert.match(raised.text, /^Coordinator worktree disk is low: 1014\.\d GB used of 1022\.0 GB, 7\.8 GB left — \/home\/vish\/code\/graphyard\/\.graphyard\/worktrees; /);
+  // …and the reading at the instance's own state carries the detail line the instance quotes.
+  const reading = readResources(volumeReading()).find(entry => entry.resource === 'worktree-disk')!;
+  assert.equal(reading.state, 'low');
+  assert.match(reading.detail!, /nothing is reclaimable now \(the loop's latest worktree-reclaim pass at [^)]* took back 1 unowned managed checkouts removed\)/);
+
+  // Instance 2: the loop's derived line — the item's wording is the line's fixed text at this pass
+  // summary, raised wherever the answer gate fails (reach beside it, the base's drained letter at
+  // the instance state itself).
+  const lines = diskLine(2);
+  assert.deepEqual(lines.map(line => line.kind), ['disk-pressure']);
+  assert.match(lines[0].text, /^Free space below its configured bound at the last reclaim \(2026-10-15T23:30:40\.457Z\)$/);
+  const opened = trackFaults(emptyDaemonState(masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/credentials/coordinator.token', cliPath: 'graphyard', repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'vishrog', masterAgentName: 'graphyard-master-project', workers: [], run: { intervalSeconds: 20, diskThresholdGb: 10 } })).faults, lines, new Date(instance1At).toISOString());
+  assert.deepEqual(opened.map(line => `${line.kind}|${line.subject}`), ['disk-pressure|disk'], 'one crossing opens each line its instance');
+});
+
+test('manual:fault-class-resources — GY-1828 instances 1 and 2 do not recur: the same pass over the plan it drained to empty answers both lines, and everything the base honoured still raises', () => {
+  // The candidate: the out-of-reach judgement answers — the removals were the drain, not reach left.
+  const judged = judgeWorktreeDisk({ freeBytes: freeAtInstance, thresholdBytes, pass: instancePass, reclaimable: 0 }, instance1At);
+  assert.equal(judged.answered, true);
+  assert.deepEqual(classifyAttention(resourceAttention(readResources(volumeReading()))).filter(entry => entry.subject === 'resource:worktree-disk').map(entry => entry.subject), [], 'the registry line raises nothing');
+  assert.deepEqual(diskLine(0), [], 'the derived line raises nothing with it');
+
+  // Everything the base answered still answers, and everything it raised still raises.
+  assert.equal(judgeWorktreeDisk({ freeBytes: freeAtInstance, thresholdBytes, pass: instancePass, reclaimable: 2 }, instance1At).answered, false, 'a plan with reach now is reach');
+  assert.equal(judgeWorktreeDisk({ freeBytes: freeAtInstance, thresholdBytes, pass: { ...instancePass, treeBacklog: 3 }, reclaimable: 0 }, instance1At).answered, false, 'worktrees waiting on the next cycle are reach');
+  assert.equal(judgeWorktreeDisk({ freeBytes: freeAtInstance, thresholdBytes, pass: { ...instancePass, errors: 1 }, reclaimable: 0 }, instance1At).answered, false, 'a pass that met an error has unknown reach');
+  assert.equal(judgeWorktreeDisk({ freeBytes: freeAtInstance, thresholdBytes, pass: instancePass, reclaimable: null }, instance1At).answered, false, 'a plan that could not be read never answers');
+  assert.equal(judgeWorktreeDisk({ freeBytes: freeAtInstance, thresholdBytes, pass: instancePass }, instance1At).answered, false, 'judging from the pass alone keeps the letter of drained: only a pass that removed nothing answers');
+  assert.equal(judgeWorktreeDisk({ freeBytes: thresholdBytes / 2, thresholdBytes, pass: instancePass, reclaimable: 0 }, instance1At).answered, false, 'at the exhaustion floor the reading raises whatever the pass answered');
+  assert.equal(judgeWorktreeDisk({ freeBytes: freeAtInstance, thresholdBytes, pass: instancePass, reclaimable: 0 }, instance1At + worktreePassCurrentMs + 1).answered, false, 'a stale pass answers nothing');
+  assert.equal(judgeWorktreeDisk({ freeBytes: freeAtInstance, thresholdBytes, pass: instancePass, reclaimable: 0, standing: true }, instance1At).answered, false, 'a standing fault is never answered');
+  // And the two lines stay honest beside it: reach and an unreadable plan raise the derived line as before.
+  assert.match(diskLine(2)[0].text, /^Free space below its configured bound/);
+  assert.equal(diskLine(null).length, 1, 'a plan the loop cannot read never answers the derived line');
+});
+
+/** The stale entry the item names, rebuilt: a `gy-` test temp holding a sandbox repository whose linked worktree's admin directory git left mode 0555. */
+async function staleSandboxEntry(base: string, now: number) {
+  const tmp = join(base, 'tmp'), entry = join(tmp, 'gy-teK30QK');
+  const admin = join(entry, 'graphyard-sandbox-5ClynR', 'repo', '.git', 'worktrees', 'GY-7-1');
+  await mkdir(join(admin, 'logs'), { recursive: true });
+  await writeFile(join(admin, 'HEAD'), 'ref: refs/heads/main\n');
+  await writeFile(join(admin, 'index'), 'x');
+  await writeFile(join(admin, 'gitdir'), `${join(entry, 'worktree', '.git')}\n`);
+  await writeFile(join(admin, 'logs', 'HEAD'), 'x');
+  await chmod(admin, 0o555);
+  const age = testTempMinAgeMs + 3_600_000;
+  for (const path of [entry, join(entry, 'graphyard-sandbox-5ClynR'), join(entry, 'graphyard-sandbox-5ClynR', 'repo'), join(entry, 'graphyard-sandbox-5ClynR', 'repo', '.git'), join(entry, 'graphyard-sandbox-5ClynR', 'repo', '.git', 'worktrees'), admin, join(admin, 'logs'), join(admin, 'HEAD'), join(admin, 'index'), join(admin, 'gitdir'), join(admin, 'logs', 'HEAD')])
+    await utimes(path, new Date(now - age), new Date(now - age));
+  return { tmp, entry, admin };
+}
+
+test('manual:fault-class-resources — GY-1828 instance 3 reproduces: the base pass reports the entry EACCES and frees nothing; the candidate frees it whole and the action records done', async () => {
+  const base = await temporaryDirectory('fault-class-resources-readonly');
+  const now = instance3At - 3_600_000;
+  const { tmp, entry } = await staleSandboxEntry(base, now);
+
+  // REPRODUCE against the base: the removal the base's pass runs fails exactly as the item
+  // recorded — `EACCES: permission denied, unlink` on the first file inside the 0555 directory —
+  // and the entry stays, so the pass reports the error the action record carried as a fault.
+  const baseError = await rm(entry, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 }).then(() => null, error => error as NodeJS.ErrnoException);
+  assert.match(baseError!.message, /EACCES: permission denied, unlink '.*\.git\/worktrees\/GY-7-1\/HEAD'$/, 'the base\'s removal primitive fails on the read-only admin directory');
+  assert.equal(existsSync(entry), true, 'the base frees nothing: the entry stands');
+  const baseReport = { at: new Date(instance3At).toISOString(), reaped: { review: 1, producer: 0 }, closed: [], released: [], tmp: { removed: 1, bytes: 38_973_291 }, errors: [`/var/tmp/gy-teK30QK: ${baseError!.message}`] } as unknown as ResourceReclaimReport;
+  const baseLine = describeReclaim(baseReport)!;
+  assert.match(baseLine, /^Resource reclaim: reaped 1 review and 0 producer ledger record\(s\); freed 39 MB from 1 stale \/tmp entry; 1 could not be reclaimed: \/var\/tmp\/gy-teK30QK: EACCES: permission denied, unlink/);
+  assert.equal(baseLine.includes('could not be reclaimed'), true, 'the loop records the reclaim action failed on this report: the action:reclaim fault the item lists');
+
+  // CANDIDATE: the same tree, the pass as it now runs — owner-held directories are made writable
+  // before unlinking, the entry goes whole, and no error is reported.
+  const fresh = await staleSandboxEntry(await temporaryDirectory('fault-class-resources-readonly-freed'), now);
+  // A wide retry window: the assertion is that the writability pass frees the entry, not how fast
+  // the pass's own 2 s default window closes on a loaded runner.
+  const report = await reclaimTmpDirectories({ tmpRoot: fresh.tmp, now, held: new Set(), retryMs: 10_000 });
+  assert.deepEqual(report.errors, [], 'no EACCES is reported for the owned entry');
+  assert.deepEqual(report.removed.map(removed => removed.path), [fresh.entry], 'the entry is freed whole');
+  assert.ok(report.bytes > 0, 'the bytes come back with it');
+  assert.equal(report.classes?.testTemp, 1);
+  assert.equal(existsSync(fresh.entry), false);
+  const candidateLine = describeReclaim({ at: report.at, reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: report.removed.length, bytes: report.bytes }, errors: report.errors } as unknown as ResourceReclaimReport)!;
+  assert.match(candidateLine, /freed \d+ (MB|GB) from 1 stale \/tmp entry/);
+  assert.equal(candidateLine.includes('could not be reclaimed'), false, 'the action records done: the instance\'s fault never opens');
+});
+
+test('unit:tmp-reclaim-read-only-directories — the pass frees an owned entry holding read-only directories, never touches a kept one\'s modes, and never touches another user\'s entry', async () => {
+  const now = instance3At - 3_600_000;
+  // An entry younger than its bound is kept, and its read-only directory keeps its mode exactly.
+  const kept = await temporaryDirectory('tmp-reclaim-readonly-kept');
+  const keptRoot = join(kept, 'tmp'), keptEntry = join(keptRoot, 'gy-young');
+  const keptAdmin = join(keptEntry, 'repo', '.git', 'worktrees', 'GY-1-1');
+  await mkdir(keptAdmin, { recursive: true });
+  await writeFile(join(keptAdmin, 'HEAD'), 'x');
+  await chmod(keptAdmin, 0o555);
+  const young = now - 60_000;
+  for (const path of [keptEntry, join(keptEntry, 'repo'), join(keptEntry, 'repo', '.git'), join(keptEntry, 'repo', '.git', 'worktrees'), keptAdmin, join(keptAdmin, 'HEAD')]) await utimes(path, new Date(young), new Date(young));
+
+  // The stale owned entry beside it goes, errors and all.
+  const base = await temporaryDirectory('tmp-reclaim-readonly');
+  const { tmp, entry, admin } = await staleSandboxEntry(base, now);
+  const report = await reclaimTmpDirectories({ tmpRoot: join(base, 'tmp'), now, held: new Set(), retryMs: 10_000 });
+  assert.deepEqual(report.errors, []);
+  assert.deepEqual(report.removed.map(removed => removed.path), [entry]);
+  assert.equal(existsSync(admin), false, 'the owner-held read-only directory went with the entry');
+
+  // What the pass keeps is never made writable: the young entry's 0555 directory keeps its mode.
+  const keptReport = await reclaimTmpDirectories({ tmpRoot: keptRoot, now, held: new Set() });
+  assert.deepEqual(keptReport.removed, []);
+  assert.equal((await stat(keptAdmin)).mode & 0o777, 0o555, 'a kept entry\'s read-only directory keeps its mode');
+
+  // Another user's entry is never touched: a pass running as another uid skips it whole, and the
+  // 0555 directory inside it stands exactly as it was.
+  const foreign = await temporaryDirectory('tmp-reclaim-readonly-foreign');
+  const { tmp: foreignRoot, entry: foreignEntry, admin: foreignAdmin } = await staleSandboxEntry(foreign, now);
+  const getuid = process.getuid, realUid = getuid!.call(process);
+  process.getuid = () => realUid + 1;
+  let others;
+  try { others = await reclaimTmpDirectories({ tmpRoot: foreignRoot, now, held: new Set() }); } finally { process.getuid = getuid; }
+  assert.deepEqual(others.errors, []);
+  assert.deepEqual(others.removed, [], 'an entry that is not the pass\'s uid\'s is never removed');
+  assert.equal(existsSync(foreignEntry), true);
+  assert.equal((await stat(foreignAdmin)).mode & 0o777, 0o555, 'another user\'s read-only directory is never made writable');
 });

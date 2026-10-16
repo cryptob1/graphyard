@@ -272,8 +272,11 @@ test('unit:tmp-reclaim-error-isolated — one entry\'s removal failure leaves th
   const root = await temporaryDirectory('reclaim-isolated');
   const { entry: stuck, deepest } = await staleTree(root, 'graphyard-stuck');
   const { entry: other } = await staleTree(root, 'graphyard-other');
-  // The nested tree cannot be emptied this pass: its directory refuses removal of its entries.
-  await chmod(deepest, 0o555);
+  // The nested tree cannot be emptied this pass: its directory refuses to be listed, so the removal
+  // cannot enumerate its entries (GY-1828: a directory that merely refuses writes is no longer a
+  // failure — the pass makes its owner's directories writable and takes the entry; one it cannot
+  // read still is, and this is the failure the carry and the isolation are pinned against).
+  await chmod(deepest, 0o100);
   t.after(() => chmod(deepest, 0o755).catch(() => {}));
   const unfinished = new Set<string>();
   const first = await reclaimTmpDirectories({ now: Date.now(), tmpRoot: root, held: new Set(), unfinished, retryMs: 20 });

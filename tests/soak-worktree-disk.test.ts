@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { inventoryWorktrees, loadMasterConfig, planWorktreeReclaim, setupMaster, worktreeRemovalReason, worktreesDirectory, writeWorktreeInventoryCache, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { readDisk, readResources, resourceAttention } from '../src/master-resources.js';
+import { disposableWorktrees, readDisk, readResources, resourceAttention } from '../src/master-resources.js';
 import { diskRecoveryBandBytes, worktreePassCurrentMs, worktreePassOf } from '../src/master/worktree-disk.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -37,7 +37,7 @@ const work = (key: string, path: string, branch: string, overrides: Partial<Work
     ready: false, epoch: 1, lease: null, workspaces: [workspace(path, branch, 1)], candidate: null, submission: null, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], ...overrides }) as Work;
 
-test('unit:soak-worktree-disk — over simulated cycles the disk gate answers a drained pass, reopens for reach it gained, holds a standing fault inside the band whatever the pass then does, raises at the floor, and keeps one wobble one instance, with every system invariant holding', { timeout: 300_000 }, async () => {
+test('unit:soak-worktree-disk — over simulated cycles the disk gate answers a drained pass and the pass that drains the plan it took back, opens for a stale pass with the volume low, holds a standing fault inside the band whatever the pass then does, raises at the floor, and keeps one wobble one instance, with every system invariant holding', { timeout: 300_000 }, async () => {
   const root = await temporaryDirectory('soak-worktree-disk');
   const credentials = await temporaryDirectory('soak-worktree-disk-credentials');
   try {
@@ -98,6 +98,9 @@ test('unit:soak-worktree-disk — over simulated cycles the disk gate answers a 
     const effects = {
       agents: () => [], credentials: async () => ({}), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
       recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+      // The plan beside the pass, as production wires it (effects-production.ts): the derived line
+      // judges the same plan the registry reading does, never the pass alone.
+      worktreeReclaimable: (work: Work[], at: number) => disposableWorktrees(root, config10, { work, now: at }),
       snapshot: async () => ({ work: [itemA(finished), itemB], now: iso(now) }),
       observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
       controlPlane: async () => ({ build: { commit: null } }),
@@ -134,15 +137,32 @@ test('unit:soak-worktree-disk — over simulated cycles the disk gate answers a 
       assert.equal(step.derived, 0, `answer cycle ${index}: the derived line is silent with it`);
       assert.equal(step.reading.answered, true, `answer cycle ${index}: the pass is current and drained over a plan that counts nothing`);
     }
-    // Phase B — GY-91 finishes: its tree turns disposable under a pass that removed nothing, the reading is not answered, and the pass takes the install.
+    // Phase B — GY-91 finishes: its tree turns disposable. The pass and the faults step run in one
+    // cycle, so the cycle that gains reach also takes the install, and the reading answers — a
+    // current pass above the floor whose plan it drained to empty is the drain finished, whatever it
+    // removed, not reach left (GY-1828, the item's two worktree-volume instances): no instance opens
+    // for a dip the loop reclaims away in the same cycle, end to end through the real loop.
     finished = true;
-    const opened = await until('the gained reach', step => step.instances === 1);
-    assert.deepEqual(opened.items, ['resource:worktree-disk'], 'the gained reach raises the registry line');
+    const drainedAway = await cycle();
+    assert.deepEqual(drainedAway.items, [], 'the cycle that takes the gained reach opens no instance');
+    assert.equal(drainedAway.instances, 0, 'the drained-to-empty pass is the drain, not reach left');
+    assert.equal(drainedAway.derived, 0, 'the derived line is silent with it');
+    assert.equal(drainedAway.reading.answered, true, 'the same-cycle pass answers the reading it drained to empty');
+    assert.match(drainedAway.reading.detail!, /nothing is reclaimable now \(the loop's latest worktree-reclaim pass at .* took back 1 worktrees removed\)/);
+    // The one instance this soak owes the line opens the way a real loop's own failure opens it: the
+    // pass stops recording (its step throws every cycle) while the volume stays low, and past its
+    // currency bound a low reading stands — a stale pass answers nothing. A plan the pass could not
+    // take in its judgement window (a backlog past the pass's bound, a tree finishing between the
+    // pass and the faults step) raises the same way, on reach, which the unit tests pin.
+    passFails = true;
+    const opened = await until('the stale pass', step => step.instances === 1);
+    passFails = false;
+    assert.deepEqual(opened.items, ['resource:worktree-disk'], 'the stale pass raises the registry line');
     assert.equal(opened.derived, 1, 'the derived line opens with it, judged on the same pass');
-    assert.equal(opened.reading.answered, undefined, 'a pass that removed nothing is not drained over a plan that counts one');
-    // The wording at the cycle the record catches the line on is either the reach the pass has not used or the standing hold once the pass has taken it; both name the reading as raised, not answered.
-    assert.ok(/still has reach \(|the reading's fault stands, so it holds/.test(opened.reading.detail ?? ''), `the gained reach names itself: ${opened.reading.detail}`);
-    // The pass took it: fresh and drained over an empty plan, but the fault stands — still below the line, it holds.
+    assert.equal(opened.reading.answered, undefined, 'a stale pass never answers');
+    assert.match(opened.reading.detail!, /that pass is past its 30-minute currency bound, so the reading stands until the next pass/);
+    // The pass runs again and takes nothing — the install went the cycle the finish landed — so the
+    // fresh drained pass finds the volume held below the line with the fault standing: it holds.
     const taken = await until('the taken install', step => /found nothing reclaimable/.test(step.reading.detail ?? ''), 3);
     assert.equal(taken.instances, 1, 'the taken install opens no further instance');
     assert.equal(taken.derived, 1);
