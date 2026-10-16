@@ -1,4 +1,5 @@
 import { ReconciliationRetry, Refusal, MergeConflict, requireCurrent } from './model.js';
+import { recordedMergerMode, type MergerMode } from './merger-mode.js';
 import { createHash, createSign, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -2990,7 +2991,7 @@ const submittedAt = (work: Work) => work.documentation?.submission?.pr === work.
  * and the jobs and items in the work snapshot. A band whose readings fall past its bound is raised
  * as attention naming the band, its oldest item and its lag.
  */
-export function observationThroughputStatus(coordinator: { githubBudget?: ({ throughput?: { jobsPerMinute?: number; medianDurationMs?: number | null; p90DurationMs?: number | null } | null } & Partial<Pick<GitHubBudget, 'remaining' | 'limit' | 'resetAt' | 'perMinute' | 'projectedExhaustionAt' | 'exhaustsBeforeReset' | 'reserve' | 'tokens' | 'billable'>> & { pace?: Partial<GitHubBudget['pace']> | null }) | null } | null | undefined,
+export function observationThroughputStatus(coordinator: { githubBudget?: ({ throughput?: { jobsPerMinute?: number; medianDurationMs?: number | null; p90DurationMs?: number | null } | null } & Partial<Pick<GitHubBudget, 'remaining' | 'limit' | 'resetAt' | 'perMinute' | 'projectedExhaustionAt' | 'exhaustsBeforeReset' | 'reserve' | 'tokens' | 'billable' | 'lastHour'>> & { pace?: Partial<GitHubBudget['pace']> | null }) | null } | null | undefined,
   snapshot: { work: Work[]; now: string; jobs?: IntegrationJob[] }, now = Date.parse(snapshot.now)) {
   const throughput = coordinator?.githubBudget?.throughput ?? null;
   const reading = coordinator?.githubBudget ?? null;
@@ -3002,7 +3003,10 @@ export function observationThroughputStatus(coordinator: { githubBudget?: ({ thr
     // Each token's own remaining, reset and projection at that reset (GY-690).
     tokens: (reading.tokens ?? []).map(token => ({ token: token.token, current: token.current, remaining: token.remaining, resetAt: token.resetAt, perMinute: token.perMinute, otherPerMinute: token.otherPerMinute, projectedAtReset: token.projectedAtReset, belowReserveAtReset: token.belowReserveAtReset })),
     // Billable requests over the last hour against the hourly budget, by endpoint (GY-806).
-    billable: reading.billable ?? null } : null;
+    billable: reading.billable ?? null,
+    // What the last hour spent, count and by kind (GY-1835): master status carries the hour's
+    // GitHub request count, so the drop a control-plane merger brings is measurable on it.
+    lastHour: reading.lastHour ?? null } : null;
   const oldestDueJobMs = (snapshot.jobs ?? []).reduce<number | null>((oldest, job) => {
     const locked = job.locked_until !== null && Date.parse(job.locked_until) > now, held = job.held_until != null && Date.parse(job.held_until) > now;
     if (locked || held) return oldest;
@@ -3118,6 +3122,11 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   // it only when the installation actually changed (see Store.releaseHeldJobs).
   const heldOn = () => installationFingerprint(github.permissionReport?.() ?? null);
   let held: string | null = null;
+  // The recorded merger, read once per claim and only when a control-plane candidate asks for it
+  // (GY-1835): a GitHub-mode observation spends no query on it, and a mode read is cheap beside
+  // the observation it gates.
+  let merger: MergerMode | null = null;
+  const mergerNow = async (): Promise<MergerMode> => merger ??= (await recordedMergerMode(engine.store.pool)).merger;
   // Whether this run saved an observation (GY-506): every claimed job either saves one or records
   // why it did not — in the job's error, hold or deferral — and the job's consecutive
   // no-observation count is reset or incremented accordingly, whichever way it ends.
@@ -3138,6 +3147,19 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       held = hold('observation');
       if (held) { await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn(), observed); return true; }
       const now = new Date();
+      // GY-1835: under the control-plane merger a candidate whose latest observation the control
+      // plane made itself is observed from the checkout, and GitHub is asked for no pull request,
+      // review or check run — its head, merge and verdicts are the control plane's own records
+      // (GY-1523), the gates read the merge ledger for what GitHub would answer, and every
+      // GitHub-side step below (reruns, base refresh, review dispatch, check publication and the
+      // merge hand-off) is work on a pull request this candidate does not have. A pull request a
+      // person opened — an observation GitHub supplied, `source` unset — is still observed from
+      // GitHub below, and with GitHub as the recorded merger nothing changes.
+      if (work.observation?.source === 'control-plane' && await mergerNow() === 'control-plane') {
+        const local = await engine.observeControlPlaneCandidate(work);
+        if (local) { work = await engine.observe(work.id, work.revision, local, job.token); observed = true; }
+        return false;
+      }
       github.noteFleet?.(openCandidates(all));
       // Below the merge-path reserve, an observation that is neither a merge-gate candidate's nor
       // a webhook wake is rescheduled past the reset rather than spent.
@@ -3159,7 +3181,10 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       work = await engine.observe(work.id, work.revision, observation, job.token);
       observed = true;
       // A peer git shows landed while its item records it unlanded is delivered now (GY-744).
-      await engine.reconcileLanded(observation, all, peer => github.observe(peer, all));
+      // Under the control-plane merger the reconcile asks GitHub for no peer the control plane
+      // observed itself: its landing is the merge writer's own record to deliver (GY-1835), and its
+      // job observes it from the checkout; a person-opened pull request is still reconciled here.
+      await engine.reconcileLanded(observation, all, await mergerNow() === 'control-plane' ? null : peer => github.observe(peer, all));
       schedule.cadence = observationCadence(work, all.map(item => item.id === work!.id ? work! : item), now, previous, github.steadyStateMs?.(now.getTime()));
       // A required check that failed on this candidate is rerun once before it counts (GY-516): the
       // observation recorded the rerun as owed, holding the entry's position; GitHub is asked here,
