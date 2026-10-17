@@ -20,7 +20,6 @@ import type { PendingFollowUps, TriageRecord } from './machine-backlog.js';
 import { proofSchema } from './proof.js';
 import { closedQuestionsSchema } from './closed-question.js';
 import { workOriginSchema, type WorkOrigin } from './interventions.js';
-import type { PrAdoption } from './pr-adoption.js';
 import { demand } from './refusal.js';
 
 export const CHECK_NAME = 'Graphyard / merge', LANDABLE_CHECK = 'graphyard/landable'; // GY-887: both are Graphyard's own, never CI inputs to the verdict
@@ -223,14 +222,7 @@ export interface Work extends Create {
    */
   humanRequest?: HumanRequest | null; humanRequests?: HumanRequest[]; /** The loop's last probe of the blocker's cause (GY-1008). */ blockerProbe?: import('./blocker-class.js').BlockerProbe | null;
   /** What the research step found before build, and the product questions it asked (src/research.ts); the decomposition run before first dispatch and the split relation it recorded, set only by the control plane (src/decomposition.ts). */
-  researchBrief?: ResearchRecord | null; decomposition?: DecompositionRecord | null; parent?: string | null; children?: string[];
-  /**
-   * GY-1849: one existing pull request adopted into this item on its same branch and head, with the
-   * original source's key and URL kept beside it. One binding per item: an attempt works on the
-   * adopted branch, `complete` accepts only the adopted pull request, and repeating the adoption is
-   * a no-op; see model/pr-adoption.ts.
-   */
-  prAdoption?: PrAdoption | null;
+  researchBrief?: ResearchRecord | null; decomposition?: DecompositionRecord | null; parent?: string | null; children?: string[]; /** GY-1849: the one pull request adopted into this item at its own branch and head, source kept (model/pr-adoption.ts). */ prAdoption?: import('./pr-adoption.js').PrAdoption | null;
   /** Set when the item was closed without delivery (model/closure.ts); a closed item is `done` but never delivered. */
   closure?: Closure | null; triage?: TriageRecord | null; pendingFollowUps?: PendingFollowUps | null; // triage: a machine-filed item's judgement (GY-402); pendingFollowUps: follow-ups held until it shipped (GY-845), stored before GY-1249 and never written now, model/machine-backlog.ts
   /** Sessions of this item that ran out of provider quota, and any role with no account left (model/capacity.ts). */

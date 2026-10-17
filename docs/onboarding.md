@@ -90,7 +90,7 @@ Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck work (`maste
 
 ### Supervised mode (up --local)
 
-`graphyard up --local` writes `"supervision": "supervised"` and your login (`operatorLogin`) to `master.json`; absent is autonomous: your GitHub approval of the exact head passes review and auto-merge lands it; the loop launches no reviewer, approver or escalation. `master status` prints `supervision` and flags PRs your login authored. Promote: `master reviewer setup`, `master reviewer add`, `master promote --admin-token-stdin` ([promotion](master-agent-reference.md#promotion-to-autonomy)).
+`graphyard up --local` writes `"supervision": "supervised"` and your login (`operatorLogin`) to `master.json`; absent is autonomous. Supervised: your GitHub approval of the exact head passes review and auto-merge lands it; the loop launches no reviewer, approver or escalation. `master status` prints `supervision` and flags PRs your login authored. Promote: `master reviewer setup`, `master reviewer add`, `master promote --admin-token-stdin` ([promotion](master-agent-reference.md#promotion-to-autonomy)).
 
 ## 4. Prove the first PR
 
@@ -102,4 +102,4 @@ CI workflows should cancel superseded pull-request runs: group `${{ github.workf
 
 `graphyard onboard inventory --repo OWNER/REPO [--mapping FILE] [--out FILE]` labels open PRs and drafts: `continue`, `hold` (draft), `adopt` (mergeable; protection, ruleset checks clean per App) or `superseded` (base holds the head). Read-only; `--mapping` binds keys.
 
-`master adopt GY-N --pr NUMBER --head SHA [--source-key KEY --source-url URL] REASON` binds an open non-draft PR at its live head to the item (source kept); attempts work on the PR's own branch and `complete` accepts only that PR. Moved head or second owner: refused naming it; the same adoption again: a no-op; GitHub is never written.
+`master adopt GY-N --pr NUMBER --head SHA [--source-key KEY --source-url URL] REASON` binds an open non-draft PR at its live head (source kept); attempts work on the PR's own branch and `complete` accepts only that PR. Moved head or second owner: refused naming it; the same adoption again: a no-op; GitHub is never written.
