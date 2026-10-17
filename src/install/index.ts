@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
-import { chmod, readdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 import { dirname, resolve } from 'node:path';
@@ -17,7 +17,7 @@ import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerPro
 import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
 import { repositoryPolicyAssignment } from '../model/repository-policy.js';
 import { delegationLimitAssignments, delegationLimitVariables } from './limits.js';
-import { assertOutsideRepository, configHome, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalsVariable, readInstallRecord, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord } from './secrets.js';
+import { assertOutsideRepository, configHome, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalRecords, principalsVariable, readInstallRecord, reconcileRoster, recordedRoster, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord, type RosterPrincipal } from './secrets.js';
 import { AppStepPending, readAppFile, readSavedApp, readUninstalledApp, type SavedApp } from './manifest.js';
 import { appRoles, importApp, listApps, publiclyReachable, reuseExistingApp, savedRegistrations, type AppCredentials, type AppRole, type SavedRegistration } from '../github-setup.js';
 import { herdrBoundElsewhere, herdrPluginBinding, herdrRebindRefusal } from '../repository-setup.js';
@@ -206,7 +206,8 @@ const held = (action: Omit<PlanAction, 'state' | 'held'>, reason: string): PlanA
 export interface InstallSession {
   root: string; inputs: Required<Pick<InstallInputs, 'repository' | 'provider' | 'baseBranch'>> & InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice & FreshCursorChoice;
   installId: string; directory: string; adapter: ProviderAdapter; context: AdapterContext;
-  principals: PlannedPrincipal[]; tokens: Map<string, string>; vault: Vault;
+  /** The roster this apply deploys: the plan's principals reconciled with the recorded roster (GY-1879, `reconcileRoster`). */
+  principals: RosterPrincipal[]; tokens: Map<string, string>; vault: Vault;
   record: InstallRecord | null; reviewers: { name: string; appId: number; botUserId: number }[];
   mode: 'plan' | 'apply';
   /** True once every principal credential exists on disk, so fingerprints are real. */
@@ -435,11 +436,14 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
   // on a failed preflight having changed nothing, so the credential directory, the tokens and
   // the database password are minted by `materializeInstall` after that gate — not here.
   assertOutsideRepository(directory, root);
-  // Observation-only installs no worker principal (nor a producer, a standing CI credential).
-  const principals = plannedPrincipals(installId, { workers: rawInputs.workers, producerProofs: rawInputs.producerProofs })
-    .filter(principal => !rawInputs.observeOnly || (principal.role !== 'worker' && principal.role !== 'producer'));
-  const tokens = selfContained ? new Map<string, string>() : await ensureTokens(directory, principals, vault, false);
   const record = await readInstallRecord(directory);
+  // Observation-only plans no worker principal (nor a producer, a standing CI credential). The
+  // recorded roster is reconciled in, never rewritten (GY-1879): a principal `graphyard principal
+  // add` registered, or one an earlier apply registered that observation-only cannot plan, keeps
+  // its entry and its credential.
+  const principals = reconcileRoster(plannedPrincipals(installId, { workers: rawInputs.workers, producerProofs: rawInputs.producerProofs })
+    .filter(principal => !rawInputs.observeOnly || (principal.role !== 'worker' && principal.role !== 'producer')), recordedRoster(record), { observeOnly: !!rawInputs.observeOnly });
+  const tokens = selfContained ? new Map<string, string>() : await ensureTokens(directory, principals, vault, false);
   let generatedFiles: InstallSession['generatedFiles'];
   try { generatedFiles = { assignment: generatedFilesAssignment(root), error: null }; }
   catch (error: any) { generatedFiles = { assignment: null, error: error.message }; }
@@ -907,10 +911,8 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     else preflight.push({ name: 'GitHub App', ok: true, detail: `--no-github-app: no App is registered or reused, ${APP_VARIABLES.join(', ')} stay unset, and the server serves without GitHub` });
   }
 
-  // The deployed roster is replaced by the planned one: an existing installation whose workers or
-  // producers authenticate would lose them while their setup is reported held, so refuse.
-  const rosterHeld = observeOnly ? (record?.principals ?? []).filter(principal => principal.role === 'worker' || principal.role === 'producer') : [];
-  if (rosterHeld.length) preflight.push({ name: 'Principals', ok: false, detail: `--observe-only installs no worker or producer, and this installation already authenticates ${rosterHeld.map(principal => principal.id).join(', ')}; redeploying without them would revoke their credentials`, fix: `Rerun without --observe-only to keep the installation's roster` });
+  // The deployed roster is reconciled, not replaced (GY-1879): an existing installation's workers
+  // and producers stay in session.principals with their credentials, so observation-only revokes none.
 
   const core = coreEnv(session);
   const drift: PlanDrift[] = [];
@@ -1262,7 +1264,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   // The record names this run's App choice before the App step can pause it: a rerun without
   // --no-github-app waiting at its App page must not keep a prior no-App install's marker, or
   // `init --scan --apply` would onboard against an App still being bound (GY-1642).
-  record = { ...record, url, domain: context.domain, service: context.service, provider: context.provider, selfContained: !!context.host, migratedFrom, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, noGithubApp: !!session.inputs.noGithubApp, principals: session.principals.map(principal => ({ id: principal.id, role: principal.role, ...(principal.sessionKind ? { sessionKind: principal.sessionKind } : {}), ...(principal.proofs?.length ? { proofs: principal.proofs } : {}), fingerprint: fingerprint(session.tokens.get(principal.id)!) })), updatedAt: new Date(deps.now()).toISOString() };
+  record = { ...record, url, domain: context.domain, service: context.service, provider: context.provider, selfContained: !!context.host, migratedFrom, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, noGithubApp: !!session.inputs.noGithubApp, principals: principalRecords(session.principals, session.tokens), updatedAt: new Date(deps.now()).toISOString() };
   await writeInstallRecord(session.directory, record, vault);
 
   // The master's local configuration and the profiles come before the App step (GY-1413), so
@@ -1525,6 +1527,54 @@ async function pausedSummary(session: InstallSession, plan: InstallPlan, url: st
       ...(stop ? [`To stop the control plane instead: ${stop}`] : []),
     ],
   };
+}
+
+/**
+ * `graphyard principal add|remove` (GY-1879): deploy `roster`, the installation's recorded roster
+ * with one entry upserted or removed, as the one variable it renders. The deployment is handed
+ * GRAPHYARD_PRINCIPALS alone where its adapter merges (`applyVariables`: Railway, local); a bundle
+ * adapter (Compose, a host) is rewritten with every other value as it stands. The record then
+ * keeps the roster, a removed principal's credential leaves this machine, and the served control
+ * plane's roster is read back, as the admin, until it shows the change. With `changed` false
+ * nothing is written and the roster is only read back.
+ */
+export async function applyRosterChange(session: InstallSession, record: InstallRecord, roster: RosterPrincipal[], change: { id: string; changed: boolean; entry: RosterPrincipal | null }) {
+  const { adapter, context, deps, vault } = session;
+  if (!record.url) throw new Error(`The installation record under ${session.directory} names no server URL; rerun graphyard install --apply first`);
+  if (context.host) {
+    if (context.host.secretsUnreadable) throw new Error(`The host's credentials could not be read (${context.host.secretsUnreadable}); the roster is not edited blind`);
+    context.host.principals = roster;
+    generateHostSecrets(context);
+  } else {
+    for (const [principal, token] of await ensureTokens(session.directory, roster.filter(principal => principal.id !== change.id), vault, false)) session.tokens.set(principal, token);
+    const missing = roster.filter(principal => principal.id !== change.id && !session.tokens.has(principal.id));
+    if (missing.length) throw new Error(`No credential is saved for ${missing.map(principal => principal.id).join(', ')} under ${session.directory}; rerun graphyard install --apply before editing the roster`);
+    if (change.entry) for (const [principal, token] of await ensureTokens(session.directory, [change.entry], vault, true)) session.tokens.set(principal, token);
+  }
+  session.principals = roster;
+  const merges = typeof adapter.applyVariables === 'function';
+  let deployment: { provider: Provider; service: string; variables: string[]; rewritten: boolean } | null = null;
+  if (change.changed) {
+    const values = coreEnv(session);
+    if (merges) await adapter.applyVariables!(context, values.filter(value => value.name === 'GRAPHYARD_PRINCIPALS'));
+    else { await adapter.setEnv(context, values); await adapter.deploy(context); }
+    deployment = { provider: context.provider, service: context.service, variables: ['GRAPHYARD_PRINCIPALS'], rewritten: !merges };
+    await writeInstallRecord(session.directory, { ...record, principals: principalRecords(roster, session.tokens), updatedAt: new Date(deps.now()).toISOString() }, vault);
+    if (!change.entry && !context.host) await rm(tokenFile(session.directory, change.id), { force: true });
+  }
+  const admin = principalOfRole(roster, 'admin');
+  const target = `${record.url.replace(/\/$/, '')}/api/principals`;
+  let readback: { url: string; principal: { id: string; role: string; sessionKind: string | null; grants: string[] } | null; principals: number } | null = null;
+  for (let attempt = 0; attempt < 40 && !readback; attempt++) {
+    const response = await deps.fetch(target, { headers: { Authorization: `Bearer ${session.tokens.get(admin.id)}` }, signal: AbortSignal.timeout(15_000) }).catch(() => null);
+    const served = response?.ok ? (await response.json().catch(() => null))?.principals : null;
+    const listed = Array.isArray(served) ? served.find((principal: { id: string }) => principal.id === change.id) : undefined;
+    if (Array.isArray(served) && (change.entry ? listed : !listed)) readback = { url: target, principal: listed ? { id: listed.id, role: listed.role, sessionKind: listed.sessionKind ?? null, grants: listed.grants ?? [] } : null, principals: served.length };
+    else await deps.wait(3000);
+  }
+  if (!readback) throw new Error(`${target} still ${change.entry ? `does not list ${change.id}` : `lists ${change.id}`} after two minutes; the redeploy may still be in progress. Rerun the same command: it changes nothing and reads the roster back again`);
+  return vault.scrub({ action: change.entry ? 'add' as const : 'remove' as const, repository: record.repository, installDirectory: session.directory, principal: change.entry ? { id: change.entry.id, role: change.entry.role, sessionKind: change.entry.sessionKind ?? null, grants: change.entry.grants ?? [] } : { id: change.id }, changed: change.changed, deployment, readback,
+    ...(change.entry && !context.host ? { tokenFile: tokenFile(session.directory, change.entry.id) } : {}) });
 }
 
 function emptyRecord(session: InstallSession, url: string): InstallRecord {

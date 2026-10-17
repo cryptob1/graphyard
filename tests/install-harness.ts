@@ -185,6 +185,22 @@ export interface HarnessOptions {
   registry?: any;
 }
 
+/**
+ * The roster the fake deployment serves (GY-1879): the last GRAPHYARD_PRINCIPALS the transport was
+ * handed, over standard input (Railway, local) or in a written env file (Compose, a host).
+ */
+export function deployedRoster(transport: ReturnType<typeof fakeTransport>, remotes: Map<string, ReturnType<typeof fakeTransport>> = new Map()): { id: string; role: string; sessionKind?: string; proofs?: string[]; grants?: string[]; token: string }[] {
+  const commands = [...transport.commands, ...[...remotes.values()].flatMap(remote => remote.commands)];
+  const handed = [...commands].reverse().find(command => command.args.includes('GRAPHYARD_PRINCIPALS') && command.input);
+  if (handed) return JSON.parse(handed.input!);
+  const files = [...transport.files.values(), ...[...remotes.values()].flatMap(remote => [...remote.files.values()])];
+  for (const file of [...files].reverse()) {
+    const line = file.content.split('\n').find(entry => entry.startsWith('GRAPHYARD_PRINCIPALS='));
+    if (line) return JSON.parse(line.slice('GRAPHYARD_PRINCIPALS='.length));
+  }
+  return [];
+}
+
 export async function harness(options: HarnessOptions): Promise<Harness> {
   const repository = options.repository ?? REPOSITORY;
   const reused = !!(options.root && options.configHome);
@@ -213,6 +229,8 @@ export async function harness(options: HarnessOptions): Promise<Harness> {
     const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
     if (url.endsWith('/healthz')) return options.healthy === false ? json(503, { ok: false }) : json(200, { ok: true, commit: options.servedCommit === undefined ? GRAPHYARD_SOURCE_SHA : options.servedCommit });
     if (url.endsWith('/api/agent-registry/document')) return json(200, registry);
+    // The served roster (GET /api/principals), as the control plane lists it: ids, roles, kinds and grants, never tokens.
+    if (url.endsWith('/api/principals')) return json(200, { principals: deployedRoster(transport, remotes).map(principal => ({ id: principal.id, role: principal.role, sessionKind: principal.sessionKind ?? null, grants: principal.grants ?? [], leases: [] })) });
     if (url.endsWith('/api/agent-registry/apply') && method === 'POST') return json(200, { applied: true });
     if (url.endsWith('/api/status')) return json(200, options.statusBody ?? { actor: { id: `${installId}-operator`, role: 'admin' }, repository, github: true, githubAppId: GRAPHYARD_APP_ID, githubInstallationId: 500 });
     if (url.includes('/app/installations/') && url.endsWith('/access_tokens')) return json(201, { token: 'installation-token-for-tests', expires_at: new Date(Date.now() + 3_600_000).toISOString() });

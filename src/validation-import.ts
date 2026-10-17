@@ -9,10 +9,12 @@ import type { Store } from './store.js';
 import { importExternalRun, type ExternalRunResult } from './runner-report.js';
 import { importedRunVerdict, type FlakyAcceptance, type ImportedBlockingCase } from './e2e/runner.js';
 import { candidateAtHead, candidateTagPrefix, type PromotionImports, type ReleaseCandidate } from './release-candidate.js';
+import { externalRunsImportGrant } from './server/principals.js';
 
 /**
  * GY-1842 gave the format and the verdict rule (`importExternalRun`, `importedRunVerdict`); this
- * module is the one way a run gets in from outside the process. A producer credential posts one
+ * module is the one way a run gets in from outside the process. A producer credential holding the
+ * `external-runs:import` grant (GY-1879; the grant authorizes nothing else, and no proof evidence) posts one
  * run; the plane binds it to the release candidate whose head is exactly the run's `sha` — read
  * from the repository's `rc/` tags through the GitHub App, the ledger `release cut` writes, never
  * from a candidate id the producer names — and refuses a run cut at no candidate. The record keeps
@@ -146,7 +148,7 @@ const sameRun = (existing: ImportedRunRecord, run: ExternalRunResult) =>
 export interface ImportPlane { store: Store; github: LedgerReader | null }
 
 /**
- * Import one run for `actor`. Refuses any credential but a producer's (403), a run naming no head
+ * Import one run for `actor`. Refuses any credential but a producer's holding `external-runs:import` (403), a run naming no head
  * (400), a plane with no GitHub adapter to read the ledger through (503), a head no candidate was
  * cut at (409), a candidate bound to another producer principal (409) and a sealed candidate (409). The record is written once per producer and run id: the same document again replays
  * it (`replayed`) with the candidate it bound to, read from the record before any GitHub read, so a
@@ -156,6 +158,7 @@ export interface ImportPlane { store: Store; github: LedgerReader | null }
  */
 export async function importRun(plane: ImportPlane, actor: Principal, input: unknown, now = new Date()) {
   demand(actor.role === 'producer', 'A producer credential is required to import an external run', 403);
+  demand(actor.grants?.includes(externalRunsImportGrant), `Importing an external run requires the ${externalRunsImportGrant} grant; producer ${actor.id} holds ${actor.grants?.length ? actor.grants.join(', ') : 'no grant'}`, 403);
   const run = importExternalRun(input);
   demand(run.sha, 'An imported run binds to a release candidate by its head: give the candidate `sha` the run tested', 400);
   const committed = await committedRun(plane.store.pool, run);
