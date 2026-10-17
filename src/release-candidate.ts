@@ -188,7 +188,8 @@ export interface E2eCaseRecord {
 /** The e2e release run bound to the candidate: its run id, the SHA UAT served, every case's verdict and the blocking ones. */
 export interface E2eRecord { runId: string; sha: string; cases: E2eCaseRecord[]; blocking: string[] }
 export interface UatRecord {
-  id: string; sha: string; result: 'passed' | 'failed'; deployedSha: string | null; at: string; suites: SuiteResult[];
+  /** GY-1965: `cancelled` is the verdict of a uat job cancelled or failed before its suites recorded one; it concludes the validation and never promotes. */
+  id: string; sha: string; result: 'passed' | 'failed' | 'cancelled'; deployedSha: string | null; at: string; suites: SuiteResult[];
   /** The follow-up item a failed candidate filed, once filed. */
   followUp: string | null;
   e2e?: E2eRecord | null;
@@ -377,6 +378,7 @@ export function assessPromotion(candidate: ReleaseCandidate, uat: UatRecord | nu
       refusals.push(`Candidate ${candidate.id}'s UAT record was taken against ${uat.digests.map(digest => `${digest.service} ${digest.digest.slice(0, 18)}…`).join(', ')}, not its recorded build (${candidate.build.artifacts.map(digest => `${digest.service} ${digest.digest.slice(0, 18)}…`).join(', ')}); deploy the recorded digests to UAT and validate them again`);
     const flaky = unacceptedFlaky(candidate, uat, acceptances);
     if (flaky?.length) refusals.push(`Candidate ${candidate.id}'s required E2E case${flaky.length > 1 ? 's' : ''} ${flaky.join(', ')} ${flaky.length > 1 ? 'were' : 'was'} flaky at ${candidate.sha} in run ${uat.e2e!.runId}; an evidence decision must accept ${flaky.length > 1 ? 'each' : 'it'} at that exact SHA before promotion`);
+    else if (uat.result === 'cancelled') refusals.push(`Candidate ${candidate.id}'s UAT validation was cancelled before it recorded a verdict; cut a newer candidate`);
     else if (!flaky && uat.result !== 'passed') refusals.push(`Candidate ${candidate.id} failed UAT (${failingSuites(uat).map(suite => suite.name).join(', ')}); cut a newer candidate after the fix`);
   }
   if (imported && 'unread' in imported) refusals.push(`Candidate ${candidate.id}'s imported external runs could not be read (${imported.unread}); promotion waits until their hold is known`);
@@ -898,7 +900,7 @@ export function uatValidationCeilingMs(workflow: string, job = 'uat') {
  * Pure: whether UAT may take a candidate — by the branch move of a sha deploy, or by the
  * recorded-digests deployment of a digest-capable one (GY-1844) — given the commit the branch holds
  * now. UAT serving another candidate that has no verdict yet, cut within the validation window, is
- * a validation in progress: replacing it would fail that validation and file a spurious follow-up,
+ * a validation in progress (any verdict concludes it, a cancelled one too, GY-1965): replacing it would fail that validation and file a spurious follow-up,
  * so the deploy is refused. A digest deployment moves no branch, so when UAT's current deployment
  * generation (src/release-digests.ts) is a digest one, the candidate it names is judged the same
  * way. Otherwise the branch move is leased on the observed tip, so a concurrent deploy that moved
