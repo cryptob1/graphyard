@@ -84,6 +84,8 @@ export function stallUpstreamFiler(config: MasterConfig, root: string): StallUps
  * plane files it, so a stall that falls due while the ledger is full waits on its own run to be admitted.
  */
 export const retainedStallFilings = retainedStepStalls, retainedStallFiled = 200;
+/** One filing pass's bound (GY-1855): at most this many asks, none started past this budget, each ask timed out at 30 s. */
+export const stallUpstreamAsksPerPass = 4, stallUpstreamPassBudgetMs = 30_000;
 
 /**
  * Whether a filing is asked again now: a failed ask on the daemon's backoff (`readyToRetry`), and an
@@ -125,32 +127,54 @@ async function askStallUpstream(state: DaemonState, filer: StallUpstreamFiler, n
 }
 
 /**
- * Filing step beside the remedies (GY-1855 AC-2): every standing stall past `stallFilesUpstream` files
- * exactly one upstream item per signature. Its body is composed once and kept on the cursor until the
- * plane files it, so a failed, unanswered or interrupted ask — even one whose stall has since cleared —
- * is asked again with the same body and key; a filed key, or the done row, files nothing more.
+ * Admission (GY-1855 AC-2): every standing stall past `stallFilesUpstream` that no filing, filed key or
+ * done row answers yet is composed into the ledger — oldest stall first, while it has room — before any
+ * ask is made, and persisted at once, so a slow, refused or unanswered plane never keeps a due signature
+ * off the cursor and a stall that clears meanwhile is still filed.
  */
-export async function fileStalledStepsUpstream(state: DaemonState, filer: StallUpstreamFiler | null, now: () => number, persist: DaemonEffects['persist']): Promise<DaemonAction | null> {
-  let last: DaemonAction | null = null;
-  if (!filer) return last;
+async function admitDueStalls(state: DaemonState, now: () => number, persist: DaemonEffects['persist']): Promise<void> {
   const ledger = state.stallUpstream;
-  for (const [subject, pending] of Object.entries(ledger.pending).sort((a, b) => Date.parse(a[1].at) - Date.parse(b[1].at))) {
-    if (!stallUpstreamAskReady(state.actions[stallUpstreamActionKey(pending.signature)], state.cycle)) continue;
-    // A plane that did not answer ends this cycle's asks: every other one is asked on a later cycle, on its own backoff.
-    const asked = await askStallUpstream(state, filer, now, persist, subject, true);
-    last = asked.action;
-    if (asked.unanswered) return last;
-  }
+  let admitted = false;
   const due = Object.values(state.stepStalls).filter(run => run.stalledAt && stallFilesUpstream(run)).sort((a, b) => Date.parse(a.stalledAt!) - Date.parse(b.stalledAt!));
   for (const stall of due) {
     const subject = stallSubjectKey(stall.signature), previous = state.actions[stallUpstreamActionKey(stall.signature)];
     if (ledger.filed[subject] || ledger.pending[subject] || previous?.state === 'done' || !stallUpstreamAskReady(previous, state.cycle)) continue;
-    // A full ledger admits nothing: the stall still stands, so it is admitted on a later cycle once a waiting filing settles.
+    // A full ledger admits nothing: the stall still stands, so it is admitted once a waiting filing settles.
     if (Object.keys(ledger.pending).length >= retainedStallFilings) break;
     ledger.pending[subject] = { signature: stall.signature, step: stall.step, at: new Date(now()).toISOString(), body: JSON.stringify(stallUpstreamItem(stall)) };
-    const asked = await askStallUpstream(state, filer, now, persist, subject, false);
-    last = asked.action;
-    if (asked.unanswered) return last;
+    admitted = true;
+  }
+  if (admitted) await persist(state);
+}
+
+/**
+ * Filing step beside the remedies (GY-1855 AC-2): every standing stall past `stallFilesUpstream` files
+ * exactly one upstream item per signature. Its body is composed once and kept on the cursor until the
+ * plane files it, so a failed, unanswered or interrupted ask — even one whose stall has since cleared —
+ * is asked again with the same body and key; a filed key, or the done row, files nothing more. A pass
+ * starts at most `stallUpstreamAsksPerPass` asks and none once `stallUpstreamPassBudgetMs` has passed —
+ * least recently asked first — so a slow plane holds the loop for one budget plus one request timeout;
+ * every filing it did not reach waits on the cursor for a later cycle.
+ */
+export async function fileStalledStepsUpstream(state: DaemonState, filer: StallUpstreamFiler | null, now: () => number, persist: DaemonEffects['persist']): Promise<DaemonAction | null> {
+  let last: DaemonAction | null = null;
+  if (!filer) return last;
+  await admitDueStalls(state, now, persist);
+  const started = now(), asked = new Set<string>();
+  for (let asks = 0; asks < stallUpstreamAsksPerPass && now() - started < stallUpstreamPassBudgetMs; asks++) {
+    const ready = Object.entries(state.stallUpstream.pending)
+      .map(([subject, pending]) => ({ subject, pending, previous: state.actions[stallUpstreamActionKey(pending.signature)] }))
+      .filter(entry => !asked.has(entry.subject) && stallUpstreamAskReady(entry.previous, state.cycle))
+      .sort((a, b) => (a.previous?.cycle ?? -1) - (b.previous?.cycle ?? -1) || Date.parse(a.pending.at) - Date.parse(b.pending.at));
+    const next = ready[0];
+    if (!next) break;
+    asked.add(next.subject);
+    const answer = await askStallUpstream(state, filer, now, persist, next.subject, !!next.previous);
+    last = answer.action;
+    // A plane that did not answer ends this cycle's asks: every other one is asked on a later cycle, on its own backoff.
+    if (answer.unanswered) break;
+    // A filed item frees its place: a stall the full ledger declined is admitted now.
+    if (answer.action.state === 'done') await admitDueStalls(state, now, persist);
   }
   return last;
 }

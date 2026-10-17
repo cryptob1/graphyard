@@ -918,6 +918,71 @@ test('unit:loop-step-stall-upstream-ledger-full — a full ledger of waiting fil
   assert.equal(Object.keys(loop.stallUpstream.pending).length, U.retainedStallFilings - 1, 'the unanswered filing still waits');
 });
 
+test('unit:loop-step-stall-upstream-admits-before-asking — every due signature is on the cursor before any ask, so a plane that times out keeps them all, and stalls that clear during the outage are each filed once it answers', async () => {
+  const { S, U } = await load();
+  const loop = state();
+  const failures = ['refresh', 'reclaim', 'close'].map(kind => ({ kind, state: 'failed' as const, detail: `the ${kind} call timed out after 5000ms` }));
+  for (const cycle of [1, 2, 3, 4, 5, 6]) { loop.cycle = cycle; S.noteCycleStalls(loop, failures.slice(0, 2), cycle, tick(S.stallBackoffMs + 1)); }
+  const persisted: string[][] = [];
+  const persist = async (written: typeof loop) => { persisted.push(Object.values(written.stallUpstream.pending).map(pending => pending.step)); };
+  const asks: string[] = [];
+  const down = async (_input: unknown, key: string) => { asks.push(key); throw new Error('The operation was aborted due to timeout'); };
+  assert.equal((await U.fileStalledStepsUpstream(loop, down, () => clock, persist))?.state, 'failed');
+  assert.equal(asks.length, 1, 'the unanswered ask ends the cycle’s asks');
+  assert.deepEqual(persisted[0]?.sort(), ['reclaim', 'refresh'], 'both due signatures were persisted before the first ask');
+  assert.equal(Object.keys(loop.stallUpstream.pending).length, 2);
+
+  // A retry of a waiting filing that times out again still admits a stall that fell due meanwhile.
+  for (const cycle of [7, 8, 9, 10, 11, 12]) { loop.cycle = cycle; S.noteCycleStalls(loop, failures, cycle, tick(S.stallBackoffMs + 1)); }
+  loop.cycle = 40;
+  assert.equal((await U.fileStalledStepsUpstream(loop, down, () => clock, persist))?.state, 'failed');
+  assert.deepEqual(Object.values(loop.stallUpstream.pending).map(pending => pending.step).sort(), ['close', 'reclaim', 'refresh']);
+
+  // Every stall clears during the outage; once the plane answers, each signature is filed exactly once.
+  loop.cycle = 41;
+  S.noteStepsSucceeded(loop, loop.cycle, tick(S.stallBackoffMs + 1));
+  assert.deepEqual(loop.stepStalls, {}, 'the stalls cleared');
+  asks.length = 0;
+  const filer = async (_input: unknown, key: string) => { asks.push(key); return { key: `GY-UP-${asks.length}` } as never; };
+  loop.cycle = 80;
+  await U.fileStalledStepsUpstream(loop, filer, () => clock, persist);
+  assert.equal(new Set(asks).size, 3, `each of the three signatures was filed: ${asks.join(', ')}`);
+  assert.equal(asks.length, 3, 'once each');
+  assert.deepEqual(loop.stallUpstream.pending, {});
+  assert.equal(Object.keys(loop.stallUpstream.filed).length, 3);
+});
+
+test('unit:loop-step-stall-upstream-pass-budget — a slow-answering plane holds one filing pass for at most its budget plus one request, a fast one for at most its ask count, and every filing it did not reach waits for a later cycle', async () => {
+  const { S, U } = await load();
+  const loop = state();
+  loop.cycle = 10;
+  const body = JSON.stringify({ title: 'waiting', type: 'bug', priority: 1, description: 'waiting', criteria: [{ id: 'AC-1', text: 'waiting', proofs: ['unit:waiting'] }], reason: 'waiting' });
+  for (let index = 0; index < 50; index++) loop.stallUpstream.pending[`stall:slow${index}`] = { signature: `slow filing ${index}`, step: 'refresh', at: new Date(clock + index).toISOString(), body };
+  // Each answer arrives just under the 30-second request timeout, refused for the item alone.
+  const asks: string[] = [];
+  const slow = async (_input: unknown, key: string) => { asks.push(key); tick(29_000); throw new Error('Graphyard refused work (422): invalid item'); };
+  const began = clock;
+  await U.fileStalledStepsUpstream(loop, slow, () => clock, async () => {});
+  assert.ok(clock - began <= U.stallUpstreamPassBudgetMs + 30_000, `the pass took ${clock - began}ms`);
+  assert.equal(asks.length, 2, 'no ask starts once the budget is spent');
+  assert.equal(Object.keys(loop.stallUpstream.pending).length, 50, 'every filing still waits');
+  // A fast plane: the pass stops at its ask count, and the next cycle reaches filings this one did not.
+  const filed: string[] = [];
+  const fast = async (_input: unknown, key: string) => { filed.push(key); return { key: `GY-UP-${filed.length}` } as never; };
+  loop.cycle = 11;
+  await U.fileStalledStepsUpstream(loop, fast, () => clock, async () => {});
+  assert.equal(filed.length, U.stallUpstreamAsksPerPass);
+  assert.ok(!filed.some(key => asks.includes(key)), 'never-asked filings go before those just refused');
+  for (let cycle = 12; Object.keys(loop.stallUpstream.pending).length; cycle++) {
+    assert.ok(cycle < 200, 'every waiting filing is filed within a bounded number of cycles');
+    loop.cycle = cycle;
+    await U.fileStalledStepsUpstream(loop, fast, () => clock, async () => {});
+  }
+  assert.equal(new Set(filed).size, 50);
+  assert.equal(filed.length, 50, 'each filed exactly once');
+  assert.equal(S.stallUpstreamCycles, 6);
+});
+
 test('unit:stall-signature-overflow-invocations-held — ten panes sharing one signature from one effect are all held after the third cycle, every invocation past the eighth included, and the record stays within its bound', async () => {
   const { S } = await load();
   const { stepStallSchema } = await import('../src/daemon/state.js');

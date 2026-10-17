@@ -5,7 +5,7 @@ import { stepStallSchema } from '../src/daemon/state.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { noteCycleStalls, retainedStepStalls, stallBackoffMs, stallCycleBound, stallHeldEffects, stallSubjectKey, stallWakeSubjects } from '../src/daemon/step-stalls.js';
 import { daemonSummary } from '../src/daemon/run.js';
-import { stallStatusAttention, stallUpstreamActionKey, type StallUpstreamItemInput } from '../src/daemon/stall-upstream.js';
+import { stallStatusAttention, stallUpstreamActionKey, stallUpstreamAsksPerPass, stallUpstreamPassBudgetMs, type StallUpstreamItemInput } from '../src/daemon/stall-upstream.js';
 import type { StepStallRemedyKind } from '../src/stall-remedies.js';
 import type { Work } from '../src/model.js';
 import type { HerdrAgent } from '../src/master/herdr.js';
@@ -42,7 +42,8 @@ import { clearReviewerProfileRefusal, readReviewerProfileRefusal, recordReviewer
 // re-forms under the same signature files exactly one item for it; a filer that refuses every ask is
 // asked again only on the loop's widening, capped backoff, always with the same key and body; and
 // twenty-five filings waiting through an upstream outage, their stalls clearing meanwhile, are each
-// kept and filed once it recovers.
+// kept and filed once it recovers; and the same through an upstream whose every answer takes 29 s
+// and whose asks time out for three hours: one unanswered ask per cycle, each pass within its budget.
 
 const minute = 60_000, hour = 60 * minute, interval = 2 * minute, dayMs = Number(process.env.SOAK_DAY_MS ?? 8 * hour);
 const start = Date.parse('2026-10-15T00:00:00.000Z');
@@ -140,6 +141,8 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
   upstreamFailure?: string;
   /** The upstream filer refuses only until this time into the day, then files every ask. */
   upstreamRecoversAt?: number;
+  /** Each upstream answer, refusal or item, arrives this long after its ask, on the simulated clock. */
+  upstreamAnswerMs?: number;
   /** The cursor the day starts on holds this many distinct stalls past their upstream bound, the i-th (from 1) held by a window ending i × windowMs into the day, so each clears once its window ends. */
   seededStalls?: { count: number; windowMs: number } }): Promise<Day> {
   const files = options.credentials ?? (options.reviewerProfile ? await (async () => {
@@ -234,6 +237,7 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
     // The upstream filer (GY-1855): one item per idempotency key, as the plane answers a re-ask with the item already filed.
     stallUpstream: async (input: StallUpstreamItemInput, key: string) => {
       result.filings.push({ at: now - start, cycle: result.state.cycle, key, input });
+      now += options.upstreamAnswerMs ?? 0;
       if (options.upstreamFailure && !(options.upstreamRecoversAt !== undefined && now - start >= options.upstreamRecoversAt)) throw new Error(options.upstreamFailure);
       return { key: `GY-UP-${new Set(result.filings.map(filing => filing.key)).size}` } as Work;
     },
@@ -717,6 +721,29 @@ test('unit:soak-step-stalls-upstream-outage — a day that starts with twenty-fi
     const gaps = asks.slice(1).map((filing, index) => filing.cycle - asks[index].cycle);
     assert.ok(gaps.every(gap => gap <= 30), `${key}: the backoff is capped: ${gaps.join(', ')} cycles`);
     assert.ok(asks.length <= 12, `${key}: ${asks.length} asks over a three-hour outage is the backoff, not once per cycle`);
+  }
+  assert.deepEqual(result.state.stallUpstream.pending, {}, 'nothing waits to be filed once the upstream recovered');
+  assert.equal(Object.keys(result.state.stallUpstream.filed).length, count, 'every signature remembers its filed item');
+});
+
+test('unit:soak-step-stalls-upstream-timeout — a day that starts with twenty-five stalls past their upstream bound while every upstream ask times out for three hours and every answer takes 29 seconds, most of the stalls clearing meanwhile: every signature is on the cursor before the first ask and filed exactly once after the upstream recovers, an unanswered ask ends its cycle’s asks, and no pass outlasts its budget, every invariant holding', { timeout: 600_000 }, async () => {
+  const count = 25, recoversAt = 3 * hour, answerMs = 29_000;
+  const result = await runDay({ withoutWork: true, seededStalls: { count, windowMs: 8 * minute }, upstreamFailure: 'The operation was aborted due to timeout', upstreamRecoversAt: recoversAt, upstreamAnswerMs: answerMs });
+  const keys = [...new Set(result.filings.map(filing => filing.key))];
+  assert.equal(keys.length, count, `every seeded signature was asked under its own key (${keys.length})`);
+  const cleared = Array.from({ length: count }, (_, index) => (index + 1) * 8 * minute).filter(end => end < recoversAt).length;
+  assert.ok(cleared >= 20, `${cleared} of the stalls cleared during the outage`);
+  const byCycle = new Map<number, typeof result.filings>();
+  for (const filing of result.filings) byCycle.set(filing.cycle, [...byCycle.get(filing.cycle) ?? [], filing]);
+  for (const [cycle, asks] of byCycle) {
+    assert.ok(asks.length <= stallUpstreamAsksPerPass, `cycle ${cycle}: ${asks.length} asks`);
+    assert.ok(asks.at(-1)!.at - asks[0].at < stallUpstreamPassBudgetMs, `cycle ${cycle}: its last ask started within the pass budget`);
+    if (asks[0].at < recoversAt) assert.equal(asks.length, 1, `cycle ${cycle}: the unanswered ask ended the cycle’s asks`);
+  }
+  for (const key of keys) {
+    const asks = result.filings.filter(filing => filing.key === key);
+    assert.equal(new Set(asks.map(filing => JSON.stringify(filing.input))).size, 1, `${key}: every ask resends the body first composed`);
+    assert.equal(asks.filter(filing => filing.at >= recoversAt).length, 1, `${key}: filed exactly once, after the upstream recovered`);
   }
   assert.deepEqual(result.state.stallUpstream.pending, {}, 'nothing waits to be filed once the upstream recovered');
   assert.equal(Object.keys(result.state.stallUpstream.filed).length, count, 'every signature remembers its filed item');
