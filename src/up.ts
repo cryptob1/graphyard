@@ -19,6 +19,7 @@ import { installIdFor } from './install/types.js';
 import { installDirectory, readInstallRecord } from './install/secrets.js';
 import { ensureDeployKey, ensureMainWriteProtection } from './install/deploy-key.js';
 import type { GitHubCli } from './install/github.js';
+import type { Transport } from './install/transport.js';
 import { herdrAttachCommand, installHerdrInstance, type HerdrInstance } from './master/herdr.js';
 import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, HerdrSetupFailure, herdrSync, hostHerdrDeps, prepareHerdrInstance, withLocalBin, type HerdrHostDeps } from './herdr-host.js';
 import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin } from './repository-setup.js';
@@ -229,9 +230,11 @@ export interface UpDependencies {
   /**
    * GY-1851: the HTTP status the control plane gave each credential this install recorded (the
    * coordinator, operator-agent and approver) at a status read; one that drew no answer is left out.
-   * Absent, nothing is judged stale; the real dependencies read recordedCredentialAnswers.
+   * HOST_INSTALL is the `install --plan` argv of a self-contained host install, whose identities live
+   * on the host (null otherwise). Absent, nothing is judged stale; the real dependencies read
+   * recordedCredentialAnswers here, or hostCredentialAnswers through the install's host transport.
    */
-  credentialAnswers?(adminToken: string | null): Promise<{ identity: string; status: number; listed?: boolean | null }[]>;
+  credentialAnswers?(adminToken: string | null, hostInstall?: string[] | null): Promise<{ identity: string; status: number; listed?: boolean | null }[]>;
   /**
    * GY-1851: stop the master loop and wait until its process has exited, so nothing holds the old
    * cursor in memory to write it again; answers the systemd unit it stopped, or null for a loop run
@@ -459,17 +462,16 @@ const masterJson = (root: string) => readFile(resolve(root, '.graphyard/master.j
  * A refused agent identity carries `listed`: true when the plane's operator-agent listing (read with
  * ADMIN) still holds it (revoked, say: its database row stands, so the database is not fresh), false
  * when the listing confirms it absent, and null when no listing was read (no ADMIN, or the request
- * failed): its absence is then unknown.
+ * failed): its absence is then unknown. CONFIG is master.json and READ reads a file it names.
  */
-export async function recordedCredentialAnswers(root: string, server: string, fetcher: typeof fetch = fetch, admin: string | null = null) {
-  const config = await masterJson(root);
+async function credentialAnswersFrom(config: any, read: (file: string) => Promise<string>, server: string, fetcher: typeof fetch, admin: string | null) {
   const recorded = [['coordinator', null, config?.credentialFile], ['operator-agent', config?.operatorAgent?.id, config?.operatorAgent?.credentialFile], ['approver', config?.approver?.id, config?.approver?.credentialFile]] as const;
   const call = (path: string, token: string) => fetcher(`${server.replace(/\/+$/, '')}/api/${path}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000) });
   const answers: { identity: string; status: number; listed?: boolean | null }[] = [];
   let listing: unknown[] | null | undefined;
   for (const [identity, id, file] of recorded) {
     if (typeof file !== 'string') continue;
-    const token = await readFile(resolve(file), 'utf8').then(text => text.trim(), () => '');
+    const token = (await read(file).catch(() => '')).trim();
     if (token.length < 32) continue;
     const status = await call('status', token).then(response => response.status, () => null);
     if (status === null) continue;
@@ -481,6 +483,23 @@ export async function recordedCredentialAnswers(root: string, server: string, fe
     answers.push({ identity, status });
   }
   return answers;
+}
+/** GY-1851: credentialAnswersFrom over this checkout's master.json and the credential files it names here. */
+export async function recordedCredentialAnswers(root: string, server: string, fetcher: typeof fetch = fetch, admin: string | null = null) {
+  return credentialAnswersFrom(await masterJson(root), file => readFile(resolve(file), 'utf8'), server, fetcher, admin);
+}
+/**
+ * GY-1851: a self-contained host's identities, judged where they were provisioned: install runs
+ * master init and master autonomy in the host's checkout (CHECKOUT), so its master.json and the
+ * credential files it names are read there through the install's transport, and ADMIN is the admin
+ * credential the host keeps, for the confirming operator-agent listing. A master.json the host
+ * does not answer with fails, so up says it could not judge the host rather than judging nothing.
+ */
+export async function hostCredentialAnswers(remote: Transport, checkout: string, server: string, fetcher: typeof fetch = fetch, admin: string | null = null) {
+  const cat = async (file: string) => { const result = await remote.exec('cat', [file], { allowFailure: true, timeout: 60_000 }); return result.code === 0 ? result.stdout : ''; };
+  const config = parseJson(await cat(`${checkout}/.graphyard/master.json`));
+  if (!config || typeof config !== 'object') throw new Error(`${checkout}/.graphyard/master.json on ${remote.description} could not be read`);
+  return credentialAnswersFrom(config, cat, server, fetcher, admin);
 }
 /** GY-1851: the master loop's cursor file, found from the coordinator credential master.json records. */
 const recordedCursor = async (root: string) => { const file = (await masterJson(root))?.credentialFile; return typeof file === 'string' ? { credentialFile: resolve(file) } : null; };
@@ -821,13 +840,18 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     // An identity the plane still lists (revoked, say) is no fresh database, and is left to master autonomy's own refusal;
     // a refused identity whose absence no listing confirmed leaves the state untouched, so a later run judges it again.
     if (state.completed.includes('control-plane') && !state.reissue?.length && deps.credentialAnswers) {
-      const admin = await deps.operatorToken?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
-      const answers = await deps.credentialAnswers(admin).catch(() => []);
+      // A self-contained host's identities live on the host, with the admin credential: they are judged there (hostCredentialAnswers).
+      const host = state.identitiesHost ?? null;
+      const admin = host ? null : await deps.operatorToken?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
+      const answers = await deps.credentialAnswers(admin, host ? installArgs('--plan') : null).catch((error: any) => {
+        deps.emit({ kind: 'note', text: `The recorded credentials could not be checked against the control plane (${String(error?.message ?? error).split('\n')[0].slice(0, 300)}), so nothing is judged stale on this run.` });
+        return [];
+      });
       const refused = answers.filter(answer => answer.status === 401).map(answer => answer.identity);
       const listed = answers.filter(answer => answer.status === 401 && answer.listed === true).map(answer => answer.identity);
       const unknown = answers.filter(answer => answer.status === 401 && answer.listed === null).map(answer => answer.identity);
       if (listed.length) deps.emit({ kind: 'note', text: `The control plane refused the recorded ${listed.join(', ')} credential${listed.length > 1 ? 's' : ''} (401) but still lists the identit${listed.length > 1 ? 'ies' : 'y'}: its database is not fresh (a revoked or rotated identity), so nothing is re-issued; restore it through the operator-agent API or choose another identity in .graphyard/master.json.` });
-      else if (unknown.length) deps.emit({ kind: 'note', text: `The control plane refused the recorded ${unknown.join(', ')} credential${unknown.length > 1 ? 's' : ''} (401), but its operator-agent listing could not be read (${admin ? 'GET /api/operator-agents failed' : "the operator's admin credential is not on this machine"}), so nothing confirms a fresh database and nothing is re-issued; rerun graphyard up once the listing answers.` });
+      else if (unknown.length) deps.emit({ kind: 'note', text: `The control plane refused the recorded ${unknown.join(', ')} credential${unknown.length > 1 ? 's' : ''} (401), but its operator-agent listing could not be read (${host ? `the admin credential on ${host} could not be read, or GET /api/operator-agents failed` : admin ? 'GET /api/operator-agents failed' : "the operator's admin credential is not on this machine"}), so nothing confirms a fresh database and nothing is re-issued; rerun graphyard up once the listing answers.` });
       else if (refused.length) {
         state.reissue = refused;
         state.completed = state.completed.filter(name => !reissueSteps.includes(name));
@@ -1719,7 +1743,16 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
       });
       child.stdin.end(options.stdin ?? '');
     }),
-    credentialAnswers: async admin => { const url = await serverUrl(); return url ? recordedCredentialAnswers(root, url, fetch, admin) : []; },
+    credentialAnswers: async (admin, hostInstall) => {
+      const url = await serverUrl();
+      if (!url) return [];
+      if (!hostInstall) return recordedCredentialAnswers(root, url, fetch, admin);
+      // GY-1851: the host install's own session reaches the host and reads back the admin credential it keeps there.
+      const [{ installRequestFromArgs, prepareInstall }, { hostRemote }] = await Promise.all([import('./install/index.js'), import('./install/host.js')]);
+      const session = await prepareInstall(root, installRequestFromArgs(hostInstall.slice(1)).request, { cliPath, log: () => {} }, 'plan');
+      const adminId = session.principals.find(principal => principal.role === 'admin')?.id;
+      return hostCredentialAnswers(await hostRemote(session.context), session.context.host!.layout.checkout, url, fetch, adminId ? session.tokens.get(adminId) ?? null : null);
+    },
     status: async () => {
       const url = await serverUrl(), token = await masterToken();
       return url && token ? planeRequest(url, token)('status') : null;

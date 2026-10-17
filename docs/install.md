@@ -22,7 +22,7 @@ Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/gr
 - `railway`: `npm i -g @railway/cli`, `railway login`.
 - `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; `--ssh-key NAME`, `--domain`. `manual:…install…-live` coordinators need `HCLOUD_TOKEN`, `HETZNER_SPEND_CAP_USD_MONTHLY` in repo-root `.env` (`0600`, uncommitted); optional `HETZNER_SSH_KEY` (else throwaway).
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; `--ssh-host`, `--domain`.
-- `compose` (local): `curl -fsSL https://get.docker.com | sh`. Polls GitHub, skipping webhook steps; publishes `127.0.0.1:4310`, else the first free port to 4329, kept on reruns (`up`, `master init` use it); a taken `--port N` fails preflight. Under `up`, a failed step's `next` carries its last 20 redacted lines. A stale `already exists in network` endpoint is disconnected, `up` retried once only; others stand.
+- `compose` (local): `curl -fsSL https://get.docker.com | sh`. Polls GitHub, skipping webhook steps; publishes `127.0.0.1:4310`, else the first free port to 4329, kept on reruns (`up`, `master init` use it); a taken `--port N` fails preflight. Under `up`, a failed step's `next` carries its last 20 redacted lines. A stale `already exists in network` endpoint is disconnected, `up` retried once; others stand.
 - `local` (`graphyard up --local`, not with another `--provider`): no Docker; embedded Postgres (`npm install` without `--omit=optional`), cluster in `INSTALL/postgres`; user unit `graphyard-local-INSTALL.service` starts, migrates (`db migrate`) and serves it (no systemd: prints foreground command). Polls GitHub like compose.
 
 ## Step 1: plan and approve
@@ -76,7 +76,7 @@ Price: `--confirm-price`, `--max-monthly`. Saved Apps (`--github-app FILE`, `.gr
 | `Branch protection could not be applied` | admin `gh auth login`
 | `already binds` / `still holds GITHUB_APP_` / `could not be read` | remove binding/variables or drop `--no-github-app`
 | `inside the managed repository` | `GRAPHYARD_CONFIG_HOME` outside worktrees
-| fresh database (401, unlisted agents) | `up` re-issues credentials, refiles onboarding/goal, archives cursor (hosts: `--fresh-cursor`)
+| fresh database (401, unlisted agents) | `up` re-issues credentials, refiles onboarding/goal, archives cursor (hosts: on host)
 
 ## Agent execution contract
 

@@ -191,7 +191,9 @@ test('unit:reinstall-reissues-stale-credentials — up re-issues the coordinator
  * loop unit running and holding its cursor in memory, writing it again as systemd stops it.
  */
 const fakeHost = (checkout: string, unit: string, cursor: string) => {
-  const files = new Map<string, string>([[`${checkout}/.graphyard/master.json`, JSON.stringify({ credentialFile: cursor.replace(/\.daemon\.json$/, '.token') })]]);
+  // master init and master autonomy ran here, in the host's checkout: the master's identities and their credential files are on the host only.
+  const config = { credentialFile: cursor.replace(/\.daemon\.json$/, '.token'), operatorAgent: { id: 'graphyard-master-shop-operator', credentialFile: `${checkout}/.graphyard/operator-agent.token` }, approver: { id: 'graphyard-approver-shop', credentialFile: `${checkout}/.graphyard/approver.token` } };
+  const files = new Map<string, string>([[`${checkout}/.graphyard/master.json`, JSON.stringify(config)], [config.credentialFile, `${MASTER}\n`]]);
   const commands: string[] = [];
   let loop: { cycle: number } | null = null;
   const start = () => { const text = files.get(cursor); loop = { cycle: text ? JSON.parse(text).cycle : 0 }; files.set(cursor, JSON.stringify({ cycle: loop.cycle })); };
@@ -210,11 +212,11 @@ const fakeHost = (checkout: string, unit: string, cursor: string) => {
       return { stdout: '', stderr: `unexpected ${command}`, code: 127 };
     },
   };
-  return { files, commands, transport, start, get loop() { return loop; }, set cycle(value: number) { loop!.cycle = value; } };
+  return { files, commands, transport, start, config, get loop() { return loop; }, set cycle(value: number) { loop!.cycle = value; } };
 };
 
 test('unit:reinstall-reissues-stale-credentials — a self-contained host install restarts the loop on the host on a fresh cursor, archiving the running loop\'s old one there, and starts nothing on this machine', async () => {
-  const { runUp } = await up();
+  const { runUp, hostCredentialAnswers, recordedCredentialAnswers } = await up();
   const { installRequestFromArgs, resetHostCursor, resumeCommand } = await import('../src/install/index.js');
   const parsed = installRequestFromArgs(['--repo', 'acme/shop', '--target', 'host', '--fresh-cursor']).request;
   assert.equal(parsed.freshCursor, true);
@@ -225,14 +227,23 @@ test('unit:reinstall-reissues-stale-credentials — a self-contained host instal
   const host = fakeHost(checkout, unit, cursor);
   host.start(); host.cycle = 16602;
 
-  const calls: string[][] = [];
-  let refused = false, stops = 0, starts = 0;
+  // `master autonomy` on the host: each identity created on the plane, its credential written beside the host's master.json.
+  let plane: Plane = { agents: [] }, issued = 0;
+  const autonomy = () => {
+    for (const [id, file] of [[host.config.operatorAgent.id, host.config.operatorAgent.credentialFile], [host.config.approver.id, host.config.approver.credentialFile]]) {
+      const token = `${id}-${++issued}`.padEnd(40, 'x');
+      plane.agents.push({ id, token }); host.files.set(file, `${token}\n`);
+    }
+  };
+  const calls: string[][] = [], judged: (string[] | null)[] = [];
+  let stops = 0, starts = 0, unreachable = false;
   const cli: UpDependencies['cli'] = async args => {
     calls.push(args);
     if (args[0] === 'install' && args.includes('--plan')) return { code: 0, stdout: JSON.stringify({ installId: 'acme-shop', installDirectory: '/install/acme-shop', principals: [{ id: 'acme-shop-operator', role: 'admin', sessionKind: 'human' }], preflight: [{ name: 'GitHub CLI', ok: true }] }) };
     if (args[0] === 'install' && args.includes('--apply')) {
       // The install itself: install --fresh-cursor resets the cursor on the host, through its transport.
       const fleet = { host: 'box', units: [{ name: unit, scope: 'user' as const, path: '', role: 'master loop', active: 'active' }] };
+      if (!args.includes('--herdr-only')) autonomy();
       const freshCursor = args.includes('--fresh-cursor') ? await resetHostCursor(host.transport, checkout, fleet, new Date('2026-10-17T03:00:00.000Z')) : undefined;
       return { code: 0, stdout: JSON.stringify({ ok: true, host: { ...fleet, masterIdentities: true }, ...(freshCursor ? { freshCursor } : {}) }) };
     }
@@ -243,7 +254,12 @@ test('unit:reinstall-reissues-stale-credentials — a self-contained host instal
     now: () => 0, sleep: async () => { await yieldTurn(); },
     serverUrl: async () => SERVER, masterToken: async () => MASTER, operatorToken: async () => ADMIN,
     status: async () => green(host.loop !== null),
-    credentialAnswers: async () => refused ? [{ identity: 'operator-agent', status: 401, listed: false }, { identity: 'approver', status: 401, listed: false }] : [],
+    // The production discovery: the host's master.json and credential files read through its transport, the host's admin credential confirming the listing.
+    credentialAnswers: async (token, hostInstall) => {
+      judged.push(hostInstall ?? null);
+      if (unreachable) throw new Error(`${checkout}/.graphyard/master.json on fake host could not be read`);
+      return hostCredentialAnswers(host.transport, checkout, SERVER, planeFetch(plane), ADMIN);
+    },
     stopLoop: async () => { stops++; return { unit: null }; }, startUnit: async () => { starts++; },
     publishOnboarding: async () => null, onboardingMerged: async () => true,
   });
@@ -255,13 +271,27 @@ test('unit:reinstall-reissues-stale-credentials — a self-contained host instal
   assert.equal(JSON.parse(await readFile(join(root, '.graphyard/up.json'), 'utf8')).identitiesHost, 'box');
   assert.ok(!calls.some(args => args.includes('--fresh-cursor')), 'a first install resets no cursor');
 
-  // The database is replaced; the host's loop runs on, and writes cycle 16603 from memory as it stops.
-  refused = true; host.cycle = 16603;
+  assert.deepEqual(plane.agents.map(agent => agent.id), ['graphyard-master-shop-operator', 'graphyard-approver-shop']);
+  const old = { operator: host.files.get(host.config.operatorAgent.credentialFile), approver: host.files.get(host.config.approver.credentialFile) };
+
+  // The database is replaced: the host's operator-agent and approver rows are gone. This machine
+  // holds neither identity (its master.json records none), so only the host can show the refusal.
+  plane = { agents: [] };
+  assert.deepEqual(await recordedCredentialAnswers(root, SERVER, planeFetch(plane)), [], 'nothing on this machine reveals the fresh database');
+  assert.deepEqual((await hostCredentialAnswers(host.transport, checkout, SERVER, planeFetch(plane), ADMIN)).map(answer => `${answer.identity} ${answer.status} ${answer.listed ?? ''}`.trim()), ['coordinator 200', 'operator-agent 401 false', 'approver 401 false']);
+  assert.deepEqual((await hostCredentialAnswers(host.transport, checkout, SERVER, planeFetch(plane), null)).map(answer => answer.listed ?? null), [null, null, null], 'with no admin credential on the host, absence is unknown');
+  // The host's loop runs on, and writes cycle 16603 from memory as it stops.
+  host.cycle = 16603;
   const before = { commands: host.commands.length, restarts: local() };
   const events: UpEvent[] = [];
   const reinstall = await runUp(request, deps(events));
   assert.equal(reinstall.exitCode, 0, reinstall.next);
   assert.ok(calls.some(args => args[0] === 'install' && args.includes('--apply') && args.includes('--fresh-cursor')), 'the install is asked to reset the host\'s cursor');
+  const asked = judged.at(-1)!;
+  assert.ok(asked && asked[0] === 'install' && asked.includes('--plan') && asked[asked.indexOf('--provider') + 1] === 'host', `the host's identities are judged through its own install session: ${JSON.stringify(asked)}`);
+  assert.ok(events.some(event => event.kind === 'note' && /refused the recorded operator-agent, approver credentials \(401\): it serves a fresh database/.test(event.text)), JSON.stringify(events));
+  assert.notEqual(host.files.get(host.config.operatorAgent.credentialFile), old.operator); assert.notEqual(host.files.get(host.config.approver.credentialFile), old.approver);
+  assert.deepEqual((await hostCredentialAnswers(host.transport, checkout, SERVER, planeFetch(plane), ADMIN)).map(answer => answer.status), [200, 200, 200], 'the host\'s identities are accepted by the fresh database');
   // On the host: stopped, its shutdown write archived, started again on no cursor.
   const order = host.commands.slice(before.commands).map(command => command.split(' ')[0] === 'systemctl' ? command : command.split(' ')[0]);
   assert.deepEqual(order.filter(command => command !== 'cat'), [`systemctl --user stop ${unit}`, 'mv', `systemctl --user start ${unit}`]);
@@ -278,10 +308,16 @@ test('unit:reinstall-reissues-stale-credentials — a self-contained host instal
   const state = JSON.parse(await readFile(join(root, '.graphyard/up.json'), 'utf8'));
   assert.equal(state.reissue, null); assert.equal(state.hostCursor, null);
 
-  // Accepted credentials again: no install (Herdr's own --herdr-only check runs on every run), nothing touched on the host.
-  refused = false;
+  // Accepted credentials again: no install (Herdr's own --herdr-only check runs on every run), nothing touched on the host but reads.
   const settled = { calls: calls.length, commands: host.commands.length };
   assert.equal((await runUp(request, deps([]))).exitCode, 0);
   assert.deepEqual(calls.slice(settled.calls).filter(args => (args[0] === 'install' && !args.includes('--herdr-only')) || args[1] === 'restart'), []);
-  assert.equal(host.commands.length, settled.commands);
+  assert.deepEqual(host.commands.slice(settled.commands).filter(command => !command.startsWith('cat ')), []);
+
+  // A host that cannot be read is said so, and nothing is judged stale.
+  unreachable = true;
+  const blind: UpEvent[] = [], quiet = calls.length;
+  assert.equal((await runUp(request, deps(blind))).exitCode, 0);
+  assert.deepEqual(calls.slice(quiet).filter(args => (args[0] === 'install' && !args.includes('--herdr-only')) || args[1] === 'restart'), []);
+  assert.ok(blind.some(event => event.kind === 'note' && /recorded credentials could not be checked against the control plane \(.*master\.json on fake host could not be read\)/.test(event.text)), JSON.stringify(blind));
 });
