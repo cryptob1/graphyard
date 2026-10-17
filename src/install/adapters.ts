@@ -50,6 +50,8 @@ export interface AdapterContext {
   host: import('./host.js').HostSettings | null;
   /** The local provider's cluster, unit and supervisor (GY-1500); absent for every other provider. */
   local?: import('./local.js').LocalSettings | null;
+  /** `install --observe-only` (GY-1846): observation runs no provider command that prints variable values. */
+  observeOnly?: boolean;
   /** Spend consent for a server this install creates: a monthly cap, or the exact price confirmed. */
   spend: { maxMonthly: number | null; confirmPrice: number | null };
   wait: (ms: number) => Promise<void>;
@@ -663,8 +665,15 @@ export const railwayAdapter: ProviderAdapter = {
     observation.database = services.some(name => /postgres/i.test(name));
     observation.app = services.includes(ctx.service);
     if (!observation.app) return observation;
-    const variables = await runRailway(ctx, ['variables', '--service', ctx.service, '--json'], { allowFailure: true, timeout: 180_000 });
-    if (variables.code === 0) {
+    // Every Railway variable listing prints values, and none prints names alone, so an
+    // observation-only install (GY-1846) never runs one: the service's existence stands for an
+    // installed deployment, and its variable names are reported unknown (variablesObserved false).
+    if (ctx.observeOnly) {
+      observation.installed = true;
+      observation.detail.push(`Variables of ${ctx.service} not read (observation-only reads no values): their names are unknown`);
+    }
+    const variables = ctx.observeOnly ? null : await runRailway(ctx, ['variables', '--service', ctx.service, '--json'], { allowFailure: true, timeout: 180_000 });
+    if (variables?.code === 0) {
       try {
         const parsed = JSON.parse(variables.stdout) as Record<string, string>;
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not a variable listing');
