@@ -263,4 +263,8 @@ test('unit:evaluation-attempts-kept — every attempt is kept with its outcome, 
   assert.deepEqual(attempt.evaluation.fault, { kind: 'evaluator-error', errors: fault.errors });
   const events = (await store.pool.query("SELECT kind FROM events WHERE work_id=$1 AND kind='validation.evaluation-fault'", [h.w.id])).rows;
   assert.equal(events.length, 1);
+  // Operator analytics read the same attempt as an evaluator fault, never a failed proof.
+  const live = (await validation.replay.analytics()).groups.find(g => g.proof === h.proof)!;
+  assert.ok(live.outcomes.evaluatorError >= 1, JSON.stringify(live.outcomes));
+  assert.equal(live.outcomes.failed, 0, 'an exhausted evaluation is not counted as a failed proof');
 });

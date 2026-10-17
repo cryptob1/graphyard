@@ -46,7 +46,8 @@ export interface ReplayRecord {
 export interface DurationSummary { samples: number; p50Ms: number | null; maxMs: number | null }
 export interface AnalyticsGroup {
   proof: string; environment: string; runner: string; attempts: number;
-  outcomes: Record<'passed' | 'failed' | 'expired' | 'cancelled' | 'superseded' | 'inFlight', number>;
+  /** GY-1841: `evaluatorError` counts completed attempts whose evaluation exhausted its retries without a verdict — a fault, never a failed proof. */
+  outcomes: Record<'passed' | 'failed' | 'evaluatorError' | 'expired' | 'cancelled' | 'superseded' | 'inFlight', number>;
   observed: Record<'queueMs' | 'acknowledgeMs' | 'executionMs' | 'collectionMs' | 'totalMs', DurationSummary>;
   reported: { durationMs: DurationSummary; cpuSeconds: DurationSummary };
   cost: { observed: { attempts: number; amounts: Record<string, number> }; estimated: { attempts: number; amounts: Record<string, number> }; unavailable: number };
@@ -193,13 +194,15 @@ export class ArtifactReplay {
     const requests = new Map<string, ValidationRequest>((await this.store.pool.query('SELECT document FROM validation_requests WHERE id=ANY($1::uuid[])', [requestIds])).rows.map(r => [r.document.id, r.document]));
     const candidates = new Map<string, ValidationCandidate>((await this.store.pool.query('SELECT document FROM validation_candidates WHERE id=ANY($1::uuid[])', [[...new Set(sequenced.map(s => s.candidate_id))]])).rows.map(r => [r.document.id, r.document]));
     const groups = new Map<string, AnalyticsGroup & { samples: Record<string, number[]>; reportedSamples: { durationMs: number[]; cpuSeconds: number[] } }>();
-    const outcomeOf = (r: ValidationRequest, a: Attempt): keyof AnalyticsGroup['outcomes'] => a.state === 'completed' ? (a.report ? (a.report.passed ? 'passed' : 'failed') : (r.attempts.at(-1)?.id === a.id && r.result ? (r.result.passed ? 'passed' : 'failed') : 'failed')) : a.state === 'expired' ? 'expired' : a.state === 'cancelled' ? 'cancelled' : a.state === 'superseded' ? 'superseded' : 'inFlight';
+    // GY-1841: an exhausted evaluation is classified before the passed/failed fallback, so an
+    // evaluator outage never counts as a failed proof or a later failure contradicting reuse.
+    const outcomeOf = (r: ValidationRequest, a: Attempt): keyof AnalyticsGroup['outcomes'] => a.state === 'completed' && (a.evaluation?.fault || (!a.report && r.attempts.at(-1)?.id === a.id && r.result?.fault)) ? 'evaluatorError' : a.state === 'completed' ? (a.report ? (a.report.passed ? 'passed' : 'failed') : (r.attempts.at(-1)?.id === a.id && r.result ? (r.result.passed ? 'passed' : 'failed') : 'failed')) : a.state === 'expired' ? 'expired' : a.state === 'cancelled' ? 'cancelled' : a.state === 'superseded' ? 'superseded' : 'inFlight';
     for (const row of sequenced) {
       const r = requests.get(row.request_id), a = r?.attempts.find(a => a.id === row.attempt_id), c = candidates.get(row.candidate_id);
       if (!r || !a || !c) continue;
       const key = `${r.proof}${c.environment.id}${r.runner.id}`;
       let group = groups.get(key);
-      if (!group) { group = { proof: r.proof, environment: c.environment.id, runner: r.runner.id, attempts: 0, outcomes: { passed: 0, failed: 0, expired: 0, cancelled: 0, superseded: 0, inFlight: 0 }, observed: { queueMs: median([]), acknowledgeMs: median([]), executionMs: median([]), collectionMs: median([]), totalMs: median([]) }, reported: { durationMs: median([]), cpuSeconds: median([]) }, cost: { observed: { attempts: 0, amounts: {} }, estimated: { attempts: 0, amounts: {} }, unavailable: 0 }, samples: { queueMs: [], acknowledgeMs: [], executionMs: [], collectionMs: [], totalMs: [] }, reportedSamples: { durationMs: [], cpuSeconds: [] } }; groups.set(key, group); }
+      if (!group) { group = { proof: r.proof, environment: c.environment.id, runner: r.runner.id, attempts: 0, outcomes: { passed: 0, failed: 0, evaluatorError: 0, expired: 0, cancelled: 0, superseded: 0, inFlight: 0 }, observed: { queueMs: median([]), acknowledgeMs: median([]), executionMs: median([]), collectionMs: median([]), totalMs: median([]) }, reported: { durationMs: median([]), cpuSeconds: median([]) }, cost: { observed: { attempts: 0, amounts: {} }, estimated: { attempts: 0, amounts: {} }, unavailable: 0 }, samples: { queueMs: [], acknowledgeMs: [], executionMs: [], collectionMs: [], totalMs: [] }, reportedSamples: { durationMs: [], cpuSeconds: [] } }; groups.set(key, group); }
       group.attempts++; group.outcomes[outcomeOf(r, a)]++;
       const previous = r.attempts[a.epoch - 2];
       const observed = { queueMs: span(previous?.finishedAt ?? (a.epoch === 1 ? r.createdAt : undefined), a.dispatchedAt), acknowledgeMs: span(a.dispatchedAt, a.acknowledgedAt), executionMs: span(a.acknowledgedAt, a.collectingAt), collectionMs: span(a.collectingAt, a.finishedAt), totalMs: span(a.dispatchedAt, a.finishedAt) };
