@@ -112,7 +112,7 @@ async function delivered(title: string, line: string) {
   return mergeSha;
 }
 /** The loop's path for one change: the plane cuts it, `rc/ID` is tagged, the combined required cases pass on its source, and the promoter's gate selects it for production. */
-async function promoted(title: string, line: string): Promise<{ candidate: ExactCandidate; record: ReleaseCandidate; artifact: string }> {
+async function promoted(title: string, line: string, beforePromotion?: (exact: { record: ReleaseCandidate; artifact: string }) => Promise<void>): Promise<{ candidate: ExactCandidate; record: ReleaseCandidate; artifact: string }> {
   await delivered(title, line);
   const answer = await call('POST', 'candidates', 'coordinator', { trigger: 'manual' });
   assert.equal(answer.status, 200, JSON.stringify(answer.body));
@@ -127,6 +127,7 @@ async function promoted(title: string, line: string): Promise<{ candidate: Exact
   assert.equal(run.record.result, 'passed', JSON.stringify(run.record.suites));
   const artifact = await candidateArtifact(asyncGit, record);
   await ports.validated(candidate.id, exactValidation({ ...record, exact: record.exact! }, run.record, artifact));
+  await beforePromotion?.({ record, artifact });
   const moved = await promoteAsync(asyncGit, record.id, { base: 'main', push: true, now: new Date(clock += 60_000), gate: entry => exactPromotionGate(ports, asyncGit, entry) });
   assert.equal(moved.promoted, true, JSON.stringify(moved));
   return { candidate, record, artifact };
@@ -229,11 +230,18 @@ test('integration:goal-exact-live-verification — production observed through t
   assert.equal(malformed.status, 400, 'an artifact that names no digest or tree is refused');
 
   // A newer promotion is not verified by what production ran before it: the reading must follow the selection.
+  // That holds against a producer clock running ahead too: the candidate's exact identity reported before its
+  // promotion, dated 50 s on (within the accepted skew), counts from when the plane received it, so it neither
+  // verifies the selection nor outranks the honest reading that follows it.
   serving = { status: 200, body: { release: first.record.id, sourceSha: first.record.sha, artifact: first.artifact } };
-  const second = await promoted('Home line B', 'change B');
+  const second = await promoted('Home line B', 'change B', async exact => {
+    const early = await observeSha(exact.record.sha, { release: exact.record.id, artifact: exact.artifact, observedAt: new Date(Date.now() + 50_000).toISOString() });
+    assert.equal(early.status, 200, JSON.stringify(early.body));
+  });
   production = await view();
   assert.equal(production.expected!.candidate, second.candidate.id);
-  assert.equal(production.verification.status, 'unobserved');
+  assert.equal(production.observed!.sourceSha, second.record.sha, 'the early reading is the newest observed');
+  assert.equal(production.verification.status, 'unobserved', 'a reading received before the selection never verifies it, whatever its producer dated it');
   await sweep();
   production = await view();
   assert.equal(production.verification.status, 'mismatched', 'production still runs the first candidate after the second was selected');

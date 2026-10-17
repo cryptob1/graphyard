@@ -293,9 +293,11 @@ const escapeHtml = text => text.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`)
  */
 export function startDeliveryLoop({ plane, front, origin, scratch, delivery, launcher, environment }) {
   const work = join(scratch, 'delivery');
-  execFileSync('git', ['clone', '-q', origin, work], { stdio: 'ignore' });
+  // Initialised and fetched rather than cloned: fetch and push are this fixture's only git network subcommands.
+  execFileSync('git', ['init', '-q', '-b', 'main', work], { stdio: 'ignore' });
   for (const [key, value] of [['user.name', 'fixture'], ['user.email', 'fixture@example.invalid'], ['commit.gpgsign', 'false'], ['tag.gpgsign', 'false']]) execFileSync('git', ['-C', work, 'config', key, value]);
   const git = (...args) => execFileSync('git', ['-C', work, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  git('remote', 'add', 'origin', origin); git('fetch', '-q', '--tags', 'origin'); git('checkout', '-q', '-B', 'main', '--track', 'refs/remotes/origin/main');
   const asyncGit = async args => git(...args);
   const store = new Store(plane.database);
   const call = async (method, path, token, body, key) => {

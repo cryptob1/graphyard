@@ -65,12 +65,17 @@ const notificationSchema = z.object({ environment: name, provider: z.string().tr
  * GY-1906: what production was independently observed running — the release record, its source and
  * the artifact — read from the live identity endpoint by the sweep or reported by an observe-sha
  * producer. An exact candidate's selection is verified only against this, never against the promotion.
+ * A reading counts from the earlier of its `observedAt` and `receivedAt` (the plane's own clock), both for
+ * which reading is newest and for whether it follows a selection: a producer's clock may run ahead, and a
+ * reading received before a selection never verifies it (records without `receivedAt` count from `observedAt`).
  */
-export interface ObservedIdentity { environment: string; releaseId: string | null; sourceSha: string; artifact: string | null; observedAt: string; observer: string; source: 'endpoint' | 'producer' }
+export interface ObservedIdentity { environment: string; releaseId: string | null; sourceSha: string; artifact: string | null; observedAt: string; receivedAt?: string; observer: string; source: 'endpoint' | 'producer' }
+/** When a reading counts from: its observation, never later than the plane received it. */
+const identityAt = (identity: ObservedIdentity) => Math.min(Date.parse(identity.observedAt), Date.parse(identity.receivedAt ?? identity.observedAt));
 /** The event every changed reading of an environment's live identity appends. */
 export const identityObservedKind = 'delivery.identity-observed';
-/** The newest identity is the latest observed; insertion order only breaks ties. */
-const identityNewest = `(payload->>'observedAt')::timestamptz DESC, seq DESC`;
+/** The newest identity is the latest counted (`identityAt`); insertion order only breaks ties. */
+const identityNewest = `LEAST((payload->>'observedAt')::timestamptz, COALESCE(payload->>'receivedAt', payload->>'observedAt')::timestamptz) DESC, seq DESC`;
 /** What a live identity endpoint answers: the release record it runs, its source commit and artifact. */
 export const liveIdentitySchema = z.object({ release: name.optional(), sourceSha: sha, artifact: candidateArtifact.optional() });
 export type LiveIdentity = (environment: string) => Promise<z.infer<typeof liveIdentitySchema>>;
@@ -159,9 +164,10 @@ type CandidateSelection = { candidate: string; promotion: { environment: string;
  */
 export function candidateVerification(expected: NonNullable<EnvironmentDelivery['expected']>, generation: number, observed: ObservedIdentity | null): EnvironmentDelivery['verification'] {
   const candidate = `candidate ${expected.candidate}'s release ${expected.releaseId} (source ${expected.sourceSha}, artifact ${expected.artifact})`;
-  const result = (status: VerificationStatus, reasons: string[]) => ({ generation, status, reasons, interval: null, evaluatedAt: observed?.observedAt ?? expected.selectedAt, verifiedAt: status === 'verified' ? observed!.observedAt : null });
-  if (!observed || Date.parse(observed.observedAt) < Date.parse(expected.selectedAt))
-    return result('unobserved', [`Production has not been observed since ${candidate} was selected at ${expected.selectedAt}${observed ? `; the last observation, at ${observed.observedAt}, predates it` : ''}`]);
+  const at = observed && new Date(identityAt(observed)).toISOString();
+  const result = (status: VerificationStatus, reasons: string[]) => ({ generation, status, reasons, interval: null, evaluatedAt: at ?? expected.selectedAt, verifiedAt: status === 'verified' ? at : null });
+  if (!observed || identityAt(observed) < Date.parse(expected.selectedAt))
+    return result('unobserved', [`Production has not been observed since ${candidate} was selected at ${expected.selectedAt}${observed ? `; the last observation, at ${at}, predates it` : ''}`]);
   const by = `observed by ${observed.observer} from ${observed.source === 'endpoint' ? 'the production identity endpoint' : 'its deployment observation'} at ${observed.observedAt}`;
   const differences = [
     ...observed.sourceSha !== expected.sourceSha ? [`Production serves source ${observed.sourceSha}, not ${expected.sourceSha}`] : [],
@@ -723,7 +729,7 @@ export class Delivery {
       const observation: ShaObservation = existing ?? { ...reading, id: randomUUID(), observer: actor.id, receivedAt: now.toISOString() };
       if (!existing) await this.event(db, actor.id, 'sha-observed', observation);
       // GY-1906: every reading is also production's observed identity, so a repeat of an earlier commit after drift is seen.
-      await this.recordIdentity(db, { environment: data.environment.id, releaseId: data.release ?? null, sourceSha: data.sha, artifact: data.artifact ?? null, observedAt: data.observedAt, observer: actor.id, source: 'producer' });
+      await this.recordIdentity(db, { environment: data.environment.id, releaseId: data.release ?? null, sourceSha: data.sha, artifact: data.artifact ?? null, observedAt: data.observedAt, receivedAt: now.toISOString(), observer: actor.id, source: 'producer' });
       const deployed: string[] = [], awaiting: { key: string; reason: string }[] = [];
       for (const candidate of candidates) {
         const work = (await db.query('SELECT document FROM work_items WHERE id=$1', [candidate.id])).rows[0]?.document as Work | undefined;
@@ -765,10 +771,10 @@ export class Delivery {
    */
   private async recordIdentity(db: pg.PoolClient, reading: ObservedIdentity) {
     const latest = (await db.query(`SELECT payload FROM events WHERE kind=$1 AND work_id IS NULL AND payload->>'environment'=$2 ORDER BY ${identityNewest} LIMIT 1`, [identityObservedKind, reading.environment])).rows[0]?.payload as ObservedIdentity | undefined;
-    if (latest && Date.parse(reading.observedAt) < Date.parse(latest.observedAt)) return false;
+    if (latest && identityAt(reading) < identityAt(latest)) return false;
     const selectedAt = (await db.query(`SELECT payload->'promotion'->>'at' AS at FROM events WHERE kind=$1 AND work_id IS NULL AND payload->'promotion'->>'environment'=$2 ORDER BY seq DESC LIMIT 1`, [candidatePromotionKind, reading.environment])).rows[0]?.at as string | undefined;
     const same = latest && latest.sourceSha === reading.sourceSha && latest.releaseId === reading.releaseId && latest.artifact === reading.artifact;
-    if (same && !(selectedAt && Date.parse(latest.observedAt) < Date.parse(selectedAt))) return false;
+    if (same && !(selectedAt && identityAt(latest) < Date.parse(selectedAt))) return false;
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [reading.observer, identityObservedKind, JSON.stringify(reading)]);
     return true;
   }
@@ -784,7 +790,7 @@ export class Delivery {
     let answer: z.infer<typeof liveIdentitySchema>;
     try { answer = await this.live('production'); } catch (error) { return { observed: null, recorded: false, error: String((error as Error)?.message ?? error).slice(0, 500) }; }
     return this.store.transaction(async (db, now) => {
-      const observed: ObservedIdentity = { environment: 'production', releaseId: answer.release ?? null, sourceSha: answer.sourceSha.toLowerCase(), artifact: answer.artifact ?? null, observedAt: now.toISOString(), observer: 'graphyard', source: 'endpoint' };
+      const observed: ObservedIdentity = { environment: 'production', releaseId: answer.release ?? null, sourceSha: answer.sourceSha.toLowerCase(), artifact: answer.artifact ?? null, observedAt: now.toISOString(), receivedAt: now.toISOString(), observer: 'graphyard', source: 'endpoint' };
       return { observed, recorded: await this.recordIdentity(db, observed), error: null };
     });
   }
