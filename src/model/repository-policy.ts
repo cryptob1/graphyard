@@ -109,6 +109,20 @@ export const policySections = (config: Record<string, unknown> | null | undefine
   Object.fromEntries(['risk', 'review', 'e2e'].filter(key => config?.[key] !== undefined).map(key => [key, config![key]]));
 
 /**
+ * The deployment value an installer sets from a parsed graphyard.json (null when the repository has
+ * none): compact JSON of its `risk`, `review` and `e2e` sections, `{}` when it declares none, so a
+ * redeploy also clears a declaration since removed. The runtime image carries no repository, so this
+ * variable is how the deployed control plane judges changes by the committed policy. Refuses a
+ * declaration the control plane would refuse.
+ */
+export function repositoryPolicyAssignment(config: Record<string, unknown> | null) {
+  const sections = policySections(config);
+  repositoryPolicySchema.parse(sections);
+  const value = JSON.stringify(sections);
+  return { variable: repositoryPolicyVariable, value, line: `${repositoryPolicyVariable}=${value}` };
+}
+
+/**
  * Reads the policy a process serves: GRAPHYARD_REPOSITORY_POLICY when set (the control plane's
  * deployment, whose image carries no repository), else the graphyard.json in the working directory
  * (the CLI, loop, coordinator and E2E runner all run in the managed checkout), else the default. A

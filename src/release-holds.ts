@@ -1,4 +1,5 @@
-import { releaseVerdict, type E2eReport } from './e2e/runner.js';
+import { pendingUnder, releaseVerdict, type E2eReport } from './e2e/runner.js';
+import { repositoryPolicy, type RepositoryPolicy } from './model/repository-policy.js';
 import type { ReleaseContract } from './e2e/case.js';
 import { candidateId, contractPendingCases, filingReason, readRecords, writeRecord, type E2eCaseRecord, type E2eRecord, type FlakyAcceptance, type Git, type HoldOutcome, type ReleaseCandidate, type UatRecord } from './release-candidate.js';
 
@@ -74,12 +75,13 @@ export function foldHolds(records: readonly HoldRecord[]): Hold[] {
  * candidate's own: another run, or a UAT that served another SHA, is never attributed to it. With
  * the contract (GY-1802) the blocking cases are the candidate record's pending outcomes' cases
  * removed, and each case that failed or flaked against a pending outcome is kept as `pending: true`
- * with its failing step, so the record shows it ran and why it did not count.
+ * with its failing step, so the record shows it ran and why it did not count. Under the repository's
+ * `e2e.pendingOutcomes: blocking` (GY-1843) no case is pending, and each blocks like any required case.
  */
-export function e2eRecord(report: E2eReport | null, candidate: ReleaseCandidate, contract: ReleaseContract | null = null): E2eRecord | null {
+export function e2eRecord(report: E2eReport | null, candidate: ReleaseCandidate, contract: ReleaseContract | null = null, policy: RepositoryPolicy = repositoryPolicy()): E2eRecord | null {
   if (!report || report.sha !== candidate.sha || report.runId !== `rc-${candidate.id}`) return null;
-  const pendingCases = contractPendingCases(contract, candidate.pendingOutcomes);
-  return { runId: report.runId, sha: report.sha, blocking: releaseVerdict(report, [], pendingCases).blocking.map(outcome => outcome.id),
+  const pendingCases = pendingUnder(contractPendingCases(contract, candidate.pendingOutcomes), policy);
+  return { runId: report.runId, sha: report.sha, blocking: releaseVerdict(report, [], pendingCases, policy).blocking.map(outcome => outcome.id),
     cases: report.cases.map(outcome => ({ case: outcome.id, verdict: outcome.verdict, required: outcome.required, ...(outcome.pending || pendingCases.includes(outcome.id) && (outcome.verdict === 'failed' || outcome.verdict === 'flaky') ? { pending: true as const } : {}), ...(outcome.stoppedBy ? { stoppedBy: outcome.stoppedBy } : {}), attempts: outcome.attempts, failingStep: outcome.failingStep })) };
 }
 
@@ -89,14 +91,15 @@ export function e2eRecord(report: E2eReport | null, candidate: ReleaseCandidate,
  * not touch clears when every case attached to it passed in this run, the run is bound to the
  * candidate's exact SHA as UAT served it, and the candidate is newer than every attachment.
  */
-export function assessHolds(contract: ReleaseContract, candidate: ReleaseCandidate, record: Pick<UatRecord, 'deployedSha'> & { e2e?: E2eRecord | null }, holds: readonly Hold[], at: string): HoldRecord[] {
+export function assessHolds(contract: ReleaseContract, candidate: ReleaseCandidate, record: Pick<UatRecord, 'deployedSha'> & { e2e?: E2eRecord | null }, holds: readonly Hold[], at: string, policy: RepositoryPolicy = repositoryPolicy()): HoldRecord[] {
   const e2e = record.e2e;
   if (!e2e || e2e.sha !== candidate.sha || record.deployedSha !== candidate.sha) return [];
   const open = holds.filter(hold => hold.state === 'open');
   const records: HoldRecord[] = [];
   for (const outcome of contract.outcomes) {
-    // GY-1802: an outcome still pending on the candidate files no hold — its cases ran and recorded, but their failure counts against nothing yet.
-    if (candidate.pendingOutcomes?.includes(outcome.id)) continue;
+    // GY-1802: an outcome still pending on the candidate files no hold — its cases ran and recorded, but their failure counts against nothing yet —
+    // unless the repository declares e2e.pendingOutcomes: blocking (GY-1843), when it holds like any other.
+    if (policy.e2e.pendingOutcomes !== 'blocking' && candidate.pendingOutcomes?.includes(outcome.id)) continue;
     const failing = e2e.cases.filter(entry => outcome.cases.includes(entry.case) && e2e.blocking.includes(entry.case));
     if (!failing.length) continue;
     const cases = failing.map(entry => ({ case: entry.case, verdict: entry.verdict as HoldCase['verdict'], candidate: candidate.id, sha: candidate.sha, runId: e2e.runId, attempts: entry.attempts, failingStep: entry.failingStep }));
@@ -139,9 +142,12 @@ export function holdItem(record: HoldRecord, candidate: ReleaseCandidate) {
  * candidate's follow-up still names it, as it names every failure no case explains.
  */
 export const releaseHolds = (git: Git, options: { contract: ReleaseContract | null; report: () => Promise<E2eReport | null>; push: boolean; now?: () => Date;
+  /** The repository's policy (GY-1843), whose `e2e.pendingOutcomes` decides whether a pending outcome holds; the one in force by default. */
+  policy?: RepositoryPolicy;
   file?: (item: ReturnType<typeof holdItem>, requestId: string) => Promise<string> }) => async (candidate: ReleaseCandidate, record: UatRecord): Promise<HoldOutcome> => {
-  const e2e = e2eRecord(await options.report(), candidate, options.contract);
-  const planned = options.contract ? assessHolds(options.contract, candidate, { deployedSha: record.deployedSha, e2e }, foldHolds(readRecords<HoldRecord>(git, holdTagPrefix)), (options.now ?? (() => new Date()))().toISOString()) : [];
+  const policy = options.policy ?? repositoryPolicy();
+  const e2e = e2eRecord(await options.report(), candidate, options.contract, policy);
+  const planned = options.contract ? assessHolds(options.contract, candidate, { deployedSha: record.deployedSha, e2e }, foldHolds(readRecords<HoldRecord>(git, holdTagPrefix)), (options.now ?? (() => new Date()))().toISOString(), policy) : [];
   let filingError: string | null = null;
   for (const entry of planned.filter(entry => entry.kind === 'open' && options.file)) {
     try { entry.item = await options.file!(holdItem(entry, candidate), holdRequestId(entry.outcome, candidate.id)); }
