@@ -1099,10 +1099,12 @@ export async function installHerdrOnly(session: InstallSession) {
 }
 /**
  * `install --target host --profiles-only` (GY-1850): the reviewer and worker profiles written on an
- * installed self-contained host, nothing else applied. `graphyard up`'s accounts step runs it there,
+ * installed self-contained host, nothing else applied (with --apply, as every write). `graphyard up`'s accounts step runs it there,
  * as it runs `master environments --apply` on this machine for every other provider.
  */
 export async function installProfilesOnly(session: InstallSession) {
+  // The write runs on the host, so a --plan session (any run without --apply) refuses before any transport.
+  if (session.mode !== 'apply') throw new Error('--profiles-only writes the profiles on the host; pass --apply (--plan sessions change nothing)');
   if (!session.context.host) throw new Error('--profiles-only writes the profiles on a self-contained host (--target host or hetzner); for any other install, run graphyard master environments --apply in the configured checkout');
   if (!session.record?.url) throw new Error(`--profiles-only needs an installed host, and no install of ${session.inputs.repository} is recorded here; run install --apply first`);
   const { host, report } = await hostProfilesOnly(session.context);

@@ -114,7 +114,7 @@ export const installCommands = defineCommands([
       '                                changes nothing; --apply executes the same plan. UAT and',
       '                                production resources that cost money are created only with --create-environments.',
       '                                A Herdr plugin bound elsewhere is repointed only with --herdr-rebind; --herdr-only sets up Herdr alone;',
-      '                                --profiles-only writes the reviewer and worker profiles on the host (master environments --apply there).',
+      '                                --profiles-only (with --apply) writes the reviewer and worker profiles on the host (master environments --apply there).',
       '                                An App step nobody confirms within 900 s (under up: its --wait,',
       '                                plus a minute) exits 1 with a JSON summary and the exact resume command.',
       '                                See docs/install.md for the agent-executable runbook.',

@@ -298,6 +298,22 @@ test('unit:up-writes-profiles — on a self-contained host the accounts step wri
   for (const id of ['account:worker', 'account:reviewer'] as const) assert.equal(held.checklist.find(item => item.id === id)?.done, false, `${id} is not green while the host lacks its reviewer profile`);
 });
 
+// Review of 4e263adf0b03: --plan prints and changes nothing, so a plan session (any run without --apply) must not write the host's profiles.
+test('unit:up-writes-profiles — install --profiles-only refuses a plan session before any host transport, so only --apply writes the profiles there', async () => {
+  const { installProfilesOnly } = await import('../src/install/index.js');
+  const touched: string[] = [];
+  const transport = { exec: async (command: string, args: string[]) => { touched.push([command, ...args].join(' ')); throw new Error('transport exec reached'); } };
+  const session = (mode: 'plan' | 'apply') => ({
+    mode, inputs: { repository: 'owner/project', provider: 'host' }, record: { url: 'https://graphyard.example' },
+    context: { provider: 'host', host: { local: true, layout: {} }, transport },
+  }) as unknown as Parameters<typeof installProfilesOnly>[0];
+  await assert.rejects(installProfilesOnly(session('plan')), /--apply/);
+  assert.deepEqual(touched, [], 'a plan session reaches no transport');
+  // The same session in apply mode goes on to the host: the write is attempted through its transport.
+  await assert.rejects(installProfilesOnly(session('apply')), /transport exec reached/);
+  assert.equal(touched.length, 1, `an apply session runs the write on the host: ${touched.join('; ')}`);
+});
+
 test('unit:up-writes-profiles — an account signed in while the accounts step waits gets its profile: a write that left a profile missing runs again on each wait, and the step ends green once both exist', async () => {
   const { runUp } = await import('../src/up.js');
   const checkout = await temporaryDirectory('up-writes-profiles-late');
