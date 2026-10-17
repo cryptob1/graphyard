@@ -13,6 +13,7 @@ import { ciCheckName } from './ci-refusal.js';
 import { requiredCheckFailurePattern } from './required-check-refusal.js';
 import type { WorkOrigin } from './interventions.js';
 import { namedPaths, pathScope, pathScopeContains, testFile } from './scope.js';
+import { soakSuiteGround } from './repeating-paths.js';
 
 interface CompanionCriterion { id: string; text: string; proofs?: readonly string[] }
 
@@ -196,6 +197,8 @@ export function companionGround(path: string, item: { plannedFiles?: readonly st
   }
   const described = path.startsWith('web/') && !testFile(path) ? item.criteria.find(criterion => webUi.test(criterion.text)) : undefined;
   if (described) return `${path} is the web UI ${described.id} describes`;
+  const soak = soakSuiteGround(path, item.plannedFiles ?? []);
+  if (soak) return soak;
   return failedCheckTestGround(path, item, reason);
 }
 
