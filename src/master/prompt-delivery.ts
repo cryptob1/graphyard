@@ -39,7 +39,8 @@ export class PromptNotAcceptedError extends Error { readonly promptDropped = tru
 /** The delivery that stops at a consent dialog rather than submit into it. */
 function consentRefusal(target: string, screen: string | null, stalls: string[]) {
   const consent = detectConsentPrompt(screen);
-  return consent ? new PromptNotAcceptedError(`${target} shows a ${consent.kind} consent dialog, so its prompt is not submitted into it${stalls.length ? ` (${stalls.join(', ')})` : ''}; the session is closed and relaunched rather than left idle; the pane showed: "${consent.text}"`) : null;
+  // A settings-suggestion dialog (GY-1872) is the notice the delivery puts away, not a refusal.
+  return consent && consent.kind !== 'settings' ? new PromptNotAcceptedError(`${target} shows a ${consent.kind} consent dialog, so its prompt is not submitted into it${stalls.length ? ` (${stalls.join(', ')})` : ''}; the session is closed and relaunched rather than left idle; the pane showed: "${consent.text}"`) : null;
 }
 export function herdrErrorCode(error: unknown) {
   const text = [(error as any)?.herdrCode, (error as any)?.stdout, (error as any)?.stderr, (error as any)?.message].filter(value => value !== undefined && value !== null).map(String).join('\n');
