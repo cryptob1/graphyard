@@ -55,7 +55,7 @@ Skip with `--no-github-app` until App binds; else dispatch [small item](onboardi
 
 ## Self-contained host
 
-`--target host --ssh-host HOST` (or `--target hetzner`): server/Postgres/loop/executors/Herdr/runtimes on one systemd machine; credentials in `~graphyard/.config/graphyard/<install>/`. Public IPv4 serves `<ip>.sslip.io`; else `--domain`. Unpullable images build at installer's commit. Workers push/open PRs as App (one-hour tokens).
+`--target host --ssh-host HOST` (or `--target hetzner`): server/Postgres/loop/executors/Herdr/runtimes on one systemd machine; credentials in `~graphyard/.config/graphyard/<install>/`. Public IPv4 serves `<ip>.sslip.io`; else `--domain`. Unpullable images build at installer's commit. Workers push/open PRs as App (one-hour tokens). `--apply --profiles-only`: `master environments --apply` there.
 
 Price: `--confirm-price`/`--max-monthly`. Saved Apps (`--github-app FILE`/this install's/`.graphyard/github-app.json`) reused if minting a token; `--reuse-app SLUG` (or App page) reuses host-saved Apps. `--migrate` stops loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`), restores; logins move.
 
