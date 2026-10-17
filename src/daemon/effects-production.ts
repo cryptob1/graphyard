@@ -127,7 +127,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     const config = current();
     const response = await fetcher(`${config.url}/api/${path}`, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(timeoutMs) });
     const result = await response.json();
-    if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
+    // The status travels with the refusal: promotion reads a 404 from a server without the import route as no hold (GY-1860).
+    if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`, response.status, result);
     return result;
   };
   const coordinatorStatus = async () => await asCoordinator('status') as ControlPlaneStatus & Record<string, unknown>;
@@ -338,7 +339,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // GY-1526: under a control-plane merger (read afresh each cycle, as the merge step reads it) the drive runs candidates through the local ports — the release functions in this checkout, pushes through the deploy key, the revert recorded as the coordinator — and dispatches no workflow; the ports are null while the environment names no UAT.
     get promotion() { const config = current(); return promotionReads(config, root, run, existsSync(join(root, '.github', 'workflows', promotionWorkflow)), undefined, { merger: recordedMerger, local: localReleasePorts(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, revertRecordKey(work, event)),
       file: async (item, requestId) => ((await mutate('work', item, requestId)) as Work).key,
-      plane: { goals: async () => (await asCoordinator('goals?open=1')).goals, stage: async key => servingStage((await asCoordinator(`work/${encodeURIComponent(key)}`)) as Work | undefined) } }) }); },
+      plane: { goals: async () => (await asCoordinator('goals?open=1')).goals, stage: async key => servingStage((await asCoordinator(`work/${encodeURIComponent(key)}`)) as Work | undefined), read: path => asCoordinator(path) } }) }); },
     // GY-1519: the watch reads history from this checkout and its policy from the control plane; the freeze is the environment's ask.
     get mainWatch() { return mainWatchReads(current(), root, run, { policy: () => asCoordinator('main-watch'), freeze: mainWatchFreezeFromEnv() }); },
     // GY-1522 / GY-1560: the gate trial-merges in this checkout's object store under the managed worktree root, records each verdict as the coordinator (one idempotency key per (head, tip)), and reads disagreement explanations so explaining clears the cursor's standing action.
