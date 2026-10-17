@@ -252,7 +252,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
         return `left it pending for an approver slot, launched on the first cycle one frees: ${full}`;
       }
       // GY-1888: a launch refused for this decision's own session name is recovered before it fails (recoverHeldName): adopted, or relaunched once.
-      const held = await recoverHeldName({ effects, state, stamp, sessions, invalidate, listingLost }, item, watch, error, () => (cycle.detached ? cycle.effects : effects).approver!(item, watch.decision));
+      const held = await recoverHeldName({ effects: cycle.detached ? cycle.effects : effects, state, stamp, invalidate, listingLost }, item, watch, error, () => (cycle.detached ? cycle.effects : effects).approver!(item, watch.decision));
       if ('adopted' in held) return held.adopted;
       if ('launched' in held) ({ launched, detail: recovered } = held); else {
         // A registry session the failed launch could not end stays on the watch, so the next launch ends it first. The launch made no
@@ -260,7 +260,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
         // never spends it, and the escalation past the bound counts only the sessions that ran. GY-920: a failure for any other reason is not
         // a capacity wait — the stale wait is cleared with the rest of the launch state, so `master status` classifies the watch by this
         // failure and its remedy instead of reporting a wait for capacity that is over.
-        const orphan = (held.failed as { registrySession?: string })?.registrySession;
+        const orphan = ('session' in held ? held.session : undefined) ?? (held.failed as { registrySession?: string })?.registrySession;
         Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, launchedAt: null, account: null, runtime: null, session: orphan ?? null, capacity: null });
         await effects.persist(state);
         throw held.failed;

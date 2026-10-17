@@ -1157,16 +1157,22 @@ test('manual:fault-class-decision — action:decision|GY-1884|2026-10-17T08:25:2
   const name = approverSessionName({ key: 'GY-1884' } as Work, decisionId);
   const heldName = () => new Error(`No session can be launched as ${JSON.stringify(name)}: the runtime refused it: {"error":{"code":"agent_name_taken","message":"agent name ${name} is already used; candidates: terminal_id=term_65e050436138156a0 pane_id=w1V:pQGR workspace_id=w1V tab_id=w1V:tQGM. A session name must start with a lowercase letter, use only lowercase letters, digits, '-' or '_', and be 1-32 characters. Retry with graphyard master approver GY-1884 ${decisionId}"}}`);
   let work = instanceItem('GY-1884', false, true);
-  const launches: string[] = [], closed: string[] = [];
+  const launches: string[] = [], closed: string[] = [], ended: string[] = [], order: string[] = [];
   const state = emptyDaemonState(loopConfig());
   await runCycle(loopConfig(), state, instanceEffects(() => work, {
     decide: async () => ({ id: decisionId }),
     decisions: async () => ({ decisions: [{ id: decisionId, action: 'rework', state: 'requested', input: {}, approvedBy: null }] }),
-    approver: async () => { launches.push(decisionId); if (launches.length === 1) throw heldName(); return { agentName: name, pane: 'w1V:pNEW' }; },
-    closeSession: pane => { closed.push(pane); },
+    approver: async () => { launches.push(decisionId); if (launches.length === 1) throw heldName(); order.push('launch'); return { agentName: name, pane: 'w1V:pNEW' }; },
+    // The leftover's pane-bound launch record names the registry session that still holds the role's slot.
+    approverLaunch: async () => ({ account: null, runtime: 'claude', session: 'registry-1884', pane: 'w1V:pQGR' }),
+    endRegistrySession: async session => { ended.push(session); order.push('end'); },
+    closeSession: pane => { closed.push(pane); order.push('close'); },
   }), () => instanceClock);
-  // The candidate: the refusal names the pane that holds the decision's own name; the loop closes the
-  // leftover and makes the launch once more, so the decision is put to an approver instead of standing.
+  // The candidate: the refusal names the pane that holds the decision's own name; the loop ends the
+  // leftover's registry session (freeing the role's slot), closes the pane and makes the launch once
+  // more, so the decision is put to an approver instead of standing.
+  assert.deepEqual(ended, ['registry-1884'], 'the leftover registry session is ended, so the retry is not refused for the role slot it held');
+  assert.deepEqual(order, ['end', 'close', 'launch'], 'the session is ended and the pane closed before the launch is made again');
   assert.deepEqual(closed, ['w1V:pQGR'], 'the leftover pane holding the name is closed');
   assert.deepEqual(launches, [decisionId, decisionId], 'the launch is made again once the leftover is gone');
   const watch = Object.values(state.approvals).find(entry => entry.decision === decisionId);
