@@ -19,7 +19,7 @@ Control-plane App (`src/github-permissions.ts`):
 | Pull requests | Read and write | read pull requests and reviews (pull request observation); post review request comments (review dispatch) |
 | Workflows | Read and write | push base syncs carrying the base's workflow changes (workflow sync) |
 
-A reviewer App is never granted Contents: write, Checks, or Administration; worker identities are not Apps at all. It holds:
+A reviewer App is never granted Contents: write, Checks, or Administration; worker identities are not Apps. It holds:
 
 | Permission | Access | Needed to |
 | --- | --- | --- |
