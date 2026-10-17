@@ -30,6 +30,8 @@ Flaky required cases block promotion until an `evidence` decision (`{"case":ID,"
 
 A required check or merge-trial file passing its one rerun at the failed SHA is a flake, read into `.graphyard/flake-ledger.json`. Each `unit:`/`integration:` test gets one P1 `Flaky test: NAME` item at its first flake unless it proves its item, else after 3+ on 2+ SHAs/7 days. Own-proof failures never excused; own and unread proofs never rerun. Gates ignore it.
 
+`tests/fixtures/gy-1907-slow-tick-receipt`: `unit:slow-tick-names-cause`'s receipt/failed attempt; `integration:slow-tick-exact-head-twenty-consecutive` re-executes.
+
 ## Goals and acceptance
 
 `goal FILE` records (`statement`/`users`/`constraints`/`deployTarget`), listed in `master status`. The `acceptance` role (`run.diagnostician` models) drafts outcomes (one required `uat` case each) and contract bindings in one PR the approver judges. `goal land` merges the approved head after CI, [revert approver App](deployment.md#variables) approving first. Under a `control-plane` merger the draft is one unpushed commit on `graphyard/goal-N-acceptance-R` the merge writer lands on the approver's exact-head verdict; `goal land` then records it. Stuck a day: `goal closed GOAL-N change -- REASON`. `complete`/later heads refuse protected case or `e2e/contract.json` changes lacking that item's `goal case-change`, approved by neither requester nor implementer; the loop's approver judges each; `master status`: `pendingCaseChanges`. [Planner](how-graphyard-works.md#from-goal-to-work-items) plans items; `goal deliver` needs each done and served in production.
