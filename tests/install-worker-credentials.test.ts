@@ -272,7 +272,10 @@ test('unit:up-issues-install-worker-credentials — with no logged-in account, u
   await mkdir(join(checkout, '.graphyard'), { recursive: true });
   await writeFile(join(checkout, '.graphyard', 'master.json'), JSON.stringify({ version: 1, url: UP_SERVER }), { mode: 0o600 });
   await installRecordIn(installDir);
-  const world = accountsWorld(checkout, installDir, { fleetAfterTicks: 3, loggedIn: 0 });
+  // No account is logged in for the first writes (the real write then scans no credential, so
+  // nothing is issued yet and the run keeps waiting); an account signs in during the wait.
+  let writes = 0;
+  const world = accountsWorld(checkout, installDir, { fleetAfterTicks: 3, loggedIn: () => (++writes > 4 ? 2 : 0) });
   await world.installWorker('acme-shop-worker-1', 'shop-worker-1');
   await world.installWorker('acme-shop-worker-2', 'shop-worker-2');
 

@@ -1130,7 +1130,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
           if (refused.length) throw new UpStop(`accounts: the control plane at ${await deps.serverUrl().catch(() => null) ?? 'its recorded address'} refuses ${refused.map(entry => entry.file).join(', ')} (${refused.map(entry => String(entry.reason ?? 'refused').split('\n')[0]).join('; ')}), so no worker profile can be written; a sign-in cannot fix this. Reissue this install's worker credentials, then rerun ${rerun()}`, upExitCodes.failed);
           // Only a missing worker profile is this install's to issue, once, and only where this
           // machine holds the install directory; anything else keeps waiting as before.
-          if (issuedOnce || remoteProfiles || (writtenProfiles?.workers ?? 0) > 0) return;
+          // With no account logged in the write scans no credential, so issuing waits for a login.
+          if (issuedOnce || remoteProfiles || (writtenProfiles?.workers ?? 0) > 0 || !(report?.counts?.loggedIn > 0)) return;
           issuedOnce = true;
           const files = await issueWorkerCredentials();
           if (files.length) deps.emit({ kind: 'note', text: `accounts: issued this install's worker credentials (${files.join(', ')}), so the profiles write makes a worker profile from each.` });

@@ -601,9 +601,11 @@ export async function setupAgentEnvironments(root: string, input: { directory?: 
     // Worker and producer credentials are per install (GY-1885): they are read only from the
     // directory `graphyard install` manages for this repository, so a second install on one host
     // never scans — and never refuses — another install's token folder. A master configured with
-    // no install of its own keeps reading beside its coordinator credential, as it always has.
+    // no install of its own (no install.json) keeps reading beside its coordinator credential, as
+    // it always has; an install record that exists but cannot be read fails here, never falling
+    // back to the host-wide folder another install fills.
     const own = (() => { try { return installDirectory(installIdFor(config.repository)); } catch { return null; } })();
-    const installed = own ? await readInstallRecord(own).catch(() => null) : null;
+    const installed = own ? await readInstallRecord(own) : null;
     const credentialHome = installed ? own! : dirname(dirname(config.credentialFile));
     const issued = async (role: 'worker' | 'producer') => {
       const folder = resolve(credentialHome, `${role}s`);
