@@ -191,6 +191,15 @@ test('unit:promotion-reason-agrees-with-release-lag — master status\'s promoti
   const otherReason = observedPromotionStatus(validating, { tip: LAG_TIP, awaiting: ['GY-1872'], now: T });
   assert.ok(otherReason.attention);
   assert.equal(otherReason.reason, validating.reason, 'a reason that claims nothing about the tip is not rewritten');
+  // Local mode records its own up-to-date wording (promotion-local.ts); the false claim gives way there too.
+  const localReason = 'Production runs the base branch tip; nothing to cut or promote';
+  const localAttention: AttentionItem[] = [];
+  const local = promotionSummaryWithLag(stuckState({ ...pastWindow, reason: localReason }), { baseTip: LAG_TIP, promotion: { pending: ['GY-1872'] } }, localAttention, T);
+  assert.equal(localAttention.length, 1, 'the local-mode mismatch raises attention');
+  assert.match(localAttention[0]!.text, new RegExp(PROMOTED.slice(0, 12)));
+  assert.match(localAttention[0]!.text, new RegExp(LAG_TIP.slice(0, 12)));
+  assert.doesNotMatch(local.reason ?? '', /Production runs the base branch tip/, 'the local-mode up-to-date claim never stands on a moved tip');
+  assert.match(local.reason ?? '', new RegExp(LAG_TIP.slice(0, 12)));
   // No lag read beside the summary: exactly what the loop recorded, as before.
   const unobserved = observedPromotionStatus(stuckState(pastWindow));
   assert.equal(unobserved.attention, null);

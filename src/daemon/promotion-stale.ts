@@ -1,6 +1,6 @@
 // Concern: master status's stale promotion tip — the loop's promotion ledger crossed with the release-lag read (GY-1894).
 import type { AttentionItem } from '../master/attention.js';
-import { promotionOffReason, promotionReadWindows, promotionStatus, promotionUpToDateReason, promotionWorkflow } from './deployment.js';
+import { promotionBaseTipClaim, promotionOffReason, promotionReadWindows, promotionStatus, promotionWorkflow } from './deployment.js';
 import type { PromotionState } from './state.js';
 
 /** What master status crossed the promotion ledger with: the release-lag read of the base tip. */
@@ -28,7 +28,7 @@ function stalePromotionTip(state: PromotionState, observed: PromotionObserved | 
       text: `Loop promotion is off; its ledger last read ${short(state.mainSha)} as the base tip and ${short(state.promotedSha ?? state.mainSha)} production, while ${waiting}`,
       next: `Promotion is intentionally off, so no candidate is cut for these deliveries until it is turned back on; no restart is needed` } satisfies AttentionItem,
   };
-  const reason = state.reason?.startsWith(promotionUpToDateReason) ? tipReason : state.reason;
+  const reason = state.reason?.startsWith(promotionBaseTipClaim) ? tipReason : state.reason;
   const pastWindow = !state.ledgerReadAt || now - Date.parse(state.ledgerReadAt) >= ledgerMs;
   const attention: AttentionItem = pastWindow
     ? { subject: 'promotion', role: 'master', approvedBy: null, human: false, humanOnly: null,

@@ -498,7 +498,9 @@ export const promotionFrozenReason = (frozen: { sha: string; since: string }) =>
 export const promotionFrozenReasonPrefix = 'Promotion is frozen since ';
 /** The reason a recorded promotion state names while `run.promoteEveryMinutes` is 0 and nothing is ever dispatched (GY-1831's gate reading). */
 export const promotionOffReason = 'Promotion by the loop is off (run.promoteEveryMinutes is 0)';
-export const promotionUpToDateReason = 'Production runs the base branch tip; nothing to promote';
+/** The claim every up-to-date promotion reason starts with, control-plane and local mode alike (GY-1894). */
+export const promotionBaseTipClaim = 'Production runs the base branch tip;';
+export const promotionUpToDateReason = `${promotionBaseTipClaim} nothing to promote`;
 
 const later = (...times: (string | null | undefined)[]) => times.filter((time): time is string => !!time && Number.isFinite(Date.parse(time)))
   .sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? null;
