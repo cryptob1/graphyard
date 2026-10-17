@@ -11,7 +11,7 @@ import { parseRepositoryConfig, repositoryConfigFile } from '../model/documentat
 import { requiredPullRequestChecks, type DeliveryPolicy } from '../model/delivery-policy.js';
 import { applyWiring, deploymentAdapters, observeReleaseWiring, wiringActions, type DeploymentAdapter, type DeploymentContext } from './deploy-target.js';
 import { adapterFor, carriesCredential, readRemote, isProviderReference, quotedPrice, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
-import { asUser, existingMachineAdapter, generateHostSecrets, hostHerdrOnly, hostLayout, hostProfilesOnly, hostPlan, hostRemote, hostTokenFile, installHostFleet, readHostSecrets, selfContainedAdapter, MIGRATE_SOURCE_VARIABLE, type HostFleetResult } from './host.js';
+import { asUser, existingMachineAdapter, generateHostSecrets, SIGNIN_CLAIM_VARIABLE, hostHerdrOnly, hostLayout, hostProfilesOnly, hostPlan, hostRemote, hostTokenFile, installHostFleet, readHostSecrets, selfContainedAdapter, MIGRATE_SOURCE_VARIABLE, type HostFleetResult } from './host.js';
 import { applyProtection, applyRestore, observeRestore, protectionRecordFile, readProtectionRecord, recordProtectionOnce, restoreChanges, type ProtectionRecord, type RestoreChange, appClient, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, installationClient, installationToken, protectionSatisfied, readProtection, GRAPHYARD_CHECKS, readWebhookConfig, repositoryInstallation, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
 import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
 import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
@@ -1614,9 +1614,9 @@ export async function applyRosterChange(session: InstallSession, record: Install
   const merges = typeof adapter.applyVariables === 'function';
   let deployment: { provider: Provider; service: string; variables: string[]; rewritten: boolean } | null = null;
   if (change.changed) {
-    const values = coreEnv(session);
-    if (merges) await adapter.applyVariables!(context, values.filter(value => value.name === 'GRAPHYARD_PRINCIPALS'));
-    else { await adapter.setEnv(context, values); await adapter.deploy(context); }
+    const principals = coreEnv(session).filter(value => value.name === 'GRAPHYARD_PRINCIPALS');
+    if (merges) await adapter.applyVariables!(context, principals);
+    else { await adapter.setEnv(context, [...(await deployedBundle(session)).filter(value => value.name !== 'GRAPHYARD_PRINCIPALS'), ...principals]); await adapter.deploy(context); }
     deployment = { provider: context.provider, service: context.service, variables: ['GRAPHYARD_PRINCIPALS'], rewritten: !merges };
     await writeInstallRecord(session.directory, { ...record, principals: principalRecords(roster, session.tokens), updatedAt: new Date(deps.now()).toISOString() }, vault);
     if (!change.entry && !context.host) await rm(tokenFile(session.directory, change.id), { force: true });
@@ -1628,12 +1628,42 @@ export async function applyRosterChange(session: InstallSession, record: Install
     const response = await deps.fetch(target, { headers: { Authorization: `Bearer ${session.tokens.get(admin.id)}` }, signal: AbortSignal.timeout(15_000) }).catch(() => null);
     const served = response?.ok ? (await response.json().catch(() => null))?.principals : null;
     const listed = Array.isArray(served) ? served.find((principal: { id: string }) => principal.id === change.id) : undefined;
-    if (Array.isArray(served) && (change.entry ? listed : !listed)) readback = { url: target, principal: listed ? { id: listed.id, role: listed.role, sessionKind: listed.sessionKind ?? null, grants: listed.grants ?? [] } : null, principals: served.length };
+    if (Array.isArray(served) && (change.entry ? listed && servedAs(listed, change.entry) : !listed)) readback = { url: target, principal: listed ? { id: listed.id, role: listed.role, sessionKind: listed.sessionKind ?? null, grants: listed.grants ?? [] } : null, principals: served.length };
     else await deps.wait(3000);
   }
-  if (!readback) throw new Error(`${target} still ${change.entry ? `does not list ${change.id}` : `lists ${change.id}`} after two minutes; the redeploy may still be in progress. Rerun the same command: it changes nothing and reads the roster back again`);
+  if (!readback) throw new Error(`${target} still ${change.entry ? `does not list ${change.id} as ${change.entry.role} with grants ${(change.entry.grants ?? []).join(', ') || 'none'}` : `lists ${change.id}`} after two minutes; the redeploy may still be in progress. Rerun the same command: it changes nothing and reads the roster back again`);
   return vault.scrub({ action: change.entry ? 'add' as const : 'remove' as const, repository: record.repository, installDirectory: session.directory, principal: change.entry ? { id: change.entry.id, role: change.entry.role, sessionKind: change.entry.sessionKind ?? null, grants: change.entry.grants ?? [] } : { id: change.id }, changed: change.changed, deployment, readback,
     ...(change.entry && !context.host ? { tokenFile: tokenFile(session.directory, change.entry.id) } : {}) });
+}
+
+/** The served entry carries the requested role, session kind and grants: an entry still served from before the change does not count as read back. */
+const servedAs = (listed: { role?: string; sessionKind?: string | null; grants?: string[] }, entry: RosterPrincipal) => listed.role === entry.role
+  && (listed.sessionKind ?? null) === (entry.sessionKind ?? null) && [...(listed.grants ?? [])].sort().join(',') === [...(entry.grants ?? [])].sort().join(',');
+
+/**
+ * The environment a bundle deployment (Compose, a Docker host, a self-contained host) runs now, read
+ * from its server.env, with each mounted App key read back from its bundle file, so a roster edit
+ * rewrites the bundle with every other value as deployed: the App, its keys and any operator setting.
+ */
+async function deployedBundle(session: InstallSession): Promise<EnvValue[]> {
+  const { context } = session;
+  const transport = context.host ? await hostRemote(context) : context.provider === 'docker-host' ? context.ssh(context.sshHost!, context.sshUser) : context.transport;
+  const text = await readRemote(transport, `${context.workdir}/server.env`);
+  if (text === null) throw new Error(`${context.workdir}/server.env could not be read; the roster is not edited blind. Rerun graphyard install --apply`);
+  const keys: Record<string, string> = { GITHUB_PRIVATE_KEY_FILE: 'GITHUB_PRIVATE_KEY', GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY_FILE: 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY' };
+  const values: EnvValue[] = [];
+  for (const line of text.split('\n')) {
+    const index = line.indexOf('=');
+    if (index <= 0 || line.startsWith('#')) continue;
+    const name = line.slice(0, index).trim(), value = line.slice(index + 1);
+    // A host appends its sign-in claim itself (host.ts hostFiles).
+    if (name === SIGNIN_CLAIM_VARIABLE && context.host?.claim) continue;
+    if (!keys[name]) { values.push({ name, value, secret: true }); continue; }
+    const key = await readRemote(transport, `${context.workdir}/${value.slice(value.lastIndexOf('/') + 1)}`);
+    if (key === null) throw new Error(`The mounted key ${value} behind ${name} could not be read from ${context.workdir}; the roster is not edited blind`);
+    values.push({ name: keys[name], value: session.vault.add(key), secret: true });
+  }
+  return values;
 }
 
 function emptyRecord(session: InstallSession, url: string): InstallRecord {

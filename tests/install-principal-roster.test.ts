@@ -236,3 +236,54 @@ test('unit:external-import-requires-grant — a producer holding external-runs:i
   assert.throws(() => rosterEntry({ id: 'huck-engineer', role: 'producer', grants: [] }), /explicit grant/);
   assert.deepEqual(rosterEntry({ id: 'huck-engineer', role: 'producer', grants: [GRANT, GRANT] }), { ...huck, source: 'principal' });
 });
+
+test('unit:principal-upsert-remove-single-entry-readback — on a bundle provider (Compose) principal add rewrites the bundle with every deployed value as it stands, the installed GitHub App, its mounted key and an unrelated setting kept, and changes only GRAPHYARD_PRINCIPALS', async () => {
+  let fixture: Harness | undefined;
+  // `cat` reads back what the installer wrote, as a real machine would.
+  const cat = { match: 'cat /', result: (line: string) => fixture!.transport.files.get(line.slice(4))?.content ?? { stdout: '', stderr: 'No such file', code: 1 } };
+  fixture = await harness({ provider: 'compose', extraResponses: [cat] });
+  try {
+    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, fixture.deps);
+    await applyInstall(session, await buildPlan(session));
+    const { workdir } = session.context;
+    // The installation runs with its GitHub App (its id, installation, webhook secret and a key mounted from the bundle); an operator added a setting outside the core variables.
+    const env = `${workdir}/server.env`, key = `${workdir}/github-private-key.pem`;
+    const extra = ['GITHUB_APP_ID=200001', 'GITHUB_INSTALLATION_ID=500', 'GITHUB_PRIVATE_KEY_FILE=/run/graphyard/github-private-key.pem', 'OPERATOR_SETTING=keep-me'];
+    fixture.transport.files.set(env, { ...fixture.transport.files.get(env)!, content: `${fixture.transport.files.get(env)!.content.trimEnd()}\nOPERATOR_SETTING=keep-me\n` });
+    const pem = fixture.transport.files.get(key)!.content;
+    assert.match(pem, /PRIVATE KEY/);
+    const lines = (text: string) => text.trimEnd().split('\n');
+    const before = lines(fixture.transport.files.get(env)!.content);
+
+    const added = await principal(fixture, ['add', 'huck-engineer', '--role', 'producer', '--grant', GRANT]);
+    assert.equal(added.changed, true);
+    assert.deepEqual(added.deployment, { provider: 'compose', service: session.context.service, variables: ['GRAPHYARD_PRINCIPALS'], rewritten: true });
+    assert.deepEqual(added.readback.principal, huck);
+    const after = lines(fixture.transport.files.get(env)!.content);
+    const principalsLine = (all: string[]) => all.find(line => line.startsWith('GRAPHYARD_PRINCIPALS='));
+    assert.deepEqual(after.filter(line => line !== principalsLine(after)).sort(), before.filter(line => line !== principalsLine(before)).sort(), 'every other variable stands as deployed');
+    for (const line of extra) assert.ok(after.includes(line), `${line} is kept`);
+    assert.equal(fixture.transport.files.get(key)!.content, pem, 'the mounted App key is written back unchanged');
+    assert.match(fixture.transport.files.get(`${workdir}/compose.yaml`)!.content, /github-private-key\.pem:\/run\/graphyard\/github-private-key\.pem:ro/, 'the key stays mounted');
+    assert.deepEqual(deployedRoster(fixture.transport).map(entry => entry.id).at(-1), 'huck-engineer');
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:principal-upsert-remove-single-entry-readback — a re-add that changes an entry reads back only once the served roster carries the new fields: a stale served entry under the same id is not taken for the change', async () => {
+  const fixture = await harness({ provider: 'railway' });
+  try {
+    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, fixture.deps);
+    await applyInstall(session, await buildPlan(session));
+    await principal(fixture, ['add', 'huck-engineer', '--role', 'producer', '--grant', GRANT]);
+    // The served roster lags the redeploy: the first three reads still list huck-engineer as declared before.
+    let reads = 0;
+    const stale = (async (input: any, init?: any) => {
+      if (String(input).endsWith('/api/principals') && reads++ < 3) return new Response(JSON.stringify({ principals: [{ ...huck, leases: [] }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      return fixture.deps.fetch!(input, init);
+    }) as typeof fetch;
+    const changed = await principalCommand(['add', 'huck-engineer', '--role', 'producer', '--session-kind', 'human', '--grant', GRANT], { ...fixture.deps, fetch: stale, cwd: fixture.root });
+    assert.equal(changed.changed, true);
+    assert.equal(reads, 4, 'the stale entry was read three times and refused as the change');
+    assert.deepEqual(changed.readback.principal, { ...huck, sessionKind: 'human' }, 'the readback is the served entry with the requested fields');
+  } finally { await fixture.cleanup(); }
+});

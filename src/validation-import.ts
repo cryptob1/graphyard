@@ -193,10 +193,11 @@ export async function importRun(plane: ImportPlane, actor: Principal, input: unk
  * authenticated reader. `candidate` names it by id; left out, it is the newest candidate any import
  * at `sha` bound to.
  */
-export async function readImports(plane: Pick<ImportPlane, 'store'>, sha: string, candidate?: string | null) {
+export async function readImports(plane: Pick<ImportPlane, 'store'>, sha: string, candidate?: string | null, importer?: string) {
   demand(/^[a-f0-9]{40}$/.test(sha), 'A candidate head is a 40-hex commit', 400);
-  const id = candidate || (await plane.store.pool.query(`SELECT max(payload->'candidate'->>'id') AS id FROM events WHERE kind=$1 AND payload->'candidate'->>'sha'=$2`, [importEventKind, sha])).rows[0]?.id as string | null;
-  const runs = id ? await importedRuns(plane.store.pool, { id, sha }) : [];
+  // `importer` (GY-1879) limits the read to the runs that principal imported: a lane-only producer reads only its own.
+  const id = candidate || (await plane.store.pool.query(`SELECT max(payload->'candidate'->>'id') AS id FROM events WHERE kind=$1 AND payload->'candidate'->>'sha'=$2 AND ($3::text IS NULL OR payload->>'importedBy'=$3)`, [importEventKind, sha, importer ?? null])).rows[0]?.id as string | null;
+  const runs = id ? (await importedRuns(plane.store.pool, { id, sha })).filter(record => !importer || record.importedBy === importer) : [];
   return { sha, candidate: id ? { id, sha } : null, runs, hold: importedHold(runs), sealed: id ? !!await importSeal(plane.store.pool, { id, sha }) : false };
 }
 

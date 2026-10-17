@@ -1,5 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { demand, operatorScopeIncludes, type Principal } from '../model.js';
+import { demand, laneOnlyProducer, operatorScopeIncludes, type Principal } from '../model.js';
+import { readImports } from '../validation-import.js';
 import { Next, type Route, type Services } from './routes.js';
 import { leaseCommandRequest } from './routes/work.js';
 
@@ -46,6 +47,27 @@ export const operatorAgentRouteGuard: Route = {
       || (req.method === 'GET' && /^\/api\/validation\/import\/[a-f0-9]{40}$/.test(url.pathname))
       || (req.method === 'POST' && /^\/api\/validation\/import\/[a-f0-9]{40}\/seal$/.test(url.pathname)),
       'Route is not available to operator agents', 403);
+    return Next;
+  },
+};
+
+/**
+ * A lane-only producer (GY-1879: role producer, whose only grant is `external-runs:import`) is held
+ * to the routes that grant names, derived from the grant alone. This guard is the first
+ * authenticated route, so nothing else runs first: it passes POST /api/validation/import on to the
+ * import, answers GET /api/validation/import/{sha} with the runs this principal imported itself and
+ * GET /api/principals with its own entry, and refuses every other route before any effect.
+ */
+export const laneProducerRouteGuard: Route = {
+  method: '*', path: /^\/api\//,
+  async handle({ actor, url, req, services }) {
+    if (!laneOnlyProducer(actor)) return Next;
+    if (req.method === 'POST' && url.pathname === '/api/validation/import') return Next;
+    const head = req.method === 'GET' ? /^\/api\/validation\/import\/([a-f0-9]{40})$/.exec(url.pathname) : null;
+    if (head) return readImports({ store: services.engine.store }, head[1], url.searchParams.get('candidate'), actor.id);
+    if (req.method === 'GET' && url.pathname === '/api/principals')
+      return { principals: [{ id: actor.id, role: actor.role, sessionKind: actor.sessionKind ?? null, grants: actor.grants ?? [], leases: [] }] };
+    demand(false, `${req.method} ${url.pathname} is outside the external-runs:import lane of producer ${actor.id}: it may import a run, read its own imports and read its own principal`, 403);
     return Next;
   },
 };

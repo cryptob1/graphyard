@@ -55,7 +55,7 @@ Skip with `--no-github-app` until App binds; else dispatch [small item](onboardi
 
 ## Principal roster
 
-`install.json` is the roster; `--apply` reconciles it, keeping `principal add` entries (and tokens) and, under `--observe-only`, recorded workers/producers. `node "$GRAPHYARD_CLI" principal add ID --role ROLE [--session-kind ai|human] [--grant external-runs:import]...`/`principal remove ID`: one credential and entry, `GRAPHYARD_PRINCIPALS` alone (bundles rewritten), `/api/principals` readback; repeats no-op; installer ids refused. Producers need `--grant`; `external-runs:import` admits only `POST /api/validation/import`, never evidence.
+`install.json` is the roster; `--apply` keeps `principal add` entries/tokens and, under `--observe-only`, recorded workers/producers. `node "$GRAPHYARD_CLI" principal add ID --role ROLE [--session-kind ai|human] [--grant external-runs:import]...`/`principal remove ID`: one entry, only `GRAPHYARD_PRINCIPALS` changes, `/api/principals` readback; repeats no-op; installer ids refused. Producers need `--grant`; `external-runs:import` alone confines one (no reviewer slot) to `POST /api/validation/import`, its own imports and `/api/principals` entry.
 
 ## Self-contained host
 
