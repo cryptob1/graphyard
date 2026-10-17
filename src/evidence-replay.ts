@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { demand, type Principal } from './model.js';
+import { demand, evaluateWithRecovery, type EvaluationRecord, type Principal } from './model.js';
 import { defaultReportFormat, reportAdapter, type ArtifactKindName, type ReportVerification } from './report-adapters.js';
 import type { Attempt, AttemptReport, Environment, Validation, ValidationCandidate, ValidationRequest } from './validation.js';
 import type { ReuseDecision } from './evidence-reuse.js';
@@ -17,6 +17,15 @@ import type { ReuseDecision } from './evidence-reuse.js';
  * repeat. Replay records are exported through the same retention and redaction rules as
  * the artifacts themselves: expired artifacts are not read, artifact bytes are never
  * exported, and every string in a record passes the redaction filter.
+ *
+ * An evaluation that cannot reach a verdict is recovered under the explicit rule of
+ * model/evidence.ts (GY-1841): an evaluator-error is retried against the same retained
+ * evidence — the artifact rows pinned by the authorization transaction, never a newer
+ * query, never new evidence — at most `evaluationRetries` more times with a widening
+ * backoff; a verdict the verifier reached (a fail) is never retried; a pass on any attempt
+ * is the evaluation's result; every attempt is appended to the record with its time,
+ * evaluator, outcome and cause; and after the retries are exhausted the record carries the
+ * evaluator errors as the evaluation's fault — never as a failed proof.
  */
 const replaySchema = z.object({ requestId: z.uuid(), attemptId: z.uuid() }).strict();
 export type ReplayCoverage = 'covered' | 'unmeasured' | 'not-covered';
@@ -25,6 +34,8 @@ export interface ReplayRecord {
   id: string; at: string; actor: string; requestId: string; attemptId: string; epoch: number; sequence: number | null; workId: string; proof: string; candidateId: string; sourceSha: string; format: string;
   /** `consistent`/`inconsistent` compare the replayed verdict with the collector's report; `uncompared` means the verifier ran but the attempt recorded no report summary; `unmeasured` means the retained artifacts lack the instrumentation to replay at all. */
   outcome: 'consistent' | 'inconsistent' | 'uncompared' | 'unmeasured';
+  /** GY-1841: the evaluation the recovery rule drove — every evaluator attempt kept with its time, evaluator, outcome and cause, and the evaluator errors as the fault when the retries were exhausted without a verdict: a fault of the evaluation, never a failed proof. */
+  evaluation: EvaluationRecord;
   coverage: Record<'inventory' | 'behavior' | 'artifactIntegrity' | 'bundleIdentity' | 'targetAttribution' | 'settlement' | 'deploymentHealth', { status: ReplayCoverage; reason: string }>;
   verification: ReportVerification | null; recorded: AttemptReport | null; differences: string[];
   artifacts: ReplayArtifact[];
@@ -87,30 +98,53 @@ export class ArtifactReplay {
     });
     const { r, a, c, format } = authorized;
     const adapter = reportAdapter(format);
-    const artifacts: ReplayArtifact[] = [];
-    const documents: Partial<Record<ArtifactKindName, unknown>> = {};
-    let bytesRead = 0;
-    for (const row of authorized.rows) {
-      const entry: ReplayArtifact = { name: row.name, digest: row.digest, state: row.state, backend: row.backend, read: false, bytes: 0, integrity: 'not-read', reason: null };
-      artifacts.push(entry);
-      // Retention applies to replay inputs exactly as to reads: nothing expired or never stored is touched.
-      if (row.state !== 'stored' || row.expires_at <= authorized.now) { entry.reason = row.state === 'stored' ? 'Artifact retention expired' : `Artifact is ${row.state}; no bytes were retained`; continue; }
-      let bytes: Buffer | null = row.bytes;
-      if (row.backend !== 'postgres') {
-        if (!v.artifactBackend || v.artifactBackend.kind !== row.backend) { entry.reason = `Artifact is stored in the ${row.backend} backend, which this server is not configured to read`; continue; }
-        try { bytes = await v.artifactBackend.get(row.location!); } catch (error) { entry.reason = `Backend read failed: ${error instanceof Error ? error.message : 'unknown'}`; continue; }
+    // One evaluation attempt (GY-1841): read, digest-check and parse the pinned artifact set —
+    // the rows the authorization transaction returned, never a newer query, so a retry judges
+    // exactly the evidence the first attempt was given — and let the pinned verifier judge them.
+    // Anything that stops the verifier from reaching a verdict is that attempt's evaluator-error
+    // with its cause; a verdict the verifier reached ends the evaluation, a fail never retried.
+    const missingOf = (documents: Partial<Record<ArtifactKindName, unknown>>) => (Object.keys(adapter.artifacts) as ArtifactKindName[]).filter(kind => !(kind in documents));
+    const unmeasuredCause = (artifacts: ReplayArtifact[], missing: ArtifactKindName[]) =>
+      `Retained artifacts lack the instrumentation to replay: ${missing.map(kind => { const entry = artifacts.find(x => x.name === kind); return entry?.reason ? `${kind} — ${entry.reason}` : `${kind} was never retained`; }).join('; ')}`;
+    let judged: { artifacts: ReplayArtifact[]; bytesRead: number; verification: ReportVerification | null; cause: string | null } | undefined;
+    const evaluation = await evaluateWithRecovery(format, async () => {
+      const artifacts: ReplayArtifact[] = [];
+      const documents: Partial<Record<ArtifactKindName, unknown>> = {};
+      let bytesRead = 0;
+      for (const row of authorized.rows) {
+        const entry: ReplayArtifact = { name: row.name, digest: row.digest, state: row.state, backend: row.backend, read: false, bytes: 0, integrity: 'not-read', reason: null };
+        artifacts.push(entry);
+        // Retention applies to replay inputs exactly as to reads: nothing expired or never stored is touched.
+        if (row.state !== 'stored' || row.expires_at <= authorized.now) { entry.reason = row.state === 'stored' ? 'Artifact retention expired' : `Artifact is ${row.state}; no bytes were retained`; continue; }
+        let bytes: Buffer | null = row.bytes;
+        if (row.backend !== 'postgres') {
+          if (!v.artifactBackend || v.artifactBackend.kind !== row.backend) { entry.reason = `Artifact is stored in the ${row.backend} backend, which this server is not configured to read`; continue; }
+          try { bytes = await v.artifactBackend.get(row.location!); } catch (error) { entry.reason = `Backend read failed: ${error instanceof Error ? error.message : 'unknown'}`; continue; }
+        }
+        if (!bytes) { entry.reason = 'Artifact bytes are missing from the backend'; continue; }
+        entry.read = true; entry.bytes = bytes.length; bytesRead += bytes.length;
+        if (`sha256:${createHash('sha256').update(bytes).digest('hex')}` !== row.digest) { entry.integrity = 'failed'; entry.reason = 'Artifact bytes fail the digest recorded at upload'; continue; }
+        entry.integrity = 'verified';
+        if (!(row.name in adapter.artifacts)) { entry.reason = `No deterministic verifier replays ${row.name} (${row.media_type}); it is retained but not judged`; continue; }
+        try { documents[row.name as ArtifactKindName] = adapter.parse(row.name as ArtifactKindName, bytes).document; }
+        catch { entry.reason = `Artifact is not a ${format} ${row.name} document`; }
       }
-      if (!bytes) { entry.reason = 'Artifact bytes are missing from the backend'; continue; }
-      entry.read = true; entry.bytes = bytes.length; bytesRead += bytes.length;
-      if (`sha256:${createHash('sha256').update(bytes).digest('hex')}` !== row.digest) { entry.integrity = 'failed'; entry.reason = 'Artifact bytes fail the digest recorded at upload'; continue; }
-      entry.integrity = 'verified';
-      if (!(row.name in adapter.artifacts)) { entry.reason = `No deterministic verifier replays ${row.name} (${row.media_type}); it is retained but not judged`; continue; }
-      try { documents[row.name as ArtifactKindName] = adapter.parse(row.name as ArtifactKindName, bytes).document; }
-      catch { entry.reason = `Artifact is not a ${format} ${row.name} document`; }
-    }
-    const missing = (Object.keys(adapter.artifacts) as ArtifactKindName[]).filter(kind => !(kind in documents));
-    const instrumented = missing.length === 0;
-    const verification = instrumented ? adapter.verify(documents.inventory, documents.report) : null;
+      const missing = missingOf(documents);
+      if (missing.length) { const cause = unmeasuredCause(artifacts, missing); judged = { artifacts, bytesRead, verification: null, cause }; return { error: cause }; }
+      try {
+        const verification = adapter.verify(documents.inventory, documents.report);
+        judged = { artifacts, bytesRead, verification, cause: null };
+        return verification.passed ? 'pass' : 'fail';
+      } catch (error) {
+        const cause = `The pinned ${format} verifier failed: ${error instanceof Error ? error.message : 'unknown'}`;
+        judged = { artifacts, bytesRead, verification: null, cause };
+        return { error: cause };
+      }
+    });
+    const final = judged!;
+    const { artifacts, bytesRead } = final;
+    const verification = final.verification;
+    const instrumented = verification !== null;
     const recorded = a.report ?? null;
     const differences: string[] = [];
     if (verification && recorded) {
@@ -119,7 +153,7 @@ export class ArtifactReplay {
       if (verification.skipped !== recorded.skipped) differences.push(`Replay counts ${verification.skipped} skipped; the collector reported ${recorded.skipped}`);
       if (verification.inventoryComplete !== recorded.inventoryComplete) differences.push(`Replay finds the inventory ${verification.inventoryComplete ? 'complete' : 'incomplete'}; the collector reported it ${recorded.inventoryComplete ? 'complete' : 'incomplete'}`);
     }
-    const unmeasured = !instrumented ? `Retained artifacts lack the instrumentation to replay: ${[...missing.map(kind => artifacts.find(x => x.name === kind)?.reason ? `${kind} — ${artifacts.find(x => x.name === kind)!.reason}` : `${kind} was never retained`)].join('; ')}` : null;
+    const unmeasured = !instrumented ? final.cause : null;
     const coverage: ReplayRecord['coverage'] = {
       inventory: instrumented ? { status: 'covered', reason: `${verification!.executed} executed and ${verification!.skipped} skipped re-derived from the retained ${format} inventory and report` } : { status: 'unmeasured', reason: unmeasured! },
       behavior: instrumented ? { status: 'covered', reason: verification!.passed ? 'Every retained execution passed under the pinned verifier' : verification!.reasons.join('; ') } : { status: 'unmeasured', reason: unmeasured! },
@@ -132,7 +166,7 @@ export class ArtifactReplay {
     const record: ReplayRecord = redact({
       id: randomUUID(), at: new Date().toISOString(), actor: actor.id, requestId: r.id, attemptId: a.id, epoch: a.epoch, sequence: a.sequence ?? null, workId: r.workId, proof: r.proof, candidateId: c.id, sourceSha: c.sourceSha, format,
       outcome: !instrumented ? 'unmeasured' : !recorded ? 'uncompared' : differences.length ? 'inconsistent' : 'consistent',
-      coverage, verification, recorded, differences: !instrumented ? [] : !recorded ? ['The attempt predates recorded report summaries; nothing to compare against'] : differences, artifacts,
+      evaluation, coverage, verification, recorded, differences: !instrumented ? [] : !recorded ? ['The attempt predates recorded report summaries; nothing to compare against'] : differences, artifacts,
       cost: { durationMs: Date.now() - started, bytesRead, artifactsRead: artifacts.filter(x => x.read).length, backend: v.artifactBackend?.label ?? 'postgres' },
       authorizes: 'nothing', liveVerification: 'not-established', redaction: { artifactBytesExported: false, identities: 'hashed', strings: 'redacted' },
     });
@@ -189,6 +223,8 @@ export class ArtifactReplay {
       avoidedExecutions: granted.filter(d => later(d).length === 0).length };
     const replays: ReplayRecord[] = (await this.store.pool.query('SELECT document FROM validation_replays ORDER BY seq')).rows.map(r => r.document);
     const replaySummary = { total: replays.length, outcomes: { consistent: replays.filter(x => x.outcome === 'consistent').length, inconsistent: replays.filter(x => x.outcome === 'inconsistent').length, uncompared: replays.filter(x => x.outcome === 'uncompared').length, unmeasured: replays.filter(x => x.outcome === 'unmeasured').length },
+      // GY-1841: evaluations whose retries were exhausted without a verdict — faults of the evaluation, never failed proofs.
+      faults: replays.filter(x => x.evaluation?.fault).length,
       durationMs: median(replays.map(x => x.cost.durationMs)), bytesRead: replays.reduce((sum, x) => sum + x.cost.bytesRead, 0) };
     return { now: now.toISOString(), attempts: { sequenced: sequenced.length, groups: summarised.length }, groups: summarised, reuse, replays: replaySummary,
       caveat: 'Groups are keyed by proof, environment and runner registration because those decide the workload. Durations are Graphyard\'s own observations of the attempt timeline; reported durations, CPU and cost come from the runner and are labeled observed, estimated or unavailable. No group is ranked against another.' };

@@ -30,11 +30,8 @@ Kept: leases and epochs, the transactional ledger, two risk lanes, UAT on a pinn
 
 ## Rollout
 
-1. **Shadow mode**: trials beside the GitHub gate, nothing written; `shadowGate` counts agree-pass, agree-fail, shadow-only-fail, shadow-missed, pending; p50/p90; newest ten disagreements. Switch criterion: two weeks with no shadow-passed head reverted by the main guard and every shadow-only failure explained. `POST /api/merger` `control-plane` refuses while any shadow disagreement stands unexplained.
-2. **Switch** `control-plane`.
-3. **Run the Snake pilot.**
-4. **After a week**, delete the github-mode gate code.
+Shadow mode ran trials beside the GitHub gate first: `shadowGate` counted agree-pass, agree-fail, shadow-only-fail, shadow-missed, pending, and `POST /api/merger` refused `control-plane` while a shadow disagreement stood unexplained. The pilot switched, `control-plane` is the default, and the github-mode gate code stays while the `merger` setting offers `github`.
 
 ## Measures
 
-Weekly: defects reaching production (escapes), merge-queue wait, human touches. Deferred until one demands it: pre-merge review for medium risk, batched merge validation, a per-test flake ledger.
+Weekly: production escapes, merge-queue wait, human touches. Deferred until one demands it: pre-merge review for medium risk and batched merge validation.

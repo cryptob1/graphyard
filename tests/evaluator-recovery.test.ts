@@ -1,0 +1,188 @@
+import { after, before, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import EmbeddedPostgres from 'embedded-postgres';
+import { Store } from '../src/store.js';
+import { Engine } from '../src/engine.js';
+import { Validation, type ValidationRequest } from '../src/validation.js';
+import { currentEvidence, evaluateWithRecovery, evaluationRetries, evaluationRetryBackoffMs, type Principal, type ScopeFile, type Work } from '../src/model.js';
+import type { ReplayRecord } from '../src/evidence-replay.js';
+import type { ArtifactBackend } from '../src/artifacts.js';
+import { defineScenario } from '../src/scenarios.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
+
+/**
+ * GY-1841: evaluator recovery. Judging a proof's retained evidence is an evaluation the pinned
+ * verifier performs, and it can end for reasons that are not the change's — the artifacts were
+ * never retained, the bytes cannot be read, the verifier crashed. The explicit rule of
+ * model/evidence.ts retries such an evaluator-error against the same retained evidence at most
+ * twice with a widening backoff, never against new evidence; a fail the verifier reached is never
+ * retried; a pass on any attempt is the evaluation's result; every attempt is kept with its
+ * outcome, cause and time; and after the retries are exhausted the record carries the evaluator
+ * errors as a fault — never a failed proof. Everything runs against a disposable real Postgres
+ * database; the artifact backend is an in-memory double whose reads the tests fault on purpose.
+ */
+const operator: Principal = { id: 'operator', role: 'admin' };
+const worker: Principal = { id: 'implementer', role: 'worker' };
+const runner: Principal = { id: 'runner', role: 'worker' };
+const collector: Principal = { id: 'collector', role: 'producer', proofs: [] };
+const builder: Principal = { id: 'builder', role: 'producer' };
+const reader: Principal = { id: 'auditor', role: 'reader' };
+const principals = [operator, worker, runner, collector, builder, reader];
+const attestationPublicKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString();
+const sha = (label: string) => label.repeat(40).slice(0, 40);
+const head = sha('1'), base = sha('b');
+const digest = `sha256:${'c'.repeat(64)}`, inputs = `sha256:${'d'.repeat(64)}`;
+let pg: EmbeddedPostgres, store: Store, engine: Engine, validation: Validation;
+let serial = 0;
+
+before(async () => {
+  const port = Number(process.env.GRAPHYARD_EVALUATOR_RECOVERY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1841);
+  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('evaluator-recovery'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  await pg.initialise(); await pg.start(); await pg.createDatabase('evaluator_recovery_test');
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/evaluator_recovery_test`); await store.init(); await recordLegacyMerger(store);
+  engine = new Engine(store, [15368], 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository');
+});
+after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
+const id = () => randomUUID();
+async function current(workId: string) { return (await store.list()).find(w => w.id === workId)!; }
+
+/** An in-memory artifact backend whose reads a test can fault: each failure is one host fault, named per call. */
+class FaultyBackend implements ArtifactBackend {
+  readonly kind = 's3' as const;
+  readonly label = 'memory/faulty';
+  readonly objects = new Map<string, Buffer>();
+  readonly reads: string[] = [];
+  failures = 0;
+  async put(location: string, bytes: Buffer) { this.objects.set(location, bytes); }
+  async get(location: string) {
+    this.reads.push(location);
+    if (this.failures > 0) { this.failures--; throw new Error(`host fault ${this.reads.length}`); }
+    return this.objects.get(location) ?? null;
+  }
+  async delete(location: string) { this.objects.delete(location); }
+  async exists(location: string) { return this.objects.has(location); }
+}
+
+type Fixture = { n: number; w: Work; r: ValidationRequest; proof: string; environment: { id: string; revision: number }; runnerRef: { id: string; revision: number }; collectorRef: { id: string; revision: number }; builderRef: { id: string; revision: number }; bundle: { id: string; revision: number }; backend: FaultyBackend };
+const file = (path: string, label: string | null): ScopeFile => ({ path, status: 'modified', sha: label === null ? null : sha(label), additions: 1, deletions: 0, binary: false });
+const files = [file('src/app.ts', 'a')];
+
+async function fixture(): Promise<Fixture> {
+  const n = ++serial;
+  const environment = { id: `preview-${n}`, revision: 1 }, runnerRef = { id: `runner-${n}`, revision: 1 }, collectorRef = { id: `collector-${n}`, revision: 1 }, builderRef = { id: `builder-${n}`, revision: 1 }, bundle = { id: `bundle-${n}`, revision: 1 }, proof = `e2e:recovery-${n}`;
+  collector.proofs!.push(proof);
+  const scenario = await defineScenario(store, operator, { id: `recovery-${n}`, title: 'Behavior', purpose: 'Prove behavior', steps: ['Execute'], expected: ['Correct'], environment: environment.id, runner: 'playwright', testPath: 'tests/behavior.spec.ts' }, id());
+  await validation.define(operator, { kind: 'environment', id: environment.id, expectedRevision: 0, repository: 'test/repository', url: 'https://preview.example.test', instance: `instance-${n}`, immutable: true, services: ['api'], resources: [`test-account-${n}`] }, id());
+  for (const [ref, actor, role] of [[runnerRef, runner, 'runner'], [collectorRef, collector, 'collector'], [builderRef, builder, 'builder']] as const) await validation.define(operator, { kind: 'registration', id: ref.id, expectedRevision: 0, principalId: actor.id, role, environment, adapterVersion: 'test-v1', proofs: role === 'collector' ? [proof] : [], enabled: true, ...(role === 'runner' ? { executionHost: 'unix:///var/run/docker.sock', attestationPublicKey, executionNetwork: 'gy-isolated' } : {}) }, id());
+  await validation.define(operator, { kind: 'bundle', id: bundle.id, expectedRevision: 0, scenario: scenario.id, scenarioRevision: scenario.revision, scenarioHash: scenario.hash, digest, runnerImageDigest: inputs, reportFormat: 'graphyard-playwright-v1' }, id());
+  let w = await engine.execute(operator, 'create', null, { title: `Evaluator recovery ${n}`, criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }] }, id());
+  w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
+  w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/recovery-${n}`, branch: `graphyard/recovery-${n}` }, id());
+  w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: n }, id());
+  w = await engine.observe(w.id, w.revision, { candidate: { sha: head, baseSha: base, pr: n, branch: `graphyard/recovery-${n}`, author: 'implementer' }, checks: [{ name: 'test', appId: 15368, result: 'success' }, { name: 'typecheck', appId: 15368, result: 'success' }], reviews: [{ reviewer: 'other', sha: head, state: 'APPROVED' }], merged: false, mergeSha: null, protected: true, mergeable: true, files: files.map(f => f.path), at: new Date().toISOString(), scopeFiles: files }) as Work;
+  const build = await validation.attestBuild(builder, { registration: builderRef, workId: w.id, expectedWorkRevision: w.revision, sourceSha: head, baseSha: base, buildInputsDigest: inputs, artifacts: [{ service: 'api', digest }], provenanceUrl: 'https://ci.example.test/build/1' }, id()) as { id: string };
+  const backend = new FaultyBackend();
+  validation.artifactBackend = backend;
+  const c = await validation.createCandidate(operator, { workId: w.id, expectedWorkRevision: (await current(w.id)).revision, proof, environment, bundle, buildAttestationId: build.id, requiredArtifacts: ['inventory', 'report'], artifactStorage: 'postgres' }, id()) as { id: string };
+  const r = await validation.createRequest(operator, { candidateId: c.id, expectedWorkRevision: (await current(w.id)).revision, runner: runnerRef, collector: collectorRef, deadline: new Date(Date.now() + 600_000).toISOString(), maxAttempts: 3 }, id()) as ValidationRequest;
+  return { n, w, r, proof, environment, runnerRef, collectorRef, builderRef, bundle, backend };
+}
+
+/** Dispatch the fixture's request, acknowledge it and hand collection to the collector. */
+async function start(f: Fixture) {
+  const d: any = await validation.dispatch(runner, { registration: f.runnerRef }, id()); assert.equal(d.request?.id, f.r.id, d.reason);
+  const command = { requestId: d.request.id as string, attemptId: d.attempt.id as string, epoch: d.attempt.epoch as number };
+  await validation.runnerCommand(runner, 'ack', command, id());
+  await validation.collectionAuthority(collector, command);
+  return command;
+}
+
+const playwrightDocument = (executed: boolean, failed = false) => ({ format: 'graphyard-playwright-v1', declared: [{ id: 'a'.repeat(64), expected: 'passed', location: { file: 'tests/behavior.spec.ts', line: 1, column: 1 } }, { id: 'b'.repeat(64), expected: 'passed', location: { file: 'tests/behavior.spec.ts', line: 9, column: 1 } }],
+  executions: executed ? [{ id: 'a'.repeat(64), status: failed ? 'failed' : 'passed', retry: 0 }, { id: 'b'.repeat(64), status: 'passed', retry: 0 }] : [], steps: [], errors: 0, overflow: false, status: failed ? 'failed' : 'passed' });
+const upload = (command: { requestId: string; attemptId: string; epoch: number }, name: string, document: unknown) => ({ ...command, name, mediaType: 'application/json', bytes: Buffer.from(JSON.stringify(document)).toString('base64'), capturePolicy: 'approved-test-data-only' });
+
+/** Retain both artifacts for the attempt and have the collector claim the pass. */
+async function retain(f: Fixture, command: Awaited<ReturnType<typeof start>>, report = playwrightDocument(true)) {
+  const inventory: any = await validation.uploadArtifact(collector, upload(command, 'inventory', playwrightDocument(false)), id());
+  const executed: any = await validation.uploadArtifact(collector, upload(command, 'report', report), id());
+  const result: any = await validation.result(collector, { ...command, execution: 'completed', behavior: 'passed', executed: 2, skipped: 0, inventoryComplete: true, target: { instance: `instance-${f.n}`, artifacts: [{ service: 'api', digest }], measurement: 'provider', coversEntireRun: true, attribution: 'matched' }, bundleDigest: digest, runnerImageDigest: inputs, artifacts: [{ name: 'inventory', digest: inventory.digest, url: inventory.url }, { name: 'report', digest: executed.digest, url: executed.url }], artifactState: 'verified', executionSettled: true, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, id());
+  assert.equal(result.passed, true, result.reasons.join('; '));
+  return { inventory, executed };
+}
+
+test('unit:evaluator-error-retried — an evaluator-error is retried against the same retained evidence at most twice, a fail is never retried, and a pass on retry is the result', async () => {
+  // The rule itself, without a database: exactly two retries at most, with the widening backoff.
+  const waits: number[] = [];
+  const exhausted = await evaluateWithRecovery('graphyard-playwright-v1', async () => ({ error: 'the evaluator crashed' }), { sleep: async ms => { waits.push(ms); } });
+  assert.equal(exhausted.attempts.length, evaluationRetries + 1, 'the first attempt plus at most two retries');
+  assert.deepEqual(waits, [evaluationRetryBackoffMs, evaluationRetryBackoffMs * 2]);
+  let judged = 0;
+  const failed = await evaluateWithRecovery('graphyard-playwright-v1', async () => { judged++; return 'fail'; }, { sleep: async () => assert.fail('a fail is never retried') });
+  assert.equal(failed.outcome, 'fail'); assert.equal(failed.attempts.length, 1); assert.equal(judged, 1); assert.equal(failed.fault, null);
+  const recovered = await evaluateWithRecovery('graphyard-playwright-v1', async () => judged++ === 1 ? { error: 'once' } : 'pass', { sleep: async () => {} });
+  assert.equal(recovered.outcome, 'pass'); assert.equal(recovered.attempts.length, 2); assert.equal(recovered.fault, null);
+  const crashed = await evaluateWithRecovery('graphyard-playwright-v1', () => { throw new Error('the evaluator crashed'); }, { retries: 0, sleep: async () => {} });
+  assert.equal(crashed.outcome, 'evaluator-error'); assert.equal(crashed.attempts.length, 1); assert.equal(crashed.attempts[0].cause, 'the evaluator crashed');
+
+  // Against a real attempt: a host fault on the first read is an evaluator-error, and the retry
+  // judges the same retained evidence — the same two pinned artifacts, no new evidence — to a pass.
+  const f = await fixture();
+  const command = await start(f);
+  await retain(f, command);
+  f.backend.failures = 1; // the first read of the first artifact throws: the host ran out of resources
+  const replay = await validation.replay.replay(reader, { requestId: command.requestId, attemptId: command.attemptId }) as ReplayRecord;
+  assert.equal(replay.evaluation.attempts.length, 2, JSON.stringify(replay.evaluation));
+  assert.equal(replay.evaluation.attempts[0].outcome, 'evaluator-error');
+  assert.match(replay.evaluation.attempts[0].cause!, /Backend read failed: host fault/);
+  assert.equal(replay.evaluation.attempts[1].outcome, 'pass'); assert.equal(replay.evaluation.attempts[1].cause, null);
+  assert.equal(replay.evaluation.outcome, 'pass', 'a pass on retry is the evaluation’s result');
+  assert.equal(replay.evaluation.fault, null);
+  assert.equal(replay.outcome, 'consistent', JSON.stringify(replay.differences));
+  assert.equal(replay.verification?.passed, true);
+  assert.equal(replay.coverage.behavior.status, 'covered');
+  assert.equal(f.backend.reads.length, 4, 'two reads per attempt: the faulted one and its retry');
+  assert.equal(new Set(f.backend.reads).size, 2, 'only the two retained artifacts were ever read — the same pinned evidence, never new evidence');
+
+  // A verdict the verifier reached is not retried, whatever it disagrees with: one attempt, one fail.
+  const g = await fixture();
+  const gCommand = await start(g);
+  await retain(g, gCommand, playwrightDocument(true, true));
+  const contradiction = await validation.replay.replay(reader, { requestId: gCommand.requestId, attemptId: gCommand.attemptId }) as ReplayRecord;
+  assert.equal(contradiction.outcome, 'inconsistent');
+  assert.equal(contradiction.evaluation.attempts.length, 1, 'a fail is a verdict on the change and is never retried');
+  assert.equal(contradiction.evaluation.attempts[0].outcome, 'fail'); assert.equal(contradiction.evaluation.attempts[0].cause, null);
+  assert.equal(contradiction.evaluation.outcome, 'fail'); assert.equal(contradiction.evaluation.fault, null);
+  assert.match(contradiction.differences.join('\n'), /Replayed verdict failed but the collector reported behavior passed/);
+});
+
+test('unit:evaluation-attempts-kept — every attempt is kept with its outcome, cause and time, and exhausted retries leave the evaluator errors as a fault, never a failed proof', async () => {
+  const f = await fixture();
+  const command = await start(f);
+  await retain(f, command);
+  const before = await current(f.w.id);
+  f.backend.failures = Number.MAX_SAFE_INTEGER; // the host never recovers within this evaluation
+  const replay = await validation.replay.replay(reader, { requestId: command.requestId, attemptId: command.attemptId }) as ReplayRecord;
+  // Every attempt is appended, none overwritten: three distinct records, each with its outcome, cause and time.
+  assert.equal(replay.evaluation.attempts.length, evaluationRetries + 1, JSON.stringify(replay.evaluation));
+  assert.ok(replay.evaluation.attempts.every(try_ => try_.outcome === 'evaluator-error'), 'no attempt was judged');
+  assert.ok(replay.evaluation.attempts.every(try_ => typeof try_.at === 'string' && try_.at.length > 0), 'each attempt carries its time');
+  assert.ok(replay.evaluation.attempts.every((try_, index) => index === 0 || Date.parse(replay.evaluation.attempts[index].at) >= Date.parse(replay.evaluation.attempts[index - 1].at)));
+  assert.deepEqual(replay.evaluation.attempts.map(try_ => try_.evaluator), replay.evaluation.attempts.map(() => 'graphyard-playwright-v1'), 'each attempt names the pinned evaluator');
+  const causes = new Set(replay.evaluation.attempts.map(try_ => try_.cause));
+  assert.equal(causes.size, replay.evaluation.attempts.length, 'each attempt kept its own cause, none overwritten');
+  for (const attempt of replay.evaluation.attempts) assert.match(attempt.cause!, /Backend read failed: host fault/);
+  // After the retries the item shows the evaluator errors as a fault, not a failed proof.
+  assert.equal(replay.evaluation.outcome, 'evaluator-error');
+  assert.deepEqual(replay.evaluation.fault, { kind: 'evaluator-error', errors: replay.evaluation.attempts.map(try_ => try_.cause) });
+  assert.equal(replay.outcome, 'unmeasured', 'the record is a fault of the evaluation, never a verdict');
+  assert.equal(replay.verification, null);
+  assert.match(replay.coverage.behavior.reason, /lack the instrumentation to replay/);
+  const after = await current(f.w.id);
+  assert.equal(after.evidence.length, before.evidence.length, 'the faulting evaluation appends nothing to the item');
+  assert.ok(after.evidence.every(entry => entry.result !== 'fail'), 'no failed proof was recorded');
+  assert.equal(after.revision, before.revision);
+  const analytics = await validation.replay.analytics();
+  assert.ok(analytics.replays.faults >= 1, 'the exhausted evaluation is counted as a fault');
+});
