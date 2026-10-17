@@ -12,7 +12,7 @@ import { requiredPullRequestChecks, type DeliveryPolicy } from '../model/deliver
 import { applyWiring, deploymentAdapters, observeReleaseWiring, wiringActions, type DeploymentAdapter, type DeploymentContext } from './deploy-target.js';
 import { adapterFor, carriesCredential, readRemote, isProviderReference, quotedPrice, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
 import { asUser, existingMachineAdapter, generateHostSecrets, hostHerdrOnly, hostLayout, hostPlan, hostRemote, hostTokenFile, installHostFleet, readHostSecrets, selfContainedAdapter, MIGRATE_SOURCE_VARIABLE, type HostFleetResult } from './host.js';
-import { applyProtection, appClient, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, installationClient, installationToken, protectionSatisfied, readProtection, GRAPHYARD_CHECKS, readWebhookConfig, repositoryInstallation, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
+import { applyProtection, applyRestore, observeRestore, protectionRecordFile, readProtectionRecord, recordProtectionOnce, restoreChanges, type ProtectionRecord, type RestoreChange, appClient, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, installationClient, installationToken, protectionSatisfied, readProtection, GRAPHYARD_CHECKS, readWebhookConfig, repositoryInstallation, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
 import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
 import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
 import { repositoryPolicyAssignment } from '../model/repository-policy.js';
@@ -115,6 +115,14 @@ export interface GitHubAppChoice { noGithubApp?: boolean }
  * read by value. Implies --no-github-app and --no-herdr; the plan lists each held action.
  */
 export interface ObserveOnlyChoice { observeOnly?: boolean }
+/**
+ * GY-1870: `--restore-protection` returns the base branch to the protection install recorded before
+ * its first github.protection write (protection-record.json in the install directory): `--plan`
+ * lists the writes against what GitHub answers now, `--apply` makes them and verifies by re-reading.
+ * It touches nothing else, so every flag but --repo and --base-branch is refused beside it.
+ */
+export interface RestoreProtectionChoice { restoreProtection?: boolean }
+export interface ProtectionRestorePlan { version: 1; action: 'restore-protection'; repository: string; branch: string; record: string; recordedAt: string; changes: RestoreChange[] }
 export type InstallRequest = InstallInputs & HerdrChoice;
 /** The variables an App binding writes; `--no-github-app` leaves every one of them unset. */
 export const APP_VARIABLES = ['GITHUB_APP_ID', 'GITHUB_INSTALLATION_ID', 'GITHUB_PRIVATE_KEY', 'GITHUB_WEBHOOK_SECRET', 'GITHUB_CI_APP_IDS'] as const;
@@ -136,8 +144,9 @@ export function installRequestFromArgs(args: string[]) {
     target: { type: 'string' }, local: { type: 'boolean' }, migrate: { type: 'boolean' }, 'max-monthly': { type: 'string' }, 'confirm-price': { type: 'string' },
     'github-app': { type: 'string' }, 'reuse-app': { type: 'string', multiple: true }, 'no-github-app': { type: 'boolean' },
     'create-environments': { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' }, 'no-herdr': { type: 'boolean' }, 'herdr-instance': { type: 'boolean' }, 'herdr-only': { type: 'boolean' }, 'fresh-cursor': { type: 'boolean' },
-    'observe-only': { type: 'boolean' },
+    'observe-only': { type: 'boolean' }, 'restore-protection': { type: 'boolean' },
   }, allowPositionals: false });
+  if (values['restore-protection']) return { values, request: restoreRequest(values) };
   if ([values['herdr-rebind'], values['no-herdr'], values['herdr-instance']].filter(Boolean).length > 1) throw new Error('Choose one of --herdr-rebind, --no-herdr or --herdr-instance');
   if (!values.repo) throw new Error('Use --repo OWNER/NAME');
   for (const slug of values['reuse-app'] ?? []) if (!/^[a-z0-9][a-z0-9-]{0,99}$/i.test(slug)) throw new Error(`--reuse-app takes an App slug such as graphyard-owner-repo, not ${slug}`);
@@ -165,7 +174,7 @@ export function installRequestFromArgs(args: string[]) {
   // A count that silently became NaN would install a control plane with no worker principal
   // or an unusable port, so a non-numeric value stops the command instead.
   const count = (flag: string, value: string) => { const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`--${flag} takes a whole number`); return parsed; };
-  const request: InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice & FreshCursorChoice = { repository: values.repo,
+  const request: InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice & FreshCursorChoice & RestoreProtectionChoice = { repository: values.repo,
     ...(values['herdr-rebind'] ? { herdr: 'rebind' as const } : values['no-herdr'] ? { herdr: 'skip' as const } : values['herdr-instance'] ? { herdr: 'instance' as const } : {}), provider: provider as InstallRequest['provider'],
     ...(values.target || provider === 'host' ? { selfContained: true } : {}),
     ...(values.local ? { local: true } : {}), ...(values.migrate ? { migrate: true } : {}),
@@ -191,6 +200,15 @@ export function installRequestFromArgs(args: string[]) {
   return { values, request };
 }
 
+function restoreRequest(values: Record<string, string | boolean | string[] | undefined>): InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice & FreshCursorChoice & RestoreProtectionChoice {
+  if (!values.repo) throw new Error('Use --repo OWNER/NAME');
+  if (values.plan && values.apply) throw new Error('Choose either --plan or --apply');
+  const others = Object.keys(values).filter(name => !['restore-protection', 'repo', 'base-branch', 'plan', 'apply'].includes(name) && (Array.isArray(values[name]) ? (values[name] as string[]).length > 0 : values[name] !== undefined && values[name] !== false));
+  if (others.length) throw new Error(`--restore-protection writes only the recorded branch protection, so it cannot be combined with ${others.map(name => `--${name}`).join(', ')}`);
+  // No provider is read or deployed: the placeholder only completes the request's type.
+  return { repository: String(values.repo), provider: 'local', restoreProtection: true, ...(values['base-branch'] ? { baseBranch: String(values['base-branch']) } : {}) };
+}
+
 function observeOnlyConflicts(values: Record<string, string | boolean | string[] | undefined>, provider: string) {
   const given = (name: string) => Array.isArray(values[name]) ? (values[name] as string[]).length > 0 : !!values[name];
   return [...['github-app', 'reuse-app', 'reviewer', 'workers', 'producer-proof', 'create-environments', 'migrate', 'herdr-rebind', 'herdr-instance', 'herdr-only'].filter(given).map(name => `--${name}`),
@@ -204,7 +222,9 @@ export const OBSERVE_ONLY_HELD = 'held by observation-only (--observe-only)';
 const held = (action: Omit<PlanAction, 'state' | 'held'>, reason: string): PlanAction => ({ ...action, state: 'held', held: `${OBSERVE_ONLY_HELD}: ${reason}` });
 
 export interface InstallSession {
-  root: string; inputs: Required<Pick<InstallInputs, 'repository' | 'provider' | 'baseBranch'>> & InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice & FreshCursorChoice;
+  root: string; inputs: Required<Pick<InstallInputs, 'repository' | 'provider' | 'baseBranch'>> & InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice & FreshCursorChoice & RestoreProtectionChoice;
+  /** Set only on a `--restore-protection` session (GY-1870): the record it restores, which buildPlan and applyInstall act on instead of an install. */
+  restore?: ProtectionRecord;
   installId: string; directory: string; adapter: ProviderAdapter; context: AdapterContext;
   principals: PlannedPrincipal[]; tokens: Map<string, string>; vault: Vault;
   record: InstallRecord | null; reviewers: { name: string; appId: number; botUserId: number }[];
@@ -411,7 +431,8 @@ export function composeCheckoutMounts(root: string): { repoCheckout: string | nu
   return { repoCheckout: root, repoGitDir: resolve(common) };
 }
 
-export async function prepareInstall(cwd: string, rawInputs: InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice, dependencies: InstallDependencies = {}, mode: 'plan' | 'apply' = 'apply'): Promise<InstallSession> {
+export async function prepareInstall(cwd: string, rawInputs: InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice & RestoreProtectionChoice, dependencies: InstallDependencies = {}, mode: 'plan' | 'apply' = 'apply'): Promise<InstallSession> {
+  if (rawInputs.restoreProtection) return prepareRestore(rawInputs, dependencies, mode);
   const provider = rawInputs.provider;
   if (!provider) throw new Error('Use --provider railway|hetzner|docker-host|compose|local, or --target host|hetzner');
   // Observation-only (GY-1846) binds no App and leaves Herdr untouched, whoever builds the request.
@@ -542,6 +563,32 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
  * passed, so a refused `--apply` leaves the machine exactly as it found it. Idempotent — an
  * existing installation keeps every credential it already has.
  */
+/**
+ * A restore session (GY-1870): the recorded protection and the gh CLI, nothing else. Refuses, before
+ * anything is read from GitHub, without a record (naming the file it looked for) or when the record
+ * belongs to another repository or branch.
+ */
+async function prepareRestore(rawInputs: InstallRequest & RestoreProtectionChoice, dependencies: InstallDependencies, mode: 'plan' | 'apply'): Promise<InstallSession> {
+  const installId = installIdFor(rawInputs.repository);
+  const directory = installDirectory(installId, dependencies.configHome);
+  const record = await readProtectionRecord(directory);
+  if (!record) throw new Error(`No protection record exists for ${rawInputs.repository}: ${protectionRecordFile(directory)} is missing, so there is no pre-Graphyard protection to restore. Install writes it before its first branch-protection write.`);
+  if (record.repository.toLowerCase() !== rawInputs.repository.toLowerCase()) throw new Error(`The protection record ${protectionRecordFile(directory)} is for ${record.repository}, not ${rawInputs.repository}`);
+  if (rawInputs.baseBranch && rawInputs.baseBranch !== record.branch) throw new Error(`The protection record ${protectionRecordFile(directory)} is for branch ${record.branch}, not ${rawInputs.baseBranch}`);
+  const transport = dependencies.transport ?? localTransport();
+  const deps = { fetch, now: Date.now, wait: (ms: number) => new Promise<void>(accept => setTimeout(accept, ms)), log: (line: string) => console.error(line), ...dependencies };
+  // Only the fields buildPlan and applyInstall read on a restore are set: no provider is planned or deployed.
+  return { inputs: { ...rawInputs, baseBranch: record.branch }, installId, directory, mode, restore: record, vault: new Vault(), deps, context: { transport } } as unknown as InstallSession;
+}
+
+/** The writes that return the branch to the record, against what GitHub answers now; nothing is written. */
+async function planRestore(session: InstallSession): Promise<ProtectionRestorePlan> {
+  const record = session.restore!;
+  const gh = githubCli(session.context.transport);
+  return { version: 1, action: 'restore-protection', repository: record.repository, branch: record.branch, record: protectionRecordFile(session.directory), recordedAt: record.recordedAt,
+    changes: restoreChanges(record, await observeRestore(gh, record.repository, record.branch)) };
+}
+
 export async function materializeInstall(session: InstallSession): Promise<InstallSession> {
   if (session.mode !== 'apply') throw new Error('Apply requires a session prepared in apply mode; --plan sessions create nothing');
   if (session.context.host) {
@@ -841,6 +888,8 @@ export function webhookPreflight(provider: Provider): PreflightItem | null {
 type WebhookProof = DeliveryProof & { skipped?: true };
 
 export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
+  // A restore session plans the restore, not an install; the CLI prints either plan as it is.
+  if (session.restore) return await planRestore(session) as unknown as InstallPlan;
   const { adapter, context, record } = session;
   const preflight = await adapter.preflight(context);
   const gh = githubCli(context.transport);
@@ -1188,6 +1237,12 @@ export async function resetHostCursor(remote: Transport, checkout: string, fleet
  * line and the summary.
  */
 export async function applyInstall(session: InstallSession, plan: InstallPlan): Promise<InstallSummary> {
+  if (session.restore) {
+    // Exactly the reviewed plan's writes, then a re-read that must match the record.
+    const restore = plan as unknown as ProtectionRestorePlan;
+    const { verified } = await applyRestore(githubCli(session.context.transport), session.restore, restore.changes);
+    return { ...restore, restored: true, verified } as unknown as InstallSummary;
+  }
   try { return await performInstall(session, plan); }
   catch (error: any) {
     if (error instanceof InstallPaused) throw error;
@@ -1288,7 +1343,11 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
     // context that does not exist yet would block every pull request on the repository.
     mergeCheckExists = (current?.required_status_checks?.checks ?? []).some((check: any) => check.context === CHECK_NAME)
       || (await detectCiAppIds(gh, session.inputs.repository, session.inputs.baseBranch, null)).some(entry => entry.appId === facts.appId);
-    const applied = protectionSatisfied(protectionInputs, current) ? null : await applyProtection(gh, { ...protectionInputs, graphyardAppId: mergeCheckExists ? facts.appId : null });
+    const satisfied = protectionSatisfied(protectionInputs, current);
+    // Before the first write, the protection, auto-merge and queue ruleset found are recorded once,
+    // for `install --restore-protection` (GY-1870); a later apply keeps that record.
+    if (!satisfied) await recordProtectionOnce(gh, { directory: session.directory, repository: session.inputs.repository, branch: session.inputs.baseBranch, current, now: deps.now(), assertClean: (text, where) => vault.assertClean(text, where) });
+    const applied = satisfied ? null : await applyProtection(gh, { ...protectionInputs, graphyardAppId: mergeCheckExists ? facts.appId : null });
     protectionDetail = applied
       ? `required checks ${applied.required_status_checks.checks.map(check => check.context).join(', ')} ("up to date" off: a candidate merges on the base it was built on); ${applied.required_pull_request_reviews.required_approving_review_count} approving review(s); admin enforcement`
       : `already matches the ${session.reviewPolicy} review policy`;
