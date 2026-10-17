@@ -3,13 +3,16 @@ import { isAbsolute, relative, resolve } from 'node:path';
 import { fingerprint, Vault } from './secrets.js';
 import { SERVER_CONTAINER_UID, shellQuote, type Transport } from './transport.js';
 import { SERVER_PORT, type EnvValue, type PlanAction, type PreflightItem, type Provider } from './types.js';
-import { packageVersion } from '../release.js';
+import { cliRelease, defaultImageFor } from '../release.js';
 import { hetznerQuote, spendConsent, type PriceQuote, type QuoteResult } from './pricing.js';
 import { localAdapter } from './local.js';
 import { buildIdentity, cliCommit } from '../protocol-version.js';
 
-/** The versioned release image for the checkout's own version, as .github/workflows/release.yml publishes it. */
-export const DEFAULT_IMAGE = `ghcr.io/cryptob1/graphyard:${packageVersion}`;
+/**
+ * The release image an install defaults to: the image the promotion published under the CLI's own
+ * date version (.github/workflows/release-candidate.yml), or the `stable` channel from an unreleased checkout.
+ */
+export const DEFAULT_IMAGE = defaultImageFor(cliRelease());
 
 export interface AdapterContext {
   provider: Provider;
