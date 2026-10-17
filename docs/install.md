@@ -15,7 +15,7 @@ Ask only: **Which provider**; **Provider login**; **GitHub App confirmation clic
 
 ## Preconditions
 
-Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`, admin `gh auth status` with scope `repo` (and `admin:repo_hook` except compose/local; `--no-github-app` needs `gh` only for release-candidate `release.*`); worker and non-Actions unit-proof hosts pass [`bwrap` probe](setup-from-zero.md#1-machine-prerequisites).
+Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`, admin `gh auth status` with scope `repo` (and `admin:repo_hook` except compose/local/`--observe-only`; `--no-github-app` needs `gh` only for release-candidate `release.*`); worker and non-Actions unit-proof hosts pass [`bwrap` probe](setup-from-zero.md#1-machine-prerequisites).
 
 ### Providers
 
