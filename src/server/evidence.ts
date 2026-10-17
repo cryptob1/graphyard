@@ -20,10 +20,10 @@ export async function flakyEvidence(db: Db, action: DecisionAction, input: Recor
 
 /**
  * The applied outcome of a decision that changes nothing about the item: a merge approval the
- * guarded merge still rechecks, or a release-ledger decision (GY-1378) the ledger reads.
+ * guarded merge still rechecks (and, with automatic merging off, the release merger-mode.ts reads), or a release-ledger decision (GY-1378) the ledger reads.
  */
 export function appliedOutcome(action: DecisionAction, input: Record<string, any>): string | null {
-  if (action === 'merge') return `Merge of ${input.sha} onto ${input.baseSha} at policy revision ${input.policyRevision} approved; the guarded merge still rechecks every gate`;
+  if (action === 'merge') return `Merge of ${input.sha} onto ${input.baseSha} at policy revision ${input.policyRevision} approved; with automatic merging off it releases that candidate alone (GY-1927), and the guarded merge still rechecks every gate`;
   if (action === 'evidence') return `Flaky E2E case ${input.case} of run ${input.runId} accepted at ${input.sha} only`;
   if (action === 'fold') return `Release hold of outcome ${input.outcome} may fold into the hold of outcome ${input.into}`;
   return null;
