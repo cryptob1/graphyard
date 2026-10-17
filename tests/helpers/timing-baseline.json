@@ -906,6 +906,7 @@
     "tests/unknown-reviewer-profile.test.ts": 800,
     "tests/unproduced-manual-attestation.test.ts": 537,
     "tests/unresolved-threads.test.ts": 816,
+    "tests/unit-launcher-quoted-path.test.ts": 700,
     "tests/up-control-plane.test.ts": 2500,
     "tests/upgrade-dirty-snapshot.test.ts": 4000,
     "tests/upgrade-slot-restart.test.ts": 1800,
@@ -938,6 +939,9 @@
     "tests/worktree-reclaim.test.ts": 3054,
     "tests/zero-touch-control-plane.test.ts": 4000,
     "tests/zero-touch-onboarding.test.ts": 5900,
-    "tests/evaluator-recovery.test.ts": 4000
+    "tests/evaluator-recovery.test.ts": 4000,
+    "tests/sync-timing-baseline.test.ts": 4000,
+    "tests/file-durations-status.test.ts": 257,
+    "tests/event-loop-lag-pending.test.ts": 729
   }
 }
