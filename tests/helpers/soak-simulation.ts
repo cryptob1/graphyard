@@ -11,6 +11,11 @@ import { GitHubChargeLedger } from '../../src/github-charges.js';
 import { type Principal, Refusal, type Work, observationWindowHold } from '../../src/model.js';
 import { type PostDeployFiler, filePostDeployFollowUps, localPostDeployChecks, verifyDeployment } from '../../src/master-verification.js';
 import { postDeployReader } from '../../src/master/post-deploy-readings.js';
+import type { OnboardingTargetPorts } from '../../src/cli/master-deployment.js';
+/** GY-1906: the onboarding-target proof and the case its executions pass, as master-deployment.ts names them (a checkout without the reader still loads this helper). */
+const onboardingTargetProof = 'manual:post-deploy/onboarding-default-target', onboardingCase = 'onboarding-delivery-defaults';
+import type { HoldRecord } from '../../src/release-holds.js';
+import type { UatRecord } from '../../src/release-candidate.js';
 import type { PatternReader } from '../../src/model/observation-window.js';
 import { plainStatus } from '../../src/model/plain-status.js';
 import { buildBoard, groupOf } from '../../src/model/board.js';
@@ -354,7 +359,14 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * 98070f3538 filed GY-1721..GY-1725); the served release's isolated checkout carries the current filer.
    * `windowHours` makes the criterion a live window of that many hours instead of a rate per `windowDays`.
    */
-  observationWindow?: { item: number; windowDays: number; filedAfterMs: number; unwindowed?: boolean; staleCoordinator?: boolean; windowHours?: number; closeRefusedHours?: number };
+  observationWindow?: { item: number; windowDays: number; filedAfterMs: number; unwindowed?: boolean; staleCoordinator?: boolean; windowHours?: number; closeRefusedHours?: number;
+    /**
+     * GY-1906: the parent declares GY-1910 AC-2 (`manual:post-deploy/onboarding-default-target`, no window) instead,
+     * read by the loop's ledger reader over a release ledger the day writes: the onboarding-default-path hold GY-1909
+     * open from the start, cleared at `clearAt` on a candidate at the parent's merge whose own execution passes,
+     * and each served release's own UAT execution failing onboarding-delivery-defaults until `passAt`.
+     */
+    onboardingTarget?: { clearAt: number; passAt: number } };
   /**
    * GY-1740: one post-deploy follow-up per entry of `hours`, filed as verify-deployment files them and
    * blocked by its first worker on a reading that cannot exist before the day's start plus that many
@@ -580,7 +592,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     const criteria = [{ id: 'AC-1', text: plan.scoped.has(n) || (options.remedies && n === remedyItem) ? `Item ${n} behaves, with its fixture ${fixture(n)}` : `Item ${n} behaves`, proofs: [PROOF] },
       ...(n === plan.attested ? [{ id: 'AC-2', text: `Item ${n} is attested`, proofs: [MANUAL] }] : []),
       // GY-1698: the windowed post-deploy verification whose follow-up the day files and releases, as GY-1685 AC-1 declared it.
-      ...(options.observationWindow?.item === n ? [{ id: 'AC-2', text: options.observationWindow.windowHours
+      ...(options.observationWindow?.item === n && options.observationWindow.onboardingTarget ? [{ id: 'AC-2', text: 'On the serving release, onboarding-delivery-defaults passes through the repaired normal-onboarding fixture path on a newer UAT candidate served at its exact SHA and the onboarding-default-path release hold GY-1909 clears under its original rule.', proofs: [onboardingTargetProof] }] : []),
+      ...(options.observationWindow?.item === n && !options.observationWindow.onboardingTarget ? [{ id: 'AC-2', text: options.observationWindow.windowHours
         ? `The intervention report shows no escalation interventions at the build stage over ${options.observationWindow.windowHours} hours of live activity after item ${n} ships`
         : `The cause of the recurring escalation interventions at the build stage is found and removed: the intervention report shows the escalation rate at the build stage below 3 per ${options.observationWindow.windowDays} days after item ${n} ships`, proofs: [windowedPatternProof] }] : [])];
     const smokeIntake = options.slowDeployment ? { policy: { checks: ['test', 'typecheck'], review: true, deploySmoke: true } } : {};
@@ -591,7 +604,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   }
   // ---- GY-1698: the windowed post-deploy follow-up the day files as master verify-deployment does, releases at once, and watches. ----
   const windowDay = options.observationWindow ? {
-    parent: items[options.observationWindow.item - 1], windowDays: options.observationWindow.windowDays, proof: windowedPatternProof,
+    parent: items[options.observationWindow.item - 1], windowDays: options.observationWindow.windowDays, proof: options.observationWindow.onboardingTarget ? onboardingTargetProof : windowedPatternProof,
     followUp: null as Work | null, filedAt: null as number | null, releasedAt: null as number | null, filings: 0, staleFilings: 0, created: [] as string[],
     deferred: [] as { at: number; epoch: number; notBefore: string }[],
     samples: [] as { elapsed: number; at: string; stage: string; waiting: boolean | null; attention: string | null; attentionRows: number; sentence: string; dispatches: { requestedBy: string; at: string }[]; lease: string | null; sessions: number; masterLive: boolean; faults: string[]; escalations: string[]; counted: 'ready' | 'waiting' | null; next: string | null; readings: { result: string; sha: string }[]; closure: { kind: string; ref: string | null } | null; wait: string | null }[],
@@ -1960,10 +1973,37 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     readingDay!.passFrom ??= clock.now();
     return { since: new Date(notBefore + hour - options.observationWindow!.windowHours * hour).toISOString(), projected: null };
   };
+  // GY-1906: the release ledger the onboarding-target reader reads, as release validate writes it over the day: the
+  // hold opened on an older candidate, its clear on a newer one at the parent's merge with that execution passing,
+  // and each served release's own execution, recorded where the UAT deployed it and only once the hold has cleared.
+  const onboarding = options.observationWindow?.onboardingTarget ?? null;
+  const onboardingDay = onboarding ? { reads: 0, clearing: null as { candidate: string; sha: string; at: string } | null } : null;
+  const opened = '20000101T000000Z', candidateAt = (at: number) => new Date(at).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+  const execution = (id: string, sha: string, verdict: 'passed' | 'failed', at: string): UatRecord => ({ id, sha, result: verdict, deployedSha: sha, at, suites: [], followUp: null,
+    e2e: { runId: `rc-${id}`, sha, blocking: verdict === 'passed' ? [] : [onboardingCase], cases: [{ case: onboardingCase, verdict, required: true, attempts: 1, failingStep: verdict === 'passed' ? null : { index: 1, name: 'read the merger mode', reason: 'mode is "github", expected "control-plane"' } }] } });
+  const onboardingLedger: OnboardingTargetPorts | null = onboardingDay ? {
+    holdRecords: async () => {
+      const failedSha = sha('onboarding-failed', 0);
+      const open: HoldRecord = { kind: 'open', outcome: 'onboarding-default-path', hold: 'onboarding-default-path', candidate: opened, sha: failedSha, at: new Date(dayStart).toISOString(), item: 'GY-1909',
+        cases: [{ case: onboardingCase, verdict: 'failed', candidate: opened, sha: failedSha, runId: `rc-${opened}`, attempts: 2, failingStep: { index: 1, name: 'read the merger mode', reason: 'mode is "github", expected "control-plane"' } }] };
+      const parent = windowDay!.parent && (await store.list()).find(item => item.id === windowDay!.parent.id);
+      if (clock.now() >= dayStart + onboarding!.clearAt && parent?.delivery && !onboardingDay.clearing) onboardingDay.clearing = { candidate: candidateAt(clock.now()), sha: parent.delivery.mergeSha, at: new Date(clock.now()).toISOString() };
+      const clearing = onboardingDay.clearing;
+      return clearing ? [open, { kind: 'clear', outcome: 'onboarding-default-path', hold: 'onboarding-default-path', candidate: clearing.candidate, sha: clearing.sha, at: clearing.at, item: 'GY-1909' }] : [open];
+    },
+    uatRecords: async () => {
+      onboardingDay.reads += 1;
+      const clearing = onboardingDay.clearing;
+      if (!clearing) return [];
+      const now = new Date(clock.now()).toISOString();
+      return [execution(clearing.candidate, clearing.sha, 'passed', clearing.at), ...(production.sha === clearing.sha ? [] : [execution(candidateAt(clock.now() + 1000), production.sha, clock.now() >= dayStart + onboarding!.passAt ? 'passed' : 'failed', now)])];
+    },
+    contains: async (ancestor, descendant) => github.contains(descendant, ancestor),
+  } : null;
   const effects: DaemonEffects = {
     ...(promotionEffect ? { promotion: promotionEffect } : {}),
     ...(readingDay ? {
-      readPattern, postDeployFiler: localPostDeployChecks, readPostDeploy: postDeployReader(readPattern),
+      readPattern, postDeployFiler: localPostDeployChecks, readPostDeploy: postDeployReader(readPattern, 'graphyard', onboardingLedger ?? undefined),
       recordReading: (work, reading) => api(principals.coordinator, 'POST', `work/${work.id}/reading`, reading),
       closeObservation: async (work, release, reason, key) => {
         // GY-1794: `closeRefusedHours` makes the plane refuse the recorded pass's close for that long after the pass began.
@@ -3545,12 +3585,12 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         const file = async (input: Parameters<typeof engine.execute>[3], key: string) => {
           // File through the engine the same way the API create path does, so the window rides the
           // create schema onto the item (a missing window would dispatch at once and is the bug).
-          assert.ok((input as Work).observationWindow, `filePostDeployFollowUps must put observationWindow on the follow-up input: ${JSON.stringify(input)}`);
+          assert.ok(onboarding || (input as Work).observationWindow, `filePostDeployFollowUps must put observationWindow on the follow-up input: ${JSON.stringify(input)}`);
           // GY-1726: an older release's filing carried no window.
           const { observationWindow: _window, ...unwindowed } = input as Work;
           const filed = await engine.execute(principals.operator, 'create', null, options.observationWindow!.unwindowed ? unwindowed as typeof input : input, key) as Work;
           // GY-1735: a filing without its window takes the one the control plane derives from the parent's own criterion.
-          assert.ok(options.observationWindow!.unwindowed ? filed.observationWindow?.basis === 'criterion-window' : filed.observationWindow, `create must persist what was filed, or derive what it owed: ${JSON.stringify(filed.observationWindow)}`);
+          assert.ok(onboarding || (options.observationWindow!.unwindowed ? filed.observationWindow?.basis === 'criterion-window' : filed.observationWindow), `create must persist what was filed, or derive what it owed: ${JSON.stringify(filed.observationWindow)}`);
           windowDay.created.push(filed.key); return filed;
         };
         const patterns = async () => ({ since: null, projected });
@@ -3573,12 +3613,12 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         const key = checks.find(check => check.proof === windowDay.proof)?.followUp ?? null;
         if (key && !windowDay.followUp) {
           const filed = (await store.list()).find(item => item.key === key)!;
-          assert.ok(options.observationWindow!.unwindowed || filed.observationWindow, `the filed follow-up must carry observationWindow after create: ${filed.key}`);
+          assert.ok(onboarding || options.observationWindow!.unwindowed || filed.observationWindow, `the filed follow-up must carry observationWindow after create: ${filed.key}`);
           windowDay.followUp = filed; windowDay.filedAt = at;
           // Released at once, days before its instant: GY-1689 was released three hours after its filing.
           await engine.execute(principals.operator, 'ready', filed.id, {}, id()); windowDay.releasedAt = clock.now();
           windowDay.followUp = (await store.list()).find(item => item.id === filed.id)!;
-          assert.ok(options.observationWindow!.unwindowed || windowDay.followUp.observationWindow, `ready must keep observationWindow on ${filed.key}`);
+          assert.ok(onboarding || options.observationWindow!.unwindowed || windowDay.followUp.observationWindow, `ready must keep observationWindow on ${filed.key}`);
         }
       }
       if (windowDay.followUp) {
@@ -3691,7 +3731,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: existsSync(tmpRoot) ? readdirSync(tmpRoot) : [] };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { observationWindowDay: windowDay, readingDay, blockedHoldDay: holdDay, unmatchedRefusals, capAnswers, askedAgain, readinessDay, waitsDay, outageDay, coordinateOutageDay, panes, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
+  return { observationWindowDay: windowDay, readingDay, onboardingDay, blockedHoldDay: holdDay, unmatchedRefusals, capAnswers, askedAgain, readinessDay, waitsDay, outageDay, coordinateOutageDay, panes, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, limitMenuDay, menuReset, menuNotice, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, githubStatusReads, credentialReads, blockerRecords, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
