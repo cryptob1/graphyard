@@ -106,7 +106,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // Candidate session status, conflict probe and timing failure qualification (GY-1157)
   const { probe, status: pipelined, delivery } = await buildPipelineStatus(root, master, snapshot, coordinator, runtime, credentials, containment, reviews, producers, dispatch.failures, retries, daemonState, cycling, launches, masterApi, sections);
   // A failed check a since-fixed base breakage explains names the refresh that clears it (GY-793).
-  // GY-1810: a review-gate row gives way to the stalled review-cap step wherever that step, not a review, holds the head.
+  // GY-1810: the stalled review-cap step replaces a review-gate row where that step holds the head.
   const status = nameBaseBreaks(stalledReviewCapAttention(pipelined, snapshot.work, cursor, master.reviewRoundCap, Date.parse(snapshot.now)), snapshot.work);
   // Time to merge by planned source-file band (GY-1858), over the timelines attached above.
   const itemSize = timeToMergeBySize(snapshot.work, Date.parse(snapshot.now));

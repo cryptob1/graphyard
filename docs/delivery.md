@@ -19,7 +19,7 @@ Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`
 
 ### Release filing credential
 
-UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds/follow-ups as `graphyard-release-follow-up` (only `intent:create`, work items `*`); the loop's hourly `master setup --apply` keeps it, else `master status` names the administrator's step (`graphyard operator-agent setup FILE --token-stdin`). `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` with only `e2e:record`, never admin. Uat imports first run read-only `release seal-check ID` (`GET /api/validation/import/seal-authority`, recording `rc-seal-check/ID.AT`; older planes skip): refusal fails pre-seal; `master status` (loop promotion on or off) names `GRAPHYARD_RELEASE_TOKEN` in `uat`, role, rotation.
+UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds/follow-ups as `graphyard-release-follow-up` (only `intent:create`, work items `*`); the loop's hourly `master setup --apply` keeps it, else `master status` names the administrator's step (`graphyard operator-agent setup FILE --token-stdin`). `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` with only `e2e:record`, never admin. Uat imports first run read-only `release seal-check ID` (`GET /api/validation/import/seal-authority`, recording `rc-seal-check/ID.AT`; older planes skip): refusal fails pre-seal; `master status` (promotion on/off) names `GRAPHYARD_RELEASE_TOKEN` in `uat`, role, rotation.
 
 ### Pre-merge gate and release-candidate validation
 
