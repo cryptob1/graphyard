@@ -1,4 +1,5 @@
 // Concern: the master-session step (GY-898) — launch, adopt, supervise, rotate and wake the loop's own master session.
+import { detectConsentPrompt, type ConsentAnswer } from '../consent-prompt.js';
 import { detectExhaustion, detectRetryingExhaustion } from '../model/capacity.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { launchAppearanceMs, promptDigest, record, stoppedStates, type DaemonEffects } from './effects.js';
@@ -9,11 +10,14 @@ import { emptyMasterSession, type MasterSessionState } from './state.js';
 import { sessionCapMs } from '../model/registry-sessions.js';
 import { masterHandover, masterSessionBudgetMs, masterHeartbeatIntervalMs, masterWakeText, masterProfile } from '../master/master-session.js';
 import { outputReadDue } from './cycle-sessions.js';
+import type { HerdrAgent } from '../master/herdr.js';
 import type { Cycle } from './cycle.js';
-import { carriedCall, owedWrite, stepCallCarried, withinStepBudget } from './step-budget.js';
+import { boundedCalls, carriedCall, owedWrite, stepCallBoundMs, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
 
 /** The launcher key the master launch records its started entry under: one in flight at a time. */
 export const masterLaunchKey = 'master:launch';
+/** The standing record of a master wake a dialog holds (GY-1872): refreshed while it holds, retired with the wake that ends it. */
+export const masterWakeHeldKey = 'wake:master:held';
 /** The standing wait recorded while the registry decides no master role. */
 export const masterSetupKey = 'master:setup';
 /** The standing record of registry sessions the loop still owes the registry an end for. */
@@ -178,15 +182,57 @@ async function masterSessionStepWithin(cycle: Cycle) {
     for (const key of Object.keys(live.subjects)) if (!standing.has(key)) delete live.subjects[key];
     if ((causes.length || heartbeat) && agent.agent_status !== 'working') await isolate('wake', null, 'master-session', async () => {
       const keys = causes.slice(0, 20), at = new Date(clock).toISOString();
+      // GY-1872: a settings-suggestion dialog the pane is stopped on (Claude Code's "We recommend
+      // compacting earlier") would take the wake's text into its menu, and the master stops acting
+      // until a human presses esc by hand. The wake reads the pane first and answers such a dialog
+      // with the not-now key its own footer offers, reads again to confirm it closed, and only then
+      // delivers the wake; a dialog it cannot answer holds the wake for the next cycle and is
+      // recorded, as a consent hold is.
+      const dialog = await masterWakeDialog(cycle, live.agentName!, agent);
+      if (dialog.hold) {
+        if (detailChanged(state.actions[masterWakeHeldKey], dialog.detail)) performed.push(await record(state, masterWakeHeldKey, { kind: 'wake', work: null, principal: null, state: 'waiting', detail: dialog.detail, attempts: 1, cycle: state.cycle }, now(), effects.persist, null));
+        return;
+      }
+      const held = state.actions[masterWakeHeldKey];
+      if (held?.state === 'waiting') performed.push(await record(state, masterWakeHeldKey, { kind: 'wake', work: null, principal: null, state: 'done', detail: 'The master wake went through once the dialog holding it was answered or closed', attempts: held.attempts, cycle: state.cycle }, now(), effects.persist, null));
       await effects.promptSession!(agent, masterWakeText(config.cliPath, keys, heartbeat, Math.round(quietMs / 60_000)));
       live.lastWake = { at, causes: keys, heartbeat };
       for (const subject of subjects) live.subjects[subject.key] = promptDigest(subject.detail);
       performed.push(await record(state, `wake:master:${state.cycle}`, { kind: 'wake', work: null, principal: null, state: 'done',
-        detail: heartbeat ? `Woke master session ${live.agentName}: no material event for ${Math.round(quietMs / 60_000)} minutes (the heartbeat fallback)`
-          : `Woke master session ${live.agentName} for changed subjects: ${keys.join(', ')}`,
+        detail: (heartbeat ? `Woke master session ${live.agentName}: no material event for ${Math.round(quietMs / 60_000)} minutes (the heartbeat fallback)`
+          : `Woke master session ${live.agentName} for changed subjects: ${keys.join(', ')}`)
+          + (dialog.answered ? `; answered its settings-suggestion dialog "${dialog.answered.prompt}" with "${dialog.answered.answer}" first` : ''),
         attempts: 1, cycle: state.cycle }, now(), effects.persist));
     });
   }
+}
+
+/** What the pane showed before a master wake: nothing in the way, the dialog the wake answered away, or the one holding it. */
+type MasterWakeDialog = { hold: false; answered: ConsentAnswer | null } | { hold: true; detail: string };
+
+/**
+ * GY-1872: the dialog on the master's pane before its wake, and what the wake does about it. A
+ * settings-suggestion dialog is answered with the not-now key its own footer offers — the send is
+ * bounded by the per-call bound alone, like a triage record made after its step — and the pane is
+ * read again: the wake is delivered only once no dialog shows. Any other dialog — a credential, a
+ * payment, a menu no rule answers — holds the wake, named for the record. A pane that cannot be
+ * read holds nothing: the wake goes out as it always did, into whatever the pane shows.
+ */
+async function masterWakeDialog(cycle: Cycle, name: string, agent: HerdrAgent): Promise<MasterWakeDialog> {
+  const { effects } = cycle;
+  const read = async () => effects.sessionOutput ? await carriedCall(cycle, 'master', 'session', 'sessionOutput', () => Promise.resolve(effects.sessionOutput!(agent)).catch(error => { if (stepCallCarried(error)) throw error; return null; }), () => null) : null;
+  const prompt = detectConsentPrompt(await read());
+  if (!prompt) return { hold: false, answered: null };
+  const showing = `master session ${name} is stopped on a ${prompt.kind} dialog: "${prompt.text}"`;
+  if (prompt.kind !== 'settings' || !prompt.rule || !prompt.keys || !effects.answerSession) {
+    const why = prompt.kind === 'settings' ? 'this loop cannot send it keys' : 'no rule answers it, and the wake would type into it';
+    return { hold: true, detail: `Held the master wake: ${showing} (${why})` };
+  }
+  await boundedCalls(unboundedEffects(effects), cycle.state, cycle.now, () => stepCallBoundMs, { step: 'master', calls: ['answerSession'] }).answerSession!(agent, prompt.keys);
+  const answer: ConsentAnswer = { rule: prompt.rule.id, kind: prompt.kind, prompt: prompt.text, answer: prompt.rule.answer, keys: prompt.keys, at: new Date(cycle.clock).toISOString() };
+  const still = detectConsentPrompt(await read());
+  if (still) return { hold: true, detail: `Held the master wake: ${showing}; the loop sent ${prompt.keys.join(' ')} ("${prompt.rule.answer}") but the pane still shows a dialog: "${still.text}"` };
+  return { hold: false, answered: answer };
 }
 
 /**

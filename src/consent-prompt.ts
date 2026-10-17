@@ -19,9 +19,12 @@ import { z } from 'zod';
  * grants nothing — never one that trusts hooks, trusts a folder's settings, or leaves the sandbox.
  * A prompt that asks for a credential, a login or a payment is never answered, whatever else it
  * says. Every other prompt holds the session for a human, who has `consentHoldMs` to answer it
- * before the watch supervisor releases the slot.
+ * before the watch supervisor releases the slot. A runtime's own settings-suggestion dialog —
+ * Claude Code's "We recommend compacting earlier" (GY-1872) — is answered with the not-now key its
+ * own footer offers, which leaves every setting as it is; it is never answered by choosing one of
+ * its options, any of which would change one.
  */
-export type ConsentKind = 'hooks' | 'trust' | 'folder' | 'telemetry' | 'credential' | 'payment';
+export type ConsentKind = 'hooks' | 'trust' | 'folder' | 'telemetry' | 'credential' | 'payment' | 'settings';
 export interface ConsentRule {
   id: string;
   kind: ConsentKind;
@@ -42,6 +45,22 @@ export const consentAnswers: ConsentRule[] = [
   { id: 'telemetry-decline', kind: 'telemetry', asks: /\b(?:telemetry|usage (?:data|statistics)|anonymous (?:usage|data)|crash reports?|analytics)\b/i,
     choose: /^\W*(\d)[.)]\s*(?:No\b|Don'?t\b|Do not\b|Decline\b|Opt[ -]out\b|Disable\b)/im, answer: 'Decline (nothing is sent)' },
 ];
+/**
+ * A runtime settings-suggestion dialog (GY-1872), Claude Code's "We recommend compacting earlier"
+ * among them: the screen ends on an arrow-selected menu whose footer offers esc as "not now" (or
+ * "to dismiss"). It is answered with that one key, read off the footer — never with an option of
+ * the menu, any of which would change a setting. The dialog is known by that shape, not by its
+ * question's words, so the rule's `asks` names the footer; detectConsentPrompt answers it from its
+ * settings-suggestion branch, never from the numbered rules above, which choose an option by
+ * number — and only when the footer is the screen's last line, so the same words quoted above an
+ * ordinary prompt end on that prompt, not on a menu, and are never answered.
+ */
+export const settingsSuggestionAnswer: ConsentRule = {
+  id: 'settings-not-now', kind: 'settings',
+  asks: /(?:↑|↓|arrow keys?)[^\n]*\besc\b[^a-z\n]{0,3}(?:not now|to dismiss)|\besc\b[^a-z\n]{0,3}(?:not now|to dismiss)[^\n]*(?:↑|↓|arrow keys?)/i,
+  choose: /\b(esc)\b[^a-z\n]{0,3}(?:not now|to dismiss)/i,
+  answer: 'Not now (settings unchanged)',
+};
 /** What a prompt asks, for every kind the launcher recognises, answered or not. */
 const promptKinds: [ConsentKind, RegExp][] = [
   ['payment', /\b(?:payment|credit card|billing|purchase|subscribe|subscription|upgrade to|pay\b)/i],
@@ -80,12 +99,40 @@ function trailingDialog(lines: string[]): { lines: string[]; question: string[] 
   return { lines: [...question, ...lines.slice(first, last + 1)], question };
 }
 
+/**
+ * The settings-suggestion dialog the screen ends on (GY-1872): the lines that ask its question —
+ * those within `consentQuestionLines` of the footer above it — or null. The footer must be the
+ * screen's last line, so a session that merely quotes the dialog above its ordinary prompt ends on
+ * the prompt, not on a menu, and is not a dialog waiting for a keystroke.
+ */
+function trailingSettingsSuggestion(lines: string[]): string[] | null {
+  const last = lines.length - 1;
+  if (last < 1 || !settingsSuggestionAnswer.asks.test(lines[last])) return null;
+  return lines.slice(Math.max(0, last - consentQuestionLines), last);
+}
+
+/**
+ * The settings-suggestion prompt (GY-1872) the screen ends on, or null: recognised by its footer
+ * shape alone and answered with the one key the footer names. A question that asks for a
+ * credential or a payment is never answered, whatever its footer offers.
+ */
+function settingsSuggestionPrompt(lines: string[]): ConsentPrompt | null {
+  const question = trailingSettingsSuggestion(lines);
+  if (!question) return null;
+  const footer = lines[lines.length - 1], shown = [...question, footer].join(' / ');
+  const text = shown.length > consentTextLimit ? `${shown.slice(0, consentTextLimit - 1)}…` : shown;
+  const asking = promptKinds.find(([kind, asks]) => (kind === 'credential' || kind === 'payment') && asks.test(`${question.join('\n')}\n${footer}`));
+  if (asking) return { kind: asking[0], text, rule: null, keys: null };
+  const key = settingsSuggestionAnswer.choose.exec(footer)?.[1];
+  return { kind: 'settings', text, rule: key ? settingsSuggestionAnswer : null, keys: key ? [key] : null };
+}
+
 /** The consent prompt on a pane's screen, or null when the screen is not stopped on one. */
 export function detectConsentPrompt(screen: string | null | undefined): ConsentPrompt | null {
   if (!screen) return null;
   const tail = screen.split('\n').map(line => line.replace(/\s+/g, ' ').trim()).filter(Boolean).slice(-consentScreenLines);
   const dialog = trailingDialog(tail);
-  if (!dialog) return null;
+  if (!dialog) return settingsSuggestionPrompt(tail);
   const { lines } = dialog, asked = dialog.question.join('\n'), bottom = lines.join('\n');
   // The question decides the kind; the options only ever pick the answer. A question wrapped at a
   // narrow pane can start above the lines read for it — Claude Code 2.1's folder-trust dialog asks
@@ -222,6 +269,6 @@ export function consentHoldVerdict(hold: ConsentHold | null, screen: string | nu
 
 /** An answered prompt as a session record keeps it. */
 export const consentAnswerSchema = z.object({
-  rule: z.string().min(1).max(80), kind: z.enum(['hooks', 'trust', 'folder', 'telemetry', 'credential', 'payment']),
+  rule: z.string().min(1).max(80), kind: z.enum(['hooks', 'trust', 'folder', 'telemetry', 'credential', 'payment', 'settings']),
   prompt: z.string().min(1).max(consentTextLimit + 1), answer: z.string().min(1).max(200), keys: z.array(z.string().min(1).max(20)).min(1).max(4), at: z.string().min(1).max(40),
 }).strict();
