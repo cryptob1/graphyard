@@ -265,7 +265,7 @@ export async function setupRepository(root: string, input: Connection, options: 
   // hand-typed command (GY-105). A host without a coordinator credential runs no executor.
   let executors: ExecutorSupervision | { installed: false; reason: string; next: string } | null = null;
   if (options.executors !== false && await coordinatorConfigured(connectionRoots(root)[0])) {
-    try { executors = await installExecutorSupervision(root, options.executors ?? {}); }
+    try { executors = await installExecutorSupervision(root, { ...(options.executors ?? {}), heldRoot: (await import('./daemon/checkout-state.js')).loopCodeRoot(connection.cliPath, root) }); }
     catch (error) { const reason = error instanceof Error ? error.message : String(error); executors = { installed: false, reason, next: `Executor supervision could not be installed: ${reason}. Fix it and rerun init, or node scripts/graphyard-executor.mjs --install` }; }
   }
   return { discovery, server: connection.url, cliPath: connection.cliPath, principal: connection.principal ?? null, connected: !!connection.principal,
@@ -1014,7 +1014,7 @@ export async function readHostLoopCode(run: (program: string, args: string[]) =>
  * restores) and the held pointer is removed, its snapshot left; the next promotion pins afresh.
  * Returns what was lifted, one phrase each; nothing standing lifts nothing.
  */
-export async function liftLoopPins(root: string, options: { installDir?: string | null; repository?: string | null } = {}): Promise<string[]> {
+export async function liftLoopPins(root: string, options: { installDir?: string | null; repository?: string | null; /** GY-1899: the checkout the running CLI comes from, where the held snapshot's pointer lives; default ROOT. */ heldRoot?: string } = {}): Promise<string[]> {
   const [{ knownGoodDirectory, knownGoodState }, { heldCliPointer, readHeldCli }] = await Promise.all([import('./master/known-good.js'), import('./daemon/held-cli.js')]);
   const installDir = options.installDir !== undefined ? options.installDir : await (async () => {
     if (!options.repository) return null;
@@ -1028,10 +1028,13 @@ export async function liftLoopPins(root: string, options: { installDir?: string 
     await rename(join(directory, 'state.json'), join(directory, 'lifted.json'));
     lifted.push(`the known-good pin at ${shortSha(pin.sha)} (${join(directory, 'state.json')}, kept as lifted.json)`);
   }
-  const held = readHeldCli(root);
+  // GY-1899: the held snapshot's pointer lives under the checkout the running CLI comes from
+  // (`heldRoot`), where the loop's holdCliAt wrote it — the managed root holds none of it.
+  const heldRoot = options.heldRoot ?? root;
+  const held = readHeldCli(heldRoot);
   if (held) {
-    await rm(heldCliPointer(root), { force: true });
-    lifted.push(`the held snapshot at ${shortSha(held)} (${heldCliPointer(root)})`);
+    await rm(heldCliPointer(heldRoot), { force: true });
+    lifted.push(`the held snapshot at ${shortSha(held)} (${heldCliPointer(heldRoot)})`);
   }
   return lifted;
 }
@@ -1052,7 +1055,7 @@ const knownExecutorInstances = (run: SystemctlRunner, units: InstallUnits) => {
  * uninstalled template is reported, never created: installing executors stays the operator's
  * `scripts/graphyard-executor.mjs --install`.
  */
-export async function alignExecutorUnits(root: string, options: { run?: SystemctlRunner; unitDirectory?: string; node?: string; heldScript?: string | null; /** GY-1859: restart the slots even when the template already binds this checkout — a slot booted before the checkout moved keeps the commit it loaded. */ restart?: boolean } = {}): Promise<{ wrote: 'updated' | 'unchanged' | 'none'; reason: string | null; restarted: string[] }> {
+export async function alignExecutorUnits(root: string, options: { run?: SystemctlRunner; unitDirectory?: string; node?: string; heldScript?: string | null; /** GY-1899: the checkout the running CLI comes from, where the held snapshot's pointer lives; default ROOT. */ heldRoot?: string; /** GY-1859: restart the slots even when the template already binds this checkout — a slot booted before the checkout moved keeps the commit it loaded. */ restart?: boolean } = {}): Promise<{ wrote: 'updated' | 'unchanged' | 'none'; reason: string | null; restarted: string[] }> {
   const primary = connectionRoots(root)[0];
   const unitDirectory = options.unitDirectory ?? executorUnitDirectory();
   const units = await executorInstallUnits(primary, unitDirectory);
@@ -1065,8 +1068,9 @@ export async function alignExecutorUnits(root: string, options: { run?: Systemct
   }
   // GY-1790: while the CLI pin stands a slot starts the entry held in the snapshot; the alignment
   // keeps that binding, read lazily as the installer does, so it never points a slot at a checkout
-  // entry the checkout may hold dirty.
-  const heldScript = options.heldScript !== undefined ? options.heldScript : await (await import('./daemon/held-cli.js')).heldExecutorEntryOf(primary);
+  // entry the checkout may hold dirty. GY-1899: the pin is read under the running CLI's checkout
+  // (`heldRoot`), where the loop's holdCliAt wrote it — never under the managed repository.
+  const heldScript = options.heldScript !== undefined ? options.heldScript : await (await import('./daemon/held-cli.js')).heldExecutorEntryOf(options.heldRoot ?? primary);
   let rendered: string;
   try { rendered = renderExecutorUnit(current, { root: primary, node: options.node ?? process.execPath, ...(heldScript ? { script: heldScript, checkoutRoot: primary } : {}) }); }
   catch (error) { return { wrote: 'none', reason: `${unitFile} could not be re-bound to this checkout: ${error instanceof Error ? error.message : String(error)}`, restarted: [] }; }
@@ -1169,7 +1173,7 @@ export function staleExecutorLauncherCheckout(text: string, root: string, home =
  * and unit are left alone, and `enable --now` on a running instance is a no-op. Without a user
  * manager the declaration is still written, and the result names the unit to install by hand.
  */
-export async function installExecutorSupervision(root: string, options: { count?: number; kinds?: NextActionKind[] | null; intervalSeconds?: number; run?: SystemctlRunner; unitDirectory?: string; template?: string; node?: string; loop?: { name: string } | null; heldScript?: string | null } = {}): Promise<ExecutorSupervision> {
+export async function installExecutorSupervision(root: string, options: { count?: number; kinds?: NextActionKind[] | null; intervalSeconds?: number; run?: SystemctlRunner; unitDirectory?: string; template?: string; node?: string; loop?: { name: string } | null; heldScript?: string | null; /** GY-1899: the checkout the running CLI comes from, where the held snapshot's pointer lives; default ROOT. */ heldRoot?: string } = {}): Promise<ExecutorSupervision> {
   const primary = connectionRoots(root)[0];
   const existing = await readExecutorDeclaration(primary);
   // Exactly one component merges (GY-245): where the master loop merges, the executors are
@@ -1212,7 +1216,8 @@ export async function installExecutorSupervision(root: string, options: { count?
   // caller that knows the pin hands the script in (`heldScript`); one that does not (`graphyard
   // init` re-run on a coordinator host) reads it here, lazily, so this module stays out of the
   // daemon's module graph and a re-run never points the slots back at the checkout's entry.
-  const heldScript = options.heldScript !== undefined ? options.heldScript : (await import('./daemon/held-cli.js')).heldExecutorEntryOf(primary);
+  // GY-1899: the pin is read under the running CLI's checkout (`heldRoot`), never the managed root.
+  const heldScript = options.heldScript !== undefined ? options.heldScript : (await import('./daemon/held-cli.js')).heldExecutorEntryOf(options.heldRoot ?? primary);
   const held = heldScript ? { script: heldScript, checkoutRoot: primary } : {};
   const rendered = renderExecutorUnit(template, { root: primary, node: options.node ?? process.execPath, ...held });
   if (current !== rendered) { await mkdir(dirname(unitFile), { recursive: true }); await atomicWrite(unitFile, rendered, 0o644); }

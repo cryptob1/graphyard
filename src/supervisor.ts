@@ -1126,7 +1126,13 @@ export async function installLoopSupervisor(given: LoopUnitInput, host: LoopSupe
   // restart's pin stands) reads it, so the unit keeps starting the launcher held in the snapshot —
   // never a launcher the checkout may hold dirty — until the loop's own alignment lifts the pin.
   // Read lazily: the pin module is the daemon's, loaded long before any loop exists.
-  const input = given.heldLauncher === undefined ? { ...given, heldLauncher: (await import('./daemon/held-cli.js')).heldLauncherOf(given.root) } : given;
+  // GY-1899: the pin lives under the checkout the configured launcher comes from, where the loop's
+  // holdCliAt wrote it; the unit's WorkingDirectory stays this install's (given.root).
+  let input = given;
+  if (given.heldLauncher === undefined) {
+    const [{ heldLauncherOf }, { loopCodeRoot }] = await Promise.all([import('./daemon/held-cli.js'), import('./daemon/checkout-state.js')]);
+    input = { ...given, heldLauncher: heldLauncherOf(loopCodeRoot(given.cliPath, given.root)) };
+  }
   const support = supervisorSupport(host);
   const unitDirectory = loopUnitDirectory(host);
   const home = host.home ?? ((host.env ?? process.env).HOME?.trim() || homedir());

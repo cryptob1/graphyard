@@ -57,6 +57,7 @@ import { worktreeRoot } from '../install/worktree-root.js';
 import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
 import { readingEffects } from './reading-effect.js';
 import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, recoverMovedHead, type SelfUpgradeDeps, type SelfUpgradeOutcome } from './upgrade.js';
+import { loopCodeRoot } from './checkout-state.js';
 import { alignExecutorUnitScript } from '../repository-setup.js';
 import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
@@ -446,7 +447,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     settleContainment: (work, assessment) => mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
       reason: `The master loop verified on ${assessment.host ?? current().hostId} that the supervisor of epoch ${assessment.epoch} is gone; the item is released for a fresh attempt`, verification: assessment.verification, origin: 'loop' }),
     // systemd-notify keep-alive (NOTIFY_SOCKET; NotifyAccess=all; bounded child via `run`). GY-437: upgrade between cycles — executors first, then re-exec under the cgroup unit.
-    loadedRelease: readRelease(root),
+    // GY-1899: the release the loop records is the checkout its loaded code comes from — the one
+    // the running CLI starts from, read once at process startup — never the managed repository's
+    // root, whose HEAD names the managed project. A later move of that checkout is a moved head
+    // (GY-1464), still judged between cycles; the startup reading stays what this process loaded.
+    loadedRelease: readRelease(loopCodeRoot(current().cliPath, root)),
     selfUpgrade: (state, keepAlive) => performSelfUpgrade(current(), state, upgradeDeps(keepAlive)),
     recoverHead: (state, from, to, keepAlive) => recoverMovedHead(current(), state, from, to, upgradeDeps(keepAlive)),
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },

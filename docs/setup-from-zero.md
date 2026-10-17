@@ -14,9 +14,7 @@ cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --agent --repo OWNER/R
 
 Only legacy `--merger github` needs a human (GitHub Mobile).
 
-Hetzner waits (exit 3) for price approval: `--confirm-price`, `--max-monthly` or `--ssh-key`.
-
-`up` runs, in order: preflight, control plane, host supervisor, Herdr, deploy key, merger setting (legacy: `github` only) and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` reviews and merges, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop. The loop merges onboarding's pull request (host install: a person); goals wait. Reruns skip recorded `.graphyard/up.json` steps, redoing `master-loop` until loop and executors run this CLI's clean commit (`doctor`: `loop-code`); stale host executor launchers rebind (declared slots restart); foreign refused; the loop reports and upgrades the checkout its CLI runs from, never the managed repository's checkout.
+`up` runs, in order: preflight, control plane, host supervisor, Herdr, deploy key, merger setting (legacy: `github` only) and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` reviews and merges, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop. The loop merges onboarding's pull request (host install: a person); goals wait. Reruns skip `.graphyard/up.json` steps, redoing `master-loop` until loop and executors run this CLI's clean commit (`doctor`: `loop-code`); stale host executor launchers rebind (declared slots restart); foreign refused; the loop reports and upgrades the checkout its CLI runs from, never the managed repository's checkout. Its `.graphyard/held-cli` pin and snapshots live beside that checkout's launcher; `master status` names the pin there, `up` lifts it there; the managed repository is never touched.
 
 ## The Setup page
 
@@ -57,7 +55,7 @@ Needs a GitHub `origin` and an Actions `pull_request` test workflow. **Verify:**
 
 ## 3. Install the control plane
 
-`gy install --provider compose --repo OWNER/REPO --reviewer claude --plan`, then `--apply` ([install](install.md); `gy` is `node ~/graphyard/bin/graphyard.mjs`). `--apply` records the master connection `.graphyard/master.json`, its `0600` credential under `installDirectory`; `gy doctor` reads it; `GRAPHYARD_TOKEN_FILE` overrides it. **Verify:** `control-plane` and `credentials-file` pass.
+`gy install --provider compose --repo OWNER/REPO --reviewer claude --plan`, then `--apply` ([install](install.md); `gy` is `node ~/graphyard/bin/graphyard.mjs`). `--apply` records the master connection `.graphyard/master.json`, its `0600` credential under `installDirectory`; `gy doctor` reads as it; `GRAPHYARD_TOKEN_FILE` overrides it. **Verify:** `control-plane` and `credentials-file` pass.
 
 ### Control-plane merger
 
@@ -65,15 +63,15 @@ Needs a GitHub `origin` and an Actions `pull_request` test workflow. **Verify:**
 
 ## 4. Register the GitHub App
 
-Legacy merger only. `--apply` serves `http://127.0.0.1:4311`; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`. Branch protection: `--apply` protects the base; rerun once `Graphyard / merge` requires it; **Verify:** `branch-protection`.
+Legacy merger only. `--apply` serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`. Branch protection: `--apply` protects the base; rerun once `Graphyard / merge` requires it; **Verify:** `branch-protection`.
 
 ## 6. Onboard the checkout
 
-`gy init --scan`, then `gy init --scan --apply --url SERVER`; merge `AGENTS.md .gitignore graphyard.json .github/workflows` to the base (never `.graphyard/`). `--no-github-app` onboards App-less; a rerun adding an App refuses, naming `install.json`. **Verify:** readiness `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
+`gy init --scan`, then `--apply --url SERVER`; merge `AGENTS.md .gitignore graphyard.json .github/workflows` to the base (never `.graphyard/`). `--no-github-app` onboards App-less; a rerun adding an App refuses, naming `install.json`. **Verify:** readiness `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
 
 ## 8. Agent environments
 
-Connect accounts in Settings → Agents ([dashboard](dashboard.md#settings-agents)); host-logged-in accounts register with `gy master registry propose --apply`, profiles with `gy master environments --apply`; up runs both where the loop runs (host: `install --profiles-only`), issuing the install's `workers/` credentials and naming refused ones; account lines wait for both. Unknown-reviewer-profile refusals: one `gy master status` attention, uncounted five-minute retries. **Verify:** one `agent-environment:NAME` line passes per environment; then [roles](onboarding.md#configure-the-fleet).
+Connect accounts in Settings → Agents ([dashboard](dashboard.md#settings-agents)); host-logged-in accounts register with `gy master registry propose --apply`, profiles with `gy master environments --apply`; up runs both where the loop runs (host: `install --profiles-only`), issuing the install's `workers/` credentials and naming refused ones. **Verify:** one `agent-environment:NAME` line passes per environment; then [roles](onboarding.md#configure-the-fleet).
 
 ## 9. Worker sandbox and harness rules
 

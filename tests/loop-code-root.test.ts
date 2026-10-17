@@ -2,13 +2,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { deploymentObservationSchema, emptyDaemonState } from '../src/master-daemon.js';
+import { daemonSummary, deploymentObservationSchema, emptyDaemonState, writeDaemonState } from '../src/master-daemon.js';
 import { checkoutState, loopCodeRoot } from '../src/daemon/checkout-state.js';
-import { performSelfUpgrade, recoverMovedHead, type SelfUpgradeDeps } from '../src/daemon/upgrade.js';
+import { alignRunningLoopUnit, heldCliPointer, heldCliSnapshotAt, heldExecutorEntryOf, holdCliAt, loadedHeldSnapshot, performSelfUpgrade, readHeldCli, recoverMovedHead, type SelfUpgradeDeps } from '../src/daemon/upgrade.js';
+import { daemonEffects } from '../src/daemon/effects-production.js';
+import { masterStatusReport } from '../src/cli/master-status.js';
+import { alignLoopUnit, loopUnitOf, loopUnitText } from '../src/supervisor.js';
+import { upDependencies } from '../src/up.js';
 import { judgeLoopCode } from '../src/repository-setup.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -32,7 +36,7 @@ const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root
 const run = (command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8' });
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 
-const config = (cliPath: string): MasterConfig => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath,
+const config = (cliPath: string, credentialDirectory?: string): MasterConfig => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(credentialDirectory ?? '/outside', 'coordinator.token'), cliPath,
   repository: 'owner/managed', baseBranch: 'main', githubAppId: 1234, hostId: 'host-a', masterAgentName: 'graphyard-master-managed', autoMerge: true, mergeMethod: 'merge', workers: [] });
 
 interface Calls { persists: number; self: number; executors: string[] }
@@ -57,14 +61,18 @@ async function managedRepository(): Promise<{ root: string; commit: string }> {
 /**
  * A separate Graphyard checkout with an origin of its own: `main` holds `tip` (one loaded-code
  * commit past `loaded`), and the checkout stands clean and detached at `loaded`, one move behind
- * the tip — what a loop runs between its own alignments.
+ * the tip — what a loop runs between its own alignments. `seed` and `origin` stay alive so the
+ * day's heads can advance the same history (`advance`); the managed repository can be cloned from
+ * `origin` at its own commit, sharing this history (AC-1's fork-or-second-checkout shape).
  */
-async function cliCheckout(): Promise<{ checkout: string; loaded: string; tip: string }> {
+async function cliCheckout(): Promise<{ checkout: string; loaded: string; tip: string; origin: string; seed: string; advance: (version: number) => Promise<string> }> {
   const seed = await temporaryDirectory('loop-code-root-seed'), origin = await temporaryDirectory('loop-code-root-origin');
   await mkdir(join(seed, 'src'), { recursive: true });
   git(seed, 'init', '-q', '-b', 'main');
   await writeFile(join(seed, 'src', 'loop.ts'), 'export const version = 0;\n');
-  git(seed, 'add', 'src/loop.ts');
+  // The launcher's sanity read (`readHeldCli`) takes a snapshot for the CLI's code only when it holds src/cli.ts.
+  await writeFile(join(seed, 'src', 'cli.ts'), 'export const cli = true;\n');
+  git(seed, 'add', 'src/loop.ts', 'src/cli.ts');
   git(seed, 'commit', '-q', '-m', 'base');
   const loaded = git(seed, 'rev-parse', 'HEAD');
   git(origin, 'init', '-q', '--bare');
@@ -79,7 +87,26 @@ async function cliCheckout(): Promise<{ checkout: string; loaded: string; tip: s
   git(checkout, 'remote', 'add', 'origin', origin);
   git(checkout, 'fetch', '-q', '--no-tags', 'origin', '+refs/heads/main:refs/remotes/origin/main');
   git(checkout, 'checkout', '-q', '--detach', loaded);
-  return { checkout, loaded, tip };
+  const advance = async (version: number) => {
+    await writeFile(join(seed, 'src', 'loop.ts'), `export const version = ${version};\n`);
+    git(seed, 'commit', '-q', '-am', `merged release ${version}`);
+    git(seed, 'push', '-q', 'origin', 'main');
+    return git(seed, 'rev-parse', 'HEAD');
+  };
+  return { checkout, loaded, tip, origin, seed, advance };
+}
+
+/** The managed repository sharing the CLI checkout's history: another clone of the same origin, standing at `commit` — a commit the CLI checkout's repository holds. */
+async function managedCloneOf(origin: string, commit: string): Promise<{ root: string; head: string }> {
+  const root = await temporaryDirectory('loop-code-root-managed');
+  git(root, 'init', '-q');
+  git(root, 'remote', 'add', 'origin', origin);
+  git(root, 'fetch', '-q', '--no-tags', 'origin', '+refs/heads/main:refs/remotes/origin/main');
+  git(root, 'checkout', '-q', '--detach', commit);
+  // The control-plane configuration a managed repository carries in production, untracked like the real one.
+  await mkdir(join(root, '.graphyard'), { recursive: true });
+  await writeFile(join(root, '.graphyard', 'master.json'), '{}\n');
+  return { root, head: git(root, 'rev-parse', 'HEAD') };
 }
 
 test('unit:loop-reports-cli-checkout-commit — a loop run from a separate CLI checkout reports that checkout\u2019s commit as its loaded release, never the managed repository\u2019s HEAD', async () => {
@@ -206,4 +233,185 @@ test('unit:upgrade-acts-on-cli-checkout-only — a moved HEAD on the CLI checkou
   assert.equal(git(managed.root, 'rev-parse', 'HEAD'), managed.commit);
   assert.ok(existsSync(join(managed.root, 'notes.txt')));
   assert.match(git(managed.root, 'status', '--porcelain'), /notes\.txt/);
+});
+
+
+/**
+ * The production startup reading, as run.ts layers it at process start (run.ts:275-287): the
+ * wiring's own read (`daemonEffects(...).loadedRelease`, what `readRelease` answers), then, when
+ * the loaded modules come from a held snapshot, the snapshot's commit over it. `snapshotFor` is a
+ * path inside a held snapshot standing in for the restarted process's own entry — exactly what its
+ * `import.meta.url` is.
+ */
+async function startupRelease(managedRoot: string, master: MasterConfig, snapshotFor?: string): Promise<{ commit: string | null; dirty: boolean | null } | null> {
+  const reading = (daemonEffects(managedRoot, master, { snapshot: async () => ({ work: [], now: at }), mutate: async () => ({}), run }).loadedRelease ?? null) as { commit: string | null; dirty: boolean | null } | null;
+  const snapshot = snapshotFor ? loadedHeldSnapshot(loopCodeRoot(master.cliPath, managedRoot), join(snapshotFor, 'src', 'daemon', 'upgrade.ts')) : null;
+  return snapshot ? { commit: snapshot, dirty: false } : reading;
+}
+
+/** A minimal answer to every status read the report makes against the control plane, so only the host reads are real. */
+const statusApi = async (path: string) => path === 'work-snapshot' ? { work: [], now: at } : { decisions: [] };
+
+test('unit:loop-reports-cli-checkout-commit — the production startup wiring reads the code checkout, even when the managed repository shares its history at another commit', async () => {
+  const cli = await cliCheckout();
+  // The managed repository: another clone of the same history, standing at the tip — a commit the
+  // CLI checkout's repository holds. This is the fork-or-second-checkout shape the unrelated-history
+  // test missed: reconciliation's cat-file answers for it, so the false reading used to stand.
+  const managed = await managedCloneOf(cli.origin, cli.tip);
+  git(cli.checkout, 'cat-file', '-e', managed.head);
+  const master = config(join(cli.checkout, 'bin', 'graphyard.mjs'));
+  // Through the production wiring, as run.ts records it at startup (run.ts:276-289): the checkout
+  // the CLI runs from is read, and the managed repository's HEAD is never taken for it.
+  assert.deepEqual(await startupRelease(managed.root, master), { commit: cli.loaded, dirty: false });
+  // One directory — the repository and the CLI checkout the same — reads that directory, as today.
+  const own = await managedCloneOf(cli.origin, cli.loaded);
+  assert.deepEqual(await startupRelease(own.root, config(join(own.root, 'bin', 'graphyard.mjs'))), { commit: cli.loaded, dirty: false });
+  // A loop restarted onto a held snapshot records the snapshot's commit, layered over the same
+  // wiring read: the checkout beside it has since moved on, and names nothing the loop loaded.
+  git(cli.checkout, 'checkout', '-q', '--detach', cli.tip);
+  await holdCliAt(cli.checkout, run, cli.loaded);
+  const restarted = await startupRelease(managed.root, master, heldCliSnapshotAt(cli.checkout, cli.loaded));
+  assert.deepEqual(restarted, { commit: cli.loaded, dirty: false });
+  assert.notEqual(restarted.commit, cli.tip, 'the moved checkout beside the loop is not its release');
+});
+
+/** A fake supervisor host for the loop unit, its unit directory under a temporary home (the alignment refuses the real one). */
+function unitHost(home: string) {
+  return { home, platform: 'linux' as const, temporaryDirectories: [join(home, 'elsewhere')],
+    run: (command: string, args: string[]) => (args[1] === 'is-enabled' ? 'enabled' : args[1] === 'is-active' ? 'active' : '') };
+}
+
+test('unit:upgrade-acts-on-cli-checkout-only — a dirty-checkout upgrade pins and restarts through the held snapshot under the CLI checkout: the loop unit and the executor units start the snapshot, status names the checkout left behind there, and the lift returns them', async () => {
+  const cli = await cliCheckout();
+  const tip2 = await cli.advance(2);
+  const managed = await managedCloneOf(cli.origin, cli.loaded); // shares the history, stands at its own commit
+  const credentials = await temporaryDirectory('loop-code-root-credentials');
+  const master = config(join(cli.checkout, 'bin', 'graphyard.mjs'), credentials);
+  // The loop unit as master init installed it: the checkout's launcher, no pin.
+  const home = await temporaryDirectory('loop-code-root-home');
+  const unitDirectory = join(home, '.config', 'systemd', 'user');
+  await mkdir(unitDirectory, { recursive: true });
+  const unitName = loopUnitOf(managed.root), unitPath = join(unitDirectory, unitName);
+  const unitInput = { root: managed.root, cliPath: master.cliPath, repository: master.repository, intervalSeconds: master.run.intervalSeconds };
+  await writeFile(unitPath, loopUnitText({ ...unitInput, heldLauncher: null }));
+  const host = unitHost(home);
+  // The checkout is dirtied in a tracked file: the upgrade never touches it, it snapshots instead.
+  await writeFile(join(cli.checkout, 'src', 'loop.ts'), 'export const version = 1; // work in progress\n');
+  const state = emptyDaemonState(master);
+  state.release = { commit: cli.loaded, dirty: false };
+  state.deployment = deploymentObservationSchema.parse({ source: 'endpoint', sha: tip2, at, reason: null, deployed: ['GY-1'], pending: [] });
+  const executorEntries: (string | null)[] = [];
+  let self = 0;
+  const deps: SelfUpgradeDeps = {
+    root: managed.root, run, now: () => now,
+    persist: async written => writeDaemonState(master, written),
+    alignUnit: async () => alignRunningLoopUnit(managed.root, master, unitName, input => alignLoopUnit(input, host)),
+    alignExecutorUnits: async script => { executorEntries.push(script); return { wrote: 'updated', reason: null }; },
+    restartExecutors: async to => ({ result: 'restarted' as const, reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }),
+    restartSelf: async () => { self += 1; state.release = await startupRelease(managed.root, master, heldCliSnapshotAt(cli.checkout, tip2)); },
+  };
+  const outcome = await performSelfUpgrade(master, state, deps);
+  assert.equal(outcome.outcome, 'upgraded', JSON.stringify(outcome));
+  // The pin and the snapshot live under the CLI checkout, where its launcher reads them; the
+  // managed repository holds neither, and its HEAD and tracked tree stand exactly as found.
+  const snapshot = heldCliSnapshotAt(cli.checkout, tip2);
+  assert.equal(readHeldCli(cli.checkout), tip2);
+  assert.ok(existsSync(heldCliPointer(cli.checkout)));
+  assert.ok(!existsSync(heldCliPointer(managed.root)), 'no pin lands on the managed repository');
+  assert.ok(!existsSync(join(managed.root, '.graphyard', 'held-cli')), 'no snapshots land on the managed repository');
+  assert.equal(git(managed.root, 'rev-parse', 'HEAD'), managed.head);
+  assert.equal(git(managed.root, 'status', '--porcelain', '--untracked-files=no'), '', 'the managed repository’s tracked tree is untouched');
+  assert.equal(await readFile(join(snapshot, 'src', 'loop.ts'), 'utf8'), 'export const version = 2;\n', 'the snapshot holds the merged tip’s code');
+  // GY-1790 through the real alignment: the loop unit's ExecStart starts the snapshot's launcher,
+  // and the executor units were pointed at the snapshot's entry — read from the CLI checkout.
+  assert.deepEqual(executorEntries, [join(snapshot, 'scripts', 'graphyard-executor.mjs')]);
+  assert.equal(await readFile(unitPath, 'utf8'), loopUnitText({ ...unitInput, heldLauncher: join(snapshot, 'bin', 'graphyard.mjs') }));
+  // The restarted process loaded the snapshot, so the cursor records it — never the managed
+  // repository's HEAD a startup read of the wrong root would have written.
+  assert.deepEqual(state.release, { commit: tip2, dirty: false });
+  assert.deepEqual(state.upgrade.snapshot, { at, commit: tip2, checkout: cli.loaded, dirty: ['src/loop.ts'] });
+  assert.equal(self, 1, 'one restart for one head');
+  // Status visibility (master-status.ts): the left-behind checkout is named with the pin under the
+  // CLI checkout, and the lift instruction runs there — never against the managed repository.
+  await writeDaemonState(master, state);
+  const report = await masterStatusReport(managed.root, master, statusApi, { actor: { id: 'coordinator-1' } }, { commit: tip2 }, { now: () => now });
+  const behind = report.attentionItems.filter(item => item.text.includes('/.graphyard/held-cli'));
+  assert.equal(behind.length, 1, JSON.stringify(report.attentionItems.map(item => item.text)));
+  assert.ok(behind[0]!.text.includes(`${cli.checkout}/.graphyard/held-cli`), behind[0]!.text);
+  assert.ok(behind[0]!.next.includes(`git -C ${cli.checkout} status --porcelain`), behind[0]!.next);
+  assert.ok(report.attentionItems.every(item => !item.text.includes(`${managed.root}/.graphyard/held-cli`)), 'the managed repository is never named as the pin’s home');
+
+  // The checkout moved onto the commit the loop runs from its snapshot and cleaned there: the next
+  // pass lifts the pin, returns both units to the checkout, and restarts nothing.
+  git(cli.checkout, 'checkout', '-q', '--', 'src/loop.ts');
+  git(cli.checkout, 'checkout', '-q', '--detach', tip2);
+  const lifted = await performSelfUpgrade(master, state, deps);
+  assert.equal(lifted.outcome, 'up-to-date', JSON.stringify(lifted));
+  assert.equal(readHeldCli(cli.checkout), null, 'the pin is lifted');
+  assert.ok(!existsSync(heldCliPointer(cli.checkout)));
+  assert.deepEqual(executorEntries, [join(snapshot, 'scripts', 'graphyard-executor.mjs'), null], 'the executor units go back to the checkout');
+  assert.equal(await readFile(unitPath, 'utf8'), loopUnitText({ ...unitInput, heldLauncher: null }), 'the loop unit goes back to the checkout’s launcher');
+  assert.equal(state.upgrade.snapshot, undefined);
+  assert.equal(self, 1, 'the lift restarts nothing: the code is the same');
+  assert.equal(git(managed.root, 'rev-parse', 'HEAD'), managed.head);
+});
+
+test('unit:upgrade-acts-on-cli-checkout-only — a restart held for the served release pins the served release under the CLI checkout and completes onto it when production catches up', async () => {
+  const cli = await cliCheckout();
+  const tip2 = await cli.advance(2);
+  const managed = await managedCloneOf(cli.origin, cli.loaded);
+  const master = config(join(cli.checkout, 'bin', 'graphyard.mjs'));
+  const state = emptyDaemonState(master);
+  state.release = { commit: cli.loaded, dirty: false };
+  // Production serves the release the loop already runs, which does not contain the merged tip.
+  state.deployment = deploymentObservationSchema.parse({ source: 'endpoint', sha: cli.loaded, at, reason: null, deployed: ['GY-1'], pending: [] });
+  const executorEntries: (string | null)[] = [];
+  let executors: string[] = [], self = 0;
+  const deps: SelfUpgradeDeps = {
+    root: managed.root, run, now: () => now, persist: async () => {},
+    alignUnit: async () => ({ wrote: 'updated', reason: null }),
+    alignExecutorUnits: async script => { executorEntries.push(script); return { wrote: 'updated', reason: null }; },
+    restartExecutors: async to => { executors.push(to); return { result: 'restarted' as const, reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; },
+    restartSelf: async () => { self += 1; state.release = await startupRelease(managed.root, master); },
+  };
+  const held = await performSelfUpgrade(master, state, deps);
+  assert.equal(held.outcome, 'pending', JSON.stringify(held));
+  assert.equal(state.upgrade.stalled?.cause, 'release-lagged');
+  // The pin holds the SERVED release, under the CLI checkout: the moved checkout's launcher speaks
+  // the served protocol until the plane catches up, and the managed repository holds nothing.
+  assert.equal(readHeldCli(cli.checkout), cli.loaded);
+  assert.ok(!existsSync(heldCliPointer(managed.root)));
+  assert.equal(git(cli.checkout, 'rev-parse', 'HEAD'), tip2, 'the checkout moved; only the restart is held');
+  assert.equal(git(managed.root, 'rev-parse', 'HEAD'), managed.head);
+  assert.equal(state.release.commit, cli.loaded, 'the loop still runs the served release');
+  // Production catches up: the held restart completes onto the checkout, the pin lifts, the
+  // executor units return, and the loop re-executes onto the commit it now reports.
+  state.deployment = deploymentObservationSchema.parse({ source: 'endpoint', sha: tip2, at, reason: null, deployed: ['GY-1'], pending: [] });
+  const served = await performSelfUpgrade(master, state, deps);
+  assert.equal(served.outcome, 'upgraded', JSON.stringify(served));
+  assert.equal(served.code, true);
+  assert.equal(readHeldCli(cli.checkout), null, 'the pin is lifted once the plane serves the move');
+  assert.deepEqual(executorEntries, [null], 'the executor units return to the checkout’s entry');
+  assert.deepEqual(executors, [tip2]);
+  assert.equal(self, 1);
+  assert.deepEqual(state.release, { commit: tip2, dirty: false }, 'the restarted loop reports the checkout it runs');
+  assert.equal(git(managed.root, 'rev-parse', 'HEAD'), managed.head);
+});
+
+test('unit:upgrade-acts-on-cli-checkout-only — up lifts the pin from the CLI checkout it stands under, never from the managed repository', async () => {
+  const cli = await cliCheckout();
+  const managed = await managedCloneOf(cli.origin, cli.loaded);
+  const master = config(join(cli.checkout, 'bin', 'graphyard.mjs'));
+  // The pin stands under the CLI checkout, the way the upgrade's own hold places it.
+  await holdCliAt(cli.checkout, run, cli.loaded);
+  assert.equal(readHeldCli(cli.checkout), cli.loaded);
+  assert.equal(readHeldCli(managed.root), null, 'the managed repository never holds the pin: lifting through it removes nothing');
+  const request = { repository: 'owner/managed', provider: 'compose', agent: false, reviewer: 'claude', master: 'claude', goalFile: null, browserProfile: null } as Parameters<typeof upDependencies>[2];
+  const deps = upDependencies(managed.root, join(cli.checkout, 'bin', 'graphyard.mjs'), request, () => {});
+  const lifted = await deps.liftLoopPins!(null);
+  assert.match(lifted[0] ?? '', /the held snapshot at [0-9a-f]{12}/, JSON.stringify(lifted));
+  assert.ok((lifted[0] ?? '').includes(heldCliPointer(cli.checkout)), 'the lift names the pointer it removed, under the CLI checkout');
+  assert.equal(readHeldCli(cli.checkout), null, 'up lifted the actual pin');
+  assert.ok(!existsSync(heldCliPointer(managed.root)));
+  assert.equal(git(managed.root, 'rev-parse', 'HEAD'), managed.head);
 });
