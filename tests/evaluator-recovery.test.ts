@@ -58,13 +58,15 @@ class FaultyBackend implements ArtifactBackend {
   readonly objects = new Map<string, Buffer>();
   readonly reads: string[] = [];
   failures = 0;
+  /** Locations whose every read throws, whatever `failures` holds. */
+  readonly broken = new Set<string>();
   /** Database sessions holding an open transaction, sampled at each read. */
   readonly openTransactions: number[] = [];
   async put(location: string, bytes: Buffer) { this.objects.set(location, bytes); }
   async get(location: string) {
     this.reads.push(location);
     this.openTransactions.push(Number((await store.pool.query("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND state LIKE 'idle in transaction%'")).rows[0].count));
-    if (this.failures > 0) { this.failures--; throw new Error(`host fault ${this.reads.length}`); }
+    if (this.failures > 0 || this.broken.has(location)) { this.failures = Math.max(0, this.failures - 1); throw new Error(`host fault ${this.reads.length}`); }
     return this.objects.get(location) ?? null;
   }
   async delete(location: string) { this.objects.delete(location); }
@@ -110,9 +112,10 @@ const playwrightDocument = (executed: boolean, failed = false) => ({ format: 'gr
 const upload = (command: { requestId: string; attemptId: string; epoch: number }, name: string, document: unknown) => ({ ...command, name, mediaType: 'application/json', bytes: Buffer.from(JSON.stringify(document)).toString('base64'), capturePolicy: 'approved-test-data-only' });
 
 /** Retain both artifacts for the attempt and have the collector claim the pass; `failures` faults that many backend reads of the result's own evaluation. */
-async function retain(f: Fixture, command: Awaited<ReturnType<typeof start>>, report = playwrightDocument(true), options: { failures?: number; skipped?: number; expect?: boolean } = {}) {
+async function retain(f: Fixture, command: Awaited<ReturnType<typeof start>>, report = playwrightDocument(true), options: { failures?: number; skipped?: number; expect?: boolean; tamper?: (backend: FaultyBackend) => void } = {}) {
   const inventory: any = await validation.uploadArtifact(collector, upload(command, 'inventory', playwrightDocument(false)), id());
   const executed: any = await validation.uploadArtifact(collector, upload(command, 'report', report), id());
+  options.tamper?.(f.backend);
   f.backend.failures = options.failures ?? 0;
   const result: any = await validation.result(collector, { ...command, execution: 'completed', behavior: 'passed', executed: 2, skipped: options.skipped ?? 0, inventoryComplete: true, target: { instance: `instance-${f.n}`, artifacts: [{ service: 'api', digest }], measurement: 'provider', coversEntireRun: true, attribution: 'matched' }, bundleDigest: digest, runnerImageDigest: inputs, artifacts: [{ name: 'inventory', digest: inventory.digest, url: inventory.url }, { name: 'report', digest: executed.digest, url: executed.url }], artifactState: 'verified', executionSettled: true, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, id());
   if (options.expect ?? true) assert.equal(result.passed, true, result.reasons.join('; '));
@@ -203,6 +206,25 @@ test('unit:evaluator-error-retried — an evaluator-error is retried against the
   assert.equal((await current(q.w.id)).validation?.[q.proof]?.fault, undefined);
   assert.deepEqual(refuted.evaluation?.attempts.map(x => x.outcome), ['fail'], 'a fail is judged once');
   assert.equal((await storedAttempt(qCommand.requestId)).evaluation.attempts.length, 1);
+
+  // A digest fail on an earlier artifact is a verdict the evaluator reached: a read error on a
+  // later artifact neither retries it nor replaces it with an evaluator fault.
+  const m = await fixture();
+  const mCommand = await start(m);
+  waits.length = 0;
+  const { result: mixedResult } = await retain(m, mCommand, playwrightDocument(true), { expect: false, tamper: backend => {
+    const [inventoryAt, reportAt] = [...backend.objects.keys()];
+    backend.objects.set(inventoryAt, Buffer.from('tampered inventory bytes'));
+    backend.broken.add(reportAt);
+  } });
+  assert.equal(mixedResult.passed, false); assert.equal(mixedResult.fault, undefined);
+  assert.match(mixedResult.reasons.join('\n'), /Private artifact inventory bytes fail the digest recorded at upload/);
+  const mixed = currentEvidence(await current(m.w.id), m.proof)!;
+  assert.equal(mixed.result, 'fail', 'the established digest fail is the proof’s result');
+  assert.deepEqual(mixed.evaluation?.attempts.map(x => x.outcome), ['fail'], 'the digest fail is judged once, never retried');
+  assert.equal((await current(m.w.id)).validation?.[m.proof]?.fault, undefined);
+  assert.deepEqual(waits, [], 'no retry backoff after a reached fail');
+  assert.equal(m.backend.reads.length, 1, 'nothing after the failing artifact is read');
 });
 
 test('unit:evaluation-attempts-kept — every attempt is kept with its outcome, cause and time, and exhausted retries leave the evaluator errors as a fault, never a failed proof', async () => {

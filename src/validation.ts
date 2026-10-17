@@ -629,7 +629,11 @@ export class Validation {
       const read: RetainedRead = { at: '', bytes: new Map(), error: null };
       reads.push(read);
       for (const row of ordered) {
-        try { read.bytes.set(row.id, await this.retainedBytes(row)); } catch (error) { read.error = error instanceof Error ? error.message : 'The artifact could not be read'; break; }
+        let bytes: Buffer;
+        try { bytes = await this.retainedBytes(row); } catch (error) { read.error = error instanceof Error ? error.message : 'The artifact could not be read'; break; }
+        read.bytes.set(row.id, bytes);
+        // Bytes that fail their digest are a fail the evaluator reaches on them: nothing later is read or retried.
+        if (`sha256:${createHash('sha256').update(bytes).digest('hex')}` !== row.digest) break;
       }
       read.at = (this.evaluationRecovery.now?.() ?? new Date()).toISOString();
       return read.error ? { error: read.error } : 'pass';
@@ -677,8 +681,9 @@ export class Validation {
       }
       if (!reasons.length) for (const actual of available) {
         const bytes = read.bytes.get(actual.id);
-        // The attempt's reads stopped at its error; a pinned row they never reached is that error.
-        if (!bytes) throw new Error(read.error ?? `Artifact ${actual.name} changed after its bytes were read`);
+        // The attempt's reads stopped at its error; a pinned row they never reached is that error,
+        // unless an earlier artifact already failed its digest: that fail is a verdict and stands.
+        if (!bytes) { if (reasons.length) break; throw new Error(read.error ?? `Artifact ${actual.name} changed after its bytes were read`); }
         if (`sha256:${createHash('sha256').update(bytes).digest('hex')}` !== actual.digest) reasons.push(`Private artifact ${actual.name} bytes fail the digest recorded at upload`);
       }
     } else evidenceArtifacts.push(...data.artifacts.map(artifact => safeHttpUrl(artifact.url)
