@@ -108,6 +108,10 @@ test('unit:repo-risk-policy — a declared risk.sensitive classifies exactly the
     for (const plan of ['packages/web/', 'app/models/', 'packages/api-v2/readme.md'])
       assert.equal(workerPreference({ plannedFiles: [plan] }), 'fast', `${plan} cannot`);
   });
+  // A terminal single star is one segment (thread PRRT_kwDOUZby-s6tcVmR): `config/*` holds config's own files only.
+  const shallow = resolveRepositoryPolicy({ risk: { sensitive: [{ rule: 'config', glob: 'config/*' }] } });
+  assert.deepEqual(classifyRisk([{ path: 'config/app.yml' }], shallow), { risk: 'sensitive', reasons: ['config/app.yml: config'] });
+  assert.deepEqual(classifyRisk([{ path: 'config/public/images/logo.svg' }], shallow), { risk: 'normal', reasons: [] });
   // `only` narrows an entry to the class or to the lane.
   const narrowed = resolveRepositoryPolicy({ risk: { sensitive: [{ rule: 'ci', glob: '.ci/', only: 'risk' }, { rule: 'schema', glob: 'schema/', only: 'lane' }] } });
   assert.equal(classifyRisk([{ path: '.ci/run.sh' }], narrowed).risk, 'sensitive');

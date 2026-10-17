@@ -73,9 +73,10 @@ export function resolveRepositoryPolicy(input: unknown): RepositoryPolicy {
 /** One rule compiled for a reader: its name, the entries' globs and one anchored pattern over them. */
 export interface CompiledRule { rule: string; globs: string[]; pattern: RegExp }
 const globSource = (pattern: string) => {
-  // The documentation glob syntax (documentation-glob.ts), compiled here so one RegExp serves every glob of a rule.
+  // The documentation glob syntax (documentation-glob.ts), except that a terminal `/*` stays one segment:
+  // `config/*` names config's own files, not `config/public/images/logo.svg`; `config/` or `config/**` is the tree.
   const glob = pattern.replace(/^\.\//, '');
-  const source = /\/\*{1,2}$/.test(glob) ? glob.replace(/\*+$/, '**') : glob.endsWith('/') ? `${glob}**` : glob;
+  const source = glob.endsWith('/') ? `${glob}**` : glob;
   return source.split(/(\*\*\/?|\*|\?)/).map(part => part === '**/' ? '(?:.*/)?' : part === '**' ? '.*' : part === '*' ? '[^/]*' : part === '?' ? '[^/]' : part.replace(/[.+^${}()|[\]\\]/g, '\\$&')).join('');
 };
 /** The rules a policy applies to `use`, grouped by rule name in declaration order. */
