@@ -295,6 +295,7 @@
     "tests/cli.test.ts": 64457,
     "tests/close-work.test.ts": 2835,
     "tests/closed-question-evidence.test.ts": 2373,
+    "tests/completion-clarity.test.ts": 250,
     "tests/codex-protected-paths.test.ts": 500,
     "tests/codex-review.test.ts": 531,
     "tests/confirm-access-capture.test.ts": 1000,
