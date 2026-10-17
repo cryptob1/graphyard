@@ -7,7 +7,7 @@ import { candidateTagPrefix, contractPendingCases, gitIn, readRecords, servedRev
 import { contractFile, describeStep, loadCases, loadContract, registeredRevision, scenarioDefinition, type Api, type CaseFile, type E2eStep, type ReleaseContract } from './case.js';
 import { checkoutRepositoryPolicy, repositoryPolicy, type RepositoryPolicy } from '../model/repository-policy.js';
 import { installSecretsDirectory, loadSecrets, redact, redactValues, runAgentStep, runCommandStep, runProcess, stepEnvironment, type ProcessRunner, type StepRecord } from './steps.js';
-import type { ExternalRunResult, ExternalVerdict } from '../runner-report.js';
+import type { ExternalEvidence, ExternalRunResult, ExternalVerdict } from '../runner-report.js';
 import { importedEvidenceArtifacts, type EvidenceArtifact } from '../model/evidence.js';
 
 /**
@@ -341,8 +341,11 @@ export function releaseVerdict(report: Pick<E2eReport, 'runId' | 'sha' | 'cases'
   };
 }
 
-/** One blocking case of an imported run: its verdict as given, why a blocked one could not run, and where its own record lives. */
-export interface ImportedBlockingCase { id: string; verdict: ExternalVerdict; reason?: string; evidence: EvidenceArtifact[] }
+/**
+ * One blocking case of an imported run: its verdict as given, why a blocked one could not run, and
+ * where its own record lives — its links as external artifacts, its opaque pointers (GY-1860) as given.
+ */
+export interface ImportedBlockingCase { id: string; verdict: ExternalVerdict; reason?: string; evidence: EvidenceArtifact[]; evidencePointers?: Exclude<ExternalEvidence, string>[] }
 
 /**
  * The release verdict of an imported run (GY-1842, `graphyard-external-run-v1`). The import keeps
@@ -353,16 +356,20 @@ export interface ImportedBlockingCase { id: string; verdict: ExternalVerdict; re
  * required `blocked` case blocks like a failed one: it did not run to a pass, and its missing
  * precondition is the producer's own record of why. A required `unrun` case blocks on its own
  * too: an import has no `stoppedBy` chain, so the run that stopped before reaching it would have
- * carried the required failure it stopped at, and either way the head is not releasable. A case
+ * carried the required failure it stopped at, and either way the head is not releasable. A
+ * `skipped` case (GY-1860) follows the required-case rule the runner's own inventory holds
+ * (`verifyRunnerReport` fails a required inventory that skips): required and skipped blocks,
+ * optional and skipped does not, and the verdict stays skipped on the record either way. A case
  * bound to a still-pending outcome (`pendingCases`, GY-1802) is listed apart and never blocks, as in
  * `releaseVerdict`.
  */
 export function importedRunVerdict(run: ExternalRunResult, acceptances: readonly FlakyAcceptance[] = [], pendingCases: readonly string[] = []) {
   const accepted = (id: string) => !!run.sha && acceptances.some(entry => entry.case === id && entry.runId === run.runId && entry.sha === run.sha);
-  const wouldBlock = (outcome: ExternalRunResult['cases'][number]) => outcome.required && (outcome.verdict === 'failed' || outcome.verdict === 'blocked' || outcome.verdict === 'unrun'
+  const wouldBlock = (outcome: ExternalRunResult['cases'][number]) => outcome.required && (outcome.verdict === 'failed' || outcome.verdict === 'blocked' || outcome.verdict === 'unrun' || outcome.verdict === 'skipped'
     || (outcome.verdict === 'flaky' && !accepted(outcome.id)));
   const listed = (outcome: ExternalRunResult['cases'][number]): ImportedBlockingCase => ({ id: outcome.id, verdict: outcome.verdict,
-    ...(outcome.reason ? { reason: outcome.reason } : {}), evidence: importedEvidenceArtifacts(outcome.evidence) });
+    ...(outcome.reason ? { reason: outcome.reason } : {}), evidence: importedEvidenceArtifacts(outcome.evidence.filter(entry => typeof entry === 'string')),
+    ...(outcome.evidence.some(entry => typeof entry !== 'string') ? { evidencePointers: outcome.evidence.filter(entry => typeof entry !== 'string') } : {}) });
   const blocking = run.cases.filter(outcome => wouldBlock(outcome) && !pendingCases.includes(outcome.id));
   return { passed: blocking.length === 0, blocking: blocking.map(listed), pending: run.cases.filter(outcome => wouldBlock(outcome) && pendingCases.includes(outcome.id)).map(listed) };
 }
