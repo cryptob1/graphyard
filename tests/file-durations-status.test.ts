@@ -36,6 +36,18 @@ function runWithReporter(root: string, fixtures: readonly string[], reporterModu
   });
 }
 
+/** Runs a shard the way CI's shard jobs do, through tests/helpers/ordered-tests.mjs with `--durations`; resolves with the run's stderr. */
+function runShardRecording(root: string, fixtures: readonly string[], destination: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const { NODE_TEST_CONTEXT: _outer, ...inherited } = process.env;
+    const child = spawn(process.execPath, [fileURLToPath(new URL('./helpers/ordered-tests.mjs', import.meta.url)), '--durations', destination, ...fixtures.map(file => join(root, file))], { cwd: root, env: inherited, stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr?.on('data', chunk => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', () => resolve(stderr));
+  });
+}
+
 /** Runs the reporter over the fixtures and parses its output; a run that wrote no output fails with the run's stderr. */
 async function recorded(root: string, fixtures: readonly string[], reporterModule: string, destination: string, environment?: NodeJS.ProcessEnv): Promise<Map<string, Record>> {
   const stderr = await runWithReporter(root, fixtures, reporterModule, destination, environment);
@@ -91,4 +103,14 @@ export default async function* flipFileLevelCompletion(source) {
   assert.deepEqual(flippedFiles, ['mixed.test.mjs'], 'the flip reporter really rewrote the completion');
   assert.ok(flippedMixed, 'the flipped run recorded the mixed fixture');
   assert.equal(flippedMixed!.passed, false, 'a file whose nested test failed is recorded passed:false even when its completion event claims passed:true');
+
+  // The shard path CI's durations-4.jsonl came from: tests/helpers/ordered-tests.mjs composes the
+  // same reporter over the programmatic run() event stream, whose test:fail events carry the file
+  // like the CLI reporter's do. The same fixture through that path must still record passed:false.
+  const shardDestination = join(root, 'shard-durations.jsonl');
+  await runShardRecording(root, ['mixed.test.mjs', 'allpass.test.mjs'], shardDestination);
+  const shardRecords = new Map((await readFile(shardDestination, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line) as Record).map(record => [record.file, record]));
+  assert.deepEqual([...shardRecords.keys()].sort(), ['allpass.test.mjs', 'mixed.test.mjs'], 'the shard path records every file that ran');
+  assert.equal(shardRecords.get('mixed.test.mjs')!.passed, false, 'the shard path records a file with a failing test passed:false');
+  assert.equal(shardRecords.get('allpass.test.mjs')!.passed, true, 'the shard path records an all-passing file passed:true');
 });
