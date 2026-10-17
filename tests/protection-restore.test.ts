@@ -2,13 +2,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { readFile, stat, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { applyInstall, buildPlan, installRequestFromArgs, prepareInstall } from '../src/install/index.js';
 import { installDirectory } from '../src/install/secrets.js';
-import { protectionRecordFile, restorePayload } from '../src/install/github.js';
 import { mergeQueueRulesetName } from '../src/protection.js';
 import { allText, appKey, githubResponses, harness, satisfiedProtection, REPOSITORY, WEBHOOK_SECRET, type Harness } from './install-harness.js';
 
 const PROTECTION = `repos/${REPOSITORY}/branches/main/protection`;
+/** Where install keeps the record: the install directory, beside the installation's credentials. */
+const recordFile = (configHome: string) => join(installDirectory('owner-project', configHome), 'protection-record.json');
 
 /**
  * GitHub as the restore sees it: protection that a PUT replaces (answered back in GET form) and a
@@ -59,7 +61,7 @@ function fakeGitHub(initial: { protection?: any; allowAutoMerge?: boolean } = {}
 
 async function install(github: ReturnType<typeof fakeGitHub>, reuse?: Harness) {
   const fixture = await harness({ provider: 'railway', extraResponses: github.responses, ...(reuse ? { root: reuse.root, configHome: reuse.configHome } : {}) });
-  github.github.recordFile = protectionRecordFile(installDirectory('owner-project', fixture.configHome));
+  github.github.recordFile = recordFile(fixture.configHome);
   const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, fixture.deps);
   await applyInstall(session, await buildPlan(session));
   return fixture;
@@ -113,10 +115,12 @@ test('unit:protection-prior-state-recorded-before-first-apply — the first gith
 });
 
 test('unit:protection-restore-matches-recorded-state — the restore plan lists its writes and writes nothing, the apply writes exactly the recorded payload (or deletes protection for none) and its re-read matches, and no record refuses naming it', async () => {
+  // Loaded when the test runs, so a checkout without the restore fails here as a test case.
+  const { restorePayload } = await import('../src/install/github.js') as any;
   // No record: plan and apply both refuse, naming the file they looked for, having written nothing.
   const empty = await harness({ provider: 'railway' });
   try {
-    const file = protectionRecordFile(installDirectory('owner-project', empty.configHome));
+    const file = recordFile(empty.configHome);
     for (const mode of ['plan', 'apply'] as const) await assert.rejects(restore(empty, mode), (error: Error) => error.message.includes(file) && /No protection record exists/.test(error.message));
     assert.equal(empty.transport.commands.length, 0);
     assert.throws(() => installRequestFromArgs(['--repo', REPOSITORY, '--restore-protection', '--provider', 'railway']), /cannot be combined with --provider/);
