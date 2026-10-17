@@ -95,14 +95,14 @@ export function ghImportSource(gh: GhApi): ImportSource {
       // answers it on the single-pull read, and may still be computing it there. One read each,
       // before any disposition is proposed; a read that fails, or a value still unset, stays null
       // (unknown), and the model never proposes adoption without a definite no-conflict.
-      return Promise.all(raw.map(async pull => {
+      return pooled(raw, async pull => {
         const detail = await optional(`repos/${repository}/pulls/${pull.number}`);
         return {
           number: pull.number, base: pull.base?.ref, headBranch: pull.head?.ref, headSha: pull.head?.sha,
           draft: pull.draft === true, url: pull.html_url,
           mergeable: typeof detail?.mergeable === 'boolean' ? detail.mergeable : typeof pull.mergeable === 'boolean' ? pull.mergeable : null,
         };
-      }));
+      });
     },
     async compareBaseHead(repository, base, head) {
       const answer = await optional(`repos/${repository}/compare/${encodeURIComponent(base)}...${head}`);
@@ -114,11 +114,11 @@ export function ghImportSource(gh: GhApi): ImportSource {
       for (let page = 1; ; page++) {
         const answer = await optional(`repos/${repository}/actions/workflows?per_page=100&page=${page}`);
         const batch = answer?.workflows;
-        if (!Array.isArray(batch)) return listedWorkflows.length ? await Promise.all(listedWorkflows.map(toWorkflow.bind(null, repository, decode))) : null;
+        if (!Array.isArray(batch)) return listedWorkflows.length ? await pooled(listedWorkflows, toWorkflow.bind(null, repository, decode)) : null;
         listedWorkflows.push(...batch);
         if (batch.length < 100 || page >= 1_000) break;
       }
-      return Promise.all(listedWorkflows.map(toWorkflow.bind(null, repository, decode)));
+      return pooled(listedWorkflows, toWorkflow.bind(null, repository, decode));
     },
     async requiredChecks(repository, branch) {
       const answer = await optional(`repos/${repository}/branches/${encodeURIComponent(branch)}/protection/required_status_checks`);
@@ -135,12 +135,23 @@ export function ghImportSource(gh: GhApi): ImportSource {
         runs.push(...answer.check_runs);
         if (answer.check_runs.length < 100 || page >= 1_000) break;
       }
+      // A failed combined-status read leaves the head checks unknown rather than silently statusless.
       const statuses = await optional(`repos/${repository}/commits/${sha}/status`);
-      for (const status of Array.isArray(statuses?.statuses) ? statuses.statuses : []) runs.push(status);
+      if (!Array.isArray(statuses?.statuses)) return null;
+      runs.push(...statuses.statuses);
       return dedupeChecks(runs);
     },
   };
 }
+/** Maps every entry in order with at most eight reads in flight, so a large repository never starts one gh process per pull request at once. */
+const pooled = async <T, R>(entries: readonly T[], map: (entry: T) => Promise<R>): Promise<R[]> => {
+  const results: R[] = new Array(entries.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(8, entries.length) }, async () => {
+    while (next < entries.length) { const at = next++; results[at] = await map(entries[at]); }
+  }));
+  return results;
+};
 /** One listed workflow, with the triggers its file's `on:` block names, or unknown when the file cannot be read. */
 const toWorkflow = async (repository: string, decode: (path: string) => Promise<string | null>, workflow: any) => ({
   name: String(workflow?.name ?? ''), path: String(workflow?.path ?? ''),

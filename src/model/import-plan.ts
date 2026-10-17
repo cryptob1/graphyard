@@ -200,7 +200,12 @@ export async function buildImportPlan(repository: string, source: ImportSource, 
       source.headChecks(repository, pull.headSha),
     ]);
     const names = required.get(pull.base) ?? null;
-    const failing = (names ?? []).filter(name => checkFailed(checks?.find(check => check.name === name)?.result));
+    // A required check with no reported result — not yet run, or a head-check read that failed — is
+    // not clean either, so it withholds adoption exactly as a failed one does.
+    const failing = (names ?? []).filter(name => {
+      const result = checks?.find(check => check.name === name)?.result;
+      return result === undefined || checkFailed(result);
+    });
     const contained = patchContained(compare);
     const facts = [
       factOf('mergeability', pull.mergeable === null ? 'unknown' : 'detected',

@@ -143,7 +143,7 @@ test('unit:onboard-inventory-read-only — each fact is marked detected or unkno
 test('unit:onboard-inventory-read-only — a non-draft pull request is adopted only on a definite no-conflict: mergeability unknown or conflicting continues', async () => {
   const { buildImportPlan } = await planModule();
   const pull = { number: 9, base: 'main', headBranch: 'feature/nine', headSha: sha(9), draft: false, url: url(9) };
-  const withMergeable = (mergeable: boolean | null) => ({ ...world(), pulls: [{ ...pull, mergeable }], compares: {}, checks: {} });
+  const withMergeable = (mergeable: boolean | null) => ({ ...world(), pulls: [{ ...pull, mergeable }], compares: {}, checks: { [sha(9)]: [{ name: 'ci', result: 'success' }, { name: 'typecheck', result: 'success' }] } });
   const unknown = await buildImportPlan(REPO, new FakeListing(withMergeable(null)), null);
   assert.equal(unknown.pulls[0].disposition, 'continue', 'mergeability GitHub has not computed is no evidence of a clean merge');
   assert.equal(unknown.pulls[0].facts.find(fact => fact.fact === 'mergeability')!.state, 'unknown');
@@ -152,6 +152,14 @@ test('unit:onboard-inventory-read-only — a non-draft pull request is adopted o
   assert.match(conflicting.pulls[0].facts.find(fact => fact.fact === 'mergeability')!.detail, /conflict/);
   // A definite no-conflict is still the only mergeability that adopts.
   assert.equal((await buildImportPlan(REPO, new FakeListing(withMergeable(true)), null)).pulls[0].disposition, 'adopt');
+});
+
+test('unit:onboard-inventory-read-only — a required check with no reported result, or head checks that could not be read, withholds adoption', async () => {
+  const { buildImportPlan } = await planModule();
+  const pull = { number: 9, base: 'main', headBranch: 'feature/nine', headSha: sha(9), draft: false, url: url(9), mergeable: true };
+  const withChecks = (checks: any[] | null) => ({ ...world(), pulls: [pull], compares: {}, checks: { [sha(9)]: checks } });
+  assert.equal((await buildImportPlan(REPO, new FakeListing(withChecks([{ name: 'ci', result: 'success' }])), null)).pulls[0].disposition, 'continue', 'typecheck has not reported');
+  assert.equal((await buildImportPlan(REPO, new FakeListing(withChecks(null)), null)).pulls[0].disposition, 'continue', 'unknown head checks are not clean');
 });
 
 test('unit:onboard-inventory-read-only — release and deploy workflows are named with their triggers, and unreadable triggers are unknown', async () => {
@@ -252,7 +260,7 @@ test('unit:onboard-inventory-read-only — through the gh client the command onl
     else if (/^repos\/owner\/repo\/compare\/main\.\.\./.test(path)) body = [sha(3), sha(6)].some(end => path.endsWith(end)) ? restBehind : restDiverged;
     else if (/^repos\/owner\/repo\/branches\/main\/protection/.test(path)) body = { contexts: [], checks: [{ context: 'ci', app_id: 1 }, { context: 'typecheck', app_id: 1 }] };
     else if (/^repos\/owner\/repo\/branches\/[^/]+\/protection/.test(path)) return fail('protection unreadable');
-    else if (/^repos\/owner\/repo\/commits\/[a-f0-9]+\/check-runs\?/.test(path)) body = { check_runs: [{ name: 'ci', conclusion: path.includes(sha(4)) ? 'failure' : 'success', status: 'completed' }] };
+    else if (/^repos\/owner\/repo\/commits\/[a-f0-9]+\/check-runs\?/.test(path)) body = { check_runs: [{ name: 'ci', conclusion: path.includes(sha(4)) ? 'failure' : 'success', status: 'completed' }, { name: 'typecheck', conclusion: 'success', status: 'completed' }] };
     else if (/^repos\/owner\/repo\/commits\/[^/]+\/status/.test(path)) body = { statuses: [] };
     else if (/^repos\/owner\/repo\/actions\/workflows\?/.test(path)) body = { workflows: [{ name: 'release', path: '.github/workflows/release.yml' }], total_count: 1 };
     else if (/^repos\/owner\/repo\/contents\//.test(path)) body = { encoding: 'base64', content: Buffer.from(releaseYaml).toString('base64') };
