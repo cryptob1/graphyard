@@ -35,6 +35,7 @@ import { hotspots } from './hotspots.js';
 import { stallAttention } from './stall-attention.js';
 import { coordinationStep } from './coordination-snapshot.js';
 import { buildPipelineStatus, reconcileLedgers } from './master-status-pipeline.js';
+import { stallStatusAttention } from '../daemon/step-stalls.js';
 import { assembleReportedAttention, assembleStatusSections } from './master-status-sections.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
@@ -82,12 +83,11 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const launches = await timedStep('worker launches', () => workerLaunchStatus(root, master)); // GY-417
   dispatchItems.push(...launches.items);
   const containment = await timedStep('containment', () => assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset }));
-  // Disk is read from the host: the volume filling stops the loop. The plan is `master reclaim`'s,
-  // over the cached inventory (GY-360).
+  // Disk: the volume filling stops the loop; the plan is `master reclaim`'s over the cached inventory (GY-360).
   const worktrees = worktreesDirectory(root);
   const inventory = await timedStep('worktrees', () => statusWorktreeInventory(root).catch(() => ({ entries: [], at: null, cached: false }))), trees = inventory.entries, reclaimPlan = planWorktreeReclaim(trees, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
   const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
-  // The loop's latest pass and the standing disk line decide whether a low reading is answered and where it recovers (GY-1784).
+  // The loop's latest pass and the standing disk line decide how a low reading is answered (GY-1784).
   const cursor = 'error' in daemonState ? null : daemonState;
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan, { reclaimable: 'unreadable' in inventory && inventory.unreadable ? null : reclaimableNow(reclaimPlan, trees, snapshot.work, { idleMs: reclaimIdleMs(master), now: Date.now(), held: 'held' in inventory ? inventory.held : undefined }), pass: worktreePassOf(cursor?.reclaim), standing: standingDiskLine(cursor?.faults.open, 'disk-pressure'), now: Date.now() });
   // The managed root, often its own volume, has its own minimum and budget.
@@ -97,7 +97,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const cycling = 'error' in daemonState ? null : daemonSummary(daemonState, Date.now(), intervalMs, master.hostId);
   const daemon = cycling ?? { running: false, error: (daemonState as { error: string }).error };
   const diskAttention = [...diskPressureAttention(disk), ...managedRoot.attention, ...loopMemoryAttention(cycling)];
-  // The loop's own health comes first: a stalled coordinator is why nothing else moves.
+  // Loop health first, standing stalls beside it (GY-1855): a stalled coordinator is why nothing else moves.
+  const stallItems = stallStatusAttention(cursor, master.cliPath);
   const loopItems: AttentionItem[] = cycling
     ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, failures: cycling.failures, cost: cycling.cost }), ...slowCycleAttention(cycling), ...approverLaunchAttention(cycling), ...baseFailureAttention(cycling.baseFailures, master.baseBranch)]
     : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
@@ -105,24 +106,17 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
   // Candidate session status, conflict probe and timing failure qualification (GY-1157)
   const { probe, status: pipelined, delivery } = await buildPipelineStatus(root, master, snapshot, coordinator, runtime, credentials, containment, reviews, producers, dispatch.failures, retries, daemonState, cycling, launches, masterApi, sections);
-  // A failed check a since-fixed base breakage explains names the refresh that clears it (GY-793).
-  // GY-1810: the stalled review-cap step replaces a review-gate row where that step holds the head.
+  // Failed check a fixed base explains (GY-793); stalled review-cap replaces a relaunching review-gate row (GY-1810).
   const status = nameBaseBreaks(stalledReviewCapAttention(pipelined, snapshot.work, cursor, master.reviewRoundCap, Date.parse(snapshot.now)), snapshot.work);
-  // Time to merge by planned source-file band (GY-1858), over the timelines attached above.
-  const itemSize = timeToMergeBySize(snapshot.work, Date.parse(snapshot.now));
-  // A waiting sudo prompt is the operator confirming their own GitHub credential on their device.
-  const sudo = administration.sudo;
-  // A request whose session settled without satisfying its gate: nothing runs for it, nothing
-  // refused, and nothing relaunches until it is named here with the command that answers it.
-  // A review every session settled on a dismissal for is the stronger statement of the same
-  // request (GY-100), reported once as the review that cannot be obtained on that commit.
+  const itemSize = timeToMergeBySize(snapshot.work, Date.parse(snapshot.now)); // GY-1858
+  const sudo = administration.sudo; // operator confirming their GitHub credential on device
+  // Unsatisfied settled request, or a review every session dismissed (GY-100), with the command that answers it.
   const unobtainable = unobtainableReviewAttention(status.work, reviews.completed as SettledReviewSession[]);
   const unanswered = unansweredRequestAttention(status.work);
-  // An open item the control plane names no action for. Waiting on another item or a live
-  // session raises nothing; what is left is named, with what is missing.
+  // Open item with no named action: waiting on another item or a live session raises nothing.
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
   const liveness = livenessStatus(snapshot); // GY-201: open items holding no obligation, with ages
-  // Requests, conflicts, stalls, executors, owed judgments: derivedAttention, which the loop reads too.
+  // Requests, conflicts, stalls, executors, owed judgments: derivedAttention (the loop reads it too).
   const { generatedFiles, docs, overflow, interventions, releases, decisions, throughput, resources, derived: { scopeRequests, stalledItems: derivedStalls, actorless, executors, conflicted, stalled, owed, budget, overlong, triage, backlog } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
     { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees,
       // The slow intervention report: the loop's copy, or a bounded live read.
@@ -139,8 +133,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const { changes: caseChanges, items: caseChangeItems } = await pendingCaseChanges(sections, masterApi);
   const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...conflicted, ...stuck.attentionItems, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...triage, ...owed.items, ...caseChangeItems, ...status.attentionItems, ...(sudo ? [{ subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [])];
-  // First: loop health, dispatcher, unclaimable actions, merger, release lag (GY-437); nothing below moves until they do.
-  const ahead = [...loopItems, ...dispatchItems, ...executors.attention, ...merger.attention, ...lag.attention];
+  // First: loop health and stalls, dispatcher, unclaimable actions, merger, release lag (GY-437).
+  const ahead = [...loopItems, ...stallItems, ...dispatchItems, ...executors.attention, ...merger.attention, ...lag.attention];
   attentionItems.unshift(...ahead);
   // Setup that stops every launch, or leaves the loop unsupervised, is the master's to repair.
   attentionItems.push(...setupItems);

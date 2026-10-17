@@ -108,6 +108,9 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   ['docs/delivery.md', /`deploy\/helm\/exercise\.sh` forwards a kubectl-chosen free port, re-forwarding a lost or foreign one within `FORWARD_BUDGET` seconds; waits for the rollout's new Ready pod, retrying transient API failures \(empty reply, reset, stall, non-2xx, bodiless 2xx\), else ending `api METHOD \/api\/PATH failed after 15 attempts: status STATUS, body: BODY`/],
   // GY-1844: the release-candidate section states digest promotion: a candidate's recorded build promotes by its exact digests, never a rebuild.
   ['docs/delivery.md', /A recorded build promotes by digest, never rebuilt, once UAT names it/],
+  // GY-1855 AC-2: stall signatures, the 3-cycle rule, bound remedies, wake and backoff, upstream filing and the status listing.
+  ['docs/master-agent-reference.md', /A loop step or dispatcher call failing with one normalised signature on three consecutive cycles is one stall \(`daemon\.stepStalls`\)/],
+  ['docs/master-agent-reference.md', /Past six uncleared cycles the loop files exactly one upstream item per signature, into the install `\.graphyard\/master\.json` names as `upstream` or into itself, deduplicated by signature; `master status` lists each stall with signature, count, remedy and owner/],
 ];
 
 test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and every docs page) keep every page within its per-page budget and 200 words under it, counted as wc -w counts them; a total within 3% of the budget fails a change that adds to it and warns otherwise', () => {

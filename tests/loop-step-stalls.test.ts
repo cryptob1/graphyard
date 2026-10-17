@@ -763,3 +763,66 @@ test('unit:stall-kept-while-admitted-attempt-runs — a launch admitted by a sta
   assert.equal(note.run.count, 4);
   assert.deepEqual(await S.remedyStalledSteps(loop, async () => { throw new Error('applied twice'); }, clock), []);
 });
+
+// GY-1855 AC-2: past the clearing bound the loop files exactly one upstream item per signature; master status lists each stall.
+test('unit:loop-step-stall-upstream — a stall past six consecutive failing cycles files exactly one upstream item per signature; a later cycle and a retry after a lost reply file nothing new; master status lists signature, count, remedy and owner', async () => {
+  const { S } = await load();
+  const loop = state();
+  loop.cycle = 1;
+  const failing = { kind: 'refresh', state: 'failed' as const, detail: 'the control plane timed out after 5000ms reading /api/status' };
+  // Three cycles record the stall; cycles 4–6 push it past the upstream bound without a clearing remedy.
+  for (const cycle of [1, 2, 3, 4, 5, 6]) {
+    loop.cycle = cycle;
+    S.noteCycleStalls(loop, [failing], cycle, tick(S.stallBackoffMs + 1));
+  }
+  const [stall] = Object.values(loop.stepStalls);
+  assert.equal(stall.count, S.stallUpstreamCycles);
+  assert.equal(S.stallFilesUpstream(stall), true);
+  assert.equal(S.stallUpstreamCycles, 2 * S.stallCycleBound);
+
+  const asks: { input: unknown; key: string }[] = [];
+  const persist = async () => {};
+  const filer = async (input: unknown, key: string) => {
+    asks.push({ input, key });
+    return { key: 'GY-STALL-1' } as never;
+  };
+  const filed = await S.fileStalledStepsUpstream(loop, filer, () => clock, persist);
+  assert.ok(filed);
+  assert.equal(filed.state, 'done');
+  assert.equal(asks.length, 1);
+  assert.equal(asks[0].key, S.stallUpstreamIdempotencyKey(stall.signature));
+  assert.equal(asks[0].key, `loop-step-stall:${S.stallSubjectKey(stall.signature).slice('stall:'.length)}`);
+  // The body is a pure function of the signature: a re-ask under the same key would return the same item.
+  assert.deepEqual(asks[0].input, S.stallUpstreamItem(stall.signature));
+  assert.match((asks[0].input as { title: string }).title, /refresh call fails/);
+
+  // A later cycle past the bound files nothing more: the cursor's done row is the local dedup.
+  loop.cycle = 7;
+  S.noteCycleStalls(loop, [failing], 7, tick(S.stallBackoffMs + 1));
+  assert.equal(await S.fileStalledStepsUpstream(loop, filer, () => clock, persist), null);
+  assert.equal(asks.length, 1, 'exactly one item per signature');
+
+  // master status lists the stall with signature, count, remedy and owner, and names the filed item.
+  const standing = Object.values(loop.stepStalls)[0];
+  const attention = S.stallStatusAttention(loop, '/outside/graphyard.mjs');
+  assert.equal(attention.length, 1);
+  assert.equal(attention[0].subject, S.stallSubjectKey(standing.signature));
+  assert.match(attention[0].text, new RegExp(`failed ${standing.count} cycle`));
+  assert.match(attention[0].text, new RegExp(standing.signature.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(attention[0].text, /no remedy binds to it/);
+  assert.match(attention[0].text, /Its upstream item is GY-STALL-1/);
+  assert.equal(attention[0].role, 'master');
+  assert.equal(attention[0].human, false);
+  assert.match(attention[0].next, /master status/);
+
+  // A stall under the bound is listed but files nothing yet.
+  const early = state();
+  for (const cycle of [1, 2, 3]) S.noteCycleStalls(early, [failing], cycle, tick(1));
+  assert.equal(S.stallFilesUpstream(Object.values(early.stepStalls)[0]), false);
+  assert.equal(await S.fileStalledStepsUpstream(early, filer, () => clock, persist), null);
+  assert.equal(asks.length, 1);
+  const earlyList = S.stallStatusAttention(early, 'graphyard.mjs');
+  assert.equal(earlyList.length, 1);
+  assert.match(earlyList[0].text, /failed 3 cycle/);
+  assert.doesNotMatch(earlyList[0].text, /upstream item/);
+});

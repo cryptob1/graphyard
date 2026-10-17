@@ -30,7 +30,7 @@ import { shadowGateSummary } from './cycle-shadow.js';
 import { adoptLoopRelease, fileSlowLoopItem } from './slow-loop-item.js';
 import { mergeWriterSummary } from './cycle-merge-writer.js';
 import { wakeMasterForStalls } from './cycle-master.js';
-import { admitStalledCycle, noteCycleStalls, noteStepFailure, noteStepsSucceeded, readReviewerProfileFailures, remedyStalledSteps, stallHeldEffects, stallNeedsMaster, stallRemedyRunner, stallSubjectKey, type ProfileRemedyPorts, type StepStallRemedyRunner } from './step-stalls.js';
+import { admitStalledCycle, fileStalledStepsUpstream, noteCycleStalls, noteStepFailure, noteStepsSucceeded, readReviewerProfileFailures, remedyStalledSteps, stallHeldEffects, stallNeedsMaster, stallRemedyRunner, stallSubjectKey, stallUpstreamFiler, type ProfileRemedyPorts, type StepStallRemedyRunner } from './step-stalls.js';
 import { detachRuns } from '../runner/registry.js';
 import type { LoopWake } from './loop-wake.js';
 
@@ -408,7 +408,10 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           const applied = await remedyStalledSteps(state, stallRunner, now(), effects.persist);
           for (const { signature, record } of applied)
             log(`[graphyard-master] the ${record.kind} stall remedy ${record.outcome}${record.verified ? ', verified' : ', unverified'}: ${record.detail} (${signature.slice(0, 160)})`);
-          if (stalls.notes.length || stalls.cleared || applied.length) await effects.persist(state);
+          // GY-1855: a stall past its clearing bound files exactly one upstream item per signature.
+          const upstream = await fileStalledStepsUpstream(state, stallUpstreamFiler(config, options.repository ?? coordinatorCheckoutRoot(config.cliPath)), now, effects.persist);
+          if (upstream) log(`[graphyard-master] cycle ${result.metrics.cycle} ${upstream.kind} ${upstream.state}: ${upstream.detail}`);
+          if (stalls.notes.length || stalls.cleared || applied.length || upstream) await effects.persist(state);
           for (const action of result.actions) log(`[graphyard-master] cycle ${result.metrics.cycle} ${action.kind} ${action.state}: ${action.detail}`);
           // Both halves of every cycle: what it could act on, and what it did about it — and where its
           // time went: its three slowest steps and its slowest external call (GY-377).
@@ -443,7 +446,9 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           const stallApplied = await remedyStalledSteps(state, stallRunner, now(), effects.persist);
           for (const { record } of stallApplied)
             log(`[graphyard-master] the ${record.kind} stall remedy ${record.outcome}${record.verified ? ', verified' : ', unverified'}: ${record.detail}`);
-          if (stall.counted || owedCounted || cleared || stallApplied.length) await effects.persist(state);
+          const upstream = await fileStalledStepsUpstream(state, stallUpstreamFiler(config, options.repository ?? coordinatorCheckoutRoot(config.cliPath)), now, effects.persist);
+          if (upstream) log(`[graphyard-master] cycle ${failure.cycle} ${upstream.kind} ${upstream.state}: ${upstream.detail}`);
+          if (stall.counted || owedCounted || cleared || stallApplied.length || upstream) await effects.persist(state);
           // A stall that needs the master is woken from here: this cycle failed before its
           // master-session step, and every cycle the same read fails would too (cycle-master.ts).
           const woken = await wakeMasterForStalls(config, state, effects, now).catch(error => { log(`[graphyard-master] the stall wake was not delivered beside cycle ${failure.cycle}: ${message(error)}`); return [] as string[]; });

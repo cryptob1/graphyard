@@ -1,15 +1,24 @@
-// Concern: loop-step stall signatures (GY-1854) — the normalised signature of a failing call, the three-consecutive-cycle stall rule, the bound remedy applied once per run and verified, and the unbound stall's master wake and five-minute backoff.
+// Concern: loop-step stall signatures (GY-1854) and upstream filing of uncleared stalls (GY-1855) — normalised signature, three-cycle stall, bound remedy, master wake, five-minute backoff, and one upstream item per signature past the clearing bound.
 import { createHash } from 'node:crypto';
 import { chmod, readdir, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
+import { z } from 'zod';
 import { runChild } from '../child-runner.js';
 import type { ActionableSubject } from './metrics.js';
-import type { DaemonAction, DaemonState, StepStall, StepStallRemedyRecord } from './state.js';
+import { message, type DaemonAction, type DaemonState, type StepStall, type StepStallRemedyRecord } from './state.js';
 import { applyStepStallRemedy, stepStallRemedy, type BoundStepStallRemedy, type StepStallRemedyKind, type StepStallRemedyOutcome } from '../stall-remedies.js';
 import type { MasterConfig } from '../master.js';
+import { agentToken } from '../master/autonomy.js';
+import { agentOwner, type AttentionItem } from '../master/attention.js';
 import type { DaemonEffects } from './effects.js';
+import { record } from './preserve.js';
+import { readyToRetry } from './sessions.js';
 import { mergeRecordKey, pushEnvironment } from '../merge-writer/executor.js';
-import { loadMasterConfig, readCredentialFile } from '../master/config.js';
+import { externalCredential, loadMasterConfig, readCredentialFile } from '../master/config.js';
+import { serverOrigin } from '../repository-setup.js';
+import type { Work } from '../model.js';
+import { RefusedResponse } from '../model/refusal.js';
+import { planeWideRefusal } from '../model/blocker-class.js';
 import { configuredProfileFingerprint, readReviewerProfileRefusal, type ReviewerProfileRefusal } from '../reviewer.js';
 import { mergeWriterSettings } from '../master/merge-writer-settings.js';
 import { installIdFor } from '../install/types.js';
@@ -22,12 +31,7 @@ import { setupAgentEnvironments } from '../master/environments.js';
 
 /** Consecutive cycles one signature must fail for the run to be recorded as one stall (GY-1854 AC-1). */
 export const stallCycleBound = 3;
-/**
- * A stalled call is attempted at most once per five minutes while its stall stands (GY-1854 AC-1):
- * `noteStepFailure` arms one window per attempt, failures inside it are that attempt still failing,
- * and the loop's own failing-call retry schedule converges to the same bound
- * (cycleFailureCeilingMs in ./liveness.ts).
- */
+/** A stalled call is attempted at most once per five minutes while its stall stands (GY-1854 AC-1): */
 export const stallBackoffMs = 5 * 60_000;
 /** The most a signature holds: the step and the normalised error text. */
 export const stallSignatureMax = 800;
@@ -41,14 +45,7 @@ const shas = /\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b/gi;
 /** Numbers not already inside a `<…>` token: the 401 the credential remedy binds to keeps its token. */
 const numbers = /(?<!<)\d+/g;
 
-/**
- * The normalised signature of a failing loop step or dispatcher call: the step and the error text
- * with everything that differs between attempts of one cause taken out — UUIDs, 7-to-40-hex
- * commit ids, epochs, worktree ordinals and every other number — so two failures of one fault
- * sign the same and any other change in the fault signs differently. A `401` is made its own
- * letters-only token before the numbers pass, so the credential refusal a remedy binds to stays
- * readable.
- */
+/** The normalised signature of a failing loop step or dispatcher call: the step and the error text with everything that differs between attempts of one cause taken out — UUIDs,… */
 export function stallSignature(step: string, error: unknown): string {
   const text = (error instanceof Error ? error.message : String(error ?? '')).replace(/\s+/g, ' ').trim();
   return `${step}: ${text}`.replace(uuids, '<id>').replace(shas, '<sha>').replace(/\b401\b/g, '<unauthorized>').replace(numbers, 'N').slice(0, stallSignatureMax);
@@ -62,13 +59,7 @@ export const isStallHold = (text: unknown): boolean => typeof text === 'string' 
 /** The hold one stalled step's call is under right now: until when, and the refusal its port answers with. */
 export interface StallHold { step: string; signature: string; until: number; reason: string }
 
-/**
- * The five-minute window one stalled call's retry is held to (GY-1854 AC-1): while a stall of `step`
- * stands with `now < nextAttemptAt`, its owning step attempts the call at most once per window — the
- * dispatcher's launch is refused before any claim, the merge writer starts no new merge, and a failed
- * cycle's next run of the call waits out the window. The earliest standing window is the one that
- * holds; past every window the call is due again, and one failure re-arms the window.
- */
+/** The five-minute window one stalled call's retry is held to (GY-1854 AC-1): while a stall of `step` stands with `now < nextAttemptAt`, its owning step attempts the call at most… */
 export function stallHold(state: DaemonState, step: string, now: number): StallHold | null {
   let hold: StallHold | null = null;
   for (const run of Object.values(state.stepStalls)) {
@@ -90,20 +81,7 @@ export interface StepStallNote { run: StepStall; counted: boolean; stalled: bool
 const heldNote = (step: string, error: unknown): StepStallNote =>
   ({ run: { signature: stallSignature(step, error), step, count: 0, lastCycle: 0, firstAt: '', lastAt: '', lastError: errorText(error).slice(0, 1000), stalledAt: null, remedy: null, nextAttemptAt: null, attemptAt: null, calls: [], cycle: false }, counted: false, stalled: false, bound: null });
 
-/**
- * One failure of a loop step or dispatcher call, under the signature it signs: the run advances
- * at most one count per cycle — several actions of one step failing the same way in a cycle are
- * that cycle's one failure, three affected work items are not three cycles — and a run that
- * reached three consecutive cycles is recorded as one stall, once, never again while it stands,
- * bound to its remedy when the registry recognises the signature. A stalled call backs off to
- * once per five minutes: a failure inside the backoff window is that window's one attempt still
- * failing, so it moves the run's last error without advancing count. `cycle` is what makes the
- * run consecutive: the count advances only on the cycle right after the run's last one, a cycle
- * that ends without the step failing clears the run (`noteStepsSucceeded`), and a failure past a
- * gap starts a new run whose stall and remedy the old one does not carry — except a standing stall,
- * whose held cycles are no gap: the failure of the attempt its window admitted (`admitStalledCall`),
- * however many cycles later it settles, counts as that window's one failure.
- */
+/** One failure of a loop step or dispatcher call, under the signature it signs: the run advances at most one count per cycle — several actions of one step failing the same way in a… */
 export function noteStepFailure(state: DaemonState, step: string, error: unknown, now: number, cycle: number, options: { cycleCall?: boolean } = {}): StepStallNote {
   // A held call's hold answer counts nothing: the tracker speaking, not the fault failing again.
   if (isStallHold(error)) return heldNote(step, error);
@@ -130,13 +108,7 @@ export function noteStepFailure(state: DaemonState, step: string, error: unknown
   return { run, counted: !sameCycle && !backingOff, stalled, bound: run.stalledAt ? stepStallRemedy(signature) : null };
 }
 
-/**
- * Admits a held call's one attempt per window (GY-1854 AC-1): while a stall of `step` stands with
- * `now < nextAttemptAt` the call is held and the hold is answered; once a window has passed, the
- * call is admitted and the admission itself arms the next window, so every other call of the step
- * until then is held — a call that settles a cycle or more later (a launch, a merge) is still the
- * window's one attempt, and its failure, whenever it is recorded, is counted as that attempt's.
- */
+/** Admits a held call's one attempt per window (GY-1854 AC-1): while a stall of `step` stands with `now < nextAttemptAt` the call is held and the hold is answered; */
 export function admitStalledCall(state: DaemonState, step: string, now: number): StallAdmission {
   const hold = stallHold(state, step, now);
   if (hold) return { hold, armed: false };
@@ -151,15 +123,7 @@ export function admitStalledCall(state: DaemonState, step: string, now: number):
 }
 
 
-/**
- * Admits the next cycle of a loop whose failed cycles stalled on one of its own calls (GY-1854
- * AC-1) — the snapshot read every step waits on, which no effect hold can reach because the cycle
- * fails before any step runs. While such a stall stands inside its window the whole cycle is held
- * (`hold`); past the window the cycle is admitted and the admission arms the next window
- * (`armed`), which the loop writes to the cursor before the cycle makes the call, so a process
- * that ends during that read restarts into the window it armed. A completed cycle answers every
- * cycle-level call (`noteCycleStalls`), and a failed one counts as the admitted attempt's failure.
- */
+/** Admits the next cycle of a loop whose failed cycles stalled on one of its own calls (GY-1854 AC-1) — the snapshot read every step waits on, which no effect hold can reach because… */
 export function admitStalledCycle(state: DaemonState, now: number): StallAdmission {
   const runs = Object.values(state.stepStalls).filter(run => run.cycle && run.stalledAt);
   let hold: StallHold | null = null;
@@ -184,13 +148,7 @@ const unheldEffects: ReadonlySet<string> = new Set(['persist', 'snapshot', 'disp
 const failedCalls = new WeakMap<DaemonState, { call: string; async: boolean; resource: string | null; text: string }[]>();
 const flatText = (text: string) => text.replace(/\s+/g, ' ').trim();
 
-/**
- * The resource one effect invocation acts on, read off its first argument: a string or number as
- * itself, an object by its `key`, `pane_id`, `id` or `name` (a work item, a pane, a record). A
- * failure and its hold are the invocation's, not the method's: a prompt refused for pane A never
- * holds pane B, and B answering never lets A go. Null when the first argument names nothing: every
- * invocation of the call is then the same one.
- */
+/** The resource one effect invocation acts on, read off its first argument: a string or number as itself, an object by its `key`, `pane_id`, `id` or `name` (a work item, a pane, a… */
 export function callResource(args: readonly unknown[]): string | null {
   const first = args[0];
   if (typeof first === 'string' || typeof first === 'number') return String(first).slice(0, 200);
@@ -215,12 +173,7 @@ export function noteCallFailure(state: DaemonState, call: string, error: unknown
   if (list.length < 50 && !list.some(entry => entry.call === call && entry.resource === resource && entry.text === text)) list.push({ call, async, resource, text });
 }
 
-/**
- * Whether a failed action's detail carries one call's failure text: the text stands in the detail
- * as a whole — never as the inside of a longer word — however short it is. `EACCES` is carried by
- * `Worktree reclamation failed: EACCES` exactly as a long refusal is by the sentence that quotes
- * it; nothing is judged by the text's length.
- */
+/** Whether a failed action's detail carries one call's failure text: the text stands in the detail as a whole — never as the inside of a longer word — however short it is. */
 export const detailCarries = (detail: string, text: string): boolean =>
   new RegExp(`(?<![\\p{L}\\p{N}_])${text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}_])`, 'u').test(detail);
 
@@ -228,15 +181,7 @@ export const detailCarries = (detail: string, text: string): boolean =>
 export const stallsHolding = (state: DaemonState, call: string, resource: string | null): StepStall[] =>
   Object.values(state.stepStalls).filter(run => run.stalledAt && run.calls.some(entry => sameInvocation(entry, call, resource)));
 
-/**
- * Admits one effect invocation of a stalled run (GY-1854 AC-1): the generic form of
- * `admitStalledCall` for every step whose failing call is an effect — the host's reclaim, a
- * refresh, a review read, a structured port's method. While a stall whose failed actions carried
- * this invocation's failure stands inside its window, the invocation is held and the hold
- * answered; past the window it is admitted and the admission arms the next window, so the failing
- * invocation is attempted at most once per five minutes. Any other resource of the same call is
- * neither held nor admitted by it.
- */
+/** Admits one effect invocation of a stalled run (GY-1854 AC-1): the generic form of `admitStalledCall` for every step whose failing call is an effect — the host's reclaim, a… */
 export function admitStalledEffect(state: DaemonState, call: string, now: number, resource: string | null = null): StallAdmission {
   const runs = stallsHolding(state, call, resource);
   let hold: StallHold | null = null;
@@ -254,12 +199,7 @@ export function admitStalledEffect(state: DaemonState, call: string, now: number
 const callIsAsync = (state: DaemonState, call: string, resource: string | null) =>
   stallsHolding(state, call, resource).some(run => run.calls.some(entry => sameInvocation(entry, call, resource) && entry.async));
 
-/**
- * An admitted invocation that answered: it no longer fails, so the runs holding exactly it let it
- * go — another resource of the same call answering lets nothing go — and a run holding no call any
- * more ends its window, so the next cycle that does not fail its step ends the run
- * (`noteStepsSucceeded`); one that fails it again counts on, never re-forms.
- */
+/** An admitted invocation that answered: it no longer fails, so the runs holding exactly it let it go — another resource of the same call answering lets nothing go — and a run… */
 export function noteCallAnswered(state: DaemonState, call: string, resource: string | null = null): void {
   for (const run of Object.values(state.stepStalls)) {
     if (!run.stalledAt || !run.attemptAt || !run.calls.some(entry => sameInvocation(entry, call, resource))) continue;
@@ -269,15 +209,7 @@ export function noteCallAnswered(state: DaemonState, call: string, resource: str
   }
 }
 
-/**
- * Ends every run the completed cycle did not fail in: one clean cycle breaks the consecutive
- * chain, and its stall with it. A stalled run is kept while the loop still holds its call — its
- * five-minute window stands, its admitted attempt has not settled (a launch or a merge trial
- * running beside the loop past the window), or a failing invocation it holds has not answered —
- * since a quiet cycle is then the hold working, not the fault clearing; what resolves it is the
- * attempt's own settlement. Answers how many runs ended, so the caller persists a cursor the
- * clearing actually moved.
- */
+/** Ends every run the completed cycle did not fail in: one clean cycle breaks the consecutive chain, and its stall with it. */
 export function noteStepsSucceeded(state: DaemonState, cycle: number, now?: number): number {
   let cleared = 0;
   for (const [signature, run] of Object.entries(state.stepStalls)) {
@@ -289,12 +221,7 @@ export function noteStepsSucceeded(state: DaemonState, cycle: number, now?: numb
   return cleared;
 }
 
-/**
- * The cursor keeps at most `retainedStepStalls` runs. A run the current cycle failed in is never
- * the one dropped — `noteCycleStalls` folds a cycle's failures past the bound into one overflow
- * run, so the current cycle never holds more than the cursor keeps — then a standing stall is kept
- * before a run that has not stalled, and the newest before the oldest.
- */
+/** The cursor keeps at most `retainedStepStalls` runs. A run the current cycle failed in is never the one dropped — `noteCycleStalls` folds a cycle's failures past the bound into one… */
 export function pruneStepStalls(state: DaemonState, cycle?: number): void {
   const entries = Object.entries(state.stepStalls);
   if (entries.length <= retainedStepStalls) return;
@@ -305,13 +232,7 @@ export function pruneStepStalls(state: DaemonState, cycle?: number): void {
 /** The step a cycle's failures past the cursor's bound are signed as, one run for all of them, so recurring overflow still stalls and wakes the master. */
 export const overflowStep = 'stall-overflow';
 
-/**
- * A cycle's failed actions, one per signature, fitted to the cursor's bound: runs already on the
- * cursor are continued first (the most advanced first), new signatures in their order, and every
- * signature past `retainedStepStalls - 1` is folded into one `stall-overflow` failure naming how
- * many and which steps — never a run silently dropped and re-formed every cycle, so a recurring
- * overflow reaches three cycles like any other signature.
- */
+/** A cycle's failed actions, one per signature, fitted to the cursor's bound: runs already on the cursor are continued first (the most advanced first), new signatures in their order,… */
 function fitCycleFailures(state: DaemonState, failed: readonly { kind: string; detail: string }[]): { kind: string; detail: string }[] {
   const distinct = new Map<string, { kind: string; detail: string }>();
   for (const action of failed) { const signature = stallSignature(action.kind, action.detail); if (!distinct.has(signature)) distinct.set(signature, action); }
@@ -328,17 +249,7 @@ function fitCycleFailures(state: DaemonState, failed: readonly { kind: string; d
 /** The port one bound remedy runs through: it applies the remedy for the stalled run and answers whether its verification held. */
 export type StepStallRemedyRunner = (kind: StepStallRemedyKind, stall?: StepStall) => Promise<StepStallRemedyOutcome>;
 
-/**
- * Applies the stalled run's bound remedy once and records the attempt on it: a run already
- * carrying one is applied nothing (one attempt per run, whoever asks). The attempt is written
- * first — a `started` record, persisted through `persist` before the remedy's mutation runs — so a
- * process that ends during the profile write, the credential renewal or the ledger adoption
- * restarts into a run already remedied, never applying it twice; such a run needs the master
- * session (`stallNeedsMaster`). A write that fails leaves the run unremedied and applies nothing.
- * The outcome — refused or unverified included — then replaces the started record. Answers the
- * record, or null when the run is unbound, not stalled, already remedied, or its attempt could not
- * be written.
- */
+/** Applies the stalled run's bound remedy once and records the attempt on it: a run already carrying one is applied nothing (one attempt per run, whoever asks). */
 export async function remedyStepStall(state: DaemonState, signature: string, runner: StepStallRemedyRunner, now: number, persist?: (state: DaemonState) => Promise<void>): Promise<StepStallRemedyRecord | null> {
   const stall = state.stepStalls[signature];
   if (!stall?.stalledAt || stall.remedy) return null;
@@ -369,24 +280,19 @@ export async function remedyStalledSteps(state: DaemonState, runner: StepStallRe
 /** The subject key one stall rides the master wake as, hashed off its signature so a standing stall is never a second subject. */
 export const stallSubjectKey = (signature: string) => `stall:${createHash('sha256').update(signature).digest('hex').slice(0, 12)}`;
 
-/**
- * Whether a stall needs the master session: no remedy binds to it, or its one bound remedy was
- * refused or did not verify, or a verified remedy has stood through a second full run of failures —
- * otherwise the loop would back the call off indefinitely and nobody would be told.
- */
+/** Whether a stall needs the master session: no remedy binds to it, or its one bound remedy was refused or did not verify, or a verified remedy has stood through a second full run of… */
 export function stallNeedsMaster(stall: StepStall): boolean {
   if (!stall.stalledAt) return false;
   if (!stall.remedy) return true;
   return stall.remedy.outcome === 'refused' || !stall.remedy.verified || stall.count >= 2 * stallCycleBound;
 }
 
-/**
- * The task an unbound stall wakes the master session with: the signature, the step, the stall's own
- * recording instant, and the remedy attempt when one was made (GY-1854 AC-1). Everything in it is
- * stable for as long as one run stands — the live count and last error stay on the cursor, where
- * `master status` reads them — so the digest machinery wakes the session once per run, never once
- * per cycle and never again per backed-off attempt of a standing stall.
- */
+/** Past this many consecutive failing cycles an uncleared stall files its one upstream item (GY-1855 AC-2): woken at three, the master session holds one full stall-length more. */
+export const stallUpstreamCycles = 2 * stallCycleBound;
+/** Whether a standing stall files its one upstream item: it still needs the master session and stood past the bound. */
+export const stallFilesUpstream = (stall: StepStall): boolean => stallNeedsMaster(stall) && stall.count >= stallUpstreamCycles;
+
+/** The task an unbound stall wakes the master session with: the signature, the step, the stall's own recording instant, and the remedy attempt when one was made (GY-1854 AC-1). */
 export function stallWakeTask(stall: StepStall, cliPath: string): string {
   const remedy = !stall.remedy ? ''
     : stall.remedy.outcome === 'started' ? ` Its ${stall.remedy.kind} remedy was started once at ${stall.remedy.at} and never reported: ${stall.remedy.detail}`
@@ -400,17 +306,7 @@ export function stallWakeSubjects(state: DaemonState, cliPath: string): Actionab
     .map(stall => ({ key: stallSubjectKey(stall.signature), kind: 'wake' as const, work: null, detail: stallWakeTask(stall, cliPath) }));
 }
 
-/**
- * The stall bookkeeping one completed cycle owes (GY-1854), run beside the cycle's result: every
- * action the cycle recorded failed — the dispatcher's failures among them, a held call's hold
- * answer among them never counted — signs its action kind as the step, at most once per signature
- * per cycle, and names the effect calls whose thrown failure its detail carries, which the run's
- * window then holds (`admitStalledEffect`); failures past the cursor's bound fold into one overflow
- * run (`fitCycleFailures`). A stalled run of a step-held step whose admitted attempt landed — the
- * step recorded done this cycle and did not fail it — ends, as does every cycle-level run (the
- * completed cycle made its call), and a cycle that failed nowhere ends the runs it did not fail in. Answers what was counted and how many standing
- * runs the cycle ended, so the caller persists a cursor the bookkeeping moved.
- */
+/** The stall bookkeeping one completed cycle owes (GY-1854), run beside the cycle's result: */
 export function noteCycleStalls(state: DaemonState, actions: readonly (Pick<DaemonAction, 'kind' | 'state' | 'detail'> | StepFailure)[], cycle: number, now: number): { notes: StepStallNote[]; cleared: number } {
   const calls = failedCalls.get(state) ?? [];
   failedCalls.delete(state);
@@ -439,22 +335,10 @@ export function noteCycleStalls(state: DaemonState, actions: readonly (Pick<Daem
 /** A failure the cycle owes the stall step beside its recorded actions: a call no action row carries. */
 export interface StepFailure { kind: string; state: 'failed'; detail: string }
 
-/**
- * The step a review launch refused for an unknown reviewer profile signs as (GY-1854). Reviews are
- * launched by the dispatcher beside the loop, which answers such a refusal as a configuration wait
- * and never as a failed action (src/auto-dispatch.ts, GY-1850), so the loop reads the refusal the
- * launch boundary records instead (src/reviewer.ts readReviewerProfileRefusal).
- */
+/** The step a review launch refused for an unknown reviewer profile signs as (GY-1854). */
 export const reviewLaunchStep = 'review-launch';
 
-/**
- * The review-launch failure one cycle owes the stall step: the refusal the launch boundary
- * recorded, while it stands against the profiles this loop has configured, signed exactly as the
- * boundary throws it — `Unknown reviewer profile NAME` — so every cycle it stands is that cycle's
- * one failure of the same signature and three are one stall bound to the profile remedy. A record
- * the profiles moved past (the missing name written) is stale until the next launch clears it, and
- * owes nothing; the launch that gets past the lookup clears the record, and the run ends with it.
- */
+/** The review-launch failure one cycle owes the stall step: the refusal the launch boundary recorded, while it stands against the profiles this loop has configured, signed exactly as… */
 export function reviewerProfileFailures(refusal: ReviewerProfileRefusal | null, config: Pick<MasterConfig, 'workers' | 'reviewers'>): StepFailure[] {
   if (!refusal || refusal.profiles !== configuredProfileFingerprint(config)) return [];
   return [{ kind: reviewLaunchStep, state: 'failed', detail: `Unknown reviewer profile ${refusal.profile}` }];
@@ -465,10 +349,7 @@ export async function readReviewerProfileFailures(config: Pick<MasterConfig, 'cr
   return reviewerProfileFailures(await readReviewerProfileRefusal(config).catch(() => null), config);
 }
 
-/**
- * Judges the report the profile write answered with (GY-1854): applied when it wrote at least one
- * profile change, verified when the write landed and no credential was skipped unread.
- */
+/** Judges the report the profile write answered with (GY-1854): applied when it wrote at least one profile change, verified when the write landed and no credential was skipped unread. */
 export function profileRemedyOutcome(report: { applied?: boolean; profiles?: unknown[]; skipped?: { reason: string }[]; next?: string }): StepStallRemedyOutcome {
   const profiles = report.profiles?.length ?? 0, skipped = report.skipped?.length ?? 0;
   return {
@@ -478,13 +359,7 @@ export function profileRemedyOutcome(report: { applied?: boolean; profiles?: unk
   };
 }
 
-/**
- * The verification a review-launch stall's profile remedy owes (GY-1854): the write is verified only
- * when the reviewer profile the refused launches named is configured once it landed — read back from
- * the configuration the write produced, which the loop and the dispatcher reload — so a write that
- * changed other profiles, or none, is unverified and the stall wakes the master session. A stall of
- * any other step keeps the write's own verification.
- */
+/** The verification a review-launch stall's profile remedy owes (GY-1854): the write is verified only when the reviewer profile the refused launches named is configured once it… */
 export function profileRemedyVerification(outcome: StepStallRemedyOutcome, stall: StepStall | undefined, configured: Pick<MasterConfig, 'reviewers'>): StepStallRemedyOutcome {
   if (!stall || stall.step !== reviewLaunchStep) return outcome;
   const named = /Unknown reviewer profile (\S+)/.exec(stall.lastError)?.[1] ?? null;
@@ -499,17 +374,7 @@ export interface ProfileRemedyPorts {
   configured(): Promise<Pick<MasterConfig, 'reviewers'>>;
 }
 
-/**
- * Adopts the server's merge ledger for a refused merge record (GY-1854), and answers whether the
- * next attempt records under a key that was never sent. The refused attempt is named by the failed
- * merge action that carries the refusal: its item key, its head, and the instant the refusal was
- * recorded. The adoption reads the item's folded ledger back from the snapshot — the executor
- * reads the same fold every cycle, so the queue and the attempt key it derives next are the
- * server's truth — clears the refused attempt's own persisted in-flight marker, and refuses to
- * touch a marker naming any other item or head, or one started after the refusal was recorded:
- * a merge of another item, or a later attempt of the same one, is a live or newer flight whose
- * crash-recovery marker is its own, never cleared from the remedy.
- */
+/** Adopts the server's merge ledger for a refused merge record (GY-1854), and answers whether the next attempt records under a key that was never sent. */
 export function mergeLedgerAdoption(state: DaemonState, work: readonly { key: string; id: string; mergeLedger?: { events: number } | null }[], refused: { key: string; head: string; at: string } | null): StepStallRemedyOutcome {
   if (!refused) return { outcome: 'refused', verified: false, detail: 'No failed merge action carrying a reused record key stands on the cursor, so nothing was adopted' };
   const item = work.find(entry => entry.key === refused.key);
@@ -517,9 +382,7 @@ export function mergeLedgerAdoption(state: DaemonState, work: readonly { key: st
   const marker = state.mergeWriter.inFlight;
   const stale = !!marker && marker.key === refused.key && marker.head === refused.head && Date.parse(marker.startedAt) < Date.parse(refused.at);
   if (stale) state.mergeWriter.inFlight = null;
-  // A replay of the item's writes would send the refused key again: until its answer is settled, the adoption cannot claim a fresh key. The refused attempt's own marker never stands past this
-  // function: it was either cleared above or belonged to no refused flight (started after the
-  // refusal was recorded, so a later attempt's), and a later attempt always mints a fresh id.
+  // A replay of the item's writes would send the refused key again: until its answer is settled, the adoption cannot claim a fresh key. The refused attempt's…
   const replay = state.mergeWriter.unconfirmed?.find(entry => entry.key === refused.key) ?? null;
   const verified = events !== null && !replay;
   const derivation = item && events ? ` — the next attempt-free record for it derives ${mergeRecordKey({ id: item.id, mergeLedger: item.mergeLedger ?? null }, { kind: 'refused', head: refused.head, reason: 'adopted' })}, a derivation the pre-adoption ledger never gave` : '';
@@ -530,11 +393,7 @@ export function mergeLedgerAdoption(state: DaemonState, work: readonly { key: st
 /** What the plane answers one credential file with: the principal it authenticates as, a refusal (401), or no reading. */
 export interface CredentialReading { state: 'ok' | 'refused' | 'unknown'; principal: string | null; detail: string }
 
-/**
- * The host-owned credentials the credential-401 remedy may renew (GY-1854), and how it reads and
- * writes them. The coordinator's own credential is read, never renewed: rotating it is the
- * operator's (admin) authority, not the loop's.
- */
+/** The host-owned credentials the credential-401 remedy may renew (GY-1854), and how it reads and writes them. */
 export interface CredentialRenewalPorts {
   /** Reads one credential file and asks the plane whom it authenticates as. */
   authenticate(file: string): Promise<CredentialReading>;
@@ -555,16 +414,7 @@ export interface CredentialRenewalPorts {
 /** Whether a stall's 401 is the merge writer's push credential rather than a profile's: the merge step, or a refusal naming the deploy key or a push. */
 const deployKeyStall = (stall: StepStall | undefined) => !!stall && (stall.step === 'merge' || /deploy.?key|publickey|git push/i.test(stall.signature));
 
-/**
- * The credential-401 remedy (GY-1854): renews the host-owned credential the refusal names, once,
- * and verifies it authenticates. The coordinator's credential is read first: refused, it is
- * outside the loop's authority, so the remedy is refused and the stall wakes the master session.
- * A merge-step stall renews the merge writer's deploy key and verifies it reaches the repository.
- * Any other stall reads each worker and producer profile credential; a refused one is renewed from
- * the credential the install issued for the same principal on this host (one the plane
- * authenticates as that principal), and verified by reading it back through the plane. Nothing is
- * minted here: a principal with no issued credential that authenticates is a refusal naming it.
- */
+/** The credential-401 remedy (GY-1854): renews the host-owned credential the refusal names, once, and verifies it authenticates. */
 export async function renewHostCredentials(stall: StepStall | undefined, ports: CredentialRenewalPorts): Promise<StepStallRemedyOutcome> {
   const coordinator = await ports.authenticate(ports.coordinator);
   if (coordinator.state === 'refused')
@@ -631,12 +481,7 @@ export function hostCredentialPorts(config: MasterConfig, root: string): Credent
   };
 }
 
-/**
- * The stall step's own remedy ports (GY-1854): the loop writes the agent profiles exactly as
- * `master environments --apply` does, renews the host-owned credential a 401 names
- * (`renewHostCredentials` over `hostCredentialPorts`, or the ports a test hands in), and adopts
- * the server's merge ledger for a refused merge record.
- */
+/** The stall step's own remedy ports (GY-1854): the loop writes the agent profiles exactly as `master environments --apply` does, renews the host-owned credential a 401 names… */
 export function stallRemedyRunner(config: () => MasterConfig, state: () => DaemonState, read: DaemonEffects['snapshot'], root: () => string, credentials?: () => CredentialRenewalPorts, profiles?: () => ProfileRemedyPorts): StepStallRemedyRunner {
   return async (kind, stall) => {
     if (kind === 'profile-unknown') {
@@ -651,9 +496,7 @@ export function stallRemedyRunner(config: () => MasterConfig, state: () => Daemo
       return stall?.step === reviewLaunchStep ? profileRemedyVerification(outcome, stall, await ports.configured()) : outcome;
     }
     if (kind === 'merge-record-idempotency') {
-      // The refused attempt is the newest failed merge action that carries the refusal — the
-      // writer's settle wording ("a record key reused") or the engine's ("Idempotency key
-      // reused") — and its detail names the item and the head the flight was merging.
+      // The refused attempt is the newest failed merge action that carries the refusal — the writer's settle wording ("a record key reused") or the engine's…
       const refused = Object.values(state().actions)
         .filter(action => action.kind === 'merge' && action.state === 'failed' && /key reused with different input/i.test(action.detail))
         .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0] ?? null;
@@ -664,31 +507,7 @@ export function stallRemedyRunner(config: () => MasterConfig, state: () => Daemo
   };
 }
 
-/**
- * The stalled calls' hold, composed over the loop's own effects (GY-1854 AC-1): while a stall
- * stands inside its five-minute window, its failing call is attempted at most once per window.
- * The dispatcher's launch is refused before anything is claimed, exactly as a dispatch another
- * dispatcher holds is — `DispatchReservedError` with the item as the held resource, which the
- * dispatch step answers by passing the item over and recording no failure — and the merge
- * writer's `admit` answers false, so it starts no new merge while the window stands (a settled
- * flight is still recorded, replays and owed reworks still run); its `merger` read, made before
- * admission every cycle, is held as an effect call. Every other effect call — a top-level port,
- * or a method of a structured port (`shadow.record`, `mainWatch.*`, `promotion.*`, …), named
- * `port.method` — is watched per invocation: its failure is noted with the resource its first
- * argument names (`noteCallFailure`, `callResource`), and once a stall holds that invocation, a
- * call of it inside the window answers the hold — thrown, or rejected when it failed as a promise —
- * without being made (`admitStalledEffect`); the window's one admitted invocation that answers lets
- * it go (`noteCallAnswered`), and other resources of the call are never held by it.
- *
- * Past each window the first call is admitted and arms the next, and the armed window is on the
- * cursor through `persist` before the admitted call is made, so a process that dies between the
- * admission and its next cursor write restarts into the window it armed, never into the expired
- * one and a second attempt at once: a call that fails as a promise waits for the write; one that
- * fails synchronously cannot, so its admitting invocation answers the hold while the write runs,
- * and the window's attempt is the first invocation after that write landed — a write that fails
- * admits nothing until the window passes. The merge writer's own flight write persists its
- * admission the same way, before its first write.
- */
+/** The stalled calls' hold, composed over the loop's own effects (GY-1854 AC-1): while a stall stands inside its five-minute window, its failing call is attempted at most once per… */
 export function stallHeldEffects<T extends DaemonEffects>(effects: T, state: () => DaemonState, now: () => number, persist?: (state: DaemonState) => Promise<void>): T {
   const wrapped = new Map<string, { value: unknown; held: unknown }>();
   // The synchronous admissions whose armed window reached the cursor and whose attempt is not yet
@@ -765,5 +584,107 @@ export function stallHeldEffects<T extends DaemonEffects>(effects: T, state: () 
       wrapped.set(property, { value, held });
       return held;
     },
+  });
+}
+
+/** Cursor action key for one stall's upstream filing (GY-1855): derived from its subject so a done row is the local dedup. */
+export const stallUpstreamActionKey = (signature: string) => `stall-upstream:${stallSubjectKey(signature).slice('stall:'.length)}`;
+/** Idempotency key for the filed item: the signature alone, so a retry or re-ask returns the one item already filed. */
+export const stallUpstreamIdempotencyKey = (signature: string) => `loop-step-stall:${stallSubjectKey(signature).slice('stall:'.length)}`;
+
+/** Item body as the create command parses it; validated before ask so a body the plane would refuse is recorded, never sent. */
+export const stallUpstreamItemSchema = z.object({
+  title: z.string().min(1).max(200), type: z.literal('bug'), priority: z.literal(1),
+  description: z.string().min(1).max(20_000),
+  criteria: z.array(z.object({ id: z.string().regex(/^AC-\d+$/), text: z.string().min(1).max(2000), proofs: z.array(z.string().min(1).max(100)).min(1).max(20) }).strict()).min(1).max(50),
+  reason: z.string().min(1).max(2000),
+}).strict();
+export type StallUpstreamItemInput = z.infer<typeof stallUpstreamItemSchema>;
+
+/** Pure function of the signature: same key and body forever so a retry never files a second item. Live evidence stays on the filing install. */
+export function stallUpstreamItem(signature: string): StallUpstreamItemInput {
+  const step = signature.includes(': ') ? signature.slice(0, signature.indexOf(': ')) : 'loop';
+  return {
+    title: `Loop-step stall: the ${step} call fails with one signature past its clearing bound`.slice(0, 200), type: 'bug' as const, priority: 1,
+    description: [
+      `The master loop filed this item itself (GY-1855): a loop step or dispatcher call failed with one normalised signature on three consecutive cycles — one stall — and the stall stood past ${stallUpstreamCycles}, so the master session woken for it had not cleared it within its bound. Exactly one item is filed per signature: this signature never files a second one.`,
+      `Signature: ${signature}`,
+      `Step: ${step}. While a stall stands its failing call is attempted at most once per five minutes, and a remedy the signature binds to is applied once and verified; a stall no remedy binds to is only woken for. The live evidence — the standing count, the failing attempts so far and the last error text, and the one remedy record — is on the filing install: run graphyard master status there and read daemon.stepStalls, subject ${stallSubjectKey(signature)}.`,
+    ].join('\n\n'),
+    criteria: [{ id: 'AC-1', text: `The ${step} call no longer fails with this signature on a release serving the filing install, or the stall is cleared within its bound before one is filed, covered by a test that pins the bound`, proofs: ['unit:loop-step-stall-cleared'] }],
+    reason: `The loop-step stall with this signature stood past ${stallUpstreamCycles} consecutive failing cycles and no open item names it`,
+  };
+}
+
+export type StallUpstreamFiler = (input: StallUpstreamItemInput, key: string) => Promise<Work>;
+
+async function postStallWork(origin: string, token: string, input: StallUpstreamItemInput, key: string): Promise<Work> {
+  const response = await fetch(`${origin}/api/work`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(input), signal: AbortSignal.timeout(30_000) });
+  const text = await response.text(); // GY-1751: a proxy's empty or HTML 502-504 keeps its status
+  let result: any; try { result = JSON.parse(text); } catch { result = response.ok ? undefined : { text: text.slice(0, 200) }; }
+  if (!response.ok) throw new RefusedResponse(`Graphyard refused work (${response.status}): ${result?.error ?? result?.text ?? text.slice(0, 200)}`, response.status, result);
+  return result as Work;
+}
+
+/** Production filer: `upstream` absent files into this install as the operator-agent (slow-loop precedent); present files into the named install with its credential file. */
+export function stallUpstreamFiler(config: MasterConfig, root: string): StallUpstreamFiler {
+  const upstream = config.upstream;
+  if (!upstream) return async (input, key) => {
+    if (!config.operatorAgent) throw new Error('No master operator-agent identity is provisioned; run graphyard master autonomy --admin-token-stdin --apply so the loop can file the stalls it cannot clear');
+    return postStallWork(config.url, await agentToken(root, config, 'operatorAgent'), input, key);
+  };
+  return async (input, key) => {
+    await externalCredential(root, upstream.credentialFile, 'Upstream filing');
+    return postStallWork(serverOrigin(upstream.url), await readCredentialFile(upstream.credentialFile), input, key);
+  };
+}
+
+/**
+ * Filing step beside the remedies (GY-1855 AC-2): every standing stall past `stallFilesUpstream` files exactly one
+ * upstream item per signature — local action-row dedup plus control-plane idempotency. Unanswered plane asks retry on backoff.
+ */
+export async function fileStalledStepsUpstream(state: DaemonState, filer: StallUpstreamFiler | null, now: () => number, persist: DaemonEffects['persist']): Promise<DaemonAction | null> {
+  let last: DaemonAction | null = null;
+  if (!filer) return last;
+  const due = Object.values(state.stepStalls).filter(run => run.stalledAt && stallFilesUpstream(run)).sort((a, b) => Date.parse(a.stalledAt!) - Date.parse(b.stalledAt!));
+  for (const stall of due) {
+    const key = stallUpstreamActionKey(stall.signature), previous = state.actions[key];
+    if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) continue;
+    const short = stall.signature.slice(0, 160);
+    const attempts = (previous?.attempts ?? 0) + 1;
+    await record(state, key, { kind: 'fault', work: null, principal: null, state: 'started', detail: `Filing the one upstream item for the loop-step stall on the ${stall.step} call, standing since ${stall.stalledAt} past ${stallUpstreamCycles} consecutive failing cycles: ${short}`, attempts, cycle: state.cycle }, now(), persist);
+    const parsed = stallUpstreamItemSchema.safeParse(stallUpstreamItem(stall.signature));
+    if (!parsed.success) {
+      last = await record(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the upstream item for the loop-step stall on the ${stall.step} call: the body does not parse as the create command reads it: ${parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ').slice(0, 500)}`, attempts, cycle: state.cycle }, now(), persist);
+      continue;
+    }
+    try {
+      const filed = await filer(parsed.data, stallUpstreamIdempotencyKey(stall.signature));
+      last = await record(state, key, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} for the loop-step stall on the ${stall.step} call (${stallUpstreamIdempotencyKey(stall.signature)}); the same signature never files a second item, and a later ask returns this one`, attempts, cycle: state.cycle }, now(), persist);
+    } catch (error) {
+      const unanswered = planeWideRefusal(error);
+      last = await record(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the upstream item for the loop-step stall on the ${stall.step} call${unanswered ? ' (the control plane did not answer, so it is asked again on a later cycle)' : ''}: ${message(error)}`, attempts, cycle: state.cycle }, now(), persist, unanswered ? null : undefined);
+    }
+  }
+  return last;
+}
+
+/** `master status` listing (GY-1855 AC-2): one attention line per standing stall with signature, count, remedy and owner. */
+export function stallStatusAttention(state: DaemonState | null, cliPath: string): AttentionItem[] {
+  if (!state) return [];
+  return Object.values(state.stepStalls).filter(run => run.stalledAt).map(run => {
+    const subject = stallSubjectKey(run.signature);
+    const remedy = !run.remedy ? 'no remedy binds to it'
+      : run.remedy.outcome === 'started' ? `its ${run.remedy.kind} remedy was started at ${run.remedy.at} and never reported`
+        : `its ${run.remedy.kind} remedy was applied once at ${run.remedy.at} and ${run.remedy.outcome}${run.remedy.verified ? ', verified' : ', unverified'}`;
+    const filed = state.actions[stallUpstreamActionKey(run.signature)];
+    const upstream = stallFilesUpstream(run)
+      ? (filed?.state === 'done' && filed.work ? ` Its upstream item is ${filed.work}.` : ` It stood past its ${stallUpstreamCycles}-cycle bound${filed?.state === 'failed' ? ` and its upstream filing is on its backoff (${filed.attempts} attempt(s))` : ', so its one upstream item is being filed'}.`)
+      : '';
+    return {
+      subject,
+      text: `Loop-step stall: the ${run.step} call failed ${run.count} cycle(s) with one signature, standing since ${run.stalledAt}: ${run.signature}; ${remedy}.${upstream} The stalled call is attempted at most once per five minutes while this stands.`,
+      ...agentOwner('master', `node ${cliPath} master status (daemon.stepStalls, subject ${subject}) names the failing attempts; judge the cause and clear it, or judge the upstream item it filed`),
+    };
   });
 }
