@@ -501,7 +501,7 @@ test('unit:held-effects-hold-any-stalled-call — a stalled step whose failing c
   for (const index of [1, 2, 3]) { tick(60_000); await cycle(index); }
   const [run] = Object.values(loop.stepStalls);
   assert.ok(run.stalledAt, 'three consecutive cycles are one stall');
-  assert.deepEqual(run.calls, [{ call: 'reclaim', async: true }], 'the stall names the effect its failed actions carry');
+  assert.deepEqual(run.calls, [{ call: 'reclaim', async: true, resource: null }], 'the stall names the effect its failed actions carry');
   assert.equal(calls, 3);
   // Inside the window the call is not made: the hold answers, as a rejection, and is never counted.
   for (const index of [4, 5, 6, 7]) { tick(60_000); await cycle(index); }
@@ -529,7 +529,7 @@ test('unit:held-effects-hold-any-stalled-call — a stalled step whose failing c
   const failed = (detail: string) => [{ kind: 'session' as const, state: 'failed' as const, detail }];
   for (const index of [11, 12, 13]) { tick(60_000); try { sync.agents!(); } catch (error) { S.noteCycleStalls(loop, failed(`Session listing failed: ${(error as Error).message}`), index, clock); } }
   const syncRun = Object.values(loop.stepStalls)[0];
-  assert.deepEqual(syncRun.calls, [{ call: 'agents', async: false }], 'a six-character failure names its call');
+  assert.deepEqual(syncRun.calls, [{ call: 'agents', async: false, resource: null }], 'a six-character failure names its call');
   assert.throws(() => sync.agents!(), new RegExp(S.stallHoldMarker), 'a call that failed synchronously is held as a throw');
   S.noteCallFailure(loop, 'agents', new Error(''), false);
   S.noteCallFailure(loop, 'agents', `${S.stallHoldMarker}: held`, false);
@@ -572,4 +572,176 @@ test('unit:loop-step-stall-reviewer-profile — the launch boundary\u2019s recor
   // The launch that gets past the lookup clears the record, and the run ends with it.
   await clearReviewerProfileRefusal(config);
   assert.deepEqual(await S.readReviewerProfileFailures(config), []);
+});
+
+test('unit:stall-holds-the-failing-invocation — a stalled call is held per resource: pane A failing never holds pane B, B answering never lets A go, quiet cycles without A keep its stall, and A is attempted once per window', async () => {
+  const { S } = await load();
+  const loop = state();
+  let failingA = true;
+  const prompted: string[] = [];
+  const held = S.stallHeldEffects({ promptSession: async (agent: { pane_id: string }) => { prompted.push(agent.pane_id); if (agent.pane_id === 'A' && failingA) throw new Error('pane A is gone'); } } as unknown as DaemonEffects, () => loop, () => clock);
+  const cycle = async (index: number, panes: string[]) => {
+    const actions: { kind: 'wake'; state: 'failed' | 'done'; detail: string }[] = [];
+    for (const pane of panes) {
+      try { await held.promptSession!({ pane_id: pane } as never, 'wake'); actions.push({ kind: 'wake', state: 'done', detail: `woke ${pane}` }); }
+      catch (error) { actions.push({ kind: 'wake', state: 'failed', detail: `The wake was not delivered: ${(error as Error).message}` }); }
+    }
+    return S.noteCycleStalls(loop, actions, index, clock);
+  };
+  const made = (pane: string) => prompted.filter(entry => entry === pane).length;
+  for (const index of [1, 2, 3]) { tick(60_000); await cycle(index, ['A', 'B']); }
+  const signature = Object.keys(loop.stepStalls)[0];
+  assert.ok(loop.stepStalls[signature].stalledAt, 'three cycles of A failing are one stall');
+  assert.deepEqual(loop.stepStalls[signature].calls, [{ call: 'promptSession', async: true, resource: 'A' }], 'the stall holds the invocation that failed: pane A');
+  // Inside the window A is held and B is prompted every cycle, never held by A's stall.
+  for (const index of [4, 5, 6, 7]) { tick(60_000); await cycle(index, ['A', 'B']); }
+  assert.equal(made('A'), 3, 'A is not attempted inside its window');
+  assert.equal(made('B'), 7, 'B is prompted on every cycle');
+  // Past the window, cycles that prompt only B: B answering lets nothing of A go, and the quiet cycles keep A's stall.
+  for (const index of [8, 9, 10, 11, 12, 13, 14]) { tick(60_000); await cycle(index, ['B']); }
+  assert.ok(loop.stepStalls[signature]?.stalledAt, 'quiet cycles without A keep its stall: A was never retried');
+  assert.deepEqual(loop.stepStalls[signature].calls.map(entry => entry.resource), ['A'], 'B answering never lets A go');
+  // A prompted again: admitted once, its failure continues the run rather than starting another.
+  tick(60_000); await cycle(15, ['A', 'B']);
+  assert.equal(made('A'), 4, 'past the window A is attempted once');
+  assert.equal(loop.stepStalls[signature].count, 4, 'the admitted attempt counts on the standing run');
+  tick(60_000); await cycle(16, ['A', 'B']);
+  assert.equal(made('A'), 4, 'the admission arms the next window');
+  // A answers at the next window: its stall lets it go and the next clean cycle ends the run.
+  failingA = false;
+  tick(S.stallBackoffMs); await cycle(17, ['A', 'B']);
+  assert.equal(made('A'), 5);
+  tick(60_000); await cycle(18, ['B']);
+  assert.deepEqual(loop.stepStalls, {}, 'A answering ends its run');
+});
+
+test('unit:stall-overflow-still-stalls — recurring failures past the cursor bound still reach three cycles: 101 distinct signatures all stall, and a cycle failing more ways than the cursor keeps folds the rest into one overflow stall', async () => {
+  const { S } = await load();
+  const words = (index: number) => `cause ${'_'.repeat(index + 1)} of many`;
+  {
+    const loop = state();
+    for (const cycle of [1, 2, 3]) S.noteCycleStalls(loop, Array.from({ length: 101 }, (_, index) => ({ kind: 'dispatch', state: 'failed' as const, detail: words(index) })), cycle, tick(60_000));
+    const runs = Object.values(loop.stepStalls);
+    assert.equal(runs.length, 101, 'every recurring signature keeps its run');
+    assert.ok(runs.every(run => run.stalledAt && run.count === 3), 'every one of them, the 101st included, is one stall after three cycles');
+  }
+  {
+    const loop = state();
+    // A standing stall from before is kept behind the cycle's own runs, never ahead of them.
+    const total = S.retainedStepStalls + 25;
+    for (const cycle of [1, 2, 3]) S.noteCycleStalls(loop, Array.from({ length: total }, (_, index) => ({ kind: index % 2 ? 'dispatch' : 'reclaim', state: 'failed' as const, detail: words(index) })), cycle, tick(60_000));
+    const runs = Object.values(loop.stepStalls);
+    assert.ok(runs.length <= S.retainedStepStalls, `the cursor stays bounded: ${runs.length}`);
+    const overflow = runs.find(run => run.step === S.overflowStep);
+    assert.ok(overflow?.stalledAt, 'the folded overflow recurs every cycle, so it stalls like any other signature');
+    assert.match(overflow.signature, /more distinct failing signatures in one cycle than the N the cursor keeps a run for, from the steps dispatch, reclaim/);
+    assert.equal(runs.filter(run => run.step !== S.overflowStep && run.stalledAt).length, S.retainedStepStalls - 1, 'every kept signature stalls too');
+    assert.ok(S.stallNeedsMaster(overflow), 'no remedy binds the overflow: it wakes the master session');
+  }
+});
+
+test('unit:stall-wake-acknowledges-only-delivered — a wake beside a failed cycle names at most twenty stalls and acknowledges only those, so the twenty-first is delivered by the next', async () => {
+  const { S } = await load();
+  const { wakeMasterForStalls } = await import('../src/daemon/cycle-master.js');
+  const loop = state(), config = loopConfig();
+  loop.master.agentName = 'master-test'; loop.master.pane = 'pane-master'; loop.master.startedAt = new Date(clock).toISOString();
+  for (const cycle of [1, 2, 3]) S.noteCycleStalls(loop, Array.from({ length: 21 }, (_, index) => ({ kind: 'snapshot-read', state: 'failed' as const, detail: `unbound ${'_'.repeat(index + 1)} refusal` })), cycle, tick(60_000));
+  assert.equal(S.stallWakeSubjects(loop, config.cliPath).length, 21);
+  const prompts: string[] = [];
+  const effects = { agents: () => [], herdr: async () => ({ agents: [{ name: 'master-test', pane_id: 'pane-master', agent: 'claude', agent_status: 'idle' }], available: true }),
+    masterSession: { launch: async () => { throw new Error('never launched'); } }, promptSession: async (_agent: unknown, text: string) => { prompts.push(text); }, persist: async () => {} } as unknown as DaemonEffects;
+  const first = await wakeMasterForStalls(config, loop, effects, () => clock);
+  assert.equal(first.length, 20, 'one wake carries twenty subjects');
+  const missing = S.stallWakeSubjects(loop, config.cliPath).filter(subject => !first.includes(subject.key));
+  assert.equal(missing.length, 1);
+  assert.equal(loop.master.subjects[missing[0].key], undefined, 'the subject the wake did not name is not acknowledged');
+  tick(60_000);
+  const second = await wakeMasterForStalls(config, loop, effects, () => clock);
+  assert.deepEqual(second, [missing[0].key], 'the next wake delivers the twenty-first');
+  assert.ok(prompts[1].includes(missing[0].key));
+  assert.deepEqual(await wakeMasterForStalls(config, loop, effects, () => tick(60_000)), [], 'every stall delivered once: nothing more to wake');
+});
+
+test('unit:stall-remedy-written-before-it-runs — the remedy attempt is on the cursor before its mutation runs, so a process ending during it restarts into a remedied run that wakes the master and is never applied twice', async () => {
+  const { S } = await load();
+  const loop = state();
+  for (const cycle of [1, 2, 3]) S.noteStepFailure(loop, 'dispatch', 'Graphyard refused /api/work (401): unauthorized', tick(60_000), cycle);
+  const signature = Object.keys(loop.stepStalls)[0];
+  let cursor = '';
+  const persist = async (written: DaemonState) => { cursor = JSON.stringify(written); };
+  let runs = 0;
+  // The process ends during the renewal: the runner never returns.
+  const dying = async () => { runs += 1; assert.equal((JSON.parse(cursor) as DaemonState).stepStalls[signature].remedy?.outcome, 'started', 'the attempt is written before the mutation runs'); return new Promise<StepStallRemedyOutcome>(() => {}); };
+  void S.remedyStalledSteps(loop, dying, clock, persist);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runs, 1);
+  // The restart reads the cursor written before the mutation.
+  const restarted = JSON.parse(cursor) as DaemonState;
+  const applied = await S.remedyStalledSteps(restarted, async () => { runs += 1; return { outcome: 'applied', verified: true, detail: 'renewed again' }; }, tick(60_000), persist);
+  assert.deepEqual(applied, [], 'a run whose attempt was started is never remedied again');
+  assert.equal(runs, 1);
+  const stall = restarted.stepStalls[signature];
+  assert.ok(S.stallNeedsMaster(stall), 'an attempt that never reported wakes the master session');
+  assert.match(S.stallWakeTask(stall, '/outside/graphyard.mjs'), /remedy was started once at .* and never reported/);
+  // A write that fails applies nothing: the run stays unremedied for the next cycle.
+  const other = state();
+  for (const cycle of [1, 2, 3]) S.noteStepFailure(other, 'dispatch', 'Graphyard refused /api/work (401): unauthorized', tick(60_000), cycle);
+  const refusedWrite = await S.remedyStalledSteps(other, async () => { runs += 1; return { outcome: 'applied', verified: true, detail: 'renewed' }; }, clock, async () => { throw new Error('disk full'); });
+  assert.deepEqual(refusedWrite, []);
+  assert.equal(runs, 1, 'no mutation runs before its attempt is durable');
+  assert.equal(Object.values(other.stepStalls)[0].remedy, null);
+});
+
+test('unit:stall-sync-admission-durable — a call that fails synchronously is made only once its admitted window is on the cursor, so a write that fails or a process ending before it admits nothing more', async () => {
+  const { S } = await load();
+  const loop = state();
+  let calls = 0, release: (() => void) | null = null, refuse = false;
+  const writes: string[] = [];
+  const persist = (written: DaemonState) => { writes.push(JSON.stringify(written.stepStalls)); return refuse ? Promise.reject(new Error('disk full')) : new Promise<void>(resolve => { release = resolve; }); };
+  const held = S.stallHeldEffects({ agents: () => { calls += 1; throw new Error('EACCES'); } } as unknown as DaemonEffects, () => loop, () => clock, persist);
+  const failed = (detail: string) => [{ kind: 'session' as const, state: 'failed' as const, detail }];
+  const cycle = (index: number) => { try { held.agents!(); } catch (error) { S.noteCycleStalls(loop, failed(`Session listing failed: ${(error as Error).message}`), index, clock); } };
+  for (const index of [1, 2, 3]) { tick(60_000); cycle(index); }
+  assert.equal(calls, 3);
+  const signature = Object.keys(loop.stepStalls)[0];
+  // Past the window the admitting invocation answers the hold while the window is written: nothing is made yet.
+  tick(S.stallBackoffMs); cycle(4);
+  assert.equal(calls, 3, 'the admission is not acted on before it is durable');
+  assert.equal(writes.length, 1);
+  const admitted = loop.stepStalls[signature].attemptAt;
+  assert.ok(admitted && (JSON.parse(writes[0]) as Record<string, { attemptAt: string }>)[signature].attemptAt === admitted, 'the write carries the armed window');
+  // A restart before the write lands would read the old cursor and admit once — the old process made no call, so the window has one attempt.
+  tick(60_000); cycle(5);
+  assert.equal(calls, 3, 'still not made while the write is in flight');
+  release!(); await new Promise(resolve => setImmediate(resolve));
+  tick(60_000); cycle(6);
+  assert.equal(calls, 4, 'once the window is on the cursor the call is made once');
+  tick(60_000); cycle(7);
+  assert.equal(calls, 4, 'and only once per window');
+  // A write that fails admits nothing for that window.
+  refuse = true;
+  tick(S.stallBackoffMs); cycle(8);
+  await new Promise(resolve => setImmediate(resolve));
+  for (const index of [9, 10, 11]) { tick(60_000); cycle(index); }
+  assert.equal(calls, 4, 'a refused write leaves the call held until the window passes');
+});
+
+test('unit:stall-kept-while-admitted-attempt-runs — a launch admitted by a standing stall that runs past its window keeps the stall and its remedy until it settles, and its failure counts on the same run', async () => {
+  const { S } = await load();
+  const loop = state();
+  for (const cycle of [1, 2, 3]) S.noteStepFailure(loop, 'dispatch', 'Graphyard refused /api/work (401): unauthorized', tick(60_000), cycle);
+  const signature = Object.keys(loop.stepStalls)[0];
+  await S.remedyStalledSteps(loop, async () => ({ outcome: 'applied', verified: true, detail: 'renewed' }), clock);
+  tick(S.stallBackoffMs);
+  assert.equal(S.admitStalledCall(loop, 'dispatch', clock).hold, null, 'past the window the launch is admitted');
+  // The admitted launch runs beside the loop for twelve minutes: every cycle meanwhile is quiet.
+  for (let cycle = 4; cycle < 16; cycle++) S.noteCycleStalls(loop, [], cycle, tick(60_000));
+  const standing = loop.stepStalls[signature];
+  assert.ok(standing?.stalledAt, 'the stall stands while its admitted attempt has not settled');
+  assert.equal(standing.remedy?.outcome, 'applied', 'its one remedy is kept');
+  // The launch fails: the same run counts on, never forming a second stall or remedy.
+  const note = S.noteCycleStalls(loop, [{ kind: 'dispatch', state: 'failed', detail: 'Graphyard refused /api/work (401): unauthorized' }], 16, tick(60_000)).notes[0];
+  assert.equal(note.stalled, false, 'no second stall is recorded');
+  assert.equal(note.run.count, 4);
+  assert.deepEqual(await S.remedyStalledSteps(loop, async () => { throw new Error('applied twice'); }, clock), []);
 });

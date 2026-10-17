@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. `daemon.stepStalls`: 3 same-signature cycles: remedied once, verified (unknown/`review-launch` profile: configured; 401: profile credential/deploy key reissued, never coordinator's; merge-record key-reuse), else wakes master; 5min retries.
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. `daemon.stepStalls`: 3 same-signature cycles: remedied once, verified (unknown/`review-launch` profile: configured; 401: profile credential/deploy-key reissued, never coordinator's; merge-record key-reuse), else wakes master; per-resource 5min retries.
 
 ### Perpetual master loop
 

@@ -30,7 +30,7 @@ import { shadowGateSummary } from './cycle-shadow.js';
 import { adoptLoopRelease, fileSlowLoopItem } from './slow-loop-item.js';
 import { mergeWriterSummary } from './cycle-merge-writer.js';
 import { wakeMasterForStalls } from './cycle-master.js';
-import { noteCycleStalls, noteStepFailure, noteStepsSucceeded, readReviewerProfileFailures, remedyStalledSteps, stallHeldEffects, stallHold, stallNeedsMaster, stallRemedyRunner, stallSubjectKey, type ProfileRemedyPorts, type StepStallRemedyRunner } from './step-stalls.js';
+import { admitStalledCycle, noteCycleStalls, noteStepFailure, noteStepsSucceeded, readReviewerProfileFailures, remedyStalledSteps, stallHeldEffects, stallNeedsMaster, stallRemedyRunner, stallSubjectKey, type ProfileRemedyPorts, type StepStallRemedyRunner } from './step-stalls.js';
 import { detachRuns } from '../runner/registry.js';
 import type { LoopWake } from './loop-wake.js';
 
@@ -338,6 +338,15 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
       restart: options.restartLoop ?? restartThroughUnit, pid: options.identity.pid, loaded: () => guard.expected(),
       restore: releasePinnedRestore({ release: () => ({ deployment: state.deployment, baseBranch: config.baseBranch }), grant: { file: checkoutRestoreGrantPath(config), credentialFile: config.credentialFile, pid: options.identity.pid }, ledger: { file: checkoutRestoreFreezeLedgerPath(config) }, keepAlive, keepAliveEveryMs }),
       ...(executorsAct ? { executors: (args: string[]) => executorsAct(args, keepAlive) } : {}) }));
+    // GY-1854: a stalled cycle's window is waited out in keep-alive slices, so a supervised loop
+    // holding its next cycle is never mistaken for one that hung.
+    const waitOutStallHold = async (until: number) => {
+      while (!stopping && now() < until) {
+        const slice = Math.min(until - now(), keepAliveEveryMs ?? until - now());
+        try { await (options.delay ? options.delay(slice, waking.signal) : delay(slice, undefined, { signal: waking.signal })); } catch { /* woken to stop */ }
+        if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
+      }
+    };
     const serveRestore = async (keepAlive?: () => Promise<void>) => {
       try { await restoreCheckout(adopt => guard.settle({ adopt }), keepAlive, loaded => guard.settle({ revert: loaded })); }
       catch (error) { log(`[graphyard-master] checkout-restore could not be served: ${message(error)}`); }
@@ -355,6 +364,21 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
         }
       // A loop stopped during startup runs no cycle (GY-1603).
       } else while (!stopping) {
+        // GY-1854: a loop whose failed cycles stalled on one of the cycle's own calls (the snapshot
+        // read) runs its next cycle once per five-minute window — at startup too, honouring the
+        // window a previous process left on the cursor — and the admitted cycle's window is written
+        // before the cycle makes that call, so a process ending during it restarts into the window.
+        const cycleAdmission = admitStalledCycle(state, now());
+        if (cycleAdmission.hold) {
+          log(`[graphyard-master] the next cycle is held to ${new Date(cycleAdmission.hold.until).toISOString()}: ${cycleAdmission.hold.reason}`);
+          if (options.once) break;
+          await waitOutStallHold(cycleAdmission.hold.until);
+          continue;
+        }
+        if (cycleAdmission.armed) {
+          try { await effects.persist(state); }
+          catch (error) { log(`[graphyard-master] the stalled cycle's admission could not be written, so the cycle waits out its window: ${message(error)}`); continue; }
+        }
         let phase: 'reload' | 'cycle' = 'reload', wait: number, wakeable = false, holdBound: number | null = null;
         try {
           if (options.reload) {
@@ -381,7 +405,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           const stalls = noteCycleStalls(state, [...result.actions, ...await readReviewerProfileFailures(config)], result.metrics.cycle, now());
           for (const note of stalls.notes)
             if (note.stalled) log(`[graphyard-master] cycle ${result.metrics.cycle} recorded one ${note.bound ? `stall bound to the ${note.bound.kind} remedy` : 'stall no remedy binds to'}: ${note.run.signature}`);
-          const applied = await remedyStalledSteps(state, stallRunner, now());
+          const applied = await remedyStalledSteps(state, stallRunner, now(), effects.persist);
           for (const { signature, record } of applied)
             log(`[graphyard-master] the ${record.kind} stall remedy ${record.outcome}${record.verified ? ', verified' : ', unverified'}: ${record.detail} (${signature.slice(0, 160)})`);
           if (stalls.notes.length || stalls.cleared || applied.length) await effects.persist(state);
@@ -408,13 +432,15 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           // The stalled call backs off to once per five minutes through the tracker's attempt
           // window; the loop's own retry schedule converges to the same bound
           // (cycleFailureCeilingMs).
-          const stall = noteStepFailure(state, failure.call ?? 'cycle', failure.reason, now(), failure.cycle);
+          const stall = noteStepFailure(state, failure.call ?? 'cycle', failure.reason, now(), failure.cycle, { cycleCall: true });
+          // Another cycle-level call's admitted attempt settled with this cycle: its run ends with its window.
+          for (const run of Object.values(state.stepStalls)) if (run.cycle && run !== stall.run && run.attemptAt) run.attemptAt = null;
           // A refused review launch beside it fails this cycle too, so a failed cycle is no gap in its run.
           let owedCounted = false;
           for (const owed of await readReviewerProfileFailures(config)) owedCounted = noteStepFailure(state, owed.kind, owed.detail, now(), failure.cycle).counted || owedCounted;
           const cleared = noteStepsSucceeded(state, failure.cycle, now());
           if (stall.stalled) log(`[graphyard-master] cycle ${failure.cycle} recorded one ${stall.bound ? `stall bound to the ${stall.bound.kind} remedy` : 'stall no remedy binds to'}: ${stall.run.signature}`);
-          const stallApplied = await remedyStalledSteps(state, stallRunner, now());
+          const stallApplied = await remedyStalledSteps(state, stallRunner, now(), effects.persist);
           for (const { record } of stallApplied)
             log(`[graphyard-master] the ${record.kind} stall remedy ${record.outcome}${record.verified ? ', verified' : ', unverified'}: ${record.detail}`);
           if (stall.counted || owedCounted || cleared || stallApplied.length) await effects.persist(state);
@@ -422,15 +448,8 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           // master-session step, and every cycle the same read fails would too (cycle-master.ts).
           const woken = await wakeMasterForStalls(config, state, effects, now).catch(error => { log(`[graphyard-master] the stall wake was not delivered beside cycle ${failure.cycle}: ${message(error)}`); return [] as string[]; });
           if (woken.length) log(`[graphyard-master] woke master session ${state.master.agentName} beside failed cycle ${failure.cycle} for ${woken.join(', ')}`);
+          // The stalled call's five-minute window holds the next cycle at the top of the loop.
           wait = failure.delayMs;
-          // GY-1854: the stalled call's five-minute window holds the failed cycle's next run of it
-          // too: the later of the failed-cycle backoff and the window ends the wait, so neither
-          // schedule shortens the other.
-          const held = stallHold(state, failure.call ?? 'cycle', now());
-          if (held && held.until - now() > wait) {
-            wait = held.until - now();
-            log(`[graphyard-master] the stalled ${held.step} call holds the next cycle to ${new Date(held.until).toISOString()}: ${held.reason}`);
-          }
         }
         // GY-437: between cycles — never mid-cycle — align this checkout with the verified deployed
         // release. An alignment that re-executes the loop through its supervisor ends this process

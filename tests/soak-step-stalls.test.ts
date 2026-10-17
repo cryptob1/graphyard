@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { emptyDaemonState, runDaemon, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { retainedStepStalls, stallBackoffMs, stallCycleBound, stallSubjectKey, stallWakeSubjects } from '../src/daemon/step-stalls.js';
+import { noteCycleStalls, retainedStepStalls, stallBackoffMs, stallCycleBound, stallHeldEffects, stallSubjectKey, stallWakeSubjects } from '../src/daemon/step-stalls.js';
 import { daemonSummary } from '../src/daemon/run.js';
 import type { StepStallRemedyKind } from '../src/stall-remedies.js';
 import type { Work } from '../src/model.js';
@@ -337,7 +337,7 @@ test('unit:soak-step-stalls-call-hold — a day whose host reclaim throws the sa
   assert.ok(standing?.stalledAt, 'the day recorded the reclaim stall');
   assert.equal(standing.signature, 'reclaim: Worktree reclamation failed: EACCES');
   assert.equal(Object.values(result.state.stepStalls).filter(run => run.step === 'reclaim').length, 1, 'one signature, one run, one stall');
-  assert.deepEqual(standing.calls, [{ call: 'reclaim', async: true }], 'the stall holds the effect its failed rows carry, however short the failure text');
+  assert.deepEqual(standing.calls, [{ call: 'reclaim', async: true, resource: null }], 'the stall holds the effect its failed rows carry, however short the failure text');
   // The call itself — not just its bookkeeping — is made once per window from the stall on.
   const stalledFrom = Date.parse(standing.stalledAt!) - start;
   const after = result.reclaims.filter(at => at >= stalledFrom);
@@ -433,7 +433,10 @@ function assertReadBounded(result: Day, stalledFrom: number, what: string) {
   assert.ok(gaps.length >= 3, `the day runs several windows past the stall (${after.length} ${what} read(s))`);
   assert.ok(gaps.every(gap => gap >= stallBackoffMs), `every ${what} read past the stall waits a full window: ${gaps.map(gap => Math.round(gap / minute)).join(', ')} min`);
   assert.ok(after.length <= 2 + (dayMs - stalledFrom) / stallBackoffMs, `${after.length} ${what} reads from the stall on is once per window, not once per cycle`);
-  assert.ok(result.cycles - after.length >= 0 && result.credentialReads.length === result.cycles, 'every cycle that ran made its one read: the held cycles are not run at all, since the read fails the cycle before anything else');
+  // Every wait the day answered is either a cycle that ran (and made its one read) or the loop holding its next cycle to the window.
+  const held = result.logs.filter(line => /the next cycle is held to/.test(line)).length;
+  assert.ok(held > 0, 'the loop held its next cycle to the stall window');
+  assert.equal(result.credentialReads.length + held, result.cycles, 'every cycle that ran made its one read: the held cycles are not run at all, since the read fails the cycle before anything else');
 }
 
 test('unit:soak-step-stalls-failed-cycle-wake — a day whose credential read fails the same unbound way on every cycle, before the master-session step ever runs: three failed cycles are one stall, the master is woken for it exactly once beside the failed cycles, and the read is retried once per five minutes', { timeout: 600_000 }, async () => {
@@ -519,4 +522,89 @@ test('unit:soak-step-stalls-reviewer-profile-unverified — a day whose profile 
   const task = stallWakeSubjects(result.state, 'graphyard').find(entry => entry.key === subject)!;
   assert.match(task.detail, /profile-unknown remedy was applied once .* unverified/);
   assert.ok(Object.keys(result.state.stepStalls).length <= retainedStepStalls);
+});
+
+/**
+ * The real loop whose every cycle fails at its own snapshot read, from `from` for `span`
+ * milliseconds of simulated time, over the cursor `state`: answers each snapshot read's instant and
+ * the cursor as last written. Every read asserts that the stall window admitting it is already on
+ * the cursor, so a process ending during the read restarts into that window.
+ */
+async function snapshotDay(state: DaemonState, from: number, span: number) {
+  let now = from, stop = () => {}, cursor = JSON.stringify(state);
+  const reads: number[] = [], logs: string[] = [], admitted: boolean[] = [];
+  const effects = {
+    agents: () => [], herdr: () => ({ agents: [masterSession()], available: true }),
+    masterSession: { launch: async () => { throw new Error('never launched'); }, adopt: async () => null },
+    promptSession: async () => {},
+    snapshot: async () => {
+      reads.push(now);
+      const standing = Object.values(state.stepStalls).find(run => run.cycle && run.stalledAt && run.attemptAt);
+      // Judged after the day: a throw here would only be another failed cycle.
+      if (standing) admitted.push((JSON.parse(cursor) as DaemonState).stepStalls[standing.signature]?.attemptAt === standing.attemptAt);
+      throw new Error('Graphyard refused /api/work (503): upstream unavailable');
+    },
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, requestSmoke: () => {},
+    observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {},
+    persist: async (written: DaemonState) => { cursor = JSON.stringify(written); },
+  } as unknown as DaemonEffects;
+  const sleep = async (wait: number) => { now += wait; if (now - from >= span) stop(); };
+  await runDaemon(config(), state, effects, { intervalMs: interval, identity: { pid: process.pid, host: 'soak-host' }, now: () => now, log: line => logs.push(line),
+    checkout: async () => ({ root: '/outside/repo', commit: 'c'.repeat(40), modified: [], untracked: [] }), checkoutRestore: async () => [],
+    process: { on: (signal: string, handler: () => void) => { if (signal === 'SIGTERM') stop = handler; }, off: () => {} } as unknown as Pick<NodeJS.Process, 'on' | 'off'>,
+    delay: async wait => sleep(wait), wake: { sleep: async wait => { await sleep(wait); return ['soak-tick']; } } });
+  return { reads, cursor, logs, admitted, end: now };
+}
+
+test('unit:soak-step-stalls-snapshot-restart — failed cycles stalled on the snapshot read run once per five minutes, each admitted read’s window written before the read, and a restart honours the window the previous process left', { timeout: 600_000 }, async () => {
+  const first = await snapshotDay(emptyDaemonState(config()), start, 2 * hour);
+  const stall = Object.values((JSON.parse(first.cursor) as DaemonState).stepStalls).find(run => run.step === 'snapshot');
+  assert.ok(stall?.stalledAt && stall.cycle, 'three failed cycles at the snapshot read are one cycle-level stall');
+  const stalledAt = Date.parse(stall.stalledAt);
+  const after = first.reads.filter(at => at > stalledAt);
+  assert.ok(after.length >= 3, `the reads go on past the stall (${after.length})`);
+  const gaps = [stalledAt, ...after].slice(1).map((at, index) => at - [stalledAt, ...after][index]);
+  assert.ok(gaps.every(gap => gap >= stallBackoffMs), `every read past the stall waits a full window: ${gaps.map(gap => gap / minute).join(', ')} min`);
+  assert.equal(first.admitted.length, after.length, 'every read past the stall was admitted by its window');
+  assert.ok(first.admitted.every(Boolean), 'each admitted read’s window was on the cursor before the read');
+  // The restart: a new process over the cursor the last one wrote, a minute after its last read.
+  const lastRead = first.reads.at(-1)!;
+  const restarted = JSON.parse(first.cursor) as DaemonState;
+  const nextAt = Date.parse(Object.values(restarted.stepStalls).find(run => run.step === 'snapshot')!.nextAttemptAt!);
+  assert.ok(nextAt > lastRead + minute, 'the window the last read armed is still standing a minute later');
+  const second = await snapshotDay(restarted, lastRead + minute, hour);
+  assert.ok(second.reads.length >= 1 && second.reads[0] >= nextAt, `the restarted loop's first read waits for the saved window (${(second.reads[0] - lastRead) / minute} min after the last read)`);
+  assert.ok(second.logs.some(line => /the next cycle is held to/.test(line)), 'the restart logs the hold it honoured');
+  const restartedGaps = second.reads.slice(1).map((at, index) => at - second.reads[index]);
+  assert.ok(restartedGaps.every(gap => gap >= stallBackoffMs), 'and keeps one read per window');
+});
+
+test('unit:soak-step-stalls-structured-port — a day whose shadow gate\u2019s verdict write is refused the same way every cycle: one stall holding shadow.record for that item, the write made at most once per five minutes, the port\u2019s other methods never held', { timeout: 600_000 }, async () => {
+  const state = emptyDaemonState(config());
+  let now = start;
+  const records: number[] = [];
+  let explanations = 0;
+  // The shadow gate's reads, as cycle-shadow.ts calls them: the owed verdict write retried every cycle, the explanations read beside it.
+  const held = stallHeldEffects({ shadow: {
+    record: async () => { records.push(now); throw new Error('Graphyard refused /api/work/work-7/shadow (409): verdict conflict'); },
+    explanations: async () => { explanations += 1; return []; },
+  } } as unknown as DaemonEffects, () => state, () => now);
+  let cycles = 0;
+  for (; now - start < dayMs; now += interval) {
+    cycles += 1;
+    const actions: { kind: string; state: 'failed'; detail: string }[] = [];
+    try { await held.shadow!.record(claimable(now), {} as never); }
+    catch (error) { actions.push({ kind: 'merge', state: 'failed', detail: `The shadow verdict for GY-7 is not yet recorded by the coordinator and is retried next cycle: ${(error as Error).message}` }); }
+    await held.shadow!.explanations!([]);
+    noteCycleStalls(state, actions, cycles, now);
+  }
+  const runs = Object.values(state.stepStalls);
+  assert.equal(runs.length, 1, 'one signature, one run');
+  assert.ok(runs[0].stalledAt, 'the recurring refusal is one stall');
+  assert.deepEqual(runs[0].calls, [{ call: 'shadow.record', async: true, resource: 'GY-7' }], 'the stall holds the structured call that failed, for its item');
+  assert.ok(records.length <= stallCycleBound + 1 + dayMs / stallBackoffMs, `${records.length} verdict writes over ${cycles} cycles is once per window, not once per cycle`);
+  const gaps = records.slice(stallCycleBound).map((at, index) => at - records[stallCycleBound - 1 + index]);
+  assert.ok(gaps.every(gap => gap >= stallBackoffMs), 'every write past the stall waits a full window');
+  assert.equal(explanations, cycles, 'the port\u2019s other methods are made every cycle');
 });

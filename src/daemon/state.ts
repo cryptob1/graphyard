@@ -468,7 +468,9 @@ export function masterSummary(master: MasterSessionState, now: number) {
 export const dispatchFailureRunSchema = z.object({ key: z.string().max(100), cause: z.string().max(2000), count: z.number().int().min(1), epoch: z.number().int().min(0).default(0), firstAt: z.string(), lastAt: z.string() }).strict(); export type DispatchFailureRun = z.infer<typeof dispatchFailureRunSchema>;
 /** GY-1854: one attempt of the remedy a stalled loop-step signature binds to, recorded on the stall. */
 export const stepStallRemedyRecordSchema = z.object({
-  kind: z.string().max(40), at: z.string(), outcome: z.enum(['applied', 'unchanged', 'refused']), verified: z.boolean(), detail: z.string().max(2000),
+  kind: z.string().max(40), at: z.string(),
+  /** `started` is the attempt written before its mutation runs: a process that ends during it leaves the run remedied, never applied twice. */
+  outcome: z.enum(['started', 'applied', 'unchanged', 'refused']), verified: z.boolean(), detail: z.string().max(2000),
 }).strict();
 export type StepStallRemedyRecord = z.infer<typeof stepStallRemedyRecordSchema>;
 /**
@@ -493,8 +495,10 @@ export const stepStallSchema = z.object({
   nextAttemptAt: z.string().nullable().default(null),
   /** When the held call admitted its window's one attempt, until that attempt's failure is counted; null otherwise. */
   attemptAt: z.string().nullable().default(null),
-  /** The loop effects whose thrown failure the run's failed actions carry, and whether each failed as a promise: the calls its window holds. */
-  calls: z.array(z.object({ call: z.string().max(100), async: z.boolean() }).strict()).max(8).default(() => []),
+  /** The loop effects whose thrown failure the run's failed actions carry, whether each failed as a promise, and the resource the failing invocation named (its first argument's key, pane or id; null when it named none): the invocations its window holds. */
+  calls: z.array(z.object({ call: z.string().max(100), async: z.boolean(), resource: z.string().max(200).nullable().default(null) }).strict()).max(8).default(() => []),
+  /** Whether the run is a failed cycle's own call (the snapshot read a cycle fails on): the loop holds the whole next cycle to its window. */
+  cycle: z.boolean().default(false),
 }).strict();
 export type StepStall = z.infer<typeof stepStallSchema>;
 export const daemonStateSchema = z.object({

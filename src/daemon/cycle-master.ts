@@ -211,7 +211,10 @@ async function masterSessionStepWithin(cycle: Cycle) {
         return;
       }
       live.lastWake = { at, causes: keys, heartbeat };
-      for (const subject of subjects) live.subjects[subject.key] = promptDigest(subject.detail);
+      // Only the subjects the prompt named are acknowledged (GY-1854): a changed subject past the
+      // twenty a wake carries stays changed, so a later wake delivers it.
+      const delivered = new Set(keys);
+      for (const subject of subjects) if (delivered.has(subject.key)) live.subjects[subject.key] = promptDigest(subject.detail);
       // The accepted delivery also ends the bound's standing failure, so the class counts one
       // instance per deaf episode and the record reads the recovery, never a failure for ever.
       if (state.actions[masterWakeKey]?.state === 'failed')
@@ -286,7 +289,9 @@ export async function wakeMasterForStalls(config: MasterConfig, state: DaemonSta
   } finally { budget.end(); }
   const at = new Date(clock).toISOString();
   live.lastWake = { at, causes: keys, heartbeat: false };
-  for (const subject of subjects) live.subjects[subject.key] = promptDigest(subject.detail);
+  // Only the subjects the prompt named are acknowledged: a stall past the twenty it carried is woken by a later delivery.
+  const delivered = new Set(keys);
+  for (const subject of subjects) if (delivered.has(subject.key)) live.subjects[subject.key] = promptDigest(subject.detail);
   await record(state, `wake:master:${state.cycle}`, { kind: 'wake', work: null, principal: null, state: 'done',
     detail: `Woke master session ${live.agentName} for changed subjects: ${keys.join(', ')} — delivered beside the failed cycle, which ended before its master-session step`, attempts: 1, cycle: state.cycle }, clock, effects.persist);
   return keys;
