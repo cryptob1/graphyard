@@ -370,8 +370,8 @@ export interface AppCommandDependencies {
  */
 export async function appCommand(args: string[], dependencies: AppCommandDependencies) {
   const [action, ...rest] = args;
-  const { values, positionals } = parseArgs({ args: rest, options: { repo: { type: 'string' }, 'app-id': { type: 'string' }, 'key-file': { type: 'string' }, role: { type: 'string' }, plan: { type: 'boolean' }, 'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' }, 'ssh-key': { type: 'string' } }, allowPositionals: true });
-  if (action !== 'bind' && (positionals.length || values.plan || values['ssh-host'] || values['ssh-user'] || values['ssh-key'])) throw new Error('Only app bind takes a SLUG, --plan or --ssh-host/--ssh-user/--ssh-key: use app import --app-id ID --key-file PEM [--role ROLE], app list, or app bind SLUG [--plan]');
+  const { values, positionals } = parseArgs({ args: rest, options: { repo: { type: 'string' }, 'app-id': { type: 'string' }, 'key-file': { type: 'string' }, role: { type: 'string' }, plan: { type: 'boolean' }, 'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' }, 'ssh-key': { type: 'string' }, workspace: { type: 'string' } }, allowPositionals: true });
+  if (action !== 'bind' && (positionals.length || values.plan || values['ssh-host'] || values['ssh-user'] || values['ssh-key'] || values.workspace)) throw new Error('Only app bind takes a SLUG, --plan, --workspace or --ssh-host/--ssh-user/--ssh-key: use app import --app-id ID --key-file PEM [--role ROLE], app list, or app bind SLUG [--plan]');
   const repository = values.repo ?? (await discover(dependencies.root)).repository;
   if (!repository) throw new Error('Use --repo OWNER/NAME, or run from a checkout whose origin is the managed repository');
   const directory = installDirectory(installIdFor(repository), dependencies.configHome);
@@ -400,22 +400,24 @@ export async function appCommand(args: string[], dependencies: AppCommandDepende
  * `app bind SLUG [--plan]` (GY-1877): the separate step after `install --observe-only --apply`. It
  * prepares the recorded installation's own session (provider, service, domain, base branch) as an
  * observation-only one that binds SLUG, and prints its plan, or applies it: exactly the App step.
- * The record keeps no SSH target, so a docker-host installation names its host again with --ssh-host,
- * and an SSH-reached one its --ssh-user and --ssh-key as its install did.
+ * The record keeps no SSH target or Railway workspace, so a docker-host installation names its host
+ * again with --ssh-host, an SSH-reached one its --ssh-user and --ssh-key, and a Railway one whose
+ * account belongs to several workspaces its --workspace, as its install did.
  */
-async function bindAppCommand(positionals: string[], values: { 'app-id'?: string; 'key-file'?: string; role?: string; plan?: boolean; 'ssh-host'?: string; 'ssh-user'?: string; 'ssh-key'?: string }, repository: string, directory: string, record: InstallRecord | null, dependencies: AppCommandDependencies) {
+async function bindAppCommand(positionals: string[], values: { 'app-id'?: string; 'key-file'?: string; role?: string; plan?: boolean; 'ssh-host'?: string; 'ssh-user'?: string; 'ssh-key'?: string; workspace?: string }, repository: string, directory: string, record: InstallRecord | null, dependencies: AppCommandDependencies) {
   const [slug, ...extra] = positionals;
-  if (!slug || extra.length || values['app-id'] || values['key-file'] || values.role) throw new Error('Use app bind SLUG [--plan] [--repo OWNER/NAME] [--ssh-host HOST [--ssh-user USER] [--ssh-key FILE]]');
+  if (!slug || extra.length || values['app-id'] || values['key-file'] || values.role) throw new Error('Use app bind SLUG [--plan] [--repo OWNER/NAME] [--workspace NAME] [--ssh-host HOST [--ssh-user USER] [--ssh-key FILE]]');
   if (!/^[a-z0-9][a-z0-9-]{0,99}$/i.test(slug)) throw new Error(`app bind takes an App slug such as graphyard-owner-repo, not ${slug}`);
   if (!record) throw new Error(`No installation of ${repository} is recorded under ${directory}; app bind binds an App to a deployed observation-only control plane. Run graphyard install --provider PROVIDER --repo ${repository} --observe-only --apply first`);
   if (record.provider === 'docker-host' && !values['ssh-host']) throw new Error(`${repository} is installed on a Docker host, and its record keeps no SSH target: rerun as graphyard app bind ${slug} --ssh-host HOST [--ssh-user USER] [--ssh-key FILE], naming the host its observation-only install reached`);
   if (record.provider !== 'docker-host' && values['ssh-host']) throw new Error(`--ssh-host names a docker-host installation's target; ${repository} is installed on ${record.provider}`);
+  if (record.provider !== 'railway' && values.workspace) throw new Error(`--workspace names a Railway installation's workspace; ${repository} is installed on ${record.provider}`);
   if (record.provider !== 'docker-host' && record.provider !== 'hetzner' && (values['ssh-user'] || values['ssh-key'])) throw new Error(`--ssh-user and --ssh-key reach a docker-host or Hetzner installation; ${repository} is installed on ${record.provider}`);
   const session = await prepareInstall(dependencies.root, {
     repository, provider: record.provider, baseBranch: record.baseBranch, reviewPolicy: record.reviewPolicy,
     ...(record.domain ? { domain: record.domain } : {}), ...(record.service ? { serverName: record.service } : {}),
     ...(values['ssh-host'] ? { sshHost: values['ssh-host'] } : {}), ...(values['ssh-user'] ? { sshUser: values['ssh-user'] } : {}),
-    ...(values['ssh-key'] ? { sshKey: values['ssh-key'] } : {}),
+    ...(values['ssh-key'] ? { sshKey: values['ssh-key'] } : {}), ...(values.workspace ? { workspace: values.workspace } : {}),
     observeOnly: true, bindApp: slug,
   }, { log: line => console.error(line), ...(dependencies.configHome ? { configHome: dependencies.configHome } : {}), ...(dependencies.fetcher ? { fetch: dependencies.fetcher } : {}), ...dependencies.install }, values.plan ? 'plan' : 'apply');
   const plan = await buildPlan(session);
@@ -1730,11 +1732,12 @@ async function buildBindAppPlan(session: InstallSession): Promise<InstallPlan> {
   else if (saved.role !== 'control-plane') preflight.push({ name, ok: false, detail: `${saved.app.slug} is saved as a ${saved.role} App, and app bind binds the control-plane App`, fix: importFix });
   else if (bound && bound.appId !== saved.app.appId) preflight.push({ name, ok: false, detail: `this installation already binds GitHub App ${bound.slug} (app ${bound.appId}); app bind does not replace a bound App`, fix: `Rerun graphyard app bind ${bound.slug}, or remove that binding and every ${APP_VARIABLES.join(', ')} variable from the ${context.provider} deployment first` });
   else if (ghStatus.code !== 0) preflight.push({ name, ok: false, detail: 'reading the repository and adding it to the App\'s installation needs the GitHub CLI', fix: 'Authenticate gh (see the GitHub CLI check), then rerun' });
-  let installationId: number | null = null;
+  let installationId: number | null = null, deselected = false;
   if (saved && saved.role === 'control-plane' && !(bound && bound.appId !== saved.app.appId) && ghStatus.code === 0 && url) try {
     const reuse = await reuseApp(session, slug, 'control-plane', webhookUrlFor(url), false);
     installationId = reuse.app.installationId;
-    preflight.push({ name, ok: true, detail: `the imported control-plane App ${saved.app.slug} (app ${saved.app.appId}) holds the permissions it needs and is installed on ${reuse.account}${reuse.selection === 'all' ? ' for every repository' : bound ? '' : `; --apply adds ${repository} to that installation`}` });
+    deselected = !!bound && !await reachesRepository(session, saved.app, installationId);
+    preflight.push({ name, ok: true, detail: `the imported control-plane App ${saved.app.slug} (app ${saved.app.appId}) holds the permissions it needs and is installed on ${reuse.account}${reuse.selection === 'all' ? ' for every repository' : bound && !deselected ? '' : `; --apply adds ${repository} to that installation${deselected ? `, which no longer reaches it` : ''}`}` });
   } catch (error) { preflight.push({ name, ok: false, detail: error instanceof Error ? error.message : String(error), fix: importFix }); }
 
   // An App the record binds with the registration it holds now. `graphyard app import` writes a fresh
@@ -1756,7 +1759,7 @@ async function buildBindAppPlan(session: InstallSession): Promise<InstallPlan> {
   const hook = saved && alreadyBound && !polling ? await readWebhookConfig(appClient({ appId: saved.app.appId, privateKey: saved.app.privateKey }, session.deps.fetch)) : null;
   const merges = typeof adapter.applyVariables === 'function';
   const actions: PlanAction[] = [
-    { id: 'github.app', target: 'github', state: alreadyBound ? 'satisfied' : 'update', title: `Bind the imported GitHub App ${slug}${saved ? ` (app ${saved.app.appId})` : ''} as the control-plane App: add ${repository} to its installation with the host's gh login, verify the App reaches it, and record the binding in ${session.directory}; no browser step` },
+    { id: 'github.app', target: 'github', state: alreadyBound && !deselected ? 'satisfied' : 'update', title: `Bind the imported GitHub App ${slug}${saved ? ` (app ${saved.app.appId})` : ''} as the control-plane App: add ${repository} to its installation with the host's gh login, verify the App reaches it, and record the binding in ${session.directory}; no browser step` },
     { id: 'github.env', target: 'provider', state: ciPending || rebinding ? 'update' : alreadyBound ? 'satisfied' : 'create', title: `Write exactly ${APP_VARIABLES.join(', ')} to the server${merges ? '' : `; ${context.provider} rewrites the whole environment, so the control-plane variables are written again unchanged beside them`}`, values: [
       { name: 'GITHUB_APP_ID', value: saved ? String(saved.app.appId) : '<from the imported registration>', secret: false },
       { name: 'GITHUB_INSTALLATION_ID', value: bound && alreadyBound ? String(bound.installationId) : '<from the App installation>', secret: false },
@@ -1798,6 +1801,14 @@ async function buildBindAppPlan(session: InstallSession): Promise<InstallPlan> {
  * `graphyard app import` writes a new one, so a re-imported, rotated key never matches) and, when the
  * App's installation was read, the same installation.
  */
+/**
+ * Whether the App's installation still reaches the repository, read as the App itself: a repository
+ * removed from a selected-repositories installation since the bind is no longer reached, though the
+ * account's installation, and so the binding, still stands.
+ */
+const reachesRepository = async (session: InstallSession, app: Pick<AppFacts, 'appId' | 'privateKey'>, installationId: number) =>
+  await repositoryInstallation(app, session.inputs.repository, session.deps.fetch) === installationId;
+
 const bindingCurrent = (bound: { webhookFingerprint: string; installationId: number }, app: { webhookSecret?: string }, installationId: number | null) =>
   bound.webhookFingerprint === fingerprint(app.webhookSecret ?? '') && (installationId === null || installationId === bound.installationId);
 
@@ -1819,6 +1830,11 @@ async function performBindApp(session: InstallSession, plan: InstallPlan): Promi
   const installationId = sameApp ? (await reuseApp(session, slug, 'control-plane', webhookUrlFor(url), false)).app.installationId : null;
   const alreadyBound = sameApp && bindingCurrent(record.github!, saved.app, installationId);
   if (sameApp && !alreadyBound) log(`The imported registration of GitHub App ${saved.app.slug} (app ${saved.app.appId}) differs from the one bound to ${url}; binding it again`);
+  // A bound App whose installation no longer reaches the repository has it added back and reached with the App's own token; nothing else is written again.
+  if (alreadyBound && !await reachesRepository(session, saved.app, installationId!)) {
+    log(`Installation ${installationId} of GitHub App ${saved.app.slug} no longer reaches ${repository}; adding it back`);
+    await reuseApp(session, slug, 'control-plane', webhookUrlFor(url), true);
+  }
   let facts: AppFacts & { slug: string }, ciAppIds: number[];
   const detect = async () => {
     const ciApps = await detectCiAppIds(githubCli(context.transport), repository, base, facts.appId);

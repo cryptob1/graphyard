@@ -4,7 +4,7 @@ import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { appCommand, applyInstall, buildPlan, installRequestFromArgs, prepareInstall, type InstallDependencies, type InstallPlan, type InstallSummary } from '../src/install/index.js';
 import { deliveryPolicySchema } from '../src/model/delivery-policy.js';
-import { appKey, harness, CI_APP_ID, REPOSITORY, REPOSITORY_ID } from './install-harness.js';
+import { appKey, harness, CI_APP_ID, REPOSITORY, REPOSITORY_ID, type FakeApp } from './install-harness.js';
 
 // GY-1877: `graphyard app bind SLUG`, the separate step after `install --observe-only --apply`, binds an
 // App `graphyard app import` saved on this host to the recorded observation-only control plane:
@@ -50,7 +50,10 @@ async function observeOnlyInstallation(options: { ciVisible?: boolean } = {}) {
   // The served App is the one whose GITHUB_APP_ID the deployment was given, unless the server fails to load it.
   const server = { loadsApp: true };
   let fixture: Awaited<ReturnType<typeof harness>>;
-  fixture = await harness({ provider: 'railway', extraResponses: [ciChecks(ci), ...statefulRailway()], apps: [{ appId: APP_ID, slug: SLUG, installationId: INSTALLATION_ID }],
+  // The App's installation, whose selected repositories the gh PUT the bind runs adds the repository back to.
+  const app: FakeApp = { appId: APP_ID, slug: SLUG, installationId: INSTALLATION_ID, deselected: false };
+  const addRepository = { match: `gh api --method PUT /user/installations/${INSTALLATION_ID}/repositories/${REPOSITORY_ID}`, result: () => { app.deselected = false; return ''; } };
+  fixture = await harness({ provider: 'railway', extraResponses: [addRepository, ciChecks(ci), ...statefulRailway()], apps: [app],
     statusBody: () => {
       const bound = server.loadsApp && fixture.allCommandLines().some(line => line.includes(`--set GITHUB_APP_ID=${APP_ID}`));
       return { actor: { id: 'owner-project-operator', role: 'admin' }, repository: REPOSITORY, github: bound, githubAppId: bound ? APP_ID : null, githubInstallationId: bound ? INSTALLATION_ID : null };
@@ -78,7 +81,7 @@ async function observeOnlyInstallation(options: { ciVisible?: boolean } = {}) {
   // What `graphyard app import --app-id APP_ID --key-file PEM` saves in the install directory.
   const importApp = (webhookSecret = IMPORTED_SECRET) => writeFile(join(first.directory, `imported-app-${SLUG}.json`), JSON.stringify({ appId: APP_ID, slug: SLUG, privateKey: appKey, webhookSecret, repository: REPOSITORY, role: 'control-plane' }), { mode: 0o600 });
   const readRecord = async () => JSON.parse(await readFile(join(first.directory, 'install.json'), 'utf8'));
-  return { fixture, calls, logs, observe, bind, bindPlan, bindApply, directory: first.directory, importApp, readRecord, ci, server };
+  return { fixture, calls, logs, observe, bind, bindPlan, bindApply, directory: first.directory, importApp, readRecord, ci, server, app };
 }
 
 const state = (actions: InstallPlan['actions'], id: string) => actions.find(action => action.id === id)!.state;
@@ -275,6 +278,7 @@ test('app bind reaches a recorded docker-host installation through --ssh-host, w
     await applyInstall(first, await buildPlan(first));
     await writeFile(join(first.directory, `imported-app-${SLUG}.json`), JSON.stringify({ appId: APP_ID, slug: SLUG, privateKey: appKey, webhookSecret: IMPORTED_SECRET, repository: REPOSITORY, role: 'control-plane' }), { mode: 0o600 });
     const bind = (...flags: string[]) => appCommand(['bind', SLUG, ...flags], { root: fixture.root, configHome: fixture.configHome, install: fixture.deps });
+    await assert.rejects(bind('--plan', '--ssh-host', target.sshHost, '--workspace', 'Graphyard'), /--workspace names a Railway installation's workspace; owner\/project is installed on docker-host/);
     await assert.rejects(bind('--plan'), /installed on a Docker host, and its record keeps no SSH target: rerun as graphyard app bind graphyard-owner-project-imported --ssh-host HOST/);
     const plan = await bind('--plan', '--ssh-host', target.sshHost, '--ssh-user', target.sshUser) as InstallPlan;
     assert.equal(plan.preflight.find(entry => entry.name === 'SSH target')!.detail, 'deploy@203.0.113.10');
@@ -349,5 +353,37 @@ test('app bind binds a re-imported App again: a rotated key and new webhook secr
     assert.ok(lines.some(line => /--set GITHUB_CI_APP_IDS=/.test(line) && line.includes('424242')), 'GITHUB_CI_APP_IDS was not written with the new publisher');
     assert.equal(lines.filter(line => /^railway up/.test(line)).length, 1);
     assert.deepEqual([...(await readRecord()).github.ciAppIds].sort(), [CI_APP_ID, 424_242].sort());
+  } finally { await fixture.cleanup(); }
+});
+
+test('app bind adds the repository back to a bound App installation that no longer reaches it, writing nothing else, and passes --workspace to a Railway installation (GY-1877)', async () => {
+  const { fixture, bind, bindPlan, bindApply, importApp, readRecord, app } = await observeOnlyInstallation();
+  try {
+    await importApp();
+    await bindApply();
+    const record = await readRecord();
+    // The repository is removed from the App's selected-repositories installation after the bind.
+    app.deselected = true;
+    const plan = await bindPlan();
+    assert.equal(state(plan.actions, 'github.app'), 'update');
+    assert.match(plan.preflight.find(entry => entry.name === `Bind App ${SLUG}`)!.detail, /--apply adds owner\/project to that installation, which no longer reaches it/);
+    const mark = fixture.allCommandLines().length;
+    const patches = fixture.requests.filter(request => request.method === 'PATCH').length;
+    const tokens = fixture.requests.filter(request => request.url.endsWith('/access_tokens')).length;
+    await bindApply();
+    const lines = fixture.allCommandLines().slice(mark);
+    assert.deepEqual(lines.filter(line => /--method (POST|PUT|PATCH|DELETE)/.test(line)), [`gh api --method PUT /user/installations/${INSTALLATION_ID}/repositories/${REPOSITORY_ID}`]);
+    assert.ok(fixture.requests.filter(request => request.url.endsWith('/access_tokens')).length > tokens, 'the App did not prove it reaches the repository');
+    assert.equal(app.deselected, false);
+    assert.deepEqual(variablesSet(lines), []);
+    assert.ok(!lines.some(line => /^railway up/.test(line)), 'the repair deployed');
+    assert.equal(fixture.requests.filter(request => request.method === 'PATCH').length, patches);
+    assert.deepEqual(await readRecord(), record);
+    assert.equal(state((await bindPlan()).actions, 'github.app'), 'satisfied');
+
+    // A Railway account in several workspaces names the one its install used; another provider refuses the flag.
+    const named = await bind('--plan', '--workspace', 'Graphyard') as InstallPlan;
+    assert.equal(named.preflight.find(entry => entry.name === 'Railway workspace')!.detail, 'Graphyard (ws-graphyard-0001)', 'the named workspace was not the one resolved');
+    await assert.rejects(appCommand(['list', '--workspace', 'Personal'], { root: fixture.root, configHome: fixture.configHome }), /Only app bind takes/);
   } finally { await fixture.cleanup(); }
 });

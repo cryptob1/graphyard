@@ -139,7 +139,9 @@ export function githubResponses(state: FakeState, repository = REPOSITORY, branc
 export const REPOSITORY_ID = 9001;
 
 /** An App whose key is saved on the host (`app import`, GY-1877), as GitHub's App endpoints answer the App itself. */
-export interface FakeApp { appId: number; slug: string; installationId: number; account?: string; repositorySelection?: 'all' | 'selected'; permissions?: Record<string, string> }
+export interface FakeApp { appId: number; slug: string; installationId: number; account?: string; repositorySelection?: 'all' | 'selected'; permissions?: Record<string, string>;
+  /** The repository is not among its selected repositories (GY-1877); GitHub's GET /repos/{repo}/installation answers 404. */
+  deselected?: boolean }
 /** The App a JWT names (`iss`), read without verifying its signature: the harness checks flows, not keys. */
 const appOfJwt = (apps: FakeApp[], authorization: string) => {
   try { return apps.find(app => String(app.appId) === String(JSON.parse(Buffer.from(authorization.replace(/^Bearer /, '').split('.')[1], 'base64url').toString()).iss)) ?? null; } catch { return null; }
@@ -236,6 +238,7 @@ export async function harness(options: HarnessOptions): Promise<Harness> {
     const app = appOfJwt(options.apps ?? [], String((init.headers ?? {}).Authorization ?? ''));
     if (app && url.endsWith('/app')) return json(200, { id: app.appId, slug: app.slug, owner: { login: app.account ?? repository.split('/')[0] }, permissions: app.permissions ?? requiredPermissions(controlPlanePermissions) });
     if (app && url.includes('/app/installations')) return json(200, [{ id: app.installationId, account: { login: app.account ?? repository.split('/')[0] }, permissions: app.permissions ?? requiredPermissions(controlPlanePermissions), repository_selection: app.repositorySelection ?? 'selected', suspended_at: null }]);
+    if (app && url.endsWith(`/repos/${repository}/installation`)) return app.deselected ? json(404, { message: 'Not Found' }) : json(200, { id: app.installationId });
     if (url.endsWith(`/repos/${repository}`)) return json(200, { id: REPOSITORY_ID, full_name: repository, owner: { login: repository.split('/')[0] } });
     if (url.endsWith('/app/hook/config') && method === 'PATCH') { state.hookConfig = JSON.parse(String(init.body)); return json(200, state.hookConfig); }
     if (url.endsWith('/app/hook/config')) return json(200, state.hookConfig ?? { url: '', content_type: 'json' });
