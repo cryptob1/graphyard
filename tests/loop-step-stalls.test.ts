@@ -13,7 +13,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // The modules under test are imported inside each test, so a run against code without them fails
 // its cases rather than the file (graphyard verify's exercise).
-const load = async () => ({ S: await import('../src/daemon/step-stalls.js'), R: await import('../src/stall-remedies.js') });
+const load = async () => ({ S: await import('../src/daemon/step-stalls.js'), U: await import('../src/daemon/stall-upstream.js'), R: await import('../src/stall-remedies.js') });
 
 // GY-1854: a loop step or dispatcher call that fails with the same normalised signature on three
 // consecutive cycles is recorded as one stall; a bound remedy (unknown profile, 401 credential,
@@ -762,6 +762,225 @@ test('unit:stall-kept-while-admitted-attempt-runs — a launch admitted by a sta
   assert.equal(note.stalled, false, 'no second stall is recorded');
   assert.equal(note.run.count, 4);
   assert.deepEqual(await S.remedyStalledSteps(loop, async () => { throw new Error('applied twice'); }, clock), []);
+});
+
+// GY-1855 AC-2: past the clearing bound the loop files exactly one upstream item per signature; master status lists each stall.
+test('unit:loop-step-stall-upstream — a stall past six consecutive failing cycles files exactly one upstream item per signature; a later cycle and a retry after a lost reply file nothing new; master status lists signature, count, remedy and owner', async () => {
+  const { S, U } = await load();
+  const loop = state();
+  loop.cycle = 1;
+  const failing = { kind: 'refresh', state: 'failed' as const, detail: 'the control plane timed out after 5000ms reading /api/status' };
+  // Three cycles record the stall; cycles 4–6 push it past the upstream bound without a clearing remedy.
+  for (const cycle of [1, 2, 3, 4, 5, 6]) {
+    loop.cycle = cycle;
+    S.noteCycleStalls(loop, [failing], cycle, tick(S.stallBackoffMs + 1));
+  }
+  const [stall] = Object.values(loop.stepStalls);
+  assert.equal(stall.count, S.stallUpstreamCycles);
+  assert.equal(U.stallFilesUpstream(stall), true);
+  assert.equal(S.stallUpstreamCycles, 2 * S.stallCycleBound);
+
+  const asks: { input: unknown; key: string }[] = [];
+  const persist = async () => {};
+  const filer = async (input: unknown, key: string) => {
+    asks.push({ input, key });
+    return { key: 'GY-STALL-1' } as never;
+  };
+  const filed = await U.fileStalledStepsUpstream(loop, filer, () => clock, persist);
+  assert.ok(filed);
+  assert.equal(filed.state, 'done');
+  assert.equal(asks.length, 1);
+  assert.equal(asks[0].key, U.stallUpstreamIdempotencyKey(stall.signature));
+  assert.equal(asks[0].key, `loop-step-stall:${S.stallSubjectKey(stall.signature).slice('stall:'.length)}`);
+  // The body carries the stall's evidence: step, signature, count, times, last error and remedy record.
+  assert.deepEqual(asks[0].input, U.stallUpstreamItem(stall));
+  const body = asks[0].input as { title: string; description: string };
+  assert.match(body.title, /refresh call fails/);
+  assert.match(body.description, new RegExp(`Consecutive failing cycles: ${S.stallUpstreamCycles}`));
+  assert.match(body.description, /Last error: the control plane timed out after 5000ms reading \/api\/status/);
+  assert.match(body.description, /Remedy: none: no remedy binds/);
+  assert.match(body.description, new RegExp(`First failure: ${stall.firstAt}`));
+  assert.equal(loop.stallUpstream.filed[S.stallSubjectKey(stall.signature)]?.key, 'GY-STALL-1');
+  assert.deepEqual(loop.stallUpstream.pending, {});
+
+  // A later cycle past the bound files nothing more: the cursor's done row is the local dedup.
+  loop.cycle = 7;
+  S.noteCycleStalls(loop, [failing], 7, tick(S.stallBackoffMs + 1));
+  assert.equal(await U.fileStalledStepsUpstream(loop, filer, () => clock, persist), null);
+  assert.equal(asks.length, 1, 'exactly one item per signature');
+
+  // master status lists the stall with signature, count, remedy and owner, and names the filed item.
+  const standing = Object.values(loop.stepStalls)[0];
+  const attention = U.stallStatusAttention(loop, '/outside/graphyard.mjs');
+  assert.equal(attention.length, 1);
+  assert.equal(attention[0].subject, S.stallSubjectKey(standing.signature));
+  assert.match(attention[0].text, new RegExp(`failed ${standing.count} cycle`));
+  assert.match(attention[0].text, new RegExp(standing.signature.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(attention[0].text, /no remedy binds to it/);
+  assert.match(attention[0].text, /Its upstream item is GY-STALL-1/);
+  assert.equal(attention[0].role, 'master');
+  assert.equal(attention[0].human, false);
+  assert.match(attention[0].next, /master status/);
+
+  // A stall under the bound is listed but files nothing yet.
+  const early = state();
+  for (const cycle of [1, 2, 3]) S.noteCycleStalls(early, [failing], cycle, tick(1));
+  assert.equal(U.stallFilesUpstream(Object.values(early.stepStalls)[0]), false);
+  assert.equal(await U.fileStalledStepsUpstream(early, filer, () => clock, persist), null);
+  assert.equal(asks.length, 1);
+  const earlyList = U.stallStatusAttention(early, 'graphyard.mjs');
+  assert.equal(earlyList.length, 1);
+  assert.match(earlyList[0].text, /failed 3 cycle/);
+  assert.doesNotMatch(earlyList[0].text, /upstream item/);
+});
+
+test('unit:loop-step-stall-upstream-retries — an interrupted filing, a failed one whose stall cleared, and a re-formed stall each file exactly once, with the body first composed', async () => {
+  const { S, U } = await load();
+  const failing = { kind: 'refresh', state: 'failed' as const, detail: 'the control plane timed out after 5000ms reading /api/status' };
+  const stalled = () => {
+    const loop = state();
+    for (const cycle of [1, 2, 3, 4, 5, 6]) { loop.cycle = cycle; S.noteCycleStalls(loop, [failing], cycle, tick(S.stallBackoffMs + 1)); }
+    return loop;
+  };
+  const persist = async () => {};
+  const asks: { input: unknown; key: string }[] = [];
+  const filer = async (input: unknown, key: string) => { asks.push({ input, key }); return { key: 'GY-STALL-2' } as never; };
+
+  // B1: the loop exits after persisting `started`, before the plane's answer is recorded.
+  const interrupted = stalled();
+  const [stall] = Object.values(interrupted.stepStalls);
+  void U.fileStalledStepsUpstream(interrupted, () => new Promise(() => {}), () => clock, persist);
+  await new Promise(resolve => setImmediate(resolve));
+  const subject = S.stallSubjectKey(stall.signature), key = U.stallUpstreamActionKey(stall.signature);
+  assert.equal(interrupted.actions[key]?.state, 'started', 'the ask was cut off before its answer was recorded');
+  const first = interrupted.stallUpstream.pending[subject]!.body;
+  assert.equal(await U.fileStalledStepsUpstream(interrupted, filer, () => clock, persist), null, 'the same cycle does not ask twice');
+  interrupted.cycle += 1;
+  // The stall counted on meanwhile: the re-ask still sends the body first composed.
+  S.noteCycleStalls(interrupted, [{ ...failing, detail: `${failing.detail} again` }], interrupted.cycle, tick(S.stallBackoffMs + 1));
+  const resumed = await U.fileStalledStepsUpstream(interrupted, filer, () => clock, persist);
+  assert.equal(resumed?.state, 'done');
+  assert.equal(asks.length, 1);
+  assert.deepEqual(asks[0].input, JSON.parse(first));
+  interrupted.cycle += 1;
+  assert.equal(await U.fileStalledStepsUpstream(interrupted, filer, () => clock, persist), null);
+  assert.equal(asks.length, 1, 'a started row followed by a re-run files exactly once');
+
+  // A filing that failed at the bound is asked again after its stall cleared, with the same body.
+  const cleared = stalled();
+  const failed = await U.fileStalledStepsUpstream(cleared, async () => { throw new Error('Graphyard refused work (403): forbidden'); }, () => clock, persist);
+  assert.equal(failed?.state, 'failed');
+  const body = Object.values(cleared.stallUpstream.pending)[0]!.body;
+  cleared.cycle += 1;
+  S.noteStepsSucceeded(cleared, cleared.cycle, tick(S.stallBackoffMs + 1));
+  assert.deepEqual(cleared.stepStalls, {}, 'the stall cleared');
+  cleared.cycle += 1;
+  assert.equal((await U.fileStalledStepsUpstream(cleared, filer, () => clock, persist))?.state, 'done');
+  assert.equal(asks.length, 2);
+  assert.deepEqual(asks[1].input, JSON.parse(body));
+
+  // The stall re-forms under the same signature: its filed key files nothing more.
+  for (const cycle of [20, 21, 22, 23, 24, 25]) { cleared.cycle = cycle; S.noteCycleStalls(cleared, [failing], cycle, tick(S.stallBackoffMs + 1)); }
+  assert.equal(U.stallFilesUpstream(Object.values(cleared.stepStalls)[0]!), true);
+  delete cleared.actions[U.stallUpstreamActionKey(Object.values(cleared.stepStalls)[0]!.signature)];
+  assert.equal(await U.fileStalledStepsUpstream(cleared, filer, () => clock, persist), null);
+  assert.equal(asks.length, 2, 'one item per signature, even after the done row is pruned');
+});
+
+test('unit:loop-step-stall-upstream-ledger-full — a full ledger of waiting filings evicts none: a newly due stall waits on its run until one is filed, and a plane that does not answer ends the cycle\u2019s asks', async () => {
+  const { S, U } = await load();
+  const failing = { kind: 'refresh', state: 'failed' as const, detail: 'the control plane timed out after 5000ms reading /api/status' };
+  const loop = state();
+  for (const cycle of [1, 2, 3, 4, 5, 6]) { loop.cycle = cycle; S.noteCycleStalls(loop, [failing], cycle, tick(S.stallBackoffMs + 1)); }
+  const [stall] = Object.values(loop.stepStalls);
+  const body = JSON.stringify(U.stallUpstreamItem({ ...stall!, signature: 'waiting' }));
+  for (let index = 0; index < U.retainedStallFilings; index++)
+    loop.stallUpstream.pending[`stall:waiting${index}`] = { signature: `waiting filing ${index}`, step: 'refresh', at: new Date(clock).toISOString(), body };
+  for (let index = 0; index < U.retainedStallFilings; index++)
+    loop.actions[U.stallUpstreamActionKey(`waiting filing ${index}`)] = { kind: 'fault', work: null, principal: null, state: 'failed', detail: 'refused', attempts: 5, cycle: loop.cycle, at: new Date(clock).toISOString(), epoch: null };
+  const asks: string[] = [];
+  const filer = async (_input: unknown, key: string) => { asks.push(key); return { key: 'GY-STALL-3' } as never; };
+  assert.equal(await U.fileStalledStepsUpstream(loop, filer, () => clock, async () => {}), null, 'the full ledger admits nothing and its waiting filings are on backoff');
+  assert.equal(Object.keys(loop.stallUpstream.pending).length, U.retainedStallFilings, 'no waiting filing was evicted');
+  assert.equal(asks.length, 0);
+  // One waiting filing is filed: its place admits the stall, which still stands.
+  delete loop.actions[U.stallUpstreamActionKey('waiting filing 0')];
+  assert.equal((await U.fileStalledStepsUpstream(loop, filer, () => clock, async () => {}))?.state, 'done');
+  assert.deepEqual(asks, [U.stallUpstreamIdempotencyKey('waiting filing 0'), U.stallUpstreamIdempotencyKey(stall!.signature)]);
+  assert.equal(loop.stallUpstream.filed[S.stallSubjectKey(stall!.signature)]?.key, 'GY-STALL-3');
+
+  // A plane that does not answer: one ask this cycle, the rest wait for a later one.
+  for (let index = 1; index < 4; index++) delete loop.actions[U.stallUpstreamActionKey(`waiting filing ${index}`)];
+  asks.length = 0;
+  const down = async (_input: unknown, key: string) => { asks.push(key); throw new Error('The operation was aborted due to timeout'); };
+  assert.equal((await U.fileStalledStepsUpstream(loop, down, () => clock, async () => {}))?.state, 'failed');
+  assert.equal(asks.length, 1, 'the unanswered ask ends the cycle\u2019s asks');
+  assert.equal(Object.keys(loop.stallUpstream.pending).length, U.retainedStallFilings - 1, 'the unanswered filing still waits');
+});
+
+test('unit:loop-step-stall-upstream-admits-before-asking — every due signature is on the cursor before any ask, so a plane that times out keeps them all, and stalls that clear during the outage are each filed once it answers', async () => {
+  const { S, U } = await load();
+  const loop = state();
+  const failures = ['refresh', 'reclaim', 'close'].map(kind => ({ kind, state: 'failed' as const, detail: `the ${kind} call timed out after 5000ms` }));
+  for (const cycle of [1, 2, 3, 4, 5, 6]) { loop.cycle = cycle; S.noteCycleStalls(loop, failures.slice(0, 2), cycle, tick(S.stallBackoffMs + 1)); }
+  const persisted: string[][] = [];
+  const persist = async (written: typeof loop) => { persisted.push(Object.values(written.stallUpstream.pending).map(pending => pending.step)); };
+  const asks: string[] = [];
+  const down = async (_input: unknown, key: string) => { asks.push(key); throw new Error('The operation was aborted due to timeout'); };
+  assert.equal((await U.fileStalledStepsUpstream(loop, down, () => clock, persist))?.state, 'failed');
+  assert.equal(asks.length, 1, 'the unanswered ask ends the cycle’s asks');
+  assert.deepEqual(persisted[0]?.sort(), ['reclaim', 'refresh'], 'both due signatures were persisted before the first ask');
+  assert.equal(Object.keys(loop.stallUpstream.pending).length, 2);
+
+  // A retry of a waiting filing that times out again still admits a stall that fell due meanwhile.
+  for (const cycle of [7, 8, 9, 10, 11, 12]) { loop.cycle = cycle; S.noteCycleStalls(loop, failures, cycle, tick(S.stallBackoffMs + 1)); }
+  loop.cycle = 40;
+  assert.equal((await U.fileStalledStepsUpstream(loop, down, () => clock, persist))?.state, 'failed');
+  assert.deepEqual(Object.values(loop.stallUpstream.pending).map(pending => pending.step).sort(), ['close', 'reclaim', 'refresh']);
+
+  // Every stall clears during the outage; once the plane answers, each signature is filed exactly once.
+  loop.cycle = 41;
+  S.noteStepsSucceeded(loop, loop.cycle, tick(S.stallBackoffMs + 1));
+  assert.deepEqual(loop.stepStalls, {}, 'the stalls cleared');
+  asks.length = 0;
+  const filer = async (_input: unknown, key: string) => { asks.push(key); return { key: `GY-UP-${asks.length}` } as never; };
+  loop.cycle = 80;
+  await U.fileStalledStepsUpstream(loop, filer, () => clock, persist);
+  assert.equal(new Set(asks).size, 3, `each of the three signatures was filed: ${asks.join(', ')}`);
+  assert.equal(asks.length, 3, 'once each');
+  assert.deepEqual(loop.stallUpstream.pending, {});
+  assert.equal(Object.keys(loop.stallUpstream.filed).length, 3);
+});
+
+test('unit:loop-step-stall-upstream-pass-budget — a slow-answering plane holds one filing pass for at most its budget plus one request, a fast one for at most its ask count, and every filing it did not reach waits for a later cycle', async () => {
+  const { S, U } = await load();
+  const loop = state();
+  loop.cycle = 10;
+  const body = JSON.stringify({ title: 'waiting', type: 'bug', priority: 1, description: 'waiting', criteria: [{ id: 'AC-1', text: 'waiting', proofs: ['unit:waiting'] }], reason: 'waiting' });
+  for (let index = 0; index < 50; index++) loop.stallUpstream.pending[`stall:slow${index}`] = { signature: `slow filing ${index}`, step: 'refresh', at: new Date(clock + index).toISOString(), body };
+  // Each answer arrives just under the 30-second request timeout, refused for the item alone.
+  const asks: string[] = [];
+  const slow = async (_input: unknown, key: string) => { asks.push(key); tick(29_000); throw new Error('Graphyard refused work (422): invalid item'); };
+  const began = clock;
+  await U.fileStalledStepsUpstream(loop, slow, () => clock, async () => {});
+  assert.ok(clock - began <= U.stallUpstreamPassBudgetMs + 30_000, `the pass took ${clock - began}ms`);
+  assert.equal(asks.length, 2, 'no ask starts once the budget is spent');
+  assert.equal(Object.keys(loop.stallUpstream.pending).length, 50, 'every filing still waits');
+  // A fast plane: the pass stops at its ask count, and the next cycle reaches filings this one did not.
+  const filed: string[] = [];
+  const fast = async (_input: unknown, key: string) => { filed.push(key); return { key: `GY-UP-${filed.length}` } as never; };
+  loop.cycle = 11;
+  await U.fileStalledStepsUpstream(loop, fast, () => clock, async () => {});
+  assert.equal(filed.length, U.stallUpstreamAsksPerPass);
+  assert.ok(!filed.some(key => asks.includes(key)), 'never-asked filings go before those just refused');
+  for (let cycle = 12; Object.keys(loop.stallUpstream.pending).length; cycle++) {
+    assert.ok(cycle < 200, 'every waiting filing is filed within a bounded number of cycles');
+    loop.cycle = cycle;
+    await U.fileStalledStepsUpstream(loop, fast, () => clock, async () => {});
+  }
+  assert.equal(new Set(filed).size, 50);
+  assert.equal(filed.length, 50, 'each filed exactly once');
+  assert.equal(S.stallUpstreamCycles, 6);
 });
 
 test('unit:stall-signature-overflow-invocations-held — ten panes sharing one signature from one effect are all held after the third cycle, every invocation past the eighth included, and the record stays within its bound', async () => {

@@ -1,4 +1,4 @@
-// Concern: loop-step stall signatures (GY-1854) — the normalised signature of a failing call, the three-consecutive-cycle stall rule, the bound remedy applied once per run and verified, and the unbound stall's master wake and five-minute backoff.
+// Concern: loop-step stall signatures (GY-1854) — the normalised signature of a failing call, the three-consecutive-cycle stall rule, the bound remedy applied once per run and verified, the unbound stall's master wake and five-minute backoff, and when an uncleared stall files upstream (GY-1855).
 import { createHash } from 'node:crypto';
 import { chmod, readdir, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
@@ -20,8 +20,8 @@ import { localTransport } from '../install/transport.js';
 import { DispatchReservedError } from '../master/dispatch-reservation.js';
 import { setupAgentEnvironments } from '../master/environments.js';
 
-/** Consecutive cycles one signature must fail for the run to be recorded as one stall (GY-1854 AC-1). */
-export const stallCycleBound = 3;
+/** Consecutive cycles one signature must fail for the run to be recorded as one stall (GY-1854 AC-1); past twice that an uncleared stall files its one upstream item (GY-1855 AC-2, stallFilesUpstream in ./stall-upstream.ts): woken at three, the master holds one stall-length more. */
+export const stallCycleBound = 3, stallUpstreamCycles = 2 * stallCycleBound;
 /**
  * A stalled call is attempted at most once per five minutes while its stall stands (GY-1854 AC-1):
  * `noteStepFailure` arms one window per attempt, failures inside it are that attempt still failing,

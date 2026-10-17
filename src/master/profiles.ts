@@ -380,6 +380,11 @@ export const masterConfigSchema = z.object({
   // The master's operator-agent identity and the approver identity for its two-party decisions. Paths only, never tokens.
   operatorAgent: agentIdentitySchema.optional(),
   approver: agentIdentitySchema.optional(),
+  // GY-1855: install that receives uncleared loop-step stall filings; absent files into this install (slow-loop precedent).
+  upstream: z.object({
+    url: z.string().min(1).max(500),
+    credentialFile: z.string().min(1).max(1000).refine(isAbsolute, 'upstream.credentialFile must be absolute'),
+  }).strict().optional(),
   // The system invariants' thresholds (GY-404, src/model/invariants.ts), each defaulting to the loop's bound.
   invariants: invariantThresholdsSchema.optional(),
   // Delivery-speed p90 targets master status judges (GY-1232); unset keeps 2h ready→merged, 8h merged→production.

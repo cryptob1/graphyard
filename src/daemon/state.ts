@@ -605,6 +605,14 @@ export const daemonStateSchema = z.object({
    * and bounds the record (retainedStepStalls).
    */
   stepStalls: z.record(z.string(), stepStallSchema).default(() => ({})),
+  /**
+   * GY-1855: upstream filings of uncleared stalls, by stall subject: each body composed once at its
+   * first ask and kept until the plane files it, then the filed key. src/daemon/stall-upstream.ts owns the rules and bounds.
+   */
+  stallUpstream: z.object({
+    pending: z.record(z.string().max(40), z.object({ signature: z.string().max(800), step: z.string().max(100), at: z.string(), body: z.string().max(30_000) }).strict()).default(() => ({})),
+    filed: z.record(z.string().max(40), z.object({ key: z.string().max(100), at: z.string() }).strict()).default(() => ({})),
+  }).strict().default(() => ({ pending: {}, filed: {} })),
   /** The item keys the decisions step reached past its time budget last cycle, which this cycle reaches first (GY-1286). */
   decisionsDeferred: z.array(z.string().max(200)).max(5000).default(() => []),
   /** Shared project memory (GY-1125): recent approved decisions, recurring pitfalls with sanctioned remedies, and merges. */
