@@ -1,14 +1,10 @@
-// Concern: the recurring-intervention scan — when it runs, and the work item it opens for a kind at a stage that keeps recurring.
-import { createHash } from 'node:crypto';
-import type { Engine } from '../engine.js';
-import type { Principal, Work } from '../model.js';
-import { postDeployProofPrefix } from '../model/post-merge-proofs.js';
-import { interventionKindLabel, type InterventionPattern, type InterventionPolicy } from '../model/interventions.js';
+// Concern: the recurring-intervention scan — when it runs and the policy window it reads; patterns are reported in master status, never filed as work items.
+import type { Principal } from '../model.js';
+import type { InterventionPolicy } from '../model/interventions.js';
 import { boundedSnapshot } from '../store/bounded-snapshot.js';
 import { LedgerRowCache, readAbsorbedPlans, readInterventionLedger } from './ledger.js';
 import type { Store } from '../store.js';
-import { foldInterventions } from './fold.js';
-import { detectPatterns, readLoopRoutes, windowStart } from './report.js';
+import { readLoopRoutes, windowStart } from './report.js';
 
 /**
  * Whether the server runs the pattern scan (GY-1372). On by default (GY-1381): the scan reads the
@@ -59,51 +55,3 @@ export type ScanWindow = Awaited<ReturnType<typeof readScanWindow>>;
 
 /** The control plane acting as itself when it opens work from feedback; the ledger names it as every other control-plane write is named. */
 export const controlPlaneActor: Principal = { id: 'graphyard', role: 'admin', sessionKind: 'ai' };
-const minutes = (value: number) => `${Math.round(value / 60_000)} min`;
-
-/**
- * A recurring intervention becomes work without a human noticing it (AC-3): a kind at a stage
- * that crossed the threshold inside the window opens one item naming the pattern, its frequency,
- * the items it affected and the attention it cost, and linking the instances as evidence. While
- * that item is open nothing is opened again for the pattern; instances an item already links
- * never count towards a second one.
- */
-export async function openPatternItems(engine: Engine, policy: InterventionPolicy, options: { now?: string; actor?: Principal; limit?: number; window?: ScanWindow } = {}) {
-  // Detection reads the policy window of the ledger and nothing older (GY-422).
-  const { snapshot, now, rows, truncated, routes } = options.window ?? await readScanWindow(engine.store, policy, options);
-  const folded = foldInterventions(rows, snapshot.work, now, { routes });
-  const opened: Work[] = [];
-  for (const pattern of detectPatterns(folded.interventions, snapshot.work, policy, now)) {
-    if (pattern.item || pattern.unlinked.length < policy.threshold) continue;
-    const instances = pattern.unlinked;
-    const items = [...new Set(instances.map(entry => entry.work?.key).filter((key): key is string => !!key))];
-    const waitedMs = instances.reduce((total, entry) => total + entry.waitedMs, 0);
-    const label = interventionKindLabel[pattern.kind], where = pattern.stage ? `the ${pattern.stage} stage` : 'no stage';
-    const origin: InterventionPattern = { kind: pattern.kind, stage: pattern.stage, window: { from: pattern.from, to: now, days: policy.windowDays }, threshold: policy.threshold, count: instances.length, waitedMs, items,
-      instances: instances.map(entry => ({ id: entry.id, work: entry.work?.key ?? null, requestedAt: entry.requestedAt, resolvedAt: entry.resolvedAt, waitedMs: entry.waitedMs, sources: entry.sources.slice(0, 20) })), detectedAt: now };
-    const description = [
-      `Graphyard opened this item itself: ${instances.length} ${label} interventions were needed at ${where} between ${pattern.from} and ${now} (threshold ${policy.threshold} in ${policy.windowDays} days). Every intervention is an admission that the product asked a person or a coordinator to do its job; this one recurs.`,
-      `Frequency: ${instances.length} in ${policy.windowDays} days, ${(instances.length / policy.windowDays).toFixed(2)} per day. Attention cost: ${minutes(waitedMs)} waited in total, ${minutes(waitedMs / instances.length)} per intervention.`,
-      `Items affected: ${items.length ? items.join(', ') : 'none named'}.`,
-      'Instances (the evidence; each is read from the ledger rows it names):',
-      ...instances.map(entry => `- ${entry.id}: ${entry.work?.key ?? 'no item'} — blocked ${entry.blocked}; waited ${minutes(entry.waitedMs)}${entry.resolvedBy ? `; resolved by ${entry.resolvedBy}` : '; still open'}${entry.resolution ? ` (${entry.resolution})` : ''}; ledger ${entry.sources.map(source => `${source.kind}#${source.seq}`).join(', ')}`),
-      'Find what makes this intervention necessary and remove it, so the product handles the case itself.',
-    ].join('\n\n');
-    const stageSlug = pattern.stage ?? 'none';
-    const key = `intervention-pattern:${pattern.kind}:${stageSlug}:${createHash('sha256').update(instances.map(entry => entry.id).sort().join(',')).digest('hex').slice(0, 32)}`;
-    const work = await engine.execute(options.actor ?? controlPlaneActor, 'create', null, {
-      title: `Recurring ${label} interventions at ${where}: ${instances.length} in ${policy.windowDays} days`.slice(0, 200), description: description.slice(0, 20000), type: 'bug', priority: 1,
-      // The post-ship rate is an observation only the serving release can make, so it is declared a
-      // post-deploy verification (GY-1660): judged on the head's evidence, checked after deploy, and
-      // owned by a follow-up when unobserved. What the head can show before merge is AC-2's regression test.
-      criteria: [
-        { id: 'AC-1', text: `The cause of the recurring ${label} interventions at ${where} is found and removed: the intervention report shows the ${pattern.kind} rate at ${where} below ${policy.threshold} per ${policy.windowDays} days after the change ships, and the linked instances could not recur`, proofs: [`${postDeployProofPrefix}intervention-pattern-${pattern.kind}-${stageSlug}`] },
-        { id: 'AC-2', text: `Each linked instance is reproduced against the base and shown not to recur against the candidate, by a test the change adds`, proofs: [`manual:intervention-pattern-${pattern.kind}-${stageSlug}`] },
-      ],
-      origin: { pattern: origin }, reason: `Recurring ${label} interventions at ${where} crossed the threshold (${instances.length} ≥ ${policy.threshold} in ${policy.windowDays} days)`,
-    }, key);
-    opened.push(work);
-    snapshot.work.push(work);
-  }
-  return { opened, truncated };
-}

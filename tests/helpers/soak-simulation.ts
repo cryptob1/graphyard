@@ -9,15 +9,6 @@ import { GitHub, idleObservationSeconds, processJob } from '../../src/github.js'
 import { GitHubCacheStore } from '../../src/github-cache.js';
 import { GitHubChargeLedger } from '../../src/github-charges.js';
 import { type Principal, Refusal, type Work, observationWindowHold } from '../../src/model.js';
-import { type PostDeployFiler, filePostDeployFollowUps, localPostDeployChecks, verifyDeployment } from '../../src/master-verification.js';
-import { postDeployReader } from '../../src/master/post-deploy-readings.js';
-import type { OnboardingTargetPorts } from '../../src/cli/master-deployment.js';
-/** GY-1906: the onboarding-target proof and the case its executions pass, as master-deployment.ts names them (a checkout without the reader still loads this helper). */
-const onboardingTargetProof = 'manual:post-deploy/onboarding-default-target', onboardingCase = 'onboarding-delivery-defaults';
-import type { HoldRecord } from '../../src/release-holds.js';
-import type { UatRecord } from '../../src/release-candidate.js';
-import type { PatternReader } from '../../src/model/observation-window.js';
-import { plainStatus } from '../../src/model/plain-status.js';
 import { buildBoard, groupOf } from '../../src/model/board.js';
 import { conflictReworkBoundMs } from '../../src/model/approval.js';
 import * as deploymentStep from '../../src/daemon/deployment.js';
@@ -64,7 +55,6 @@ import { terminalDecisions } from '../../src/cli/decision-report.js';
 import { Launcher } from '../../src/daemon/cycle.js';
 import { wakeOwnObservation } from '../../src/master/base-break-refresh.js';
 import { buildMasterStatus } from '../../src/master/status.js';
-import { actionAccount, nextAction } from '../../src/model/next-action.js';
 import * as faultsStep from '../../src/daemon/faults.js';
 import { type ReportedAttention, docsHeadroomStatus, docsWordCountAt } from '../../src/daemon/faults.js';
 import { docsTrimTitle } from '../../src/model/documentation.js';
@@ -186,15 +176,6 @@ export interface MainWatchLanding { sha: string; at: number; subject: string; au
 /** The reviewer App of the capped day (GY-1575): its change requests are the loop's to withdraw. */
 const cappedReviewerApp = { appId: 77_001, installationId: 77_002, slug: 'graphyard-reviewer', credentialFile: '/outside/reviewer.pem', boundAt: '2026-09-24T00:00:00Z' };
 export const supervisedAbsentEffects = ['decide', 'approver', 'docsSync', 'withdraw', 'resume', 'decisions', 'decisionChanges', 'replan', 'widenScope', 'withdrawReview', 'diagnostician', 'acceptance', 'planner', 'fileFaultClass', 'unblock', 'doctor'] as const;
-/** GY-1698: the intervention-pattern proof the windowed post-deploy criterion declares, as interventions/patterns.ts files it. */
-const windowedPatternProof = 'manual:post-deploy/intervention-pattern-escalation-build';
-// GY-1732: the coordinator checkout behind the serving release, and its filer — code from before
-// observation windows existed, which files each follow-up without one (as 98070f3538 did).
-const staleCoordinatorSha = '98070f3538'.padEnd(40, '0');
-const staleFiler: PostDeployFiler = async input => (await localPostDeployChecks(input)).map(check => check.followUp
-  ? { ...check, followUp: { ...check.followUp, input: (({ observationWindow: _, ...rest }) => ({ ...rest, description: rest.description.replace(/\n\nObservation window: [^\n]*/, '') }))(check.followUp.input) } } : check);
-// What the served release's isolated checkout emits: every statement the verifier checks.
-const loopInstructions = (text => ({ guide: text, init: text }))('Keep cycling; deployment verification is a step of the cycle, against the exact deployed release. Stop only at a genuinely external blocker recorded in Graphyard. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. Close finished agent sessions.');
 export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; limitMenu?: { worker: number; prose: number; twinLogin?: boolean }; unbounded?: { stuck: number; progressing: number; pushedOnce: number; rework: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowCalls?: { from: number; to: number; ms: number; observe?: boolean }; slowAnswers?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; lateReading?: boolean; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-1294: the loop's own write moves a diagnosed item's revision before its approver reads the diagnosis decision, so the decision settles stale. */
@@ -346,29 +327,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    */
   releaseLag?: { cutAgoMs: number; fleet?: { refuse?: { from: number; to: number }; strandAt?: number; stalePinAt?: number } };
   /**
-   * GY-1698: item `item` declares a post-deploy verification whose reading is a rate per `windowDays`
-   * days (its proof an intervention pattern). `filedAfterMs` after its merge, and on every cycle after,
-   * the day files its follow-up exactly as master verify-deployment does (filePostDeployFollowUps over
-   * the day's items, the report's projection read for the pattern), releases the one it files at once,
-   * and samples the loop's view of it after every cycle (observationWindowDay). GY-1726: `unwindowed`
-   * files it without its window, as releases before GY-1698 did (GY-1689, GY-1721, GY-1724); since
-   * GY-1735 the control plane derives the window the filing owed it at create, and a worker dispatched
-   * to it without one would find the reading cannot exist yet and defer it to that instant.
-   * GY-1732: `staleCoordinator` files through verifyDeployment itself, from a coordinator checkout behind
-   * the serving release whose own filer predates observation windows (it files window-less, as
-   * 98070f3538 filed GY-1721..GY-1725); the served release's isolated checkout carries the current filer.
-   * `windowHours` makes the criterion a live window of that many hours instead of a rate per `windowDays`.
-   */
-  observationWindow?: { item: number; windowDays: number; filedAfterMs: number; unwindowed?: boolean; staleCoordinator?: boolean; windowHours?: number; closeRefusedHours?: number;
-    /**
-     * GY-1906: the parent declares GY-1910 AC-2 (`manual:post-deploy/onboarding-default-target`, no window) instead,
-     * read by the loop's ledger reader over a release ledger the day writes: the onboarding-default-path hold GY-1909
-     * open from the start, cleared at `clearAt` on a candidate at the parent's merge whose own execution passes,
-     * and each served release's own UAT execution failing onboarding-delivery-defaults until `passAt`.
-     */
-    onboardingTarget?: { clearAt: number; passAt: number } };
-  /**
-   * GY-1740: one post-deploy follow-up per entry of `hours`, filed as verify-deployment files them and
+   * GY-1740: one post-deploy follow-up per entry of `hours`, seeded as earlier releases filed them and
    * blocked by its first worker on a reading that cannot exist before the day's start plus that many
    * hours, as GY-1689, GY-1721 and GY-1724 were. The loop holds each on its instant itself (its blocker
    * step's `window`, through the real route) and every cycle samples each one (blockedHoldDay).
@@ -590,25 +549,13 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       plannedFiles: ['src/', 'tests/', 'docs/'],
     } : {};
     const criteria = [{ id: 'AC-1', text: plan.scoped.has(n) || (options.remedies && n === remedyItem) ? `Item ${n} behaves, with its fixture ${fixture(n)}` : `Item ${n} behaves`, proofs: [PROOF] },
-      ...(n === plan.attested ? [{ id: 'AC-2', text: `Item ${n} is attested`, proofs: [MANUAL] }] : []),
-      // GY-1698: the windowed post-deploy verification whose follow-up the day files and releases, as GY-1685 AC-1 declared it.
-      ...(options.observationWindow?.item === n && options.observationWindow.onboardingTarget ? [{ id: 'AC-2', text: 'On the serving release, onboarding-delivery-defaults passes through the repaired normal-onboarding fixture path on a newer UAT candidate served at its exact SHA and the onboarding-default-path release hold GY-1909 clears under its original rule.', proofs: [onboardingTargetProof] }] : []),
-      ...(options.observationWindow?.item === n && !options.observationWindow.onboardingTarget ? [{ id: 'AC-2', text: options.observationWindow.windowHours
-        ? `The intervention report shows no escalation interventions at the build stage over ${options.observationWindow.windowHours} hours of live activity after item ${n} ships`
-        : `The cause of the recurring escalation interventions at the build stage is found and removed: the intervention report shows the escalation rate at the build stage below 3 per ${options.observationWindow.windowDays} days after item ${n} ships`, proofs: [windowedPatternProof] }] : [])];
+      ...(n === plan.attested ? [{ id: 'AC-2', text: `Item ${n} is attested`, proofs: [MANUAL] }] : [])];
     const smokeIntake = options.slowDeployment ? { policy: { checks: ['test', 'typecheck'], review: true, deploySmoke: true } } : {};
     let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: failover?.plannedFiles?.[n] ? [...failover.plannedFiles[n]] : files(n), criteria, ...scopeIntake, ...docsIntake, ...broadIntake, ...smokeIntake }, id());
     if (n === plan.exhaustedReviewer) work = await engine.execute(principals.operator, 'reviewpolicy', work.id, { provider: 'agent', expectedPolicyRevision: work.policyRevision, reason: 'Reviewed by the reviewer bots',
       reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer' }, { name: 'cursor-reviewer', runtime: 'cursor', reviewerApp: 'cursor-reviewer' }] }, id());
     items.push(work);
   }
-  // ---- GY-1698: the windowed post-deploy follow-up the day files as master verify-deployment does, releases at once, and watches. ----
-  const windowDay = options.observationWindow ? {
-    parent: items[options.observationWindow.item - 1], windowDays: options.observationWindow.windowDays, proof: options.observationWindow.onboardingTarget ? onboardingTargetProof : windowedPatternProof,
-    followUp: null as Work | null, filedAt: null as number | null, releasedAt: null as number | null, filings: 0, staleFilings: 0, created: [] as string[],
-    deferred: [] as { at: number; epoch: number; notBefore: string }[],
-    samples: [] as { elapsed: number; at: string; stage: string; waiting: boolean | null; attention: string | null; attentionRows: number; sentence: string; dispatches: { requestedBy: string; at: string }[]; lease: string | null; sessions: number; masterLive: boolean; faults: string[]; escalations: string[]; counted: 'ready' | 'waiting' | null; next: string | null; readings: { result: string; sha: string }[]; closure: { kind: string; ref: string | null } | null; wait: string | null }[],
-  } : null;
   // ---- GY-1740: blocked, unleased post-deploy follow-ups whose recorded blockers name future instants. ----
   const holdDay = options.blockedHolds ? { seeded: [] as { id: string; key: string; notBefore: number }[], windows: [] as { key: string; at: number; notBefore: string }[], final: [] as Work[],
     samples: [] as { key: string; at: string; notBefore: number; stage: string; blocker: string | null; window: string | null; group: string | null; overdue: boolean | null; lease: string | null; sessions: number; dispatches: { requestedBy: string; at: string }[]; faults: string[]; escalations: string[] }[] } : null;
@@ -800,8 +747,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     limitMenuAt?: number | null; proseAt?: number | null; proseClearsAt?: number | null; files?: string[]; bot?: MechanicalFixRequest;
     /** GY-1460: the unbounded day's attempt that renews without submitting (a first attempt, or a rework on the linked pull request), the one that pushes once and stalls, or the long one that pushes as it goes, and when it last pushed. */
     unbounded?: 'stuck' | 'progressing' | 'pushed-once'; pushedAt?: number;
-    /** GY-1726: when the unwindowed follow-up's worker, finding its reading cannot exist yet, defers it. */
-    deferAt?: number | null }
+  }
   const sessions: Session[] = [], lost: string[] = [], launches: number[] = [];
   // GY-1566: what the usage-limit-menu day saw: each account the loop held, each spent session stopped, any keys sent, and the prose session's block.
   const limitMenuDay = { holds: [] as { account: string; resetsAt: string | null; elapsed: number }[], stoppedAt: [] as { key: string; epoch: number; elapsed: number }[], answered: [] as { pane: string; keys: string[] }[], proseBlocked: [] as string[],
@@ -1099,8 +1045,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       // GY-1008: the blocked day's first attempts record their blocker; the repeating item's every attempt does.
       blockAt: options.blockers && blockerPlan.classes[n] && (attempt === 1 || n === blockerPlan.repeating) ? clock.now() + (blockerPlan.blockAfter[n] ?? blockerPlan.blockAfterMs) : null,
       credentialAt: credentialBlocks ? clock.now() + 5 * minute : null, retryingAt: options.retrying?.worker === n && attempt === 1 ? clock.now() + 5 * minute : null,
-      limitMenuAt: options.limitMenu?.worker === n && attempt === 1 ? clock.now() + 5 * minute : null, proseAt: options.limitMenu?.prose === n && attempt === 1 ? clock.now() + 5 * minute : null, settlementToken, files: sessionFiles, ...(bot ? { bot } : {}),
-      deferAt: options.observationWindow?.unwindowed && work.id === windowDay?.followUp?.id && !work.observationWindow ? clock.now() + 3 * minute : null });
+      limitMenuAt: options.limitMenu?.worker === n && attempt === 1 ? clock.now() + 5 * minute : null, proseAt: options.limitMenu?.prose === n && attempt === 1 ? clock.now() + 5 * minute : null, settlementToken, files: sessionFiles, ...(bot ? { bot } : {}) });
     // A scope scenario asks the moment it holds the lease, as a worker does, and keeps working
     // while the control plane decides. An ask carries at most fifty paths, so a wide ask is
     // filed in batches, which one open request of the attempt merges.
@@ -1190,19 +1135,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         herdr.status(session.pane, 'idle');
         await engine.execute(principals.coordinator, 'autoscope', session.work, { epoch: session.epoch }, id());
         decided.push(`${session.key}:${session.epoch}`);
-      }
-      // GY-1726: the unwindowed follow-up's worker reads that its reading cannot exist before the
-      // parent's merge plus the criterion's window, and defers the item to that instant: the attempt
-      // ends with no blocker, and its runtime exits.
-      if (session.deferAt && now >= session.deferAt && windowDay?.parent.id) {
-        session.deferAt = null;
-        const parent = (await store.list()).find(item => item.id === windowDay.parent.id)!;
-        const notBefore = new Date(Date.parse(parent.delivery!.mergedAt) + windowDay.windowDays * 24 * hour).toISOString();
-        await engine.execute(principal, 'defer', session.work, { epoch: session.epoch, notBefore, reason: `the ${windowDay.windowDays}-day rate after ${parent.key} shipped cannot be read before ${notBefore}` }, id());
-        windowDay.deferred.push({ at: now, epoch: session.epoch, notBefore });
-        herdr.kill(session.pane);
-        session.state = 'blocked';
-        continue;
       }
       // GY-1008: the worker records its blocker, which ends the attempt in the same transaction; its
       // runtime then exits. The needs-decision item's master requested a decision first and put it
@@ -1951,68 +1883,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       ...entry, reason: entry.reason?.replace(/\[Capped review under policy revision \d+\.\]\s*/, ''),
       ...(undated ? { requestedAt: undefined, refusal: entry.refusal ? { ...entry.refusal, at: undefined } : entry.refusal } : {}) }) };
   };
-  // GY-1779: the loop's own readings of the windowed follow-up over the real control plane. A live window
-  // (`windowHours`: GY-1732's and GY-1762's own day) reads as the filing projection did (no streak yet) until an
-  // hour past the follow-up's instant — every due cycle records a failed reading, raises the item's escalation
-  // naming the measured values and re-reads on the backoff — then as a streak that meets the window: the pass is
-  // recorded and the item closes delivered-observation, all under the day's invariants. A multi-day criterion
-  // window (GY-1698's three-day window, and the unwindowed filing GY-1735 derives one for) serves the projection
-  // the filer's window computation reads, but within the day holds no measured row the loop's reading could read
-  // (GY-1814: the streak such a row measures begins, at the earliest, with the merge itself) — `readPattern`
-  // answers no row, the loop records that it cannot take the reading and stays on the wait: never an escalation,
-  // never a recorded reading, never a close.
-  const readingDay = windowDay ? { reads: 0, passFrom: null as number | null, closeAsks: [] as { at: number; key: string }[] } : null;
-  const readPattern: PatternReader = async pattern => {
-    readingDay!.reads += 1;
-    const parent = (await store.list()).find(item => item.id === windowDay!.parent.id)!, mergedAt = parent.delivery ? Date.parse(parent.delivery.mergedAt) : clock.now();
-    const projected = new Date(mergedAt + windowDay!.windowDays * 24 * hour - 12 * hour).toISOString();
-    if (pattern.kind !== 'escalation' || pattern.stage !== 'build') return null;
-    if (!options.observationWindow!.windowHours) return null;
-    const notBefore = windowDay!.followUp?.observationWindow ? Date.parse(windowDay!.followUp.observationWindow.notBefore) : null;
-    if (notBefore === null || clock.now() < notBefore + hour) return { since: null, projected };
-    readingDay!.passFrom ??= clock.now();
-    return { since: new Date(notBefore + hour - options.observationWindow!.windowHours * hour).toISOString(), projected: null };
-  };
-  // GY-1906: the release ledger the onboarding-target reader reads, as release validate writes it over the day: the
-  // hold opened on an older candidate, its clear on a newer one at the parent's merge with that execution passing,
-  // and each served release's own execution, recorded where the UAT deployed it and only once the hold has cleared.
-  const onboarding = options.observationWindow?.onboardingTarget ?? null;
-  const onboardingDay = onboarding ? { reads: 0, clearing: null as { candidate: string; sha: string; at: string } | null } : null;
-  const opened = '20000101T000000Z', candidateAt = (at: number) => new Date(at).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
-  const execution = (id: string, sha: string, verdict: 'passed' | 'failed', at: string): UatRecord => ({ id, sha, result: verdict, deployedSha: sha, at, suites: [], followUp: null,
-    e2e: { runId: `rc-${id}`, sha, blocking: verdict === 'passed' ? [] : [onboardingCase], cases: [{ case: onboardingCase, verdict, required: true, attempts: 1, failingStep: verdict === 'passed' ? null : { index: 1, name: 'read the merger mode', reason: 'mode is "github", expected "control-plane"' } }] } });
-  const onboardingLedger: OnboardingTargetPorts | null = onboardingDay ? {
-    holdRecords: async () => {
-      const failedSha = sha('onboarding-failed', 0);
-      const open: HoldRecord = { kind: 'open', outcome: 'onboarding-default-path', hold: 'onboarding-default-path', candidate: opened, sha: failedSha, at: new Date(dayStart).toISOString(), item: 'GY-1909',
-        cases: [{ case: onboardingCase, verdict: 'failed', candidate: opened, sha: failedSha, runId: `rc-${opened}`, attempts: 2, failingStep: { index: 1, name: 'read the merger mode', reason: 'mode is "github", expected "control-plane"' } }] };
-      const parent = windowDay!.parent && (await store.list()).find(item => item.id === windowDay!.parent.id);
-      if (clock.now() >= dayStart + onboarding!.clearAt && parent?.delivery && !onboardingDay.clearing) onboardingDay.clearing = { candidate: candidateAt(clock.now()), sha: parent.delivery.mergeSha, at: new Date(clock.now()).toISOString() };
-      const clearing = onboardingDay.clearing;
-      return clearing ? [open, { kind: 'clear', outcome: 'onboarding-default-path', hold: 'onboarding-default-path', candidate: clearing.candidate, sha: clearing.sha, at: clearing.at, item: 'GY-1909' }] : [open];
-    },
-    uatRecords: async () => {
-      onboardingDay.reads += 1;
-      const clearing = onboardingDay.clearing;
-      if (!clearing) return [];
-      const now = new Date(clock.now()).toISOString();
-      return [execution(clearing.candidate, clearing.sha, 'passed', clearing.at), ...(production.sha === clearing.sha ? [] : [execution(candidateAt(clock.now() + 1000), production.sha, clock.now() >= dayStart + onboarding!.passAt ? 'passed' : 'failed', now)])];
-    },
-    contains: async (ancestor, descendant) => github.contains(descendant, ancestor),
-  } : null;
   const effects: DaemonEffects = {
     ...(promotionEffect ? { promotion: promotionEffect } : {}),
-    ...(readingDay ? {
-      readPattern, postDeployFiler: localPostDeployChecks, readPostDeploy: postDeployReader(readPattern, 'graphyard', onboardingLedger ?? undefined),
-      recordReading: (work, reading) => api(principals.coordinator, 'POST', `work/${work.id}/reading`, reading),
-      closeObservation: async (work, release, reason, key) => {
-        // GY-1794: `closeRefusedHours` makes the plane refuse the recorded pass's close for that long after the pass began.
-        readingDay.closeAsks.push({ at: clock.now(), key });
-        const refusedHours = options.observationWindow?.closeRefusedHours;
-        if (refusedHours && readingDay.passFrom !== null && clock.now() < readingDay.passFrom + refusedHours * hour) throw new Error('the control plane refused the close');
-        return api(principals.coordinator, 'POST', `work/${work.id}/close`, { kind: 'delivered-observation', ref: release, reason }, key);
-      },
-    } : {}),
     ...(mainWatchEffect ? { mainWatch: mainWatchEffect } : {}),
     ...(hostDay ? { healHostSupervision: allow => healUserSupervision(hostDay.root, { systemctl: hostSystemctl, loginctl: hostLoginctl, masked: () => false, platform: 'linux',
       wait: async ms => { fenced.drift += ms; await moveClock(ms); } }, allow) } : {}),
@@ -3079,7 +2951,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     }
     // GY-1698: the observation-window day does not assert the hourly /tmp leftovers (soak-day does);
     // skip them so a long idle hold never depends on recreating scratch the reclaim step may have taken.
-    if (!windowDay && elapsed > 0 && elapsed % hour === 0 && elapsed < options.hours * hour) hourly.push({ directory: await leftover(`graphyard-hour-${elapsed / hour}`, 0), at: elapsed });
+    if (elapsed > 0 && elapsed % hour === 0 && elapsed < options.hours * hour) hourly.push({ directory: await leftover(`graphyard-hour-${elapsed / hour}`, 0), at: elapsed });
     // GY-839: while the window stands, GitHub answers every open candidate's compares without a
     // usable merge base; afterwards its answers carry the true one again.
     const blind = plan.blind;
@@ -3574,75 +3446,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         else lanesSeen.add(item.lane);
       }
     }
-    // GY-1698: once the parent has merged and the filing delay has run, every cycle files the follow-up
-    // as master verify-deployment does after each deploy observation — the real filing over the day's
-    // items, idempotent on the follow-up's request id — and the loop's view of the follow-up is sampled.
-    if (windowDay) {
-      const listed = await store.list(), parent = listed.find(item => item.id === windowDay.parent.id)!, at = clock.now();
-      if (parent.delivery && at >= Date.parse(parent.delivery.mergedAt) + options.observationWindow!.filedAfterMs) {
-        // The report's projection for the pattern: a streak not yet begun, projected half a day before the merge bound, as GY-1689's was.
-        const projected = new Date(Date.parse(parent.delivery.mergedAt) + windowDay.windowDays * 24 * hour - 12 * hour).toISOString();
-        const file = async (input: Parameters<typeof engine.execute>[3], key: string) => {
-          // File through the engine the same way the API create path does, so the window rides the
-          // create schema onto the item (a missing window would dispatch at once and is the bug).
-          assert.ok(onboarding || (input as Work).observationWindow, `filePostDeployFollowUps must put observationWindow on the follow-up input: ${JSON.stringify(input)}`);
-          // GY-1726: an older release's filing carried no window.
-          const { observationWindow: _window, ...unwindowed } = input as Work;
-          const filed = await engine.execute(principals.operator, 'create', null, options.observationWindow!.unwindowed ? unwindowed as typeof input : input, key) as Work;
-          // GY-1735: a filing without its window takes the one the control plane derives from the parent's own criterion.
-          assert.ok(onboarding || (options.observationWindow!.unwindowed ? filed.observationWindow?.basis === 'criterion-window' : filed.observationWindow), `create must persist what was filed, or derive what it owed: ${JSON.stringify(filed.observationWindow)}`);
-          windowDay.created.push(filed.key); return filed;
-        };
-        const patterns = async () => ({ since: null, projected });
-        const checks = options.observationWindow!.staleCoordinator ? await (async () => {
-          // GY-1732: master verify-deployment with the coordinator checkout behind the serving release (the parent's merge).
-          const served = parent.delivery!.mergeSha, iso = new Date(at).toISOString();
-          const verified = await verifyDeployment(parent, {
-            snapshot: async () => ({ work: listed, now: iso }), now: () => at, repository: 'owner/project',
-            observe: async () => ({ source: 'endpoint' as const, sha: served, at: iso, reason: null, deployed: [parent.key], pending: [] }),
-            release: () => ({ sha: staleCoordinatorSha, clean: true, repository: 'owner/project', reason: null }),
-            emit: async () => assert.fail('the coordinator checkout behind the release emits nothing'),
-            isolate: async sha => ({ release: { sha, clean: true, repository: 'owner/project', reason: null }, emit: async () => loopInstructions, checks: localPostDeployChecks, dispose: async () => {} }),
-            checks: staleFiler, record: async () => {}, file: file as never, releaseWork: async () => {}, patterns,
-          });
-          assert.equal(verified.result, 'verified', verified.refusals.join('; '));
-          windowDay.staleFilings += 1;
-          return verified.postDeploy;
-        })() : await filePostDeployFollowUps(parent, parent.delivery.mergeSha, listed, file as never, new Date(at), patterns);
-        windowDay.filings += 1;
-        const key = checks.find(check => check.proof === windowDay.proof)?.followUp ?? null;
-        if (key && !windowDay.followUp) {
-          const filed = (await store.list()).find(item => item.key === key)!;
-          assert.ok(onboarding || options.observationWindow!.unwindowed || filed.observationWindow, `the filed follow-up must carry observationWindow after create: ${filed.key}`);
-          windowDay.followUp = filed; windowDay.filedAt = at;
-          // Released at once, days before its instant: GY-1689 was released three hours after its filing.
-          await engine.execute(principals.operator, 'ready', filed.id, {}, id()); windowDay.releasedAt = clock.now();
-          windowDay.followUp = (await store.list()).find(item => item.id === filed.id)!;
-          assert.ok(onboarding || options.observationWindow!.unwindowed || windowDay.followUp.observationWindow, `ready must keep observationWindow on ${filed.key}`);
-        }
-      }
-      if (windowDay.followUp) {
-        const all = await store.list(), current = all.find(item => item.id === windowDay.followUp!.id);
-        if (current) {
-          const status = buildMasterStatus({ work: all, now: new Date(at).toISOString() }, [], []);
-          const row = status.work.find(entry => entry.key === current.key);
-          // Status rows omit delivered items; the hold is still the item's own window when the row is gone.
-          const waiting = row ? row.observationWindow?.waiting ?? null : observationWindowHold(current, new Date(at)) !== null;
-          windowDay.samples.push({ elapsed, at: new Date(at).toISOString(), stage: current.stage, waiting, attention: row?.attention ?? null,
-            attentionRows: status.attentionItems.filter(entry => entry.subject === current.key).length, sentence: plainStatus(current, at).sentence,
-            // GY-1762: how the status counts it, and the kind of action the queue computes for it.
-            counted: row && row.stage === 'ready' ? (row.observing ? 'waiting' : 'ready') : null, next: nextAction(current, all, new Date(at))?.kind ?? null,
-            dispatches: [...(current.actionQueue?.actions ?? []), ...(current.actionQueue?.history ?? [])].filter(action => action.kind === 'dispatch').map(action => ({ requestedBy: action.requestedBy, at: action.requestedAt })),
-            lease: current.lease?.owner ?? null, sessions: sessions.filter(session => session.key === current.key).length, masterLive: !!herdr.byName(config.masterAgentName!) || !!state.master.session,
-            faults: state.faults.instances.filter(instance => instance.subject === current.key).map(instance => instance.kind),
-            escalations: Object.values(state.actions).filter(action => action.kind === 'escalation' && action.work === current.key).map(action => action.detail),
-            // GY-1779: the loop's recorded readings on the item, its closure once a pass closed it, and the wait the queue names.
-            readings: current.evidence.filter(entry => entry.reading).map(entry => ({ result: entry.result, sha: entry.sha })), closure: current.closure ? { kind: current.closure.kind, ref: current.closure.ref } : null,
-            wait: actionAccount(current, all, new Date(at)).wait?.detail ?? null });
-          windowDay.followUp = current;
-        }
-      }
-    }
     // GY-1740: every cycle samples each seeded follow-up as the board and the loop see it.
     if (holdDay) {
       const all = await store.list(), at = clock.now(), board = buildBoard(all, at);
@@ -3659,15 +3462,13 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     // GY-1698: a day whose every open item is held on its observation window (and none is leased) is as
     // idle as one with nothing open — the production loop's 10-minute sleep. A live lease must keep
     // the one-minute tick: the soak lease is two minutes, so a ten-minute jump would expire it before
-    // the session's next heartbeat. Until the follow-up is filed, keep the one-minute tick too: the
-    // filing is due `filedAfterMs` after the parent's merge, and a ten-minute jump overshoots that.
+    // the session's next heartbeat.
     const tickAt = clock.now();
-    const filingDue = !!windowDay && !windowDay.followUp;
-    const heldIdle = (!!windowDay || !!holdDay) && !filingDue && opened.length > 0 && opened.every(item => {
+    const heldIdle = !!holdDay && opened.length > 0 && opened.every(item => {
       const live = item.lease && Date.parse(item.lease.expiresAt) > tickAt;
       return !live && observationWindowHold(item, new Date(tickAt)) !== null;
     });
-    const idle = (!opened.length && !filingDue) || heldIdle;
+    const idle = !opened.length || heldIdle;
     const step = loopWakeDay ? loopWakeDay.tickMs : idle ? 10 * minute : minute;
     // The containment day's slow reads moved the clock inside the cycle; the day keeps one cycle a minute.
     elapsed += step; await moveClock(Math.max(0, step - fenced.drift)); fenced.drift = 0;
@@ -3714,16 +3515,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     if (owner) await engine.execute(owner, 'release', leftover.id, { epoch: leftover.lease!.epoch }, id()).catch(() => {});
     await api(principals.operator, 'POST', `work/${leftover.key}/close`, { kind: 'obsolete', reason: 'soak: the day ended with this item unfinished; a later day must not dispatch it' }).catch(() => {});
   }
-  // GY-1698: the follow-up's final state is the day's record; left open, it is taken out of the plane like any leftover.
-  if (windowDay?.followUp) {
-    const leftover = (await store.list()).find(item => item.id === windowDay.followUp!.id)!;
-    windowDay.followUp = leftover;
-    if (leftover.stage !== 'done' && !leftover.closure) {
-      const owner = leftover.lease && everyone.find(principal => principal.id === leftover.lease!.owner);
-      if (owner) await engine.execute(owner, 'release', leftover.id, { epoch: leftover.lease!.epoch }, id()).catch(() => {});
-      await api(principals.operator, 'POST', `work/${leftover.key}/close`, { kind: 'obsolete', reason: 'soak: the day ended with its windowed follow-up unfinished; a later day must not dispatch it' }).catch(() => {});
-    }
-  }
   if (options.decomposition) {
     decompositionHistory.deliveredParents = (await store.list()).filter(item => item.children?.length && item.stage === 'done').map(item => item.key);
   }
@@ -3731,7 +3522,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: existsSync(tmpRoot) ? readdirSync(tmpRoot) : [] };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { observationWindowDay: windowDay, readingDay, onboardingDay, blockedHoldDay: holdDay, unmatchedRefusals, capAnswers, askedAgain, readinessDay, waitsDay, outageDay, coordinateOutageDay, panes, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
+  return { blockedHoldDay: holdDay, unmatchedRefusals, capAnswers, askedAgain, readinessDay, waitsDay, outageDay, coordinateOutageDay, panes, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, limitMenuDay, menuReset, menuNotice, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, githubStatusReads, credentialReads, blockerRecords, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
