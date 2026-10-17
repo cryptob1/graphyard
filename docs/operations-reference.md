@@ -7,7 +7,7 @@
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` emits instructions, refusing *unobserved*, *stale* (rerun), merge-missing or recorded releases; without `--deployment-url`, newest successful [`productionEnvironment`](deployment.md#production-environment-name) deployment counts.
+`master verify-deployment GY-N` emits instructions, refusing *unobserved*, *stale* (rerun), merge-missing or recorded releases; without `--deployment-url`, the newest successful [`productionEnvironment`](deployment.md#production-environment-name) deployment.
 
 ## Lost worker before submission
 
@@ -68,7 +68,7 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ### Reading under control-plane
 
-`master merger control-plane`: control-plane-observed candidates are observed from its checkout, GitHub polled for none of their pull request, reviews or checks; a person-opened one is still observed. Diagnostician and doctor read `graphyard status GY-N`, not `gh pr view`.
+`master merger control-plane`: control-plane-observed candidates are observed from its checkout, GitHub polled for none of their pull request, reviews or checks; a person-opened one is still observed. Diagnostician and doctor read `graphyard status GY-N`.
 
 ### Webhook liveness
 
@@ -98,7 +98,7 @@ Ungated merges: permanent violations (never backfilled): repair access, file fol
 
 ## Merge-intent withdrawal
 
-`graphyard master withdraw [--repo OWNER/NAME] [--apply] [--json] --admin-token-stdin` (admin; loop stopped; `--repo` only the managed repository) dequeues or disarms each open or closed-unmerged item's pull request via `gh`, reporting number, head, prior mode, result; `none` rows untouched, so reruns write nothing; failed rows exit 1; without `--apply`, the plan.
+`graphyard master withdraw [--repo OWNER/NAME] [--apply] [--json] --admin-token-stdin` (admin; loop stopped; `--repo` only the managed repository) dequeues or disarms each open or closed-unmerged item's pull request via `gh`, reporting number, head, prior mode, result; `none` rows untouched, so reruns write nothing; failed rows exit 1; `--apply` absent: plan only.
 
 ## Credentials
 
@@ -115,7 +115,7 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ## Setup proposals and drift
 
-`graphyard init --scan` writes `.graphyard/setup-proposal.json` (`--apply` applies); rescans and `doctor --profile through-merge|preview-validation|production-verification` report drift, never repair.
+`graphyard init --scan` writes `.graphyard/setup-proposal.json` (`--apply` applies); rescans and `doctor --profile through-merge|preview-validation|production-verification` report drift.
 
 ## Scale limits
 
