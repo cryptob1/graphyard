@@ -330,6 +330,12 @@ test('integration:prompt-delivery-confirmed — a launch counts only once the ru
   assert.deepEqual(calls[1], ['agent', 'prompt', 'opencode-worker', 'Implement GY-68', '--wait', '--until', 'working', '--until', 'blocked', '--timeout', '1000']);
   assert.deepEqual(calls[2], ['agent', 'read', 'opencode-worker', '--source', 'recent-unwrapped', '--lines', '80'], 'a stall is read off the pane before anything is re-submitted');
   assert.deepEqual(calls[3], ['agent', 'wait', 'opencode-worker', '--until', 'working', '--until', 'blocked', '--timeout', '1000'], 'the submission Herdr accepted is waited out');
+  // The final delivery's stall is waited out like any other: a slow start on the last submission is accepted, never judged deaf.
+  let lastPrompts = 0; const last: string[][] = [];
+  const slow = await deliverPrompt('slow', 'x', herdr(last, args => args[1] === 'prompt' ? (++lastPrompts, stalled) : args[1] === 'wait' && lastPrompts < 3 ? timedOut : undefined), fast);
+  assert.equal(slow.attempts, 3); assert.equal(last.at(-1)![1], 'wait', 'the third submission is waited out, and that wait accepts it');
+  const single = await deliverPrompt('single', 'x', herdr([], args => args[1] === 'prompt' ? stalled : undefined), { ...fast, attempts: 1 });
+  assert.equal(single.attempts, 1, 'with one attempt the only submission is still waited out');
   await assert.rejects(deliverPrompt('dropped', 'x', herdr([], args => args[1] === 'prompt' || args[1] === 'wait' ? stalled : undefined), fast), (error: any) => error instanceof PromptNotAcceptedError && error.promptDropped && /after 3 deliveries/.test(error.message));
   const blocked: string[][] = [];
   await assert.rejects(deliverPrompt('blocked', 'x', herdr(blocked, () => ({ error: { code: 'agent_blocked', message: 'agent is blocked' } })), fast), /agent is blocked/);

@@ -236,7 +236,8 @@ async function masterSessionStepWithin(cycle: Cycle) {
  * accepted — the `(deaf)` rotation records newer than the newest accepted wake, both on the
  * cursor's own action records, so the count needs no state of its own and survives restarts.
  * A rotation for another cause between two deaf ones does not reset the count: the role was
- * not heard from either way, which is the churn the bound exists to cap.
+ * not heard from either way, which is the churn the bound exists to cap. pruneDaemonState retires
+ * resolved rows oldest first, so a rotation older than the newest accepted wake goes before it.
  */
 export function deafRotationsSince(actions: Readonly<Record<string, DaemonAction>>): number {
   let accepted = 0;

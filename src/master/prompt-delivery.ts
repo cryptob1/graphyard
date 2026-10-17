@@ -89,7 +89,8 @@ export async function deliverPrompt(target: string, text: string, run?: ChildRun
         await sleep(noticeSettleMs);
         continue;
       }
-      if (code === 'agent_prompt_stalled' && attempt < attempts + granted) {
+      // Every accepted submission is waited out, the last one too: only the retry pause is spared.
+      if (code === 'agent_prompt_stalled') {
         try { await herdrJson(['agent', 'wait', target, ...accepted], run); return { attempts: attempt, accepted: true as const, ...(dismissed.length ? { dismissed } : {}) }; }
         catch (waited) {
           const waitCode = herdrErrorCode(waited);
