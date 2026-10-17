@@ -6,7 +6,7 @@ import { resolveWork } from './context.js';
 import { releaseLeaseCommand } from './lease.js';
 import {
   apiSuite, assessProductionServing, awaitServing, commandSuite, cutAsync, deployToUatAsync, endpointSuite, findCandidate, followUpItem, followUpRequestId, gitIn,
-  ledgerStatus, maxPrsFrom, promoteAsync, readLedger, readRecords, readServed, recordSoak, syncLedger, uatServedDigests, unacceptedFlaky, validateAndRecord, writeRecord,
+  ledgerStatus, maxPrsFrom, promoteAsync, readLedger, readRecords, readServed, recordSoak, recordUatCancelled, syncLedger, uatServedDigests, unacceptedFlaky, validateAndRecord, writeRecord,
   type AsyncGit, type CutTrigger, type FlakyAcceptance, type ReleaseCandidate, type SoakRecord, type Suite,
 } from '../release-candidate.js';
 import { commandDigestAdapter, shellRun, uatDigestSuite, verifyProductionDigests } from '../release-digests.js';
@@ -17,7 +17,7 @@ import { handedImports, handedImportsVariable, promotionImports, sealAuthorityOu
 import { checkRepositoryContract, contractFile, loadContract } from '../e2e/case.js';
 
 const switches = new Set(['no-push', 'api']);
-const subcommands = new Set(['contract', 'cut', 'status', 'uat', 'validate', 'follow-up', 'holds', 'fold', 'promote', 'verify', 'soak', 'imports', 'seal-check']);
+const subcommands = new Set(['contract', 'cut', 'status', 'uat', 'uat-cancelled', 'validate', 'follow-up', 'holds', 'fold', 'promote', 'verify', 'soak', 'imports', 'seal-check']);
 /** Flags after the subcommand: `--name value` pairs, repeatable, and bare `--flag` switches. */
 function flags(args: string[]) {
   const values = new Map<string, string[]>(); const positional: string[] = [];
@@ -32,7 +32,7 @@ function flags(args: string[]) {
 }
 
 const workKey = (created: any) => String(created?.key ?? created?.work?.key ?? created?.id);
-const usage = 'Use release contract | release cut [--trigger schedule|manual] [--max-prs N] | release status | release uat ID | release validate ID --url URL [--api] [--check PATH]... [--suite NAME=COMMAND]... [--e2e-report FILE] | release follow-up ID | release holds | release fold OUTCOME --decision ID | release seal-check [ID] | release imports ID | release promote ID | release verify --url URL | release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]';
+const usage = 'Use release contract | release cut [--trigger schedule|manual] [--max-prs N] | release status | release uat ID | release uat-cancelled ID | release validate ID --url URL [--api] [--check PATH]... [--suite NAME=COMMAND]... [--e2e-report FILE] | release follow-up ID | release holds | release fold OUTCOME --decision ID | release seal-check [ID] | release imports ID | release promote ID | release verify --url URL | release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]';
 
 /** Every applied evidence decision on the hold items the candidate's failures landed in (GY-1378). */
 async function acceptancesOf(api: (path: string) => Promise<any>, git: ReturnType<typeof gitIn>, candidate: string): Promise<FlakyAcceptance[]> {
@@ -58,6 +58,8 @@ export const releaseCommands = defineCommands([
       '  release status                Every candidate with its UAT verdict and production promotion',
       '  release uat ID|latest         Deploy the candidate to UAT: release/uat moves to its exact SHA,',
       '                                or GRAPHYARD_DEPLOY_DIGESTS deploys its recorded build digests',
+      '  release uat-cancelled ID      Record a cancelled UAT verdict for a candidate that has none, so',
+      '                                the next candidate deploys at once; it never promotes',
       '  release validate ID --url URL [--api] [--check PATH]... [--suite NAME=COMMAND]... [--wait SECONDS]',
       '                                Run the suites against UAT serving the candidate and record the',
       '                                verdict; --api drives the deployed API with GRAPHYARD_UAT_TOKEN;',
@@ -133,6 +135,7 @@ export const releaseCommands = defineCommands([
       }
       if (id === 'status' || !id) { syncLedger(git, base); return print(ledgerStatus(readLedger(git))); }
       if (id === 'uat') return print(await deployToUatAsync(asyncGit, target, base, new Date(), digests.deploy));
+      if (id === 'uat-cancelled') return print(recordUatCancelled(git, target, { base, now: new Date(), push }));
       if (id === 'soak') {
         const sha = options.one('sha'), result = options.one('result');
         if (!sha || !result) throw new Error(usage);

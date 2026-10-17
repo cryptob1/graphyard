@@ -325,6 +325,12 @@ jobs:
           GRAPHYARD_CANDIDATE_ID: ${{ needs.candidate.outputs.id }}
           GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
           GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
+      - name: Record a cancelled verdict when the suites recorded none
+        # GY-1965: a uat job cancelled or failed before the suites above wrote rc-uat/ID would leave UAT
+        # reading the candidate as a validation in progress, refusing every later candidate for the
+        # whole window. `cancelled` concludes it and never promotes; a recorded verdict is kept.
+        if: ${{ always() }}
+        run: node bin/graphyard.mjs release uat-cancelled "${{ needs.candidate.outputs.id }}"
       - name: Record the E2E case runs on the control plane's Tests page
         # Best effort and after the verdict: recording never decides promotion. The suite command
         # never holds a control-plane credential, so this step records the report it wrote. It uses
