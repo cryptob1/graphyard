@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
@@ -110,7 +111,7 @@ test('unit:slow-tick-receipt-durable-artifact — the receipt\'s artifact is a c
   }
 });
 
-test('integration:slow-tick-exact-head-twenty-consecutive — an independent execution re-runs the pinned source twenty consecutive times and its receipt verifies beside the retained one', { timeout: 900_000 }, async () => {
+test('integration:slow-tick-exact-head-twenty-consecutive — an independent execution re-runs the pinned source twenty consecutive times and its receipt verifies beside the retained one', { timeout: 900_000 }, async t => {
   const execution = await executeSlowTickReceiptRuns();
   try {
     const verdict = verifySlowTickReceipt(execution.receipt);
@@ -125,5 +126,13 @@ test('integration:slow-tick-exact-head-twenty-consecutive — an independent exe
     assert.deepEqual(logs.faults, [], `every executed run's log matches its digest: ${logs.faults.join(' | ')}`);
     const retained = verifySlowTickReceipt(retainedSlowTickReceipt);
     assert.deepEqual(retained.faults, [], `the retained receipt still verifies: ${retained.faults.join(' | ')}`);
+    const retainedLogs = verifyRetainedArtifact(retainedSlowTickReceipt);
+    assert.deepEqual(retainedLogs.faults, [], `the retained receipt's logs still match: ${retainedLogs.faults.join(' | ')}`);
+    // The execution's output names what it verified, so the independent producer's retained
+    // evidence identifies the pinned source, the retained receipt (by digest) and its own runs.
+    const retainedDigest = createHash('sha256').update(await readFile(join(process.cwd(), retainedReceiptDirectory, 'receipt.json'))).digest('hex');
+    const { environment, runs } = execution.receipt;
+    t.diagnostic(`verified ${retainedReceiptDirectory}/receipt.json sha256 ${retainedDigest} for ${slowTickProof} at ${pinnedSourceSha} (tree ${pinnedSourceTree})`);
+    t.diagnostic(`independent execution: ${runs.length} consecutive passes on node ${environment.node} ${environment.platform}/${environment.arch}, ${environment.cpus} cpus, ci ${environment.ci}; exit statuses ${runs.map(run => run.exitCode).join(',')}; log sha256 ${runs.map(run => run.logDigest.slice(0, 12)).join(',')}`);
   } finally { await execution.release({ logs: true }); }
 });
