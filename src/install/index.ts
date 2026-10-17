@@ -12,6 +12,7 @@ import { requiredPullRequestChecks, type DeliveryPolicy } from '../model/deliver
 import { applyWiring, deploymentAdapters, observeReleaseWiring, wiringActions, type DeploymentAdapter, type DeploymentContext } from './deploy-target.js';
 import { adapterFor, carriesCredential, hetznerAddress, publishedPort, readRemote, isProviderReference, quotedPrice, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
 import { asUser, existingMachineAdapter, generateHostSecrets, SIGNIN_CLAIM_VARIABLE, hostHerdrOnly, hostLayout, hostProfilesOnly, hostPlan, hostRemote, hostTokenFile, installHostFleet, readHostSecrets, selfContainedAdapter, MIGRATE_SOURCE_VARIABLE, type HostFleetResult } from './host.js';
+import { applyOperatorRulesetAdd, missingGraphyardChecks, protectionSnapshots, readOperatorRulesets, rulesetTarget, type OperatorRulesets } from '../protection.js';
 import { applyProtection, applyRestore, observeRestore, protectionRecordFile, readProtectionRecord, recordProtectionOnce, restoreChanges, type ProtectionRecord, type RestoreChange, appClient, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, installationClient, installationToken, protectionSatisfied, readProtection, GRAPHYARD_CHECKS, readWebhookConfig, repositoryInstallation, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
 import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
 import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
@@ -132,7 +133,7 @@ export interface ObserveOnlyChoice {
  * It touches nothing else, so every flag but --repo and --base-branch is refused beside it.
  */
 export interface RestoreProtectionChoice { restoreProtection?: boolean }
-export interface ProtectionRestorePlan { version: 1; action: 'restore-protection'; repository: string; branch: string; record: string; recordedAt: string; changes: RestoreChange[] }
+export interface ProtectionRestorePlan { version: 1; action: 'restore-protection'; repository: string; branch: string; record: string; recordedAt: string; changes: RestoreChange[]; operatorRulesets?: { rulesets: { id: number; name: string }[]; restored: false; note: string } }
 export type InstallRequest = InstallInputs & HerdrChoice;
 /** The variables an App binding writes; `--no-github-app` leaves every one of them unset. */
 export const APP_VARIABLES = ['GITHUB_APP_ID', 'GITHUB_INSTALLATION_ID', 'GITHUB_PRIVATE_KEY', 'GITHUB_WEBHOOK_SECRET', 'GITHUB_CI_APP_IDS'] as const;
@@ -671,8 +672,12 @@ async function prepareRestore(rawInputs: InstallRequest & RestoreProtectionChoic
 async function planRestore(session: InstallSession): Promise<ProtectionRestorePlan> {
   const record = session.restore!;
   const gh = githubCli(session.context.transport);
-  return { version: 1, action: 'restore-protection', repository: record.repository, branch: record.branch, record: protectionRecordFile(session.directory), recordedAt: record.recordedAt,
-    changes: restoreChanges(record, await observeRestore(gh, record.repository, record.branch)) };
+  const changes = restoreChanges(record, await observeRestore(gh, record.repository, record.branch));
+  // The record never holds the operator's rulesets (GY-1926): say so instead of implying their restore.
+  const operator = await readOperatorRulesets(gh, record.repository, record.branch);
+  return { version: 1, action: 'restore-protection', repository: record.repository, branch: record.branch, record: protectionRecordFile(session.directory), recordedAt: record.recordedAt, changes,
+    ...(operator.rulesets.length ? { operatorRulesets: { rulesets: operator.rulesets.map(ruleset => ({ id: ruleset.id, name: ruleset.name })), restored: false as const,
+      note: `install --restore-protection restores only classic protection, auto-merge and Graphyard's queue ruleset; operator ruleset(s) ${operator.rulesets.map(ruleset => ruleset.id).join(', ')} on ${record.branch} are restored only through graphyard master protection --restore SNAPSHOT, from a snapshot under .graphyard/protection-snapshots/` } } : {}) };
 }
 
 export async function materializeInstall(session: InstallSession): Promise<InstallSession> {
@@ -1115,7 +1120,11 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   if (!noApp) actions.push({ id: 'github.ci-app-ids', target: 'github', state: record?.github?.ciAppIds.length ? 'satisfied' : 'create', title: `Detect the GitHub App IDs publishing checks on ${session.inputs.baseBranch} and set GITHUB_CI_APP_IDS`, values: record?.github?.ciAppIds.length ? [{ name: 'GITHUB_CI_APP_IDS', value: record.github.ciAppIds.join(','), secret: false }] : [] });
 
   // Branch protection requires the App-bound merge check, so without an App none is planned (GY-1550).
-  const protection = !noApp && preflight.some(item => item.name === 'GitHub CLI' && item.ok) ? await readProtection(gh, session.inputs.repository, session.inputs.baseBranch) : null;
+  const ghProtection = !noApp && preflight.some(item => item.name === 'GitHub CLI' && item.ok);
+  const protection = ghProtection ? await readProtection(gh, session.inputs.repository, session.inputs.baseBranch) : null;
+  // An operator ruleset on the base (GY-1926) takes the classic protection write's place entirely.
+  // A failed read leaves governance unknown, so the plan stands but apply refuses on it.
+  const operator = ghProtection ? await readOperatorRulesets(gh, session.inputs.repository, session.inputs.baseBranch).catch((error: Error) => { preflight.push({ name: 'Branch rulesets', ok: false, detail: error.message }); return null; }) : null;
   const protectionInputs = { repository: session.inputs.repository, branch: session.inputs.baseBranch, requiredChecks: session.requiredChecks, graphyardAppId: record?.github?.appId ?? null, reviewCount: session.reviewCount };
   const protectionOk = protectionSatisfied(protectionInputs, protection);
   // A branch that already demands more reviewers keeps its own count; the plan says so.
@@ -1123,9 +1132,16 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   const reviewPhrase = plannedReviews > session.reviewCount
     ? `${plannedReviews} approving review(s), the stricter count this branch already requires`
     : `at least ${session.reviewCount} approving review(s) for the ${session.reviewPolicy} review policy`;
+  if (operator?.rulesets.length) {
+    const ruleset = rulesetPlanAction(operator, session.inputs.baseBranch, record?.github?.appId ?? null);
+    if (ruleset.refusal) preflight.push({ name: 'Branch protection', ok: false, detail: ruleset.refusal });
+    if (observeOnly) actions.push(held({ id: 'github.protection', target: 'github', title: ruleset.action.title }, `the operator rulesets on ${session.inputs.baseBranch} are never written`));
+    else if (!noApp) actions.push(ruleset.action);
+  } else {
   if (!noApp && protection && !protectionOk) drift.push({ action: 'github.protection', field: 'branch protection', expected: `required checks ${[...session.requiredChecks, ...GRAPHYARD_CHECKS].join(', ')} with "up to date" off (a candidate merges on the base it was built on); at least ${session.reviewCount} approving review(s); admin enforcement; conversation resolution off (the reviewer's verdict is the review gate)`, observed: describeProtection(protection) });
   if (observeOnly) actions.push(held({ id: 'github.protection', target: 'github', title: `Require Graphyard's status checks and reviews on ${session.inputs.baseBranch} and enable its merge queue or auto-merge` }, `${session.inputs.baseBranch}'s branch protection, auto-merge and merge-queue settings are never written`));
   if (!noApp) actions.push({ id: 'github.protection', target: 'github', state: protectionOk ? 'satisfied' : protection ? 'update' : 'create', ...(protectionHuman ? { human: protectionHuman } : {}), title: `Require status checks (${[...session.requiredChecks, ...GRAPHYARD_CHECKS].join(', ')}) with "require branches to be up to date" off, so a candidate merges on the base it was built on, ${reviewPhrase} and administrator enforcement, with conversation resolution off (the reviewer's verdict is the review gate), on ${session.inputs.baseBranch}` });
+  }
   // The release-candidate pipeline's environments (GY-1102): free wiring, then every UAT and
   // production resource the deployment adapter would create, cost-bearing ones marked human.
   if (candidateModel) {
@@ -1206,6 +1222,20 @@ function deliverySummary(session: InstallSession): InstallPlan['delivery'] {
  * repository public" means a private repository on a free plan, which can never have branch
  * protection, so the merge gate is impossible — a human choice of public or paid, not an agent's.
  */
+/**
+ * The plan's github.protection step on a base an operator ruleset governs (GY-1926): AC-2's add to
+ * the one ruleset requiring checks, or the refusal naming each candidate. Classic protection is
+ * never planned there.
+ */
+function rulesetPlanAction(operator: OperatorRulesets, branch: string, appId: number | null): { action: PlanAction; refusal: string | null } {
+  const { target, refusal } = rulesetTarget(operator.rulesets, branch);
+  const governing = operator.rulesets.map(ruleset => `${ruleset.id} (${ruleset.name})`).join(', ');
+  const satisfied = !!target && appId !== null && !missingGraphyardChecks(target, appId).length;
+  return { refusal: refusal && `${branch} is governed by operator ruleset(s) ${governing}, so Graphyard writes no classic protection there, and its checks cannot be added: ${refusal}`,
+    action: { id: 'github.protection', target: 'github', state: satisfied ? 'satisfied' : 'update',
+      title: `Add ${GRAPHYARD_CHECKS.join(' and ')} from App ${appId ?? '<the bound App>'} to the required checks of operator ruleset ${target ? `${target.id} (${target.name})` : `<none qualifies among ${governing}>`} on ${branch}, after snapshotting it; every other rule, condition, bypass actor and check stays as the operator wrote it, and classic protection is never written while an operator ruleset governs ${branch}` } };
+}
+
 export async function protectionAvailability(gh: ReturnType<typeof githubCli>, repository: string, branch: string): Promise<PreflightItem> {
   const result = await gh(['api', `repos/${repository}/branches/${branch}/protection`], { allowFailure: true });
   const answer = `${result.stderr}\n${result.stdout}`;
@@ -1582,10 +1612,22 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
     const { facts } = bound;
     const protectionInputs = { repository: session.inputs.repository, branch: session.inputs.baseBranch, requiredChecks: session.requiredChecks, graphyardAppId: facts.appId, reviewCount: session.reviewCount };
     const current = await readProtection(gh, session.inputs.repository, session.inputs.baseBranch);
+    const operator = await readOperatorRulesets(gh, session.inputs.repository, session.inputs.baseBranch);
     // The App-bound merge check is added only once Graphyard has published it; requiring a
     // context that does not exist yet would block every pull request on the repository.
     mergeCheckExists = (current?.required_status_checks?.checks ?? []).some((check: any) => check.context === CHECK_NAME)
+      || operator.rulesets.some(ruleset => !missingGraphyardChecks(ruleset, facts.appId).some(entry => entry.context === CHECK_NAME))
       || (await detectCiAppIds(gh, session.inputs.repository, session.inputs.baseBranch, null)).some(entry => entry.appId === facts.appId);
+    if (operator.rulesets.length) {
+      // GY-1926: an operator ruleset governs the base, so no classic protection is recorded or written.
+      const governing = operator.rulesets.map(ruleset => `${ruleset.id} (${ruleset.name})`).join(', ');
+      if (!mergeCheckExists) protectionDetail = `governed by operator ruleset(s) ${governing}; classic protection is not written, and ${GRAPHYARD_CHECKS.join(' and ')} are added to the ruleset once App ${facts.appId} has published them (rerun install --apply, or graphyard master protection --apply)`;
+      else {
+        const added = await applyOperatorRulesetAdd(gh, { repository: session.inputs.repository, baseBranch: session.inputs.baseBranch, githubAppId: facts.appId, snapshots: protectionSnapshots(session.root), now: deps.now() })
+          .catch((error: any) => { throw new Error(`${session.inputs.baseBranch} is governed by operator ruleset(s) ${governing}, so the installer writes no classic protection there, and adding Graphyard's checks was refused: ${error.message}`); });
+        protectionDetail = added.result;
+      }
+    } else {
     const satisfied = protectionSatisfied(protectionInputs, current);
     // Before the first write, the protection, auto-merge and queue ruleset found are recorded once,
     // for `install --restore-protection` (GY-1870); a later apply keeps that record.
@@ -1594,6 +1636,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
     protectionDetail = applied
       ? `required checks ${applied.required_status_checks.checks.map(check => check.context).join(', ')} ("up to date" off: a candidate merges on the base it was built on); ${applied.required_pull_request_reviews.required_approving_review_count} approving review(s); admin enforcement`
       : `already matches the ${session.reviewPolicy} review policy`;
+    }
   }
 
   // The release pipeline's free wiring, then the adapter's environments: paid ones only with

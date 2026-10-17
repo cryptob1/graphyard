@@ -642,6 +642,7 @@
     "tests/proof-planner.test.ts": 827,
     "tests/protection-merge-mode-persistence.test.ts": 579,
     "tests/protection-merge-mode.test.ts": 761,
+    "tests/protection-operator-rulesets.test.ts": 600,
     "tests/provider-usage.test.ts": 484,
     "tests/quarantine.test.ts": 276,
     "tests/queue-carry.test.ts": 460,
