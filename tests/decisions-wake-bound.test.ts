@@ -177,3 +177,61 @@ test('unit:slow-loop-step-bounded — an observe past its per-call bound with bu
   assert.equal(slow.calls.length, 1, 'the answer was consumed, never sent twice');
   assert.deepEqual(woken, [], 'the consumed observe was the wake; no wakeObservation followed it');
 });
+
+test('unit:slow-loop-step-bounded — a carried wake retired as moot leaves its flight behind: once that resync settles, a later wake of the same item and binding is a fresh send, never the retired wake\'s answer', async () => {
+  const work = item('GY-1875'), slow = hanging(), woken: Work[] = [];
+  let listed: Work[] = [work], at = 0;
+  const fx = effects(work, {
+    snapshot: async () => ({ work: listed, now: iso(at), jobs: [] }),
+    observe: async () => null,
+    wakeObservation: ((subject: Work) => { woken.push(subject); return woken.length === 1 ? slow.call(subject) : Promise.resolve(); }) as unknown as DaemonEffects['wakeObservation'],
+  } as Partial<DaemonEffects>);
+  const state = emptyDaemonState(config());
+  await returns(runCycle(config(), state, fx, () => clock));
+  assert.equal(wakeRow(state, work)?.state, 'waiting', 'the first wake was carried past its bound');
+  // The item leaves the loop's items: its carried wake is moot and retired, with the resync still in flight.
+  listed = [];
+  await returns(runCycle(config(), state, fx, () => clock + 60_000));
+  const retired = wakeRow(state, work);
+  assert.equal(retired.state, 'done', 'the moot carried wake was retired');
+  assert.match(retired.detail, /is moot: the item left the loop's items/, retired.detail);
+  // The retired wake's resync settles after its retirement, and the item comes back on the same head and binding, its rework still waiting past the re-wake interval.
+  slow.answer(undefined);
+  listed = [work]; at = 11 * 60_000;
+  await returns(runCycle(config(), state, fx, () => clock + at));
+  assert.equal(woken.length, 2, `the later wake was sent afresh, not answered by the retired wake's settled flight: ${JSON.stringify(wakeRow(state, work))}`);
+  const again = wakeRow(state, work);
+  assert.equal(again.state, 'done', `the fresh wake answered: ${again.detail}`);
+  assert.match(again.detail, /Woke the observation job of GY-1875/, again.detail);
+});
+
+test('unit:slow-loop-step-bounded — a carried wake whose resync later fails keeps the sends already made, so repeated slow failures keep growing the retry backoff', async () => {
+  const work = item('GY-1876'), calls: Work[] = [];
+  let reject!: (error: Error) => void;
+  const failing = new Promise<never>((_, fail) => { reject = fail; });
+  failing.catch(() => {});
+  const fx = effects(work, {
+    observe: async () => null,
+    wakeObservation: (async (subject: Work) => { calls.push(subject); if (calls.length === 1) throw new Error('resync answered 502'); return failing; }) as unknown as DaemonEffects['wakeObservation'],
+  } as Partial<DaemonEffects>);
+  const state = emptyDaemonState(config());
+  await returns(runCycle(config(), state, fx, () => clock));
+  assert.equal(wakeRow(state, work).state, 'failed');
+  assert.equal(wakeRow(state, work).attempts, 1, 'the first send failed');
+  // The backoff lets the next cycle send again; that send hangs past the bound and is carried, counting the second send.
+  await returns(runCycle(config(), state, fx, () => clock + 60_000));
+  assert.equal(wakeRow(state, work).state, 'waiting', 'the second send was carried');
+  assert.equal(wakeRow(state, work).attempts, 2, 'the carried row counts both sends');
+  // The carried send fails; the next cycle's retry consumes that rejection and makes no new send, so the failure keeps both sends.
+  reject(new Error('resync answered 504'));
+  await returns(runCycle(config(), state, fx, () => clock + 120_000));
+  const failed = wakeRow(state, work);
+  assert.equal(failed.state, 'failed', failed.detail);
+  assert.equal(failed.attempts, 2, 'consuming the carried failure made no send and kept the two sends already made');
+  assert.equal(calls.length, 2, 'the rejection was consumed, never sent again');
+  // Two failed sends back off two cycles, not one: the very next cycle sends nothing.
+  await returns(runCycle(config(), state, fx, () => clock + 180_000));
+  assert.equal(calls.length, 2, 'the accumulated backoff holds the next send');
+  await returns(runCycle(config(), state, fx, () => clock + 240_000));
+  assert.equal(calls.length, 3, 'the backoff\'s second cycle sends again');
+});

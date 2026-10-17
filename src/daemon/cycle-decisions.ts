@@ -29,6 +29,10 @@ import { closeStanding, closingItems, recordingWrites, staleCloseStep } from './
 export { handWatchPrefix }; const approverCalls: readonly (keyof DaemonEffects)[] = ['approver', 'endRegistrySession', 'resume', 'withdraw', 'closeSession', 'herdr', 'agents', 'approverLaunches', 'approverLaunch', 'sessionOutput', 'recordSession', 'holdAccount', 'reportCapacity', 'reconcileSessions'];
 /** GY-1865: the decisions step's observation wakes — the rework waker's `observe` and the waiting refusal's `wakeObservation` — are the same slow `resync` write the decisions wait behind, so they wait under the step's bound with every other call it makes: one past the bound is carried to the next cycle, which joins it or consumes its answer so a wake starts once, and a spent budget wakes nothing new, so a slow control plane can no longer stack one 30s resync POST after another inside the step and hold the cycle past its 60s bound. */
 const wakeCalls: readonly (keyof DaemonEffects)[] = ['observe', 'wakeObservation'];
+/** GY-1865 review: per loop cursor, each item's observation-wake generation, bumped when its carried wake is retired as moot: the generation is part of the wake's flight key, so a later wake never joins, nor consumes the answer of, the retired one. */
+const wakeGenerations = new WeakMap<DaemonState, Map<string, number>>();
+const wakeGeneration = (state: DaemonState, id: string | undefined) => (id && wakeGenerations.get(state)?.get(id)) || 0;
+const nextWakeGeneration = (state: DaemonState, id: string) => { const generations = wakeGenerations.get(state) ?? new Map<string, number>(); wakeGenerations.set(state, generations); generations.set(id, wakeGeneration(state, id) + 1); };
 const holdBounds = new WeakMap<DaemonState, Map<string, number>>(); // GY-1622: per loop cursor, each held item's docs-sync hold bound on the local clock; an item the step did not reach this cycle (put off by its budget) keeps the one it last left; one already passed locally while its hold stood is a zero wait, so the next cycle re-reads it; one exactly a wait away still binds, so the guard's time comes off it. `bound` is the earliest bound when it ends this wait, `next` the earliest whether or not it does: one just beyond the wait still caps the sleep left after the checkout guard
 export const holdBoundWait = (state: DaemonState, wait: number, at: number) => { const bounds = holdBounds.get(state); const next = bounds?.size ? Math.min(...bounds.values()) : null; return next !== null && next - at <= wait ? { wait: Math.max(0, next - at), bound: next, next } : { wait, bound: null, next }; };
 /** Step 4c: request and supervise the routine decisions. */
@@ -37,7 +41,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // The items this step writes, which the stale-close step leaves to the next cycle's read (GY-1439).
   const written = new Set<string>(); let budgetLeft = (): number => Number.POSITIVE_INFINITY; // the step budget every call below is capped by, bound where the budget is made; no decide call runs before it
   // GY-1865: the wake is the item's — the waker's remaining wait (`observe`'s second argument) moves between retries, so the key drops it and a retry joins the wake still in flight instead of starting a second one.
-  const wakeBound = (base: DaemonEffects) => boundedCalls(base, cycle.heldDecisions, now, () => budgetLeft(), { step: 'decisions', calls: wakeCalls, key: (call, args) => callKey(call, [args[0]]), wording: (_call, args) => ({ what: `${(args[0] as Work | undefined)?.key ?? 'the item'}'s observation wake`, owed: 'wake', per: 'call' }) });
+  // GY-1865 review: the wake's flights are kept on the cursor, the state its carried rows stand on and `retireCarried` releases them from, so they age by its cycles; the item's wake generation, bumped when a moot row is retired, parts a later wake from the obsolete flight, so it is a fresh send, never the retired wake's answer.
+  const wakeBound = (base: DaemonEffects) => boundedCalls(base, state, now, () => budgetLeft(), { step: 'decisions', calls: wakeCalls, key: (call, args) => callKey(call, [args[0], wakeGeneration(state, (args[0] as Work | undefined)?.id)]), wording: (_call, args) => ({ what: `${(args[0] as Work | undefined)?.key ?? 'the item'}'s observation wake`, owed: 'wake', per: 'call' }) });
   const effects = recordingWrites(boundedDecisions(boundedCalls(await decisionReads(wakeBound(cycle.effects), cycle.heldDecisions, snapshot.work, Object.values(state.approvals), clock, cycle.effects.decisionReadDeadlineMs), cycle.heldDecisions, now, () => budgetLeft(), { step: 'approvers', calls: approverCalls }), cycle.heldDecisions, now, () => budgetLeft()), written);
   // 4c. Routine decisions: request with the master's operator-agent identity, launch an independent approver, supervise every cycle (see `approvalStep`).
   const stamp = new Date(clock).toISOString(), bounds = holdBounds.get(state) ?? new Map<string, number>(); holdBounds.set(state, bounds); for (const id of bounds.keys()) if (!snapshot.work.some(work => work.id === id)) bounds.delete(id);
@@ -414,7 +419,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // GY-1865 review: a carried wake whose item no longer waits is retired, never left `waiting` forever — nothing would retry it, `pruneDaemonState` drops only settled rows, and the row would keep the flight and its answer in memory while status counted a call nothing will make. An item still open is retired where its decision is read (decideItem); one that left the loop's items is retired here, its row's last reader.
   const present = new Set(snapshot.work.map(work => work.id));
   for (const [rowKey, row] of Object.entries(state.actions)) if (rowKey.startsWith('wake:observation:') && carriedRow(row) && !present.has(rowKey.slice('wake:observation:'.length)))
-    await retireCarried(cycle, rowKey, row, `Waking ${row.work ?? 'the item'}'s observation job, carried on cycle ${row.cycle}, is moot: the item left the loop's items`);
+    { await retireCarried(cycle, rowKey, row, `Waking ${row.work ?? 'the item'}'s observation job, carried on cycle ${row.cycle}, is moot: the item left the loop's items`); nextWakeGeneration(state, rowKey.slice('wake:observation:'.length)); }
   // A producer request whose attempts are used up calls for rework once its escalation stood a cycle (GY-496).
   const exhausted = (await cycle.exhaustedProofs()).filter(entry => { const raised = state.actions[exhaustedProofKey(entry)]; return !!raised && raised.cycle < state.cycle; });
   // A needed decision with no watch is requested once ready to retry, or escalated.
@@ -428,7 +433,12 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   };
   // GY-1865 review: an `observe` past its bound is recorded carried on the item's wake row before the waker reads it as no reading, so the cycle sends no `wakeObservation` resync beside the one still in flight, and the next cycle's retry joins that `observe` flight.
   const observeWake = (work: Work) => `Observing ${work.key}'s reading`;
-  const wake = effects.observe && observationWaker((work, waitMs) => effects.observe!(work, waitMs).catch(async (error: unknown) => {
+  // An answer the waker's own call takes for a row carried on an earlier cycle is that row's retry: it joined the flight or consumed its answer, so the row is retired then, and the step's wake never sends the carried observe a second time.
+  const wake = effects.observe && observationWaker((work, waitMs) => effects.observe!(work, waitMs).then(async fresh => {
+    const key = `wake:observation:${work.id}`, row = state.actions[key];
+    if (row && carriedRow(row) && row.cycle < state.cycle && row.detail.startsWith(observeWake(work))) await retireCarried(cycle, key, row, `${observeWake(work)}, carried on cycle ${row.cycle}, answered on its retry`);
+    return fresh;
+  }, async (error: unknown) => {
     if (stepCallCarried(error)) await recordCarried(cycle, `wake:observation:${work.id}`, { kind: 'refresh', work: work.key, epoch: work.epoch }, error, observeWake(work));
     throw error;
   }));
@@ -443,8 +453,10 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (!effects.wakeObservation && !observed) return;
     if (carried && previous!.cycle === state.cycle) return;
     if (previous && !carried && (previous.state === 'failed' ? !readyToRetry(previous, state.cycle) : !observationWakeDue(item, previous?.at, clock, pause))) return;
+    // GY-1865 review: a carried row's attempts are the sends already made (recordCarried); consuming its rejection makes none, so a failure keeps that count — and the backoff it grows — adding one only for the first send a spent budget had never made.
+    const sends = carried ? previous!.attempts + (/ budget passed before .+ was made /.test(previous!.detail) ? 1 : 0) : (previous?.state === 'failed' ? previous.attempts : 0) + 1;
     const noteWake = async (outcome: 'done' | 'failed', detail: string, at: number) =>
-      performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: outcome, detail, attempts: outcome === 'failed' ? (previous?.state === 'failed' ? previous.attempts : 0) + 1 : 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist));
+      performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: outcome, detail, attempts: outcome === 'failed' ? Math.max(1, sends) : 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist));
     try { await (observed ? effects.observe!(item, 0) : effects.wakeObservation!(item)); }
     catch (error) {
       if (stepCallCarried(error)) { await recordCarried(cycle, key, { kind: 'refresh', work: item.key, epoch: item.epoch }, error, observed ? observeWake(item) : `Waking ${item.key}'s observation job`); return; }
@@ -455,7 +467,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   /** GY-1865 review: retire the item's carried wake row once its wake is moot — no rework wait, a fresher observation, or the item gone — so no carried call stays owed with nothing left to retry it. */
   const retireMootWake = async (item: Work, why: string) => {
     const key = `wake:observation:${item.id}`, row = state.actions[key];
-    if (row && carriedRow(row)) await retireCarried(cycle, key, row, `Waking ${item.key}'s observation job, carried on cycle ${row.cycle}, is moot: ${why}`);
+    if (row && carriedRow(row)) { await retireCarried(cycle, key, row, `Waking ${item.key}'s observation job, carried on cycle ${row.cycle}, is moot: ${why}`); nextWakeGeneration(state, item.id); }
   };
   const mechanicalRead = effects.mechanicalFixes ? await effects.mechanicalFixes().then(read => read, () => null) : null, mechanical = mechanicalRead?.requests ?? []; // GY-971 planned bot rounds; GY-1764: reported to the review gate, an unreported plan holds its item's decision
   const planUnreported = await reportMechanicalPlans(snapshot.work, mechanical, effects, clock, planReportSink(state, note), effects.mechanicalFixes ? mechanicalRead : undefined); // GY-1814: the plans and the answered approvals come from this one ledger read. GY-1795: a write the gate's freshness already supersedes fails visibly but counts no decision fault, and an item delivered meanwhile settles its report (mechanical-plan-report.ts)

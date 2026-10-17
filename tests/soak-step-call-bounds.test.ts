@@ -57,6 +57,38 @@ test('unit:soak-invariants-hold — a day of approver, decision and session call
   assert.deepEqual(state.faults.instances.filter(instance => carried.test(instance.text)), [], 'no fault is filed for a carried call');
 });
 
+test('unit:soak-invariants-hold — a day whose rework waker\'s observe answers slower than the per-call bound carries the observe on the item\'s wake row, sends no second resync beside it or on its retry, retires every carried wake, and holds every invariant', { timeout: 600_000 }, async () => {
+  // GY-1865 review: the window slows the rework waker's `observe` — the decisions step's own resync — as well as
+  // `wakeObservation`, and the docs-conflict item's readings land late, so its rework waits and the step's observe
+  // is carried across cycles: the retry joins the flight or consumes its answer, and nothing sends it twice.
+  const window = { from: 30 * minute, to: 150 * minute, ms: 15_000, observe: true };
+  const day = await simulateDay({ hours: 5, lateReading: true, slowCalls: window, plan: basePlan });
+  assertLaunchesConfined(day, coordinatorRoot!);
+  const { violations, failures, lost, final, state, observed, budgetDay } = day;
+  assert.deepEqual(violations, [], 'every system invariant holds while the observe resync answers slower than the bound');
+  assert.ok(observed.has('cycle-p90'), 'cycle-p90 is judged on measured cycles, not vacuously');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'every item is delivered');
+  // The observe was slowed past the bound and recorded carried on the item's wake row.
+  assert.ok((budgetDay.slowed.observe ?? 0) >= 1, `the window slowed the waker's observe: ${JSON.stringify(budgetDay.slowed)}`);
+  const observeCarries = budgetDay.carriedWakes.filter(row => /^Observing .+'s reading was carried to the next cycle/.test(row.detail));
+  assert.ok(observeCarries.length >= 1, `a carried observe stood on a wake row: ${JSON.stringify(budgetDay.carriedWakes)}`);
+  // No duplicate resync: inside the window every send is past the bound, so an item never had two wake sends in one cycle — no wakeObservation beside a carried observe, no second observe on its retry.
+  const perCycle = new Map<string, string[]>();
+  for (const send of budgetDay.wakeSends.filter(send => send.slowed)) perCycle.set(`${send.cycle} ${send.key}`, [...(perCycle.get(`${send.cycle} ${send.key}`) ?? []), send.call]);
+  assert.deepEqual([...perCycle].filter(([, calls]) => calls.length > 1), [], 'no item was sent a second resync in a cycle while its first was in flight');
+  // The very next cycle's retry joins the observe still in flight or consumes its answer: it sends that item nothing.
+  const keyOf = (rowKey: string) => final.find(entry => `wake:observation:${entry.id}` === rowKey)?.key;
+  assert.deepEqual(observeCarries.filter(row => budgetDay.wakeSends.some(send => send.cycle === row.cycle + 1 && send.key === keyOf(row.key))).map(row => `${row.key} carried on cycle ${row.cycle}`), [], `a carried observe's retry sent no second resync: ${JSON.stringify(budgetDay.wakeSends.filter(send => send.slowed))}`);
+  // Every carried wake was consumed or retired: none stands waiting at the end of the day, and no fault was filed for one.
+  assert.deepEqual(Object.entries(state.actions).filter(([key, row]) => key.startsWith('wake:observation:') && row.state === 'waiting').map(([key, row]) => `${key}: ${row.detail}`), [], 'no observation wake stays carried');
+  assert.equal(budgetDay.cycles.at(-1)!.carried, 0, `nothing stays carried at the end of the day: ${JSON.stringify(Object.entries(state.actions).filter(([, row]) => row.state === 'waiting' && carried.test(row.detail)))}`);
+  assert.deepEqual(state.faults.instances.filter(instance => carried.test(instance.text)), [], 'no fault is filed for a carried call');
+  const intervalMs = soakConfig.run.intervalSeconds * 1000;
+  assert.deepEqual(budgetDay.cycles.filter(entry => entry.spentMs > intervalMs).map(entry => `cycle ${entry.cycle}: ${entry.spentMs}ms`), [], 'every cycle stays within the interval');
+});
+
 test('unit:soak-invariants-hold — goals drafted, judged and planned while the acceptance and planner calls answer slower than the bound carry the triage phases, hold no cycle past the interval, and are all delivered', { timeout: 900_000 }, async () => {
   const day = await simulateDay({ hours: 14, acceptance: true, planner: true, slowCalls: { from: 20 * minute, to: 60 * minute, ms: 15_000 }, plan: { ...basePlan, deploys: [2 * hour + 30 * minute, 5 * hour, 9 * hour, 11 * hour, 13 * hour] } });
   const { violations, failures, lost, state, budgetDay } = day;
