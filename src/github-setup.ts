@@ -515,7 +515,9 @@ export async function startGithubSetup(root: string, repository: string, deploym
    * GY-1878: the repository owner's account type, so an organization-owned repository registers its
    * Apps through the organization's settings path (the user path would create a user-owned private
    * App the repository cannot install). A failed or unknown reading keeps the user path, which a
-   * user-owned repository needs; githubOwnerType resolves the reading without credentials.
+   * user-owned repository needs. Defaults to githubOwnerType, which resolves the reading without
+   * credentials, so every caller registers an organization's repository through its path; a test
+   * that must stay offline injects its own reading.
    */
   ownerType?: (owner: string) => Promise<'User' | 'Organization' | null>;
 } = {}, reviewer?: string) {
@@ -551,10 +553,12 @@ export async function startGithubSetup(root: string, repository: string, deploym
     return Number.isSafeInteger(installation?.id) && installation.id > 0 ? installation.id as number : null;
   });
   // GY-1878: the owner's account type is resolved once per page and shared by both manifest forms
-  // and the App-import route the page shows; without a reading the page keeps the user path.
-  const readOwnerType = dependencies.ownerType;
+  // and the App-import route the page shows; without a reading the page keeps the user path. The
+  // default reading is GitHub's public API (githubOwnerType), so a caller that injects nothing —
+  // every production one — still registers an organization's repository through its path.
+  const readOwnerType = dependencies.ownerType ?? githubOwnerType;
   let ownerType: Promise<'User' | 'Organization'> | null = null;
-  const repositoryOwnerType = () => ownerType ??= (readOwnerType ?? (async () => 'User' as const))(repository.split('/')[0])
+  const repositoryOwnerType = () => ownerType ??= readOwnerType(repository.split('/')[0])
     .then(reading => reading === 'Organization' ? 'Organization' as const : 'User' as const, () => 'User' as const);
   /** Records an installation the operator made elsewhere; false while there is none (or it cannot be read). */
   async function detectInstallation() {

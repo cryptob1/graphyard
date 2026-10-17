@@ -7,7 +7,7 @@ import { dirname, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { goalSubmission, setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
 import { actionsDirectory, agentBrowserPage, browserProfileMode, offeredSudoMethods, passSudo, recordingPage, submitSudoCode, sudoInstruction, sudoProtectedPage, sudoStateSchema, takeSudoCode, type BrowserPage, type BrowserProfileMode, type RecordedStep, type SudoOptions, type SudoState } from './master-browser.js';
-import { appImportRoute } from './github-setup.js';
+import { appImportRoute, githubOwnerType } from './github-setup.js';
 import { masterCredential, planeRequest } from './setup-from-zero.js';
 import { fileOnboardingWork, onboardingChecks } from './onboarding.js';
 import { findOnboardingWork, onboardingBranch, onboardingWait, waitedFor, type OnboardingWait } from './model/onboarding-work.js';
@@ -1372,12 +1372,20 @@ class AppRejected extends Error {}
  */
 export function browserAppDriver(options: { page: BrowserPage; repository: string; ids: () => { owner: number; repository: number }; sleep: (ms: number) => Promise<void>; now?: () => Date; timeoutMs?: number; record?: string; sudo?: SudoOptions['prefer']; readCode?: SudoOptions['readCode']; onClose?: (outcome: DriveOutcome) => Promise<void> | void;
   profile?: { mode: BrowserProfileMode; name: string } | null; noWait?: boolean; upFlags?: string; reuseFlags?: string;
+  /** GY-1878: the repository owner's account type for the App-import route; defaults to githubOwnerType. */
+  ownerType?: (owner: string) => Promise<'User' | 'Organization' | null>;
   pending?: () => Promise<SudoState | null> | SudoState | null; remember?: (state: SudoState | null) => Promise<void> | void; onResume?: (state: SudoState) => void }) {
   const { page } = options;
   const owner = options.repository.split('/')[0];
   // The operator's up command past its repository (upCommandFlags), for the rerun and the App-import route; the rerun keeps its --reuse-app too.
   const upFlags = options.upFlags ?? ' --agent';
-  const rerun = `graphyard up --repo ${options.repository}${options.reuseFlags ?? ''}${upFlags}`, importRoute = appImportRoute(options.repository, upFlags);
+  const rerun = `graphyard up --repo ${options.repository}${options.reuseFlags ?? ''}${upFlags}`;
+  // GY-1878: the route names the owner's registration path, so the drive resolves the owner's account
+  // type once (an injected reading, else GitHub's public API) before the handoff that quotes it; a
+  // failed or unknown reading keeps the user path, as on the setup page itself.
+  let route: Promise<string> | null = null;
+  const importRoute = () => route ??= (options.ownerType ?? githubOwnerType)(owner)
+    .then(read => appImportRoute(options.repository, upFlags, false, read === 'Organization' ? 'Organization' : 'User'), () => appImportRoute(options.repository, upFlags));
   let setupPage: string | null = null, resumeChecked = false, settledLocally = false;
   const driveStarted = (options.now ?? (() => new Date()))();
   const awaitSudo = async (handoff: Handoff) => {
@@ -1390,9 +1398,9 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
       await options.remember?.(resumed ? { ...state, issuedAt: resumed.issuedAt } : state);
       if (resumed) options.onResume?.(resumed);
       // GY-1510: a GitHub Mobile prompt is handed off as one plain sentence naming its number.
-      else handoff(state.method === 'mobile' ? sudoInstruction(state, 'your phone', { ...(options.readCode ? { page: setupPage, command: 'graphyard up --sudo-code' } : {}), profile: options.profile ?? null }) : [sudoInstruction(state, 'your phone', { ...(options.readCode ? { page: setupPage, command: 'graphyard up --sudo-code' } : {}), profile: options.profile ?? null }), importRoute].join('\n'),
+      else handoff(state.method === 'mobile' ? sudoInstruction(state, 'your phone', { ...(options.readCode ? { page: setupPage, command: 'graphyard up --sudo-code' } : {}), profile: options.profile ?? null }) : [sudoInstruction(state, 'your phone', { ...(options.readCode ? { page: setupPage, command: 'graphyard up --sudo-code' } : {}), profile: options.profile ?? null }), await importRoute()].join('\n'),
         { url: state.fallback?.url ?? state.url ?? page.url(), code: state.code });
-      if (options.noWait) throw new SudoNoWait(`GitHub asks to confirm access before it creates the App, and --no-wait does not wait for it. ${importRoute}; or rerun ${rerun} without --no-wait to wait for the confirmation.`);
+      if (options.noWait) throw new SudoNoWait(`GitHub asks to confirm access before it creates the App, and --no-wait does not wait for it. ${await importRoute()}; or rerun ${rerun} without --no-wait to wait for the confirmation.`);
     };
     // passSudo's flow names the closest master browser flow; its rerun advice is this command's.
     try {

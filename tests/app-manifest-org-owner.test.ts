@@ -62,6 +62,85 @@ test('unit:app-manifest-org-route — the hand-made route names the organization
   }
 });
 
+/** Opens the local App setup page for REPOSITORY with no owner-type reader injected: the page's default reading runs. */
+async function openDefaultPage(repository: string): Promise<OpenPage> {
+  const { startGithubSetup } = await setup();
+  const root = await temporaryDirectory('org-owner-page');
+  execFileSync('git', ['init', '-q', root]);
+  const page = await startGithubSetup(root, repository, 'https://graphyard.example', 0);
+  return {
+    url: page.url,
+    close: () => new Promise<void>(done => page.http.close(() => done())),
+    html: async () => (await (await fetch(page.url)).text()),
+  };
+}
+
+/** Stands in for GitHub's API while a default owner-type reading runs; answers an account of TYPE. */
+function serveOwnerType(type: string): typeof fetch {
+  return (async (input: any) => {
+    const url = String(typeof input === 'string' ? input : input?.url ?? input);
+    if (!url.startsWith('https://api.github.com/users/')) throw new Error(`unexpected fetch ${url}`);
+    return { ok: true, json: async () => ({ type }) } as any;
+  }) as typeof fetch;
+}
+
+test('unit:app-manifest-drive-route — the graphyard up --agent drive resolves the owner\'s account type before it hands off the App-import route, naming the owner\'s registration path', async () => {
+  const { browserAppDriver } = await import('../src/up.js') as any;
+  // The local App page first (the drive presses its register button), then a Confirm-access page
+  // that never settles: the drive hands off once, and --no-wait ends it with the route.
+  const page = () => {
+    let view: 'local' | 'sudo' = 'local';
+    return {
+      open: () => {}, url: () => view === 'local' ? 'http://127.0.0.1:4311' : 'https://github.com/sessions/sudo',
+      text: () => view === 'local' ? '' : 'Skip to content\nConfirm access\n\nSigned in as @operator\n\nPasskey\nWhen you are ready, authenticate using the button below.\nUse passkey\nHaving problems?\nUse GitHub Mobile\nUse your authenticator app\nSend a code via email',
+      meta: () => null,
+      locate: (kind: string, text: string) => view === 'local' && kind === 'button' && text === 'Register Graphyard App →' ? { selector: '#register', tag: 'button', checked: null, value: null, text, visible: true } : null,
+      click: (selector: string) => { if (selector === '#register') view = 'sudo'; },
+      setChecked: () => {}, select: () => {}, screenshot: () => {}, wait: () => {}, close: () => {},
+    };
+  };
+  const route = async (ownerType?: () => Promise<'User' | 'Organization' | null>) => {
+    const handed: string[] = [];
+    const outcome = await browserAppDriver({ page: page(), repository: 'acme/shop', noWait: true, ...(ownerType ? { ownerType } : {}), sleep: async () => {} })('http://127.0.0.1:4311', (sentence: string) => handed.push(sentence));
+    assert.equal(outcome.state, 'waiting', '--no-wait ends the drive at the confirmation hand-off');
+    assert.equal(handed.length, 1, 'exactly one hand-off, ending with the route');
+    return { handoff: handed[0]!, next: outcome.next as string };
+  };
+  const org = await route(async () => 'Organization');
+  assert.match(org.handoff, /create the App at github\.com\/organizations\/acme\/settings\/apps\/new whenever convenient/, 'the hand-off names the organization\'s registration path');
+  assert.match(org.next, /create the App at github\.com\/organizations\/acme\/settings\/apps\/new whenever convenient/, 'the --no-wait answer names the organization\'s registration path');
+  const none = await route(async () => null);
+  assert.match(none.handoff, /create the App at github\.com\/settings\/apps\/new whenever convenient/, 'an unknown reading keeps the user\'s path');
+  assert.doesNotMatch(none.handoff, /github\.com\/organizations\//, 'an unknown reading names no organization path');
+
+  // With nothing injected the drive consults githubOwnerType, as the setup page does.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = serveOwnerType('Organization');
+  try {
+    const drive = await route();
+    assert.match(drive.handoff, /create the App at github\.com\/organizations\/acme\/settings\/apps\/new whenever convenient/, 'the drive\'s default reading registers an organization\'s repository through the organization\'s path');
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test('unit:app-manifest-default-reading — a page opened with no injected reader consults githubOwnerType, so a real organization-owned repository registers through the organization\'s path', async () => {
+  const realFetch = globalThis.fetch;
+  const asked: string[] = [];
+  globalThis.fetch = (async (input: any, init?: any) => {
+    const url = String(typeof input === 'string' ? input : input?.url ?? input);
+    if (!url.startsWith('https://api.github.com/')) return realFetch(input, init);
+    asked.push(url);
+    return serveOwnerType('Organization')(input);
+  }) as typeof fetch;
+  try {
+    const page = await openDefaultPage('acme/shop');
+    try {
+      const { state, action } = manifestForm(await page.html());
+      assert.equal(action, `https://github.com/organizations/acme/settings/apps/new?state=${state}`, 'the default reading registers an organization\'s repository through the organization\'s path');
+      assert.ok(asked.includes('https://api.github.com/users/acme'), 'the default reading asked GitHub\'s public API for the owner\'s account type');
+    } finally { await page.close(); }
+  } finally { globalThis.fetch = realFetch; }
+});
+
 test('unit:app-manifest-owner-type — the owner type is resolved once per page, and a failed or unknown reading keeps the user\'s path', async () => {
   const { githubOwnerType } = await setup();
   const serving = (body: any, ok = true) => (async () => ({ ok, json: async () => body })) as any;
