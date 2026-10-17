@@ -323,7 +323,8 @@ export function approvedUnappliedSince(watch: Pick<ApprovalWatch, 'decision' | '
 export interface ActionableSubject { key: string; kind: DaemonActionKind; work: string | null; detail: string }
 export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run'>, work: Work[], now: number,
   context: { assessments?: Record<string, ContainmentAssessment>; approvals?: DaemonState['approvals']; baseFailed?: Map<string, Set<string>>; docsSyncs?: DaemonState['docsSyncs'];
-    /** GY-1890: the dispatch step stopped on a saturated fleet — no launch profile free by its own `saturatedFleet` decision — so a claimable item's wait is the fleet's slot capacity, not the loop's silence. */ fleetHeld?: boolean } = {}): ActionableSubject[] {
+    /** GY-1890: the dispatch step stopped on a saturated fleet — no launch profile free by its own `saturatedFleet` decision — so a claimable item's wait is the fleet's slot capacity, not the loop's silence. */ fleetHeld?: boolean;
+    /** GY-1890: whether an item's own launch is in flight; its slot is allocated, so its wait is that launch, never the fleet's capacity. */ launching?: (item: Work) => boolean } = {}): ActionableSubject[] {
   const subjects: ActionableSubject[] = [];
   // The silence record keeps each detail to 500 characters; a refusal or proof list quoted here is cut to fit.
   const add = (kind: DaemonActionKind, item: Work | null, detail: string) => subjects.push({ key: `${kind}:${item?.key ?? 'pipeline'}`, kind, work: item?.key ?? null, detail: boundDetail(detail, 500) });
@@ -357,7 +358,8 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     // GY-1890: with no launch profile free the wait on a claimable item is the fleet's slot
     // capacity, so it is a capacity subject, not a dispatch one: the loop cannot end it by acting,
     // and counting it as the loop's silence filed loop faults for a saturated fleet.
-    try { assertDispatchable(item, work, new Date(now).toISOString()); add(context.fleetHeld ? 'capacity' : 'dispatch', item, context.fleetHeld ? `${item.key} ${fleetHoldWording.held}` : `${item.key} is claimable and waiting for a worker`); } catch { /* not claimable: not actionable */ }
+    // An item whose own launch is in flight already holds its slot: it waits on that launch, not the fleet.
+    try { assertDispatchable(item, work, new Date(now).toISOString()); const fleetHeld = context.fleetHeld && !context.launching?.(item); add(fleetHeld ? 'capacity' : 'dispatch', item, fleetHeld ? `${item.key} ${fleetHoldWording.held}` : `${item.key} is claimable and waiting for a worker`); } catch { /* not claimable: not actionable */ }
     const request = item.scopeRequest;
     if (request && (!request.decision || redecidableScopeRefusal(item)) && item.lease && item.lease.epoch === request.epoch && Date.parse(item.lease.expiresAt) > now)
       add('scope', item, boundDetail(`${item.key}: ${request.requestedBy} is waiting for a decision on ${namePaths(request.paths, 300)}`, 500));

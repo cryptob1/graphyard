@@ -331,6 +331,20 @@ test('manual:fault-class-loop — GY-1890: a continuous wait keeps its age when 
   assert.equal(restarted.longest?.since, iso(firstSeen + 46 * minute));
 });
 
+test('manual:fault-class-loop — GY-1890: an item whose own launch is in flight is not fleet-held: when a later item finds the fleet saturated, only that later item becomes a capacity wait, so a hung launch still breaches as the loop\u2019s, exactly as it does alone', () => {
+  const master = config(), state = daemonState(master);
+  const work = [item('GY-2004', '2026-10-17T08:10:58.270Z'), item('GY-2005', '2026-10-17T08:11:58.270Z')];
+  const launching = (entry: Work) => entry.key === 'GY-2004';
+  const filed: Filed[] = [];
+  let silence = trackSilence(state, actionableSubjects(master, work, firstSeen, { fleetHeld: true, launching }), [], firstSeen);
+  for (let at = firstSeen + minute; at <= firstSeen + 21 * minute; at += minute) {
+    silence = trackSilence(state, actionableSubjects(master, work, at, { fleetHeld: true, launching }), [], at);
+    assert.deepEqual(silence.subjects.map(entry => `${entry.work}:${entry.kind}`).sort(), ['GY-2004:dispatch', 'GY-2005:capacity'], 'the in-flight item waits on its own launch, the queued one on the fleet');
+    for (const line of loopAttention({ liveness: runningLiveness(state), silence })) filed.push({ at: iso(at), kind: line.kind, subject: line.subject, text: line.text, owner: '' });
+  }
+  assert.ok(filed.length > 0 && filed.every(entry => entry.subject === 'GY-2004' && entry.kind === 'loop-silence'), 'the hung launch files as the loop\u2019s silence, never as concurrency-starved');
+});
+
 test('manual:fault-class-loop — GY-1890: a fleet that cannot launch at all is not a held fleet: the wait stays the loop\u2019s dispatch subject, escalates for a working credential, and breaches as loop-silence, never as capacity with a false remedy', async () => {
   const master = masterConfigSchema.parse({ ...config(), workers: JSON.parse(JSON.stringify(workerFleet(2))) });
   const work = [item('GY-2002', '2026-10-17T08:10:58.270Z')];

@@ -2,7 +2,7 @@
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
 import { cycleMetricsSchema, type CycleStepName, type DaemonAction, type DaemonActionKind, type DaemonState, emptyCycleSteps, message, pruneDaemonState } from './state.js';
-import { reconcilePendingActions } from './reconcile.js';
+import { dispatchKey, reconcilePendingActions } from './reconcile.js';
 import { type ExhaustedProof, setAsideFollowUpThreads } from './decisions.js';
 import { decisionFailureKind, emptyHeldDecisions, type HeldDecisions } from './decision-reads.js';
 import { actionableSubjects, latencyBudget, observeItemClock, stageMetrics, trackSilence } from './metrics.js';
@@ -306,7 +306,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // silence subject is a capacity one; the bound then files the class that owns slot starvation,
   // never the loop's. The flag is the step's own stop (`saturatedFleet` in the launch step), not a
   // recomputation beside it, so what reclasses a subject is what the step decided.
-  const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals, baseFailed: cycle.baseFailed, docsSyncs: state.docsSyncs, fleetHeld: cycle.fleetHeld });
+  const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals, baseFailed: cycle.baseFailed, docsSyncs: state.docsSyncs, fleetHeld: cycle.fleetHeld, launching: item => launcher.busy(dispatchKey(item)) });
   const silence = trackSilence(state, actionable, performed, clock);
   const { stages, lead, production, postDeploy, postDeployFailures } = stageMetrics(snapshot.work, clock);
   // The cycle's duration, and of it the time at least one child was in flight: the difference is
