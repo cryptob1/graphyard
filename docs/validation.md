@@ -28,7 +28,7 @@ Flaky required cases block promotion until an `evidence` decision (`{"case":ID,"
 
 ## Flake ledger
 
-A required check or merge-trial file passing its one rerun at the failed SHA is a flake, read into `.graphyard/flake-ledger.json`. Each `unit:`/`integration:` test gets one P1 `Flaky test: NAME` item at its first flake unless it proves its item, else after 3+ on 2+ SHAs/7 days; none while open or 7 days after. Own-proof failures never excused; own and unread proofs never rerun. Gates ignore it.
+A required check or merge-trial file passing its one rerun at the failed SHA is a flake, read into `.graphyard/flake-ledger.json`. Each `unit:`/`integration:` test gets one P1 `Flaky test: NAME` item at its first flake unless it proves its item, else after 3+ on 2+ SHAs/7 days. Own-proof failures never excused; own and unread proofs never rerun. Gates ignore it.
 
 ## Goals and acceptance
 
