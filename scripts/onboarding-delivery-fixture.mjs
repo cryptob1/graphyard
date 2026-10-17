@@ -10,7 +10,9 @@
 // committed to that plane as the install does, and runs the case there. preview-serves-change runs
 // there too (GY-1913): the shared install declares no application and runs no preview loop, so the
 // fixture serves the loop's own item-preview step against its plane, previewing the site onboarding
-// declared with its declared fixture-static-home case. Every other uat case runs
+// declared with its declared fixture-static-home case, and so does preview-isolation-cleanup (GY-1923):
+// its two items preview the Compose application onboarding declared (tests/fixtures/goal-compose-preview's
+// app) with its declared fixture-compose-app case, and settling one waits for the loop's cleanup. Every other uat case runs
 // against UAT as before, in one report and one verdict, so the release holds read it unchanged.
 // Nothing here reconfigures the shared install or writes the host's configuration (the fixture's
 // configuration and data homes sit in its scratch directory), and every fixture resource is removed afterwards.
@@ -33,24 +35,29 @@ import { repositoryDelivery } from '../src/install/index.ts';
 import { loadProjectDelivery, projectDeliveryAssignment } from '../src/project-applications.ts';
 import { mergeRecordKey, mergeWriterReads } from '../src/daemon/cycle-merge-writer.ts';
 import { itemPreviewStep } from '../src/merge-writer/preview.ts';
-import { previewDemand } from '../src/project-previews.ts';
+import { previewDemand, previewEnded } from '../src/project-previews.ts';
 import { defaultChildRun } from '../src/child-runner.ts';
 
 export const candidateRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 /** The uat cases that describe a freshly onboarded project, and so run against the fixture, never the shared install. */
-export const fixtureCases = ['onboarding-delivery-defaults', 'preview-serves-change'];
+export const fixtureCases = ['onboarding-delivery-defaults', 'preview-serves-change', 'preview-isolation-cleanup'];
 /** The candidate's own definition of a fixture case, tagged with the application it exercises so onboarding's scan binds it by evidence. */
 const declaredCase = (root, id, application) => { const definition = JSON.parse(readFileSync(join(root, 'e2e/cases', `${id}.json`), 'utf8')); return JSON.stringify({ ...definition, tags: [...definition.tags, application] }); };
+/** The candidate's own runnable Compose application (GY-1903's fixture): `web` serving its state and its own database `db`, from alpine:3 alone. */
+const composeApplication = (root) => {
+  const source = join(root, 'tests/fixtures/goal-compose-preview');
+  return Object.fromEntries(['compose.yml', ...['banner.txt', 'db-start.sh', 'db.Dockerfile', 'heading.txt', 'web-start.sh', 'web.sh'].map(file => `app/${file}`)].map(path => [path, readFileSync(join(source, path), 'utf8')]));
+};
 /**
  * The fixture repository: a static site whose build shows the change it previews
- * (GRAPHYARD_PREVIEW_TITLE), a Compose application, its own CI and the candidate's own fixture cases, as normal onboarding meets one.
+ * (GRAPHYARD_PREVIEW_TITLE), a runnable Compose application, its own CI and the candidate's own fixture cases, as normal onboarding meets one.
  */
 export const fixtureFiles = (root = candidateRoot) => ({
   'package.json': JSON.stringify({ name: 'fixture-project', scripts: { test: 'node --test', build: 'node build.mjs' } }),
   'build.mjs': 'import { appendFileSync } from "node:fs";\nconst title = process.env.GRAPHYARD_PREVIEW_TITLE;\nif (title) appendFileSync("public/index.html", `<p>${title.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`)}</p>\\n`);\nconsole.log("built");\n',
   '.github/workflows/ci.yml': 'name: ci\non:\n  pull_request:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n',
   'public/index.html': '<!doctype html><title>Fixture static site</title>\n<h1>Fixture static site</h1>\n',
-  'compose.yml': 'services:\n  web:\n    build: .\n    ports:\n      - "8080:3000"\n  db:\n    image: postgres:16\n',
+  ...composeApplication(root),
   'e2e/cases/fixture-static-home.json': declaredCase(root, 'fixture-static-home', 'site'),
   'e2e/cases/fixture-compose-app.json': declaredCase(root, 'fixture-compose-app', 'app'),
 });
@@ -122,7 +129,7 @@ export async function startControlPlane({ root = candidateRoot, sha, scratch, en
  * never serves another source than the candidate it is attributed to. `allocate()` makes its scratch
  * directory (a test passes its tracked temporaryDirectory). Once onboarded, the operator commits and
  * pushes what init wrote, and the loop's preview step serves the plane (`loop`); `settle(item)` waits
- * for an item's automatic preview. `close()` stops the loop and its previews, the plane and its
+ * for an item's automatic preview, and `settle(item, { ended: true })` for its automatic cleanup. `close()` stops the loop and its previews, the plane and its
  * database, and removes every file the fixture made. `launcher`, when given, opens the browser of
  * the declared cases each preview runs, as the item-preview port of the same name.
  */
@@ -159,7 +166,7 @@ export async function createOnboardingFixture({ root = candidateRoot, sha, dashb
     git('push', '-q', origin, 'main'); git('fetch', '-q', origin, 'main:refs/remotes/origin/main');
     const delivery = loadProjectDelivery({}, repository);
     loop = startPreviewLoop({ url: plane.url, token: plane.coordinatorToken, root: repository, base: join(scratch, 'worktrees'), environment: { ...isolated(host), ...confinedHomes(scratch) }, launcher });
-    const settle = item => settlePreview({ url: plane.url, token: plane.token, item, delivery });
+    const settle = (item, options = {}) => settlePreview({ url: plane.url, token: plane.token, item, delivery, ...options });
     return { url: plane.url, token: plane.token, sha: head, cli, scratch, repository, config, delivery, onboarding: { scanned, applied }, loop, settle, close };
   } catch (error) { await close(); throw error; }
 }
@@ -168,7 +175,7 @@ export async function createOnboardingFixture({ root = candidateRoot, sha, dashb
  * The loop's own item-preview step (merge-writer/preview.ts `itemPreviewStep`) over the ports the
  * daemon wires (`mergeWriterReads`), run against the plane at `url` as its coordinator identity every
  * `intervalMs`: it reads the coordination snapshot and previews every item whose criteria cite a case
- * bound to a declared static application from the checkout `root`, recording each preview through
+ * bound to a declared application from the checkout `root`, recording each preview through
  * the plane's merge-record route, opening their browsers with `launcher` when given. `stop()` ends the loop, then every preview it started.
  */
 export function startPreviewLoop({ url, token, root, base, environment, launcher, intervalMs = 1_000 }) {
@@ -207,17 +214,18 @@ export function startPreviewLoop({ url, token, root, base, environment, launcher
 /** How long a case waits for an item's automatic preview to settle before it reads the item. */
 export const previewSettleMs = 300_000;
 /**
- * Waits until `item`'s automatic preview has settled — recorded and no longer `starting` — read
- * through the plane's own API, when the item's cases need one under `delivery`; at once otherwise.
- * It writes nothing: a preview that never settles leaves the case's next step to read what is there.
+ * Waits until `item`'s automatic preview has settled — recorded and no longer `starting`, or with
+ * `ended`, recorded cleaned or failed once the item settled — read through the plane's own API, when
+ * the item's cases need one under `delivery`; at once otherwise. It writes nothing: a preview that
+ * never settles leaves the case's next step to read what is there.
  */
-export async function settlePreview({ url, token, item, delivery, timeoutMs = previewSettleMs, intervalMs = 500 }) {
+export async function settlePreview({ url, token, item, delivery, ended = false, timeoutMs = previewSettleMs, intervalMs = 500 }) {
   if (!item?.id || !previewDemand(item, delivery)) return null;
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const response = await fetch(`${url}/api/work/${encodeURIComponent(item.id)}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000) }).catch(() => null);
     const preview = response?.status === 200 ? (await response.json()).preview : null;
-    if (preview && preview.state !== 'starting') return preview;
+    if (preview && (ended ? previewEnded(preview) : preview.state !== 'starting')) return preview;
     if (Date.now() >= deadline) return preview ?? null;
     await new Promise(done => setTimeout(done, intervalMs));
   }
@@ -225,15 +233,21 @@ export async function settlePreview({ url, token, item, delivery, timeoutMs = pr
 
 /**
  * `fetcher` for a case on `target`: an item the case creates there (POST /api/work) is answered only
- * once `target.settle` saw its automatic preview settle, so the case's next step reads the preview the
- * loop recorded, as an operator opening the item later would. Every response is the plane's own.
+ * once `target.settle` saw its automatic preview settle, and an item it closes (POST /api/work/:id/close)
+ * only once it saw that preview cleaned up, so the case's next step reads the preview the loop
+ * recorded, as an operator opening the item later would. Every response is the plane's own.
  */
 export const settlingFetcher = (fetcher, target) => async (input, init) => {
   const response = await fetcher(input, init);
   const url = new URL(input instanceof Request ? input.url : String(input));
-  if (!target.settle || (init?.method ?? 'GET').toUpperCase() !== 'POST' || url.origin !== new URL(target.url).origin || url.pathname !== '/api/work' || response.status !== 200) return response;
-  await target.settle(await response.clone().json().catch(() => null));
-  return response;
+  const ended = /^\/api\/work\/[^/]+\/close$/.test(url.pathname);
+  if (!target.settle || (init?.method ?? 'GET').toUpperCase() !== 'POST' || url.origin !== new URL(target.url).origin || response.status !== 200 || (url.pathname !== '/api/work' && !ended)) return response;
+  // The body is read once and answered as received: a clone left unread through a long settle can lose the original's body.
+  const body = await response.text();
+  let item = null;
+  try { item = JSON.parse(body); } catch { /* no item to settle */ }
+  await target.settle(item, { ended });
+  return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
 };
 
 /**

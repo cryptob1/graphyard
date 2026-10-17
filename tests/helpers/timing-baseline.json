@@ -438,7 +438,7 @@
     "tests/goal-acceptance.test.ts": 2600,
     "tests/goal-compose-previews.test.ts": 40000,
     "tests/goal-delivery-onboarding.test.ts": 6500,
-    "tests/goal-exact-candidates.test.ts": 3000,
+    "tests/goal-land-without-server-fetch.test.ts": 3000,
     "tests/goal-pipeline-outright-refusals.test.ts": 1238,
     "tests/goal-planner.test.ts": 2900,
     "tests/goal-static-item-preview.test.ts": 4500,
@@ -672,6 +672,7 @@
     "tests/release-lag-ancestry.test.ts": 400,
     "tests/release-project.test.ts": 1500,
     "tests/release-revert.test.ts": 4000,
+    "tests/release-uat-compose-preview-target.test.ts": 25000,
     "tests/release-uat-preview-target.test.ts": 9000,
     "tests/repair-lane.test.ts": 446,
     "tests/report-adapters.test.ts": 740,
@@ -803,7 +804,6 @@
     "tests/soak-host-supervision.test.ts": 59368,
     "tests/soak-intervention-pattern-escalation-build.test.ts": 1892,
     "tests/soak-known-good.test.ts": 12836,
-    "tests/soak-exact-candidates.test.ts": 20000,
     "tests/soak-local-promotion.test.ts": 6000,
     "tests/soak-loop-code-root.test.ts": 45000,
     "tests/soak-loop-wake.test.ts": 34070,
@@ -965,6 +965,8 @@
     "tests/event-loop-lag-pending.test.ts": 729,
     "tests/install-worker-credentials.test.ts": 900,
     "tests/fault-class-loop.test.ts": 630,
-    "tests/slow-tick-repeat-receipt.test.ts": 600
+    "tests/slow-tick-repeat-receipt.test.ts": 600,
+    "tests/goal-exact-candidates.test.ts": 3000,
+    "tests/soak-exact-candidates.test.ts": 20000
   }
 }
