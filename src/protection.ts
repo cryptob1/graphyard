@@ -494,13 +494,15 @@ const rulesetsPage = (repository: string, page: number) => `repos/${repository}/
 /** Whether a ruleset is the repository's own, so writable through its repository endpoint (a listing without source_type predates inheritance). */
 const repositoryOwned = (ruleset: any) => (ruleset?.source_type ?? 'Repository') === 'Repository';
 
-/** An fnmatch glob as a regular expression source: `*` within one segment, `**` across them, `?`, `[set]`, `[!set]`/`[^set]` and `\\` escapes. */
+/** An fnmatch glob as a regular expression source: `*` within one segment, `**` then a slash zero or more directories, a bare `**` across them, `?`, `[set]`, `[!set]`/`[^set]` and `\\` escapes. */
 function fnmatchSource(glob: string) {
   const literal = (char: string) => char.replace(/[.+^${}()|[\]\\*?\/-]/g, '\\$&');
   let source = '';
   for (let at = 0; at < glob.length; at++) {
     const char = glob[at];
     if (char === '\\' && at + 1 < glob.length) source += literal(glob[++at]);
+    // `**/` spans zero or more whole directories (File::FNM_PATHNAME), so `qa/**/*` matches `qa/foo` too.
+    else if (char === '*' && glob[at + 1] === '*' && glob[at + 2] === '/') { source += '(?:[^/]*/)*'; at += 2; }
     else if (char === '*') { if (glob[at + 1] === '*') { source += '.*'; at++; } else source += '[^/]*'; }
     else if (char === '?') source += '[^/]';
     else if (char === '[') {

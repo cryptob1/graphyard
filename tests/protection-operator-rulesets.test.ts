@@ -174,6 +174,12 @@ test('unit:protection-reads-operator-rulesets — a classic 404 is no classic pr
   assert.equal(governs(['refs/heads/release-*'], ['refs/heads/release-[1-3]']), false);
   assert.equal(governs(['refs/heads/release-*'], ['refs/heads/release-[4-9]']), true);
   assert.equal(governs(['refs/heads/release-[0-9'], [], 'release-[0-9'), true, 'an unclosed bracket is a literal');
+  // `**/` spans zero or more directories, as GitHub's File::FNM_PATHNAME matching does.
+  assert.equal(governs(['refs/heads/qa/**/*'], [], 'qa/foo'), true, '`**/` matches zero directories');
+  assert.equal(governs(['refs/heads/qa/**/*'], [], 'qa/a/b/foo'), true);
+  assert.equal(governs(['refs/heads/qa/**/*'], [], 'qa'), false);
+  assert.equal(governs(['refs/heads/**/release-1']), true);
+  assert.equal(governs(['refs/heads/*'], ['refs/heads/**/*']), false, 'an excluding `**/*` excludes a top-level base');
   // A base governed only through a character set reads as operator-governed, so no classic write is proposed or made.
   const charset = fakeGitHub([{ ...mainRuleset(), conditions: { ref_name: { include: ['refs/heads/m[a-z]in'], exclude: ['refs/heads/[!m]*'] } } }]);
   const charsetPlan: any = protectionPlan(readProtection(config, charset.run), config, [work], undefined, []);
