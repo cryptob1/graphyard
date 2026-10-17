@@ -1,6 +1,6 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -136,6 +136,7 @@ test('unit:sha-observation-marks-deployed — a producer sha observation is idem
   const drained = await delivery.observeSha(observer, observation(release), id(), async merge => merge === older);
   assert.deepEqual([...drained.deployed].sort(), [...reached].sort());
   assert.deepEqual(new Set(drained.awaiting.map(row => row.key)), new Set([...ahead, elsewhere.key]));
+  assert.equal(drained.complete, true); assert.equal(drained.next, null);
 
   // The documented request is one the schema accepts.
   const guide = await readFile(new URL('../docs/delivery.md', import.meta.url), 'utf8');
@@ -173,4 +174,48 @@ test('unit:sha-observation-completion-states — a sha observation gives the dep
   assert.equal(deliveryOutcome(smoked(after)), `${deliveryLabel['awaiting-smoke']} — release ${shortShas(w.delivery!.mergeSha)} serving it`);
   assert.equal(deliveryLabel['awaiting-smoke'], 'Deployed, awaiting verification');
   assert.equal(deliveryOutcome(smoked(await reload(untouched))), deliveryLabel['awaiting-deployment'], 'an item the sha does not contain keeps its label');
+});
+
+test('unit:sha-observation-bounded-replay — a request does bounded provider work and continues by cursor, replays its receipt after production changes, and re-reads the production selection', async () => {
+  // Bounded: more distinct merges than one request compares are reached by continuing from `next`, and a failed comparison stops the batch before it.
+  const template = await delivered(sha('c')), served = sha('d');
+  const merges = Array.from({ length: 60 }, () => randomBytes(20).toString('hex')), mergedAt = Date.parse(template.delivery!.mergedAt);
+  const keys = (await Promise.all(merges.map((merge, n) => copies(template, 1, merge, () => new Date(mergedAt - 7_200_000 - n * 1000).toISOString())))).flat();
+  const wanted = new Set(merges);
+  let failed = false, passes = 0, after: unknown = undefined;
+  const deployed: string[] = [];
+  for (;;) {
+    let calls = 0;
+    const result = await delivery.observeSha(observer, observation(served, after ? { after } : {}), id(), async merge => {
+      calls++;
+      if (!failed && merge === merges[3]) { failed = true; throw new Error('provider rate limited'); }
+      return wanted.has(merge);
+    });
+    passes++; deployed.push(...result.deployed);
+    assert.ok(calls <= 50, `one request made ${calls} provider comparisons`);
+    if (result.providerError) { assert.match(result.providerError, /provider rate limited/); assert.equal(result.complete, false); assert.ok(!result.awaiting.some(row => row.key === keys[3]), 'the item whose comparison failed is left for the continuation'); }
+    if (result.complete) { assert.equal(result.next, null); break; }
+    assert.ok(result.next); after = result.next;
+    assert.ok(passes < 20, 'the continuation makes progress');
+  }
+  assert.ok(failed && passes >= 3, `passes ${passes}`);
+  assert.deepEqual(new Set(keys.filter(key => deployed.includes(key))), new Set(keys), 'every contained delivery is reached across continuations');
+
+  // A replayed key returns its receipt even after production's revision advances; a new key at the old revision is refused.
+  const replayed = await delivered(sha('e')), input = observation(replayed.delivery!.mergeSha), key = id();
+  const first = await delivery.observeSha(observer, input, key);
+  assert.deepEqual(first.deployed, [replayed.key]);
+  await validation.define(operator, { kind: 'environment', id: production.id, expectedRevision: 1, repository: 'test/repository', url: 'https://production.example.test', instance: 'instance-production', immutable: true, services: ['api', 'web'], resources: ['account-production'] }, id());
+  assert.deepEqual(await delivery.observeSha(observer, input, key), first);
+  await assert.rejects(delivery.observeSha(observer, observation(sha('f')), id()));
+
+  // The production selection is re-read inside the transaction: one published during the provider scan refuses the stale environment.
+  const raced = await delivered(sha('0'));
+  const select = (environment: string) => store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [operator.id, 'production.environment', JSON.stringify({ environment })]);
+  let switched = false;
+  await assert.rejects(delivery.observeSha(observer, observation(served, { environment: { ...production, revision: 2 } }), id(), async () => { if (!switched) { switched = true; await select('uat'); } return true; }),
+    /Only the production environment \('uat'\) records a deployment by commit; 'production' is not it/);
+  assert.ok(switched);
+  assert.equal((await reload(raced)).delivery!.deployment, undefined, 'nothing is recorded against the stale selection');
+  await select('production');
 });
