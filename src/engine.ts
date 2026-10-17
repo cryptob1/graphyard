@@ -797,8 +797,8 @@ function mergeFaceMoves(moves: Iterable<FaceMove>): FaceMove[] {
  * The earliest instant at which this evaluated document's outcome could change with no write
  * (GY-1873): the minimum over the time-bounded inputs its evaluation read — the lease's expiry,
  * every open row's due (its claim, its retry, its settle window, the idle bound), the bound the
- * named wait runs to, the observation window's opening, and the widest backoff a stalled action's
- * escalation lifts at. Instants already past are ignored: what they guarded has flipped already
+ * named wait runs to, the observation window's opening, every evidence record's expiry, and the
+ * widest backoff a stalled action's escalation lifts at. Instants already past are ignored: what they guarded has flipped already
  * (or needs a write, or the full evaluation), and a past due would wake the item every pass. Null
  * when the document holds none — then only a write or the full evaluation can change the outcome,
  * and the item is never evaluated as due. A wait on another item is deliberately absent: nothing
@@ -814,6 +814,8 @@ function reconcileDueAt(work: Work, all: Work[], now: Date, account: ActionAccou
   for (const row of work.actionQueue?.actions ?? []) considerIso(rowDueAt(row, now));
   if (!account.action && account.wait && account.wait.kind !== 'dependency') considerIso(waitDueAt(work, account.wait, all, now));
   considerIso(work.observationWindow?.notBefore);
+  // Accepted evidence stops counting once its expiry passes (currentEvidence), so a gate can fail by the clock alone.
+  for (const evidence of work.evidence ?? []) considerIso(evidence.expiresAt);
   for (const lift of stalledActionLifts(work)) consider(lift);
   return due;
 }
@@ -3408,7 +3410,7 @@ export class Engine {
       if (!row || !pass.fleet.has(plan.id)) return { wrote: false, stale, faceMoved: null, saved: [], apply: () => {} };
       if (row.version !== pass.fleet.get(plan.id)!.version) await pass.reread(db, [plan.id]);
       const entry = pass.fleet.get(plan.id)!;
-      let work = plan.work, before = entry.work;
+      let work = plan.work, before = entry.work, due = plan.due;
       if (!stale && entry.version === plan.version) await this.writeReconciled(db, work, pass.all(), plan.now);
       else {
         // In place: a failure from here on clears the kept view, as every rolled-back write does. The
@@ -3417,8 +3419,9 @@ export class Engine {
         before = structuredClone(entry.work);
         work = entry.work;
         const outcome = await this.reconcileItem(db, work, pass.all(), now);
-        // The re-evaluation read the document as it now stands: its due instant replaces the planned one (GY-1873).
-        entry.due = outcome.due;
+        // The re-evaluation read the document as it now stands: its due instant replaces the planned one (GY-1873),
+        // here and in what the committed write keeps.
+        entry.due = due = outcome.due;
         // Items the batch evaluated after this one read it as evaluated: if it came out otherwise, they are evaluated again too.
         if (fleetFace(work) !== fleetFace(plan.work)) stale = true;
         if (!outcome.wrote) return { wrote: false, stale, faceMoved: null, saved: [], apply: () => {} };
@@ -3426,7 +3429,7 @@ export class Engine {
       const version = ((await db.query('SELECT xmin::text AS version FROM work_items WHERE id = $1', [plan.id])).rows[0] as { version: string }).version, face = fleetFace(work);
       const saved = await savedVersions(db, [work]);
       const faceMoved = face !== entry.face ? { move: { id: plan.id, key: work.key, fields: faceFields(entry.face, face) }, before, after: work } : null;
-      return { wrote: true, stale, faceMoved, saved, apply: () => { Object.assign(entry, { work, version, face, due: plan.due }); pass.view(); } };
+      return { wrote: true, stale, faceMoved, saved, apply: () => { Object.assign(entry, { work, version, face, due }); pass.view(); } };
     }, { lane: 'background', coordinationLock: false, retryStaleWrites: false });
   }
   /**

@@ -242,3 +242,14 @@ test('unit:reconcile-due-times-match-full-evaluation — the default full pass i
   assert.ok(due.evaluatedTotal < everyPass.evaluatedTotal, `the due run wakes fewer items (${due.evaluatedTotal} of ${everyPass.evaluatedTotal}), so the comparison is not vacuous`);
   assert.deepEqual(due.final, everyPass.final, 'after the simulated hour the outcomes equal evaluating every item every pass');
 });
+
+test('unit:reconcile-due-evidence-expiry — an evidence record expiring before every other bound is the instant the evaluation records, since the gate stops counting it then with no write', { timeout: 120_000 }, async () => {
+  const work = await engine.execute(operator, 'create', null,
+    { title: 'Due evidence', plannedFiles: ['src/due-evidence.ts'], criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:reconcile-due-evidence-expiry'] }] }, randomUUID());
+  const at = new Date(await nowMs()), expiresAt = new Date(at.getTime() + 1_000).toISOString();
+  const all = await store.list(), copy = structuredClone(all.find(entry => entry.id === work.id)!);
+  const without = engine.evaluate(structuredClone(copy), all, at);
+  assert.ok(without === null || without > at.getTime() + 1_000, `no other bound of the fixture falls within the second: ${without}`);
+  copy.evidence = [...copy.evidence, { proof: 'unit:reconcile-due-evidence-expiry', trusted: false, expiresAt } as unknown as Work['evidence'][number]];
+  assert.equal(engine.evaluate(copy, all, at), Date.parse(expiresAt), 'the evidence expiry is the earliest instant the outcome can change');
+});
