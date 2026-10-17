@@ -124,14 +124,17 @@ export function repositoryPolicyAssignment(config: Record<string, unknown> | nul
 
 /**
  * Reads the policy a process serves: GRAPHYARD_REPOSITORY_POLICY when set (the control plane's
- * deployment, whose image carries no repository), else the graphyard.json in the working directory
- * (the CLI, loop, coordinator and E2E runner all run in the managed checkout), else the default. A
- * value or file that does not parse refuses, rather than silently judging every change by the
- * default. Browser-safe: with no process, the default.
+ * deployment, whose image carries no repository), else the graphyard.json at the root of the managed
+ * checkout (the CLI, loop, coordinator and E2E runner all run in it), else the default. The root is
+ * `root` when given, else GRAPHYARD_REPOSITORY_ROOT, else the Git toplevel holding `cwd` (the nearest
+ * directory with a `.git`), the same root the CLI's commands resolve, so a launch from a
+ * subdirectory reads the root's declaration. A value or file that does not parse refuses, rather than
+ * silently judging every change by the default. Browser-safe: with no process, the default.
  */
-export function loadRepositoryPolicy(env?: Record<string, string | undefined>, root?: string): { policy: RepositoryPolicy; source: Source } {
+export function loadRepositoryPolicy(env?: Record<string, string | undefined>, root?: string, cwd?: string): { policy: RepositoryPolicy; source: Source } {
   const host = (globalThis as { process?: { env: Record<string, string | undefined>; cwd(): string; getBuiltinModule?(name: string): any } }).process;
-  const raw = (env ?? host?.env)?.[repositoryPolicyVariable]?.trim();
+  const variables = env ?? host?.env;
+  const raw = variables?.[repositoryPolicyVariable]?.trim();
   if (raw) {
     let value: unknown;
     try { value = JSON.parse(raw); } catch { throw new Error(`${repositoryPolicyVariable} must be JSON of graphyard.json's risk, review and e2e sections, e.g. {"review":{"normalChanges":"pre-merge"}}`); }
@@ -140,13 +143,22 @@ export function loadRepositoryPolicy(env?: Record<string, string | undefined>, r
   const fs = host?.getBuiltinModule?.('node:fs'), path = host?.getBuiltinModule?.('node:path');
   if (!fs || !path) return { policy: defaultRepositoryPolicy, source: 'default' };
   let text: string;
-  try { text = fs.readFileSync(path.resolve(root ?? host!.cwd(), configFile), 'utf8'); } catch (error: any) {
+  const checkout = root ?? (variables?.GRAPHYARD_REPOSITORY_ROOT?.trim() ? path.resolve(variables.GRAPHYARD_REPOSITORY_ROOT.trim()) : gitToplevel(fs, path, path.resolve(cwd ?? host!.cwd())));
+  try { text = fs.readFileSync(path.resolve(checkout, configFile), 'utf8'); } catch (error: any) {
     if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return { policy: defaultRepositoryPolicy, source: 'default' };
     throw error;
   }
   let config: unknown;
   try { config = JSON.parse(text); } catch (error: any) { throw new Error(`${configFile} is not JSON: ${error.message}`); }
   return { policy: resolveRepositoryPolicy(policySections(config as Record<string, unknown>)), source: 'graphyard.json' };
+}
+
+/** The nearest directory from `start` up holding `.git` (a directory, or a worktree's file); `start` when none does. */
+function gitToplevel(fs: any, path: any, start: string): string {
+  for (let directory = start; ; directory = path.dirname(directory)) {
+    if (fs.existsSync(path.join(directory, '.git'))) return directory;
+    if (path.dirname(directory) === directory) return start;
+  }
 }
 
 /** The policy this process judges every change by, read once (`loadRepositoryPolicy`). */

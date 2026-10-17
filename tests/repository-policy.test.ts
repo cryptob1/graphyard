@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Work } from '../src/model.js';
 import { parseRepositoryConfig } from '../src/model/documentation.js';
@@ -158,6 +158,16 @@ test('unit:repo-risk-policy — Graphyard\'s own graphyard.json reproduces today
   const deployed = loadRepositoryPolicy({ [repositoryPolicyVariable]: JSON.stringify({ review: { normalChanges: 'pre-merge' } }) }, root);
   assert.deepEqual([deployed.source, deployed.policy.review.normalChanges, deployed.policy.risk.declared], ['environment', 'pre-merge', false]);
   assert.throws(() => loadRepositoryPolicy({ [repositoryPolicyVariable]: 'pre-merge' }, root), /GRAPHYARD_REPOSITORY_POLICY must be JSON/);
+  // With no root given, the managed checkout's root is read, not the working directory: a launch from
+  // a subdirectory finds the Git toplevel's declaration, and GRAPHYARD_REPOSITORY_ROOT names it outright.
+  const checkout = await temporaryDirectory('graphyard-repo-policy-checkout-'), nested = join(checkout, 'packages', 'api');
+  await mkdir(join(checkout, '.git'), { recursive: true }); await mkdir(nested, { recursive: true });
+  await writeFile(join(checkout, 'graphyard.json'), JSON.stringify({ documentation: { paths: ['docs/'] }, risk: { sensitive: [{ rule: 'billing', glob: 'billing/' }] }, e2e: { pendingOutcomes: 'blocking' } }));
+  const fromSubdirectory = loadRepositoryPolicy({}, undefined, nested);
+  assert.deepEqual([fromSubdirectory.source, fromSubdirectory.policy.e2e.pendingOutcomes, classifyRisk([{ path: 'billing/charge.ts' }], fromSubdirectory.policy).risk], ['graphyard.json', 'blocking', 'sensitive']);
+  const explicit = loadRepositoryPolicy({ GRAPHYARD_REPOSITORY_ROOT: checkout }, undefined, root);
+  assert.deepEqual([explicit.source, explicit.policy.e2e.pendingOutcomes], ['graphyard.json', 'blocking']);
+  assert.equal(loadRepositoryPolicy({ GRAPHYARD_REPOSITORY_ROOT: checkout, [repositoryPolicyVariable]: '{}' }, undefined, nested).source, 'environment', 'the deployment variable still overrides');
   assert.throws(() => parseRepositoryConfig(JSON.stringify({ documentation: { paths: ['docs/'] }, review: { normalChanges: 'sometimes' } })));
 });
 
