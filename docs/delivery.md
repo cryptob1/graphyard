@@ -10,7 +10,7 @@ Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`
 - `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N new first-parent merges (`GRAPHYARD_RC_MAX_PRS`=10; rest queue); `release-candidate.yml` cuts on loop dispatch.
 - `release uat ID` deploys `uat`, refused while unjudged <4h candidates serve.
 - `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint/API (`GRAPHYARD_UAT_TOKEN`)/`browser`/suites ([validation](validation.md#release-verdicts); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`.
-- `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`; `release verify --url URL` confirms. Direct promotion seals its read [imported-run hold](validation.md#release-verdicts) before deploying; `admin`/`operator-agent` seal **released** holds only ([filing credential](#release-filing-credential), loop operator agent); unsealable refuses; planes lacking operator agents promote unsealed.
+- `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`; `release verify --url URL` confirms. Direct promotion first seals its read [imported-run hold](validation.md#release-verdicts); `admin`/`operator-agent` seal **released** holds only ([filing credential](#release-filing-credential), loop operator agent); unsealable refuses; planes without operator agents promote unsealed.
 - `GRAPHYARD_RELEASE_BUILD` records cuts' per-service digests; with `GRAPHYARD_DEPLOY_DIGESTS` `uat`/`promote` deploy them, else SHA. A recorded build promotes by digest, never rebuilt, once UAT names it via its `digests` suite.
 - Failures file [holds](validation.md#release-holds) per outcome, else `release follow-up ID` ([filing credential](#release-filing-credential)).
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records `rc-soak/ID`.
@@ -40,6 +40,8 @@ Every 30s the guard reverts merges failing checks parents passed; the [revert ap
 `init --scan` splits checks (`delivery.mergeGate`/per-candidate); `--apply` renders `graphyard-release-candidate.yml` (`candidateSchedule`/`--candidate-cron CRON|off`), `graphyard-promotion.yml`. `deploy.adapter`: `railway` or `command` (`deploy.uat`/`deploy.production`, given `GRAPHYARD_CANDIDATE_SHA`). `--delivery local|per-pr` overrides; `install --plan` lists.
 
 `mode: local` (`control-plane` merger's default): `{"previews":"local","candidateMaxChanges":5,"productionVerification":true}`, `command` adapter, generated-workflows removed; `delivery.applications` `{id,kind:"static",directory,build}`/`{id,kind:"compose",file,service,port}`; `delivery.cases` case→application (tag/sole one); invalid ones refuse `init`/`install`/`/api/status` (`project.error`); **Delivery** shows `project.delivery` (`GRAPHYARD_PROJECT_DELIVERY`).
+
+Static-application cases preview their item (head, else main; build sees `GRAPHYARD_PREVIEW_TITLE`); passing builds publish to `/preview/KEY/`, served from `GRAPHYARD_PREVIEW_ORIGIN` (previews-only host), else sandboxed storageless; `preview` records state/cases; heads/closures/unconfirmed records clean it.
 
 **`graphyard.json` policy**: `risk.sensitive` `{rule,glob}`, else generic; `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; `release.onFailure` `revert`/`hold`; deployed `GRAPHYARD_REPOSITORY_POLICY`; `doctor` prints it.
 

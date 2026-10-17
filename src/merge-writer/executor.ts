@@ -10,6 +10,7 @@ import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { submittedAtOf } from './shadow.js';
 import { runTrial, trialAttempts, TrialCleanupError, type RunTrialInput, type TrialNoVerdict, type TrialNoVerdictOutcome, type TrialPhase, type TrialPhaseDurations, type TrialRun } from './trial.js';
 import { previewFailureReason, type PreviewVerdict } from './preview.js';
+import type { ItemPreview, PreviewSiteFile } from '../project-previews.js';
 
 /**
  * A proof's cases in a TAP stream, attributed by title prefix, as `graphyard verify` counts them
@@ -112,6 +113,14 @@ export type MergeRecordEvent =
   | { kind: 'pushed'; mergeSha: string; pushedAt: string }
   | { kind: 'reconciled'; mergeSha: string; observedTip: string }
   | { kind: 'refused'; head: string; reason: string };
+/**
+ * GY-1902: an item preview's record (project-previews.ts), written through the same coordinator
+ * route and record port as the ledger's steps; it moves no merge state and is no ledger event, so
+ * it stays outside `MergeRecordEvent` and rides the port as `previewRecordEvent` makes it.
+ */
+export interface PreviewRecordEvent { kind: 'preview'; preview: ItemPreview; site?: PreviewSiteFile[] }
+export const previewRecordEvent = (preview: ItemPreview, site?: PreviewSiteFile[]) => ({ kind: 'preview', preview, ...(site ? { site } : {}) } satisfies PreviewRecordEvent) as unknown as MergeRecordEvent;
+const previewEvent = (event: MergeRecordEvent): PreviewRecordEvent | null => (event as { kind: string }).kind === 'preview' ? event as unknown as PreviewRecordEvent : null;
 /** The ledger kind each recorded step writes; `trial` is the executor's own record beside the ledger, which the fold ignores. */
 export const mergeRecordKinds = { ...mergeLedgerKinds, trial: 'merge.trial' } as const;
 /**
@@ -127,6 +136,9 @@ export interface MergeAttempt { id: string; write: number }
  * started from (its event count, GY-1718).
  */
 export const mergeRecordKey = (work: Pick<Work, 'id'> & { mergeLedger?: Pick<MergeLedgerState, 'events'> | null; mergeAttempt?: MergeAttempt | null }, event: MergeRecordEvent) => {
+  // A preview's record is keyed by the preview and its state: a retry replays it, a later state is a new write.
+  const preview = previewEvent(event);
+  if (preview) return `preview-record:${work.id}:${preview.preview.id}:${preview.preview.state}`;
   if (work.mergeAttempt) return `merge-record:${work.id}:${work.mergeAttempt.id}:${work.mergeAttempt.write}:${event.kind}`;
   if (event.kind === 'pushed' || event.kind === 'reconciled') return `merge-record:${work.id}:${event.kind}:${event.mergeSha}`;
   const attempt = work.mergeLedger?.events ? `#${work.mergeLedger.events}` : '';

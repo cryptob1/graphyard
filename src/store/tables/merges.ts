@@ -15,5 +15,20 @@ export const changeNumbers = defineTable({
 );`,
 });
 
+/**
+ * GY-1902: the built site of an item's running preview, published by the loop with its `running`
+ * record and served at the item's preview link, so the link needs no route from the server to the
+ * loop's host. Only the item's current running preview keeps files; a restored plane's previews are
+ * recorded ended by the next loop, so the table is a disposable cache.
+ */
+export const itemPreviewFiles = defineTable({
+  name: 'item_preview_files', orderBy: 'preview_id,path', cache: true,
+  ddl: `CREATE TABLE IF NOT EXISTS item_preview_files (
+  preview_id uuid NOT NULL, work_id uuid NOT NULL REFERENCES work_items(id), path text NOT NULL, media_type text NOT NULL, bytes bytea NOT NULL,
+  PRIMARY KEY(preview_id, path)
+);
+CREATE INDEX IF NOT EXISTS item_preview_files_work ON item_preview_files(work_id);`,
+});
+
 /** The merge writer's tables, registered after the work tables they reference. */
-export const mergesTables = [changeNumbers];
+export const mergesTables = [changeNumbers, itemPreviewFiles];

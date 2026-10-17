@@ -10,8 +10,9 @@ import { mergeWriterTrialGround, trialFailurePrefix } from '../model/rework-grou
 import { installIdFor } from '../install/types.js';
 import { mergeWriterSettings, shadowGateSettings } from '../master/merge-writer-settings.js';
 import { runTrial, trialMerge, TrialCleanupError, TrialTimeoutError } from '../merge-writer/trial.js';
-import { previewSiteOf, previewSkip, runPreview } from '../merge-writer/preview.js';
-import { criterionProofs, firstParentHolds, keyReusedRefusal, mergeOne, mergeQueue, proofTestFiles, pushArgs, pushEnvironment, reconcileIntents, runMergeTrial, staleLeaseRejection, type MergeOutcome, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { itemPreviewStep, previewSiteOf, previewSkip, runPreview, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
+import { loadProjectDelivery } from '../project-applications.js';
+import { criterionProofs, firstParentHolds, keyReusedRefusal, mergeOne, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, reconcileIntents, runMergeTrial, staleLeaseRejection, type MergeOutcome, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { message, storeAction, type DaemonState } from './state.js';
 import type { LoopFiledItem } from './effects.js';
 import type { Cycle } from './cycle.js';
@@ -68,6 +69,8 @@ export interface MergeWriterReads extends MergePorts {
    * every due merge starts.
    */
   admit?(): boolean;
+  /** GY-1902: the item previews' ports (merge-writer/preview.ts `itemPreviewStep`); absent, no item is previewed. */
+  itemPreviews?: ItemPreviewPorts;
 }
 /** The idempotency key one recorded step keeps across retries. */
 export { mergeRecordKey } from '../merge-writer/executor.js';
@@ -82,7 +85,8 @@ const output = (error: unknown) => { const failed = error as { stdout?: unknown;
  * them in effects.ts; a test hands its own through `effects.mergeWriter`.
  */
 export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run' | 'repository'>, root: string, run: ChildRun,
-  options: { base: string; record: MergePorts['record']; merger: () => Promise<MergerMode>; trial?: typeof runMergeTrial; preview?: typeof runPreview; environment?: NodeJS.ProcessEnv; now?: () => number }): MergeWriterReads {
+  options: { base: string; record: MergePorts['record']; merger: () => Promise<MergerMode>; trial?: typeof runMergeTrial; preview?: typeof runPreview; environment?: NodeJS.ProcessEnv; now?: () => number;
+    itemPreviews?: Partial<ItemPreviewPorts> }): MergeWriterReads {
   const git = async (...args: string[]) => String(await run('git', ['-C', root, ...args]));
   const gitAs = async (args: string[], env?: Record<string, string>) => String(await run('git', ['-C', root, ...args], env ? { env: { ...(options.environment ?? process.env), ...env } } : undefined));
   const settings = mergeWriterSettings(config.run, installIdFor(config.repository)), shadow = shadowGateSettings(config.run);
@@ -112,6 +116,9 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
       if (!site || previewSkip(files, site)) return null;
       return (options.preview ?? runPreview)({ root, base: options.base, mergeSha, site, timeoutMs: shadow.timeoutMinutes * 60_000, run, hostEnvironment: environment });
     },
+    // GY-1902: an item citing a case bound to a declared static application is previewed from the coordinator checkout, its record written through the merge-record route.
+    itemPreviews: { root, base: options.base, timeoutMs: shadow.timeoutMinutes * 60_000, run, hostEnvironment: options.environment, now: options.now,
+      delivery: () => loadProjectDelivery(options.environment ?? process.env, root), baseTip: tip, record: (item, preview, site) => options.record(item, previewRecordEvent(preview, site)), ...options.itemPreviews },
     // Only git's own stale-lease wording is a rejection the executor re-reads the tip for; a remote's refusal (a branch rule, a hook) or a transport failure is thrown as it came.
     push: async (mergeSha, baseTip) => {
       try { await run('git', ['-C', root, ...pushArgs(base, baseTip, mergeSha)], { env: pushEnvironment(settings.deployKeyFile, options.environment) }); return 'pushed'; }
@@ -289,6 +296,8 @@ function takeFailures(advisory: AdvisoryState, merge: { key: string; mergeSha: s
 interface Flight { key: string; id: string; head: string; startedAt: string; settled: { outcome: MergeOutcome; work: Work } | { error: unknown } | null }
 const flights = new WeakMap<DaemonState, Flight>();
 /** Resolves once the merge in flight for `state` has settled; for the step's tests. */
+/** The item previews this loop process serves, by item key (GY-1902). */
+const itemPreviews = new WeakMap<DaemonState, Map<string, LivePreview>>();
 export const mergeWriterIdle = async (state: DaemonState) => { for (let waited = 0; flights.get(state) && !flights.get(state)!.settled && waited < 600_000; waited += 5) await new Promise(resolve => setTimeout(resolve, 5)); };
 /** The action key a merge of `key`'s `head` is recorded under. */
 export const mergeWriterActionKey = (key: string, head: string) => `merge-writer:${key}:${head}`;
@@ -427,6 +436,12 @@ export async function mergeWriterStep(cycle: Cycle) {
   const { state, effects, now, snapshot, performed } = cycle;
   const reads = effects.mergeWriter;
   if (!reads) return;
+  // GY-1902: item previews start, settle and end beside the cycle under any merger; a failure here never holds a merge.
+  if (reads.itemPreviews) {
+    let live = itemPreviews.get(state);
+    if (!live) itemPreviews.set(state, live = new Map());
+    try { await itemPreviewStep(live, snapshot.work, reads.itemPreviews); } catch (error) { console.error(`The item preview step failed: ${error instanceof Error ? error.message : String(error)}`); }
+  }
   const writer = state.mergeWriter;
   const at = () => new Date(now()).toISOString();
   let changed = false, delivered: { key: string; mergeSha: string } | null = null;

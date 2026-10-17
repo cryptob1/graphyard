@@ -16,7 +16,11 @@ import { answerResearch, recordResearch } from '../../research.js';
 import { recordDecomposition } from '../../decomposition.js';
 import { recordShadowVerdict } from '../shadow-verdict.js';
 import { recordReviewLaunch, recordReviewVerdict } from '../review-verdict.js';
-import { recordMergeEvent } from '../merge-record.js';
+import { mergeRecordFingerprint, recordMergeEvent } from '../merge-record.js';
+import { save } from '../../store.js';
+import { lockedWork } from '../../store/locked-read.js';
+import { applyPreviewRecord, previewRecordBodySchema, previewSiteByteLimit, previewSiteFileLimit } from '../../project-previews.js';
+import type { Services } from '../routes.js';
 import { issuePushCredential } from '../push-credential.js';
 import { controlPlaneSyncPush } from '../../sync.js';
 
@@ -139,7 +143,11 @@ export const workRoutes = defineRoutes('work', [
     method: 'POST', path: /^\/api\/work\/([^/]+)\/merge-record$/,
     async handle(context, [id]) {
       await refuseLead(context, id, 'merge-record');
-      return recordMergeEvent(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
+      // GY-1902: a running preview's record carries its built site, so the coordinator's body may be as large as a site.
+      const data = await parseJson(context, context.actor.role === 'coordinator' ? previewRecordBodyLimit : undefined), target = decodeURIComponent(id);
+      // GY-1902: an item preview's record rides the same coordinator route; it moves no merge state.
+      if ((data as { kind?: unknown } | null)?.kind === 'preview') return recordItemPreview(context.services, context.actor, target, data, context.idempotencyKey());
+      return recordMergeEvent(context.services, context.actor, target, data, context.idempotencyKey());
     },
   },
   // A worker session's short-lived push credential (GY-999), for the lease holder only.
@@ -200,3 +208,37 @@ export const workRoutes = defineRoutes('work', [
     },
   },
 ]);
+
+/**
+ * GY-1902: the loop's record of an item's preview (project-previews.ts), by the coordinator identity
+ * only, idempotent under its key, applied under the item's lock (`applyPreviewRecord`) and saved as
+ * `preview.<state>`. A running record's built site is stored with it (item_preview_files), which the
+ * link serves; every other preview's files of the item are deleted in the same transaction, so a
+ * superseded, cancelled or failed preview serves nothing. It is the control plane's own observation:
+ * never evidence, so it satisfies no proof and grants no worker or producer anything.
+ */
+async function recordItemPreview(services: Services, actor: Principal, id: string, body: unknown, key: string) {
+  demand(actor.role === 'coordinator', 'Only the loop\'s coordinator identity records an item\'s preview', 403);
+  const { preview, site } = previewRecordBodySchema.parse(body);
+  demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
+  const fingerprint = mergeRecordFingerprint(id, { kind: 'preview', preview, ...(site ? { site } : {}) });
+  return services.engine.store.transaction(async (db, now) => {
+    const replay = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
+    if (replay) { demand(replay.fingerprint === fingerprint, 'Idempotency key reused with different input'); return replay.result; }
+    const work = (await lockedWork(db, [id])).find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
+    const refusal = applyPreviewRecord(work!, preview); demand(!refusal, refusal!, 409);
+    await save(db, work!, actor.id, `preview.${preview.state}`, now, { preview: { id: preview.id, sha: preview.sha, state: preview.state, endReason: preview.endReason } });
+    const serving = work!.preview?.state === 'running' ? work!.preview.id : null;
+    await db.query('DELETE FROM item_preview_files WHERE work_id=$1 AND preview_id IS DISTINCT FROM $2', [work!.id, serving]);
+    if (site && serving === preview.id) {
+      await db.query('DELETE FROM item_preview_files WHERE preview_id=$1', [preview.id]);
+      await db.query('INSERT INTO item_preview_files(preview_id,work_id,path,media_type,bytes) SELECT $1,$2,* FROM unnest($3::text[],$4::text[],$5::bytea[])',
+        [preview.id, work!.id, site.map(file => file.path), site.map(file => file.mediaType), site.map(file => Buffer.from(file.content, 'base64'))]);
+    }
+    const result = { recorded: true, key: work!.key, kind: 'preview', preview: work!.preview };
+    await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
+    return result;
+  });
+}
+/** The largest merge-record body the coordinator sends: a running preview's site, base64-encoded, and its record. */
+const previewRecordBodyLimit = Math.ceil(previewSiteByteLimit / 3) * 4 + previewSiteFileLimit * 1024 + 64 * 1024;
