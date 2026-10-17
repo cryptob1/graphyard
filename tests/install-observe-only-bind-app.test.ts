@@ -33,7 +33,7 @@ function statefulRailway() {
   ];
 }
 /** The base branch's check runs, empty until `ci.visible`: a repository whose CI has not published a check yet. */
-const ciChecks = (ci: { visible: boolean }) => ({ match: `gh api repos/${REPOSITORY}/commits/main/check-runs`, result: () => JSON.stringify({ check_runs: ci.visible ? [{ name: 'test', app: { id: CI_APP_ID, slug: 'github-actions' } }] : [] }) });
+const ciChecks = (ci: { visible: boolean; added?: number }) => ({ match: `gh api repos/${REPOSITORY}/commits/main/check-runs`, result: () => JSON.stringify({ check_runs: ci.visible ? [{ name: 'test', app: { id: CI_APP_ID, slug: 'github-actions' } }, ...(ci.added ? [{ name: 'lint', app: { id: ci.added, slug: 'another-ci' } }] : [])] : [] }) });
 
 const releaseCandidate = deliveryPolicySchema.parse({
   mode: 'release-candidate', candidateSchedule: '0 */6 * * *',
@@ -46,7 +46,7 @@ const variablesSet = (lines: string[]) => lines.flatMap(line => line.startsWith(
 const mutations = [/git\/refs/, /\/protection/, /rulesets/, /allow_auto_merge|auto-merge|merge_queue/i, /^railway environment/, /^herdr /, /systemctl/, / master init/];
 
 async function observeOnlyInstallation(options: { ciVisible?: boolean } = {}) {
-  const ci = { visible: options.ciVisible ?? true };
+  const ci: { visible: boolean; added?: number } = { visible: options.ciVisible ?? true };
   // The served App is the one whose GITHUB_APP_ID the deployment was given, unless the server fails to load it.
   const server = { loadsApp: true };
   let fixture: Awaited<ReturnType<typeof harness>>;
@@ -76,7 +76,7 @@ async function observeOnlyInstallation(options: { ciVisible?: boolean } = {}) {
   const bindPlan = async () => await bind('--plan') as InstallPlan;
   const bindApply = async () => await bind() as InstallSummary;
   // What `graphyard app import --app-id APP_ID --key-file PEM` saves in the install directory.
-  const importApp = () => writeFile(join(first.directory, `imported-app-${SLUG}.json`), JSON.stringify({ appId: APP_ID, slug: SLUG, privateKey: appKey, webhookSecret: IMPORTED_SECRET, repository: REPOSITORY, role: 'control-plane' }), { mode: 0o600 });
+  const importApp = (webhookSecret = IMPORTED_SECRET) => writeFile(join(first.directory, `imported-app-${SLUG}.json`), JSON.stringify({ appId: APP_ID, slug: SLUG, privateKey: appKey, webhookSecret, repository: REPOSITORY, role: 'control-plane' }), { mode: 0o600 });
   const readRecord = async () => JSON.parse(await readFile(join(first.directory, 'install.json'), 'utf8'));
   return { fixture, calls, logs, observe, bind, bindPlan, bindApply, directory: first.directory, importApp, readRecord, ci, server };
 }
@@ -291,5 +291,63 @@ test('app bind takes --ssh-user and --ssh-key only for an installation reached o
     await assert.rejects(bind('--ssh-host', '203.0.113.10'), /--ssh-host names a docker-host installation's target; owner\/project is installed on railway/);
     await assert.rejects(bind('--ssh-user', 'deploy'), /--ssh-user and --ssh-key reach a docker-host or Hetzner installation/);
     await assert.rejects(appCommand(['list', '--ssh-host', 'h'], { root: fixture.root, configHome: fixture.configHome }), /Only app bind takes/);
+  } finally { await fixture.cleanup(); }
+});
+
+test('app bind binds a re-imported App again: a rotated key and new webhook secret are written to the server and the App webhook, and an observation-only rerun refuses until then; a CI publisher added after the bind is written on the next rerun (GY-1877)', async () => {
+  const { fixture, observe, bindPlan, bindApply, importApp, readRecord, ci } = await observeOnlyInstallation();
+  try {
+    await importApp();
+    await bindApply();
+    const bound = await readRecord();
+    // `graphyard app import` run again (a rotated private key) writes a fresh webhook secret.
+    const ROTATED = 'rotated-webhook-secret-for-tests-9e8d7c6b';
+    await importApp(ROTATED);
+    const plan = await bindPlan();
+    assert.ok(plan.preflight.every(entry => entry.ok), JSON.stringify(plan.preflight.filter(entry => !entry.ok)));
+    assert.match(plan.preflight.find(entry => entry.name === `Rebind App ${SLUG}`)!.detail, /imported again, so its private key and webhook secret are new/);
+    assert.deepEqual(['github.app', 'github.env', 'provider.deploy', 'github.webhook'].map(id => state(plan.actions, id)), ['update', 'update', 'update', 'update']);
+    assert.ok(!JSON.stringify(plan).includes(ROTATED), 'the plan leaks the rotated webhook secret');
+    // A whole-environment observation-only rerun would load the new secret while GitHub keeps the old one: refused, naming app bind.
+    const rerunPlan = await buildPlan(await observe('plan'));
+    const refused = rerunPlan.preflight.find(entry => entry.name === 'GitHub App')!;
+    assert.equal(refused.ok, false);
+    assert.match(refused.detail, /was imported again since graphyard app bind bound it/);
+    assert.equal(refused.fix, `graphyard app bind ${SLUG}, then rerun`);
+
+    let mark = fixture.allCommandLines().length;
+    let patches = fixture.requests.filter(request => request.method === 'PATCH').length;
+    const rebound = await bindApply();
+    assert.equal(rebound.github?.appId, APP_ID);
+    let lines = fixture.allCommandLines().slice(mark);
+    assert.deepEqual(variablesSet(lines).filter(name => name !== 'GRAPHYARD_BUILD_SHA').sort(), [...APP_VARIABLES].sort());
+    assert.equal(lines.filter(line => /^railway up/.test(line)).length, 1, 'the rebind did not deploy exactly once');
+    assert.equal(fixture.requests.filter(request => request.method === 'PATCH').length, patches + 1, 'the webhook secret was not set again');
+    assert.equal(fixture.state.hookConfig?.secret, ROTATED);
+    const record = await readRecord();
+    assert.notEqual(record.github.webhookFingerprint, bound.github.webhookFingerprint, 'the refreshed binding was not recorded');
+    assert.ok(!JSON.stringify(record).includes(ROTATED));
+    // The refreshed binding is current: the observation-only rerun plans again, and an identical bind writes nothing.
+    assert.ok((await buildPlan(await observe('plan'))).preflight.every(entry => entry.ok));
+    mark = fixture.allCommandLines().length;
+    patches = fixture.requests.filter(request => request.method === 'PATCH').length;
+    await bindApply();
+    lines = fixture.allCommandLines().slice(mark);
+    assert.deepEqual(variablesSet(lines), []);
+    assert.ok(!lines.some(line => /^railway up/.test(line) || /--method (POST|PUT|PATCH|DELETE)/.test(line)));
+    assert.equal(fixture.requests.filter(request => request.method === 'PATCH').length, patches);
+    assert.deepEqual(await readRecord(), record);
+
+    // Another CI App starts publishing checks: the plan names it, and the next bind writes GITHUB_CI_APP_IDS and deploys.
+    ci.added = 424_242;
+    const ciPlan = await bindPlan();
+    assert.deepEqual(['github.env', 'provider.deploy', 'github.ci-app-ids'].map(id => state(ciPlan.actions, id)), ['update', 'update', 'update']);
+    mark = fixture.allCommandLines().length;
+    const widened = await bindApply();
+    assert.deepEqual([...widened.github!.ciAppIds].sort(), [CI_APP_ID, 424_242].sort());
+    lines = fixture.allCommandLines().slice(mark);
+    assert.ok(lines.some(line => /--set GITHUB_CI_APP_IDS=/.test(line) && line.includes('424242')), 'GITHUB_CI_APP_IDS was not written with the new publisher');
+    assert.equal(lines.filter(line => /^railway up/.test(line)).length, 1);
+    assert.deepEqual([...(await readRecord()).github.ciAppIds].sort(), [CI_APP_ID, 424_242].sort());
   } finally { await fixture.cleanup(); }
 });

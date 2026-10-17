@@ -328,6 +328,27 @@ async function findSavedApp(root: string, directory: string, inputs: InstallInpu
   return { app: null, error: null };
 }
 
+/**
+ * The registrations `graphyard app import` wrote to this install's directory (GY-1877). A bind or
+ * --reuse-app copies the App into github-app.json, which lists first and shares its App ID, so a
+ * later import (a rotated key, a new webhook secret) is found only by reading the imported files.
+ */
+async function importedRegistrations(directory: string): Promise<SavedRegistration[]> {
+  const names = await readdir(directory).then(entries => entries.filter(name => /^imported-app-[a-z0-9][a-z0-9-]{0,99}\.json$/.test(name)).sort(), () => [] as string[]);
+  const found: SavedRegistration[] = [];
+  for (const name of names) {
+    const file = resolve(directory, name);
+    const app = await readFile(file, 'utf8').then(text => JSON.parse(text), () => null);
+    if (!Number.isSafeInteger(app?.appId) || typeof app.slug !== 'string' || !app.slug || typeof app.privateKey !== 'string' || !app.privateKey) continue;
+    found.push({ file, role: appRoles.includes(app.role) ? app.role : 'control-plane', app });
+  }
+  return found;
+}
+/** The host's registrations with each App this install imported replaced by its imported registration. */
+const preferImported = (registrations: SavedRegistration[], imported: SavedRegistration[]) => [
+  ...imported, ...registrations.filter(entry => !imported.some(own => own.app.appId === entry.app.appId)),
+];
+
 /** The App registrations saved on this host: every install directory under the config home (`app import`'s too), then the checkout's. */
 export async function hostRegistrations(root: string, override?: string) {
   const home = configHome(override);
@@ -573,7 +594,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
   const savedApp = rawInputs.noGithubApp
     ? { app: null, error: null } satisfies InstallSession['savedApp']
     : await findSavedApp(root, directory, inputs, dependencies.fetch ?? fetch);
-  const registrations = await hostRegistrations(root, dependencies.configHome);
+  const registrations = preferImported(await hostRegistrations(root, dependencies.configHome), await importedRegistrations(directory));
   for (const entry of registrations) { vault.add(entry.app.privateKey); if (entry.app.webhookSecret) vault.add(entry.app.webhookSecret); }
   if (savedApp.app) { vault.add(savedApp.app.facts.privateKey); if (savedApp.app.facts.webhookSecret) vault.add(savedApp.app.facts.webhookSecret); }
   const adapter = dependencies.adapter ?? (selfContained ? selfContainedAdapter(provider === 'host' ? existingMachineAdapter : adapterFor(provider)) : adapterFor(provider));
@@ -964,7 +985,10 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   // already binds one (GY-1550). Orphaned deployment variables are judged after observe below.
   // An observation-only installation keeps the App `app bind` bound (GY-1877) and binds none itself.
   const kept = observeOnly && record?.github ? keptRegistration(session) : null;
-  if (observeOnly && record?.github) preflight.push(kept
+  // A registration imported again since the bind (a rotated key, a new webhook secret) is not what
+  // the server and the App's webhook hold until `graphyard app bind` writes it to both.
+  if (observeOnly && record?.github && kept && !bindingCurrent(record.github, kept.app, null)) preflight.push({ name: 'GitHub App', ok: false, detail: `the imported registration of GitHub App ${record.github.slug} (app ${record.github.appId}) was imported again since graphyard app bind bound it, so its key and webhook secret are not the ones the server and the App webhook hold`, fix: `graphyard app bind ${record.github.slug}, then rerun` });
+  else if (observeOnly && record?.github) preflight.push(kept
     ? { name: 'GitHub App', ok: true, detail: `--observe-only keeps GitHub App ${record.github.slug} (app ${record.github.appId}) that graphyard app bind bound, and binds no App itself` }
     : { name: 'GitHub App', ok: false, detail: `this installation binds GitHub App ${record.github.slug} (app ${record.github.appId}), and no registration of it is imported on this host to keep its variables with`, fix: `graphyard app import --repo ${session.inputs.repository} --app-id ${record.github.appId} --key-file PEM, then rerun` });
   else if (noApp && record?.github) preflight.push({ name: 'GitHub App', ok: false, detail: `this installation already binds GitHub App ${record.github.slug} (app ${record.github.appId}); --no-github-app does not strip a live App`, fix: `Rerun without --no-github-app to keep that App, or remove its binding and every ${APP_VARIABLES.join(', ')} variable from the ${context.provider} deployment before installing without one` });
@@ -1706,14 +1730,25 @@ async function buildBindAppPlan(session: InstallSession): Promise<InstallPlan> {
   else if (saved.role !== 'control-plane') preflight.push({ name, ok: false, detail: `${saved.app.slug} is saved as a ${saved.role} App, and app bind binds the control-plane App`, fix: importFix });
   else if (bound && bound.appId !== saved.app.appId) preflight.push({ name, ok: false, detail: `this installation already binds GitHub App ${bound.slug} (app ${bound.appId}); app bind does not replace a bound App`, fix: `Rerun graphyard app bind ${bound.slug}, or remove that binding and every ${APP_VARIABLES.join(', ')} variable from the ${context.provider} deployment first` });
   else if (ghStatus.code !== 0) preflight.push({ name, ok: false, detail: 'reading the repository and adding it to the App\'s installation needs the GitHub CLI', fix: 'Authenticate gh (see the GitHub CLI check), then rerun' });
-  else if (url) try {
+  let installationId: number | null = null;
+  if (saved && saved.role === 'control-plane' && !(bound && bound.appId !== saved.app.appId) && ghStatus.code === 0 && url) try {
     const reuse = await reuseApp(session, slug, 'control-plane', webhookUrlFor(url), false);
+    installationId = reuse.app.installationId;
     preflight.push({ name, ok: true, detail: `the imported control-plane App ${saved.app.slug} (app ${saved.app.appId}) holds the permissions it needs and is installed on ${reuse.account}${reuse.selection === 'all' ? ' for every repository' : bound ? '' : `; --apply adds ${repository} to that installation`}` });
   } catch (error) { preflight.push({ name, ok: false, detail: error instanceof Error ? error.message : String(error), fix: importFix }); }
 
-  const alreadyBound = !!saved && !!bound && bound.appId === saved.app.appId;
-  // A bind that observed no CI App detects them again on apply, writing the App variables and deploying once some appear.
-  const ciPending = alreadyBound && !bound!.ciAppIds.length;
+  // An App the record binds with the registration it holds now. `graphyard app import` writes a fresh
+  // webhook secret on every import, so a re-import (a rotated private key) no longer matches the
+  // recorded fingerprint, and a reinstalled App no longer matches the recorded installation: either
+  // binds again, writing the variables, deploying and setting the webhook secret.
+  const alreadyBound = !!saved && !!bound && bound.appId === saved.app.appId && bindingCurrent(bound, saved.app, installationId);
+  const rebinding = !!saved && !!bound && bound.appId === saved.app.appId && !alreadyBound;
+  if (rebinding) preflight.push({ name: `Rebind App ${slug}`, ok: true, detail: `the imported registration of ${saved!.app.slug} differs from the one bound ${bound!.webhookFingerprint !== fingerprint(saved!.app.webhookSecret) ? '(it was imported again, so its private key and webhook secret are new)' : `(its installation is now ${installationId}, not ${bound!.installationId})`}; --apply writes the App variables, deploys and sets the webhook secret again` });
+  // CI Apps are detected again on every run: a bind that observed none, or a publisher added or
+  // replaced since, writes the App variables and deploys once the detected set differs.
+  const detected = alreadyBound && ghStatus.code === 0 ? (await detectCiAppIds(gh, repository, session.inputs.baseBranch, saved!.app.appId)).map(app => app.appId) : [];
+  const ciChanged = alreadyBound && detected.length > 0 && (detected.length !== bound!.ciAppIds.length || detected.some(id => !bound!.ciAppIds.includes(id)));
+  const ciPending = alreadyBound && (!bound!.ciAppIds.length || ciChanged);
   const polling = pollsGitHub(context.provider);
   const webhookUrl = url ? webhookUrlFor(url) : '<service URL>/api/github/webhook';
   // Whether the App's one webhook already delivers here is read as the App itself; a bind that is
@@ -1722,7 +1757,7 @@ async function buildBindAppPlan(session: InstallSession): Promise<InstallPlan> {
   const merges = typeof adapter.applyVariables === 'function';
   const actions: PlanAction[] = [
     { id: 'github.app', target: 'github', state: alreadyBound ? 'satisfied' : 'update', title: `Bind the imported GitHub App ${slug}${saved ? ` (app ${saved.app.appId})` : ''} as the control-plane App: add ${repository} to its installation with the host's gh login, verify the App reaches it, and record the binding in ${session.directory}; no browser step` },
-    { id: 'github.env', target: 'provider', state: ciPending ? 'update' : alreadyBound ? 'satisfied' : 'create', title: `Write exactly ${APP_VARIABLES.join(', ')} to the server${merges ? '' : `; ${context.provider} rewrites the whole environment, so the control-plane variables are written again unchanged beside them`}`, values: [
+    { id: 'github.env', target: 'provider', state: ciPending || rebinding ? 'update' : alreadyBound ? 'satisfied' : 'create', title: `Write exactly ${APP_VARIABLES.join(', ')} to the server${merges ? '' : `; ${context.provider} rewrites the whole environment, so the control-plane variables are written again unchanged beside them`}`, values: [
       { name: 'GITHUB_APP_ID', value: saved ? String(saved.app.appId) : '<from the imported registration>', secret: false },
       { name: 'GITHUB_INSTALLATION_ID', value: bound && alreadyBound ? String(bound.installationId) : '<from the App installation>', secret: false },
       { name: 'GITHUB_PRIVATE_KEY', value: REDACTED, secret: true },
@@ -1734,8 +1769,8 @@ async function buildBindAppPlan(session: InstallSession): Promise<InstallPlan> {
     { id: 'verify.health', target: 'graphyard', state: 'update', title: 'Verify GET /healthz returns {"ok":true}' },
     polling
       ? { id: 'github.webhook', target: 'github', state: 'satisfied', title: 'Skipped: a local install registers no App webhook; the control plane polls GitHub' }
-      : { id: 'github.webhook', target: 'github', state: hook?.url === webhookUrl ? 'satisfied' : alreadyBound ? 'update' : 'create', title: `Point the App webhook at ${webhookUrl} with the shared secret the server holds` },
-    { id: 'github.ci-app-ids', target: 'github', state: alreadyBound && bound?.ciAppIds.length ? 'satisfied' : 'create', title: `Detect the GitHub App IDs publishing checks on ${session.inputs.baseBranch} and set GITHUB_CI_APP_IDS`, values: alreadyBound && bound?.ciAppIds.length ? [{ name: 'GITHUB_CI_APP_IDS', value: bound.ciAppIds.join(','), secret: false }] : [] },
+      : { id: 'github.webhook', target: 'github', state: hook?.url === webhookUrl ? 'satisfied' : alreadyBound || rebinding ? 'update' : 'create', title: `Point the App webhook at ${webhookUrl} with the shared secret the server holds` },
+    { id: 'github.ci-app-ids', target: 'github', state: ciChanged ? 'update' : alreadyBound && bound?.ciAppIds.length ? 'satisfied' : 'create', title: `Detect the GitHub App IDs publishing checks on ${session.inputs.baseBranch} and set GITHUB_CI_APP_IDS`, values: alreadyBound && bound?.ciAppIds.length ? [{ name: 'GITHUB_CI_APP_IDS', value: bound.ciAppIds.join(','), secret: false }] : [] },
     { id: 'verify.status', target: 'graphyard', state: 'update', title: 'Verify authenticated GET /api/status reports the admin actor, the managed repository, and the bound App' },
     held({ id: 'github.protection', target: 'github', title: `Require Graphyard's status checks and reviews on ${session.inputs.baseBranch} and enable its merge queue or auto-merge` }, `${session.inputs.baseBranch}'s branch protection, auto-merge and merge-queue settings are never written`),
   ];
@@ -1759,6 +1794,14 @@ async function buildBindAppPlan(session: InstallSession): Promise<InstallPlan> {
 }
 
 /**
+ * Whether the recorded binding still holds the imported registration: the same webhook secret (every
+ * `graphyard app import` writes a new one, so a re-imported, rotated key never matches) and, when the
+ * App's installation was read, the same installation.
+ */
+const bindingCurrent = (bound: { webhookFingerprint: string; installationId: number }, app: { webhookSecret?: string }, installationId: number | null) =>
+  bound.webhookFingerprint === fingerprint(app.webhookSecret ?? '') && (installationId === null || installationId === bound.installationId);
+
+/**
  * The apply of `graphyard app bind SLUG` (GY-1877): bindApp's steps for the imported App, then the
  * binding recorded once the server reports that App. An App the record already binds is written
  * nowhere again — the variables, the deploy and the webhook stand, and the apply reads only —
@@ -1771,7 +1814,11 @@ async function performBindApp(session: InstallSession, plan: InstallPlan): Promi
   let record = session.record!;
   const url = record.url!;
   const saved = bindAppRegistration(session)!;
-  const alreadyBound = record.github?.appId === saved.app.appId;
+  const sameApp = record.github?.appId === saved.app.appId;
+  // A re-imported registration (a rotated key, a new webhook secret) or a reinstalled App binds again.
+  const installationId = sameApp ? (await reuseApp(session, slug, 'control-plane', webhookUrlFor(url), false)).app.installationId : null;
+  const alreadyBound = sameApp && bindingCurrent(record.github!, saved.app, installationId);
+  if (sameApp && !alreadyBound) log(`The imported registration of GitHub App ${saved.app.slug} (app ${saved.app.appId}) differs from the one bound to ${url}; binding it again`);
   let facts: AppFacts & { slug: string }, ciAppIds: number[];
   const detect = async () => {
     const ciApps = await detectCiAppIds(githubCli(context.transport), repository, base, facts.appId);
@@ -1781,9 +1828,12 @@ async function performBindApp(session: InstallSession, plan: InstallPlan): Promi
   let write = !alreadyBound;
   if (alreadyBound) {
     facts = { appId: saved.app.appId, slug: saved.app.slug, installationId: record.github!.installationId, privateKey: saved.app.privateKey, webhookSecret: saved.app.webhookSecret };
-    ciAppIds = record.github!.ciAppIds.length ? record.github!.ciAppIds : await detect();
-    write = ciAppIds.length > record.github!.ciAppIds.length;
-    log(write ? `GitHub App ${saved.app.slug} (app ${facts.appId}) is bound to ${url}; GITHUB_CI_APP_IDS was empty and is written now` : `GitHub App ${saved.app.slug} (app ${facts.appId}) is already bound to ${url}; its variables, deploy and webhook stand`);
+    // CI Apps are detected on every rerun: a publisher added or replaced since the last bind is written.
+    const detected = await detect();
+    const recorded = record.github!.ciAppIds;
+    write = detected.length > 0 && (detected.length !== recorded.length || detected.some(id => !recorded.includes(id)));
+    ciAppIds = write ? detected : recorded;
+    log(write ? `GitHub App ${saved.app.slug} (app ${facts.appId}) is bound to ${url}; GITHUB_CI_APP_IDS changed to ${ciAppIds.join(',')} and is written now` : `GitHub App ${saved.app.slug} (app ${facts.appId}) is already bound to ${url}; its variables, deploy and webhook stand`);
   } else {
     facts = await adoptApp(session, slug, 'control-plane', url);
     vault.add(facts.privateKey); vault.add(facts.webhookSecret);
