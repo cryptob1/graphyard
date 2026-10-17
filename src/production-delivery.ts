@@ -95,3 +95,33 @@ export class ProductionDelivery {
     });
   }
 }
+
+/** One service's promoted artifact digest, exactly as the candidate's recorded build named it (GY-1844). */
+export interface PromotedDigests { sha: string; digests?: readonly { service: string; digest: string }[] | null }
+/** One recorded running instance: the service it serves and the digest it was observed running (null when none was recorded). */
+export interface RecordedInstance { service: string; instance: string; digest: string | null }
+export interface DigestVerification {
+  /** `digest`: every promoted service's instances were compared with its promoted digest. `sha-promoted`: the promotion carried no digests — an adapter that cannot deploy by digest — so sha promotion stands and there is nothing to compare. */
+  mode: 'digest' | 'sha-promoted';
+  verified: boolean;
+  /** One entry per failing service, naming it and what ran instead. */
+  mismatches: { service: string; detail: string }[];
+}
+/**
+ * Pure (GY-1844): production verification of a digest promotion. Each promoted service's recorded
+ * running instances are compared with the digest promotion deployed; an instance running anything
+ * else — or no recorded instance digest at all — fails the verification naming that service. A
+ * promotion that names no digests was deployed by its source commit (an adapter that cannot deploy
+ * by digest keeps sha promotion) and is reported as such instead of verified by digest.
+ */
+export function verifyPromotedDigests(promoted: PromotedDigests, running: readonly RecordedInstance[]): DigestVerification {
+  const digests = promoted.digests ?? [];
+  if (!digests.length) return { mode: 'sha-promoted', verified: true, mismatches: [] };
+  const mismatches = digests.flatMap(({ service, digest }) => {
+    const instances = running.filter(entry => entry.service === service);
+    if (!instances.length) return [{ service, detail: `no running instance of ${service} reported a digest, so the promoted ${digest} is unverified` }];
+    return instances.filter(instance => instance.digest !== digest)
+      .map(instance => ({ service, detail: `instance ${instance.instance} of ${service} runs ${instance.digest ?? 'no recorded digest'} instead of the promoted ${digest}` }));
+  });
+  return { mode: 'digest', verified: mismatches.length === 0, mismatches };
+}

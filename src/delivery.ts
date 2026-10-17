@@ -13,7 +13,9 @@ const sha = z.string().regex(/^[a-f0-9]{40}$/);
 const revision = z.number().int().positive();
 const generation = z.number().int().min(0);
 const ref = z.object({ id: name, revision }).strict();
-const manifestSchema = z.array(z.object({ service: name, digest }).strict()).min(1).max(30).refine(a => new Set(a.map(x => x.service)).size === a.length, 'Services must be unique');
+/** One entry per service with its exact artifact digest: what a release deploys and verifies (GY-1844). */
+export const manifestSchema = z.array(z.object({ service: name, digest }).strict()).min(1).max(30).refine(a => new Set(a.map(x => x.service)).size === a.length, 'Services must be unique');
+export type Manifest = z.infer<typeof manifestSchema>;
 /** A promoter acts through its registration and the lease epoch it currently holds. */
 const delegateSchema = z.object({ registration: ref, epoch: revision }).strict();
 export const buildSchema = z.object({ registration: ref, sourceSha: sha, buildInputsDigest: digest, artifacts: manifestSchema, provenanceUrl: z.url().max(2000) }).strict();
