@@ -1,7 +1,9 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
@@ -300,4 +302,29 @@ test('unit:pr-adoption-merger-switch-keeps-pr — an adoption made under the git
   } finally {
     engine.submissionObserver = null;
   }
+});
+
+test('unit:pr-adoption-complete-pushes-adopted-branch — complete pushes the adopted pull request\'s own branch, which no graphyard/ prefix marks, so the head it submits is the head the worker built; a branch that is neither graphyard/ nor the adopted one is still left alone', async () => {
+  const { pushGraphyardBranch } = await import('../src/cli/complete.js');
+  const git = (cwd: string, ...args: string[]) => {
+    const result = spawnSync('git', ['-C', cwd, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { encoding: 'utf8' });
+    assert.equal(result.status, 0, `git ${args.join(' ')}: ${result.stderr}`);
+    return result.stdout.trim();
+  };
+  const checkout = async (branch: string) => {
+    const base = await temporaryDirectory('pr-adoption-push');
+    const origin = join(base, 'origin.git'), work = join(base, 'work');
+    assert.equal(spawnSync('git', ['init', '--bare', '--quiet', origin]).status, 0);
+    assert.equal(spawnSync('git', ['init', '--quiet', work]).status, 0);
+    git(work, 'checkout', '-q', '-b', branch); git(work, 'commit', '-q', '--allow-empty', '-m', 'adopted work'); git(work, 'remote', 'add', 'origin', origin);
+    return { origin, work };
+  };
+  const adopted = await checkout('feature/huck-migration');
+  assert.deepEqual(pushGraphyardBranch(adopted.work, spawnSync, 'feature/huck-migration'), { pushed: 'feature/huck-migration' });
+  assert.match(git(adopted.origin, 'branch', '--list'), /feature\/huck-migration/);
+  assert.equal(git(adopted.work, 'rev-parse', '--abbrev-ref', 'feature/huck-migration@{upstream}'), 'origin/feature/huck-migration');
+  const other = await checkout('feature/other');
+  assert.deepEqual(pushGraphyardBranch(other.work, spawnSync, 'feature/huck-migration'), { pushed: null }, 'a branch that is not the adopted one is not pushed');
+  assert.deepEqual(pushGraphyardBranch(other.work), { pushed: null }, 'without an adoption only graphyard/ branches are pushed');
+  assert.equal(git(other.origin, 'branch', '--list'), '');
 });
