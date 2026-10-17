@@ -1,5 +1,7 @@
 // Concern: GY-1773 — how the coordinator checkout stands (commit, HEAD, dirty paths), read from git.
+// GY-1899 — which checkout that is: the one the running CLI comes from, never the managed repository's root.
 import type { ChildRun } from '../child-runner.js';
+import { checkoutGuardApplies, coordinatorCheckoutRoot } from '../master/profiles.js';
 
 /** How the coordinator checkout stands: its commit, whether HEAD is detached, and whether tracked files differ from the commit (`dirtyPaths` names them: both paths of a rename). */
 export interface CheckoutState { commit: string | null; detached: boolean | null; dirty: boolean | null; dirtyPaths: string[]; branch: string | null }
@@ -43,6 +45,41 @@ const porcelainCandidates = (line: string): { pairs: [string, string][]; single:
   const pairs = pieces.slice(1).map((_, i): [string, string] => [unquotePath(pieces.slice(0, i + 1).join(' -> ').trim()), unquotePath(pieces.slice(i + 1).join(' -> ').trim())]);
   return pairs.length ? { pairs, single: null } : { pairs: [], single: unquotePath(text) };
 };
+/**
+ * The checkout the loop's loaded code comes from and its self-upgrade acts on: the one the running
+ * CLI comes from — the directory above the configured launcher's `bin/` — never the managed
+ * repository's root, whose HEAD names the managed project, not the code this process loaded (GY-1899).
+ * For Graphyard's own install the two are one directory and nothing changes; a loop configured with
+ * no CLI launcher could only ever have loaded the repository root, so that stands in. Under the test
+ * runner only a checkout under the temporary directories is judged (`checkoutGuardApplies`, the
+ * guard's own gate): a launcher a test passes from the checkout the suite itself runs from never
+ * moves a test's upgrade off the root the test injected.
+ */
+export function loopCodeRoot(cliPath: string | null | undefined, repositoryRoot: string): string {
+  if (typeof cliPath !== 'string' || cliPath.length === 0) return repositoryRoot;
+  const checkout = coordinatorCheckoutRoot(cliPath);
+  return checkoutGuardApplies(checkout) ? checkout : repositoryRoot;
+}
+
+/**
+ * The release the loop records, corrected to the commit its code checkout stands at when the
+ * recorded commit could not be code this process loaded: it names a commit this checkout's
+ * repository does not hold, so a startup read of the managed repository's HEAD wrote it (GY-1899).
+ * A commit the repository holds is left alone, whether the checkout still stands there or moved on
+ * after the load (GY-1464) — that gap is the restart the pass owes, never rewritten away — and a
+ * read that fails corrects nothing. Null when the recorded release stands.
+ */
+export async function reconcileLoadedRelease(codeRoot: string, release: { commit: string | null; dirty: boolean | null } | null | undefined, run: ChildRun): Promise<{ commit: string; dirty: boolean | null } | null> {
+  if (!release?.commit) return null;
+  const standing = await checkoutState(codeRoot, run);
+  if (!standing.commit || standing.commit === release.commit) return null;
+  // git answers exit 1, and nothing else, for a well-formed commit the repository does not hold; every other
+  // failure — a stub that cannot answer it included — leaves the recorded release standing.
+  try { await run('git', ['-C', codeRoot, 'cat-file', '-e', release.commit]); return null; }
+  catch (error: any) { if (error?.status !== 1) return null; }
+  return { commit: standing.commit, dirty: standing.dirty };
+}
+
 export async function checkoutState(root: string, run: ChildRun): Promise<CheckoutState> {
   const git = (...args: string[]) => run('git', ['-C', root, ...args]);
   let commit: string | null;
