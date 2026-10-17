@@ -442,8 +442,10 @@
     "tests/goal-land-without-server-fetch.test.ts": 3000,
     "tests/goal-pipeline-outright-refusals.test.ts": 1238,
     "tests/goal-planner.test.ts": 2900,
+    "tests/goal-rapid-delivery-pilot.test.ts": 110000,
     "tests/goal-static-item-preview.test.ts": 4500,
     "tests/graphyard-up.test.ts": 4200,
+    "tests/schema-generation-guard.test.ts": 3000,
     "tests/up-loop-code.test.ts": 850,
     "tests/gy-1050-review-followups.test.ts": 833,
     "tests/gy-1053-review-followups.test.ts": 789,
@@ -608,6 +610,7 @@
     "tests/park-requirements-bare-noun.test.ts": 196,
     "tests/park-requirements-question-refused.test.ts": 4500,
     "tests/park-requirements-question-structural.test.ts": 192,
+    "tests/pages-environment-detection.test.ts": 500,
     "tests/pending-restart-dirty-snapshot.test.ts": 3000,
     "tests/per-item-locking.test.ts": 34217,
     "tests/pi-account-key.test.ts": 1854,
@@ -973,6 +976,7 @@
     "tests/fault-class-loop.test.ts": 630,
     "tests/slow-tick-repeat-receipt.test.ts": 600,
     "tests/goal-exact-candidates.test.ts": 3000,
+    "tests/goal-exact-verification.test.ts": 4000,
     "tests/soak-exact-candidates.test.ts": 32000,
     "tests/goal-candidate-promotion.test.ts": 5000
   }

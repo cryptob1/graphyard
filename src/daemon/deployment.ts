@@ -1,5 +1,5 @@
 // Concern: observing the deployed release and which deliveries it serves.
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ciReportingEnvironment } from '../install/ci-proofs.js';
 import { productionEnvironmentFromEnv } from '../flow-analytics.js';
@@ -96,21 +96,26 @@ export function localAncestry(root: string, baseBranch: string, run: ChildRun) {
 /**
  * GY-1753 AC-3: the production environment deployments are read under: the run's
  * `productionEnvironment`, else an explicit GRAPHYARD_PRODUCTION_ENVIRONMENT, else `github-pages` when the
- * repository carries a pages-deploy.yml `production`. An explicitly set GRAPHYARD_PRODUCTION_ENVIRONMENT wins over the workflow.
+ * repository deploys with GitHub Pages (GY-1954: any workflow; explicit settings win over the workflows).
  */
 export function deploymentEnvironmentName(config: Pick<MasterConfig, 'run'>, root: string, env: NodeJS.ProcessEnv = process.env): string {
   if (config.run.productionEnvironment) return config.run.productionEnvironment;
-  if (env.GRAPHYARD_PRODUCTION_ENVIRONMENT === undefined && existsSync(join(root, '.github', 'workflows', 'pages-deploy.yml'))) return 'github-pages';
+  if (env.GRAPHYARD_PRODUCTION_ENVIRONMENT === undefined && repositoryDeploysWithPages(root)) return 'github-pages';
   return productionEnvironmentFromEnv(env);
 }
 
+/** GY-1954: any workflow running `actions/deploy-pages` names github-pages, whatever its file; pages-deploy.yml also counts. */
+const repositoryDeploysWithPages = (root: string) => {
+  const workflows = join(root, '.github', 'workflows');
+  if (existsSync(join(workflows, 'pages-deploy.yml'))) return true;
+  try { return readdirSync(workflows).some(name => { try { return /\.ya?ml$/.test(name) && readFileSync(join(workflows, name), 'utf8').includes('actions/deploy-pages'); } catch { return false; } }); } catch { return false; }
+};
+
 /**
- * Whether a GitHub deployment's environment is the configured production environment (the master
- * run's `productionEnvironment`, else GRAPHYARD_PRODUCTION_ENVIRONMENT, else `production`), compared as the provider's whole
- * identity. Railway names the GitHub environment `<project> / <environment>`, and one repository can
- * deploy several Railway projects: `staging-copy / production` is not the managed installation's
- * release, so a Railway installation configures the full name (`graphyard / production`), as the
- * flow analytics' production phase already requires.
+ * Whether a GitHub deployment's environment is the configured production environment, compared as the
+ * provider's whole identity: Railway names the GitHub environment `<project> / <environment>` and one
+ * repository can deploy several Railway projects, so a Railway installation configures the full name
+ * (`graphyard / production`), as the flow analytics' production phase already requires.
  */
 export const productionEnvironmentRecord = (environment: unknown, production: string) => environment === production;
 
@@ -118,19 +123,17 @@ export const productionEnvironmentRecord = (environment: unknown, production: st
 const deploymentNodeId = /^[A-Za-z0-9_=-]{1,200}$/;
 /**
  * How many of a deployment's statuses the batched read asks for at each end of its history, to tell
- * whether it ever reached success: the earliest and the latest, GitHub's connection maximum each, so
- * the success is seen whichever order the connection lists them in and however many statuses were
- * added after it. Only a deployment with more than twice this many statuses, its success in the
- * middle, is unseen, and that one fails closed.
+ * whether it ever reached success: the earliest and the latest, so the success is seen whichever
+ * order the connection lists them in. Only a deployment with more than twice this many statuses,
+ * its success in the middle, is unseen, and that one fails closed.
  */
 const deploymentStatusHistory = 100;
 /** States of a deployment still on its way: it does not serve yet, so it supersedes nothing. */
 const inFlightStates = new Set(['pending', 'queued', 'in_progress', 'waiting']);
 /**
- * How long a deployment may stay in flight and still not supersede the release behind it. A
- * deployment that never concludes — abandoned, or a `waiting` one held by a protection rule nobody
- * approves, or one with no status at all, which reads as `pending` — would otherwise keep an older
- * inactive release asserted as served indefinitely. Past this age, from its `created_at`, it counts
+ * How long a deployment may stay in flight and still not supersede the release behind it: one that
+ * never concludes — abandoned, held by an unapproved protection rule, or with no status yet — would
+ * otherwise keep an older inactive release asserted as served indefinitely. Past this age it counts
  * as a newer production record like any other; one whose age cannot be read never shadows.
  */
 export const inFlightShadowBound = 60 * 60_000;
@@ -191,11 +194,9 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
   } else {
     // Filtered by environment, not by ref: a platform that deploys the base branch (Railway) records
     // each release with its commit SHA as the ref, so `ref=main` saw only the CI reporting
-    // environment's records, and on 2026-09-24 GY-159 stayed pending behind a release production had
-    // already served. Unfiltered, the reporting environment's per-branch records (100+ an hour) pushed
-    // every production record past the read bound, and on 2026-10-02 a release production had served
-    // for minutes was refused. The production environment's listing is read page by page, newest
-    // first, until a release answers or a bound is reached.
+    // environment's records (GY-159), and unfiltered the per-branch records pushed every production
+    // record past the read bound. The listing is read page by page, newest first, until a release
+    // answers or a bound is reached.
     const releaseAncestry = localAncestry(options.root, config.baseBranch, run);
     let production: string;
     try { production = deploymentEnvironmentName(config, options.root); } catch (error) { return unavailable(message(error)); }
@@ -320,12 +321,11 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
 
 /**
  * What the deployment step's reads — the release observation and the promotion check — may spend in
- * one cycle before the step moves on. While the plane and GitHub answered slowly on 2026-10-06 the
- * observation's listing pages, status reads and ancestry checks ran inline for 381.9s of cycle
- * 12621's 450s and 587.1s of cycle 12624's 781s, past the two-interval liveness bound. Like the
- * decisions step (GY-1286) and the faults step's observation (GY-1345), a fifth of the interval and
- * never under the 30s actionable cadence: a read still running at the bound is left in flight, the
- * last verified observation stands, and a later cycle takes the answer once it lands.
+ * one cycle before the step moves on: on 2026-10-06 the inline reads ran for 381.9s of cycle 12621's
+ * 450s, past the two-interval liveness bound. Like the decisions step (GY-1286) and the faults
+ * step's observation (GY-1345), a fifth of the interval and never under the 30s actionable cadence:
+ * a read still running at the bound is left in flight, the last verified observation stands, and a
+ * later cycle takes the answer once it lands.
  */
 export const deploymentStepBudgetMs = (intervalMs: number) => Math.max(actionableIntervalMs, Math.round(intervalMs * 0.2));
 /** A read the budget cut: its verification goes on in flight and a later cycle takes its answer. */
@@ -731,7 +731,8 @@ export function promotionReads(config: MasterConfig, root: string, run: ChildRun
   return {
     ...(options.merger ? { merger: options.merger } : {}), ...(local !== undefined ? { local } : {}),
     ledger: async () => {
-      await git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:refs/remotes/origin/${config.baseBranch}`, '+refs/tags/rc-production/*:refs/tags/rc-production/*', '+refs/tags/rc/*:refs/tags/rc/*', '+refs/tags/rc-soak/*:refs/tags/rc-soak/*', '+refs/tags/rc-seal-check/*:refs/tags/rc-seal-check/*');
+      await git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:refs/remotes/origin/${config.baseBranch}`, '+refs/tags/rc-production/*:refs/tags/rc-production/*', '+refs/tags/rc/*:refs/tags/rc/*', '+refs/tags/rc-soak/*:refs/tags/rc-soak/*', '+refs/tags/rc-seal-check/*:refs/tags/rc-seal-check/*',
+        '+refs/tags/rc-uat/*:refs/tags/rc-uat/*', '+refs/tags/rc-hold/*:refs/tags/rc-hold/*'); // GY-1906: the onboarding-target reader's UAT and hold records.
       const mainSha = (await git('rev-parse', `refs/remotes/origin/${config.baseBranch}^{commit}`)).trim().toLowerCase() || null;
       let promotedSha: string | null = null, promotedAt: string | null = null;
       try {

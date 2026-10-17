@@ -55,10 +55,10 @@ test('integration:release-uat-declared-app-previews — previews-for-declared-ap
     'open /preview/{{keyC}}', 'expectText Fixture compose app', 'expectText E2E case {{case}} run {{run}} compose', 'expectText database preview-{{keyC}}-db']);
   const proofs = shipped.definition.steps.flatMap(step => step.kind === 'http' && step.method === 'POST' && step.path === '/api/work' ? [(step.body as any).criteria[0].proofs] : []);
   assert.deepEqual(proofs, [['e2e:fixture-static-home'], ['e2e:fixture-compose-app']], 'each change cites one of the fixture\'s declared cases');
-  // The four uat cases the failed run left unrun after this one, which still run on the shared install.
+  // The four uat cases the failed run left unrun after this one: production-exact-verification runs on the fixture too since GY-1906, the rest still on the shared install.
   const after = cases.filter(entry => entry.definition.target === 'uat' && entry.definition.id > caseId).map(entry => entry.definition.id);
   assert.deepEqual(after, ['production-exact-verification', 'sign-in', 'tests-page', 'work-item-detail']);
-  assert.ok(after.every(id => !fixtureCases.includes(id)));
+  assert.deepEqual(after.filter(id => fixtureCases.includes(id)), ['production-exact-verification']);
 
   const head = checkoutHead(root) as string;
   // The shared install: the local defaults deployed, no application declared and no preview loop, as UAT runs.

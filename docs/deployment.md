@@ -3,7 +3,7 @@
 
 ## The one command
 
-One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --apply` ([install](install.md)). Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`; `/healthz?strict` alerts (503 unhealthy). CI and release-candidate runners pull Docker Hub images through the `mirror.gcr.io` mirror.
+One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --apply` ([install](install.md)). Promotions publish `ghcr.io/cryptob1/graphyard:YYYY.M.D` ([releases](delivery.md#release-candidates)); `/healthz?strict` alerts (503 unhealthy). CI and release-candidate runners pull Docker Hub images through the `mirror.gcr.io` mirror.
 
 ## Variables
 
@@ -41,7 +41,7 @@ Railway deploys `release/production` in ~1min. `/healthz` `commit` at tip: `grap
 
 #### Production environment name
 
-Railway reports `<project> / production`. Startup uses `production.environment`, else `GRAPHYARD_PRODUCTION_ENVIRONMENT`, else `github-pages` if `.github/workflows/pages-deploy.yml` exists, else `production`; the loop publishes it.
+Railway reports `<project> / production`. Startup uses `production.environment`, else `GRAPHYARD_PRODUCTION_ENVIRONMENT`, else `github-pages` if workflows run `actions/deploy-pages`, else `production`; the loop publishes it.
 
 ### Webhook delivery
 
@@ -49,7 +49,7 @@ Hosted: `failing` ([liveness](operations-reference.md#webhook-liveness)) codes 0
 
 ## Backup, upgrade, rollback
 
-**Backup:** `graphyard db backup ./graphyard.json` (`DATABASE_URL`), `graphyard db verify FILE`; `graphyard db fence` before move (`--release` undoes). **Upgrade:** back up, deploy, check `/healthz` `commit`, run [App-permission migrations](install.md#upgrading-an-existing-installation); **rollback** only to same-schema images. **Restore:** `graphyard db migrate` empty database, `graphyard db restore FILE`.
+**Backup:** `graphyard db backup ./graphyard.json` (`DATABASE_URL`), `graphyard db verify FILE`; `graphyard db fence` before move (`--release` undoes). **Upgrade:** back up, deploy, check `graphyard version`, run [App-permission migrations](install.md#upgrading-an-existing-installation); **rollback**: older-schema images refuse to start. **Restore:** `graphyard db migrate` empty database, `graphyard db restore FILE`.
 
 ## Manual fallback
 
