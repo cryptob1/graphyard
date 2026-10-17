@@ -2582,8 +2582,9 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
   async publish(work: Work, forcedReason?: string, beforeWrite: () => Promise<void> = async () => {}): Promise<{ id: number | null; conclusion: string | null } | undefined> {
     if (!work.candidate) return;
     const reasons = [...work.gates.flatMap(g => g.reasons), ...work.violations, ...(forcedReason ? [forcedReason] : [])];
-    const existing = (await this.pages(`/commits/${work.candidate.sha}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=all`, 'check_runs'))
-      .filter(c => c?.app?.id === this.config.appId).sort((a, b) => Number(b.id) - Number(a.id))[0];
+    const runs = (await this.pages(`/commits/${work.candidate.sha}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=all`, 'check_runs'))
+      .filter(c => c?.app?.id === this.config.appId).sort((a, b) => Number(b.id) - Number(a.id));
+    const existing = runs[0];
     const body = { name: CHECK_NAME, head_sha: work.candidate.sha, status: 'completed', conclusion: reasons.length ? 'failure' : 'success', external_id: work.id,
       output: { title: reasons.length ? 'REFUSED' : 'All required gates passed', summary: (reasons.length ? reasons.map(r => `- ${r}`).join('\n') : `Candidate ${work.candidate.sha}; base ${work.candidate.baseSha}; policy ${work.policyRevision}`).slice(0, 60000) } };
     const pr = await this.request(`/pulls/${work.candidate.pr}`);
@@ -2595,11 +2596,37 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const answered = (run: any, fallback: number | null) => ({ id: typeof run?.id === 'number' ? run.id : fallback, conclusion: typeof run?.conclusion === 'string' ? run.conclusion : body.conclusion });
     if (existing) {
       const updated = answered(await this.request(`/check-runs/${existing.id}`, 'PATCH', body), existing.id ?? null);
-      if (updated.conclusion === body.conclusion) return updated;
+      // A head already carrying `verdictRunsPerHead` of the App's runs gets no more: a GitHub that
+      // keeps answering the old conclusion is held by the merge gate, not answered with a new run
+      // on every observation.
+      if (updated.conclusion === body.conclusion || runs.length >= verdictRunsPerHead) return updated;
     }
     return answered(await this.request('/check-runs', 'POST', body), null);
   }
+  /**
+   * GY-1884. The first App-bound required check whose latest run at exact head `sha` does not pass,
+   * named with why, or null when every one passes: `Graphyard / merge` from this App, then each check
+   * in `checks` bound to an app (`graphyard/landable`, the CI checks on theirs), each read fresh, and
+   * only a run of that name, from that app, at that head counts. A run that is missing, still in
+   * progress, or concluded other than passing (success, neutral or skipped, as GitHub reads a required
+   * check; success alone for Graphyard's own two) is the shortfall.
+   */
+  async requiredCheckShortfall(sha: string, checks: readonly { name: string; appId: number | null }[]): Promise<string | null> {
+    for (const check of [{ name: CHECK_NAME, appId: this.config.appId }, ...checks.filter(entry => entry.name !== CHECK_NAME)]) {
+      if (check.appId === null) continue;
+      const runs = (await this.pages(`/commits/${sha}/check-runs?check_name=${encodeURIComponent(check.name)}&filter=all`, 'check_runs'))
+        .filter(run => run?.name === check.name && run?.app?.id === check.appId && run?.head_sha === sha).sort((a, b) => Number(b.id) - Number(a.id));
+      const latest = runs[0], passing = check.name === CHECK_NAME || check.name === LANDABLE_CHECK ? ['success'] : ['success', 'neutral', 'skipped'];
+      const named = `${check.name} (app ${check.appId})`;
+      if (!latest) return `${named} has no run at ${sha.slice(0, 12)}`;
+      if (latest.status !== 'completed') return `${named} is ${latest.status ?? 'pending'} at ${sha.slice(0, 12)}`;
+      if (!passing.includes(latest.conclusion)) return `${named} reads ${latest.conclusion ?? 'no conclusion'} at ${sha.slice(0, 12)}`;
+    }
+    return null;
+  }
 }
+/** The most `Graphyard / merge` runs the App creates at one head (GY-1884): past it, an update GitHub will not apply is answered with a hold, never another run. */
+export const verdictRunsPerHead = 3;
 /** Required-check entries as GitHub listed them, each a named check with its app id or null; malformed entries are dropped. */
 export function listedRequiredChecks(checks: { name: unknown; appId: unknown }[]): { name: string; appId: number | null }[] {
   return checks.flatMap(check => typeof check.name === 'string' && check.name ? [{ name: check.name, appId: Number.isSafeInteger(check.appId) ? check.appId as number : null }] : []);
@@ -2838,7 +2865,7 @@ function appAuthored(commit: any, login: string): boolean {
     : new RegExp(`^\\d+\\+${login.replace(/[[\]]/g, '\\$&')}@users\\.noreply\\.github\\.com$`, 'i').test(email);
 }
 /** What gating one item's merge needs from GitHub (GY-258): the check publication and the merge-queue calls. */
-export type MergeGateClient = Pick<GitHub, 'publish' | 'mergeQueueState' | 'enqueuePullRequest' | 'dequeuePullRequest' | 'publishGroupCheck'>;
+export type MergeGateClient = Pick<GitHub, 'publish' | 'mergeQueueState' | 'enqueuePullRequest' | 'dequeuePullRequest' | 'publishGroupCheck'> & Partial<Pick<GitHub, 'requiredCheckShortfall'>>;
 /**
  * The merge request standing for the item's candidate (GY-1331). Since GY-1235 no executor asks
  * for a merge: every passing gate is the request. The observation that first finds the candidate
@@ -2877,10 +2904,20 @@ export async function gateMerge(github: MergeGateClient, work: Work, request: Me
   try { state = await github.mergeQueueState(work.candidate.pr); }
   catch (error) { return { action: { kind: 'hold', reason: `GitHub's merge queue could not be read for ${work.key}: ${error instanceof Error ? error.message : String(error)}` }, state: null }; }
   // The merge is requested only once the latest `Graphyard / merge` run at the head reads success
-  // (GY-1884): a head whose standing run still reads REFUSED is held, never handed to GitHub.
+  // (GY-1884): a head whose standing run still reads REFUSED is held, never handed to GitHub. The
+  // hold is GitHub's refusal of the verdict, so it is recorded once per head (`merge.enqueue.refused`)
+  // and master status and the merge-stall invariant read it as a refusal, not a silent stall.
   const decided = mergeQueueAction(work, state, request);
-  const action: MergeQueueAction = decided.kind === 'enqueue' && published && published.conclusion !== 'success'
-    ? { kind: 'hold', reason: `${work.key}: the latest ${CHECK_NAME} run at ${work.candidate.sha.slice(0, 12)} reads ${published.conclusion ?? 'no conclusion'}, not success; the merge is not requested until it does` } : decided;
+  let action: MergeQueueAction = decided.kind === 'enqueue' && published && published.conclusion !== 'success'
+    ? { kind: 'hold', reason: `GitHub refused to record ${work.key}'s passing verdict: the latest ${CHECK_NAME} run at ${work.candidate.sha.slice(0, 12)} reads ${published.conclusion ?? 'no conclusion'}, not success; the merge is not requested until it does` } : decided;
+  // Nor while any App-bound required check's latest run at the exact head does not pass: the
+  // gates read an earlier observation, and GitHub merges on the runs standing at the request.
+  if (action.kind === 'enqueue' && typeof github.requiredCheckShortfall === 'function') {
+    let shortfall: string | null;
+    try { shortfall = await github.requiredCheckShortfall(work.candidate.sha, work.observation?.requiredChecks ?? []); }
+    catch (error) { shortfall = `the required checks could not be read (${error instanceof Error ? error.message : String(error)})`; }
+    if (shortfall) action = { kind: 'hold', reason: `${work.key}: required check ${shortfall}; the merge is not requested until it passes` };
+  }
   // The current request's time goes on the record, so a merge left pending on a mergeable head is named (GY-344).
   state = { ...state, requestedAt: enqueueRequestCurrent(work, request) ? request!.at : null };
   try {

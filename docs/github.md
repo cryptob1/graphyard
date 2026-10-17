@@ -26,7 +26,7 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | post the verdict comment (review dispatch) |
 
-`master reviewer setup` creates it (tokens last one hour); `SLUG[bot]` head approval satisfies both. Shortfalls (`appPermissions`; `github-setup --update-permissions` lists `Actions: write (failed CI reruns)`) hold jobs **not retried** (`integration-held`) until `master browser app-permissions` or `master browser installation-accept`.
+`master reviewer setup` creates it (Pull requests write; tokens last one hour); `SLUG[bot]` head approval satisfies both. Shortfalls (`appPermissions`; `github-setup --update-permissions` lists `Actions: write (failed CI reruns)`) hold jobs **not retried** (`integration-held`) until `master browser app-permissions` or `master browser installation-accept`.
 
 ## Reusing an App
 
@@ -36,7 +36,7 @@ Refused workflow syncs: `sync GY-N --push-via-control-plane COMMIT` (`POST /api/
 
 ## Require the check
 
-Require `Graphyard / merge`, `graphyard/landable` ([landability](coordination.md)) from control-plane App: `strict` **off**, admin-enforced, no force push/deletion (`master protection --apply`, `master browser protection`); GitHub merges mergeable non-draft PRs, approved head green on `GITHUB_CI_APP_IDS` ([one delivery path](delivery.md#one-delivery-path)), once the head's latest `Graphyard / merge` run reads success. Observations record required checks with apps; drift raises `required-checks-disagree`.
+Require `Graphyard / merge`, `graphyard/landable` ([landability](coordination.md)) from control-plane App: `strict` **off**, admin-enforced, no force push/deletion (`master protection --apply`, `master browser protection`); merges mergeable non-draft approved heads ([one delivery path](delivery.md#one-delivery-path)) whose latest `Graphyard / merge` and App-bound required runs read success, else held (one `merge.enqueue.refused`, ≤3 runs/head); record drift: `required-checks-disagree`.
 
 ## Failed checks
 

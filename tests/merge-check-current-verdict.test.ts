@@ -30,40 +30,44 @@ const requested = (item: Work): MergeEnqueueRequest => ({ sha: item.candidate!.s
  * GitHub answer an update of a completed run with the run unchanged; `stuck` makes every write
  * answer the run's old conclusion, so no success ever stands at the head.
  */
-function fakeGitHub(options: { mergeStateStatus: string; frozen?: boolean; stuck?: boolean }) {
+function fakeGitHub(options: { mergeStateStatus: string; frozen?: boolean; stuck?: boolean; others?: any[]; store?: (run: any) => any | null }) {
   const runs: any[] = [];
   const writes: { method: string; id: number | null; conclusion: string }[] = [];
   const merges: { operation: string; latest: string | null }[] = [];
+  // Every write and merge call in the order the fake received it (AC-3's success control).
+  const calls: string[] = [];
   const latest = () => runs.filter(run => run.name === CHECK_NAME && run.head_sha === head && run.app.id === APP).sort((a, b) => b.id - a.id)[0] ?? null;
   const github = new GitHub({ repository: 'cryptob1/graphyard', base: 'main', appId: APP, installationId: 1, privateKey: 'not-used' });
   github.request = async (path: string, method = 'GET', body?: any) => {
     if (method === 'POST' && path === '/check-runs') {
-      const run = { ...body, id: 117343871285 + runs.length, app: { id: APP }, conclusion: options.stuck && runs.length ? runs[0].conclusion : body.conclusion };
-      runs.push(run);
-      writes.push({ method, id: run.id, conclusion: body.conclusion });
-      return run;
+      const created = { ...body, id: 117343871285 + runs.length, app: { id: APP }, conclusion: options.stuck && runs.length ? runs[0].conclusion : body.conclusion };
+      // `store` stands for what GitHub actually keeps of the write: nothing, or a run changed under it.
+      const run = options.store ? options.store(created) : created;
+      if (run) runs.push(run);
+      writes.push({ method, id: created.id, conclusion: body.conclusion }); calls.push(`${method} ${body.conclusion}`);
+      return run ?? {};
     }
     if (method === 'PATCH' && path.startsWith('/check-runs/')) {
       const run = runs.find(entry => entry.id === Number(path.slice('/check-runs/'.length)))!;
-      writes.push({ method, id: run.id, conclusion: body.conclusion });
-      if (!options.frozen && !options.stuck) Object.assign(run, body);
+      writes.push({ method, id: run.id, conclusion: body.conclusion }); calls.push(`${method} ${body.conclusion}`);
+      if (!options.frozen && !options.stuck) Object.assign(run, options.store ? options.store({ ...run, ...body }) ?? {} : body);
       return run;
     }
     if (method !== 'GET') return {};
     if (path === '/pulls/1265') return { number: 1265, state: 'open', draft: false, head: { sha: head }, base: { ref: 'main', sha: base } };
     if (path === '/git/ref/heads/main') return { ref: 'refs/heads/main', object: { type: 'commit', sha: base } };
     if (/^\/commits\/[a-f0-9]{40}$/.test(path)) return { sha: path.slice(9), commit: { tree: { sha: 'f'.repeat(40) } } };
-    if (path.startsWith(`/commits/${head}/check-runs`)) return { check_runs: runs.filter(run => path.includes(`check_name=${encodeURIComponent(run.name)}`)) };
+    if (path.startsWith(`/commits/${head}/check-runs`)) return { check_runs: [...runs, ...options.others ?? []].filter(run => path.includes(`check_name=${encodeURIComponent(run.name)}&`)) };
     throw new Error(`Unexpected GitHub request ${method} ${path}`);
   };
   github.graphql = async (query: string) => {
     const operation = /(enablePullRequestAutoMerge|mergePullRequest|enqueuePullRequest|disablePullRequestAutoMerge|dequeuePullRequest|mergeQueue\(branch)/.exec(query)?.[1] ?? 'unknown';
     if (operation === 'mergeQueue(branch') return { repository: { mergeQueue: null, pullRequest: { id: pullRequestId, headRefOid: head, mergeStateStatus: options.mergeStateStatus, isInMergeQueue: false, autoMergeRequest: null, mergeQueueEntry: null } } };
-    merges.push({ operation, latest: latest()?.conclusion ?? null });
+    merges.push({ operation, latest: latest()?.conclusion ?? null }); calls.push(operation);
     return {};
   };
   const requests = () => merges.filter(entry => ['enablePullRequestAutoMerge', 'mergePullRequest', 'enqueuePullRequest'].includes(entry.operation));
-  return { github, runs, writes, latest, requests };
+  return { github, runs, writes, latest, requests, calls };
 }
 
 test('unit:merge-check-updated-before-auto-merge — a head first refused gets its Graphyard / merge run updated, or a new one created, to success before auto-merge or a merge is requested; a failing head or a run that stays REFUSED never has a merge requested', async () => {
@@ -177,4 +181,63 @@ test('unit:required-checks-include-app-bound-graphyard-checks — the required-c
   const rebound = { ...observation, requiredChecks: observation.requiredChecks!.map(check => check.name === 'test' ? { ...check, appId: 99 } : check) } as Observation;
   assert.equal(requiredCheckDisagreements([work({ observation: rebound })]).length, 1);
   assert.deepEqual(requiredCheckDisagreements([work({ observation: { ...stale, protectionChecks: undefined } as Observation }), work({ stage: 'done', observation: stale })]), []);
+});
+
+/** The five checks GitHub's protection requires on main, each bound to its app, as the observation records them (AC-2). */
+const boundChecks = [{ name: CHECK_NAME, appId: APP }, { name: LANDABLE_CHECK, appId: APP }, { name: 'secrets', appId: CI }, { name: 'test', appId: CI }, { name: 'typecheck', appId: CI }];
+/** A passing run of `name` from `app` at the head, as GitHub lists it. */
+const passingRun = (name: string, app: number, id: number) => ({ id, name, head_sha: head, status: 'completed', conclusion: 'success', app: { id: app } });
+/** What each negative control does to one check's run at the head: the run missing, pending, failed, or carrying another name, app or head. */
+const spoilers: Record<string, (run: any) => any | null> = {
+  missing: () => null,
+  pending: run => ({ ...run, status: 'in_progress', conclusion: null }),
+  failed: run => ({ ...run, conclusion: 'failure' }),
+  'wrong name': run => ({ ...run, name: `${run.name} (stale)` }),
+  'wrong app id': run => ({ ...run, app: { id: 99_999 } }),
+  'wrong head sha': run => ({ ...run, head_sha: 'd'.repeat(40) }),
+};
+
+test('unit:no-auto-merge-on-missing-pending-failed-or-mismatched-check — with every gate passing, the loop requests neither auto-merge nor a merge at the head while the Graphyard / merge run or any App-bound required check there is missing, pending, failed, or of another name, app or head; the success control updates Graphyard / merge to success strictly before the auto-merge request', async () => {
+  const observed = () => work({ observation: { ...work().observation!, requiredChecks: boundChecks } as Observation });
+  const others = (spoiled?: { name: string; spoil: (run: any) => any | null }) => boundChecks.filter(check => check.name !== CHECK_NAME).flatMap((check, index) => {
+    const run = passingRun(check.name, check.appId!, 500 + index);
+    const kept = spoiled?.name === check.name ? spoiled.spoil(run) : run;
+    return kept ? [kept] : [];
+  });
+
+  // The success control: REFUSED first, then every check passes at the head; the PATCH to success precedes the request.
+  for (const mergeStateStatus of ['BLOCKED', 'CLEAN']) {
+    const fake = fakeGitHub({ mergeStateStatus, others: others() });
+    await gateMerge(fake.github, refused(), requested(refused()));
+    const item = observed();
+    const gated = await gateMerge(fake.github, item, requested(item));
+    assert.equal(gated.action.kind, 'enqueue', gated.action.reason);
+    const operation = mergeStateStatus === 'CLEAN' ? 'mergePullRequest' : 'enablePullRequestAutoMerge';
+    assert.deepEqual(fake.calls.filter(call => !call.startsWith('mergeQueue')), ['POST failure', 'PATCH success', operation], `${mergeStateStatus}: Graphyard / merge reads success strictly before ${operation}`);
+  }
+
+  const controls: string[] = [];
+  for (const mergeStateStatus of ['BLOCKED', 'CLEAN']) for (const [variant, spoil] of Object.entries(spoilers)) {
+    // Graphyard / merge itself: what GitHub keeps of the verdict write is spoiled.
+    {
+      const fake = fakeGitHub({ mergeStateStatus, others: others(), store: spoil });
+      const item = observed();
+      const gated = await gateMerge(fake.github, item, requested(item));
+      assert.equal(gated.action.kind, 'hold', `${mergeStateStatus} ${CHECK_NAME} ${variant}: ${gated.action.reason}`);
+      assert.deepEqual(fake.requests(), [], `${mergeStateStatus} ${CHECK_NAME} ${variant}: no auto-merge or merge call`);
+      controls.push(`${CHECK_NAME} ${variant}`);
+    }
+    // Each App-bound required check in turn.
+    for (const check of boundChecks.filter(entry => entry.name !== CHECK_NAME)) {
+      const fake = fakeGitHub({ mergeStateStatus, others: others({ name: check.name, spoil }) });
+      const item = observed();
+      const gated = await gateMerge(fake.github, item, requested(item));
+      assert.equal(gated.action.kind, 'hold', `${mergeStateStatus} ${check.name} ${variant}: ${gated.action.reason}`);
+      assert.match(gated.action.reason, new RegExp(`required check ${check.name.replace(/[/]/g, '\\/')} \\(app ${check.appId}\\)`));
+      assert.deepEqual(fake.requests(), [], `${mergeStateStatus} ${check.name} ${variant}: no auto-merge or merge call`);
+      assert.equal(fake.latest().conclusion, 'success', 'the verdict itself passed: only the spoiled check holds the merge');
+      controls.push(`${check.name} ${variant}`);
+    }
+  }
+  assert.equal(new Set(controls).size, boundChecks.length * Object.keys(spoilers).length, 'every check met every negative control');
 });
