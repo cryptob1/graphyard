@@ -305,7 +305,9 @@ export async function runCases(cases: readonly CaseFile[], options: RunOptions):
     const attemptResults: AttemptResult[] = [];
     do {
       const began = now();
-      const result = await attemptCase(entry, { url: options.url, token: options.token, stepTimeoutMs, runId, attempt: attemptResults.length + 1, fetcher, launcher: launch, signal, withholdSecrets: options.withholdSecrets, waitPollMs: options.waitPollMs, maxWaitSeconds: options.maxWaitSeconds, ...general });
+      const result = await attemptCase(entry, { url: options.url, token: options.token, stepTimeoutMs, runId, attempt: attemptResults.length + 1, fetcher, launcher: launch, signal, withholdSecrets: options.withholdSecrets, waitPollMs: options.waitPollMs,
+        // A case pending on the candidate cannot block it, so it asks once and never holds the run on a wait (GY-1938).
+        maxWaitSeconds: required && pendingCases.includes(id) ? 0 : options.maxWaitSeconds, ...general });
       attemptResults.push({ attempt: attemptResults.length + 1, outcome: result.failingStep ? 'fail' : 'pass', durationMs: Math.max(0, now() - began), ...result });
     } while (attemptResults.at(-1)!.outcome === 'fail' && attemptResults.length <= retries && !signal?.aborted);
     const last = attemptResults.at(-1)!;
@@ -474,6 +476,8 @@ export const failureDetail = (report: E2eReport, pendingCases: readonly string[]
  * fails the suite, but never leaves a later required case unrun.
  */
 export const releaseRetries = 1;
+/** The longest a release run's GET step waits (GY-1938): a case's two attempts stay well inside the suite's one-hour command timeout, so the suite reports instead of being killed. */
+export const releaseMaxWaitSeconds = 900;
 /** The candidate record the checkout's ledger holds for `id`, or why it reads none (GY-1802): its pending outcomes ride the `rc/ID` tag the cut pushed, which a validation checkout carries with no plane credential. A read that fails names none, so the suite blocks exactly as before. */
 export const candidatePendingOutcomes = (root: string, id: string | undefined): readonly string[] | undefined => {
   if (!id) return undefined;
@@ -497,7 +501,7 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
     const policy = options.policy ?? (options.root ? checkoutRepositoryPolicy(options.root) : repositoryPolicy());
     const pendingCases = pendingUnder(contractPendingCases(options.contract, candidate?.pendingOutcomes), policy);
     const report = await runCases(selected, { url, token, environment: 'uat', runId: candidate ? `rc-${candidate.id}` : undefined, fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs,
-      root: options.root, retries: releaseRetries, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, pendingCases, policy });
+      root: options.root, retries: releaseRetries, maxWaitSeconds: releaseMaxWaitSeconds, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, pendingCases, policy });
     await options.report?.(report);
     const verdict = releaseVerdict(report, [], pendingCases, policy), detail = failureDetail(report, pendingCases, policy);
     const executed = report.cases.length - verdict.unrun.length;

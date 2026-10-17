@@ -29,7 +29,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { loadCases } from '../src/e2e/case.ts';
-import { candidatePendingOutcomes, checkoutContract, defaultStepTimeoutMs, failureDetail, releaseRetries, releaseVerdict, runCases, summarize } from '../src/e2e/runner.ts';
+import { candidatePendingOutcomes, checkoutContract, defaultStepTimeoutMs, failureDetail, releaseMaxWaitSeconds, releaseRetries, releaseVerdict, runCases, summarize } from '../src/e2e/runner.ts';
 import { contractPendingCases } from '../src/release-candidate.ts';
 import { checkoutRepositoryPolicy } from '../src/model/repository-policy.ts';
 import { repositoryDelivery } from '../src/install/index.ts';
@@ -283,7 +283,7 @@ export async function runOnboardingE2e(cases, { url, token, fixture, candidate =
         }
       }
       // The step that creates an item on the fixture waits for its preview to settle, so each step there has the settling budget besides its own.
-      const report = await runCases([entry], { url: target.url, token: target.token, environment: 'uat', runId, retries: releaseRetries, root, pendingCases: pending, policy, launcher,
+      const report = await runCases([entry], { url: target.url, token: target.token, environment: 'uat', runId, retries: releaseRetries, maxWaitSeconds: releaseMaxWaitSeconds, root, pendingCases: pending, policy, launcher,
         fetcher: target.settle ? settlingFetcher(fetcher ?? fetch, target) : fetcher, stepTimeoutMs: target.settle ? (stepTimeoutMs ?? defaultStepTimeoutMs) + previewSettleMs : stepTimeoutMs, now });
       served.add(report.sha);
       const known = targets.find(entry => entry.url === target.url && entry.sha === report.sha);
