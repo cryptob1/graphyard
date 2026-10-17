@@ -350,9 +350,16 @@ test('unit:principal-upsert-remove-single-entry-readback — principal add reach
     const session = await prepareInstall(host.root, { repository: REPOSITORY, provider: 'host', selfContained: true, sshHost: '203.0.113.20', sshUser: 'root', domain: 'graphyard.example.test' }, host.deps);
     await applyInstall(session, await buildPlan(session));
     const tokens = '/home/graphyard/.config/graphyard/owner-project/tokens';
-    await principal(host, ['add', 'huck-engineer', '--role', 'producer', '--grant', GRANT]);
+    // The unredeemed dashboard sign-in claim install --apply printed keeps working: a roster edit mints none.
+    const claim = () => host!.hostFiles.get(`${session.context.workdir}/server.env`)!.content.split('\n').filter(line => line.startsWith('GRAPHYARD_SIGNIN_CLAIM='));
+    const installed = claim();
+    assert.equal(installed.length, 1, 'install --apply deploys one sign-in claim');
+    const added = await principal(host, ['add', 'huck-engineer', '--role', 'producer', '--grant', GRANT]);
     assert.ok(host.hostFiles.has(`${tokens}/huck-engineer.token`), 'the added credential is written on the host');
+    assert.deepEqual(claim(), installed, 'principal add keeps the deployed sign-in claim');
+    assert.equal(added.signIn, undefined, 'no new sign-in link is minted');
     await principal(host, ['remove', 'huck-engineer']);
+    assert.deepEqual(claim(), installed, 'principal remove keeps the deployed sign-in claim');
     const removals = lines(host.remotes.get('203.0.113.20')!).filter(line => line.startsWith('rm -f '));
     assert.deepEqual(removals, [`rm -f ${tokens}/huck-engineer.token`], 'only the removed principal\'s token is deleted');
     assert.ok(!deployedRoster(host.transport, host.remotes).some(entry => entry.id === 'huck-engineer'));

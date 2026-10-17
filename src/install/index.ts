@@ -1709,6 +1709,9 @@ export async function applyRosterChange(session: InstallSession, record: Install
     if (context.host.secretsUnreadable) throw new Error(`The host's credentials could not be read (${context.host.secretsUnreadable}); the roster is not edited blind`);
     context.host.principals = roster;
     generateHostSecrets(context);
+    // A roster edit mints no sign-in claim: the deployed claim hash rides through deployedBundle,
+    // so an unredeemed dashboard link keeps working and only GRAPHYARD_PRINCIPALS changes.
+    context.host.claim = null;
   } else {
     for (const [principal, token] of await ensureTokens(session.directory, roster.filter(principal => principal.id !== change.id), vault, false)) session.tokens.set(principal, token);
     const missing = roster.filter(principal => principal.id !== change.id && !session.tokens.has(principal.id));
@@ -1765,9 +1768,7 @@ async function deployedBundle(session: InstallSession): Promise<EnvValue[]> {
     const index = line.indexOf('=');
     if (index <= 0 || line.startsWith('#')) continue;
     const name = line.slice(0, index).trim(), value = line.slice(index + 1);
-    // A host appends its sign-in claim itself (host.ts hostFiles).
-    if (name === SIGNIN_CLAIM_VARIABLE && context.host?.claim) continue;
-    if (!keys[name]) { values.push({ name, value, secret: true }); continue; }
+    if (!keys[name]) { values.push({ name, value, secret: name !== SIGNIN_CLAIM_VARIABLE }); continue; }
     const key = await readRemote(transport, `${context.workdir}/${value.slice(value.lastIndexOf('/') + 1)}`);
     if (key === null) throw new Error(`The mounted key ${value} behind ${name} could not be read from ${context.workdir}; the roster is not edited blind`);
     values.push({ name: keys[name], value: session.vault.add(key), secret: true });
