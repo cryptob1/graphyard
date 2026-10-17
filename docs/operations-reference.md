@@ -53,14 +53,14 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 | --- | ---
 | `merge` | gates pass: 20s
 | `active` | awaiting check/review/refresh/rework: 1min
-| `steady` | unchanged: 5min, fleet-stretched; review requests ≤10min
+| `steady` | unchanged: 5min, fleet-stretched; reviews ≤10min
 | `idle` | awaiting dispatch/escalation: 5min, stretched
 
 Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`).
 
 ### The merge-path reserve
 
-Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observations await reset (`githubBudget.deferrals`); token (`githubBudget.tokens`) projected below it at reset raises `github`.
+Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observations await reset (`githubBudget.deferrals`); token projected below it at reset raises `github`.
 
 ### What an observation costs
 
@@ -72,19 +72,19 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ### Reading the budget
 
-`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also `master status`): REST-only `perHour` across replicas (`instances`), `limit`/`share`/`target` 0.6/`byEndpoint`. Immutable, per-cycle, webhook-driven reads [aren't repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
+`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also `master status`): REST-only `perHour` across replicas (`instances`), `limit`/`share`/`target` 0.6/`byEndpoint`. Immutable per-cycle webhook-driven reads [aren't repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
 
 ### Reading under control-plane
 
-`master merger control-plane`: candidates are observed from its checkout, polling GitHub for none of their pull request/reviews/checks; person-opened ones still are. Diagnostician/doctor read `graphyard status GY-N`, not `gh pr view`.
+`master merger control-plane`: candidates observed from its checkout, polling GitHub for none of their pull request/reviews/checks; person-opened ones still are. Diagnostician/doctor read `graphyard status GY-N`, not `gh pr view`.
 
 ### Webhook liveness
 
-`webhooks` checks receipts against GitHub's delivery log: `lastAttemptAt`/`windowSince`/`coveredFrom`/`attemptsInWindow`/`failedAttempts`/`failedStatusCodes`/`deliveryLogAt`. `state`: `delivering` (<1h), `failing` (non-2xx), `quiet`, `answered` (2xx), `unverified`. Open PRs cite `https://github.com/settings/apps/APP-SLUG`.
+`webhooks` checks receipts against GitHub's delivery log: `lastAttemptAt`/`windowSince`/`coveredFrom`/`attemptsInWindow`/`failedAttempts`/`failedStatusCodes`. `state`: `delivering` (<1h), `failing` (non-2xx; proved-foreign 403 excused), `quiet`, `answered` (2xx), `unverified` (read failed/`coveredFrom` after `windowSince`). Open PRs cite `https://github.com/settings/apps/APP-SLUG`.
 
 ## Control-plane resources
 
-`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume+`GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes[:ROOT]`, per `TMPDIR`/`/tmp` (any-name checkout/worktree unheld/unregistered 24h; <25% free: escalates, naming consumers); `loaded-revision`: code moves.
+`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume+`GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes[:ROOT]` per `TMPDIR`/`/tmp` (unheld/unregistered checkout/worktree 24h; <25% free escalates naming consumers; foreign-namespace markers judge ownerless, 6h unheld, preview too, GY-1896); `loaded-revision`: code moves. No fault: owed restart in bound, pane unowned <10min, `/tmp` >10% free <30min past ≥25% pass.
 
 Session-started `npm test`/`test:browser`/typecheck/`tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`). Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`) until 1GB above.
 
@@ -106,7 +106,7 @@ Ungated merges are permanent violations: repair access, file follow-up. Admin di
 
 ## Merge-intent withdrawal
 
-`graphyard master withdraw [--repo OWNER/NAME] [--apply] [--json] --admin-token-stdin` (admin, loop stopped, managed repository only) dequeues or disarms each unmerged pull request; reruns write nothing; without `--apply`, plans.
+`graphyard master withdraw [--repo OWNER/NAME] [--apply] [--json] --admin-token-stdin` (admin, loop stopped, managed repository only) dequeues or disarms each unmerged pull request; reruns write nothing; failures exit 1; without `--apply`, plans.
 
 ## Credentials
 
@@ -127,8 +127,8 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥2×) pace per token, merge path first (`observationThroughput`). Heartbeat/claim/`complete`/`blocked` own a lease pool (`leaseHealth`).
+`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥2× workers) pace per token, merge path first (`observationThroughput`). Heartbeat/claim/`complete`/`blocked` own a lease pool.
 
 ### Concurrent reconciliation
 
-Reconcile evaluates moved rows and due-past items (clock-only changes); full evaluation ≥ max(`GRAPHYARD_RECONCILE_FULL_MS` (300000), 3× its length) is the safety net; ticks >5s log due count, lag. Batches evaluate lock-free, write under coordination+row locks; heartbeats lock their item.
+Reconcile evaluates moved rows and due-past items (clock-only); full evaluation ≥ max(`GRAPHYARD_RECONCILE_FULL_MS` (300000), 3× its length) is the safety net; ticks >5s log due count, lag. Batches evaluate lock-free, write under coordination+row locks; heartbeats lock their item.

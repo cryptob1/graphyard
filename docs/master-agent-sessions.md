@@ -33,7 +33,7 @@ Never pasted ([authorization](onboarding.md#what-the-generated-instructions-auth
 
 #### How the request reaches the runtime
 
-Written to `.graphyard/launch/NAME.request` (Claude also `NAME.role`), mode 0600, removed with the checkout; typed line bounded at **512 bytes**:
+Written to `.graphyard/launch/NAME.request` (Claude also `NAME.role`), mode 0600, removed with the checkout; typed line is bounded at **512 bytes** whatever the request is:
 
 ```
 GY=…/.graphyard/launch/NAME; claude … --settings …/.graphyard/harness/producer-PROFILE.json --append-system-prompt-file "$GY.role" "$(cat "$GY.request")"
@@ -51,9 +51,9 @@ GY=…/.graphyard/launch/NAME; claude … --settings …/.graphyard/harness/prod
 
 Reviewers/producers are `awaiting acknowledgement` until 30s active (`counts.dispatchAwaiting`), re-prompted once quiet past `run.acknowledgementSeconds` (90); resultless is **`never started`**: relaunched ≤3 times (`retry.neverStarted`), [then elsewhere](master-agent-reference.md#producer-runtime-faults).
 
-**Reviewer verdict**: launch writes `review-binding.json` (0600: head, base, policy revision, listed threads; control-plane: `mode`, `verdictToken`) into the session's `GH_CONFIG_DIR`; no binding, no session. Reviewer posts only via `graphyard review post --event APPROVE|REQUEST_CHANGES|COMMENT [--body TEXT]` (body else stdin); raw review calls denied. Nothing posts on missing binding, `GRAPHYARD_REVIEW` ≠ `KEY@SHA`, moved head, `mergeable` UNKNOWN after 2min, an unlisted thread, or an approval leaving a listed thread unclassified; else one review POST.
+**Reviewer verdict**: launch writes `review-binding.json` (0600: head, base, policy revision, listed threads; control-plane: `mode`, `verdictToken`) into the session's `GH_CONFIG_DIR`; no binding, no session. Reviewer posts only via `graphyard review post --event APPROVE|REQUEST_CHANGES|COMMENT [--body TEXT]` (body else stdin); raw review calls denied. Nothing posts on missing binding, `GRAPHYARD_REVIEW` ≠ `KEY@SHA`, moved head, `mergeable` UNKNOWN after 2min, unlisted thread, or approval leaving a listed thread unclassified; else one review POST.
 
-**Idle-with-lease** (25 quiet minutes, nothing open): one re-prompt; quiet 45min after first idle, 10 after re-prompt: new attempt on its branch <60min from last activity. **Unsubmitted past the bound** (lease held 60min without submission): `unsubmitted-attempt` shown, a stalled-gate fault past 120min; without submission progress the loop stops the supervisor, ending the attempt; reclaim requeues it, branch and worktree kept; from 130min renewal is refused (`no-submission-bound`, not lease loss). Open scope requests exempt it. **Blocked**: destructive prompts declined; usage-limit menu fails over; folder-trust dialog relaunches; others fail after **5min**.
+**Idle-with-lease** (25 quiet minutes, nothing open): one re-prompt; quiet 45min after first idle, 10 after re-prompt: new attempt on its branch <60min from last activity. **Unsubmitted past the bound** (lease held 60min without submission): `unsubmitted-attempt` shown, a stalled-gate fault past 120min; without submission progress the loop stops the supervisor, ending the attempt; reclaim requeues it (branch+worktree kept); from 130min renewal is refused (`no-submission-bound`, not lease loss). Open scope requests exempt it. **Blocked**: destructive prompts declined; usage-limit menu fails over; folder-trust dialog relaunches; others fail after **5min**.
 
 ### Panes are closed and reclaimed
 

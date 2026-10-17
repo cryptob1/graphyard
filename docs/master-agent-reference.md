@@ -7,7 +7,7 @@ Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON`; auto-gran
 
 ## Promotion to autonomy
 
-`graphyard master promote --admin-token-stdin` makes supervised installs autonomous; `master autonomy --apply` refuses there, `master.json` edits skip checks. Refuses until reviewer App and profile exist, its bot none of your `gh` login, `operatorLogin`, worker App or principals; logs `.graphyard/master-actions/promotions.jsonl`, provisions operator-agent and approver, writes `supervision: autonomous`.
+`graphyard master promote --admin-token-stdin` makes supervised installs autonomous; `master autonomy --apply` refuses there; `master.json` edits skip checks. Refuses until reviewer App and profile exist, its bot none of your `gh` login, `operatorLogin`, worker App or principals; logs `.graphyard/master-actions/promotions.jsonl`, provisions operator-agent and approver, writes `supervision: autonomous`.
 
 ## Conflict avoidance
 
@@ -45,7 +45,7 @@ Unacted producer requests (unstarted/refused/launch-exited) relaunch on untried 
 
 ## Shadow merge gate
 
-`run.shadowGate` (`enabled` true, `timeoutMinutes` 20): each cycle trial-merges/builds/affected-tests oldest untried head credential-free in sticky tmp-reclaimed `TMPDIR` (`gy-t*`), pushing nothing; `shadow.verdict` joins GitHub's outcome in `shadowGate` (`shadow-only-fail`/`shadow-missed`: a line each, merger `github`); errors/timeouts record nothing; third timeout one line. `GET /api/shadow-disagreements`, `/api/shadow-explanations?pair=KEY:HEAD:BASETIP`.
+`run.shadowGate` (`enabled` true, `timeoutMinutes` 20): each cycle trial-merges/builds/affected-tests oldest untried head credential-free in sticky tmp-reclaimed `TMPDIR` (`gy-t*`), pushing nothing; `shadow.verdict` joins GitHub's outcome in `shadowGate` (`shadow-only-fail`/`shadow-missed`; merger `github`); errors/timeouts record nothing; third timeout one line. `GET /api/shadow-disagreements`, `/api/shadow-explanations?pair=KEY:HEAD:BASETIP`.
 
 ## Pipeline speed
 

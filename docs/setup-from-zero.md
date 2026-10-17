@@ -73,7 +73,7 @@ Legacy merger only. `--apply` serves `http://127.0.0.1:4311` and prints it; it o
 
 ## 8. Agent environments
 
-Connect accounts in Settings → Agents ([dashboard](dashboard.md#settings-agents)); host-logged-in accounts register with `gy master registry propose --apply`, profiles with `gy master environments --apply`; up runs both where the loop runs (host: `install --profiles-only`), issuing the install's `workers/` credentials and naming refused ones; account lines wait for both. Unknown-reviewer-profile refusals: one `gy master status` attention, uncounted five-minute retries. **Verify:** one `agent-environment:NAME` line passes per environment; then [roles](onboarding.md#configure-the-fleet).
+Connect accounts ([dashboard](dashboard.md#settings-agents)); host-logged-in accounts register with `gy master registry propose --apply`, profiles with `gy master environments --apply`; up runs both where the loop runs (host: `install --profiles-only`), issuing the install's `workers/` credentials and naming refused ones; account lines wait for both. Unknown-reviewer-profile refusals: one `gy master status` attention, uncounted five-minute retries. **Verify:** one `agent-environment:NAME` line passes per environment; then [roles](onboarding.md#configure-the-fleet).
 
 ## 9. Worker sandbox and harness rules
 

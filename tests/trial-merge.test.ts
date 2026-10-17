@@ -15,7 +15,7 @@ import type { Work } from '../src/model.js';
 import { preMergeTestFiles } from '../scripts/ci-tests.mjs';
 import { checkoutKinds } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { reclaimTmpDirectories, tempOwnerMarker, testTempPatterns, writeTempOwner } from '../src/tmp-reclaim.js';
+import { processPidNamespace, reclaimTmpDirectories, tempOwnerMarker, testTempPatterns, writeTempOwner } from '../src/tmp-reclaim.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
 // Time-bomb allowance (GY-1694): the 2030-03-01 start is both the loop's injected now and its snapshot's now, so the fixture's stamps are judged against it; new Date() only stamps a crashed-trial owner marker.
 
@@ -349,7 +349,7 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
   const crashed = join(clean, `${trialTemporaryPrefix}crashed`), running = join(clean, `${trialTemporaryPrefix}running`), crashedCheckout = join(clean, `${trialCheckoutPrefix}crashed`);
   mkdirSync(join(crashedCheckout, 'checkout', 'tests'), { recursive: true });
   for (const directory of [crashed, running]) mkdirSync(join(directory, 'graphyard-pg-data'), { recursive: true });
-  for (const directory of [crashed, crashedCheckout]) writeFileSync(tempOwnerMarker(directory), `${JSON.stringify({ pid: process.pid, startedAt: -1, at: new Date().toISOString() })}\n`);
+  for (const directory of [crashed, crashedCheckout]) writeFileSync(tempOwnerMarker(directory), `${JSON.stringify({ pid: process.pid, startedAt: -1, pidNamespace: processPidNamespace(), at: new Date().toISOString() })}\n`);
   await writeTempOwner(running);
   const report = await reclaimTmpDirectories({ tmpRoots: [clean], held: new Set() });
   assert.deepEqual(report.removed.map(entry => entry.path).sort(), [crashedCheckout, crashed].sort(), JSON.stringify(report));
