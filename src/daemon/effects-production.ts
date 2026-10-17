@@ -127,7 +127,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     const config = current();
     const response = await fetcher(`${config.url}/api/${path}`, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(timeoutMs) });
     const result = await response.json();
-    if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
+    // The status travels with the refusal: promotion reads a 404 from a server without the import route as no hold (GY-1860).
+    if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`, response.status, result);
     return result;
   };
   const coordinatorStatus = async () => await asCoordinator('status') as ControlPlaneStatus & Record<string, unknown>;
