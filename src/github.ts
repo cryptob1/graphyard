@@ -2593,10 +2593,14 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // The head GitHub merged keeps the verdict it was merged under (GY-1917): no later write, the
     // reconciliation error path's forced REFUSED included, contradicts the delivery it authorized.
     // A stale candidate the pull request moved past before merging is still refused.
-    if (pr.merged && pr.head.sha === work.candidate.sha) return existing ? { id: existing.id ?? null, conclusion: existing.conclusion ?? null } : undefined;
+    const frozen = (read: any) => read.merged && read.head.sha === work.candidate!.sha;
+    const standing = () => existing ? { id: existing.id ?? null, conclusion: existing.conclusion ?? null } : undefined;
+    if (frozen(pr)) return standing();
     if (!reasons.length || !forcedReason) requireCurrent(pr.head.sha === work.candidate.sha && this.boundBase(work, pr, await this.baseBranch()) === work.candidate.baseSha, 'PR changed before check publication; retry');
     if (!reasons.length) requireCurrent(pr.state === 'open' && !pr.draft && pr.base.ref === this.config.base, 'PR is closed, draft, or retargeted; refusing success');
     await beforeWrite();
+    // A merge landing while the guard ran freezes the head too: a refusal re-reads the pull request first.
+    if (reasons.length && frozen(await this.request(`/pulls/${work.candidate.pr}`))) return standing();
     if (existing?.status === body.status && existing.conclusion === body.conclusion && existing.external_id === body.external_id
       && existing.output?.title === body.output.title && existing.output?.summary === body.output.summary) return { id: existing.id ?? null, conclusion: existing.conclusion };
     const answered = (run: any, fallback: number | null) => ({ id: typeof run?.id === 'number' ? run.id : fallback, conclusion: typeof run?.conclusion === 'string' ? run.conclusion : body.conclusion });

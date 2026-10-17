@@ -104,6 +104,14 @@ test('unit:merge-verdict-after-merge — a head GitHub merged keeps the Graphyar
   Object.assign(stale.pull, { state: 'closed', merged: true, merge_commit_sha: mergeSha, head: { sha: 'b'.repeat(40) } });
   assert.equal((await stale.github.publish(item, reconciliationFailed))?.conclusion, 'failure');
   assert.equal(stale.latest().output.title, 'REFUSED', 'the stale head is refused');
+
+  // GitHub merges the head while the write guard runs: the refusal re-reads the pull request and writes nothing.
+  const racing = fakeGitHub();
+  await racing.github.publish(item);
+  const raced = racing.writes.length;
+  assert.deepEqual(await racing.github.publish(item, reconciliationFailed, async () => { Object.assign(racing.pull, { state: 'closed', merged: true, merge_commit_sha: mergeSha }); }),
+    { id: racing.latest().id, conclusion: 'success' });
+  assert.equal(racing.writes.length, raced, 'a merge during the guard freezes the head');
 });
 
 /** An observer of PR #1300 merged at `head`, its App's latest `Graphyard / merge` run reading `conclusion`. */
