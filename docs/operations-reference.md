@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Wakes dismiss autocompact suggestions (`esc`, "Not now"), re-read; unconfirmed, unanswerable dialogs hold (`wake:master:held`). `daemon.stepStalls`: 3 same-signature cycles: remedied once, verified (unknown/`review-launch` profile: configured; 401: profile credential/deploy-key reissued, never coordinator's; merge-record key-reuse), else wakes master; per-resource 5min retries.
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Wakes dismiss autocompact suggestions (`esc`, "Not now"), re-read; unconfirmed, unanswerable dialogs hold (`wake:master:held`). `daemon.stepStalls`: 3-cycle signatures get one verified remedy (unknown profile, 401 credential/deploy-key reissue, merge-record key-reuse) or wake master; 5min retries.
 
 ### Perpetual master loop
 
@@ -15,7 +15,7 @@ Leases expire 120s after last heartbeat (recorded renewal fault, plane stall: 30
 
 ## Supervisor died leaving a containment quarantine
 
-[`master settle-containment`](operations.md#recovery-recipes) verifies nothing survives; refused: confirm stop, then rework, or `recover-containment` once delivered ([autosettle](protocol/leases.md#watch)).
+[`master settle-containment`](operations.md#recovery-recipes) verifies nothing survives; refused: stop, then rework, or `recover-containment` once delivered ([autosettle](protocol/leases.md#watch)).
 
 ## Submitted implementation needs rework
 
@@ -23,7 +23,7 @@ Stop worker; [rework](operations.md) `--previous-worker-stopped`. `scripts/rewor
 
 ## Base-sync conflicts
 
-`graphyard sync GY-N` resolves a conflicted `tests/helpers/timing-baseline.json` itself: base tip's file plus the branch's own test-file lines, staged, listed under `regenerated`.
+`graphyard sync GY-N` resolves a conflicted `tests/helpers/timing-baseline.json` itself: base tip's file plus branch test-file lines, staged under `regenerated`.
 
 ## Retro synthesis
 
@@ -31,7 +31,7 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 
 ## Flaky CI check
 
-[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); main merges wait for reruns. Cancelled/timed-out jobs rerun ≤3 times, then one `escalation:main-guard:SHA` infrastructure fault names run and step, reverting nothing. A real failure reruns once: a pass joins `mainGuardFlakes` (last 20); a second failure, refusal or unconcluded hour reverts.
+[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); main merges wait for reruns. Cancelled/timed-out jobs rerun ≤3 times, then one `escalation:main-guard:SHA` infrastructure fault names run/step, reverting nothing. A real failure reruns once: a pass joins `mainGuardFlakes` (last 20); a second failure, refusal or unconcluded hour reverts.
 
 ## Accepted evidence turns out to be wrong
 
