@@ -107,6 +107,8 @@ export class ArtifactReplay {
     const unmeasuredCause = (artifacts: ReplayArtifact[], missing: ArtifactKindName[]) =>
       `Retained artifacts lack the instrumentation to replay: ${missing.map(kind => { const entry = artifacts.find(x => x.name === kind); return entry?.reason ? `${kind} — ${entry.reason}` : `${kind} was never retained`; }).join('; ')}`;
     let judged: { artifacts: ReplayArtifact[]; bytesRead: number; verification: ReportVerification | null; cause: string | null } | undefined;
+    // Cost is the I/O every attempt performed, not only the last one's: a retry re-reads the set.
+    const io = { bytesRead: 0, artifactsRead: 0 };
     const evaluation = await evaluateWithRecovery(format, async () => {
       const artifacts: ReplayArtifact[] = [];
       const documents: Partial<Record<ArtifactKindName, unknown>> = {};
@@ -129,6 +131,7 @@ export class ArtifactReplay {
         try { documents[row.name as ArtifactKindName] = adapter.parse(row.name as ArtifactKindName, bytes).document; }
         catch { entry.reason = `Artifact is not a ${format} ${row.name} document`; }
       }
+      io.bytesRead += bytesRead; io.artifactsRead += artifacts.filter(x => x.read).length;
       const missing = missingOf(documents);
       if (missing.length) { const cause = unmeasuredCause(artifacts, missing); judged = { artifacts, bytesRead, verification: null, cause }; return { error: cause }; }
       try {
@@ -142,7 +145,7 @@ export class ArtifactReplay {
       }
     });
     const final = judged!;
-    const { artifacts, bytesRead } = final;
+    const { artifacts } = final;
     const verification = final.verification;
     const instrumented = verification !== null;
     const recorded = a.report ?? null;
@@ -167,7 +170,7 @@ export class ArtifactReplay {
       id: randomUUID(), at: new Date().toISOString(), actor: actor.id, requestId: r.id, attemptId: a.id, epoch: a.epoch, sequence: a.sequence ?? null, workId: r.workId, proof: r.proof, candidateId: c.id, sourceSha: c.sourceSha, format,
       outcome: !instrumented ? 'unmeasured' : !recorded ? 'uncompared' : differences.length ? 'inconsistent' : 'consistent',
       evaluation, coverage, verification, recorded, differences: !instrumented ? [] : !recorded ? ['The attempt predates recorded report summaries; nothing to compare against'] : differences, artifacts,
-      cost: { durationMs: Date.now() - started, bytesRead, artifactsRead: artifacts.filter(x => x.read).length, backend: v.artifactBackend?.label ?? 'postgres' },
+      cost: { durationMs: Date.now() - started, bytesRead: io.bytesRead, artifactsRead: io.artifactsRead, backend: v.artifactBackend?.label ?? 'postgres' },
       authorizes: 'nothing', liveVerification: 'not-established', redaction: { artifactBytesExported: false, identities: 'hashed', strings: 'redacted' },
     });
     await this.store.transaction(async (db, now) => {

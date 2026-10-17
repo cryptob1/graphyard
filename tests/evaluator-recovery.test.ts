@@ -144,6 +144,10 @@ test('unit:evaluator-error-retried — an evaluator-error is retried against the
   assert.equal(replay.coverage.behavior.status, 'covered');
   assert.equal(f.backend.reads.length, 4, 'two reads per attempt: the faulted one and its retry');
   assert.equal(new Set(f.backend.reads).size, 2, 'only the two retained artifacts were ever read — the same pinned evidence, never new evidence');
+  // The replay's cost is every attempt's I/O: the faulted attempt still read the second artifact.
+  const finalBytes = replay.artifacts.reduce((sum, x) => sum + x.bytes, 0);
+  assert.equal(replay.cost.artifactsRead, 3, 'one read in the faulted attempt plus two in its retry');
+  assert.equal(replay.cost.bytesRead, finalBytes + replay.artifacts.find(x => x.name !== replay.artifacts[0].name)!.bytes, JSON.stringify(replay.cost));
 
   // A verdict the verifier reached is not retried, whatever it disagrees with: one attempt, one fail.
   const g = await fixture();
