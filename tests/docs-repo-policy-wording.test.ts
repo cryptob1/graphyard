@@ -42,6 +42,9 @@ test('unit:docs-repo-policy-wording — README and the how-it-works guide attrib
   assert.match(riskClass, /`graphyard\.json` `risk\.sensitive` \(generic default\)/, 'the risk class comes from graphyard.json\'s risk.sensitive, with the generic default');
   assert.doesNotMatch(riskClass, /review\.normalChanges/, 'review.normalChanges does not determine the risk class');
   assert.match(timing, /sensitive before merge, normal after unless `review\.normalChanges: pre-merge`/, 'review.normalChanges chooses when normal changes are reviewed; post-merge is the default');
+  // src/model/gates.ts applies reviewedBeforeMerge only to control-plane observations; github mode
+  // keeps its lanes and every review before the merge, whatever review.normalChanges says.
+  assert.match(timing, /; github mode: lane-gated, all pre-merge\.$/, 'github mode is the exception: lanes gate it and every change is reviewed before the merge');
   assert.doesNotMatch(timing, /risk\.sensitive/, 'risk.sensitive does not set the review timing');
   assert.match(timing, /\]\(delivery\.md\)/, 'the review timing links docs/delivery.md, which lists the graphyard.json policy');
   assert.doesNotMatch(passages[0], /judged from the merge delta,/, 'the risk class is no longer described as judged from the merge delta alone');
