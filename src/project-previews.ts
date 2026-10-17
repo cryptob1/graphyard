@@ -1,0 +1,99 @@
+// Concern: an item's openable preview (GY-1902) — which declared static application an item's cases need, and the durable preview record the loop keeps on the item.
+import { z } from 'zod';
+import type { ProjectDelivery } from './project-applications.js';
+import type { Work } from './model/work.js';
+
+// ---------------------------------------------------------------------------
+// A change whose criteria cite an E2E case bound to a declared static application gets its own
+// local preview: the loop (merge-writer/preview.ts `itemPreviewStep`) checks out the change, builds
+// and serves the application, runs those cases against it and records the outcome here, on the
+// item; the server serves the running preview at `/preview/KEY` (server/static.ts). The record is
+// the control plane's own observation, written by the coordinator identity only: it is never
+// evidence and satisfies no proof. Pure and browser-safe: Work details reads it.
+// ---------------------------------------------------------------------------
+
+export const itemPreviewStates = ['starting', 'running', 'failed', 'cleaned'] as const;
+export type ItemPreviewState = (typeof itemPreviewStates)[number];
+/** Why a preview ended: a newer head replaced it, the item was closed or delivered, a case failed, or the loop that served it restarted. */
+export const previewEndReasons = ['superseded', 'cancelled', 'delivered', 'failed', 'restarted'] as const;
+export type PreviewEndReason = (typeof previewEndReasons)[number];
+/** How many ended previews an item keeps beside its current one, newest last. */
+export const previewHistoryLimit = 5;
+
+const sha = z.string().regex(/^[0-9a-f]{40}$/, 'a lower-case 40-character commit');
+const instant = z.string().max(64).refine(value => Number.isFinite(Date.parse(value)), 'an ISO 8601 instant');
+/** One declared case's result on the preview, as the item shows it. */
+export const previewCaseResultSchema = z.object({ case: z.string().min(1).max(200), result: z.enum(['pass', 'fail', 'unrun']), reason: z.string().max(500).optional() }).strict();
+export type PreviewCaseResult = z.infer<typeof previewCaseResultSchema>;
+
+/** The preview link of an item. */
+export const previewPath = (key: string) => `/preview/${key}`;
+
+export const itemPreviewSchema = z.object({
+  /** The preview's own id: a new head, or a restarted loop, starts a new preview under a new id. */
+  id: z.string().uuid(),
+  path: z.string().regex(/^\/preview\/[A-Za-z0-9._-]{1,100}$/),
+  state: z.enum(itemPreviewStates),
+  runner: z.literal('local'),
+  application: z.string().min(1).max(40),
+  /** The commit previewed: the item's submitted head, or the base tip while it has none (`source`). */
+  sha, source: z.enum(['head', 'base']),
+  /** Where the loop serves it on loopback, while it runs; the server proxies `path` there. */
+  origin: z.string().regex(/^http:\/\/127\.0\.0\.1:\d{1,5}$/).nullable(),
+  cases: z.array(previewCaseResultSchema).max(100),
+  detail: z.string().max(1000),
+  startedAt: instant, readyAt: instant.nullable(), cleanedAt: instant.nullable(),
+  endReason: z.enum(previewEndReasons).nullable(),
+}).strict().superRefine((preview, context) => {
+  const problem = (message: string) => context.addIssue({ code: z.ZodIssueCode.custom, message });
+  // Only a preview whose every declared case passed is recorded running: a failed case never yields a passing record.
+  if (preview.state === 'running' && (!preview.cases.length || preview.cases.some(entry => entry.result !== 'pass'))) problem('a running preview has every declared case passed');
+  if ((preview.state === 'running') !== (preview.origin !== null)) problem('a preview names its origin exactly while it runs');
+  const ended = preview.state === 'failed' || preview.state === 'cleaned';
+  if (ended !== (preview.cleanedAt !== null && preview.endReason !== null)) problem('an ended preview, and only one, names when it was cleaned and why');
+});
+export type ItemPreview = z.infer<typeof itemPreviewSchema>;
+/** The loop's record of a preview: `POST /api/work/:id/merge-record` with this body. */
+export const previewRecordBodySchema = z.object({ kind: z.literal('preview'), preview: itemPreviewSchema }).strict();
+
+declare module './model/work.js' { interface Work { preview?: ItemPreview | null; previewHistory?: ItemPreview[] } }
+
+export const previewEnded = (preview: Pick<ItemPreview, 'state'>) => preview.state === 'failed' || preview.state === 'cleaned';
+
+/**
+ * Applies the loop's record of `preview` to `work`, or answers why it is refused. A record of the
+ * item's current preview replaces it, until it has ended: an ended preview stays as it ended. A new
+ * preview starts only once the current one has ended, which then moves to `previewHistory`.
+ */
+export function applyPreviewRecord(work: Work, preview: ItemPreview): string | null {
+  if (preview.path !== previewPath(work.key)) return `${work.key}'s preview is served at ${previewPath(work.key)}, not ${preview.path}`;
+  const current = work.preview ?? null;
+  if (current && current.id === preview.id) {
+    if (previewEnded(current) && JSON.stringify(current) !== JSON.stringify(preview)) return `${work.key}'s preview ${preview.id} already ended ${current.state}; a new head or restart starts a new preview`;
+    work.preview = preview;
+    return null;
+  }
+  if (preview.state !== 'starting') return `${work.key}'s current preview is ${current?.id ?? 'none'}, not ${preview.id}; only a starting preview replaces it`;
+  if (current && !previewEnded(current)) return `${work.key}'s preview ${current.id} is still ${current.state}; it is cleaned before a new one starts`;
+  if (current) work.previewHistory = [...(work.previewHistory ?? []), current].slice(-previewHistoryLimit);
+  work.preview = preview;
+  return null;
+}
+
+/** The static application an item's declared cases need, and those cases; null when it needs none or previews are off. */
+export function previewDemand(work: Pick<Work, 'criteria'>, delivery: ProjectDelivery | null): { application: Extract<ProjectDelivery['applications'][number], { kind: 'static' }>; cases: string[] } | null {
+  if (!delivery || delivery.previews !== 'local') return null;
+  const cited = [...new Set(work.criteria.flatMap(criterion => criterion.proofs).flatMap(proof => proof.startsWith('e2e:') ? [proof.slice(4)] : []))];
+  for (const application of delivery.applications) {
+    if (application.kind !== 'static') continue;
+    const cases = cited.filter(id => delivery.cases[id] === application.id);
+    if (cases.length) return { application, cases };
+  }
+  return null;
+}
+
+/** Why an item no longer wants its preview, or null while it does. */
+export function previewEndReason(work: Pick<Work, 'stage' | 'closure'>, wanted: boolean): PreviewEndReason | null {
+  if (work.stage === 'done') return work.closure ? 'cancelled' : 'delivered';
+  return wanted ? null : 'cancelled';
+}

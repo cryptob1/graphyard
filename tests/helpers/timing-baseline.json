@@ -439,6 +439,7 @@
     "tests/goal-delivery-onboarding.test.ts": 6500,
     "tests/goal-pipeline-outright-refusals.test.ts": 1238,
     "tests/goal-planner.test.ts": 2900,
+    "tests/goal-static-item-preview.test.ts": 4500,
     "tests/graphyard-up.test.ts": 4200,
     "tests/up-loop-code.test.ts": 850,
     "tests/gy-1050-review-followups.test.ts": 833,

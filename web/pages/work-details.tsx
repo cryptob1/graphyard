@@ -27,6 +27,7 @@ import StatusBadge from '../components/status-badge';
 import { StepsDetail } from '../components/steps-bar';
 import { RequestCard } from './human-requests';
 import type { Dashboard } from './dashboard';
+import type { ItemPreview, ItemPreviewState } from '../../src/project-previews';
 
 const marker: Record<string, { symbol: string; word: string; tone: string }> = {
   passed: { symbol: '✓', word: 'passed', tone: 'pass' }, failed: { symbol: '×', word: 'failed', tone: 'fail' }, revoked: { symbol: '×', word: 'withdrawn', tone: 'fail' },
@@ -36,6 +37,26 @@ const marker: Record<string, { symbol: string; word: string; tone: string }> = {
 const withoutPr = (sentence: string) => sentence.replace(/\s*(?:of|on|in)?\s*PR #\d+/g, '').replace(/\s+—/, ' —');
 /** The first sentence, capped: the plain meaning on one line; the whole text stays in the tooltip and in the details. */
 const oneLine = (text: string) => { const first = text.split(/(?<=[.;:])\s/)[0]; return first.length > 90 ? `${first.slice(0, 88).replace(/\s+\S*$/, '')}…` : first; };
+
+const previewWords: Record<ItemPreviewState, string> = { starting: 'Starting', running: 'Running', failed: 'Failed', cleaned: 'Cleaned up' };
+const caseMarks = { pass: marker.passed, fail: marker.failed, unrun: marker.unmeasured } as const;
+/**
+ * The item's local preview (GY-1902): its link while it runs, its state and why it ended, the
+ * commit it serves and each declared case's actual result on it. The control plane records it; it
+ * is no evidence, so it moves no requirement.
+ */
+export function PreviewPanel({ preview }: { preview: ItemPreview }) {
+  return <section className="panel item-preview" aria-label="Preview"><h2>Preview <small>{previewWords[preview.state]}</small></h2>
+    <dl className="facts">
+      <div><dt>Link</dt><dd>{preview.state === 'running' ? <a href={preview.path} target="_blank" rel="noopener noreferrer">{preview.path} ↗</a> : <span className="mono">{preview.path}</span>}</dd></div>
+      <div><dt>State</dt><dd>{previewWords[preview.state]}{preview.endReason ? ` · ${preview.endReason}` : ''}{preview.cleanedAt ? ` · cleaned ${new Date(preview.cleanedAt).toLocaleString()}` : ''}</dd></div>
+      <div><dt>Commit</dt><dd><span className="mono">{preview.sha.slice(0, 12)}</span>{preview.source === 'base' ? ' · the base branch, until a pull request is submitted' : ''}</dd></div>
+      <div><dt>Application</dt><dd>{preview.application} · {preview.runner} runner</dd></div>
+    </dl>
+    <ul className="proof-markers">{preview.cases.map(entry => <li key={entry.case} className={`marker-${caseMarks[entry.result].tone}`}>{caseMarks[entry.result].symbol} {entry.case} {caseMarks[entry.result].word}{entry.reason ? ` · ${entry.reason}` : ''}</li>)}</ul>
+    {preview.detail && <p className="muted">{preview.detail}</p>}
+  </section>;
+}
 
 /**
  * One work item's page (GY-161). Its first screen answers, without scrolling or a click: what
@@ -161,6 +182,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       </dl> : <p className="muted">No pull request yet.</p>}
       {item.candidate && <details className={`blast-radius danger-${radius.danger}`}><summary>{radius.headline}</summary><ul>{radius.sentences.map(sentence => <li key={sentence}>{sentence}</li>)}</ul></details>}
     </section>
+    {item.preview && <PreviewPanel preview={item.preview}/>}
     <TestCases item={item} api={api}/>
     <section className="panel activity" aria-label="Activity"><h2>Activity</h2>
       {events.length ? <ul className="activity-list">{events.slice(0, 3).map(event => <li key={event.seq}>{activityLabel(event.kind)} <small>· {formatAge(event.created_at, now)} ago</small></li>)}</ul> : <p className="muted">Nothing recorded yet.</p>}

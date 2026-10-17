@@ -10,6 +10,9 @@ import { docsOnlyPaths, testOnlyPaths } from '../model/policy.js';
 import { serveStaticSite, type ReleaseCandidate, type StaticUat } from '../release-candidate.js';
 import { hostPassthrough } from '../e2e/steps.js';
 import { buildStaticSite, projectCaseSuite, type StaticBuildShell } from '../release-project.js';
+import { previewDemand, previewEnded, previewEndReason, previewPath, type ItemPreview, type PreviewCaseResult, type PreviewEndReason } from '../project-previews.js';
+import type { ProjectDelivery } from '../project-applications.js';
+import type { Work } from '../model/work.js';
 import { heldEntries, heldOpenPaths, readTempOwner, tempOwnerGone, tempOwnerJudgeable, tempOwnerMarker, tmpReclaimMinAgeMs, treeLastWritten, writeTempOwner } from '../tmp-reclaim.js';
 
 /** The static UAT a managed repository names (`GRAPHYARD_UAT_STATIC`, `GRAPHYARD_UAT_BUILD`, release-ports.ts): its build output in the checkout and the command that builds it. */
@@ -169,6 +172,18 @@ export function previewWithheld(entry: CaseFile): string | null {
 
 const cut = (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 900);
 
+/** What an item preview (GY-1902) adds to a merge's: the declared cases it runs, the variables its build reads, and the signal that cancels it. */
+export interface PreviewOptions {
+  /** The case ids to run, every one mandatory; absent, the merge's required and uat cases (`previewCase`). */
+  cases?: readonly string[];
+  /** Variables beside `previewEnvironment` for the build and the cases: what the change is (never a credential). */
+  variables?: Record<string, string>;
+  /** Cancels the preview from outside, as its budget running out does. */
+  signal?: AbortSignal;
+}
+/** A preview that passed and is still served: its loopback origin, and `close`, which ends the server and removes the checkout. */
+export interface OpenedPreview { verdict: PreviewVerdict; url: string | null; close(): Promise<void> }
+
 /**
  * The preview of one passing trial merge: in a free slot (at most `previewConcurrency` at once), a
  * detached checkout of `mergeSha` under `base` marked with this process as its owner, the site's
@@ -184,6 +199,16 @@ const cut = (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 900);
  * ended preview outlives its slot. The first preview of a process sweeps the leftovers of dead ones first.
  */
 export async function runPreview(input: PreviewInput): Promise<PreviewVerdict> {
+  const opened = await openPreview(input, { keep: false });
+  return opened.verdict;
+}
+
+/**
+ * `runPreview`'s work, keeping a passing preview served when `keep` is set (GY-1902): its slot is
+ * freed once its cases ran, while its server and checkout stay until `close`. Every other outcome —
+ * a failure, a timeout, a cancellation through `signal` — is cleaned up before this answers.
+ */
+export async function openPreview(input: PreviewInput, options: PreviewOptions & { keep: boolean }): Promise<OpenedPreview> {
   const now = input.now ?? Date.now, run = input.run ?? defaultChildRun;
   if (!swept.has(input.base)) { swept.add(input.base); await sweepPreviewCheckouts(input.base, { root: input.root, run, procRoot: input.procRoot }); }
   const release = await (input.slots ?? sharedSlots).acquire();
@@ -191,9 +216,23 @@ export async function runPreview(input: PreviewInput): Promise<PreviewVerdict> {
   const verdict = (result: PreviewVerdict['result'], detail: string, cases: PreviewCase[] = [], failed: string[] = []): PreviewVerdict =>
     ({ result, mergeSha: input.mergeSha, cases, failed, detail: cut(detail), durationMs: Math.max(0, now() - startedAt) });
   const cancel = new AbortController(), signal = cancel.signal;
+  const external = () => cancel.abort();
+  options.signal?.addEventListener('abort', external, { once: true });
   const cancelled = () => { if (signal.aborted) throw new Error('the preview was cancelled'); };
+  // A declared case is mandatory whatever its own flags say: the item's criteria name it.
+  const mandatory = (entry: CaseFile) => options.cases ? true : entry.definition.required;
   let directory: string | null = null, served: StaticUat | null = null, timer: NodeJS.Timeout | undefined, running: Promise<PreviewVerdict> | null = null;
+  let closed: Promise<void> | null = null, outcome: PreviewVerdict | null = null;
+  const close = () => closed ??= (async () => {
+    try { await (served as StaticUat | null)?.close(); } catch { /* the server is gone either way */ }
+    if (directory) {
+      try { await run('git', ['-C', input.root, 'worktree', 'remove', '--force', join(directory, 'checkout')]); } catch { /* removed below; the next prune forgets it */ }
+      await rm(directory, { recursive: true, force: true });
+      await rm(tempOwnerMarker(directory), { force: true });
+    }
+  })();
   try {
+    if (options.signal?.aborted) return { verdict: outcome = verdict('error', 'the preview was cancelled before it started'), url: null, close };
     directory = await mkdtemp(join(input.base, previewCheckoutPrefix));
     await writeTempOwner(directory);
     const checkout = join(directory, 'checkout');
@@ -202,9 +241,11 @@ export async function runPreview(input: PreviewInput): Promise<PreviewVerdict> {
       cancelled();
       // The case files are the merge's own, loaded and kept before any of its code runs: the build cannot add, erase or rewrite a case the preview then judges. One that does not load fails the preview as a failing case would, naming why.
       let selected: CaseFile[] = [];
-      try { selected = existsSync(join(checkout, 'e2e')) ? (await loadCases(checkout)).filter(previewCase) : []; }
+      try { selected = existsSync(join(checkout, 'e2e')) ? (await loadCases(checkout)).filter(entry => options.cases ? options.cases.includes(entry.definition.id) : previewCase(entry)) : []; }
       catch (error) { return verdict('fail', `the merge's E2E cases do not load: ${error instanceof Error ? error.message : String(error)}`, [], ['cases']); }
-      const withheld = selected.flatMap(entry => { const reason = previewWithheld(entry); return reason ? [{ case: entry.definition.id, verdict: 'unrun' as PreviewCase['verdict'], required: entry.definition.required, reason }] : []; });
+      const missing = (options.cases ?? []).filter(id => !selected.some(entry => entry.definition.id === id));
+      if (missing.length) return verdict('fail', `the declared case${missing.length === 1 ? '' : 's'} ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} not in the change's e2e/cases`, missing.map(id => ({ case: id, verdict: 'failed' as const, required: true, reason: 'not in the change' })), missing);
+      const withheld = selected.flatMap(entry => { const reason = previewWithheld(entry); return reason ? [{ case: entry.definition.id, verdict: 'unrun' as PreviewCase['verdict'], required: mandatory(entry), reason }] : []; });
       // A required case the preview cannot run fails it, naming the case: no merge lands without running every required case. A uat-only one stays informational.
       const unrunRequired = withheld.filter(entry => entry.required);
       if (unrunRequired.length) return verdict('fail', `required E2E case${unrunRequired.length === 1 ? '' : 's'} ${unrunRequired.map(entry => entry.case).join(', ')} declare${unrunRequired.length === 1 ? 's' : ''} an install secret the preview withholds, so the preview cannot run ${unrunRequired.length === 1 ? 'it' : 'them'} and refuses the merge`,
@@ -213,7 +254,7 @@ export async function runPreview(input: PreviewInput): Promise<PreviewVerdict> {
       const unrun = withheld.length ? `; not run on the preview, each declaring an install secret it withholds: ${withheld.map(entry => entry.case).join(', ')}` : '';
       // A preview that runs no case served and tested nothing, so it refuses the merge, as the E2E suite refuses an empty selection: deleting every case never lands a change unexercised.
       if (!runnable.length) return verdict('fail', `no required or uat E2E case the preview can run is in the merge, so it exercised nothing${unrun}`, withheld, ['cases']);
-      const home = join(directory!, 'home'), environment = previewEnvironment(home, input.hostEnvironment);
+      const home = join(directory!, 'home'), environment = { ...previewEnvironment(home, input.hostEnvironment), ...options.variables };
       await mkdir(environment.TMPDIR, { recursive: true });
       if (input.site.build) {
         const failed = await buildStaticSite(input.site.build, checkout, input.timeoutMs, input.shell, signal, environment);
@@ -229,27 +270,27 @@ export async function runPreview(input: PreviewInput): Promise<PreviewVerdict> {
       const result = await suite.run(served.url, { id: `preview-${input.mergeSha.slice(0, 12)}` } as ReleaseCandidate);
       cancelled();
       const ran = report as E2eReport | null;
-      const cases = [...(ran?.cases ?? []).map(outcome => ({ case: outcome.id, verdict: outcome.verdict, required: outcome.required })), ...withheld];
-      const blocking = ran ? releaseVerdict(ran).blocking.map(outcome => outcome.id) : [];
-      return result.passed ? verdict('pass', `${result.detail}${unrun}`, cases) : verdict('fail', `${result.detail}${unrun}`, cases, blocking.length ? blocking : ['e2e']);
+      const cases = [...(ran?.cases ?? []).map(outcome => ({ case: outcome.id, verdict: outcome.verdict, required: options.cases ? true : outcome.required })), ...withheld];
+      const blocking = ran ? (options.cases ? ran.cases.filter(entry => entry.verdict !== 'passed') : releaseVerdict(ran).blocking).map(outcome => outcome.id) : [];
+      const passed = options.cases ? result.passed && !!ran && ran.cases.length === runnable.length && !blocking.length : result.passed;
+      return passed ? verdict('pass', `${result.detail}${unrun}`, cases) : verdict('fail', `${result.detail}${unrun}`, cases, blocking.length ? blocking : ['e2e']);
     };
     const expired = new Promise<'expired'>(accept => { timer = setTimeout(() => accept('expired'), input.timeoutMs); });
+    const stopped = new Promise<'stopped'>(accept => signal.addEventListener('abort', () => accept('stopped'), { once: true }));
     running = preview();
-    const first = await Promise.race([running, expired]);
-    if (first !== 'expired') return first;
+    const first = await Promise.race([running, expired, stopped]);
+    if (first === 'stopped') return { verdict: outcome = verdict('error', 'the preview was cancelled'), url: null, close };
+    if (first !== 'expired') return { verdict: outcome = first, url: (served as StaticUat | null)?.url ?? null, close };
     // Past the budget: the run is cancelled, and its slot is not freed until it has ended (finally).
     cancel.abort();
-    return verdict('timeout', `the preview ran past its ${Math.round(input.timeoutMs / 60_000)}-minute budget`);
+    return { verdict: outcome = verdict('timeout', `the preview ran past its ${Math.round(input.timeoutMs / 60_000)}-minute budget`), url: null, close };
   } finally {
     clearTimeout(timer);
-    cancel.abort();
+    options.signal?.removeEventListener('abort', external);
+    const kept = options.keep && outcome?.result === 'pass' && !signal.aborted;
+    if (!kept) cancel.abort();
     if (running) await running.catch(() => null);
-    try { await (served as StaticUat | null)?.close(); } catch { /* the server is gone either way */ }
-    if (directory) {
-      try { await run('git', ['-C', input.root, 'worktree', 'remove', '--force', join(directory, 'checkout')]); } catch { /* removed below; the next prune forgets it */ }
-      await rm(directory, { recursive: true, force: true });
-      await rm(tempOwnerMarker(directory), { force: true });
-    }
+    if (!kept) await close();
     release();
   }
 }
@@ -268,4 +309,138 @@ export function previewFailureReason(preview: PreviewVerdict | null | undefined,
   if (preview.failed.includes('build')) return `${trialFailurePrefix}: preview build: ${preview.detail}`.slice(0, 2000);
   if (preview.failed.includes('cases')) return `${trialFailurePrefix}: preview: ${preview.detail}`.slice(0, 2000);
   return `${trialFailurePrefix}: E2E ${named.length ? `case${named.length === 1 ? '' : 's'} ${named.slice(0, 20).join(', ')}` : 'cases'} failed on the preview of ${preview.mergeSha.slice(0, 12)}`.slice(0, 2000);
+}
+
+// ---- Item previews (GY-1902) ------------------------------------------------------------------------
+
+/** One preview this process serves (or is still starting) for an item. */
+export interface LivePreview {
+  key: string; work: string; record: ItemPreview;
+  /** The opened preview once it settled; null while it starts. */
+  opened: OpenedPreview | null;
+  stop: AbortController;
+  /** Set once it is being ended: why, and whether its cleaned record reached the server. */
+  ending: PreviewEndReason | null;
+  /** Records the server has not confirmed yet, oldest first; retried each step. */
+  owed: ItemPreview[];
+  failures: number;
+}
+/** What the step reads and writes: the loop's delivery declaration, its checkout and the server. */
+export interface ItemPreviewPorts {
+  root: string; base: string; timeoutMs: number;
+  delivery(): ProjectDelivery | null;
+  /** The base branch's tip, previewed for an item that has no submitted head yet. */
+  baseTip(): Promise<string>;
+  /** Writes the record on the item (`POST /api/work/:id/merge-record`, kind `preview`). */
+  record(item: { id: string; key: string }, preview: ItemPreview): Promise<unknown>;
+  run?: ChildRun; shell?: StaticBuildShell; launcher?: E2eLauncher; fetcher?: typeof fetch; stepTimeoutMs?: number; hostEnvironment?: NodeJS.ProcessEnv; now?: () => number;
+  slots?: ReturnType<typeof previewSlots>; procRoot?: string;
+  open?: typeof openPreview;
+}
+/** How many times an unconfirmed record is sent before it is dropped as refused. */
+export const previewRecordAttempts = 10;
+
+/** Sends what `entry` owes, oldest first, stopping at the first that fails. */
+async function settleRecords(entry: LivePreview, ports: ItemPreviewPorts) {
+  while (entry.owed.length) {
+    try { await ports.record({ id: entry.work, key: entry.key }, entry.owed[0]!); entry.owed.shift(); entry.failures = 0; }
+    catch (error) {
+      entry.failures += 1;
+      if (entry.failures < previewRecordAttempts) return false;
+      console.error(`The preview record of ${entry.key} (${entry.owed[0]!.state}) is dropped after ${entry.failures} refusals: ${error instanceof Error ? error.message : String(error)}`);
+      entry.owed.shift(); entry.failures = 0;
+    }
+  }
+  return true;
+}
+const owe = (entry: LivePreview, record: ItemPreview) => { entry.record = record; entry.owed.push(record); };
+const caseResults = (verdict: PreviewVerdict): PreviewCaseResult[] => verdict.cases.slice(0, 100).map(entry =>
+  ({ case: entry.case, result: entry.verdict === 'passed' ? 'pass' : entry.verdict === 'unrun' ? 'unrun' : 'fail', ...(entry.reason ? { reason: entry.reason } : {}) }));
+
+/**
+ * One step of the item previews, beside the loop's cycle (GY-1902). Every open item whose criteria
+ * cite a case bound to a declared static application (`previewDemand`) gets a preview of its
+ * submitted head, or of the base tip while it has none: `starting` is recorded, the change is checked
+ * out, built, served on loopback and its declared cases run against it (`openPreview`, kept served on
+ * a pass), and the outcome recorded — `running` with the origin the server proxies `/preview/KEY` to
+ * and every case passed, or `failed` with the case results, its server and checkout already removed.
+ * A preview whose item moves to a new head is `superseded`, and one whose item is closed, delivered
+ * or no longer cites such a case is ended: a starting one is cancelled, a served one's server closed
+ * and checkout removed, and then it is recorded `cleaned` with why. A record this process does not
+ * back (the loop restarted) is recorded `cleaned` (`restarted`) before a new preview starts. A failed
+ * preview is not retried on the same commit. Answers what it did, one line each.
+ */
+export async function itemPreviewStep(live: Map<string, LivePreview>, work: readonly Work[], ports: ItemPreviewPorts): Promise<string[]> {
+  const notes: string[] = [], at = () => new Date((ports.now ?? Date.now)()).toISOString();
+  let delivery: ProjectDelivery | null;
+  try { delivery = ports.delivery(); } catch { delivery = null; }
+  // A preview that ended once it settled (a failed case, or ended while starting) leaves once the
+  // server holds its last record; this step's snapshot may predate that record, so it is not stale.
+  const endedNow = new Set<string>();
+  for (const entry of [...live.values()]) {
+    if (await settleRecords(entry, ports) && entry.opened && previewEnded(entry.record)) { live.delete(entry.key); endedNow.add(entry.record.id); }
+  }
+  const ended = (record: ItemPreview, reason: PreviewEndReason, detail: string): ItemPreview => ({ ...record, state: previewEnded(record) ? record.state : 'cleaned', origin: null, cleanedAt: record.cleanedAt ?? at(), endReason: record.endReason ?? reason, detail: cut(detail) });
+  const end = async (entry: LivePreview, reason: PreviewEndReason) => {
+    if (!entry.ending) {
+      entry.ending = reason;
+      entry.stop.abort();
+      // A preview still starting is closed once it settles (`start`); a served one is closed here.
+      if (entry.opened) { await entry.opened.close(); if (!previewEnded(entry.record)) owe(entry, ended(entry.record, reason, `${entry.record.detail ? `${entry.record.detail}; ` : ''}ended: ${reason}`)); }
+    }
+    if (entry.opened && await settleRecords(entry, ports)) { live.delete(entry.key); return true; }
+    return false;
+  };
+  let tip: string | null | undefined;
+  for (const item of work) {
+    const demand = previewDemand(item, delivery), reason = previewEndReason(item, !!demand);
+    const head = item.candidate?.sha?.toLowerCase() ?? null, recorded = item.preview ?? null;
+    let entry = live.get(item.key);
+    if (entry && (reason || entry.ending || (head && entry.record.sha !== head))) {
+      const why = entry.ending ?? reason ?? 'superseded';
+      endedNow.add(entry.record.id);
+      if (await end(entry, why)) notes.push(`Ended ${item.key}'s preview of ${entry.record.sha.slice(0, 12)} (${why}): its server closed and its checkout removed`);
+      if (live.has(item.key)) continue;
+      entry = undefined;
+    }
+    if (entry) continue;
+    // A record no preview of this process backs: the loop that served it is gone, so it is recorded ended before anything new starts.
+    const stale = recorded && !previewEnded(recorded) && !endedNow.has(recorded.id) ? recorded : null;
+    if (stale) {
+      try { await ports.record(item, ended(stale, reason ?? 'restarted', `${reason ? 'ended' : 'no live preview backs it after a restart'}`)); notes.push(`Recorded ${item.key}'s preview ${stale.id} cleaned: ${reason ?? 'restarted'}`); }
+      catch (error) { notes.push(`Could not record ${item.key}'s stale preview cleaned: ${error instanceof Error ? error.message : String(error)}`); continue; }
+    }
+    if (reason || !demand) continue;
+    const sha = head ?? (tip === undefined ? (tip = await ports.baseTip().then(value => value.toLowerCase(), () => null)) : tip);
+    if (!sha || (recorded?.sha === sha && recorded.state === 'failed')) continue;
+    await start(item, sha, head ? 'head' : 'base', demand);
+    notes.push(`Started ${item.key}'s preview of ${sha.slice(0, 12)} (${demand.application.id}: ${demand.cases.join(', ')})`);
+  }
+  return notes;
+
+  async function start(item: Work, sha: string, source: 'head' | 'base', demand: NonNullable<ReturnType<typeof previewDemand>>) {
+    const record: ItemPreview = { id: randomUUID(), path: previewPath(item.key), state: 'starting', runner: 'local', application: demand.application.id, sha, source, origin: null,
+      cases: demand.cases.map(id => ({ case: id, result: 'unrun' as const })), detail: '', startedAt: at(), readyAt: null, cleanedAt: null, endReason: null };
+    const entry: LivePreview = { key: item.key, work: item.id, record, opened: null, stop: new AbortController(), ending: null, owed: [], failures: 0 };
+    owe(entry, record);
+    live.set(item.key, entry);
+    const variables = { GRAPHYARD_PREVIEW_KEY: item.key, GRAPHYARD_PREVIEW_TITLE: item.title, GRAPHYARD_PREVIEW_SHA: sha };
+    // `starting` reaches the server before the build begins and before any outcome is recorded after it.
+    await settleRecords(entry, ports);
+    void (async () => {
+      while (!await settleRecords(entry, ports) && !entry.stop.signal.aborted) await new Promise(accept => setTimeout(accept, 1000));
+      const opened = await (ports.open ?? openPreview)({ root: ports.root, base: ports.base, mergeSha: sha, site: { directory: demand.application.directory, build: demand.application.build }, timeoutMs: ports.timeoutMs,
+        run: ports.run, shell: ports.shell, launcher: ports.launcher, fetcher: ports.fetcher, stepTimeoutMs: ports.stepTimeoutMs, now: ports.now, slots: ports.slots, procRoot: ports.procRoot, hostEnvironment: ports.hostEnvironment },
+      { keep: true, cases: demand.cases, variables, signal: entry.stop.signal })
+        .catch((error: unknown): OpenedPreview => ({ verdict: { result: 'error', mergeSha: sha, cases: [], failed: [], detail: cut(`the preview could not run: ${error instanceof Error ? error.message : String(error)}`), durationMs: 0 }, url: null, close: async () => {} }));
+      const cases = opened.verdict.cases.length ? caseResults(opened.verdict) : record.cases;
+      if (entry.ending || !opened.url || opened.verdict.result !== 'pass') {
+        await opened.close();
+        const why = entry.ending ?? 'failed';
+        owe(entry, { ...entry.record, state: why === 'failed' ? 'failed' : 'cleaned', cases, origin: null, detail: cut(opened.verdict.detail), cleanedAt: at(), endReason: why });
+      } else owe(entry, { ...entry.record, state: 'running', cases, origin: opened.url, detail: cut(opened.verdict.detail), readyAt: at() });
+      entry.opened = opened;
+      await settleRecords(entry, ports);
+    })();
+  }
 }

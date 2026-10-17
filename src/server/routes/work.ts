@@ -16,7 +16,11 @@ import { answerResearch, recordResearch } from '../../research.js';
 import { recordDecomposition } from '../../decomposition.js';
 import { recordShadowVerdict } from '../shadow-verdict.js';
 import { recordReviewLaunch, recordReviewVerdict } from '../review-verdict.js';
-import { recordMergeEvent } from '../merge-record.js';
+import { mergeRecordFingerprint, recordMergeEvent } from '../merge-record.js';
+import { save } from '../../store.js';
+import { lockedWork } from '../../store/locked-read.js';
+import { applyPreviewRecord, previewRecordBodySchema } from '../../project-previews.js';
+import type { Services } from '../routes.js';
 import { issuePushCredential } from '../push-credential.js';
 import { controlPlaneSyncPush } from '../../sync.js';
 
@@ -139,7 +143,10 @@ export const workRoutes = defineRoutes('work', [
     method: 'POST', path: /^\/api\/work\/([^/]+)\/merge-record$/,
     async handle(context, [id]) {
       await refuseLead(context, id, 'merge-record');
-      return recordMergeEvent(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
+      const data = await parseJson(context), target = decodeURIComponent(id);
+      // GY-1902: an item preview's record rides the same coordinator route; it moves no merge state.
+      if ((data as { kind?: unknown } | null)?.kind === 'preview') return recordItemPreview(context.services, context.actor, target, data, context.idempotencyKey());
+      return recordMergeEvent(context.services, context.actor, target, data, context.idempotencyKey());
     },
   },
   // A worker session's short-lived push credential (GY-999), for the lease holder only.
@@ -200,3 +207,26 @@ export const workRoutes = defineRoutes('work', [
     },
   },
 ]);
+
+/**
+ * GY-1902: the loop's record of an item's preview (project-previews.ts), by the coordinator identity
+ * only, idempotent under its key, applied under the item's lock (`applyPreviewRecord`) and saved as
+ * `preview.<state>`. It is the control plane's own observation: never evidence, so it satisfies no
+ * proof and grants no worker or producer anything.
+ */
+async function recordItemPreview(services: Services, actor: Principal, id: string, body: unknown, key: string) {
+  demand(actor.role === 'coordinator', 'Only the loop\'s coordinator identity records an item\'s preview', 403);
+  const { preview } = previewRecordBodySchema.parse(body);
+  demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
+  const fingerprint = mergeRecordFingerprint(id, { kind: 'preview', preview });
+  return services.engine.store.transaction(async (db, now) => {
+    const replay = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
+    if (replay) { demand(replay.fingerprint === fingerprint, 'Idempotency key reused with different input'); return replay.result; }
+    const work = (await lockedWork(db, [id])).find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
+    const refusal = applyPreviewRecord(work!, preview); demand(!refusal, refusal!, 409);
+    await save(db, work!, actor.id, `preview.${preview.state}`, now, { preview: { id: preview.id, sha: preview.sha, state: preview.state, endReason: preview.endReason } });
+    const result = { recorded: true, key: work!.key, kind: 'preview', preview: work!.preview };
+    await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
+    return result;
+  });
+}
