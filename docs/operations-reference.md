@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Wakes dismiss autocompact suggestions; unconfirmed/unanswerable dialogs hold (`wake:master:held`). `daemon.stepStalls`: 3-cycle signatures: one verified remedy (unknown-profile/401/merge-key-reuse), else master wake; 5min retries.
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Wakes dismiss autocompact suggestions (`esc`/"Not now"), re-read; unconfirmed/unanswerable dialogs hold (`wake:master:held`). `daemon.stepStalls`: 3-cycle signatures: one verified remedy (unknown-profile/401/merge-key-reuse), else master wake; 5min retries.
 
 ### Dispatch order
 
@@ -15,7 +15,7 @@ Within a priority: a submitted attempt (returned rework) precedes unsubmitted it
 
 ## Lost worker before submission
 
-Leases expire 120s after last heartbeat (recorded renewal fault, plane stall: 30s `stallRenewalWindowMs`); higher-epoch claim keeps worktree. Unexplained lapses raise [`lease-loss`](protocol/leases.md#how-a-lease-ends), blocking merge until [settled](delegation.md#who-may-settle-what).
+Leases expire 120s after last heartbeat (recorded renewal fault, plane stall: 30s `stallRenewalWindowMs`, not another lease period); higher-epoch claim keeps worktree. Unexplained lapses raise [`lease-loss`](protocol/leases.md#how-a-lease-ends), blocking merge until [settled](delegation.md#who-may-settle-what).
 
 ## Supervisor died leaving a containment quarantine
 
@@ -23,7 +23,7 @@ Leases expire 120s after last heartbeat (recorded renewal fault, plane stall: 30
 
 ## Submitted implementation needs rework
 
-Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits. `scripts/rework-causes.mjs` classifies 100 deliveries' rounds; `speed.reworkRounds.ownChange` excludes out-of-item causes.
+Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits. `scripts/rework-causes.mjs` classifies 100 deliveries' rounds (55% own-change/33% conflicts; raw median 2); `speed.reworkRounds.ownChange` excludes out-of-item causes.
 
 ## Base-sync conflicts
 
@@ -35,7 +35,7 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 
 ## Flaky CI check
 
-[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); main merges wait for reruns. Cancelled/timed-out jobs rerun ≤3 times, then one `escalation:main-guard:SHA` infrastructure fault names run+step. A real failure reruns once: a pass joins `mainGuardFlakes` (last 20); a second failure/refusal/unconcluded hour reverts.
+[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); main merges wait for reruns. Cancelled/timed-out jobs rerun ≤3 times, then one `escalation:main-guard:SHA` infrastructure fault names run+step, reverting nothing. A real failure reruns once: a pass joins `mainGuardFlakes` (last 20); a second failure/refusal/unconcluded hour reverts.
 
 ## Accepted evidence turns out to be wrong
 
@@ -72,11 +72,11 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ### Reading the budget
 
-`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable`: REST-only `perHour` across replicas (`instances`), `limit`/`share`/`target` 0.6/`byEndpoint`; `lastHour`: hourly requests by kind. Immutable, per-cycle, webhook-driven reads [aren't repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
+`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also `master status`): REST-only `perHour` across replicas (`instances`), `limit`/`share`/`target` 0.6/`byEndpoint`; `lastHour`: hourly requests by kind. Immutable, per-cycle, webhook-driven reads [aren't repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
 
 ### Reading under control-plane
 
-`master merger control-plane`: its candidates are observed from its checkout, polling GitHub for none of their pull request/reviews/checks; person-opened ones still are.
+`master merger control-plane`: its candidates are observed from its checkout, polling GitHub for none of their pull request/reviews/checks; person-opened ones still are. Diagnostician/doctor read `graphyard status GY-N`, not `gh pr view`.
 
 ### Webhook liveness
 
@@ -115,6 +115,7 @@ Rotate [`GRAPHYARD_PRINCIPALS`](deployment.md#variables), redeploy. Operator age
 ## Proof authority grants
 
 ```sh
+graphyard grants
 graphyard grants grant|revoke ci "integration:*,unit:*" REASON
 ```
 
@@ -130,4 +131,4 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ### Concurrent reconciliation
 
-Reconcile evaluates moved rows, due-past items (clock-only changes) and, for a fleet face any writer moved, the moved item and its readers (reference/sibling/resource/paths); only an empty view, configuration change or interval makes a pass full, slow ticks naming the faces and their evaluated count. Full evaluation ≥ max(`GRAPHYARD_RECONCILE_FULL_MS` (300000), 3× its length) is the safety net. Batches evaluate lock-free, write under coordination+row locks; heartbeats lock their item.
+Reconcile evaluates moved rows, due-past items, and each moved fleet face's item plus readers; empty views, configuration changes, ≥ max(`GRAPHYARD_RECONCILE_FULL_MS` (300000), 3× length) run full. Batches evaluate lock-free, write under coordination+row locks; heartbeats lock their item.
