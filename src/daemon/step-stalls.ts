@@ -1,9 +1,8 @@
 // Concern: loop-step stall signatures (GY-1854) — the normalised signature of a failing call, the three-consecutive-cycle stall rule, the bound remedy applied once per run and verified, and the unbound stall's master wake and five-minute backoff.
 import { createHash } from 'node:crypto';
-import { execFile } from 'node:child_process';
 import { chmod, readdir, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
-import { promisify } from 'node:util';
+import { runChild } from '../child-runner.js';
 import type { ActionableSubject } from './metrics.js';
 import type { DaemonAction, DaemonState, StepStall, StepStallRemedyRecord } from './state.js';
 import { applyStepStallRemedy, stepStallRemedy, type BoundStepStallRemedy, type StepStallRemedyKind, type StepStallRemedyOutcome } from '../stall-remedies.js';
@@ -627,7 +626,7 @@ export function hostCredentialPorts(config: MasterConfig, root: string): Credent
       return ensureDeployKey(dirname(settings.deployKeyFile), config.repository, githubCli(localTransport()));
     },
     reachWithDeployKey: async () => {
-      await promisify(execFile)('git', ['-C', root, 'ls-remote', '--exit-code', 'origin', `refs/heads/${config.baseBranch}`], { env: pushEnvironment(settings.deployKeyFile), timeout: 60_000 });
+      await runChild('git', ['-C', root, 'ls-remote', '--exit-code', 'origin', `refs/heads/${config.baseBranch}`], { env: pushEnvironment(settings.deployKeyFile), timeoutMs: 60_000 });
     },
   };
 }
