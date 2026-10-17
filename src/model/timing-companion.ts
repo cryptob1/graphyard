@@ -48,6 +48,41 @@ export function timingBaselineCompanion(base: string, head: string, tests: reado
   return { allowed: true, detail: changed.length ? `implied companion of this change's test files and the baseline's unrecorded ones: writes only the lines ${listed(changed.map(describe))}` : 'implied companion of this change\'s test files: no line differs' };
 }
 
+const serialize = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
+
+/**
+ * The baseline a conflicted `graphyard sync` writes (GY-1875): the base tip's file with, for each
+ * test file the branch adds or changes relative to the merge base, the branch's own line, and the
+ * lines of test files the branch deleted removed. A line the branch added for a test file neither
+ * the merge base nor the base tip records is a gap fill the companion rule allows, and is kept; a
+ * line of either kind whose test file the merge result no longer holds (`exists`) is dropped, so a
+ * test the base deleted leaves no line behind. Every other line stays the base tip's — one the
+ * branch altered for a test file it does not touch is dropped, exactly as the companion rule would
+ * refuse it — so the result always satisfies timingBaselineCompanion against the base tip. Returns
+ * null, leaving the conflict for the worker, when either side does not parse into the object the
+ * companion judges, or when the base tip's text is not what this writer emits: the merge is only
+ * resolved by writing the base tip's file plus nothing else, never a reformatted one.
+ */
+export function resolveTimingBaseline(base: string, branch: string, files: readonly { path: string; previousPath?: string; status?: string }[], options: { mergeBase?: string | null; exists?: (path: string) => boolean } = {}): string | null {
+  const baseSide = parse(base), branchSide = parse(branch);
+  if (!baseSide || !branchSide || serialize(baseSide) !== base) return null;
+  const linesOf = (side: Record<string, any> | null): Record<string, unknown> => side?.files && typeof side.files === 'object' && !Array.isArray(side.files) ? side.files : {};
+  const branchLines = linesOf(branchSide), recorded = linesOf(options.mergeBase ? parse(options.mergeBase) : null);
+  const gone = new Set(files.flatMap(file => [...(file.status === 'removed' ? [file.path] : []), ...(file.previousPath && file.status !== 'copied' ? [file.previousPath] : [])]));
+  const lines = { ...linesOf(baseSide) };
+  const own = changedTestFiles(files);
+  // Gap fills: lines the branch added for timed test files nobody's baseline recorded (GY-1397).
+  const gaps = options.mergeBase ? Object.keys(branchLines).filter(path => !(path in recorded) && !(path in lines) && timedTestFile(path) && !own.includes(path)) : [];
+  const exists = options.exists ?? (() => true);
+  for (const path of [...own, ...gaps]) {
+    const line = branchLines[path];
+    if (gone.has(path) || !exists(path)) delete lines[path];
+    else if (typeof line === 'number' && Number.isFinite(line) && line >= 0) lines[path] = line;
+  }
+  const resolved = serialize({ ...baseSide, files: lines });
+  return timingBaselineCompanion(base, resolved, own).allowed ? resolved : null;
+}
+
 /** True when the item's planned scope or observed diff holds a test file, so the baseline is implied by it. */
 export const addsTestFile = (item: { plannedFiles?: readonly string[]; observation?: { files?: readonly string[] } | null }) =>
   (item.plannedFiles ?? []).some(planned => { const scope = pathScope(planned); return scope.path !== timingBaselinePath && (scope.prefix ? scope.path === 'tests/' : timedTestFile(scope.path)); })
