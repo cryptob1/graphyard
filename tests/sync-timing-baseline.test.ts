@@ -159,3 +159,47 @@ test('unit:sync-timing-baseline-keeps-other-conflicts \u2014 sync resolves only 
     assert.deepEqual(JSON.parse(await readFile(join(branch, timingBaselinePath), 'utf8')).files, { 'tests/alpha.test.ts': 100, 'tests/beta.test.ts': 150, 'tests/mid-main.test.ts': 300, 'tests/mid-branch.test.ts': 500, 'tests/omega.test.ts': 100 });
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });
+
+test('unit:sync-resolves-timing-baseline-conflict — a gap-fill line the branch added for a test file neither the merge base nor the base tip records is kept, and a line whose test file the merge result no longer holds is dropped', () => {
+  const mergeBase = baseline({ 'tests/alpha.test.ts': 100, 'tests/beta.test.ts': 100 });
+  const base = baseline({ 'tests/alpha.test.ts': 120, 'tests/beta.test.ts': 100 });
+  const branch = baseline({ 'tests/alpha.test.ts': 100, 'tests/beta.test.ts': 300, 'tests/unrecorded.test.ts': 40, 'tests/mid-branch.test.ts': 500 });
+  const files = [{ path: 'tests/mid-branch.test.ts', status: 'added' as const }, { path: 'tests/beta.test.ts', status: 'modified' as const }];
+  const resolved = resolveTimingBaseline(base, branch, files, { mergeBase });
+  assert.equal(resolved, baseline({ 'tests/alpha.test.ts': 120, 'tests/beta.test.ts': 300, 'tests/mid-branch.test.ts': 500, 'tests/unrecorded.test.ts': 40 }), 'the gap fill for an existing, unrecorded test stands beside the branch’s own lines');
+  assert.equal(timingBaselineCompanion(base, resolved!, changedTestFiles(files)).allowed, true, 'the companion rule allows the gap fill');
+  // The base deleted beta, and the worker kept the deletion: its line goes, whatever the branch wrote.
+  const kept = resolveTimingBaseline(baseline({ 'tests/alpha.test.ts': 120 }), branch, files, { mergeBase, exists: path => path !== 'tests/beta.test.ts' });
+  assert.equal(kept, baseline({ 'tests/alpha.test.ts': 120, 'tests/mid-branch.test.ts': 500, 'tests/unrecorded.test.ts': 40 }));
+});
+
+test('unit:sync-timing-baseline-keeps-other-conflicts — a test file the base deleted and the branch changed holds the baseline in conflict beside it; once the worker keeps the deletion, the rerun resolves the baseline with no line for the deleted test', async () => {
+  const { root, main, branch, git, addTest } = await fixtureRepository();
+  const item = { id: 'w1', key: 'GY-1', stage: 'build', ready: true, plannedFiles: ['tests/gone.test.ts', timingBaselinePath], dependencies: [], workspaces: [{ epoch: 1, host: 'h', path: branch, branch: 'graphyard/gy-1-1' }], observation: null, submission: null } as unknown as Work;
+  const server = await fakeServer(() => [item]);
+  try {
+    await addTest(main, 'gone.test.ts', 200);
+    git(main, 'add', '.'); git(main, 'commit', '-q', '-m', 'main adds gone'); git(main, 'push', '-q', 'origin', 'main');
+    git(branch, 'pull', '-q', 'origin', 'main');
+    // The branch changes the test and its line; main deletes both and adds a neighbouring line.
+    await writeFile(join(branch, 'tests/gone.test.ts'), `import { test } from 'node:test';\n\ntest('gone, changed', () => {});\n`);
+    await writeLine(branch, 'tests/gone.test.ts', 900);
+    git(branch, 'add', '.'); git(branch, 'commit', '-q', '-m', 'branch changes gone');
+    git(main, 'rm', '-q', 'tests/gone.test.ts');
+    const file = join(main, timingBaselinePath), value = JSON.parse(await readFile(file, 'utf8'));
+    delete value.files['tests/gone.test.ts']; value.files['tests/gamma.test.ts'] = 50;
+    await writeFile(file, `${JSON.stringify(value, null, 2)}\n`);
+    git(main, 'add', '.'); git(main, 'commit', '-q', '-m', 'main deletes gone'); git(main, 'push', '-q', 'origin', 'main');
+    const first = await sync(branch, server.env);
+    assert.equal(first.code, 1); assert.equal(first.output.merged, false);
+    assert.deepEqual(first.output.conflicts.map((entry: any) => entry.path).sort(), ['tests/gone.test.ts', timingBaselinePath], 'the baseline waits beside its conflicted test');
+    assert.deepEqual(first.output.regenerated, []);
+    // The worker keeps the base's deletion and reruns sync: the baseline is resolved against it.
+    git(branch, 'rm', '-q', 'tests/gone.test.ts');
+    const second = await sync(branch, server.env);
+    assert.equal(second.code, 0, JSON.stringify(second.output)); assert.equal(second.output.merged, true);
+    assert.deepEqual(second.output.regenerated, [regeneratedEntry]);
+    assert.equal(git(branch, 'status', '--porcelain'), '');
+    assert.deepEqual(JSON.parse(await readFile(join(branch, timingBaselinePath), 'utf8')).files, { 'tests/alpha.test.ts': 100, 'tests/beta.test.ts': 100, 'tests/omega.test.ts': 100, 'tests/gamma.test.ts': 50 }, 'no line remains for the deleted test');
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
