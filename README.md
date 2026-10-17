@@ -12,7 +12,7 @@ graphyard up --agent --goal GOAL.md
 
 [Install](docs/install.md) · [How it works](docs/how-graphyard-works.md) · [Onboard](docs/onboarding.md) · [Docs](docs/README.md)
 
-**[docs/install.md](docs/install.md)** is the primary install path (`install --provider railway|hetzner|compose`). Contribute: [AGENTS.md](AGENTS.md), [development](docs/development.md). Licence: [Apache 2.0](LICENSE).
+**[docs/install.md](docs/install.md) is the primary install path** (`install --provider railway|hetzner|compose`). Contribute: [AGENTS.md](AGENTS.md), [development](docs/development.md). Licence: [Apache 2.0](LICENSE).
 
 ## How it works
 
