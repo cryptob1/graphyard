@@ -1033,8 +1033,6 @@ export class Engine {
     if (!request || !pattern || !read) return {};
     try { return { [request.proof]: await read(pattern) }; } catch { return {}; }
   }
-  /** Whether this process has warmed the locked read's stand-in cache (`warmLockedReads`). */
-  private lockedReadsWarm = false;
   // Auto-dispatch transitions the last evaluation of a document produced, written to the ledger
   // by the transaction that persists it. Keyed by the object, so a probe clone records nothing.
   private dispatchTransitions = new WeakMap<Work, DispatchTransition[]>();
@@ -3242,9 +3240,10 @@ export class Engine {
     return () => clearInterval(timer);
   }
   private async reconcilePass(tickStarted: number) {
-    // A process's first pass would otherwise open on a cold stand-in cache and project every open
-    // document while it holds the coordination lock: warm it first, outside the lock (GY-1042).
-    if (!this.lockedReadsWarm) { await warmLockedReads(this.store.pool); this.lockedReadsWarm = true; }
+    // A pass would otherwise open on a cold stand-in cache and project, under the coordination lock,
+    // every row it has not cached — every open document on a process's first pass (GY-1042), and on
+    // each later pass every row another process wrote since (GY-1939): warm it, outside the lock.
+    await warmLockedReads(this.store.pool);
     const fleet = this.reconcileView;
     let all: Work[] = [], candidates: string[] = [], next = 0, documentsRead = 0, full = false;
     const tick: ReconcileTick = { at: new Date().toISOString(), candidates: 0, evaluated: 0, deferred: 0, maxAttempts: 0, ms: 0, writes: 0, lockWaitMs: 0, due: 0, full: null, faces: [], readers: 0, lagMs: null };
