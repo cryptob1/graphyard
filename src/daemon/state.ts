@@ -501,7 +501,7 @@ export const stepStallSchema = z.object({
   nextAttemptAt: z.string().nullable().default(null),
   /** When the held call admitted its window's one attempt, until that attempt's failure is counted; null otherwise. */
   attemptAt: z.string().nullable().default(null),
-  /** The loop effects whose thrown failure the run's failed actions carry, whether each failed as a promise, and the resource the failing invocation named (its first argument's key, pane or id; null when it named none): the invocations its window holds. */
+  /** The loop effects whose thrown failure the run's failed actions carry, whether each failed as a promise, and the resource the failing invocation named (its first argument's key, pane or id; null when it named none — or the run holds every invocation of the call, the collapse a full list becomes once a signature is shared by more invocations than the bound names, GY-1900): the invocations its window holds. The bound is stallInvocationBound in ./step-stalls.ts. */
   calls: z.array(z.object({ call: z.string().max(100), async: z.boolean(), resource: z.string().max(200).nullable().default(null) }).strict()).max(8).default(() => []),
   /** Whether the run is a failed cycle's own call (the snapshot read a cycle fails on): the loop holds the whole next cycle to its window. */
   cycle: z.boolean().default(false),

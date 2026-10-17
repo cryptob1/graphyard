@@ -772,7 +772,7 @@
     "tests/soak-day.test.ts": 112848,
     "tests/soak-decision-fault-restatements.test.ts": 60389,
     "tests/soak-decision-faults-settled.test.ts": 150000,
-    "tests/soak-decision-faults.test.ts": 52338,
+    "tests/soak-decision-faults.test.ts": 60000,
     "tests/soak-decisions-call-bound.test.ts": 50876,
     "tests/soak-decisions.test.ts": 227396,
     "tests/soak-diagnosis-refusals.test.ts": 25000,
@@ -951,6 +951,7 @@
     "tests/sync-timing-baseline.test.ts": 4000,
     "tests/file-durations-status.test.ts": 257,
     "tests/event-loop-lag-pending.test.ts": 729,
-    "tests/install-worker-credentials.test.ts": 900
+    "tests/install-worker-credentials.test.ts": 900,
+    "tests/fault-class-loop.test.ts": 630
   }
 }
