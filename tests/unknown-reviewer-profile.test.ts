@@ -303,8 +303,10 @@ test('unit:up-writes-profiles — install --profiles-only refuses a plan session
   const { installProfilesOnly } = await import('../src/install/index.js');
   const touched: string[] = [];
   const transport = { exec: async (command: string, args: string[]) => { touched.push([command, ...args].join(' ')); throw new Error('transport exec reached'); } };
+  // An apply holds the installation's apply lock (GY-1876), taken under its directory.
+  const directory = await temporaryDirectory('up-writes-profiles-lock');
   const session = (mode: 'plan' | 'apply') => ({
-    mode, inputs: { repository: 'owner/project', provider: 'host' }, record: { url: 'https://graphyard.example' },
+    mode, directory, deps: { now: () => 0 }, inputs: { repository: 'owner/project', provider: 'host' }, record: { url: 'https://graphyard.example' },
     context: { provider: 'host', host: { local: true, layout: {} }, transport },
   }) as unknown as Parameters<typeof installProfilesOnly>[0];
   await assert.rejects(installProfilesOnly(session('plan')), /--apply/);

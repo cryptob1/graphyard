@@ -39,7 +39,7 @@ node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --apply
 ```
 
-Writes credentials, [variables](deployment.md#variables); deploys; [protects](github.md#require-the-check) branch (not with `--no-github-app`/`--observe-only`), recording prior protection once (`protection-record.json`, no-replace); one `--apply` at once (`apply.lock`; one reclaimer replaces a dead holder's in place); `--restore-protection --plan|--apply` restores, re-read-verified; unrecorded/unreadable/other-branch refuses. **Verify** `/healthz`.
+Writes credentials, [variables](deployment.md#variables); deploys; [protects](github.md#require-the-check) branch (not with `--no-github-app`/`--observe-only`), recording prior protection once (`protection-record.json`, no-replace); one `--apply` at once, `--herdr-only`/`--profiles-only` included (`apply.lock`; one reclaimer replaces a dead holder's in place, a reused pid judged by process start); `--restore-protection --plan|--apply` restores, re-read-verified; unrecorded/unreadable/other-branch refuses. **Verify** `/healthz`.
 
 ## Step 3: App confirmation
 
