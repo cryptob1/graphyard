@@ -158,8 +158,8 @@ export interface Observation {
   scopeFiles?: ScopeFile[];
   /** The same judgement against the commit the candidate would land on, and the unlanded work its head carries; see merge-queue.ts LandingCheck. */
   landing?: LandingCheck;
-  /** Set for a merged pull request whose content the base branch does not hold; see merge-queue.ts RevertedDelivery. */
-  revertedDelivery?: RevertedDelivery;
+  revertedDelivery?: RevertedDelivery; // merged PR whose content the base branch does not hold; see merge-queue.ts RevertedDelivery
+  mergeVerdict?: { id: number; conclusion: string | null } | null; // merged PR only: the App's latest `Graphyard / merge` run at the merged head, null when none (GY-1917)
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
 /** `decision`: the approved two-party decision whose application raised it, when the item's ledger records it approved (GY-1347). */
