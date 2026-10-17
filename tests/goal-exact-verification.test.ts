@@ -15,7 +15,9 @@ import type { ExactCandidate } from '../src/model/release.js';
 import { cutAsync, readLedgerAsync, promoteAsync, type AsyncGit, type ReleaseCandidate } from '../src/release-candidate.js';
 import { validateProjectCandidate } from '../src/release-project.js';
 import { candidateArtifact, exactCandidatePorts, exactPromotionGate, exactValidation } from '../src/daemon/release-ports.js';
-import { liveIdentityReader, type EnvironmentDelivery } from '../src/delivery.js';
+// A namespace import, so a checkout without the identity reader still loads this file and fails in its cases.
+import * as delivery from '../src/delivery.js';
+import type { EnvironmentDelivery } from '../src/delivery.js';
 import type { E2eLauncher } from '../src/e2e/runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -72,7 +74,7 @@ before(async () => {
   await new Promise<void>(done => production.listen(0, '127.0.0.1', done));
   identityUrl = `http://127.0.0.1:${(production.address() as AddressInfo).port}/identity`;
   // The plane reads production's identity endpoint as GRAPHYARD_PRODUCTION_IDENTITY_URL configures it.
-  http.services.delivery.live = liveIdentityReader({ GRAPHYARD_PRODUCTION_IDENTITY_URL: identityUrl });
+  (http.services.delivery as { live: unknown }).live = (delivery as { liveIdentityReader?: (env: Record<string, string>) => unknown }).liveIdentityReader?.({ GRAPHYARD_PRODUCTION_IDENTITY_URL: identityUrl });
   await http.services.validation.define(operator, { kind: 'environment', id: 'production', expectedRevision: 0, repository: 'owner/fixture', url: 'https://production.example.test', instance: 'instance-production', immutable: true, services: ['web'], resources: ['account-production'] }, 'define-production');
   root = await temporaryDirectory('goal-exact-verification-git');
   const origin = join(root, 'origin.git'); checkout = join(root, 'checkout');

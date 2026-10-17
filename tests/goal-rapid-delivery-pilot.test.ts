@@ -11,8 +11,10 @@ import { composeLeftovers } from '../src/compose-preview.js';
 import { DeliveryDefaults } from '../web/components/delivery-slices.js';
 import Sidebar from '../web/components/sidebar.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// A namespace import, so a checkout whose fixture lacks the delivery loop still loads this file and fails in its case.
 // @ts-expect-error The fixture is a plain ES module the uat job runs under tsx.
-import { candidateRoot, createOnboardingFixture, deliveredCases, fixtureCases, runOnboardingE2e } from '../scripts/onboarding-delivery-fixture.mjs';
+import * as onboardingFixture from '../scripts/onboarding-delivery-fixture.mjs';
+const { candidateRoot, createOnboardingFixture, deliveredCases, fixtureCases, runOnboardingE2e } = onboardingFixture as Record<string, any>;
 
 // GY-1906 (GOAL-1 pilot): the complete protected GOAL-1 suite — every case the release contract binds to
 // GOAL-1's seven outcomes, unchanged — runs from this head on one isolated project normally onboarded
@@ -103,7 +105,7 @@ test('integration:goal-rapid-delivery-pilot — the complete protected seven-cas
   assert.equal(bound.length, 7);
   assert.ok(cases.every(entry => entry.definition.required && entry.definition.target === 'uat' && entry.definition.steps.length > 0), 'every case is required, targets uat and keeps its steps');
   assert.deepEqual([...fixtureCases].sort(), bound, 'every GOAL-1 case runs on the normally onboarded fixture');
-  assert.deepEqual([...deliveredCases].sort(), ['candidate-batches-five', 'candidate-gates-promotion', 'production-exact-verification']);
+  assert.deepEqual([...deliveredCases ?? []].sort(), ['candidate-batches-five', 'candidate-gates-promotion', 'production-exact-verification']);
 
   let made: any = null, snapshot: any = null;
   const launcher = pilotLauncher(launch, () => made && new URL(made.url).origin);
