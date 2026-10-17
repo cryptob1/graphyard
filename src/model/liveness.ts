@@ -61,8 +61,12 @@ const escalate = (work: Work, trigger: string, reason: string, detail: string, b
  * When a row on the queue is due. Every row there is owed by somebody — pending (or its claim
  * lapsed, so it is claimable), claimed, or settling — and one whose settle window has passed is
  * overdue rather than gone: the next evaluation reopens it while the item still needs it.
+ *
+ * Exported for the reconciliation's due instants (GY-1873): an evaluation keeps the earliest
+ * instant its outcome could change with no write, and a row's claim, retry and settle window are
+ * exactly such instants.
  */
-function rowDueAt(row: ActionRow, now: Date) {
+export function rowDueAt(row: ActionRow, now: Date) {
   if (row.state === 'claimed' && claimLive(row, now)) return row.claim!.expiresAt;
   if (row.state === 'done') return iso(Date.parse(row.resolvedAt!) + actionSettleMs);
   if (waitingToRetry(row, now)) return row.retryAt!;
@@ -125,6 +129,23 @@ function stalledConversion(work: Work, action: NextAction, now: Date): NextActio
 }
 
 /**
+ * When each stalled action on the item lifts back to its plain retry (GY-1873): the widest backoff
+ * past the last failure of every run long enough to be escalated at all. While a stall stands the
+ * derived action is the escalation itself, so the due reads the queue — open rows and retired
+ * copies, which is where a stalled row lives — rather than the action; a run that has moved on (its
+ * row completed, reopened, the situation changed) is no run, so only lifts still ahead come back.
+ */
+export function stalledActionLifts(work: Work): number[] {
+  const lifts: number[] = [];
+  for (const row of [...(work.actionQueue?.actions ?? []), ...(work.actionQueue?.history ?? [])]) {
+    if (row.kind === 'escalate') continue;
+    const run = failureRun(work, row.id);
+    if (run && run.failures >= livenessRetryLimit) lifts.push(Date.parse(run.lastAt) + actionStallMaxMs);
+  }
+  return lifts;
+}
+
+/**
  * A refused scope request is owed a scope decision: the rule again when it would now approve;
  * otherwise one escalation row, the only one. For an additive request of the live attempt the loop
  * routes that row's judgement to an independent approver as a requirements decision (GY-176), so it
@@ -147,8 +168,14 @@ function scopeDecision(work: Work, action: NextAction, now: Date): NextAction | 
     `${decides} decides ${request.paths.join(', ')} (${request.reason}); refused because ${request.decision.reason}`, `scope-refused:${request.epoch}:${request.at}`, action.gate, action.refusal);
 }
 
-/** When a wait is due, or null when what it names is gone. A wait on another item is due when that item's own step is. */
-function waitDueAt(work: Work, wait: ActionWait, all: Work[], now: Date): string | null {
+/**
+ * When a wait is due, or null when what it names is gone. A wait on another item is due when that item's own step is.
+ *
+ * Exported for the reconciliation's due instants (GY-1873): the bound a held wait runs to is the
+ * earliest instant the item's outcome could change with no write, beside the ones its lease and
+ * queue rows name.
+ */
+export function waitDueAt(work: Work, wait: ActionWait, all: Work[], now: Date): string | null {
   if (wait.kind === 'session' && liveLease(work, now) && wait.on === work.lease!.owner) return work.lease!.expiresAt;
   if (wait.kind === 'dependency') {
     const other = all.find(item => item.key === wait.on);
@@ -198,10 +225,12 @@ export function livenessCarry(work: Work, computed: Computed, _all: Work[], now:
  * past its due time. The engine queues it beside the null action (`Engine.evaluate`), so the state
  * is owned by an escalation rather than reported and left; the derivation itself still reports
  * the wait or the defect it found, so every reader of `actionAccount` sees what the item is in.
+ * `computed` hands over the account the caller already ran (GY-1873): the engine's evaluation runs
+ * the derivation once, and the fallback judges that account rather than computing it again.
  */
-export function livenessFallback(work: Work, all: Work[], now: Date): NextAction | null {
+export function livenessFallback(work: Work, all: Work[], now: Date, computed?: ActionAccount): NextAction | null {
   if (work.stage === 'done' || !work.ready) return null;
-  const account = actionAccount(work, all, now);
+  const account = computed ?? actionAccount(work, all, now);
   if (account.action) return null;
   if (account.defect) return escalate(work, 'unaccounted', `${work.key} has no rule naming its next step: ${account.defect}`, account.defect, `liveness:unaccounted:${account.defect}`, account.gate, account.refusal);
   const wait = account.wait;

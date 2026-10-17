@@ -14,9 +14,9 @@ cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --agent --repo OWNER/R
 
 Only legacy `--merger github` needs a human (GitHub Mobile).
 
-A Hetzner server waits (exit 3) for price approval: rerun with `--confirm-price`, `--max-monthly` or `--ssh-key`.
+Hetzner waits (exit 3) for price approval: rerun with `--confirm-price`, `--max-monthly` or `--ssh-key`.
 
-`up` runs, in order: preflight, control plane, host supervisor, Herdr, deploy key, merger setting (legacy: `github` only) and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` reviews and merges, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to merge (a host install: a person); goals wait. Reruns skip recorded `.graphyard/up.json` steps but redo `master-loop` until loop and executors run this CLI's exact clean commit (`doctor`: `loop-code`).
+`up` runs, in order: preflight, control plane, host supervisor, Herdr, deploy key, merger setting (legacy: `github` only) and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` reviews and merges, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop. The loop merges onboarding's `graphyard/onboarding` pull request (host install: a person); goals wait. Reruns skip recorded `.graphyard/up.json` steps but redo `master-loop` until loop and executors run this CLI's exact clean commit (`doctor`: `loop-code`).
 
 ## The Setup page
 
@@ -53,7 +53,7 @@ bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with
 
 ## 2. Graphyard and the repository
 
-The repository needs a GitHub `origin` and an Actions `pull_request` test workflow. **Verify:** doctor readiness `repository`, `required-checks` and `test-formats` are `ready`.
+Needs a GitHub `origin` and an Actions `pull_request` test workflow. **Verify:** doctor readiness `repository`, `required-checks` and `test-formats` are `ready`.
 
 ## 3. Install the control plane
 
@@ -73,7 +73,7 @@ Legacy merger only. `--apply` serves `http://127.0.0.1:4311` and prints it; it o
 
 ## 8. Agent environments
 
-Connect each account in Settings → Agents ([dashboard](dashboard.md#settings-agents)); host-logged-in accounts register with `gy master registry propose --apply`, profiles with `gy master environments --apply`; up's accounts step runs both where the loop runs (host: `install --profiles-only`); account lines wait for both. Unknown-reviewer-profile refusals: one `gy master status` attention, uncounted five-minute retries. **Verify:** one `agent-environment:NAME` line passes per environment; then [roles](onboarding.md#configure-the-fleet).
+Connect each account in Settings → Agents ([dashboard](dashboard.md#settings-agents)); host-logged-in accounts register with `gy master registry propose --apply`, profiles with `gy master environments --apply`; up runs both where the loop runs (host: `install --profiles-only`), issuing the install's own `workers/` credentials and naming refused ones; account lines wait for both. Unknown-reviewer-profile refusals: one `gy master status` attention, uncounted five-minute retries. **Verify:** one `agent-environment:NAME` line passes per environment; then [roles](onboarding.md#configure-the-fleet).
 
 ## 9. Worker sandbox and harness rules
 

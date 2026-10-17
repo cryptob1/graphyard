@@ -196,7 +196,7 @@ test('integration:pi-provider-limit-exhaustion — an idle pi session on the 131
   assert.equal(exhaustion.resetsAt, resetAt);
   assert.equal(exhaustion.partialWork.state, 'committed', 'the partial work is kept');
   assert.equal(git(worktree, 'status', '--porcelain'), '', 'the partial work is a commit on the attempt branch');
-  assert.equal((await observedExhaustions(config))['pi-a']?.until, resetAt, 'the spent account is held until the UTC reset');
+  assert.equal((await observedExhaustions(config, now()))['pi-a']?.until, resetAt, 'the spent account is held until the UTC reset');
 
   // The next cycle redispatches the item onto the healthy account, with no master action.
   clock.skewMs += 20_000;
