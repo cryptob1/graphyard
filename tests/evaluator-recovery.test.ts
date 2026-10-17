@@ -58,9 +58,12 @@ class FaultyBackend implements ArtifactBackend {
   readonly objects = new Map<string, Buffer>();
   readonly reads: string[] = [];
   failures = 0;
+  /** Database sessions holding an open transaction, sampled at each read. */
+  readonly openTransactions: number[] = [];
   async put(location: string, bytes: Buffer) { this.objects.set(location, bytes); }
   async get(location: string) {
     this.reads.push(location);
+    this.openTransactions.push(Number((await store.pool.query("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND state LIKE 'idle in transaction%'")).rows[0].count));
     if (this.failures > 0) { this.failures--; throw new Error(`host fault ${this.reads.length}`); }
     return this.objects.get(location) ?? null;
   }
@@ -185,14 +188,19 @@ test('unit:evaluator-error-retried — an evaluator-error is retried against the
   assert.deepEqual(waits, [evaluationRetryBackoffMs], 'one retry, spaced by the first backoff');
   assert.equal(new Set(p.backend.reads).size, 2, 'the retry read the same two pinned artifacts, never new evidence');
   assert.equal((await current(p.w.id)).validation?.[p.proof]?.fault, undefined);
+  // The reads and the backoff between them happen before the result's coordination transaction:
+  // no database session holds a transaction open while the artifact store is read.
+  assert.deepEqual(p.backend.openTransactions.slice(-3), [0, 0, 0], 'an artifact-store wait never holds a database connection');
 
-  // A fail the collector's result earns is a verdict and is never retried, even with the host faulting.
+  // A fail the collector's result earns is a verdict and is never retried, even with the host
+  // faulting every read: the report's own fail stands, never replaced by the read fault.
   const q = await fixture();
   const qCommand = await start(q);
-  const { result: failedResult } = await retain(q, qCommand, playwrightDocument(true), { skipped: 1, expect: false });
-  assert.equal(failedResult.passed, false);
+  const { result: failedResult } = await retain(q, qCommand, playwrightDocument(true), { skipped: 1, expect: false, failures: Number.MAX_SAFE_INTEGER });
+  assert.equal(failedResult.passed, false); assert.equal(failedResult.fault, undefined);
   const refuted = currentEvidence(await current(q.w.id), q.proof)!;
   assert.equal(refuted.result, 'fail');
+  assert.equal((await current(q.w.id)).validation?.[q.proof]?.fault, undefined);
   assert.deepEqual(refuted.evaluation?.attempts.map(x => x.outcome), ['fail'], 'a fail is judged once');
   assert.equal((await storedAttempt(qCommand.requestId)).evaluation.attempts.length, 1);
 });

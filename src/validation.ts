@@ -107,6 +107,8 @@ const reportSchema = commandSchema.extend({
 }).strict();
 type Report = z.infer<typeof reportSchema>;
 /** Stored artifact metadata. `state` is the retention state; bytes live in the row for the postgres backend and at `location` otherwise. */
+/** One evaluator attempt's reads of a result's retained bytes (GY-1841): row id to bytes, and the error that stopped them. */
+type RetainedRead = { at: string; bytes: Map<string, Buffer>; error: string | null };
 type ArtifactRow = { id: string; name: string; digest: string; expires_at: Date; media_type: string; size: string | number | null; state: 'pending' | 'stored' | 'upload-failed' | 'expired'; backend: string; location: string | null; bytes: Buffer | null };
 /** A runner's renewal interval; a running attempt quieter than this for longer is stalled. */
 export const heartbeatIntervalMs = 20_000;
@@ -526,6 +528,7 @@ export class Validation {
     // before the report is even parsed, and the refusal is ledgered against the request.
     await this.reanchoring.refuseClaimedTarget(actor, input);
     const data = reportSchema.parse(input);
+    const reads = await this.retainedReads(data);
     return this.withReceipt(actor, 'result', data, key, async (db, now) => {
       const r = await this.request(db, data.requestId);
       const pinned = await this.definition(db, 'registration', r.collector, false) as Registration;
@@ -552,20 +555,24 @@ export class Validation {
       // itself threw — is retried against the same pinned artifact rows at most twice; a fail is
       // never retried; a pass on retry is the proof's result; every attempt is kept on the attempt
       // and the evidence. Exhausted retries are the item's fault on its selection, never a failed proof.
+      // The bytes and the retry spacing were taken before this transaction (retainedReads): attempt
+      // N judges attempt N's reads, so no artifact-store wait ever holds a database connection.
       const format = ((await this.definition(db, 'bundle', c.bundle, false)) as Bundle).reportFormat ?? defaultReportFormat;
-      const stored: ArtifactRow[] = c.artifactStorage === 'postgres' ? (await db.query('SELECT id,name,digest,expires_at,media_type,size,state,backend,location,bytes FROM validation_artifacts WHERE request_id=$1 AND attempt_id=$2', [r.id, a!.id])).rows : [];
+      const stored: ArtifactRow[] = c.artifactStorage === 'postgres' ? (await db.query('SELECT id,name,digest,expires_at,media_type,size,state,backend,location FROM validation_artifacts WHERE request_id=$1 AND attempt_id=$2', [r.id, a!.id])).rows : [];
       let judged: { reasons: string[]; expiresAt?: string; evidenceArtifacts: EvidenceArtifact[] } | undefined;
+      let index = -1;
       const evaluation = await evaluateWithRecovery(format, async () => {
+        const read = reads[Math.min(++index, reads.length - 1)];
         await db.query('SAVEPOINT graphyard_evaluation');
         try {
-          judged = await this.judgeResult(db, c, data, r.id, stored, now);
+          judged = await this.judgeResult(db, c, data, r.id, stored, now, read);
           await db.query('RELEASE SAVEPOINT graphyard_evaluation');
           return judged.reasons.length ? 'fail' : 'pass';
         } catch (error) {
           await db.query('ROLLBACK TO SAVEPOINT graphyard_evaluation'); await db.query('RELEASE SAVEPOINT graphyard_evaluation');
           return { error: error instanceof Error ? error.message : 'The evaluator failed' };
         }
-      }, this.evaluationRecovery);
+      }, { sleep: async () => {}, now: () => new Date(reads[Math.min(index, reads.length - 1)].at) });
       if (evaluation.fault) {
         const errors = evaluation.fault.errors;
         const result = { accepted: true, passed: false, reasons: errors, fault: evaluation.fault };
@@ -605,15 +612,51 @@ export class Validation {
     });
   }
   /**
-   * One evaluation of a collector's result (GY-1841): the report checks and the retained artifacts —
-   * the rows pinned before the first attempt, re-read and digest-checked, never a newer query.
-   * A reason is a verdict on the change (a fail); a throw, such as bytes that cannot be read, is
-   * this attempt's evaluator-error and the recovery rule retries it.
+   * The retained bytes a collector's result is judged on (GY-1841), read before its coordination
+   * transaction so a slow or failing artifact store never holds a database connection. Each entry
+   * is one evaluator attempt's reads, in the candidate's required order, stopping at the first that
+   * cannot be read; the set is read again only after such an error, under the recovery rule's
+   * retries and backoff, and never more often than the evaluation inside the transaction may judge.
    */
-  private async judgeResult(db: pg.PoolClient, c: ValidationCandidate, data: Report, requestId: string, stored: ArtifactRow[], now: Date) {
+  private async retainedReads(data: Report): Promise<RetainedRead[]> {
+    const pool = this.store.pool;
+    const r = (await pool.query('SELECT document FROM validation_requests WHERE id=$1', [data.requestId])).rows[0]?.document as ValidationRequest | undefined;
+    const c = r && (await pool.query('SELECT document FROM validation_candidates WHERE id=$1', [r.candidateId])).rows[0]?.document as ValidationCandidate | undefined;
+    const reads: RetainedRead[] = [];
+    const rows: ArtifactRow[] = c?.artifactStorage === 'postgres' ? (await pool.query("SELECT id,name,digest,state,backend,location,bytes FROM validation_artifacts WHERE request_id=$1 AND attempt_id=$2 AND state='stored'", [data.requestId, data.attemptId])).rows : [];
+    const ordered = (c?.requiredArtifacts ?? []).map(name => rows.find(x => x.name === name && data.artifacts.some(y => y.name === name && y.digest === x.digest && y.url === this.artifactUrl(data.requestId, x.id)))).filter(x => x !== undefined);
+    await evaluateWithRecovery('retained-reads', async () => {
+      const read: RetainedRead = { at: '', bytes: new Map(), error: null };
+      reads.push(read);
+      for (const row of ordered) {
+        try { read.bytes.set(row.id, await this.retainedBytes(row)); } catch (error) { read.error = error instanceof Error ? error.message : 'The artifact could not be read'; break; }
+      }
+      read.at = (this.evaluationRecovery.now?.() ?? new Date()).toISOString();
+      return read.error ? { error: read.error } : 'pass';
+    }, this.evaluationRecovery);
+    return reads;
+  }
+  private async retainedBytes(row: ArtifactRow) {
+    let bytes = row.bytes;
+    if (row.backend !== 'postgres') {
+      if (!this.artifactBackend || this.artifactBackend.kind !== row.backend) throw new Error(`Artifact ${row.name} is stored in the ${row.backend} backend, which this server is not configured to read`);
+      try { bytes = await this.artifactBackend.get(row.location!); } catch (error) { throw new Error(`Backend read of ${row.name} failed: ${error instanceof Error ? error.message : 'unknown'}`); }
+    }
+    if (!bytes) throw new Error(`Artifact ${row.name} bytes are missing from the backend`);
+    return bytes;
+  }
+  /**
+   * One evaluation of a collector's result (GY-1841): the report checks and the retained artifacts —
+   * the rows pinned in the transaction, judged on one attempt's reads and digest-checked, never a
+   * newer query. A reason is a verdict on the change (a fail); a throw, such as bytes that could not
+   * be read, is this attempt's evaluator-error and the recovery rule retries it. Bytes are consulted
+   * only when the report and the artifacts' states establish no fail: a read fault never replaces a
+   * verdict the evaluator already reached.
+   */
+  private async judgeResult(db: pg.PoolClient, c: ValidationCandidate, data: Report, requestId: string, stored: ArtifactRow[], now: Date, read: RetainedRead) {
     const reasons = await this.reportReasons(db, c, data);
     let expiresAt: string | undefined;
-    const evidenceArtifacts: EvidenceArtifact[] = [];
+    const evidenceArtifacts: EvidenceArtifact[] = [], available: ArtifactRow[] = [];
     if (c.artifactStorage === 'postgres') {
       for (const required of c.requiredArtifacts) {
         const supplied = data.artifacts.find(x => x.name === required);
@@ -624,21 +667,19 @@ export class Validation {
         if (availability === 'upload-failed') reasons.push(`Private artifact ${required} upload failed; the collector must retry the upload or the attempt is unverifiable`);
         else if (availability === 'expired') reasons.push(`Private artifact ${required} retention expired`);
         else if (availability !== 'available') reasons.push(`Private artifact ${required} is missing, expired or mismatched`);
-        if (actual && availability === 'available') {
-          let bytes = actual.bytes;
-          if (actual.backend !== 'postgres') {
-            if (!this.artifactBackend || this.artifactBackend.kind !== actual.backend) throw new Error(`Artifact ${required} is stored in the ${actual.backend} backend, which this server is not configured to read`);
-            try { bytes = await this.artifactBackend.get(actual.location!); } catch (error) { throw new Error(`Backend read of ${required} failed: ${error instanceof Error ? error.message : 'unknown'}`); }
-          }
-          if (!bytes) throw new Error(`Artifact ${required} bytes are missing from the backend`);
-          if (`sha256:${createHash('sha256').update(bytes).digest('hex')}` !== actual.digest) reasons.push(`Private artifact ${required} bytes fail the digest recorded at upload`);
-        }
+        if (actual && availability === 'available') available.push(actual);
         if (actual) {
           const artifactExpiry = actual.expires_at.toISOString();
           if (!expiresAt || artifactExpiry < expiresAt) expiresAt = artifactExpiry;
           evidenceArtifacts.push({ kind: this.artifactKind(actual.name, actual.media_type), label: actual.name, mediaType: actual.media_type, size: Number(actual.size ?? 0), digest: actual.digest, expiresAt: artifactExpiry,
             availability, reference: { requestId, artifactId: actual.id } });
         } else evidenceArtifacts.push({ kind: this.artifactKind(required), label: required, availability: 'missing' });
+      }
+      if (!reasons.length) for (const actual of available) {
+        const bytes = read.bytes.get(actual.id);
+        // The attempt's reads stopped at its error; a pinned row they never reached is that error.
+        if (!bytes) throw new Error(read.error ?? `Artifact ${actual.name} changed after its bytes were read`);
+        if (`sha256:${createHash('sha256').update(bytes).digest('hex')}` !== actual.digest) reasons.push(`Private artifact ${actual.name} bytes fail the digest recorded at upload`);
       }
     } else evidenceArtifacts.push(...data.artifacts.map(artifact => safeHttpUrl(artifact.url)
       ? { kind: this.artifactKind(artifact.name), label: artifact.name, digest: artifact.digest, availability: 'external' as const, url: artifact.url }
