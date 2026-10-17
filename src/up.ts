@@ -1852,7 +1852,10 @@ export function hostTemplateStartsOtherCode(text: string, layout: { home: string
  * code, and every slot the host's manager knows restarted onto it. The slots are those systemd
  * lists loaded or enabled (an enabled slot it has not loaded is still the fleet), and the installer
  * keeps the host's saved declaration (--count only declares a host that saved none): the repair never shrinks the
- * configured fleet nor disables a slot the operator enabled.
+ * configured fleet nor disables a slot the operator enabled. GY-1881: the installer itself rebinds
+ * a template whose launcher names a stale Graphyard checkout of this install — a unit that works in
+ * the host's repository checkout — and still refuses a genuinely foreign one, which the alignment
+ * reports rather than papers over.
  */
 export async function alignHostExecutors(host: Pick<HostLoopSession, 'remote' | 'layout' | 'environment' | 'asUser' | 'checkoutAtRef'>, template: string | null): Promise<{ wrote: 'updated' | 'unchanged' | 'none'; reason: string | null; restarted: string[] }> {
   if (!template) return { wrote: 'none', reason: `no executor template of this install is installed on ${host.remote.description}; graphyard install --apply installs it`, restarted: [] };
@@ -1871,7 +1874,16 @@ export async function alignHostExecutors(host: Pick<HostLoopSession, 'remote' | 
     // is declared from the slots its manager knows, so no enabled slot is disabled by the repair.
     const declared = (await host.remote.exec('cat', [`${host.layout.checkout}/${executorDeclarationFile}`], { allowFailure: true, timeout: 60_000 })).code === 0;
     const installed = await host.asUser(host.layout.checkout, 'env', [...host.environment, 'node', `${host.layout.graphyard}/scripts/graphyard-executor.mjs`, '--install', ...(declared ? [] : ['--count', String(Math.max(1, instances.length))])]);
-    if (installed.code !== 0) return { wrote: 'none', reason: `the executor installer on ${host.remote.description} failed: ${(installed.stderr || installed.stdout).trim().split('\n').pop()}`, restarted: [] };
+    if (installed.code !== 0) {
+      const failure = (installed.stderr || installed.stdout).trim().split('\n').pop() ?? '';
+      // GY-1881: a stale launcher is the installer's own rewrite now; what it refuses is a genuinely
+      // foreign unit — another checkout's tree, or a launcher that is no Graphyard executor — and
+      // the alignment names that refusal, so the operator knows the unit was deliberately left.
+      const refused = /runs another installation \(/.test(failure);
+      return { wrote: 'none', reason: refused
+        ? `the executor unit on ${host.remote.description} is genuinely foreign and was left alone: ${failure}`
+        : `the executor installer on ${host.remote.description} failed: ${failure}`, restarted: [] };
+    }
   }
   if (instances.length) {
     const restarted = await host.asUser(host.layout.checkout, 'systemctl', ['--user', 'restart', ...instances]);
