@@ -293,7 +293,8 @@ jobs:
         # normally onboarded from this checkout (scripts/onboarding-delivery-fixture.mjs, GY-1910), since
         # the shared UAT install keeps its explicit github merger, and so does preview-serves-change, on
         # the loop's own preview step there (GY-1913), since the shared install runs no preview loop, and so
-        # does preview-isolation-cleanup, on two Compose previews of the fixture's declared app (GY-1923). Those four exercise
+        # does preview-isolation-cleanup, on two Compose previews of the fixture's declared app (GY-1923), and so does
+        # previews-for-declared-apps, on one preview of each of the fixture's declared site and app (GY-1924). Those four exercise
         # the UAT deployment itself; the container and chart suites ran on runners at the candidate SHA, so each
         # of those jobs' results above joins the record as a suite of its own. `zero-touch` (GY-1481)
         # runs the zero-touch onboarding scenario on this checkout of the candidate's SHA: `graphyard up
