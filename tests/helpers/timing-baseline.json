@@ -867,6 +867,7 @@
     "tests/soak-worktree-inventory-unreadable.test.ts": 1000,
     "tests/soak-worktree-prepare-cycles.test.ts": 1400,
     "tests/speed-metric.test.ts": 4808,
+    "tests/ssh-origin-delivery.test.ts": 4000,
     "tests/stable-json.test.ts": 217,
     "tests/stale-close-convergence.test.ts": 1902,
     "tests/stale-dismissal.test.ts": 987,
