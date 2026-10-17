@@ -211,8 +211,35 @@ concurrency:
   group: graphyard-promotion
   cancel-in-progress: false
 jobs:
-  promote:
+  imports:
     # A candidate run that failed UAT concludes as a failure and promotes nothing.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The production job holds no plane credential, so the hold the candidate's imported external runs
+    # leave (GY-1860) is read here, in the uat environment that holds it, and handed to promotion; a released
+    # hold is sealed as it is read, so no import binds to the candidate before the production job promotes.
+    environment: uat
+    outputs:
+      hold: \${{ steps.read.outputs.hold }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: ${base}, fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Read, and seal once released, the hold the candidate's imported external runs leave
+        id: read
+        shell: bash
+        run: |
+          set -euo pipefail
+          ${cli} release imports "\${CANDIDATE:-latest}" --base ${base} | tee imports.json
+          echo "hold=$(node -p "JSON.stringify(require('./imports.json'))")" >> "$GITHUB_OUTPUT"
+        env:
+          CANDIDATE: \${{ inputs.candidate }}
+          GRAPHYARD_URL: \${{ vars.GRAPHYARD_URL }}
+          GRAPHYARD_TOKEN: \${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
+  promote:
+    needs: imports
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -233,6 +260,8 @@ jobs:
           echo "sha=$(node -p "require('./promote.json').sha")" >> "$GITHUB_OUTPUT"
         env:
           CANDIDATE: \${{ inputs.candidate }}
+          # A hold that is missing, read for another candidate, or released but unsealed refuses promotion.
+          GRAPHYARD_PROMOTION_IMPORTS: \${{ needs.imports.outputs.hold }}
 ${deployStep(policy, 'production', '${{ steps.promote.outputs.sha }}')}
       - name: Confirm production serves the promoted SHA
         run: ${cli} release verify --base ${base} --url "$PRODUCTION_URL" --wait 1200
