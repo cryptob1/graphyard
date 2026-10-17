@@ -15,7 +15,7 @@ Leases expire 120s after last heartbeat (30s `stallRenewalWindowMs` plane stall)
 
 ## Supervisor died leaving a containment quarantine
 
-On worker, `graphyard master settle-containment GY-N "reason"` verifies nothing survives; refused: confirm stop, then [`rework`, or `recover-containment` once delivered](operations.md#recovery-recipes) ([autosettle](protocol/leases.md#watch)).
+[`master settle-containment`](operations.md#recovery-recipes) on the worker verifies nothing survives; refused: confirm stop, then rework, or `recover-containment` once delivered ([autosettle](protocol/leases.md#watch)).
 
 ## Submitted implementation needs rework
 

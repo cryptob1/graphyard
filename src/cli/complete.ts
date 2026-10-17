@@ -76,9 +76,12 @@ export function completionBody(args: readonly string[], headOf: () => string): {
  * branch (or a detached HEAD) pushes nothing. A failed push is returned, never thrown: `complete`'s own
  * refusals still run, and then it refuses to submit a head the remote does not hold.
  */
-export function pushGraphyardBranch(root: string, git: typeof spawnSync = spawnSync): { pushed: string | null; failure?: string } {
+export function pushGraphyardBranch(root: string, git: typeof spawnSync = spawnSync, adoptedBranch: string | null = null): { pushed: string | null; failure?: string } {
   const branch = String(git('git', ['-C', root, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' }).stdout ?? '').trim();
-  if (!branch.startsWith('graphyard/')) return { pushed: null };
+  // GY-1849: an adopted item's attempt works the adopted pull request's own branch, which carries
+  // no graphyard/ prefix; it is pushed the same way, or complete would submit a head the worker
+  // never sent. Any other foreign branch is still left alone.
+  if (!branch.startsWith('graphyard/') && (adoptedBranch === null || branch !== adoptedBranch)) return { pushed: null };
   const pushed = git('git', ['-C', root, 'push', '--quiet', '-u', 'origin', branch], { encoding: 'utf8' });
   return pushed.status === 0 ? { pushed: branch } : { pushed: null, failure: String(pushed.stderr ?? pushed.error ?? '').trim() };
 }
@@ -110,7 +113,7 @@ export const completeCommand: CliCommand = {
   ],
   run: async (context, work) => {
     let push: { pushed: string | null; failure?: string } = { pushed: null };
-    try { push = pushGraphyardBranch(context.repositoryRoot()); } catch { /* no readable worktree: nothing to push; the head read below reports it */ }
+    try { push = pushGraphyardBranch(context.repositoryRoot(), spawnSync, work.prAdoption?.branch ?? null); } catch { /* no readable worktree: nothing to push; the head read below reports it */ }
     let verification: Awaited<ReturnType<typeof selfVerification>> | { state: 'unavailable'; reason: string };
     try { verification = await selfVerification(context.repositoryRoot(), work.key); } catch (error: any) { verification = { state: 'unavailable', reason: `the worktree could not be read: ${error.message}` }; }
     const body = completionBody(context.args, () => worktreeHead(context.repositoryRoot())), requestId = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();
