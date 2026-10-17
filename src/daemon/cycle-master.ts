@@ -8,6 +8,7 @@ import { message } from './state.js';
 import { emptyMasterSession, type MasterSessionState } from './state.js';
 import { sessionCapMs } from '../model/registry-sessions.js';
 import { masterHandover, masterSessionBudgetMs, masterHeartbeatIntervalMs, masterWakeText, masterProfile } from '../master/master-session.js';
+import { PromptNotAcceptedError } from '../master/launch.js';
 import { outputReadDue } from './cycle-sessions.js';
 import type { Cycle } from './cycle.js';
 import { carriedCall, owedWrite, stepCallCarried, withinStepBudget } from './step-budget.js';
@@ -18,8 +19,8 @@ export const masterLaunchKey = 'master:launch';
 export const masterSetupKey = 'master:setup';
 /** The standing record of registry sessions the loop still owes the registry an end for. */
 export const masterReleaseKey = 'master:release';
-/** The rotation causes: the session exited, its account is spent, or it passed its budget. */
-export type MasterRotationCause = 'exited' | 'exhausted' | 'budget';
+/** The rotation causes: the session exited, its account is spent, it passed its budget, or it can no longer hear the loop. */
+export type MasterRotationCause = 'exited' | 'exhausted' | 'budget' | 'deaf';
 /** How long past its budget a rotation waits for a guarded merge in flight: never longer than this. */
 export const masterMergeDeferralMs = 30 * 60_000;
 
@@ -178,7 +179,24 @@ async function masterSessionStepWithin(cycle: Cycle) {
     for (const key of Object.keys(live.subjects)) if (!standing.has(key)) delete live.subjects[key];
     if ((causes.length || heartbeat) && agent.agent_status !== 'working') await isolate('wake', null, 'master-session', async () => {
       const keys = causes.slice(0, 20), at = new Date(clock).toISOString();
-      await effects.promptSession!(agent, masterWakeText(config.cliPath, keys, heartbeat, Math.round(quietMs / 60_000)));
+      try {
+        await effects.promptSession!(agent, masterWakeText(config.cliPath, keys, heartbeat, Math.round(quietMs / 60_000)));
+      } catch (error) {
+        // GY-1863: a wake the session never visibly accepted leaves the loop's own master deaf — it
+        // hears nothing of any changed subject until its budget rotates it hours later, and the
+        // delivery's stall triple repeats every cycle (the production master took 17 while its pane
+        // sat on a dialog). The delivery error has promised a close and relaunch since GY-93; the
+        // rotation is that promise kept, and the replacement inherits the standing subjects from
+        // the durable handover. Handled here, it is the wake step's own resolution of its session —
+        // recorded done, never a standing session-liveness failure of a session it just replaced.
+        if (!(error instanceof PromptNotAcceptedError)) throw error;
+        const rotated = await rotateMasterSession(cycle, 'deaf', message(error));
+        performed.push(await record(state, `wake:master:${state.cycle}`, { kind: 'wake', work: null, principal: null, state: 'done',
+          detail: `The wake for ${keys.join(', ') || 'its heartbeat'} was not visibly accepted by master session ${live.agentName} (${message(error)})`
+            + `; the session was ${rotated ? 'rotated — closed, and the role relaunches from the durable handover' : 'left in place, its rotation refused'} rather than kept deaf`,
+          attempts: 1, cycle: state.cycle }, now(), effects.persist));
+        return;
+      }
       live.lastWake = { at, causes: keys, heartbeat };
       for (const subject of subjects) live.subjects[subject.key] = promptDigest(subject.detail);
       performed.push(await record(state, `wake:master:${state.cycle}`, { kind: 'wake', work: null, principal: null, state: 'done',

@@ -25,7 +25,7 @@ Profile `accounts` lists [agent environments](onboarding.md#agent-environments) 
 
 ## The loop's own master session
 
-`master registry role set master ACCOUNTS …` (unset: none): one session; loop and `master start` adopt live `masterAgentName`. Relaunches on exit, limit notice, `run.masterSessionMinutes` (240); changed subjects wake it; `run.masterHeartbeatMinutes` (30) silent sends heartbeat (`daemon.master`).
+`master registry role set master ACCOUNTS …` (unset: none): one session; loop and `master start` adopt live `masterAgentName`. Relaunches on exit, limit notice, `run.masterSessionMinutes` (240); changed subjects wake it (a stall first reads the pane: a dismissable notice goes away with `esc`, else the accepted submission is waited out); `run.masterHeartbeatMinutes` (30) silent sends heartbeat (`daemon.master`); an undeliverable wake rotates it (`deaf`).
 
 ### The request is the session's first message
 
@@ -43,7 +43,7 @@ GY=…/.graphyard/launch/NAME; claude … --settings …/.graphyard/harness/prod
 
 **Ready**: Herdr active with no prompt, or banner shown (`the claude runtime is on screen while Herdr reports it unknown`; OpenCode 1.18 `Ask anything…`/`tab agents`, [fixture](../tests/fixtures/opencode-1.18-start-screen.txt)). Ready within **60 seconds** (`run.launchStartSeconds`) starts; still starting gets **120 seconds** (`started.extended`); supervisor first prints `graphyard: establishing containment for GY-N epoch E`. Refusals quote case and pane's last non-empty line (`the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`), never Herdr's own `agent_not_found`; retry as `Automatic producer launch for GY-N refused 1 time(s)`.
 
-**Approvers**: replaced panes' bounds run from first sight; failed relaunches adopt a started same-name approver once its registry session ends.
+**Approvers**: replaced panes' bounds run from first sight; failed relaunches adopt a started same-name approver at its registry session's end.
 
 #### First-run consent prompts
 
@@ -53,12 +53,12 @@ Reviewers/producers are `awaiting acknowledgement` until 30s active (`counts.dis
 
 **Reviewer verdict**: launch writes `review-binding.json` (0600: head, base, policy revision, listed threads; control-plane: `mode`, `verdictToken`) into the session's `GH_CONFIG_DIR`; no binding, no session. Reviewer posts only via `graphyard review post --event APPROVE|REQUEST_CHANGES|COMMENT [--body TEXT]` (body else stdin); raw review calls denied. It posts nothing on missing binding, `GRAPHYARD_REVIEW` ≠ `KEY@SHA`, moved head, `mergeable` UNKNOWN after 2min, unlisted thread ID, or an approval leaving a listed thread unclassified; else one review POST on the bound head.
 
-**Idle-with-lease** (25 quiet minutes, nothing open): one re-prompt; quiet 45min after first idle, 10 after re-prompt: new attempt on its branch <60min from last activity. **Unsubmitted past the bound** (lease held 60min without submission): `unsubmitted-attempt` shown, a stalled-gate fault past 120min; without submission progress (new PR or head within 15min) the loop stops its supervisor and ends the attempt; reclaim requeues it, branch and worktree kept; from 130min renewal is refused (`no-submission-bound`, not lease loss). Open scope requests exempt it. **Blocked**: destructive-command prompts declined; usage-limit menu fails over; folder-trust dialog relaunches, recording trust; others fail after **5min**; unreadable screens aren't timed. Headless Pi runs (`.graphyard/runs/`) survive restarts.
+**Idle-with-lease** (25 quiet minutes, nothing open): one re-prompt; quiet 45min after first idle, 10 after re-prompt: new attempt on its branch <60min from last activity. **Unsubmitted past the bound** (lease held 60min without submission): `unsubmitted-attempt` shown, a stalled-gate fault past 120min; without submission progress (new PR or head within 15min) the loop stops the supervisor, ending the attempt; reclaim requeues it, branch and worktree kept; from 130min renewal is refused (`no-submission-bound`, not lease loss). Open scope requests exempt it. **Blocked**: destructive-command prompts declined; usage-limit menu fails over; folder-trust dialog relaunches, recording trust; others fail after **5min**; unreadable screens aren't timed. Headless Pi runs (`.graphyard/runs/`) survive restarts.
 
 ### Panes are closed and reclaimed
 
-Ended sessions' panes close; each cycle closes ≤12 more, never a standing attempt's: agentless shells in `.graphyard/worktrees` after **120s**, agents named for ended sessions after **60s**. `master status` counts shells (`herdr pane list`). Over 20 agentless: `daemon.escalations` attention.
+Ended sessions' panes close; ≤12 more each cycle, never a standing attempt's: agentless `.graphyard/worktrees` shells after **120s**, ended sessions' namesakes after **60s**. `master status` counts shells (`herdr pane list`); over 20 agentless: `daemon.escalations` attention.
 
 ### The dispatcher's own state
 
-Dispatcher bounds its own state where it composes it, marking each cut with an ellipsis; schema-failing cursor is repaired, not fatal, logged once with the failing path. Tick failures are attributed (`dispatch.lastFailure`); three in a row raise one attention item (no reviewer or producer session launches for any item); `graphyard master restart` repairs it. A gh rate limit pauses its reads and reviewer launches. A session exiting **at launch** is classified by `herdr pane read`: a **provider limit notice** fails over like a mid-session exhaustion; others refused with the pane's last words and retried.
+Dispatcher bounds its own state where it composes it, cuts marked with an ellipsis; a schema-failing cursor is repaired, not fatal, logged once with the failing path. Tick failures are attributed (`dispatch.lastFailure`); three in a row raise one attention item (nothing reviewer or producer session launches); `graphyard master restart` repairs it. A session exiting **at launch** is classified by `herdr pane read`: a **provider limit notice** fails over like a mid-session exhaustion; others refused with the pane's last words and retried.

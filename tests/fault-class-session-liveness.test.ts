@@ -14,10 +14,10 @@ import { leaseLapseCause, leaseLossReason, settleableLeaseLoss, standingEscalati
 // A namespace import, so the base run of this file, which has no lapsedLeaseExpiry, fails only the case that reads it.
 import * as escalationModel from '../src/model/escalation.js';
 import type { SessionHandle, SessionHandleInput } from '../src/model/sessions.js';
-import { awaitRuntimeStart, buildMasterStatus, masterConfigSchema, SessionStartError, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { awaitRuntimeStart, buildMasterStatus, deliverPrompt, masterConfigSchema, PromptNotAcceptedError, SessionStartError, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { launchWaitAttention } from '../src/auto-dispatch.js';
 import { GhPausedError } from '../src/gh-pause.js';
-import { emptyDaemonState } from '../src/master-daemon.js';
+import { emptyDaemonState, runCycle } from '../src/master-daemon.js';
 import { record, launchAppearanceMs } from '../src/daemon/effects.js';
 import { resumeStep, checkPaneStillBelongs } from '../src/daemon/cycle-resume.js';
 import { reclaimLaunchedPanes } from '../src/daemon/cycle-reclaim.js';
@@ -37,6 +37,7 @@ import * as consent from '../src/consent-prompt.js';
 const { detectConsentPrompt } = consent;
 const screenDialog = (screen: string) => consent.screenDialog?.(screen);
 import { trackFaults, ghPausedWording, faultClassOf, launchWaitKind, type FaultRecord } from '../src/model/fault-classes.js';
+import { cycleFaults } from '../src/daemon/faults.js';
 // A namespace import, so the base run of this file, which has no rekeyLaunchedSession, fails only the GY-1788 case that reads it.
 import * as cycleDispatch from '../src/daemon/cycle-dispatch.js';
 const rekeyLaunchedSession = (...args: Parameters<NonNullable<typeof cycleDispatch.rekeyLaunchedSession>>) =>
@@ -48,7 +49,7 @@ const unclaimedLaunch = (...args: Parameters<typeof sessionState.unclaimedLaunch
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { fixtureWork } from '../scripts/dashboard-fixture.mjs';
 import { live } from '../browser-tests/ui-board.js';
-// Time-bomb allowance (GY-1694): the 2026-10-08/09 and 2026-10-14 instants are fixed clocks handed to checkInvariants, observeSessions, buildMasterStatus, resumeStep and the fake planes; new Date()/Date.now() only mint leases for the live supervisor timed by performance.now().
+// Time-bomb allowance (GY-1694): the 2026-10-08/09/14 and GY-1863's 2026-10-16/17 instants are fixed clocks handed to checkInvariants, observeSessions, buildMasterStatus, resumeStep, the fake planes and the GY-1863 fault fixtures; new Date()/Date.now() only mint leases for the live supervisor timed by performance.now().
 
 // GY-1506 names this file for its proof: manual:fault-class-session-liveness. The master loop
 // filed 5 session-liveness faults in 24 hours; the host journal names the two shapes they share.
@@ -1022,4 +1023,208 @@ test('unit:rekey-never-closes-live-lease-pane — a rekey moves the record, neve
     await reclaimLaunchedPanes(reusedCycle(launchAppearanceMs + 60_000));
     assert.deepEqual(reusedClosed, ['w1:pREUSED'], 'a finished earlier handle never holds a reused pane; the live claimed record’s pane stays shut');
   } finally { void directory; }
+});
+
+// ---------------------------------------------------------------------------
+// GY-1863 (this file's proof again): 3 session-liveness faults in 24 hours on
+// 16–17 October 2026, sharing one cause. A prompt stall is Herdr's "accepted
+// the submission, saw no start within its own 5 s window", and every delivery
+// answered it blind — the same text re-submitted up to three times, the pane
+// never read — so a session that was present but slow, or one sitting on a
+// runtime dialog, was failed and counted. The production master session
+// w1V:pQ35 sat on Claude Code's autocompact dialog while its wake failed cycle
+// after cycle, and GY-1833's cleared-wait re-prompt failed the same way. The
+// third instance counted a finished session the moment the attention saw it,
+// while the loop's own orphan watch and gone-worker preserve were still inside
+// their two-observation establishment of exactly that end.
+//
+// - action:session GY-1833 2026-10-16T22:00:39.236Z: the re-prompt after its
+//   blocker cleared and its scope request was applied failed on the stall
+//   triple; the record cuts the sentence at its 500th character.
+// - action:wake isolated:wake:master-session 2026-10-17T02:44:27.516Z:
+//   "w1V:pQ35 did not visibly accept its prompt after 3 deliveries
+//   (agent_prompt_stalled, agent_prompt_stalled, agent_prompt_stalled); the
+//   session is closed and relaunched rather than left idle" — a promise the
+//   wake step never kept: it neither closed nor relaunched, and the same wake
+//   failed again next cycle.
+// - session GY-1860 2026-10-17T03:59:33.464Z: "Assigned worker session is
+//   finished" stood from 03:59:33Z to 04:01:31Z; the preserve ended the
+//   attempt at 04:01:36Z.
+//
+// Each instance is replayed below; each case fails on the base.
+// ---------------------------------------------------------------------------
+
+const GY1863_DIALOG = [
+  '✻ Brewed for 1m 25s · done 7:33 PM',
+  ' We recommend compacting earlier',
+  '   Each message re-sends the whole conversation, so long',
+  '   conversations use up your plan\'s usage limits faster.',
+  '   With your current settings, Claude Code autocompacts',
+  '   (replaces older messages with a summary) at 1m tokens',
+  '   (default via auto setting). Compacting earlier can',
+  '   reduce usage, but it happens more often, and some',
+  '   details can be lost each time.',
+  '   Want to autocompact at 400k tokens instead? Your model',
+  '   doesn\'t change. Switch back any time with',
+  '   /autocompact.',
+  '     Autocompact at ‹ 400k › tokens',
+  '     Keep auto (1m tokens)',
+  '   ↑/↓ choose · ←/→ change size · enter confirm · esc not',
+  '   now',
+].join('\n');
+const GY1863_TRUST = ['Is this a project you created or one you trust?', '  1. Yes, I trust this folder', '  2. No, exit'].join('\n');
+const GY1863_STALLED = JSON.stringify({ error: { code: 'agent_prompt_stalled', message: 'agent did not start working within 5000ms' } });
+const GY1863_TIMEOUT = JSON.stringify({ error: { code: 'timeout', message: 'timed out' } });
+const GY1863_OK = JSON.stringify({ result: {} });
+/** A herdr CLI a delivery talks to: `answer` decides by the subcommand, every call logged. */
+const herdrRunOf = (log: string[][], answer: (args: string[]) => string) =>
+  (_command: string, args: string[]) => { log.push(args); return Promise.resolve(answer(args)); };
+const herdrSubcommand = (args: string[]) => `${args[0]} ${args[1]}`;
+
+test('unit:fault-class-session-liveness GY-1863 action:session — a stall reads the pane: a notice dialog is put away and the text delivered again, a slow start is waited out, a consent dialog is never answered and its refusal names the pane', async () => {
+  // The dialog above was read off the production master session's pane; the
+  // base answered the same stall by re-submitting the wake text twice more and
+  // failing, which is the 17 failed wakes the instance records.
+  const dialog: string[][] = [];
+  let dialogDeliveries = 0;
+  const dismissed = await deliverPrompt('w1V:pQ35', 'wake', herdrRunOf(dialog, args => herdrSubcommand(args) === 'agent prompt' && ++dialogDeliveries === 1 ? GY1863_STALLED
+    : herdrSubcommand(args) === 'agent read' ? GY1863_DIALOG : GY1863_OK), { acceptMs: 1_000, pauseMs: 0 });
+  assert.equal(dialogDeliveries, 2, 'the text is delivered again only after the notice is away');
+  assert.equal(dismissed.attempts, 2);
+  assert.deepEqual(dismissed.dismissed, ['autocompact']);
+  assert.deepEqual(dialog.map(herdrSubcommand), ['agent prompt', 'agent read', 'agent send-keys', 'agent prompt'], 'the stall is read off the pane, the notice put away with esc, then the delivery retries');
+  assert.deepEqual(dialog[2], ['agent', 'send-keys', 'w1V:pQ35', 'esc'], 'the dismissal is the no-change answer, never a menu choice');
+
+  // A stall over an undialoged pane is the start Herdr accepted but has not
+  // shown yet: the acceptance window waits it out instead of re-typing the
+  // prompt into a session that already holds it.
+  const slow: string[][] = [];
+  const waited = await deliverPrompt('w1V:pQ35', 'wake', herdrRunOf(slow, args => herdrSubcommand(args) === 'agent prompt' ? GY1863_STALLED
+    : herdrSubcommand(args) === 'agent read' ? 'the session sits idle, output unchanged' : GY1863_OK), { acceptMs: 1_000, pauseMs: 0 });
+  assert.equal(waited.attempts, 1, 'the accepted submission is waited for, not delivered twice');
+  assert.deepEqual(slow.map(herdrSubcommand), ['agent prompt', 'agent read', 'agent wait']);
+
+  // A consent dialog is not a notice: it is never put away, and the refusal
+  // that finally stands carries the pane's own words instead of a stall triple.
+  const consent: string[][] = [];
+  let consentDeliveries = 0;
+  await assert.rejects(
+    deliverPrompt('w1V:pQ35', 'resume', herdrRunOf(consent, args => herdrSubcommand(args) === 'agent prompt' && ++consentDeliveries ? GY1863_STALLED
+      : herdrSubcommand(args) === 'agent read' ? GY1863_TRUST
+      : herdrSubcommand(args) === 'agent wait' ? GY1863_TIMEOUT : GY1863_OK), { acceptMs: 1_000, pauseMs: 0 }),
+    (error: unknown) => error instanceof PromptNotAcceptedError && /after 3 deliveries/.test(error.message)
+      && /Yes, I trust this folder/.test(error.message) && error.promptDropped);
+  assert.equal(consentDeliveries, 3, 'the dropped text is still re-delivered, at most three times');
+  assert.ok(!consent.some(args => herdrSubcommand(args) === 'agent send-keys'), 'no keystroke reaches a consent dialog');
+
+  // The fault the base recorded on GY-1833: the failed re-prompt opens one
+  // action:session instance on the item, exactly as the 22:00:39Z instance
+  // stands in the class record. The candidate's delivered re-prompt records
+  // done, which ends the failing run instead of opening one.
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: 'graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'vishrog', masterAgentName: 'graphyard-master-project',
+    autoMerge: true, mergeMethod: 'merge', workers: [], run: { proofWorkflow: 'acceptance.yml' } });
+  const state = emptyDaemonState(config);
+  const failedAt = Date.parse('2026-10-16T22:00:39.236Z'), actionKey = 'resume:prompt:work-GY-1833:1:2026-10-16T21:00:00.000Z';
+  await record(state, actionKey, { kind: 'session', work: 'GY-1833', principal: 'graphyard-claude-2', epoch: 1, cycle: 1, attempts: 1, state: 'failed',
+    detail: 'GY-1833 epoch 1: its blocker ("Scope request refused: src/setup-from-zero.ts, src/cli/merger.ts, src/store/schema.ts, src/store/tables/merger-default.ts, tests/ are outside what this item\'s own criteria and the repository\'s documentation rule imply; an operator decides scope the item does not already carry") was cleared, and its scope request was applied: plannedFiles now include src/setup-from-zero.ts, src/cli/merger.ts, src/store/schema.ts, src/store/tables/merger-default.ts, tests/; re-prompting graphyard-claude-2 in pane w1V:pQ11 failed: w1V:pQ11 did not visibly accept its prompt after 3 deliveries (agent_prompt_stalled, agent_prompt_stalled, agent_prompt_stalled); the session is closed and relaunched rather than left idle' },
+    failedAt, async () => {});
+  const opened = state.faults.instances.at(-1)!;
+  assert.equal(opened.kind, 'action:session');
+  assert.equal(opened.subject, 'GY-1833');
+  assert.equal(opened.faultClass, 'session-liveness');
+  await record(state, actionKey, { kind: 'session', work: 'GY-1833', principal: 'graphyard-claude-2', epoch: 1, cycle: 1, attempts: 1, state: 'done',
+    detail: 'GY-1833 epoch 1: its blocker was cleared, and its scope request was applied; graphyard-claude-2 in pane w1V:pQ11 was re-prompted once to resume' },
+    failedAt + 1, async () => {});
+  assert.equal(state.faults.failing[actionKey], undefined, 'the delivered re-prompt ends the failing run');
+  assert.equal(state.faults.instances.filter(entry => entry.kind === 'action:session').length, 1, 'a delivered re-prompt opens nothing of its own');
+});
+
+test('unit:fault-class-session-liveness GY-1863 action:wake — a master whose wake is not visibly accepted is rotated deaf instead of failing every cycle, and no action:wake instance opens', async () => {
+  const NOW = Date.parse('2026-10-17T02:44:27.516Z');
+  const iso = (ms: number) => new Date(NOW + ms).toISOString();
+  const launcher = join('bin', 'graphyard.mjs');
+  const cfg = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: launcher,
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'vishrog', masterAgentName: 'graphyard-master-project',
+    autoMerge: true, mergeMethod: 'merge', workers: [], run: { proofWorkflow: 'acceptance.yml', masterSessionMinutes: 240, masterHeartbeatMinutes: 30 } });
+  const item = (key: string): Work => ({
+    id: `work-${key}`, key, title: `Master session ${key}`, description: '', type: 'feature', priority: 0, dependencies: [],
+    criteria: [{ id: 'AC-1', text: 'Done', proofs: ['manual:x'] }], policy: { checks: ['test'], review: true }, plannedFiles: [],
+    stage: 'ready', revision: 1, policyRevision: 1, createdAt: iso(-7_200_000), updatedAt: iso(0), stageEnteredAt: iso(-3_600_000), ready: true, epoch: 0,
+    lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
+    gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }], violations: [],
+  } as unknown as Work);
+  const work = [item('GY-1864')];
+  const state = emptyDaemonState(cfg);
+  Object.assign(state.master, { agentName: 'graphyard-master-project', pane: 'w1V:pQ35', runtime: 'claude', account: 'claude-b', session: 'reg-1',
+    startedAt: iso(-600_000), adopted: true, rotations: 1, misses: 0 });
+  const harness = { agents: [{ name: 'graphyard-master-project', pane_id: 'w1V:pQ35', agent: 'claude', agent_status: 'idle' }], launches: [] as string[], closed: [] as string[], ended: [] as [string, string][] };
+  let throws = 0;
+  const effects = {
+    agents: () => harness.agents, herdr: () => ({ agents: harness.agents, available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work, now: iso(0) }), dispatch: async () => {}, requestProof: () => {}, observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {}, sessionOutput: async () => '',
+    closeSession: (pane: string) => { harness.closed.push(pane); harness.agents = harness.agents.filter(agent => agent.pane_id !== pane); },
+    // The wake the production session refused three deliveries of.
+    promptSession: async () => { throws += 1; throw new PromptNotAcceptedError('w1V:pQ35 did not visibly accept its prompt after 3 deliveries (agent_prompt_stalled, agent_prompt_stalled, agent_prompt_stalled); the session is closed and relaunched rather than left idle'); },
+    endRegistrySession: async (session: string, reason: string) => { harness.ended.push([session, reason]); },
+    holdAccount: async () => {},
+    masterSession: { launch: async (handover: string) => { harness.launches.push(handover); return { agentName: cfg.masterAgentName!, pane: `w1V:pQ${harness.launches.length + 7}X`, runtime: 'claude', account: 'claude-b', session: `reg-${harness.launches.length + 1}` }; } },
+    persist: async () => {},
+  } as unknown as DaemonEffects;
+  const at = { value: NOW };
+  const cycle = (ms: number) => { at.value = NOW + ms; return runCycle(cfg, state, effects, () => at.value); };
+
+  // One cycle: the changed subject (a ready item nobody owns) is woken into the
+  // deaf session. The base records the failed wake and the instance stands; the
+  // candidate handles its own session — rotated, not counted.
+  await cycle(0);
+  assert.equal(throws, 1, 'the wake was attempted once');
+  assert.equal(state.actions['isolated:wake:master-session'], undefined, 'the wake step never records a failure for the session it just replaced');
+  assert.equal(state.faults.instances.some(entry => entry.kind === 'action:wake'), false, 'no action:wake session-liveness instance opens');
+  assert.equal(state.master.lastEnd?.cause, 'deaf');
+  assert.match(state.master.lastEnd!.detail, /did not visibly accept its prompt after 3 deliveries/);
+  assert.deepEqual(harness.closed, ['w1V:pQ35'], 'the deaf session\'s pane is closed, as the delivery error always promised');
+  assert.deepEqual(harness.ended.map(([session]) => session), ['reg-1'], 'its registry session is given back');
+  assert.equal(state.master.pane, null);
+
+  // The next cycle relaunches the role from the durable handover.
+  harness.agents = [];
+  await cycle(30_000);
+  assert.equal(harness.launches.length, 1, 'the role relaunches from the durable handover');
+  assert.equal(state.master.rotations, 2);
+  const wake = Object.values(state.actions).find(action => action.kind === 'wake');
+  assert.ok(wake && wake.state === 'done' && /rotated/.test(wake.detail), `the wake action records the rotation it performed: ${JSON.stringify(wake?.detail)}`);
+});
+
+test('unit:fault-class-session-liveness GY-1863 session — a finished session counts only once the orphan watch and gone-worker preserve stand down, never inside their establishment', async () => {
+  const NOW = Date.parse('2026-10-17T03:59:33.464Z');
+  const at = (ms: number) => new Date(NOW + ms).toISOString();
+  const worker = { name: 'claude-tertiary', principal: 'graphyard-cursor-1', agentName: 'graphyard-claude-3', mode: 'launch', kind: 'claude', credentialFile: '/outside/c3.token', agentArgs: [], environment: {} } as unknown as WorkerProfile;
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: 'graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'vishrog', masterAgentName: 'graphyard-master-project',
+    autoMerge: true, mergeMethod: 'merge', workers: [worker], run: { proofWorkflow: 'acceptance.yml' } });
+  const base = (fixtureWork() as unknown as Work[]).map(live)[0];
+  const handle = { id: 'graphyard-cursor-1:1', kind: 'implementation', principal: 'graphyard-cursor-1', epoch: 1, runtime: 'claude', host: 'vishrog', workspace: 'w1V', tab: null,
+    pane: 'w1V:pQ7H', agentName: 'graphyard-claude-3', role: null, head: null, attach: null, transcript: null, subject: 'GY-1860', startedAt: at(-3_600_000), updatedAt: at(-60_000), endedAt: at(-60_000), state: 'finished',
+    outcome: 'ended without submitting: its agent session graphyard-claude-3 is gone from Herdr while its supervisor (pid 1626084) still renewed the lease' } as unknown as SessionHandle;
+  const item: Work = { ...base, id: 'work-GY-1860', key: 'GY-1860', stage: 'build', lease: { owner: 'graphyard-cursor-1', epoch: 1, expiresAt: at(120_000) }, sessions: [handle], blocker: null } as Work;
+  const faults = (orphans: Record<string, unknown>, absences: Record<string, unknown> = {}) =>
+    cycleFaults({ ...emptyDaemonState(config), orphans, absences } as DaemonState, [item], NOW, { config, agents: [] })
+      .filter(entry => entry.kind === 'session' && entry.subject === 'GY-1860');
+
+  // The base counted the line the moment it stood — the recorded instance.
+  assert.deepEqual(faults({}, {}), [{ kind: 'session', faultClass: 'session-liveness', subject: 'GY-1860', text: 'Assigned worker session is finished' }],
+    'the base raised "Assigned worker session is finished" here, at 03:59:33Z');
+
+  // The loop's own machinery had the case: the orphan watch's first observation
+  // and the gone-worker absence both stand under the item's id while they
+  // establish. Inside that establishment the line is the machinery working.
+  const orphan = { epoch: 1, owner: 'graphyard-cursor-1', pid: 1626084, unit: 'graphyard-watch-1626084.scope', firstSeenAt: at(0), leaseExpiresAt: at(120_000), stops: 0, stoppedLeaseExpiresAt: null };
+  assert.deepEqual(faults({ 'work-GY-1860': orphan }), [], 'an orphan watch in motion counts nothing');
+  assert.deepEqual(faults({}, { 'work-GY-1860': { epoch: 1, owner: 'graphyard-cursor-1', firstSeenAt: at(0), cycle: 1 } }), [], 'a gone-worker absence in motion counts nothing');
+
+  // Once the machinery stands down without the attempt ended, the line counts,
+  // as the failed recovery it is.
+  assert.equal(faults({}, {}).length, 1, 'the line still counts with no machinery over the item');
 });

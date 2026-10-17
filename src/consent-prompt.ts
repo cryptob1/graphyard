@@ -125,6 +125,36 @@ export function screenDialog(screen: string | null | undefined): string | null {
 }
 
 /**
+ * GY-1863. The runtime notices a stalled prompt delivery may put away, and the one rule for them:
+ * a dialog the runtime draws over its input — Claude Code's autocompact suggestion, and others of
+ * that shape — that only sets a preference or goes away, whose key hint offers `esc` as the
+ * no-change answer. It is not consent: nothing is granted, nothing is declined on the record's
+ * behalf, and the session's own next keystroke works exactly as before. A notice is recognised
+ * only as the last thing on the pane, with its dismiss hint at the bottom, and never when the
+ * tail also asks one of the neverAnswered questions — those stay with a human, whatever else the
+ * screen says.
+ */
+export interface NoticeDialog { kind: string; text: string; keys: string[] }
+export const noticeScreenLines = 12, noticeTextLimit = 300;
+const noticeDialogs: { kind: string; asks: RegExp }[] = [
+  { kind: 'autocompact', asks: /\bauto.?compact\b|\bcompacting\b/i },
+];
+const noticeHint = /\besc\b[^\n]{0,40}(?:not now|no thanks|dismiss|later|skip|cancel)|(?:not now|no thanks|dismiss|later|skip|cancel)[^\n]{0,40}\besc\b/i;
+const noticeHintLines = 2;
+export function detectNoticeDialog(screen: string | null | undefined): NoticeDialog | null {
+  if (!screen) return null;
+  const tail = screen.split('\n').map(line => line.replace(/\s+/g, ' ').trim()).filter(Boolean).slice(-noticeScreenLines);
+  if (tail.length < 2 || !noticeHint.test(tail.slice(-noticeHintLines).join(' '))) return null;
+  // A consent dialog is never a notice, whatever else it offers: the kinds above decide it.
+  if (promptKinds.some(([, asks]) => asks.test(tail.join('\n')))) return null;
+  const found = noticeDialogs.find(dialog => dialog.asks.test(tail.join('\n')));
+  if (!found) return null;
+  const first = tail.findIndex(line => found.asks.test(line));
+  const text = tail.slice(Math.max(0, first)).join(' / ');
+  return { kind: found.kind, text: text.length > noticeTextLimit ? `${text.slice(0, noticeTextLimit - 1)}…` : text, keys: ['esc'] };
+}
+
+/**
  * Claude Code's "Settings Warning" dialog: a settings file the session loads holds rules it skips,
  * and it stops before reading its request (Herdr reports it blocked) until somebody picks
  * "Continue", "Fix with Claude" or "Exit". It is not a consent prompt and is never answered:
