@@ -339,7 +339,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // GY-1526: under a control-plane merger (read afresh each cycle, as the merge step reads it) the drive runs candidates through the local ports — the release functions in this checkout, pushes through the deploy key, the revert recorded as the coordinator — and dispatches no workflow; the ports are null while the environment names no UAT.
     get promotion() { const config = current(); return promotionReads(config, root, run, existsSync(join(root, '.github', 'workflows', promotionWorkflow)), undefined, { merger: recordedMerger, local: localReleasePorts(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, revertRecordKey(work, event)),
       file: async (item, requestId) => ((await mutate('work', item, requestId)) as Work).key,
-      plane: { goals: async () => (await asCoordinator('goals?open=1')).goals, stage: async key => servingStage((await asCoordinator(`work/${encodeURIComponent(key)}`)) as Work | undefined), read: path => asCoordinator(path) } }) }); },
+      plane: { goals: async () => (await asCoordinator('goals?open=1')).goals, stage: async key => servingStage((await asCoordinator(`work/${encodeURIComponent(key)}`)) as Work | undefined), read: path => asCoordinator(path),
+        // GY-1874: sealing a released hold is a write the coordinator credential cannot make: the loop
+        // seals through its operator-agent identity (an admin or an operator agent seals), when one is
+        // provisioned; without it the promotion keeps its read alone.
+        ...(config.operatorAgent ? { seal: (path: string, data: unknown) => asOperatorAgent('POST', path, data) } : {}) } }) }); },
     // GY-1519: the watch reads history from this checkout and its policy from the control plane; the freeze is the environment's ask.
     get mainWatch() { return mainWatchReads(current(), root, run, { policy: () => asCoordinator('main-watch'), freeze: mainWatchFreezeFromEnv() }); },
     // GY-1522 / GY-1560: the gate trial-merges in this checkout's object store under the managed worktree root, records each verdict as the coordinator (one idempotency key per (head, tip)), and reads disagreement explanations so explaining clears the cursor's standing action.
