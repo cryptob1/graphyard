@@ -16,7 +16,7 @@ Only legacy `--merger github` needs a human (GitHub Mobile).
 
 Hetzner waits (exit 3) for price approval: rerun with `--confirm-price`, `--max-monthly` or `--ssh-key`.
 
-`up` runs, in order: preflight, control plane, host supervisor, Herdr, deploy key, merger setting (legacy: `github` only) and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` reviews and merges, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop. The loop merges onboarding's `graphyard/onboarding` pull request (host install: a person); goals wait. Reruns skip recorded `.graphyard/up.json` steps but redo `master-loop` until loop and executors run this CLI's exact clean commit (`doctor`: `loop-code`).
+`up` runs, in order: preflight, control plane, host supervisor, Herdr, deploy key, merger setting (legacy: `github` only) and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` reviews and merges, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop. The loop merges onboarding's `graphyard/onboarding` pull request (host install: a person); goals wait. Reruns skip recorded `.graphyard/up.json` steps but redo `master-loop` until loop and executors run this CLI's exact clean commit (`doctor`: `loop-code`); the loop reports and upgrades the checkout its CLI runs from, never the managed repository's checkout.
 
 ## The Setup page
 
@@ -33,7 +33,7 @@ Once green, **Describe what you want built** records a goal.
 
 ## Agent setup: up --agent
 
-`up --agent` takes `[--goal FILE] [--browser-profile PROFILE] [--url URL]` (server: from `master.json` or install): stderr JSON (`step-failed`: argv, stderr); exit `0`/`1`/`2`/`3` (green/failed/prerequisite/waiting). Default: no Apps, browser profile or `--reviewer`; missing repo: `gh repo create --source . --push`; no `--local`. Apps in signed-in Chrome profile (passed, master's, same-login install's; none without `--reuse-app`/saved Apps: exit `2`) in `.graphyard/master-actions/`. Handoffs: subscription login approval, *Confirm access* Mobile number. Beside Mobile: App page (http://127.0.0.1:4311) in your browser; sudo code (Setup field/`up --sudo-code`); import both Apps, `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` → `3`). `--wait MINUTES` (20). Preflight refuses `/tmp`, `/var/tmp`.
+`up --agent` takes `[--goal FILE] [--browser-profile PROFILE] [--url URL]`: stderr JSON (`step-failed`: argv, stderr); exit `0`/`1`/`2`/`3` (green/failed/prerequisite/waiting). Default: no Apps, browser profile or `--reviewer`; missing repo: `gh repo create --source . --push`; no `--local`. Apps in signed-in Chrome profile (passed, master's, same-login install's; none without `--reuse-app`/saved Apps: exit `2`) in `.graphyard/master-actions/`. Handoffs: subscription login approval, *Confirm access* Mobile number. Beside it: the App page (http://127.0.0.1:4311); sudo code (Setup field/`up --sudo-code`); import both Apps, `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` → `3`). `--wait MINUTES` (20). Preflight refuses `/tmp`, `/var/tmp`.
 
 ## Troubleshooting: manual steps
 
@@ -49,7 +49,7 @@ herdr --version
 bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with-parent -- true
 ```
 
-**Verify:** each exits 0; `gh repo view OWNER/REPO --json viewerPermission -q .viewerPermission` prints `ADMIN`. **HUMAN:** `gh auth login` as a repository admin; user namespaces for `bwrap`; a free-plan private repository goes public.
+**Verify:** each exits 0; `gh repo view OWNER/REPO --json viewerPermission -q .viewerPermission` prints `ADMIN`. **HUMAN:** `gh auth login` as a repository admin; user namespaces for `bwrap`.
 
 ## 2. Graphyard and the repository
 
@@ -57,7 +57,7 @@ Needs a GitHub `origin` and an Actions `pull_request` test workflow. **Verify:**
 
 ## 3. Install the control plane
 
-`gy install --provider compose --repo OWNER/REPO --reviewer claude --plan`, then `--apply` ([install](install.md); `gy` is `node ~/graphyard/bin/graphyard.mjs`). `--apply` records the master connection `.graphyard/master.json`, its `0600` credential under the plan's `installDirectory`; `gy doctor` reads as it; `GRAPHYARD_TOKEN_FILE` overrides it. **Verify:** `control-plane` and `credentials-file` pass.
+`gy install --provider compose --repo OWNER/REPO --reviewer claude --plan`, then `--apply` ([install](install.md); `gy` is `node ~/graphyard/bin/graphyard.mjs`). `--apply` records the master connection `.graphyard/master.json`, its `0600` credential under the plan's `installDirectory`; `gy doctor` reads it; `GRAPHYARD_TOKEN_FILE` overrides it. **Verify:** `control-plane` and `credentials-file` pass.
 
 ### Control-plane merger
 
@@ -65,7 +65,7 @@ Needs a GitHub `origin` and an Actions `pull_request` test workflow. **Verify:**
 
 ## 4. Register the GitHub App
 
-Legacy merger only. `--apply` serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`. Branch protection: `--apply` protects the base; rerun once `Graphyard / merge` requires it; **Verify:** `branch-protection`.
+Legacy merger only. `--apply` serves `http://127.0.0.1:4311`; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`. Branch protection: `--apply` protects the base; rerun once `Graphyard / merge` requires it; **Verify:** `branch-protection`.
 
 ## 6. Onboard the checkout
 

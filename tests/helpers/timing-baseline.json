@@ -527,6 +527,7 @@
     "tests/loop-observation-waits-for-loop-recording.test.ts": 1500,
     "tests/loop-recorded-pass-closes.test.ts": 3000,
     "tests/loop-records-due-observation-reading.test.ts": 3000,
+    "tests/loop-code-root.test.ts": 1800,
     "tests/loop-restart-execstart.test.ts": 2000,
     "tests/loop-self-upgrade.test.ts": 1583,
     "tests/loop-silence-owner.test.ts": 1330,
