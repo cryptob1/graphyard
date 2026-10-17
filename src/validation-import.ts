@@ -235,8 +235,16 @@ export function sealRefusalLine(candidates: readonly { id: string; sealCheck?: O
   return { subject: 'installation', role: 'master' as const, approvedBy: null, human: false, humanOnly: null, text: `Promotion of candidate ${checked.id} was refused for seal authority at ${check.at}: ${check.secret} in the ${check.environment} environment authenticates as ${check.role}, and sealing a candidate's imports needs ${check.needed.join(' or ')}`,
     next: `replace ${check.secret} in the ${check.environment} environment with a fresh ${releaseFilingIdentity.id} (operator agent) token, as admin: ${store} (a revoked identity is reinstated by graphyard master setup --apply instead); the next candidate's seal check then passes` };
 }
-/** The loop cursor's promotion state as master status reads it: the refused seal check's item, or none. */
-export const sealRefusalAttention = (promotion?: { candidates?: Parameters<typeof sealRefusalLine>[0] } | null, repository?: string) => { const line = sealRefusalLine(promotion?.candidates ?? [], repository); return line ? [line] : []; };
+type SealChecked = Parameters<typeof sealRefusalLine>[0];
+/**
+ * The loop cursor's promotion state as master status reads it: the refused seal check's item, or none. The checks come from
+ * whichever read was later: the ledger's candidates, or the seal checks read on their own while the drive reads no ledger.
+ */
+export function sealRefusalAttention(promotion?: { candidates?: SealChecked; ledgerReadAt?: string | null; sealChecks?: SealChecked; sealChecksReadAt?: string | null } | null, repository?: string) {
+  const own = promotion?.sealChecksReadAt && promotion.sealChecks && !(Date.parse(promotion.ledgerReadAt ?? '') >= Date.parse(promotion.sealChecksReadAt));
+  const line = sealRefusalLine((own ? promotion.sealChecks : promotion?.candidates) ?? [], repository);
+  return line ? [line] : [];
+}
 
 /**
  * Read candidate `id`'s hold at `sha` for promotion and, when it is released, seal it in the same

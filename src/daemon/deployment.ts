@@ -468,6 +468,8 @@ export interface PromotionReads {
   dispatch: () => Promise<void>;
   /** The soak workflow's recent runs, newest first; absent where the repository has no soak workflow. */
   soaks?: () => Promise<SoakRun[]>;
+  /** GY-1882: the newest candidates' newest seal checks alone, read while the drive reads no ledger (off, or no local ports). */
+  sealChecks?: () => Promise<{ id: string; sealCheck?: CandidateSealCheck }[]>;
   /** GY-1526: the install's recorded merger; absent, or failing to read (an older server), the drive runs in github mode. */
   merger?: () => Promise<MergerMode>;
   /** GY-1526: the local port set control-plane mode runs candidates through (promotion-local.ts); null where the loop's environment names no UAT. */
@@ -529,11 +531,11 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
   const readLedger = async () => { const read = await reads.ledger(); return { ...read, candidates: read.candidates ?? [] }; };
   const carried = { ...(previous?.soaks ? { soaks: previous.soaks } : {}), ...(previous?.soaksReadAt ? { soaksReadAt: previous.soaksReadAt } : {}), inFlight: previous?.inFlight ?? false, runsReadAt: previous?.runsReadAt ?? null, dispatchedAt: previous?.dispatchedAt ?? null, lastDispatchAt: previous?.lastDispatchAt ?? null, cutSha: previous?.cutSha ?? null,
     ...(previous?.candidateAtDispatch !== undefined ? { candidateAtDispatch: previous.candidateAtDispatch } : {}) };
-  // Off reads nothing at all: no fetch, no GitHub request.
-  if (options.everyMinutes <= 0) return done({ checkedAt: at, ...kept, ...carried }, promotionOffReason, false);
+  // Off reads no ledger and asks GitHub nothing; workflow-run promotions' seal checks are still read once a ledger window (GY-1882).
+  if (options.everyMinutes <= 0) return done({ checkedAt: at, ...kept, ...carried, ...await sealRefresh(previous, reads, options.now, windows.ledgerMs) }, promotionOffReason, false);
   // GY-1526: under a control-plane merger the loop runs the candidate itself through its local ports; the workflow is neither read nor dispatched.
   if (await promotionMode(reads) === 'control-plane') {
-    if (!reads.local) return done({ checkedAt: at, ...kept, ...carried }, noLocalPortsReason, false);
+    if (!reads.local) return done({ checkedAt: at, ...kept, ...carried, ...await sealRefresh(previous, reads, options.now, windows.ledgerMs) }, noLocalPortsReason, false);
     return localPromotionCycle(previous, { ...reads, local: reads.local }, options);
   }
   let ledger = kept;
@@ -622,6 +624,12 @@ async function soakRefresh(carried: Pick<PromotionState, 'soaks' | 'soaksReadAt'
   if (!awaited && !soaks.some(run => runningStates.has(run.status))) return {};
   const soaksReadAt = new Date(now).toISOString();
   try { return { soaks: (await reads.soaks()).slice(0, promotionSoaksListed), soaksReadAt }; } catch { return { soaksReadAt }; }
+}
+/** GY-1882: the seal checks, re-read once `windowMs` while no ledger read carries them; a failed read keeps the last one. */
+async function sealRefresh(previous: PromotionState | null, reads: PromotionReads, now: number, windowMs: number): Promise<Pick<PromotionState, 'sealChecks' | 'sealChecksReadAt'>> {
+  const kept = { ...(previous?.sealChecks ? { sealChecks: previous.sealChecks } : {}), ...(previous?.sealChecksReadAt ? { sealChecksReadAt: previous.sealChecksReadAt } : {}) };
+  if (!reads.sealChecks || (previous?.sealChecksReadAt && now - Date.parse(previous.sealChecksReadAt) < windowMs)) return kept;
+  try { return { sealChecks: (await reads.sealChecks()).slice(0, promotionCandidatesListed), sealChecksReadAt: new Date(now).toISOString() }; } catch { return { ...kept, sealChecksReadAt: new Date(now).toISOString() }; }
 }
 /** How long after its cut a candidate's soak is looked for before the loop stops reading for it. */
 export const soakAwaitedMs = 90 * 60_000;
@@ -739,9 +747,7 @@ export function promotionReads(config: MasterConfig, root: string, run: ChildRun
         const sha = record.sha.toLowerCase();
         let queued: number | null = null;
         if (mainSha) try { queued = Number((await git('rev-list', '--first-parent', '--count', `${sha}..${mainSha}`)).trim()); } catch { queued = null; }
-        // GY-1882: this candidate's newest seal check, read under its own prefix (`rc-seal-check/ID.AT` sorts by check time), so another candidate's repeated checks never crowd it out.
-        const check = (await tagRecords(git, `refs/tags/rc-seal-check/${record.id}.*`, 1)).find(entry => entry?.id === record.id && typeof entry?.mayseal === 'boolean');
-        const sealCheck: CandidateSealCheck | undefined = check && { mayseal: check.mayseal, role: String(check.role), needed: Array.isArray(check.needed) ? check.needed.map(String) : [], at: String(check.at), secret: String(check.secret), environment: String(check.environment) };
+        const sealCheck = await sealCheckOf(git, record.id);
         candidates.push({ id: record.id, sha, cutAt: record.cutAt, prs: Number.isInteger(record.prs) ? record.prs : null, queued: Number.isInteger(queued) ? queued : null, soak: soaked.get(record.id) ?? null, ...(sealCheck ? { sealCheck } : {}) });
       }
       return { mainSha, promotedSha, promotedAt, behind, candidates };
@@ -751,10 +757,20 @@ export function promotionReads(config: MasterConfig, root: string, run: ChildRun
       return Array.isArray(listed) ? listed.filter(entry => typeof entry?.status === 'string' && typeof entry?.createdAt === 'string' && typeof entry?.event === 'string') : [];
     },
     dispatch: async () => { await run('gh', ['workflow', 'run', promotionWorkflow, '--repo', config.repository, '--ref', config.baseBranch, '-f', 'promote=true']); },
+    sealChecks: async () => {
+      await git('fetch', '--quiet', '--no-tags', 'origin', '+refs/tags/rc/*:refs/tags/rc/*', '+refs/tags/rc-seal-check/*:refs/tags/rc-seal-check/*');
+      const listed = (await tagRecords(git, 'refs/tags/rc/', promotionCandidatesListed)).filter(record => typeof record?.id === 'string');
+      return Promise.all(listed.map(async record => { const sealCheck = await sealCheckOf(git, record.id); return { id: record.id as string, ...(sealCheck ? { sealCheck } : {}) }; }));
+    },
     ...(soakExists ? { soaks: async () => soakRuns(JSON.parse(await run('gh', ['run', 'list', '--repo', config.repository, '--workflow', soakWorkflow, '--limit', '20', '--json', 'status,conclusion,createdAt,displayTitle,url']))) } : {}),
   };
 }
 
+/** GY-1882: candidate `id`'s newest seal check, read under its own prefix (`rc-seal-check/ID.AT` sorts by check time), so another candidate's repeated checks never crowd it out. */
+async function sealCheckOf(git: (...args: string[]) => string | Promise<string>, id: string): Promise<CandidateSealCheck | undefined> {
+  const check = (await tagRecords(git, `refs/tags/rc-seal-check/${id}.*`, 1)).find(entry => entry?.id === id && typeof entry?.mayseal === 'boolean');
+  return check && { mayseal: check.mayseal, role: String(check.role), needed: Array.isArray(check.needed) ? check.needed.map(String) : [], at: String(check.at), secret: String(check.secret), environment: String(check.environment) };
+}
 /** The newest `count` records under a ledger tag prefix, as the annotated tags' JSON messages; unparsable ones are skipped. */
 async function tagRecords(git: (...args: string[]) => string | Promise<string>, prefix: string, count: number): Promise<any[]> {
   let listed = '';

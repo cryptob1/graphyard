@@ -604,7 +604,7 @@
     "tests/pi-payload-validation-detail.test.ts": 686,
     "tests/promotion-hold-seal.test.ts": 2500,
     "tests/seal-authority-check.test.ts": 2500,
-    "tests/soak-seal-check.test.ts": 23000,
+    "tests/soak-seal-check.test.ts": 44000,
     "tests/pi-runner.test.ts": 1021,
     "tests/pi-worker-dispatch.test.ts": 53571,
     "tests/pipeline-doctor.test.ts": 1087,

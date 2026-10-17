@@ -19,7 +19,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * older candidate is re-checked now and then, as a retried promotion would. The uat credential holds
  * the release-filing identity, then a reader token, then a revoked one, and is repaired after each.
  * Every cycle the loop's real promotion step (promotionCycle over the real promotionReads ledger
- * read) records its state on the real cursor (writeDaemonState), and master status's attention is
+ * read, or with promotion off its seal-check read alone) records its state on the real cursor (writeDaemonState), and master status's attention is
  * read back from that cursor (readDaemonState, sealRefusalAttention).
  *
  * Invariants: master status raises exactly one item while the newest check across the listed
@@ -42,11 +42,24 @@ const credentialAt = (into: number): Principal | null =>
         : releaseFiler;
 const answerOf = (credential: Principal | null) => credential ? sealAuthority(credential) : { mayseal: false as const, role: 'unauthenticated', needed: ['admin', 'operator-agent'] };
 
-let scratch: string | undefined;
-after(async () => { if (scratch) await rm(scratch, { recursive: true, force: true }); });
+const scratches: string[] = [];
+after(async () => { for (const scratch of scratches) await rm(scratch, { recursive: true, force: true }); });
 
 test('soak:seal-check-attention — over three simulated days of cuts, repeated checks and credential refusal and repair, master status raises one item exactly while the newest check is refused, from bounded reads and a bounded cursor', async () => {
-  scratch = await temporaryDirectory('gy-1882-soak');
+  const { ledgerReads, sealReads } = await soak(defaultPromoteEveryMinutes);
+  assert.ok(ledgerReads >= days * 24 * hour / (30 * minute), `the ledger is read throughout (${ledgerReads})`);
+  assert.equal(sealReads, 0, 'the ledger carries the seal checks while the loop promotes');
+});
+
+test('soak:seal-check-attention — with loop promotion off (run.promoteEveryMinutes 0), the seal checks workflow-run promotions record still raise and clear the item, from bounded reads that never touch the ledger or GitHub', async () => {
+  const { ledgerReads, sealReads } = await soak(0);
+  assert.equal(ledgerReads, 0, 'promotion that is off reads no ledger');
+  assert.ok(sealReads >= days * 24 * hour / (30 * minute), `the seal checks are read throughout (${sealReads})`);
+});
+
+async function soak(everyMinutes: number) {
+  const scratch = await temporaryDirectory('gy-1882-soak');
+  scratches.push(scratch);
   const origin = join(scratch, 'origin.git'), work = join(scratch, 'work'), root = join(scratch, 'loop');
   const sh = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   sh(scratch, 'init', '-q', '--bare', '-b', 'main', origin);
@@ -76,7 +89,7 @@ test('soak:seal-check-attention — over three simulated days of cuts, repeated 
     checks.push({ id: candidate.id, at: now, mayseal: answer.mayseal });
   };
 
-  let gitCalls = 0, maxLedgerCalls = 0, ledgerReads = 0, expected = false;
+  let gitCalls = 0, maxLedgerCalls = 0, ledgerReads = 0, sealReads = 0, expected = false;
   const counted = (async (command: string, args: string[], options?: any) => { if (command === 'git') gitCalls++; return defaultChildRun(command, args, options); }) as typeof defaultChildRun;
   const real = promotionReads(config, root, counted, true, false)!;
   const reads: PromotionReads = {
@@ -86,8 +99,14 @@ test('soak:seal-check-attention — over three simulated days of cuts, repeated 
       expected = refusedNow();
       return read;
     },
-    runs: async () => [],
-    dispatch: async () => {},
+    sealChecks: async () => {
+      const before = gitCalls, read = await real.sealChecks!();
+      maxLedgerCalls = Math.max(maxLedgerCalls, gitCalls - before); sealReads++;
+      expected = refusedNow();
+      return read;
+    },
+    runs: async () => { assert.ok(everyMinutes > 0, 'promotion that is off asks GitHub nothing'); return []; },
+    dispatch: async () => { assert.ok(everyMinutes > 0, 'promotion that is off dispatches nothing'); },
   };
 
   let promotion: PromotionState | null = null, raised = 0, cleared = 0, olderSurfaced = false, maxCursorBytes = 0;
@@ -108,7 +127,7 @@ test('soak:seal-check-attention — over three simulated days of cuts, repeated 
     const older = candidates.at(-3);
     if (older && into >= 36 * hour && into < 44 * hour && into % (30 * minute) === 0) check(older, now + 1);
 
-    promotion = (await promotionCycle(promotion, reads, { now: now + 2, everyMinutes: defaultPromoteEveryMinutes, intervalMs })).state;
+    promotion = (await promotionCycle(promotion, reads, { now: now + 2, everyMinutes, intervalMs })).state;
     await writeDaemonState(config, { ...emptyDaemonState(config), promotion });
     const cursor = await readDaemonState(root, config);
     const items = sealRefusalAttention(cursor.promotion, config.repository);
@@ -119,7 +138,7 @@ test('soak:seal-check-attention — over three simulated days of cuts, repeated 
     if (!items.length && previous) cleared++;
     if (items.length && older && into >= 40 * hour && into < 41 * hour && items[0].text.includes(`candidate ${older.id} `)) olderSurfaced = true;
     previous = items.length > 0;
-    if ((cursor.promotion?.candidates?.length ?? 0) > promotionCandidatesListed) violations.push(`${at}: the cursor lists ${cursor.promotion!.candidates!.length} candidates`);
+    if (Math.max(cursor.promotion?.candidates?.length ?? 0, cursor.promotion?.sealChecks?.length ?? 0) > promotionCandidatesListed) violations.push(`${at}: the cursor lists more than ${promotionCandidatesListed} candidates`);
     maxCursorBytes = Math.max(maxCursorBytes, JSON.stringify(cursor.promotion).length);
   }
 
@@ -128,7 +147,7 @@ test('soak:seal-check-attention — over three simulated days of cuts, repeated 
   assert.ok(olderSurfaced, 'an older candidate refused after a newer one passed dozens of times is the item master status raises');
   assert.equal(raised, 3, 'one item for each refusal: the reader token, the retried older candidate and the revoked token');
   assert.equal(cleared, 3, 'and each clears once a later check passes');
-  assert.ok(ledgerReads >= days * 24 * hour / (30 * minute), `the ledger is read throughout (${ledgerReads})`);
-  assert.ok(maxLedgerCalls <= 6 + 2 * promotionCandidatesListed, `a ledger read makes a bounded number of git calls whatever the checks (${maxLedgerCalls})`);
+  assert.ok(maxLedgerCalls <= 6 + 2 * promotionCandidatesListed, `a ledger or seal-check read makes a bounded number of git calls whatever the checks (${maxLedgerCalls})`);
   assert.ok(maxCursorBytes < 8_000, `the cursor's promotion state stays bounded (${maxCursorBytes} bytes)`);
-});
+  return { ledgerReads, sealReads };
+}
