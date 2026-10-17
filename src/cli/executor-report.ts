@@ -116,8 +116,7 @@ export async function executorFleet(root: string, masterApi: (path: string) => P
   // The loop on this host, read from its cursor's live lock when the caller did not name it.
   const loop: ReportedLoopMerger | null = resolvedLoop !== undefined
     ? (resolvedLoop ? { live: (resolvedLoop as any).live !== false, name: resolvedLoop.name } : null)
-    // GY-1927: named from the plane's recorded automatic-merging setting, which alone holds merges.
-    : await detectLoopMerger(root, { autoMerge: await masterApi('auto-merge').then(answer => typeof answer?.autoMerge === 'boolean' ? answer.autoMerge : true, () => undefined) }).catch(() => null);
+    : await detectLoopMerger(root).catch(() => null);
   const supervision = await executorSupervisionStatus(root, run);
   let presence: ExecutorFleet['presence'];
   try {

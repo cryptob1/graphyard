@@ -21,7 +21,6 @@ import { shippingPulseRoutes } from './routes/shipping-pulse.js';
 import { flowAnalyticsRoutes } from './routes/flow-analytics.js';
 import { attributionRoutes } from './routes/attribution.js';
 import { statusRoutes } from './routes/status.js';
-import { mergeSettingsRoutes } from './routes/merge-settings.js';
 import { actionRoutes } from './routes/actions.js';
 import { workRoutes } from './routes/work.js';
 import { goalRoutes } from './routes/goals.js';
@@ -41,7 +40,7 @@ export const publicRoutes: readonly RouteModule[] = [healthRoutes, githubRoutes,
 export const apiRoutes: readonly RouteModule[] = registerApiRoutes([
   operatorAgentRoutes, proofGrantRoutes, goalRoutes,
   { name: 'operator-agent-scope', routes: [operatorAgentRouteGuard] },
-  agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, shippingPulseRoutes, flowAnalyticsRoutes, attributionRoutes, scenarioRoutes, interventionRoutes, actionRoutes, statusRoutes, mergeSettingsRoutes, workRoutes,
+  agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, shippingPulseRoutes, flowAnalyticsRoutes, attributionRoutes, scenarioRoutes, interventionRoutes, actionRoutes, statusRoutes, workRoutes,
 ]);
 
 async function body(req: IncomingMessage, limit = 1_000_000) {

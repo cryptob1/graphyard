@@ -597,8 +597,6 @@ export interface GitHubMergeQueueState {
   requestedAt?: string | null;
 }
 declare module './model/work.js' { interface Observation { githubQueue?: GitHubMergeQueueState | null } }
-/** GY-1927: the automatic-merging hold over the item's candidate, as the coordination view serves it (merger-mode.ts `mergeHolds`); absent when nothing holds it. */
-declare module './model/work.js' { interface Work { mergeHold?: string | null } }
 
 /** A coordinator's request that GitHub merge exactly this candidate, as `merge-acquire` recorded it before GY-1235. */
 export interface MergeEnqueueRequest { sha: string; baseSha: string; policyRevision: number; requestedBy: string; at: string }
