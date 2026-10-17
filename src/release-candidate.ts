@@ -5,6 +5,11 @@ import { createServer } from 'node:http';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, join, resolve, sep } from 'node:path';
 import type { Manifest } from './delivery.js';
+import {
+  currentDeployment, deploymentOutcomeTagPrefix, deploymentsIn, deploymentTagPrefix, fencedDeploy, fencedDeployAsync, outcomeOf,
+  type DeploymentOutcome, type DeploymentRecord, type DeployFence,
+} from './release-digests.js';
+export type { DeploymentOutcome, DeploymentRecord, DeployFence } from './release-digests.js';
 import type { ReleaseContract } from './e2e/case.js';
 
 /**
@@ -32,7 +37,8 @@ import type { ReleaseContract } from './e2e/case.js';
  * resolution, build inputs), and production verification compares each instance's running digest
  * with the promoted digest (src/production-delivery.ts). A deployer that cannot deploy by digest
  * (a static site deployed by commit, say) keeps sha promotion, and `release status` reports which
- * way each candidate promotes.
+ * way each candidate was promoted. Every deploy, either way, runs under its environment's fenced
+ * deployment generation (src/release-digests.ts), which also records what each one deployed.
  */
 
 export const uatBranch = 'release/uat';
@@ -40,8 +46,6 @@ export const productionBranch = 'release/production';
 export const candidateTagPrefix = 'rc/';
 export const uatTagPrefix = 'rc-uat/';
 export const productionTagPrefix = 'rc-production/';
-/** GY-1844: one digest deployment to UAT, recorded because it moves no branch: the newest record names the candidate whose validation UAT may still be serving. */
-export const uatDeployTagPrefix = 'rc-uat-deploy/';
 /** GY-1513: the advisory soak's verdict, recorded on the candidate's SHA by release-candidate-soak.yml once its run concludes. */
 export const soakTagPrefix = 'rc-soak/';
 /** The request id that makes filing a failed candidate's follow-up idempotent across retries. */
@@ -178,9 +182,8 @@ export interface UatRecord {
 }
 /** An applied evidence decision (GY-1378): one flaky case of one run accepted at one exact SHA. */
 export interface FlakyAcceptance { case: string; runId: string; sha: string; decision: string }
-export interface ProductionRecord { id: string; sha: string; at: string; /** GY-1844: the artifact digests promotion deployed; absent on a sha promotion. */ digests?: Manifest }
-/** GY-1844: a digest deployment to UAT, the digest analogue of the branch move: what UAT was last put to serve when nothing was pushed. */
-export interface UatDeployRecord { id: string; sha: string; at: string; digests: Manifest }
+/** A candidate's first promotion; what production runs since, and how, is its deployment generations (GY-1844). */
+export interface ProductionRecord { id: string; sha: string; at: string }
 /**
  * GY-1513: the advisory soak and timing-budget suites' verdict for a candidate (`rc-soak/ID`): the
  * result of the soak run that soaked its exact SHA, that run's URL and the name of the timing report
@@ -417,20 +420,22 @@ async function readRecordsAsync<T>(git: AsyncGit, prefix: string): Promise<T[]> 
   });
 }
 
-export interface Ledger { candidates: ReleaseCandidate[]; uat: UatRecord[]; uatDeploys: UatDeployRecord[]; production: ProductionRecord[]; soak: SoakRecord[] }
+export interface Ledger { candidates: ReleaseCandidate[]; uat: UatRecord[]; production: ProductionRecord[]; soak: SoakRecord[]; deployments: DeploymentRecord[]; deployed: DeploymentOutcome[] }
 export const readLedger = (git: Git): Ledger => ({
   candidates: readRecords<ReleaseCandidate>(git, candidateTagPrefix),
   uat: readRecords<UatRecord>(git, uatTagPrefix),
-  uatDeploys: readRecords<UatDeployRecord>(git, uatDeployTagPrefix),
   production: readRecords<ProductionRecord>(git, productionTagPrefix),
   soak: readRecords<SoakRecord>(git, soakTagPrefix),
+  deployments: readRecords<DeploymentRecord>(git, deploymentTagPrefix),
+  deployed: readRecords<DeploymentOutcome>(git, deploymentOutcomeTagPrefix),
 });
 export const readLedgerAsync = async (git: AsyncGit): Promise<Ledger> => ({
   candidates: await readRecordsAsync<ReleaseCandidate>(git, candidateTagPrefix),
   uat: await readRecordsAsync<UatRecord>(git, uatTagPrefix),
-  uatDeploys: await readRecordsAsync<UatDeployRecord>(git, uatDeployTagPrefix),
   production: await readRecordsAsync<ProductionRecord>(git, productionTagPrefix),
   soak: await readRecordsAsync<SoakRecord>(git, soakTagPrefix),
+  deployments: await readRecordsAsync<DeploymentRecord>(git, deploymentTagPrefix),
+  deployed: await readRecordsAsync<DeploymentOutcome>(git, deploymentOutcomeTagPrefix),
 });
 export const findCandidate = (ledger: Ledger, id: string) => {
   const candidate = id === 'latest' ? ledger.candidates[0] : ledger.candidates.find(entry => entry.id === id);
@@ -774,15 +779,25 @@ export function uatValidationCeilingMs(workflow: string, job = 'uat') {
  * recorded-digests deployment of a digest-capable one (GY-1844) — given the commit the branch holds
  * now. UAT serving another candidate that has no verdict yet, cut within the validation window, is
  * a validation in progress: replacing it would fail that validation and file a spurious follow-up,
- * so the deploy is refused. A digest deployment moves no branch and records what it serves as
- * `rc-uat-deploy/ID/AT` instead, so the latest-deployed such record is judged the same way — whichever way the
- * next deploy serves UAT. Otherwise the branch move is leased on the observed tip, so a concurrent
- * deploy that moved the branch in between is refused rather than overwritten.
+ * so the deploy is refused. A digest deployment moves no branch, so when UAT's current deployment
+ * generation (src/release-digests.ts) is a digest one, the candidate it names is judged the same
+ * way. Otherwise the branch move is leased on the observed tip, so a concurrent deploy that moved
+ * the branch in between is refused rather than overwritten.
  */
-/** The digest deploy UAT serves now: the record deployed last, by its time — a redeploy of an older candidate is newer than a later candidate's deploy. */
-const latestUatDeploy = (ledger: Ledger) => ledger.uatDeploys.reduce<UatDeployRecord | undefined>((latest, record) => !latest || Date.parse(record.at) > Date.parse(latest.at) ? record : latest, undefined);
-/** One record per digest deploy, so a redeploy of the same candidate records again instead of colliding with its earlier tag (a tag never moves). */
-const uatDeployTag = (id: string, at: Date) => `${uatDeployTagPrefix}${id}/${at.toISOString().replace(/[-:.]/g, '')}`;
+export function assessUatDeploy(candidate: ReleaseCandidate, ledger: Ledger, uatTip: string | null, now: Date) {
+  const inFlight = (serving: readonly ReleaseCandidate[]) => !serving.length || serving.some(entry => ledger.uat.some(record => record.id === entry.id))
+    ? null : serving.find(entry => now.getTime() - Date.parse(entry.cutAt) < uatValidationWindowMs) ?? null;
+  const deadline = (pending: ReleaseCandidate) => new Date(Date.parse(pending.cutAt) + uatValidationWindowMs).toISOString();
+  const digest = currentDeployment(ledger, 'uat');
+  if (digest?.mode === 'digest') {
+    const digestPending = digest.sha !== candidate.sha ? inFlight(ledger.candidates.filter(entry => entry.id === digest.id)) : null;
+    if (digestPending) return { deploy: false as const, refusal: `UAT serves candidate ${digestPending.id}'s recorded digests (generation ${digest.generation}, deployed ${digest.at}), whose validation has no verdict yet; deploying now would fail it. Wait for its verdict, or until ${deadline(digestPending)} if that validation was abandoned` };
+    return { deploy: true as const, expected: uatTip };
+  }
+  const branchPending = uatTip && uatTip !== candidate.sha ? inFlight(ledger.candidates.filter(entry => entry.sha === uatTip)) : null;
+  if (branchPending) return { deploy: false as const, refusal: `UAT serves candidate ${branchPending.id} (${branchPending.sha}), whose validation has no verdict yet; moving release/uat now would fail it. Wait for its verdict, or until ${deadline(branchPending)} if that validation was abandoned` };
+  return { deploy: true as const, expected: uatTip };
+}
 
 /**
  * GY-1844: a digest promotion deploys the candidate's recorded build, so it needs the UAT record to
@@ -793,18 +808,11 @@ export function digestPromotionRefusal(candidate: ReleaseCandidate, uat: UatReco
   if (!candidate.build?.artifacts?.length || (uat?.digests?.length && sameDigests(uat.digests, candidate.build.artifacts))) return null;
   return `Candidate ${candidate.id}'s UAT record names no digests, so it never showed that its recorded build was tested; deploy the recorded digests to UAT and validate them before promoting by digest`;
 }
-
-export function assessUatDeploy(candidate: ReleaseCandidate, ledger: Ledger, uatTip: string | null, now: Date) {
-  const inFlight = (serving: readonly ReleaseCandidate[]) => !serving.length || serving.some(entry => ledger.uat.some(record => record.id === entry.id))
-    ? null : serving.find(entry => now.getTime() - Date.parse(entry.cutAt) < uatValidationWindowMs) ?? null;
-  const deadline = (pending: ReleaseCandidate) => new Date(Date.parse(pending.cutAt) + uatValidationWindowMs).toISOString();
-  const branchPending = uatTip && uatTip !== candidate.sha ? inFlight(ledger.candidates.filter(entry => entry.sha === uatTip)) : null;
-  if (branchPending) return { deploy: false as const, refusal: `UAT serves candidate ${branchPending.id} (${branchPending.sha}), whose validation has no verdict yet; moving release/uat now would fail it. Wait for its verdict, or until ${deadline(branchPending)} if that validation was abandoned` };
-  const digest = latestUatDeploy(ledger);
-  const digestPending = digest && digest.sha !== candidate.sha ? inFlight(ledger.candidates.filter(entry => entry.sha === digest.sha)) : null;
-  if (digestPending) return { deploy: false as const, refusal: `UAT serves candidate ${digestPending.id}'s recorded digests (deployed ${digest!.at}), whose validation has no verdict yet; deploying now would fail it. Wait for its verdict, or until ${deadline(digestPending)} if that validation was abandoned` };
-  return { deploy: true as const, expected: uatTip };
-}
+/** GY-1844: the digests UAT serves for this candidate — its current generation, when that deployed this candidate by digest — which its validation tested. */
+export const uatServedDigests = (ledger: Ledger, candidate: ReleaseCandidate) => {
+  const current = currentDeployment(ledger, 'uat');
+  return current?.mode === 'digest' && current.id === candidate.id && current.digests?.length ? [...current.digests] : undefined;
+};
 
 /**
  * The branch's tip on the remote, observed after `syncLedger`, so the two are not one atomic read:
@@ -815,37 +823,43 @@ const remoteTip = (git: Git, branch: string) => git(['ls-remote', 'origin', `ref
 const remoteTipAsync = async (git: AsyncGit, branch: string) => (await git(['ls-remote', 'origin', `refs/heads/${branch}`])).split(/\s/)[0] || null;
 
 /**
- * The position a sha promotion leases `release/production` on: the last promotion that moved the
- * branch. A digest promotion (GY-1844) records itself and deploys the digests but moves no branch,
- * so the newest record overall can name a SHA the branch never held — leasing on it would reject
- * every later sha promotion forever. Past digest records the branch still stands where the last
- * sha promotion left it; with no sha promotion ever recorded, the branch's observed tip (absent
- * when the branch is) is the honest expectation.
+ * The position a sha promotion leases `release/production` on: where the last branch move left it.
+ * A digest generation (GY-1844) moves no branch, so its SHA is never the branch's: the newest sha
+ * generation not failed is, and before any sha generation was recorded, the newest production
+ * record no digest generation names. Undefined when neither exists: the observed tip is leased.
  */
-const shaLeaseTip = (git: Git, ledger: Ledger) => ledger.production.find(record => !record.digests?.length)?.sha ?? remoteTip(git, productionBranch);
-const shaLeaseTipAsync = async (git: AsyncGit, ledger: Ledger) => ledger.production.find(record => !record.digests?.length)?.sha ?? await remoteTipAsync(git, productionBranch);
+const shaLeasePosition = (ledger: Ledger) => {
+  const production = deploymentsIn(ledger, 'production').filter(record => outcomeOf(ledger, record)?.result !== 'failed');
+  const moved = production.find(record => record.mode === 'sha');
+  if (moved) return moved.sha;
+  const byDigest = new Set(production.filter(record => record.mode === 'digest').map(record => record.id));
+  return ledger.production.find(record => !byDigest.has(record.id))?.sha;
+};
 
 /**
- * GY-1844: a deployer that can put exact artifact digests into an environment without building.
- * Given one and a candidate with a recorded build, deploying puts the recorded digests into the
- * environment and moves nothing; a caller without one keeps sha promotion.
+ * GY-1844: a deployer that can put exact artifact digests into an environment without building,
+ * under the deployment generation it is handed (a provider keeping the highest one it applied
+ * refuses a stale deploy). Given one and a candidate with a recorded build, deploying puts the
+ * recorded digests into the environment and moves nothing; a caller without one keeps sha promotion.
  */
-export type DigestDeploy = (digests: Manifest, sha: string) => void;
+export type DigestDeploy = (digests: Manifest, sha: string, fence: DeployFence) => void;
 /** Async flavour for the loop's local ports. */
-export type AsyncDigestDeploy = (digests: Manifest, sha: string) => void | Promise<void>;
+export type AsyncDigestDeploy = (digests: Manifest, sha: string, fence: DeployFence) => void | Promise<void>;
 /** GY-1844: builds a candidate's artifacts once, at its exact SHA, and returns the build registration recorded on the candidate; null records none. */
 export type BuildResolver = (cut: { id: string; sha: string; items: readonly CandidateItem[] }) => CandidateBuild | null | undefined;
 /** Async flavour for the loop's local ports. */
 export type AsyncBuildResolver = (cut: { id: string; sha: string; items: readonly CandidateItem[] }) => CandidateBuild | null | undefined | Promise<CandidateBuild | null | undefined>;
 
+const intentFor = (environment: 'uat' | 'production', candidate: ReleaseCandidate, now: Date, digests: Manifest | undefined) =>
+  ({ environment, id: candidate.id, sha: candidate.sha, at: now.toISOString(), mode: digests ? 'digest' as const : 'sha' as const, ...(digests ? { digests } : {}) });
+
 /**
  * Deploy a candidate to UAT: `release/uat` moves to its exact SHA, unless another candidate's
  * validation is still running there, and only from the tip it was observed at. A candidate with a
  * recorded build and a `deployDigests` port (GY-1844) deploys the recorded digests instead —
- * `release/uat` is not moved — under the same in-flight guard, and records what it serves as
- * `rc-uat-deploy/ID/AT` (one per deploy, so a redeploy records again), the trace a branch move would otherwise leave, so later deploys see the
- * validation in flight; it reports `mode: 'digest'` with the digests deployed, while the branch
- * move reports no mode (sha promotion).
+ * `release/uat` is not moved — under the same in-flight guard. Either way the deploy runs under
+ * UAT's next deployment generation (src/release-digests.ts): a concurrent deploy that took it first
+ * refuses this one before any effect. A digest deploy reports `mode: 'digest'` with the digests.
  */
 export function deployToUat(git: Git, id: string, base: string, now = new Date(), deployDigests?: DigestDeploy) {
   syncLedger(git, base);
@@ -853,14 +867,10 @@ export function deployToUat(git: Git, id: string, base: string, now = new Date()
   const candidate = findCandidate(ledger, id);
   const assessment = assessUatDeploy(candidate, ledger, remoteTip(git, uatBranch), now);
   if (!assessment.deploy) throw new Error(assessment.refusal);
-  if (deployDigests && candidate.build?.artifacts?.length) {
-    const digests = [...candidate.build.artifacts];
-    deployDigests(digests, candidate.sha);
-    writeRecord(git, uatDeployTag(candidate.id, now), candidate.sha, { id: candidate.id, sha: candidate.sha, at: now.toISOString(), digests } satisfies UatDeployRecord, true);
-    return { candidate: candidate.id, sha: candidate.sha, branch: uatBranch, mode: 'digest' as const, digests };
-  }
-  deployBranch(git, uatBranch, candidate.sha, assessment.expected);
-  return { candidate: candidate.id, sha: candidate.sha, branch: uatBranch };
+  const digests = deployDigests && candidate.build?.artifacts?.length ? [...candidate.build.artifacts] : undefined;
+  fencedDeploy(ledger, intentFor('uat', candidate, now, digests), now, (tag, sha, record) => writeRecord(git, tag, sha, record, true),
+    fence => digests ? deployDigests!(digests, candidate.sha, fence) : deployBranch(git, uatBranch, candidate.sha, assessment.expected));
+  return { candidate: candidate.id, sha: candidate.sha, branch: uatBranch, ...(digests ? { mode: 'digest' as const, digests } : {}) };
 }
 /** Async UAT deploy for the loop's local ports (GY-1526). */
 export async function deployToUatAsync(git: AsyncGit, id: string, base: string, now = new Date(), deployDigests?: AsyncDigestDeploy) {
@@ -869,14 +879,10 @@ export async function deployToUatAsync(git: AsyncGit, id: string, base: string, 
   const candidate = findCandidate(ledger, id);
   const assessment = assessUatDeploy(candidate, ledger, await remoteTipAsync(git, uatBranch), now);
   if (!assessment.deploy) throw new Error(assessment.refusal);
-  if (deployDigests && candidate.build?.artifacts?.length) {
-    const digests = [...candidate.build.artifacts];
-    await deployDigests(digests, candidate.sha);
-    await writeRecordAsync(git, uatDeployTag(candidate.id, now), candidate.sha, { id: candidate.id, sha: candidate.sha, at: now.toISOString(), digests } satisfies UatDeployRecord, true);
-    return { candidate: candidate.id, sha: candidate.sha, branch: uatBranch, mode: 'digest' as const, digests };
-  }
-  await deployBranchAsync(git, uatBranch, candidate.sha, assessment.expected);
-  return { candidate: candidate.id, sha: candidate.sha, branch: uatBranch };
+  const digests = deployDigests && candidate.build?.artifacts?.length ? [...candidate.build.artifacts] : undefined;
+  await fencedDeployAsync(ledger, intentFor('uat', candidate, now, digests), now, (tag, sha, record) => writeRecordAsync(git, tag, sha, record, true),
+    async fence => digests ? await deployDigests!(digests, candidate.sha, fence) : await deployBranchAsync(git, uatBranch, candidate.sha, assessment.expected));
+  return { candidate: candidate.id, sha: candidate.sha, branch: uatBranch, ...(digests ? { mode: 'digest' as const, digests } : {}) };
 }
 
 /**
@@ -901,7 +907,7 @@ export async function validateAndRecord(sourceGit: AnyGit, id: string, url: stri
   const candidate = findCandidate(ledger, id);
   const existing = ledger.uat.find(record => record.id === candidate.id);
   if (existing) throw new Error(`Candidate ${candidate.id} was already validated on UAT (${existing.result} at ${existing.at}); cut a new candidate to validate again`);
-  const record = await validate(candidate, url, suites, options);
+  const record = await validate(candidate, url, suites, { ...options, digests: options.digests ?? uatServedDigests(ledger, candidate) });
   let filingError: string | null = null;
   const holds = options.holds ? await options.holds(candidate, record) : null;
   if (holds) { Object.assign(record, { e2e: holds.e2e, holds: holds.holds }); filingError = holds.filingError; }
@@ -918,46 +924,43 @@ export async function validateAndRecord(sourceGit: AnyGit, id: string, url: stri
  * Promote a candidate: `release/production` moves to its exact SHA, only after UAT passed on it.
  * A candidate with a recorded build and a `deployDigests` port (GY-1844) is promoted by digest
  * instead: the port deploys exactly the recorded build artifacts — the digests UAT tested, refused
- * unless the UAT record names them — and nothing triggers a rebuild; the production record and the result name them with `mode:
- * 'digest'`. Without the port — an adapter that cannot deploy by digest — the branch move keeps
- * sha promotion and the result names no mode.
+ * unless the UAT record names them — and nothing triggers a rebuild; the result names them with
+ * `mode: 'digest'`. Without the port — an adapter that cannot deploy by digest — the branch move
+ * keeps sha promotion and the result names no mode. Either way the deploy runs under production's
+ * next deployment generation, published before the effect with its actual mode and digests, so
+ * every deployment — a retry of the same candidate by another mode included — is recorded as what
+ * it was, and a concurrent promotion that took the generation first refuses this one.
  */
 export function promote(git: Git, id: string, options: { base: string; push: boolean; now: Date; acceptances?: readonly FlakyAcceptance[]; deployDigests?: DigestDeploy }) {
   syncLedger(git, options.base);
   const ledger = readLedger(git);
   const candidate = findCandidate(ledger, id);
-  const assessment = assessPromotion(candidate, ledger.uat.find(record => record.id === candidate.id) ?? null, ledger.production[0] ?? null, options.acceptances);
+  const uat = ledger.uat.find(record => record.id === candidate.id) ?? null;
+  const assessment = assessPromotion(candidate, uat, ledger.production[0] ?? null, options.acceptances);
   if (!assessment.promotable) return { promoted: false as const, candidate: candidate.id, refusals: assessment.refusals };
-  if (options.deployDigests && candidate.build?.artifacts?.length) {
-    const refusal = digestPromotionRefusal(candidate, ledger.uat.find(record => record.id === candidate.id) ?? null);
-    if (refusal) return { promoted: false as const, candidate: candidate.id, refusals: [refusal] };
-    const digests = [...candidate.build.artifacts];
-    options.deployDigests(digests, candidate.sha);
-    if (!ledger.production.some(record => record.id === candidate.id)) writeRecord(git, `${productionTagPrefix}${candidate.id}`, candidate.sha, { id: candidate.id, sha: candidate.sha, at: options.now.toISOString(), digests } satisfies ProductionRecord, options.push);
-    return { promoted: true as const, candidate: candidate.id, sha: candidate.sha, branch: productionBranch, mode: 'digest' as const, digests };
-  }
-  deployBranch(git, productionBranch, candidate.sha, shaLeaseTip(git, ledger));
+  const digests = options.deployDigests && candidate.build?.artifacts?.length ? [...candidate.build.artifacts] : undefined;
+  const refusal = digests ? digestPromotionRefusal(candidate, uat) : null;
+  if (refusal) return { promoted: false as const, candidate: candidate.id, refusals: [refusal] };
+  fencedDeploy(ledger, intentFor('production', candidate, options.now, digests), options.now, (tag, sha, record) => writeRecord(git, tag, sha, record, options.push),
+    fence => digests ? options.deployDigests!(digests, candidate.sha, fence) : deployBranch(git, productionBranch, candidate.sha, shaLeasePosition(ledger) ?? remoteTip(git, productionBranch)));
   if (!ledger.production.some(record => record.id === candidate.id)) writeRecord(git, `${productionTagPrefix}${candidate.id}`, candidate.sha, { id: candidate.id, sha: candidate.sha, at: options.now.toISOString() } satisfies ProductionRecord, options.push);
-  return { promoted: true as const, candidate: candidate.id, sha: candidate.sha, branch: productionBranch };
+  return { promoted: true as const, candidate: candidate.id, sha: candidate.sha, branch: productionBranch, ...(digests ? { mode: 'digest' as const, digests } : {}) };
 }
 /** Async promote for the loop's local ports (GY-1526). */
 export async function promoteAsync(git: AsyncGit, id: string, options: { base: string; push: boolean; now: Date; acceptances?: readonly FlakyAcceptance[]; deployDigests?: AsyncDigestDeploy }) {
   await syncLedgerAsync(git, options.base);
   const ledger = await readLedgerAsync(git);
   const candidate = findCandidate(ledger, id);
-  const assessment = assessPromotion(candidate, ledger.uat.find(record => record.id === candidate.id) ?? null, ledger.production[0] ?? null, options.acceptances);
+  const uat = ledger.uat.find(record => record.id === candidate.id) ?? null;
+  const assessment = assessPromotion(candidate, uat, ledger.production[0] ?? null, options.acceptances);
   if (!assessment.promotable) return { promoted: false as const, candidate: candidate.id, refusals: assessment.refusals };
-  if (options.deployDigests && candidate.build?.artifacts?.length) {
-    const refusal = digestPromotionRefusal(candidate, ledger.uat.find(record => record.id === candidate.id) ?? null);
-    if (refusal) return { promoted: false as const, candidate: candidate.id, refusals: [refusal] };
-    const digests = [...candidate.build.artifacts];
-    await options.deployDigests(digests, candidate.sha);
-    if (!ledger.production.some(record => record.id === candidate.id)) await writeRecordAsync(git, `${productionTagPrefix}${candidate.id}`, candidate.sha, { id: candidate.id, sha: candidate.sha, at: options.now.toISOString(), digests } satisfies ProductionRecord, options.push);
-    return { promoted: true as const, candidate: candidate.id, sha: candidate.sha, branch: productionBranch, mode: 'digest' as const, digests };
-  }
-  await deployBranchAsync(git, productionBranch, candidate.sha, await shaLeaseTipAsync(git, ledger));
+  const digests = options.deployDigests && candidate.build?.artifacts?.length ? [...candidate.build.artifacts] : undefined;
+  const refusal = digests ? digestPromotionRefusal(candidate, uat) : null;
+  if (refusal) return { promoted: false as const, candidate: candidate.id, refusals: [refusal] };
+  await fencedDeployAsync(ledger, intentFor('production', candidate, options.now, digests), options.now, (tag, sha, record) => writeRecordAsync(git, tag, sha, record, options.push),
+    async fence => digests ? await options.deployDigests!(digests, candidate.sha, fence) : await deployBranchAsync(git, productionBranch, candidate.sha, shaLeasePosition(ledger) ?? await remoteTipAsync(git, productionBranch)));
   if (!ledger.production.some(record => record.id === candidate.id)) await writeRecordAsync(git, `${productionTagPrefix}${candidate.id}`, candidate.sha, { id: candidate.id, sha: candidate.sha, at: options.now.toISOString() } satisfies ProductionRecord, options.push);
-  return { promoted: true as const, candidate: candidate.id, sha: candidate.sha, branch: productionBranch };
+  return { promoted: true as const, candidate: candidate.id, sha: candidate.sha, branch: productionBranch, ...(digests ? { mode: 'digest' as const, digests } : {}) };
 }
 
 /**
@@ -983,9 +986,11 @@ export function recordSoak(git: Git, id: string, input: { sha: string; result: S
 export const ledgerStatus = (ledger: Ledger) => ledger.candidates.map(candidate => {
   const uat = ledger.uat.find(record => record.id === candidate.id) ?? null, soak = ledger.soak.find(record => record.id === candidate.id) ?? null;
   const production = ledger.production.find(record => record.id === candidate.id) ?? null;
+  // GY-1844: how the candidate was actually put into production — its newest production generation not failed; a record older than generations moved the branch.
+  const deployed = deploymentsIn(ledger, 'production').find(record => record.id === candidate.id && outcomeOf(ledger, record)?.result !== 'failed') ?? null;
   return { id: candidate.id, sha: candidate.sha, cutAt: candidate.cutAt, trigger: candidate.trigger, prs: candidate.prs ?? null, queued: candidate.queued ?? null, items: candidate.items.map(item => item.key),
-    // GY-1844: which way the candidate promotes, and the digests it carries, reported for the master status surface.
-    promotion: candidate.build?.artifacts?.length ? 'digest' : 'sha',
+    // GY-1844: which way the candidate was promoted (null until it is), and the digests its build carries, reported for the master status surface.
+    promotion: deployed?.mode ?? (production ? 'sha' : null),
     build: candidate.build ? { digests: candidate.build.artifacts, provenanceUrl: candidate.build.provenanceUrl } : null,
     ...(candidate.pendingOutcomes?.length ? { pendingOutcomes: candidate.pendingOutcomes } : {}),
     uat: uat ? { result: uat.result, at: uat.at, failing: failingSuites(uat).map(suite => suite.name), followUp: uat.followUp,
@@ -993,7 +998,7 @@ export const ledgerStatus = (ledger: Ledger) => ledger.candidates.map(candidate 
       ...(uat.e2e ? { blocking: uat.e2e.blocking, unrun: uat.e2e.cases.filter(entry => entry.verdict === 'unrun').map(entry => entry.case), pending: uat.e2e.cases.filter(entry => entry.pending).map(entry => entry.case) } : {}), ...(uat.holds?.length ? { holds: uat.holds } : {}) } : null,
     soak: soak ? { result: soak.result, at: soak.at, run: soak.run, report: soak.report } : null,
     production: production?.at ?? null,
-    ...(production?.digests?.length ? { productionDigests: production.digests } : {}) };
+    ...(deployed?.mode === 'digest' && deployed.digests?.length ? { productionDigests: deployed.digests } : {}) };
 });
 
 // ——— GY-1535: a managed repository's own E2E cases on every candidate. ———
