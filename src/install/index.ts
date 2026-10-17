@@ -211,6 +211,19 @@ export function installRequestFromArgs(args: string[]) {
   return { values, request };
 }
 
+/**
+ * The `install` flags that redeploy a recorded installation's server at `image` (GY-1962, `graphyard
+ * upgrade`): its repository, provider or target, base branch, service, domain and host, so the
+ * existing adapter path redeploys what the record names and nothing else.
+ */
+export function redeployArguments(record: InstallRecord, image: string) {
+  const host = record.deployment;
+  return ['--repo', record.repository, ...(record.selfContained ? ['--target', record.provider === 'hetzner' ? 'hetzner' : 'host'] : ['--provider', record.provider]),
+    '--base-branch', record.baseBranch, ...(record.service ? ['--server-name', record.service] : []), ...(record.domain ? ['--domain', record.domain] : []),
+    ...(host?.sshHost ? ['--ssh-host', host.sshHost, '--ssh-user', host.sshUser] : []), ...(host?.port ? ['--port', String(host.port)] : []),
+    ...(host?.local ? ['--local'] : []), '--image', image, '--apply'];
+}
+
 function restoreRequest(values: Record<string, string | boolean | string[] | undefined>): InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice & FreshCursorChoice & RestoreProtectionChoice {
   if (!values.repo) throw new Error('Use --repo OWNER/NAME');
   if (values.plan && values.apply) throw new Error('Choose either --plan or --apply');
