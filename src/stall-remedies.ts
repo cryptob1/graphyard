@@ -224,7 +224,7 @@ export const stepStallRemedyRegistry: readonly { kind: StepStallRemedyKind; bind
     // src/master/dispatch.ts readMergeWriter); stallSignature keeps 401 as its own <unauthorized> token.
     kind: 'credential-401',
     bind: signature => /<unauthorized>|unauthorized/i.test(signature)
-      ? { kind: 'credential-401', remedy: 're-issue the refused credential through the install\'s bootstrap path (graphyard install --apply re-runs the idempotent install and records the fresh credential), then verify it authenticates' }
+      ? { kind: 'credential-401', remedy: 'renew the refused host-owned credential — a worker or producer profile\'s from the credential the install issued for its principal, or the merge writer\'s deploy key — then verify it authenticates; the coordinator\'s own credential is the operator\'s to rotate' }
       : null,
   },
   {

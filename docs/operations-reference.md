@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. `daemon.stepStalls`: same-signature failures three consecutive cycles stall: remedied once, verified (unknown-profile, 401, merge-record key-reuse), else master woken; dispatch/merge/cycle retry per 5min. Log: `journalctl --user -u graphyard-master`.
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. `daemon.stepStalls`: three consecutive same-signature failures stall: remedied once, verified (unknown-profile; 401: issued profile credential/deploy key, never coordinator's; merge-record key-reuse), else master woken; call retries per 5min. Log: `journalctl --user -u graphyard-master`.
 
 ### Perpetual master loop
 
@@ -19,7 +19,7 @@ On worker, `graphyard master settle-containment GY-N "reason"` verifies nothing 
 
 ## Submitted implementation needs rework
 
-Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits. `scripts/rework-causes.mjs` classifies last 100 deliveries' rounds (55% own-change, 33% conflicts; raw median 2); `speed.reworkRounds.ownChange` (`master status`) excludes out-of-item causes.
+Stop worker; [rework](operations.md) `--previous-worker-stopped`. `scripts/rework-causes.mjs` classifies last 100 deliveries' rounds (55% own-change, 33% conflicts; raw median 2); `speed.reworkRounds.ownChange` (`master status`) excludes out-of-item causes.
 
 ## Retro synthesis
 
@@ -37,7 +37,7 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 
 ### The live budget
 
-`x-ratelimit-remaining`/`-limit`/`-reset` project `projectedExhaustionAt`.
+`x-ratelimit-*` headers project `projectedExhaustionAt`.
 
 ### Observation cadence by state
 
@@ -52,7 +52,7 @@ Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`).
 
 ### The merge-path reserve
 
-Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observations await reset (`githubBudget.deferrals`); token (`githubBudget.tokens`) projected below reserve at reset raises `github`.
+Below **500 requests** (`GRAPHYARD_GITHUB_RESERVE`), non-merge observations await reset (`githubBudget.deferrals`); token (`githubBudget.tokens`) projected below reserve at reset raises `github`.
 
 ### What an observation costs
 

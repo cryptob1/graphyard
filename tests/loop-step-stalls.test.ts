@@ -7,6 +7,9 @@ import type { MergerMode } from '../src/merger-mode.js';
 import { cycleFailureCeilingMs } from '../src/daemon/liveness.js';
 import type { StepStallRemedyOutcome } from '../src/stall-remedies.js';
 import type { DaemonEffects } from '../src/daemon/effects.js';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // The modules under test are imported inside each test, so a run against code without them fails
 // its cases rather than the file (graphyard verify's exercise).
@@ -21,6 +24,10 @@ const load = async () => ({ S: await import('../src/daemon/step-stalls.js'), R: 
 let clock = 49_000_000_000;
 const tick = (ms: number) => { clock += ms; return clock; };
 const state = (): DaemonState => emptyDaemonState(masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/outside/graphyard.mjs', repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'test-host', masterAgentName: 'master-test', workers: [] }));
+const loopConfig = () => masterConfigSchema.parse({ version: 1, url: 'http://localhost', credentialFile: '/outside/coordinator.token', cliPath: '/outside/graphyard.mjs', repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'test-host', masterAgentName: 'master-test', workers: [] });
+/** Credential ports whose coordinator credential the plane refuses: the one 401 the loop never renews. */
+const coordinatorRefused = () => ({ coordinator: '/outside/coordinator.token', profiles: [], authenticate: async () => ({ state: 'refused' as const, principal: null, detail: '401' }),
+  issued: async () => [], adopt: async () => { throw new Error('nothing is adopted'); }, renewDeployKey: async () => { throw new Error('no key is renewed'); }, reachWithDeployKey: async () => {} });
 const snapshot = async () => ({ work: [] as never[], now: new Date(clock).toISOString() }) as never;
 
 test('unit:stall-signature-normalisation — two failures of one cause sign the same however its ids, shas and numbers differ, and any other change signs differently', async () => {
@@ -53,7 +60,7 @@ test('unit:stall-remedy-registry — the three seen signatures bind their remedi
   assert.match(profile!.remedy, /master environments --apply/);
   const credential = R.stepStallRemedy(S.stallSignature('dispatch', 'the control plane answered HTTP 401: credential not valid'));
   assert.equal(credential?.kind, 'credential-401');
-  assert.match(credential!.remedy, /bootstrap path/);
+  assert.match(credential!.remedy, /credential the install issued for its principal, or the merge writer's deploy key/);
   const ledger = R.stepStallRemedy(S.stallSignature('merge', 'Merge of GY-7 head aabbcc was refused a record key reused with different input; that key is never sent again'));
   assert.equal(ledger?.kind, 'merge-record-idempotency');
   assert.match(ledger!.remedy, /adopt the server's merge ledger/);
@@ -181,10 +188,10 @@ test('unit:loop-step-stall-unbound-wakes-master — an unbound stall and a refus
   const held = state();
   const credential = { kind: 'dispatch', state: 'failed', detail: 'the control plane answered HTTP 401 for GY-9 epoch 1' } as const;
   for (const cycle of [1, 2, 3]) S.noteCycleStalls(held, [credential], cycle, tick(1));
-  const refused = await S.remedyStalledSteps(held, S.stallRemedyRunner(() => ({ url: 'http://localhost' }), () => held, snapshot, () => '/outside'), tick(1));
+  const refused = await S.remedyStalledSteps(held, S.stallRemedyRunner(loopConfig, () => held, snapshot, () => '/outside', coordinatorRefused), tick(1));
   assert.equal(refused.length, 1);
   assert.equal(refused[0].record.outcome, 'refused');
-  assert.match(refused[0].record.detail, /no port that re-issues a refused credential/);
+  assert.match(refused[0].record.detail, /outside the loop's authority/);
   const woken = S.stallWakeSubjects(held, 'graphyard.mjs');
   assert.equal(woken.length, 1);
   assert.match(woken[0].detail, /credential-401 remedy was applied once at .* and refused/);
@@ -362,17 +369,17 @@ test('unit:stall-runner-finds-the-refused-merge — the loop\u2019s ports read t
     attempts: 1, epoch: null, cycle: 3, at: new Date(clock).toISOString() };
   loop.mergeWriter.inFlight = { key: 'GY-7', id: 'id-7', head, startedAt: new Date(clock - 60_000).toISOString() };
   const work = [{ key: 'GY-7', id: 'id-7', mergeLedger: { events: 4 } }];
-  const runner = S.stallRemedyRunner(() => ({ url: 'http://localhost' }), () => loop, async () => ({ work, now: new Date(clock).toISOString() }) as never, () => '/outside');
+  const runner = S.stallRemedyRunner(loopConfig, () => loop, async () => ({ work, now: new Date(clock).toISOString() }) as never, () => '/outside');
   const outcome = await R.applyStepStallRemedy('merge-record-idempotency', runner);
   assert.equal(outcome.outcome, 'applied');
   assert.equal(outcome.verified, true);
   assert.equal(loop.mergeWriter.inFlight, null);
   assert.match(outcome.detail, /Adopted the server's merge ledger for GY-7/);
 
-  // The credential kind the loop holds no port for is a recorded refusal naming the master session.
-  const refusedKind = await R.applyStepStallRemedy('credential-401', S.stallRemedyRunner(() => ({ url: 'http://localhost' }), () => state(), snapshot, () => '/outside'));
+  // A refused coordinator credential is the one 401 outside the loop's authority: a recorded refusal.
+  const refusedKind = await R.applyStepStallRemedy('credential-401', S.stallRemedyRunner(loopConfig, () => state(), snapshot, () => '/outside', coordinatorRefused));
   assert.equal(refusedKind.outcome, 'refused');
-  assert.match(refusedKind.detail, /master session runs the install's bootstrap path/);
+  assert.match(refusedKind.detail, /coordinator credential .* outside the loop's authority/);
 });
 
 test('unit:stall-record-bounded — the cursor keeps the newest runs and drops what only a recovered history would read', async () => {
@@ -383,4 +390,108 @@ test('unit:stall-record-bounded — the cursor keeps the newest runs and drops w
   assert.equal(Object.keys(loop.stepStalls).length, S.retainedStepStalls);
   assert.ok(!Object.keys(loop.stepStalls).some(signature => signature.includes('cause _ of many')), 'the oldest run is the first dropped');
   assert.ok(Object.keys(loop.stepStalls).some(signature => signature.includes(`cause ${'_'.repeat(S.retainedStepStalls + 10)} of many`)), 'the newest run is kept');
+});
+
+test('unit:stall-credential-renewal — the 401 remedy renews a refused profile credential from the one the install issued for its principal and reads it back, renews the deploy key for a merge stall, and never renews the coordinator credential', async () => {
+  const { S } = await load();
+  const home = await mkdtemp(join(tmpdir(), 'gy-1854-credentials-'));
+  try {
+    const coordinator = 'c'.repeat(40), issued = 'w'.repeat(40), stale = 's'.repeat(40);
+    for (const folder of ['master', 'workers', 'profile']) await mkdir(join(home, folder), { recursive: true });
+    const write = (file: string, token: string) => writeFile(file, `${token}\n`, { mode: 0o600 });
+    await write(join(home, 'master', 'coordinator.token'), coordinator);
+    await write(join(home, 'workers', 'worker-a.token'), issued);
+    await write(join(home, 'profile', 'worker-a.token'), stale);
+    const config = masterConfigSchema.parse({ version: 1, url: 'https://plane.example', credentialFile: join(home, 'master', 'coordinator.token'), cliPath: '/outside/graphyard.mjs', repository: 'owner/gy-1854-renewal', baseBranch: 'main', githubAppId: 1234, hostId: 'test-host', masterAgentName: 'master-test',
+      workers: [{ name: 'worker-a', principal: 'worker-a', agentName: 'agent-worker-a', mode: 'launch', kind: 'claude', credentialFile: join(home, 'profile', 'worker-a.token') }] });
+    // The plane, as /api/status answers each bearer: the coordinator and the issued worker token authenticate, anything else is 401.
+    const actors: Record<string, string> = { [coordinator]: 'master', [issued]: 'worker-a' };
+    let coordinatorRefused = false;
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (_url: string, init: { headers: Record<string, string> }) => {
+      const token = init.headers.Authorization.replace('Bearer ', '');
+      const actor = token === coordinator && coordinatorRefused ? undefined : actors[token];
+      return actor ? new Response(JSON.stringify({ actor: { id: actor, role: actor === 'master' ? 'coordinator' : 'worker' } }), { status: 200 }) : new Response('{}', { status: 401 });
+    }) as typeof fetch;
+    try {
+      const ports = S.hostCredentialPorts(config, home);
+      const dispatchStall = { step: 'dispatch', signature: 'dispatch: Graphyard refused /api/work/work-N/claim (<unauthorized>)' } as never;
+      const renewed = await S.renewHostCredentials(dispatchStall, ports);
+      assert.equal(renewed.outcome, 'applied', renewed.detail);
+      assert.equal(renewed.verified, true, renewed.detail);
+      assert.match(renewed.detail, /Renewed worker-a from .*workers\/worker-a\.token; read back: worker-a ok/);
+      assert.equal((await readFile(join(home, 'profile', 'worker-a.token'), 'utf8')).trim(), issued, 'the profile now holds the issued credential');
+      assert.equal((await stat(join(home, 'profile', 'worker-a.token'))).mode & 0o777, 0o600, 'and keeps it private');
+      // Nothing refused any more: the remedy changes nothing and verifies nothing, so the stall wakes the master.
+      const unchanged = await S.renewHostCredentials(dispatchStall, ports);
+      assert.equal(unchanged.outcome, 'unchanged');
+      assert.equal(unchanged.verified, false);
+      // A principal with no issued credential that authenticates is refused, never minted.
+      await write(join(home, 'profile', 'worker-a.token'), stale);
+      await write(join(home, 'workers', 'worker-a.token'), stale);
+      const missing = await S.renewHostCredentials(dispatchStall, ports);
+      assert.equal(missing.outcome, 'refused');
+      assert.match(missing.detail, /no credential issued on this host authenticates as worker-a/);
+      // The coordinator's own credential is outside the loop's authority.
+      coordinatorRefused = true;
+      const coordinatorOutcome = await S.renewHostCredentials(dispatchStall, ports);
+      assert.equal(coordinatorOutcome.outcome, 'refused');
+      assert.match(coordinatorOutcome.detail, /outside the loop's authority/);
+    } finally { globalThis.fetch = original; }
+
+    // A merge stall renews the merge writer's deploy key and verifies it reaches the repository.
+    let renewals = 0, reach: Error | null = null;
+    const keyPorts = { coordinator: 'coordinator', profiles: [], issued: async () => [], adopt: async () => {},
+      authenticate: async () => ({ state: 'ok' as const, principal: 'master', detail: 'authenticated' }),
+      renewDeployKey: async () => { renewals += 1; return '/install/deploy-key'; }, reachWithDeployKey: async () => { if (reach) throw reach; } };
+    const mergeStall = { step: 'merge', signature: 'merge: git push answered <unauthorized>' } as never;
+    const key = await S.renewHostCredentials(mergeStall, keyPorts);
+    assert.deepEqual([key.outcome, key.verified, renewals], ['applied', true, 1]);
+    reach = new Error('Permission denied (publickey)');
+    const unreached = await S.renewHostCredentials(mergeStall, keyPorts);
+    assert.deepEqual([unreached.outcome, unreached.verified], ['applied', false]);
+    assert.match(unreached.detail, /does not reach the repository: Permission denied/);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('unit:held-effects-hold-any-stalled-call — a stalled step whose failing call is any loop effect (the host reclaim) is held at that call: inside the window it is not made, past it once, and an answer lets it go', async () => {
+  const { S } = await load();
+  const loop = state();
+  let calls = 0, failing = true;
+  const effects = { reclaim: async () => { calls += 1; if (failing) throw new Error('EACCES: permission denied, rmdir /var/tmp/held'); return { at: 'now' }; } } as unknown as DaemonEffects;
+  const held = S.stallHeldEffects(effects, () => loop, () => clock);
+  // One cycle of the reclaim step: the call, and the failed row it records from the thrown error.
+  const cycle = async (index: number) => {
+    const actions: { kind: 'reclaim'; state: 'failed' | 'done'; detail: string }[] = [];
+    try { await held.reclaim!([], clock); actions.push({ kind: 'reclaim', state: 'done', detail: 'reclaimed' }); }
+    catch (error) { actions.push({ kind: 'reclaim', state: 'failed', detail: `Worktree reclamation failed: ${(error as Error).message}` }); }
+    return S.noteCycleStalls(loop, actions, index, clock);
+  };
+  for (const index of [1, 2, 3]) { tick(60_000); await cycle(index); }
+  const [run] = Object.values(loop.stepStalls);
+  assert.ok(run.stalledAt, 'three consecutive cycles are one stall');
+  assert.deepEqual(run.calls, [{ call: 'reclaim', async: true }], 'the stall names the effect its failed actions carry');
+  assert.equal(calls, 3);
+  // Inside the window the call is not made: the hold answers, as a rejection, and is never counted.
+  for (const index of [4, 5, 6, 7]) { tick(60_000); await cycle(index); }
+  assert.equal(calls, 3, 'the reclaim is not attempted inside its five-minute window');
+  assert.equal(Object.values(loop.stepStalls)[0].count, 3, 'a held cycle counts nothing');
+  // Past the window the call is made once, and its failure is that window's one failure.
+  tick(60_000); await cycle(8);
+  assert.equal(calls, 4, 'past the window the call is attempted once');
+  assert.equal(Object.values(loop.stepStalls)[0].count, 4);
+  tick(60_000); await cycle(9);
+  assert.equal(calls, 4, 'the admission arms the next window');
+  // The window's admitted call answers: the run lets it go and the next clean cycle ends it.
+  failing = false;
+  tick(S.stallBackoffMs); await cycle(10);
+  assert.equal(calls, 5);
+  assert.deepEqual(loop.stepStalls, {}, 'the answered call ends the run, never re-forming it');
+  // A short or hold text is never matched to a call, and a sync failure is held as a throw.
+  const sync = S.stallHeldEffects({ agents: () => { throw new Error('herdr listing failed: socket closed'); } } as unknown as DaemonEffects, () => loop, () => clock);
+  const failed = (detail: string) => [{ kind: 'session' as const, state: 'failed' as const, detail }];
+  for (const index of [11, 12, 13]) { tick(60_000); try { sync.agents!(); } catch (error) { S.noteCycleStalls(loop, failed(`Session listing failed: ${(error as Error).message}`), index, clock); } }
+  const syncRun = Object.values(loop.stepStalls)[0];
+  assert.deepEqual(syncRun.calls, [{ call: 'agents', async: false }]);
+  assert.throws(() => sync.agents!(), new RegExp(S.stallHoldMarker), 'a call that failed synchronously is held as a throw');
 });

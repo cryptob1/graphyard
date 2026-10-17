@@ -1,11 +1,22 @@
 // Concern: loop-step stall signatures (GY-1854) — the normalised signature of a failing call, the three-consecutive-cycle stall rule, the bound remedy applied once per run and verified, and the unbound stall's master wake and five-minute backoff.
 import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { chmod, readdir, rename, writeFile } from 'node:fs/promises';
+import { basename, dirname, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import type { ActionableSubject } from './metrics.js';
 import type { DaemonAction, DaemonState, StepStall, StepStallRemedyRecord } from './state.js';
 import { applyStepStallRemedy, stepStallRemedy, type BoundStepStallRemedy, type StepStallRemedyKind, type StepStallRemedyOutcome } from '../stall-remedies.js';
 import type { MasterConfig } from '../master.js';
 import type { DaemonEffects } from './effects.js';
-import { mergeRecordKey } from '../merge-writer/executor.js';
+import { mergeRecordKey, pushEnvironment } from '../merge-writer/executor.js';
+import { readCredentialFile } from '../master/config.js';
+import { mergeWriterSettings } from '../master/merge-writer-settings.js';
+import { installIdFor } from '../install/types.js';
+import { installDirectory } from '../install/secrets.js';
+import { DEPLOY_KEY_FILE, ensureDeployKey } from '../install/deploy-key.js';
+import { githubCli } from '../install/github.js';
+import { localTransport } from '../install/transport.js';
 import { DispatchReservedError } from '../master/dispatch-reservation.js';
 import { setupAgentEnvironments } from '../master/environments.js';
 
@@ -77,7 +88,7 @@ const errorText = (error: unknown) => (error instanceof Error ? error.message : 
 export interface StepStallNote { run: StepStall; counted: boolean; stalled: boolean; bound: BoundStepStallRemedy | null }
 
 const heldNote = (step: string, error: unknown): StepStallNote =>
-  ({ run: { signature: stallSignature(step, error), step, count: 0, lastCycle: 0, firstAt: '', lastAt: '', lastError: errorText(error).slice(0, 1000), stalledAt: null, remedy: null, nextAttemptAt: null, attemptAt: null }, counted: false, stalled: false, bound: null });
+  ({ run: { signature: stallSignature(step, error), step, count: 0, lastCycle: 0, firstAt: '', lastAt: '', lastError: errorText(error).slice(0, 1000), stalledAt: null, remedy: null, nextAttemptAt: null, attemptAt: null, calls: [] }, counted: false, stalled: false, bound: null });
 
 /**
  * One failure of a loop step or dispatcher call, under the signature it signs: the run advances
@@ -108,7 +119,7 @@ export function noteStepFailure(state: DaemonState, step: string, error: unknown
   const backingOff = standing && !attempted && previous.nextAttemptAt !== null && now < Date.parse(previous.nextAttemptAt);
   const run: StepStall = continued && (sameCycle || consecutive || standing)
     ? { ...previous, count: sameCycle || backingOff ? previous.count : previous.count + 1, lastCycle: Math.max(previous.lastCycle, cycle), lastAt: at, lastError: errorText(error).slice(0, 1000), attemptAt: attempted ? null : previous.attemptAt }
-    : { signature, step, count: 1, lastCycle: cycle, firstAt: at, lastAt: at, lastError: errorText(error).slice(0, 1000), stalledAt: null, remedy: null, nextAttemptAt: null, attemptAt: null };
+    : { signature, step, count: 1, lastCycle: cycle, firstAt: at, lastAt: at, lastError: errorText(error).slice(0, 1000), stalledAt: null, remedy: null, nextAttemptAt: null, attemptAt: null, calls: [] };
   const stalled = run.count >= stallCycleBound && run.stalledAt === null;
   if (stalled) run.stalledAt = at;
   const armed = attempted && previous.nextAttemptAt !== null && now < Date.parse(previous.nextAttemptAt);
@@ -136,6 +147,55 @@ export function admitStalledCall(state: DaemonState, step: string, now: number):
   return null;
 }
 
+/** The steps whose stall is held at the step itself — the dispatcher's launch and the merge writer's start — rather than at the effect calls it carries. */
+const stepHeldSteps: ReadonlySet<string> = new Set(['dispatch', 'merge']);
+/** The effects never held: the cursor write, the cycle's own read (a failed cycle is held by run.ts), the dispatcher's launch (held at its step) and plain data. */
+const unheldEffects: ReadonlySet<string> = new Set(['persist', 'snapshot', 'dispatch', 'mergeWriter', 'loadedRelease']);
+/** The effect calls that failed since the stall step last ran, by state: what a failed action's detail is matched against to name the call that failed. */
+const failedCalls = new WeakMap<DaemonState, { call: string; async: boolean; text: string }[]>();
+const flatText = (text: string) => text.replace(/\s+/g, ' ').trim();
+
+/** Notes one effect call's failure, so the stall step can name the call a failed action carries. A hold's own answer, or a text too short to match safely, names nothing. */
+export function noteCallFailure(state: DaemonState, call: string, error: unknown, async: boolean): void {
+  const text = flatText(errorText(error)).slice(0, 300);
+  if (text.length < 12 || isStallHold(text)) return;
+  const list = failedCalls.get(state) ?? failedCalls.set(state, []).get(state)!;
+  if (list.length < 50 && !list.some(entry => entry.call === call && entry.text === text)) list.push({ call, async, text });
+}
+
+/**
+ * Admits one effect call of a stalled run (GY-1854 AC-1): the generic form of `admitStalledCall`
+ * for every step whose failing call is an effect — the host's reclaim, a refresh, a review read.
+ * While a stall whose failed actions carried this call's failure stands inside its window, the
+ * call is held and the hold answered; past the window the call is admitted and the admission
+ * arms the next window, so the call is attempted at most once per five minutes.
+ */
+export function admitStalledEffect(state: DaemonState, call: string, now: number): StallHold | null {
+  const runs = Object.values(state.stepStalls).filter(run => run.stalledAt && run.calls.some(entry => entry.call === call));
+  let hold: StallHold | null = null;
+  for (const run of runs) {
+    const until = run.nextAttemptAt ? Date.parse(run.nextAttemptAt) : Number.NaN;
+    if (Number.isFinite(until) && now < until && (!hold || until < hold.until))
+      hold = { step: run.step, signature: run.signature, until, reason: `${stallHoldMarker}: the ${call} call the ${run.step} step stands stalled on since ${run.stalledAt} is attempted again at ${run.nextAttemptAt}` };
+  }
+  if (hold) return hold;
+  for (const run of runs) { run.attemptAt = new Date(now).toISOString(); run.nextAttemptAt = new Date(now + stallBackoffMs).toISOString(); }
+  return null;
+}
+
+/**
+ * An admitted call that answered: the call no longer fails, so the runs holding it let it go, and a
+ * run holding no call any more ends its window, so the next cycle that does not fail its step ends
+ * the run (`noteStepsSucceeded`) — one that fails it again counts on, never re-forms.
+ */
+export function noteCallAnswered(state: DaemonState, call: string): void {
+  for (const run of Object.values(state.stepStalls)) {
+    if (!run.stalledAt || !run.attemptAt || !run.calls.some(entry => entry.call === call)) continue;
+    run.calls = run.calls.filter(entry => entry.call !== call);
+    if (!run.calls.length && !stepHeldSteps.has(run.step)) { run.nextAttemptAt = null; run.attemptAt = null; }
+  }
+}
+
 /**
  * Ends every run the completed cycle did not fail in: one clean cycle breaks the consecutive
  * chain, and its stall with it. A stalled run whose five-minute window still stands is kept —
@@ -161,8 +221,8 @@ export function pruneStepStalls(state: DaemonState): void {
   state.stepStalls = Object.fromEntries(entries.sort((a, b) => Date.parse(b[1].lastAt) - Date.parse(a[1].lastAt)).slice(0, retainedStepStalls));
 }
 
-/** The port one bound remedy runs through: it applies the remedy and answers whether its verification held. */
-export type StepStallRemedyRunner = (kind: StepStallRemedyKind) => Promise<StepStallRemedyOutcome>;
+/** The port one bound remedy runs through: it applies the remedy for the stalled run and answers whether its verification held. */
+export type StepStallRemedyRunner = (kind: StepStallRemedyKind, stall?: StepStall) => Promise<StepStallRemedyOutcome>;
 
 /**
  * Applies the stalled run's bound remedy once and records the attempt on it: a run already
@@ -175,7 +235,7 @@ export async function remedyStepStall(state: DaemonState, signature: string, run
   if (!stall?.stalledAt || stall.remedy) return null;
   const bound = stepStallRemedy(signature);
   if (!bound) return null;
-  const outcome = await applyStepStallRemedy(bound.kind, runner);
+  const outcome = await applyStepStallRemedy(bound.kind, kind => runner(kind, stall));
   stall.remedy = { kind: bound.kind, at: new Date(now).toISOString(), outcome: outcome.outcome, verified: outcome.verified, detail: outcome.detail.slice(0, 2000) };
   return stall.remedy;
 }
@@ -228,14 +288,32 @@ export function stallWakeSubjects(state: DaemonState, cliPath: string): Actionab
  * The stall bookkeeping one completed cycle owes (GY-1854), run beside the cycle's result: every
  * action the cycle recorded failed — the dispatcher's failures among them, a held call's hold
  * answer among them never counted — signs its action kind as the step, at most once per signature
- * per cycle, and a cycle that failed nowhere ends the runs it did not fail in. Answers what was
- * counted and how many standing runs the cycle ended, so the caller persists a cursor the
- * bookkeeping moved.
+ * per cycle, and names the effect calls whose thrown failure its detail carries, which the run's
+ * window then holds (`admitStalledEffect`). A stalled run of a step-held step whose admitted
+ * attempt landed — the step recorded done this cycle and did not fail it — ends, and a cycle that
+ * failed nowhere ends the runs it did not fail in. Answers what was counted and how many standing
+ * runs the cycle ended, so the caller persists a cursor the bookkeeping moved.
  */
 export function noteCycleStalls(state: DaemonState, actions: Pick<DaemonAction, 'kind' | 'state' | 'detail'>[], cycle: number, now: number): { notes: StepStallNote[]; cleared: number } {
-  const notes = actions.filter(action => action.state === 'failed' && !isStallHold(action.detail)).map(action => noteStepFailure(state, action.kind, action.detail, now, cycle));
-  const cleared = noteStepsSucceeded(state, cycle, now);
-  return { notes, cleared };
+  const calls = failedCalls.get(state) ?? [];
+  failedCalls.delete(state);
+  const notes = actions.filter(action => action.state === 'failed' && !isStallHold(action.detail)).map(action => {
+    const note = noteStepFailure(state, action.kind, action.detail, now, cycle), detail = flatText(action.detail);
+    for (const entry of calls) {
+      if (!detail.includes(entry.text) || note.run.calls.some(known => known.call === entry.call) || note.run.calls.length >= 8) continue;
+      note.run.calls = [...note.run.calls, { call: entry.call, async: entry.async }];
+    }
+    return note;
+  });
+  let cleared = 0;
+  const failedSteps = new Set(notes.map(note => note.run.step));
+  for (const [signature, run] of Object.entries(state.stepStalls)) {
+    if (!run.stalledAt || !run.attemptAt || !stepHeldSteps.has(run.step) || failedSteps.has(run.step)) continue;
+    if (!actions.some(action => action.kind === run.step && action.state === 'done')) continue;
+    delete state.stepStalls[signature];
+    cleared += 1;
+  }
+  return { notes, cleared: cleared + noteStepsSucceeded(state, cycle, now) };
 }
 
 /**
@@ -279,14 +357,118 @@ export function mergeLedgerAdoption(state: DaemonState, work: readonly { key: st
     detail: `Adopted the server's merge ledger for ${refused.key} (${events === null ? 'no folded ledger read' : `${events} events`})${derivation}; the refused attempt's in-flight marker is ${stale ? 'cleared' : 'already gone'}, so the next flight mints a fresh attempt id${replay ? `; a replay of its writes still stands, so the refused key may be sent once more` : ' and no replay of its writes stands, so the refused key is never sent again'}`.slice(0, 2000) };
 }
 
+/** What the plane answers one credential file with: the principal it authenticates as, a refusal (401), or no reading. */
+export interface CredentialReading { state: 'ok' | 'refused' | 'unknown'; principal: string | null; detail: string }
+
+/**
+ * The host-owned credentials the credential-401 remedy may renew (GY-1854), and how it reads and
+ * writes them. The coordinator's own credential is read, never renewed: rotating it is the
+ * operator's (admin) authority, not the loop's.
+ */
+export interface CredentialRenewalPorts {
+  /** Reads one credential file and asks the plane whom it authenticates as. */
+  authenticate(file: string): Promise<CredentialReading>;
+  /** The coordinator's credential file. */
+  coordinator: string;
+  /** Each worker and producer profile's credential file and the principal it must authenticate as. */
+  profiles: { name: string; principal: string; file: string }[];
+  /** The credential files the install issued on this host: the sources a refused profile credential is renewed from. */
+  issued(): Promise<string[]>;
+  /** Writes an issued credential into a profile's file, private (0600), replacing it in one rename. */
+  adopt(from: string, to: string): Promise<void>;
+  /** The merge writer's deploy key, generated when absent and registered on the repository unless listed (ensureDeployKey); answers its path. */
+  renewDeployKey(): Promise<string>;
+  /** Reaches the repository with the deploy key alone (git ls-remote under the push environment); throws when it cannot. */
+  reachWithDeployKey(): Promise<void>;
+}
+
+/** Whether a stall's 401 is the merge writer's push credential rather than a profile's: the merge step, or a refusal naming the deploy key or a push. */
+const deployKeyStall = (stall: StepStall | undefined) => !!stall && (stall.step === 'merge' || /deploy.?key|publickey|git push/i.test(stall.signature));
+
+/**
+ * The credential-401 remedy (GY-1854): renews the host-owned credential the refusal names, once,
+ * and verifies it authenticates. The coordinator's credential is read first: refused, it is
+ * outside the loop's authority, so the remedy is refused and the stall wakes the master session.
+ * A merge-step stall renews the merge writer's deploy key and verifies it reaches the repository.
+ * Any other stall reads each worker and producer profile credential; a refused one is renewed from
+ * the credential the install issued for the same principal on this host (one the plane
+ * authenticates as that principal), and verified by reading it back through the plane. Nothing is
+ * minted here: a principal with no issued credential that authenticates is a refusal naming it.
+ */
+export async function renewHostCredentials(stall: StepStall | undefined, ports: CredentialRenewalPorts): Promise<StepStallRemedyOutcome> {
+  const coordinator = await ports.authenticate(ports.coordinator);
+  if (coordinator.state === 'refused')
+    return { outcome: 'refused', verified: false, detail: `The coordinator credential ${ports.coordinator} is refused (${coordinator.detail}): renewing it is outside the loop's authority; the operator rotates it (graphyard install --apply, or operator-agent rotate as admin)` };
+  if (deployKeyStall(stall)) {
+    const key = await ports.renewDeployKey();
+    try { await ports.reachWithDeployKey(); }
+    catch (error) { return { outcome: 'applied', verified: false, detail: `Renewed the merge writer's deploy key ${key}, but it does not reach the repository: ${errorText(error)}`.slice(0, 2000) }; }
+    return { outcome: 'applied', verified: true, detail: `Renewed the merge writer's deploy key ${key} (generated when absent, registered on the repository unless listed) and reached the repository with it alone` };
+  }
+  const before = await Promise.all(ports.profiles.map(async profile => ({ profile, reading: await ports.authenticate(profile.file) })));
+  const refused = before.filter(entry => entry.reading.state === 'refused').map(entry => entry.profile);
+  if (!refused.length)
+    return { outcome: 'unchanged', verified: false, detail: `No host-owned credential is refused: the coordinator credential and ${before.length} profile credential(s) read ${before.map(entry => `${entry.profile.name} ${entry.reading.state}`).join(', ') || 'nothing'}, so the 401 is not one this loop can renew` };
+  const refusedFiles = new Set(refused.map(profile => profile.file));
+  const sources = new Map<string, CredentialReading>();
+  for (const file of await ports.issued()) if (!refusedFiles.has(file)) sources.set(file, await ports.authenticate(file));
+  const renewed: string[] = [], missing: string[] = [];
+  for (const profile of refused) {
+    const source = [...sources].find(([, reading]) => reading.state === 'ok' && reading.principal === profile.principal)?.[0];
+    if (!source) { missing.push(`${profile.name} (${profile.principal})`); continue; }
+    await ports.adopt(source, profile.file);
+    renewed.push(`${profile.name} from ${source}`);
+  }
+  const after = await Promise.all(refused.map(async profile => ({ profile, reading: await ports.authenticate(profile.file) })));
+  const verified = after.every(({ profile, reading }) => reading.state === 'ok' && reading.principal === profile.principal);
+  return { outcome: renewed.length ? 'applied' : 'refused', verified,
+    detail: `${renewed.length ? `Renewed ${renewed.join('; ')}` : 'Renewed nothing'}${missing.length ? `; no credential issued on this host authenticates as ${missing.join(', ')}, so re-issuing it is the operator's (graphyard install --apply)` : ''}; read back: ${after.map(({ profile, reading }) => `${profile.name} ${reading.state}`).join(', ')}`.slice(0, 2000) };
+}
+
+/** The production credential ports over the loop's configuration: the plane's /api/status, the install's issued token directories, and the merge writer's deploy key. */
+export function hostCredentialPorts(config: MasterConfig, root: string): CredentialRenewalPorts {
+  const settings = mergeWriterSettings(config.run, installIdFor(config.repository));
+  const credentialHome = dirname(dirname(config.credentialFile));
+  const tokenFiles = async (folder: string) => (await readdir(folder).catch(() => [] as string[])).filter(name => name.endsWith('.token')).sort().map(name => resolve(folder, name));
+  return {
+    coordinator: config.credentialFile,
+    profiles: [...config.workers, ...config.producers].flatMap(profile => profile.credentialFile && profile.principal ? [{ name: profile.name, principal: profile.principal, file: profile.credentialFile }] : []),
+    authenticate: async file => {
+      let token: string;
+      try { token = await readCredentialFile(file); } catch (error) { return { state: 'unknown', principal: null, detail: errorText(error) }; }
+      try {
+        const response = await fetch(`${config.url}/api/status`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5_000) });
+        if (response.status === 401) return { state: 'refused', principal: null, detail: '401' };
+        if (!response.ok) return { state: 'unknown', principal: null, detail: String(response.status) };
+        const status = await response.json() as { actor?: { id?: unknown } };
+        return { state: 'ok', principal: typeof status.actor?.id === 'string' ? status.actor.id : null, detail: 'authenticated' };
+      } catch (error) { return { state: 'unknown', principal: null, detail: errorText(error) }; }
+    },
+    issued: async () => [...await tokenFiles(resolve(credentialHome, 'workers')), ...await tokenFiles(resolve(credentialHome, 'producers')), ...await tokenFiles(resolve(installDirectory(installIdFor(config.repository)), 'tokens'))],
+    adopt: async (from, to) => {
+      const next = `${to}.next`;
+      await writeFile(next, `${await readCredentialFile(from)}\n`, { mode: 0o600 });
+      await chmod(next, 0o600);
+      await rename(next, to);
+    },
+    renewDeployKey: async () => {
+      if (basename(settings.deployKeyFile) !== DEPLOY_KEY_FILE) throw new Error(`the configured deploy key ${settings.deployKeyFile} is not the install's own; renewing it is the operator's`);
+      return ensureDeployKey(dirname(settings.deployKeyFile), config.repository, githubCli(localTransport()));
+    },
+    reachWithDeployKey: async () => {
+      await promisify(execFile)('git', ['-C', root, 'ls-remote', '--exit-code', 'origin', `refs/heads/${config.baseBranch}`], { env: pushEnvironment(settings.deployKeyFile), timeout: 60_000 });
+    },
+  };
+}
+
 /**
  * The stall step's own remedy ports (GY-1854): the loop writes the agent profiles exactly as
- * `master environments --apply` does, and adopts the server's merge ledger for a refused merge
- * record. A credential the plane answers 401 this loop holds no port to re-issue: the remedy is
- * recorded refused once and its stall wakes the master session, whose task names the bootstrap.
+ * `master environments --apply` does, renews the host-owned credential a 401 names
+ * (`renewHostCredentials` over `hostCredentialPorts`, or the ports a test hands in), and adopts
+ * the server's merge ledger for a refused merge record.
  */
-export function stallRemedyRunner(config: () => Pick<MasterConfig, 'url'>, state: () => DaemonState, read: DaemonEffects['snapshot'], root: () => string): StepStallRemedyRunner {
-  return async kind => {
+export function stallRemedyRunner(config: () => MasterConfig, state: () => DaemonState, read: DaemonEffects['snapshot'], root: () => string, credentials?: () => CredentialRenewalPorts): StepStallRemedyRunner {
+  return async (kind, stall) => {
     if (kind === 'profile-unknown') {
       return profileRemedyOutcome(await setupAgentEnvironments(root(), { apply: true, verify: async token => {
         const response = await fetch(`${config().url}/api/status`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5_000) });
@@ -303,30 +485,62 @@ export function stallRemedyRunner(config: () => Pick<MasterConfig, 'url'>, state
       const named = refused ? /Merge of (\S+) head ([0-9a-f]+)/i.exec(refused.detail) : null;
       return mergeLedgerAdoption(state(), (await read()).work, refused && named ? { key: named[1], head: named[2].toLowerCase(), at: refused.at } : null);
     }
-    throw new Error('this loop holds no port that re-issues a refused credential; the master session runs the install\'s bootstrap path for it');
+    return renewHostCredentials(stall, credentials ? credentials() : hostCredentialPorts(config(), root()));
   };
 }
 
 /**
- * The stalled calls' hold, composed over the loop's own effects (GY-1854 AC-1): while a step's
- * stall stands inside its five-minute window, its owning call is attempted at most once per
- * window. The dispatcher's launch is refused before anything is claimed, exactly as a dispatch
- * another dispatcher holds is — `DispatchReservedError` with the item as the held resource, which
- * the dispatch step answers by passing the item over and recording no failure — and the merge
+ * The stalled calls' hold, composed over the loop's own effects (GY-1854 AC-1): while a stall
+ * stands inside its five-minute window, its owning call is attempted at most once per window.
+ * The dispatcher's launch is refused before anything is claimed, exactly as a dispatch another
+ * dispatcher holds is — `DispatchReservedError` with the item as the held resource, which the
+ * dispatch step answers by passing the item over and recording no failure — and the merge
  * writer's `admit` answers false, so it starts no new merge while the window stands (a settled
- * flight is still recorded, replays and owed reworks still run, and the recorded merger every
- * other step reads is left as it is). Past the window the first call is admitted and arms the
- * next window (`admitStalledCall`); every other effect passes through untouched.
+ * flight is still recorded, replays and owed reworks still run). Every other effect call is
+ * watched: its failure is noted for the stall step to name (`noteCallFailure`), and once a stall
+ * names it, a call inside the window answers the hold — thrown, or rejected when the call failed
+ * as a promise — without being made (`admitStalledEffect`); the window's one admitted call that
+ * answers lets the call go (`noteCallAnswered`). Past each window the first call is admitted and
+ * arms the next.
  */
 export function stallHeldEffects<T extends DaemonEffects>(effects: T, state: () => DaemonState, now: () => number): T {
-  const dispatch = effects.dispatch, mergeWriter = effects.mergeWriter;
-  return {
-    ...effects,
-    ...(dispatch ? { dispatch: async (work, profile, agents, snapshot) => {
-      const hold = admitStalledCall(state(), 'dispatch', now());
-      if (hold) throw new DispatchReservedError('work', work.key, hold.reason);
-      return dispatch(work, profile, agents, snapshot);
-    } } : {}),
-    ...(mergeWriter ? { mergeWriter: { ...mergeWriter, admit: () => (mergeWriter.admit?.() ?? true) && !admitStalledCall(state(), 'merge', now()) } } : {}),
-  } as T;
+  const wrapped = new Map<string, { value: unknown; held: unknown }>();
+  const hold = (name: string, value: Function): Function => {
+    if (name === 'dispatch') return async (...args: Parameters<DaemonEffects['dispatch']>) => {
+      const held = admitStalledCall(state(), 'dispatch', now());
+      if (held) throw new DispatchReservedError('work', args[0].key, held.reason);
+      return value(...args);
+    };
+    return (...args: unknown[]) => {
+      const held = admitStalledEffect(state(), name, now());
+      if (held) {
+        const error = new Error(held.reason);
+        if (state().stepStalls[held.signature]?.calls.find(entry => entry.call === name)?.async !== false) return Promise.reject(error);
+        throw error;
+      }
+      let result: unknown;
+      try { result = value(...args); } catch (error) { noteCallFailure(state(), name, error, false); throw error; }
+      if (!(result instanceof Promise)) { noteCallAnswered(state(), name); return result; }
+      return result.then(answer => { noteCallAnswered(state(), name); return answer; }, error => { noteCallFailure(state(), name, error, true); throw error; });
+    };
+  };
+  return new Proxy(effects, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (property === 'mergeWriter' && value) {
+        const known = wrapped.get(property);
+        if (known?.value === value) return known.held;
+        const writer = value as unknown as NonNullable<DaemonEffects['mergeWriter']>;
+        const held = { ...writer, admit: () => (writer.admit?.() ?? true) && !admitStalledCall(state(), 'merge', now()) };
+        wrapped.set(property, { value, held });
+        return held;
+      }
+      if (typeof property !== 'string' || typeof value !== 'function' || (unheldEffects.has(property) && property !== 'dispatch')) return value;
+      const known = wrapped.get(property);
+      if (known?.value === value) return known.held;
+      const held = hold(property, (...args: unknown[]) => value.apply(target, args));
+      wrapped.set(property, { value, held });
+      return held;
+    },
+  });
 }

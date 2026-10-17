@@ -238,7 +238,9 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   loadedSnapshot?: () => string | null;
   /** The dispatcher's wake (GY-1490, loop-wake.ts): ends the sleep after a cycle as soon as the tick sees work the loop acts on. */
   wake?: Pick<LoopWake, 'sleep'>;
-  /** The ports the stall step's bound remedies run through (GY-1854); absent, the loop's own are wired — the profile write and the merge-ledger adoption — and any other bound remedy is recorded refused for the master session to run. */
+  /** The wait after a failed cycle, never cut short by the wake; defaults to a timer. A soak on a simulated clock hands its own. */
+  delay?: (ms: number, signal: AbortSignal) => Promise<void>;
+  /** The ports the stall step's bound remedies run through (GY-1854); absent, the loop's own are wired — the profile write, the host-owned credential renewal and the merge-ledger adoption. */
   stallRemedies?: StepStallRemedyRunner; } ) {
   // Progress goes to stderr so stdout stays the machine-readable result the CLI prints.
   const now = options.now ?? Date.now, log = options.log ?? (line => console.error(line));
@@ -303,8 +305,8 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     // Session launches run beside the cycles, never inside one (GY-616): a cycle hands a launch over
     // and moves on, and the next cycle reports what it did. The launcher outlives every cycle.
     const launcher = new Launcher(config.run.launchConcurrency ?? defaultLaunchConcurrency);
-    // GY-1854: the ports the stall step's bound remedies run through, the loop's own where it holds
-    // them and a recorded refusal naming the master session where it does not.
+    // GY-1854: the ports the stall step's bound remedies run through; a credential outside the
+    // loop's authority (the coordinator's) is a recorded refusal that wakes the master session.
     const stallRunner = options.stallRemedies ?? stallRemedyRunner(() => config, () => state, raw.snapshot, () => options.repository ?? coordinatorCheckoutRoot(config.cliPath));
     // GY-857: the checkout guard. The modules this process imported were read from the coordinator
     // checkout at startup; when it holds uncommitted work, cycling would run unreviewed code and a
@@ -440,7 +442,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
         if (wakeable && options.wake) {
           const sleptAt = now(), reasons = await options.wake.sleep(wait, waking.signal);
           if (reasons.length && !stopping) log(`[graphyard-master] woken ${Math.round(Math.max(0, wait - (now() - sleptAt)) / 1000)}s before the ${Math.round(wait / 1000)}s wait ended: ${reasons.join('; ')}`);
-        } else try { await delay(wait, undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
+        } else try { await (options.delay ? options.delay(wait, waking.signal) : delay(wait, undefined, { signal: waking.signal })); } catch { /* woken to stop */ }
       }
     } finally {
       // Launches still in flight are let finish, so none is left `started` on the cursor, and what

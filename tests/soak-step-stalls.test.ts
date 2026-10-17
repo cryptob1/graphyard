@@ -7,6 +7,9 @@ import { daemonSummary } from '../src/daemon/run.js';
 import type { StepStallRemedyKind } from '../src/stall-remedies.js';
 import type { Work } from '../src/model.js';
 import type { HerdrAgent } from '../src/master/herdr.js';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // GY-1854 over simulated days. The real loop (runDaemon, cycling on its own wake, its chosen wait
 // pacing the driver's simulated clock) runs two days whose every cycle repeats the same failing
@@ -29,9 +32,9 @@ const minute = 60_000, hour = 60 * minute, interval = 2 * minute, dayMs = Number
 const start = Date.parse('2026-10-15T00:00:00.000Z');
 const head = 'a'.repeat(40), baseTip = 'b'.repeat(40), mergeSha = 'c'.repeat(40);
 const masterAgentName = 'graphyard-master-stalls';
-const config = (): MasterConfig => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: 'graphyard',
+const config = (files: { coordinator: string; worker: string } = { coordinator: '/outside/coordinator.token', worker: '/outside/worker-a.token' }): MasterConfig => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: files.coordinator, cliPath: 'graphyard',
   repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'soak-host', masterAgentName,
-  workers: [{ name: 'worker-a', principal: 'worker-a', agentName: 'agent-worker-a', mode: 'launch', kind: 'claude', credentialFile: '/outside/worker-a.token' }],
+  workers: [{ name: 'worker-a', principal: 'worker-a', agentName: 'agent-worker-a', mode: 'launch', kind: 'claude', credentialFile: files.worker }],
   run: { intervalSeconds: interval / 1000, masterSessionMinutes: 720 } });
 
 /** A claimable item the day never delivers, so its dispatch is offered on every cycle. */
@@ -62,6 +65,8 @@ const masterSession = (): HerdrAgent => ({ name: masterAgentName, pane_id: 'pane
 interface Day {
   cycles: number;
   launches: number[];
+  landed: number[];
+  reclaims: number[];
   records: number[];
   prompts: string[];
   remedies: StepStallRemedyKind[];
@@ -82,8 +87,11 @@ interface Day {
  * cursor write is kept, so the day can assert the bookkeeping a restart would read, and each
  * finished cycle is judged as it ends.
  */
-async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: string; withMergeWriter?: boolean }): Promise<Day> {
-  const result: Day = { cycles: 0, launches: [], records: [], prompts: [], remedies: [], remedyHistory: [], waits: [], cursorStalls: 'null', cursorMergeWriter: 'null', logs: [], state: emptyDaemonState(config()) };
+async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: string; withMergeWriter?: boolean; reclaimFailure?: string;
+  /** The day's credential read and launch answer by the worker's credential file: refused (401) until it holds the issued token. */
+  credentials?: { coordinator: string; worker: string; good: string } }): Promise<Day> {
+  const dayConfig = () => config(options.credentials);
+  const result: Day = { cycles: 0, launches: [], landed: [], reclaims: [], records: [], prompts: [], remedies: [], remedyHistory: [], waits: [], cursorStalls: 'null', cursorMergeWriter: 'null', logs: [], state: emptyDaemonState(dayConfig()) };
   let now = start;
   let stop = () => {};
   const effects: DaemonEffects = {
@@ -91,10 +99,19 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
     herdr: () => ({ agents: [masterSession()], available: true }),
     masterSession: { launch: async () => { throw new Error('the day adopts its master session and never launches one'); }, adopt: async () => null },
     promptSession: async (_agent, text) => { result.prompts.push(text); },
-    credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
+    credentials: async profiles => {
+      // The loop's own credential read every cycle: the plane refuses a stale worker credential (401), which fails the cycle at this call.
+      if (options.credentials && (await readFile(options.credentials.worker, 'utf8')).trim() !== options.credentials.good) throw new Error('Graphyard refused /api/status for worker-a (401): credential not valid');
+      return Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }]));
+    },
     snapshot: async () => ({ work: [options.withMergeWriter ? submitted(now) : claimable(now)], now: new Date(now).toISOString() }),
     closeSession: () => {},
-    dispatch: async () => { result.launches.push(now - start); throw new Error(options.dispatchFailure ?? 'no dispatch was due'); },
+    dispatch: async (_work, profile) => {
+      result.launches.push(now - start);
+      if (options.credentials && (await readFile(profile.credentialFile!, 'utf8')).trim() === options.credentials.good) { result.landed.push(now - start); return {}; }
+      throw new Error(options.dispatchFailure ?? 'no dispatch was due');
+    },
+    ...(options.reclaimFailure ? { reclaim: async () => { result.reclaims.push(now - start); throw new Error(options.reclaimFailure); } } : {}),
     requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {},
@@ -124,6 +141,8 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
     // The loop also listens for unhandledRejection and uncaughtException on this host: only the
     // stop signal's handler is the one the day's end calls.
     process: { on: (signal: string, handler: () => void) => { if (signal === 'SIGTERM') stop = handler; }, off: () => {} } as unknown as Pick<NodeJS.Process, 'on' | 'off'>,
+    // A failed cycle's backoff is waited out on the same simulated clock.
+    delay: async (wait: number) => { await runOptions.wake.sleep(wait); },
     wake: { sleep: async (wait: number) => {
       result.waits.push(wait);
       judge(`cycle at +${Math.round((now - start) / minute)}min`);
@@ -142,13 +161,13 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
     assert.deepEqual(Object.keys(result.state.actions).filter(key => key.startsWith('isolated:')), [], `${phase}: no step isolated a failure`);
     // The day's scripted failures are the only ones: the dispatch refusal, the merge record the
     // plane refuses as reused, and the one deployment line an unconfigured endpoint answers with.
-    const scripted = (action: { kind: string; detail: string }) => action.kind === 'dispatch' || action.kind === 'merge'
+    const scripted = (action: { kind: string; detail: string }) => action.kind === 'dispatch' || action.kind === 'merge' || (action.kind === 'reclaim' && !!options.reclaimFailure)
       || (action.kind === 'deployment' && /unverified: not configured/.test(action.detail));
     const failed = Object.values(result.state.actions).filter(action => action.state === 'failed' && !scripted(action));
     assert.deepEqual(failed.map(action => `${action.kind}: ${action.detail}`), [], `${phase}: no step but the day's scripted ones failed`);
   };
   now += interval;
-  await runDaemon(config(), result.state, effects, runOptions);
+  await runDaemon(dayConfig(), result.state, effects, runOptions);
   assert.ok(now - start >= dayMs - interval, `the day ran its hours (${Math.round((now - start) / hour)}h of ${dayMs / hour}h, ${result.cycles} cycles)`);
   if (process.env.SOAK_TRACE) {
     console.error('SOAK failures', JSON.stringify(result.state.failures.last), 'unhandled', result.state.failures.unhandled);
@@ -256,4 +275,66 @@ test('unit:soak-step-stalls-remedy-once — a day of merge records refused as re
   assert.equal(stalls[Object.keys(stalls)[0]].remedy.verified, true, 'the remedy attempt survives the cursor write');
   const inFlight = JSON.parse(result.cursorMergeWriter) as { inFlight: { key: string; head: string } | null };
   assert.ok(inFlight.inFlight === null || (inFlight.inFlight.key === 'GY-7' && inFlight.inFlight.head === head), 'the in-flight row names the day\u2019s own merge, never a stale refused attempt');
+});
+
+test('unit:soak-step-stalls-call-hold — a day whose host reclaim throws the same way every cycle: one stall, the reclaim call itself made at most once per five minutes while it stands, the master woken once, every invariant holding', { timeout: 600_000 }, async () => {
+  const result = await runDay({ reclaimFailure: 'EACCES: permission denied, rmdir /var/tmp/graphyard-held' });
+  const standing = Object.values(result.state.stepStalls).find(run => run.step === 'reclaim');
+  assert.ok(standing?.stalledAt, 'the day recorded the reclaim stall');
+  assert.equal(Object.values(result.state.stepStalls).filter(run => run.step === 'reclaim').length, 1, 'one signature, one run, one stall');
+  assert.deepEqual(standing.calls, [{ call: 'reclaim', async: true }], 'the stall holds the effect its failed rows carry');
+  // The call itself — not just its bookkeeping — is made once per window from the stall on.
+  const stalledFrom = Date.parse(standing.stalledAt!) - start;
+  const after = result.reclaims.filter(at => at >= stalledFrom);
+  const gaps = after.slice(1).map((at, index) => at - after[index]);
+  assert.ok(gaps.length >= 3, `the day runs several windows past the stall (${after.length} reclaim call(s))`);
+  assert.ok(gaps.every(gap => gap >= stallBackoffMs), `every reclaim past the stall waits a full window: ${gaps.map(gap => Math.round(gap / minute)).join(', ')} min`);
+  assert.ok(result.reclaims.length <= 4 + dayMs / stallBackoffMs, `${result.reclaims.length} reclaim calls over ${result.cycles} cycles is once per window, not once per cycle`);
+  assert.ok(result.cycles > 2 * result.reclaims.length, 'the loop kept cycling between the held calls');
+  // The held cycles count nothing: the count is the reclaims the run saw fail.
+  assert.ok(standing.count <= result.reclaims.length, 'the run counts reclaim attempts, never held cycles');
+  const subject = stallSubjectKey(standing.signature);
+  assert.equal(result.prompts.filter(prompt => prompt.includes(subject)).length, 1, 'one master wake for the run');
+  assert.deepEqual(JSON.parse(result.cursorStalls), JSON.parse(JSON.stringify(result.state.stepStalls)), 'the persisted stepStalls are the live ones');
+});
+
+test('unit:soak-step-stalls-credential-renewed — a day whose worker credential the plane refuses (401): the production remedy renews it once from the credential the install issued, verifies it, the launch lands and the stall ends, the master never woken', { timeout: 600_000 }, async () => {
+  const home = await mkdtemp(join(tmpdir(), 'gy-1854-soak-'));
+  const coordinatorToken = 'c'.repeat(40), issued = 'w'.repeat(40), stale = 's'.repeat(40);
+  for (const folder of ['master', 'workers', 'profile']) await mkdir(join(home, folder), { recursive: true });
+  const files = { coordinator: join(home, 'master', 'coordinator.token'), worker: join(home, 'profile', 'worker-a.token'), good: issued };
+  await writeFile(files.coordinator, `${coordinatorToken}\n`, { mode: 0o600 });
+  await writeFile(join(home, 'workers', 'worker-a.token'), `${issued}\n`, { mode: 0o600 });
+  await writeFile(files.worker, `${stale}\n`, { mode: 0o600 });
+  // The plane's /api/status, the one port the production remedy reads through: the coordinator and the issued worker token authenticate, the stale one is 401.
+  const original = globalThis.fetch;
+  let statusReads = 0;
+  globalThis.fetch = (async (url: string, init?: { headers?: Record<string, string> }) => {
+    if (!String(url).endsWith('/api/status')) throw new Error(`the day reads only /api/status, not ${url}`);
+    statusReads += 1;
+    const actor = ({ [coordinatorToken]: 'master', [issued]: 'worker-a' } as Record<string, string>)[(init?.headers?.Authorization ?? '').replace('Bearer ', '')];
+    return actor ? new Response(JSON.stringify({ actor: { id: actor } }), { status: 200 }) : new Response('{}', { status: 401 });
+  }) as typeof fetch;
+  let result: Day;
+  try { result = await runDay({ credentials: files }); }
+  finally { globalThis.fetch = original; }
+  try {
+    const stalls = result.remedyHistory.filter(entry => entry !== '[]');
+    assert.ok(stalls.length, 'the day stalled and carried a remedy attempt');
+    const [record] = JSON.parse(stalls[0]) as { kind: string; outcome: string; verified: boolean; detail: string }[];
+    assert.equal(record.kind, 'credential-401');
+    assert.equal(record.outcome, 'applied', record.detail);
+    assert.equal(record.verified, true, record.detail);
+    assert.match(record.detail, /Renewed worker-a from .*workers\/worker-a\.token/);
+    assert.equal(new Set(stalls).size, 1, 'the remedy is written once and never re-applied');
+    assert.ok(statusReads <= 6, `the remedy ran once: ${statusReads} status read(s)`);
+    assert.equal((await readFile(files.worker, 'utf8')).trim(), issued, 'the profile holds the renewed credential');
+    // The renewed credential lands the launch, and the run ends — never re-formed.
+    assert.ok(result.landed.length >= 1, 'a launch landed with the renewed credential');
+    assert.equal(result.landed.length, result.launches.length, 'no launch was made with the refused credential: every one landed');
+    // The credential read failed the cycle on exactly the three cycles that formed the stall; the renewal ended it.
+    assert.equal(result.logs.filter(line => /failed in .*credential not valid/.test(line)).length, stallCycleBound, 'three failed cycles, then none');
+    assert.deepEqual(result.state.stepStalls, {}, 'the stall ends once its call lands');
+    assert.equal(result.prompts.filter(prompt => prompt.includes('stall:')).length, 0, 'a verified renewal wakes no master');
+  } finally { await rm(home, { recursive: true, force: true }); }
 });

@@ -493,6 +493,8 @@ export const stepStallSchema = z.object({
   nextAttemptAt: z.string().nullable().default(null),
   /** When the held call admitted its window's one attempt, until that attempt's failure is counted; null otherwise. */
   attemptAt: z.string().nullable().default(null),
+  /** The loop effects whose thrown failure the run's failed actions carry, and whether each failed as a promise: the calls its window holds. */
+  calls: z.array(z.object({ call: z.string().max(100), async: z.boolean() }).strict()).max(8).default(() => []),
 }).strict();
 export type StepStall = z.infer<typeof stepStallSchema>;
 export const daemonStateSchema = z.object({
