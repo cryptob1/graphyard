@@ -52,7 +52,7 @@ export const consentAnswers: ConsentRule[] = [
  * the menu, any of which would change a setting. The dialog is known by that shape, not by its
  * question's words, so the rule's `asks` names the footer; detectConsentPrompt answers it from its
  * settings-suggestion branch, never from the numbered rules above, which choose an option by
- * number — and only when the footer is the screen's last line, so the same words quoted above an
+ * number — and only when the footer ends on the screen's last line, so the same words quoted above an
  * ordinary prompt end on that prompt, not on a menu, and are never answered.
  */
 export const settingsSuggestionAnswer: ConsentRule = {
@@ -101,20 +101,31 @@ function trailingDialog(lines: string[]): { lines: string[]; question: string[] 
 
 /** A line the runtime draws as the session's own transcript (Claude Code's assistant and tool-result bullets), never part of a dialog below it. */
 const transcriptLine = /^[●⏺⎿]/;
+/** A line that is the session's own input prompt, never the wrapped tail of a dialog's footer. */
+const inputPromptLine = /^[❯>]/;
 /**
- * The settings-suggestion dialog the screen ends on (GY-1872): the lines that ask its question —
- * those within `consentQuestionLines` of the footer above it, below the last transcript line among
- * them — or null. The footer must be the screen's last line, so a session that merely quotes the
- * dialog above its ordinary prompt ends on the prompt, not on a menu, and is not a dialog waiting
- * for a keystroke. The session's own output above the dialog ("Implemented login handling") is
- * not what the keystroke answers, so it is not read for a credential or a payment.
+ * The settings-suggestion dialog the screen ends on (GY-1872): its footer — the screen's last
+ * line, or the last `consentFooterLines` lines a narrow pane wrapped it onto (production's
+ * "… enter confirm · esc not" / "now") — and the lines that ask its question, those within
+ * `consentQuestionLines` above the footer and below the last transcript line among them; or null.
+ * The footer must end on the screen's last line, and a wrapped footer must need that line to read
+ * as one: a session that merely quotes the footer above its ordinary prompt ends on the prompt, not
+ * on a menu, and is not a dialog waiting for a keystroke. The session's own output above the dialog
+ * ("Implemented login handling") is not what the keystroke answers, so it is not read for a
+ * credential or a payment.
  */
-function trailingSettingsSuggestion(lines: string[]): string[] | null {
+function trailingSettingsSuggestion(lines: string[]): { question: string[]; footer: string } | null {
   const last = lines.length - 1;
-  if (last < 1 || !settingsSuggestionAnswer.asks.test(lines[last])) return null;
-  const window = lines.slice(Math.max(0, last - consentQuestionLines), last);
-  const transcript = window.findLastIndex(line => transcriptLine.test(line));
-  return window.slice(transcript + 1);
+  if (last < 1 || inputPromptLine.test(lines[last])) return null;
+  for (let size = 1; size <= Math.min(consentFooterLines, last); size += 1) {
+    const start = last - size + 1, footer = lines.slice(start, last + 1).join(' ');
+    if (!settingsSuggestionAnswer.asks.test(footer)) continue;
+    // A footer complete above the last line is a quotation over whatever the last line is.
+    if (size > 1 && settingsSuggestionAnswer.asks.test(lines.slice(start, last).join(' '))) return null;
+    const window = lines.slice(Math.max(0, start - consentQuestionLines), start);
+    return { question: window.slice(window.findLastIndex(line => transcriptLine.test(line)) + 1), footer };
+  }
+  return null;
 }
 
 /**
@@ -123,9 +134,9 @@ function trailingSettingsSuggestion(lines: string[]): string[] | null {
  * credential or a payment is never answered, whatever its footer offers.
  */
 function settingsSuggestionPrompt(lines: string[]): ConsentPrompt | null {
-  const question = trailingSettingsSuggestion(lines);
-  if (!question) return null;
-  const footer = lines[lines.length - 1], shown = [...question, footer].join(' / ');
+  const dialog = trailingSettingsSuggestion(lines);
+  if (!dialog) return null;
+  const { question, footer } = dialog, shown = [...question, footer].join(' / ');
   const text = shown.length > consentTextLimit ? `${shown.slice(0, consentTextLimit - 1)}…` : shown;
   const asking = promptKinds.find(([kind, asks]) => (kind === 'credential' || kind === 'payment') && asks.test(`${question.join('\n')}\n${footer}`));
   if (asking) return { kind: asking[0], text, rule: null, keys: null };

@@ -20,6 +20,7 @@ import { emptyMasterSession } from '../src/daemon/state.js';
 // unit:master-wake-holds-unanswerable-dialog, unit:master-wake-holds-dialog-still-showing,
 // unit:master-wake-holds-settings-warning, unit:master-wake-holds-unclassified-menu,
 // unit:master-wake-holds-dialog-after-esc, unit:master-wake-hold-outlives-failed-send,
+// unit:settings-suggestion-dialog-wrapped-footer, unit:master-wake-answers-wrapped-dialog-first,
 // unit:settings-dialog-delivered-as-notice (the merge with GY-1863: a prompt delivery puts the
 // same dialog away with its own key instead of refusing it as a consent dialog).
 
@@ -42,6 +43,33 @@ const compactDialog = [
   '',
   '↑/↓ choose · ←/→ change size · enter confirm · esc not now',
 ].join('\n');
+/**
+ * The production autocompact screen, as GY-1863 read it off the master session's pane
+ * (tests/fault-class-session-liveness.test.ts): at that pane's width the footer wraps, so the
+ * screen ends on "… esc not" and then "now", and the menu's options are unnumbered.
+ */
+const wrappedCompactDialog = [
+  '✻ Brewed for 1m 25s · done 7:33 PM',
+  ' We recommend compacting earlier',
+  '   Each message re-sends the whole conversation, so long',
+  '   conversations use up your plan\'s usage limits faster.',
+  '   With your current settings, Claude Code autocompacts',
+  '   (replaces older messages with a summary) at 1m tokens',
+  '   (default via auto setting). Compacting earlier can',
+  '   reduce usage, but it happens more often, and some',
+  '   details can be lost each time.',
+  '   Want to autocompact at 400k tokens instead? Your model',
+  '   doesn\'t change. Switch back any time with',
+  '   /autocompact.',
+  '     Autocompact at ‹ 400k › tokens',
+  '     Keep auto (1m tokens)',
+  '   ↑/↓ choose · ←/→ change size · enter confirm · esc not',
+  '   now',
+].join('\n');
+/** The footer quoted whole on one line, above a last line that merely continues the session's output: no wrapped footer. */
+const quotedFooterAboveOutput = ['The dialog read "↑/↓ choose · enter confirm · esc not now" and the loop', 'now'].join('\n');
+/** The wrapped production footer under a dialog that asks for a credential. */
+const wrappedCredentialDialog = ['Sign in to use Claude Code', 'Paste your API key, or sign in with your Claude account', '  Sign in with Claude account', '  API key (paste below)', '   ↑/↓ choose · enter confirm · esc not', '   now'].join('\n');
 /** The same words a session merely quotes, above its ordinary prompt: a footer, not a menu. */
 const quotedDialog = [
   'The item description reads: "We recommend compacting earlier … Want to autocompact at 400k tokens instead? … ↑/↓ choose · ←/→ change size · enter confirm · esc not now"',
@@ -274,6 +302,30 @@ test('unit:master-wake-hold-outlives-failed-send — a hold is retired only by t
   assert.equal(pane.prompts.length, 1);
   assert.ok(state.master.lastWake);
   assert.equal(state.actions[masterWakeHeldKey]?.state, 'done', 'the delivered wake retires the hold');
+});
+
+test('unit:settings-suggestion-dialog-wrapped-footer — the production autocompact screen, its footer wrapped onto "esc not" / "now", is the same settings dialog answered with esc; a footer quoted whole above a last line, and a wrapped footer under a credential question, are not answered', () => {
+  const prompt = detectConsentPrompt(wrappedCompactDialog);
+  assert.equal(prompt?.kind, 'settings');
+  assert.deepEqual(prompt?.keys, ['esc'], 'the not-now key read off the joined footer');
+  assert.equal(prompt?.rule?.answer, 'Not now (settings unchanged)');
+  assert.match(prompt?.text ?? '', /Want to autocompact at 400k tokens instead\?[^\u0000]*esc not now$/);
+  assert.equal(detectConsentPrompt(quotedFooterAboveOutput), null, 'a footer already whole above the last line is a quotation, not a wrapped footer');
+  assert.equal(detectConsentPrompt(`${wrappedCompactDialog}\n❯ `), null, 'the dialog\'s words above an ordinary prompt are not answered');
+  const credential = detectConsentPrompt(wrappedCredentialDialog);
+  assert.equal(credential?.kind, 'credential');
+  assert.equal(credential?.keys, null, 'a credential question is never answered, wrapped footer or not');
+});
+
+test('unit:master-wake-answers-wrapped-dialog-first — with the master pane showing the production autocompact screen, the wake sends esc, re-reads the pane, and only then sends the wake text', async () => {
+  const pane = new MasterPane(wrappedCompactDialog);
+  const { state, step } = stepOver(pane);
+  await step(clock);
+  assert.deepEqual(pane.log, ['read', 'read', 'keys:esc', 'read', 'prompt'], 'read, esc, read again, and only then the wake');
+  assert.equal(pane.prompts.length, 1);
+  assert.ok(state.master.lastWake);
+  assert.match(state.actions['wake:master:0']?.detail ?? '', /with "Not now \(settings unchanged\)" first/);
+  assert.equal(state.actions[masterWakeHeldKey], undefined, 'no hold where the dialog was answered');
 });
 
 /** A settings-suggestion dialog the notice catalogue names no kind for: the same footer, another preference. */
