@@ -147,15 +147,14 @@ test('unit:face-move-readers-match-full-evaluation — the view, the configurati
   } finally { engine.ciAppIds = apps; }
   await settle();
 
-  // The interval safety net still evaluates every live item.
-  engine.reconcileFullEvaluationMs = 2_000;
-  try {
-    await new Promise(resolve => setTimeout(resolve, 2_100));
-    await engine.reconcile();
-    const interval = engine.reconcileTicks.at(-1)!;
-    assert.equal(interval.full?.cause, 'interval');
-    assert.equal(interval.evaluated, engine.lastReconcile.live, 'the interval pass evaluated every live item');
-  } finally { engine.reconcileFullEvaluationMs = 300_000; }
+  // The interval safety net still evaluates every live item: the last full pass is backdated past
+  // the interval rather than waited out.
+  const clock = engine as unknown as { reconcileFullAt: number };
+  clock.reconcileFullAt -= 3_600_000;
+  await engine.reconcile();
+  const interval = engine.reconcileTicks.at(-1)!;
+  assert.equal(interval.full?.cause, 'interval');
+  assert.equal(interval.evaluated, engine.lastReconcile.live, 'the interval pass evaluated every live item');
   await settle();
 
   // The scripted sequence: between passes an external writer moves faces — retitles, the release
