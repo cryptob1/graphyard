@@ -92,9 +92,19 @@ export function riskDelta(work: Pick<Work, 'candidate' | 'observation'>): { file
 }
 
 /** The item's risk class and its reasons, from the delta `riskDelta` selects. */
-export function riskOf(work: Pick<Work, 'candidate' | 'observation'>): RiskVerdict & { source: DeltaSource } {
+export function riskOf(work: Pick<Work, 'candidate' | 'observation'>, policy: RepositoryPolicy = repositoryPolicy()): RiskVerdict & { source: DeltaSource } {
   const delta = riskDelta(work);
-  return { ...classifyRisk(delta.files), source: delta.source };
+  return { ...classifyRisk(delta.files, policy), source: delta.source };
+}
+
+/**
+ * The risk the item page shows (GY-1843): judged by the policy the control plane serves on
+ * /api/status (`repositoryPolicy`), the one its gates use; only a status that carries none — an older
+ * server — falls back to this process's own reading, marked `estimated` so the page labels it.
+ */
+export function shownRisk(work: Pick<Work, 'candidate' | 'observation'>, served?: RepositoryPolicy | null): RiskVerdict & { estimated: boolean } {
+  const { risk, reasons } = served ? riskOf(work, served) : riskOf(work);
+  return { risk, reasons, estimated: !served };
 }
 
 /**

@@ -22,7 +22,7 @@ import { groupWithin, nextActor, timedGroups } from '../groups';
 import { checkStates, prSteps, stepHeld } from '../../src/model/pr-steps';
 import { releaseView } from '../../src/model/release';
 import { blastRadius } from '../../src/model/blast-radius';
-import { riskOf } from '../../src/model/risk-class';
+import { shownRisk } from '../../src/model/risk-class';
 import StatusBadge from '../components/status-badge';
 import { StepsDetail } from '../components/steps-bar';
 import { RequestCard } from './human-requests';
@@ -118,11 +118,9 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const reviewGate = item.gates.find(g => g.name === 'review');
   // What merging it would reach and what could take it back (GY-972), from its scope and gates.
   const radius = blastRadius(item);
-  // The risk class of the delta the merge would apply, beside the path-glob lane (GY-1521). The gates judge it by the
-  // repository's graphyard.json policy, which the browser cannot read (GY-1843): a risk the item carries is shown as is,
-  // else this page's own reading — the generic default rules in a browser — labelled as such.
-  const carried = item as Work & { risk?: 'sensitive' | 'normal'; riskReasons?: string[] };
-  const risk = carried.risk ? { risk: carried.risk, reasons: carried.riskReasons ?? [], estimated: false } : { ...riskOf(item), estimated: true };
+  // The risk class of the delta the merge would apply, beside the path-glob lane (GY-1521), judged by the repository
+  // policy the control plane serves on /api/status, the one its gates use (GY-1843).
+  const risk = shownRisk(item, status?.repositoryPolicy);
   const review = !reviewGate || reviewGate.passed ? 'Approved' : reviewGate.reasons.some(r => r.startsWith('Outstanding change requests')) ? 'Changes requested' : 'Waiting for approval';
   return <article className="item-page" aria-label={item.title}>
     <button type="button" className="text-button back" autoFocus onClick={() => setSelected(null)}>← Back</button>

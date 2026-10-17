@@ -267,3 +267,32 @@ test('unit:repo-review-and-pending-policy — under e2e.pendingOutcomes blocking
     assert.equal(holds.filter(entry => entry.kind === 'open').length, opened, `${rule}: ${opened} hold opened`);
   }
 });
+
+test('unit:repo-risk-policy — the item page shows the risk the server\'s policy gives, served on /api/status, not the browser\'s generic reading', async () => {
+  const { resolveRepositoryPolicy, repositoryPolicy } = await policyModule();
+  const { createElement } = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { default: WorkDetails } = await import('../web/pages/work-details.js');
+  // @ts-expect-error the checked-in dashboard fixture is plain JavaScript
+  const { fixtureApi, fixtureStatus, NOW } = await import('../scripts/dashboard-fixture.mjs');
+  const noop = () => {};
+  const render = (item: Work, status: Record<string, unknown>) => renderToStaticMarkup(createElement(WorkDetails, {
+    token: 'fixture', work: [item], status, error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
+    selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
+    operatorAgents: [], operatorAgentsError: null, features: {}, events: [], editingRequirements: false, setEditingRequirements: noop, codexAvailable: false,
+    sessionEpoch: { current: 0 }, api: async (path: string) => fixtureApi(path, 'admin'), refresh: async () => {}, action: async () => {}, setError: noop, signOut: noop, item,
+  } as any));
+  const item = planeHead('GY-9', ['app/ledger/book.ts']);
+  const custom = resolveRepositoryPolicy({ risk: { sensitive: [{ rule: 'ledger', glob: 'app/ledger/' }] } });
+  // The status route serves the policy in force on the control plane (src/server/routes/status.ts).
+  const served = await under(custom, () => repositoryPolicy());
+  const shown = render(item, { ...fixtureStatus('admin'), repositoryPolicy: served });
+  assert.match(shown, /class="risk-details">sensitive<small> · app\/ledger\/book\.ts: ledger<\/small>/);
+  assert.doesNotMatch(shown, /risk-estimate/, 'a served policy is the gates\' own, so it is not labelled an estimate');
+  // An older server that serves none: the page's own reading, labelled as such.
+  const older = render(item, { ...fixtureStatus('admin'), repositoryPolicy: undefined });
+  assert.match(older, /class="risk-details">normal/);
+  assert.match(older, /risk-estimate/);
+  const statusRoute = await readFile(new URL('../src/server/routes/status.ts', import.meta.url), 'utf8');
+  assert.match(statusRoute, /repositoryPolicy: repositoryPolicy\(\)/, '/api/status serves the policy in force');
+});
