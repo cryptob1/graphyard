@@ -7,6 +7,7 @@ import { assessExactCut } from '../../daemon/candidate-cut.js';
 import { defaultCandidateIdleMinutes, maxCandidateIdleMinutes } from '../../master/merge-writer-settings.js';
 import { maxCandidateChanges, projectDelivery } from '../../project-applications.js';
 import { uatValidationWindowMs } from '../../release-candidate.js';
+import { candidatePromotionKind } from '../../delivery.js';
 import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
 
 /**
@@ -42,8 +43,8 @@ const validationSchema = z.object({
   result: z.enum(['pass', 'fail']),
   cases: z.array(z.object({ id: z.string().min(1).max(100), result: z.string().min(1).max(40) }).strict()).max(500).default([]),
   failed: z.array(z.string().min(1).max(200)).max(500).default([]),
-  /** GY-1905: the cases the run held required, and the artifact it ran against. */
-  required: caseIds.optional(), artifact: artifact.optional(),
+  /** GY-1905: the cases the run held required, the artifact it ran against and when the run was recorded. */
+  required: caseIds.optional(), artifact: artifact.optional(), ranAt: z.iso.datetime().optional(),
 }).strict();
 /**
  * GY-1905: a request to select a validated candidate for an environment. It names exactly what the
@@ -52,13 +53,13 @@ const validationSchema = z.object({
  */
 const promotionSchema = z.object({ environment: z.string().regex(/^[a-z][a-z0-9-]{0,39}$/), release: z.string().min(1).max(100), sha, identity, artifact, required: caseIds }).strict();
 export type PromotionRequest = z.infer<typeof promotionSchema>;
-export type GatedValidation = CandidateValidation & { required?: string[]; artifact?: string };
+export type GatedValidation = CandidateValidation & { required?: string[]; artifact?: string; ranAt?: string };
 /** GY-1905: the selection recorded once a candidate passed every promotion gate (`release.candidate.promotion`, append-only). */
 export interface CandidatePromotion { environment: string; releaseId: string; sourceSha: string; identity: string; artifact: string; required: string[]; at: string; by: string }
 export type PromotedCandidate = Omit<ExactCandidate, 'validation'> & { validation: GatedValidation | null; promotion?: CandidatePromotion | null };
-export const candidatePromotionKind = 'release.candidate.promotion';
-/** A required case passes when it ran and passed, or ran as pending under its outcome's pending contract (GY-1802). */
-const passing = new Set(['passed', 'pending']);
+export { candidatePromotionKind };
+/** A required case passes only when it ran and passed: a pending (GY-1802), flaky or unrun result does not. */
+const passing = 'pass';
 const cutLock = `${exactCandidateKind}:cut`;
 const candidatePath = /^\/api\/candidates\/([^/]+)$/;
 const validationPath = /^\/api\/candidates\/([^/]+)\/validation$/;
@@ -152,7 +153,7 @@ export async function cutExactCandidate(db: pg.PoolClient, actor: Principal, now
 
 /** Submitted validation content excluding server-owned `at`/`by`, for identical-replay comparison. */
 const validationContent = (value: Omit<GatedValidation, 'at' | 'by'> | z.infer<typeof validationSchema>) =>
-  JSON.stringify({ release: value.release, sha: value.sha, identity: value.identity, result: value.result, cases: value.cases, failed: value.failed, required: value.required ?? null, artifact: value.artifact ?? null });
+  JSON.stringify({ release: value.release, sha: value.sha, identity: value.identity, result: value.result, cases: value.cases, failed: value.failed, required: value.required ?? null, artifact: value.artifact ?? null, ranAt: value.ranAt ?? null });
 
 /**
  * Append the UAT verdict for candidate `id`, once. It must name the candidate's exact source and
@@ -182,7 +183,8 @@ export async function recordCandidateValidation(db: pg.PoolClient, actor: Princi
  * GY-1905: why `candidate` may not be selected for `ask.environment` at `now` — empty when it may.
  * Only the exact candidate that passed every combined required case promotes: its recorded
  * validation passed, names this source, identity and artifact, was run as the very `rc/ID` being
- * promoted, is no older than the UAT window, and holds a passing verdict for every required case
+ * promoted, ran no longer ago than the UAT window (the run's own time, not when the plane recorded
+ * it), and holds a `pass` for every required case
  * the candidate's checkout declares and the run held required. Anything absent fails closed, and a
  * candidate older than one already promoted there is superseded.
  */
@@ -196,12 +198,16 @@ export function promotionRefusals(candidate: PromotedCandidate, ask: PromotionRe
   if (!validation.artifact) refusals.push(`the validation of ${candidate.id} names no artifact, so nothing binds what it tested to what would deploy`);
   else if (validation.artifact !== ask.artifact) refusals.push(`the artifact ${ask.artifact} is not the ${validation.artifact} the validation of ${candidate.id} tested`);
   if (validation.release !== ask.release) refusals.push(`the validation of ${candidate.id} was run as ${validation.release}, not ${ask.release}`);
-  const age = now.getTime() - Date.parse(validation.at);
-  if (!(age <= uatValidationWindowMs)) refusals.push(`the validation of ${candidate.id} recorded at ${validation.at} is stale: older than ${uatValidationWindowMs / 3_600_000} hours`);
+  // The run's own time bounds freshness: a verdict recovered after a restart is recorded late, but ran when it ran.
+  if (!validation.ranAt) refusals.push(`the validation of ${candidate.id} names no run time, so its freshness is unknown`);
+  else {
+    const ran = Math.min(Date.parse(validation.ranAt), Date.parse(validation.at)), age = now.getTime() - ran;
+    if (!(age <= uatValidationWindowMs)) refusals.push(`the validation of ${candidate.id} ran at ${new Date(ran).toISOString()} and is stale: older than ${uatValidationWindowMs / 3_600_000} hours`);
+  }
   const required = [...new Set([...ask.required, ...validation.required ?? []])].sort();
   if (!required.length) refusals.push(`no required case is named for ${candidate.id}; a candidate promotes only on its combined required cases`);
   const verdicts = new Map(validation.cases.map(entry => [entry.id, entry.result]));
-  const missing = required.filter(id => !verdicts.has(id)), failing = required.filter(id => verdicts.has(id) && !passing.has(verdicts.get(id)!));
+  const missing = required.filter(id => !verdicts.has(id)), failing = required.filter(id => verdicts.has(id) && verdicts.get(id) !== passing);
   if (missing.length) refusals.push(`required case${missing.length > 1 ? 's' : ''} ${missing.join(', ')} never ran on ${candidate.id}`);
   if (failing.length) refusals.push(`required case${failing.length > 1 ? 's' : ''} ${failing.map(id => `${id} (${verdicts.get(id)})`).join(', ')} did not pass on ${candidate.id}`);
   if (newest && newest.id !== candidate.id && newest.sequence > candidate.sequence) refusals.push(`candidate ${candidate.id} is superseded: the later ${newest.id} is already promoted to ${ask.environment}`);

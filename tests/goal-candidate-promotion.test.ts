@@ -10,7 +10,7 @@ import { lockedWork } from '../src/store/locked-read.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal } from '../src/model.js';
-import { candidateValidationKind, type ExactCandidate } from '../src/model/release.js';
+import type { ExactCandidate } from '../src/model/release.js';
 import type { PromotedCandidate, PromotionRequest } from '../src/server/routes/candidates.js';
 import { cutAsync, readLedgerAsync, serveStaticSite, syncLedgerAsync, promoteAsync, type AsyncGit, type ReleaseCandidate } from '../src/release-candidate.js';
 import { buildStaticSite, projectCaseSuite, validateProjectCandidate } from '../src/release-project.js';
@@ -146,6 +146,13 @@ const promote = (id: string, body: PromotionRequest, key?: string) => call('POST
 const promoteRecord = (record: ReleaseCandidate) => promoteAsync(asyncGit, record.id, { base: 'main', push: true, now: new Date(clock += 60_000), gate: candidate => exactPromotionGate(ports, asyncGit, candidate) });
 const production = async () => { await syncLedgerAsync(asyncGit, 'main'); return execFileSync('git', ['-C', origin, 'rev-parse', '--verify', '--quiet', 'refs/heads/release/production'], { encoding: 'utf8' }).trim(); };
 const selected = async () => (await call('GET', 'candidates', 'reader')).body.production as { candidate: string; releaseId: string; sourceSha: string } | null;
+/** What the delivery view expects production to run: the release id and the source it is bound to. */
+const expectedProduction = async () => {
+  const answer = await call('GET', 'delivery', 'reader');
+  assert.equal(answer.status, 200, JSON.stringify(answer.body));
+  const environment = answer.body.environments[0];
+  return environment && { id: environment.id, releaseId: environment.expected?.releaseId, sourceSha: environment.expected?.sourceSha };
+};
 
 test('integration:goal-combined-candidate-gates — the combined required case suite runs against each pinned candidate; only an all-passing exact source and artifact is selected for promotion, and a changed source, artifact, stale validation or missing required case fails closed', { timeout: 120_000 }, async () => {
   assert.deepEqual(await requiredCaseIds(asyncGit, git('rev-parse', 'refs/remotes/origin/main')), ['fixture-compose-app', 'fixture-static-home'], 'the checkout declares both combined required cases');
@@ -190,6 +197,7 @@ test('integration:goal-combined-candidate-gates — the combined required case s
   assert.equal(moved.promoted, true, JSON.stringify(moved));
   assert.equal(await production(), first.candidate.sourceSha, 'production is the selected candidate\'s exact source');
   assert.equal((await selected())!.candidate, first.candidate.id);
+  assert.deepEqual(await expectedProduction(), { id: 'production', releaseId: first.record.id, sourceSha: first.candidate.members[0].mergeSha }, 'the delivery view expects the promoted release, bound to its member\'s merge commit');
   const otherArtifact = await promote(first.candidate.id, { ...exact, artifact: `tree:${git('rev-parse', `${other}^{tree}`)}` });
   assert.equal(otherArtifact.status, 409); assert.match(otherArtifact.body.error, /already promoted to production/);
 
@@ -206,7 +214,22 @@ test('integration:goal-combined-candidate-gates — the combined required case s
   assert.equal(await production(), first.candidate.sourceSha, 'the gate refused before the production branch moved');
   assert.equal((await read(skipped.candidate.id)).promotion, null);
 
-  // A validation recorded with no artifact binds nothing to what would deploy; a stale one is older than the UAT window.
+  // A required case that failed under its outcome's pending contract did not block the run, but it did not pass: the gate refuses it.
+  await delivered('Home line P', { 'site/index.html': home('change P') });
+  const pending = await cutAndTag();
+  const pendingRun = await combined(pending.record);
+  const pendingRecord = { ...pendingRun.record, e2e: { ...pendingRun.record.e2e!, cases: pendingRun.record.e2e!.cases.map(entry => entry.case === 'fixture-static-home' ? { ...entry, verdict: 'failed' as const, pending: true as const } : entry) } };
+  const pendingVerdict = exactValidation({ ...pending.record, exact: pending.record.exact! }, pendingRecord, await candidateArtifact(asyncGit, pending.record));
+  assert.equal(pendingVerdict.result, 'pass', 'the run itself passed: the pending case did not block it');
+  assert.deepEqual(pendingVerdict.cases, [{ id: 'fixture-compose-app', result: 'pass' }, { id: 'fixture-static-home', result: 'pending' }]);
+  await ports.validated(pending.candidate.id, pendingVerdict);
+  const pendingAnswer = await promote(pending.candidate.id, await ask(pending.record));
+  assert.equal(pendingAnswer.status, 409); assert.match(pendingAnswer.body.error, /required case fixture-static-home \(pending\) did not pass/);
+  assert.equal((await read(pending.candidate.id)).promotion, null);
+  assert.equal(await production(), first.candidate.sourceSha);
+
+  // A validation recorded with no artifact binds nothing to what would deploy; a stale one ran longer ago than the UAT window,
+  // even when the plane records it late, as a verdict recovered after a restart is.
   await delivered('Home line C', { 'site/index.html': home('change C') });
   const unbound = await cutAndTag();
   const unboundRun = await combined(unbound.record);
@@ -216,10 +239,12 @@ test('integration:goal-combined-candidate-gates — the combined required case s
   await delivered('Home line D', { 'site/index.html': home('change D') });
   const stale = await cutAndTag();
   const staleRun = await combined(stale.record);
-  const staleVerdict = { ...exactValidation({ ...stale.record, exact: stale.record.exact! }, staleRun.record, await candidateArtifact(asyncGit, stale.record)), at: new Date(Date.now() - 5 * 3_600_000).toISOString(), by: 'graphyard' };
-  await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', candidateValidationKind, JSON.stringify({ candidate: stale.candidate.id, validation: staleVerdict })]);
+  const ranAt = new Date(Date.now() - 5 * 3_600_000).toISOString();
+  await ports.validated(stale.candidate.id, exactValidation({ ...stale.record, exact: stale.record.exact! }, { ...staleRun.record, at: ranAt }, await candidateArtifact(asyncGit, stale.record)));
+  const recovered = await read(stale.candidate.id);
+  assert.equal(recovered.validation!.ranAt, ranAt); assert.ok(Date.parse(recovered.validation!.at) - Date.parse(ranAt) > 4 * 3_600_000, 'the plane recorded it hours after the run');
   const staleAnswer = await promote(stale.candidate.id, await ask(stale.record));
-  assert.equal(staleAnswer.status, 409); assert.match(staleAnswer.body.error, /is stale: older than 4 hours/);
+  assert.equal(staleAnswer.status, 409); assert.match(staleAnswer.body.error, new RegExp(`ran at ${ranAt.replace(/[.]/g, '\\.')} and is stale: older than 4 hours`));
 
   // A newer candidate that passes is selected; the older passing one is then superseded, never a promotion back.
   await delivered('Home line E', { 'site/index.html': home('change E') });
@@ -231,6 +256,11 @@ test('integration:goal-combined-candidate-gates — the combined required case s
   assert.equal(await production(), newer.candidate.sourceSha);
   const freshUnbound = await promote(unbound.candidate.id, await ask(unbound.record));
   assert.equal(freshUnbound.status, 409); assert.match(freshUnbound.body.error, new RegExp(`superseded: the later ${newer.candidate.id} is already promoted`));
+  assert.deepEqual(await expectedProduction(), { id: 'production', releaseId: newer.record.id, sourceSha: newer.candidate.members[0].mergeSha });
+  // A recorded build is the artifact only under the digest adapter; a commit deployment's artifact is its source tree.
+  const built = { ...newer.record, build: { artifacts: [{ service: 'web', digest: `sha256:${'a'.repeat(64)}` }] } } as unknown as ReleaseCandidate;
+  assert.equal(await candidateArtifact(asyncGit, built), `tree:${git('rev-parse', `${newer.record.sha}^{tree}`)}`);
+  assert.match(await candidateArtifact(asyncGit, built, true), /^sha256:[0-9a-f]{64}$/);
   // A release record the plane never cut is refused by the promoter's gate.
   assert.match((await exactPromotionGate(ports, asyncGit, { ...newer.record, exact: undefined })).join(' '), /not an exact candidate the plane cut/);
   const events = await store.pool.query("SELECT payload->>'candidate' AS id FROM events WHERE kind='release.candidate.promotion' ORDER BY seq");
@@ -273,11 +303,12 @@ test('integration:goal-failed-candidate-retained — a change that passes its ow
     const record = await read(failing.candidate.id);
     assert.equal(record.validation?.result, 'fail', label);
     assert.ok(record.validation!.failed.includes('fixture-static-home'), `${label}: ${JSON.stringify(record.validation!.failed)}`);
-    assert.deepEqual(record.validation!.cases, [{ id: 'fixture-compose-app', result: 'passed' }, { id: 'fixture-static-home', result: 'failed' }], label);
+    assert.deepEqual(record.validation!.cases, [{ id: 'fixture-compose-app', result: 'pass' }, { id: 'fixture-static-home', result: 'fail' }], label);
     assert.equal(record.promotion, null, `${label}: never promoted`);
     assert.equal(record.sourceSha, breaking.mergeSha);
     assert.equal(await production(), previous.candidate.sourceSha, `${label}: the production branch keeps the previous release`);
     assert.deepEqual(await selected(), { candidate: previous.candidate.id, ...(await read(previous.candidate.id)).promotion }, `${label}: the plane's selected release is still the previous candidate`);
+    assert.deepEqual(await expectedProduction(), { id: 'production', releaseId: previous.record.id, sourceSha: previous.candidate.members[0].mergeSha }, `${label}: the delivery view still expects the previous release`);
   };
   const attempt = async (label: string) => {
     const loop = await promoteRecord(failing.record);
@@ -285,7 +316,7 @@ test('integration:goal-failed-candidate-retained — a change that passes its ow
     assert.match((loop as { refusals: string[] }).refusals.join(' '), /failed UAT/, label);
     const direct = await promote(failing.candidate.id, await ask(failing.record), `direct-${label}`);
     assert.equal(direct.status, 409, label); assert.match(direct.body.error, /failed its combined required cases: .*fixture-static-home/, label);
-    assert.match(direct.body.error, /required case fixture-static-home \(failed\) did not pass/, label);
+    assert.match(direct.body.error, /required case fixture-static-home \(fail\) did not pass/, label);
     const contradicting = await call('POST', `candidates/${failing.candidate.id}/validation`, 'coordinator', { ...verdict, result: 'pass', failed: [] }, `contradicting-${label}`);
     assert.equal(contradicting.status, 409, label); assert.match(contradicting.body.error, /a validation is recorded once/);
     assert.equal((await call('POST', `candidates/${failing.candidate.id}/validation`, 'coordinator', verdict, `replay-${label}`)).status, 200, `${label}: the same verdict replays`);

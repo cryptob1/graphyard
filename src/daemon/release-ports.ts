@@ -100,21 +100,29 @@ export const exactCandidatePorts = (mutate: (path: string, data: unknown, reques
     },
   };
 };
+/** A case verdict as a candidate records it: `pass`/`fail` like the validation's own result (GY-1905); any other verdict as the run gave it. */
+const caseResult = (verdict: string) => verdict === 'passed' ? 'pass' : verdict === 'failed' ? 'fail' : verdict;
 /**
  * Pure: the verdict an exact candidate records from the UAT record its `rc/ID` was judged by, with
- * the artifact it ran against (GY-1905). A required case that failed while its outcome was pending
- * (GY-1802) is recorded `pending`, the non-blocking result the run gave it.
+ * the artifact it ran against and when the run was recorded (GY-1905). A required case that failed
+ * while its outcome was pending (GY-1802) is recorded `pending`: the run did not block on it, but it
+ * did not pass, so the promotion gate refuses it.
  */
-export const exactValidation = (record: Pick<ReleaseCandidate, 'id' | 'sha' | 'exact'> & { exact: NonNullable<ReleaseCandidate['exact']> }, uat: Pick<UatRecord, 'result' | 'suites' | 'e2e'>, artifact?: string): Omit<GatedValidation, 'at' | 'by'> => ({
+export const exactValidation = (record: Pick<ReleaseCandidate, 'id' | 'sha' | 'exact'> & { exact: NonNullable<ReleaseCandidate['exact']> }, uat: Pick<UatRecord, 'result' | 'suites' | 'e2e'> & Partial<Pick<UatRecord, 'at'>>, artifact?: string): Omit<GatedValidation, 'at' | 'by'> => ({
   release: record.id, sha: record.sha, identity: record.exact.identity, result: uat.result === 'passed' ? 'pass' : 'fail',
-  cases: (uat.e2e?.cases ?? []).map(entry => ({ id: entry.case, result: entry.pending && entry.verdict !== 'passed' ? 'pending' : entry.verdict })),
+  cases: (uat.e2e?.cases ?? []).map(entry => ({ id: entry.case, result: entry.pending && entry.verdict !== 'passed' ? 'pending' : caseResult(entry.verdict) })),
   failed: [...new Set([...uat.suites.filter(suite => !suite.passed).map(suite => suite.name), ...(uat.e2e?.blocking ?? [])])],
   required: (uat.e2e?.cases ?? []).filter(entry => entry.required).map(entry => entry.case),
   ...(artifact ? { artifact } : {}),
+  ...(uat.at ? { ranAt: uat.at } : {}),
 });
-/** GY-1905: what a candidate deploys as — its build's artifact digests when it carries a build, else its source tree. */
-export async function candidateArtifact(git: AsyncGit, record: Pick<ReleaseCandidate, 'sha' | 'build'>): Promise<string> {
-  const artifacts = record.build?.artifacts ?? [];
+/**
+ * GY-1905: what a candidate deploys as. Its build's artifact digests only when the digest adapter is
+ * selected (`byDigests`), as deployToUatAsync and promoteAsync then deploy them; else both deploy the
+ * commit, so the artifact is its source tree even when a build was recorded.
+ */
+export async function candidateArtifact(git: AsyncGit, record: Pick<ReleaseCandidate, 'sha' | 'build'>, byDigests = false): Promise<string> {
+  const artifacts = byDigests ? record.build?.artifacts ?? [] : [];
   if (artifacts.length) return `sha256:${createHash('sha256').update(artifacts.map(entry => `${entry.service} ${entry.digest}`).sort().join('\n')).digest('hex')}`;
   return `tree:${(await git(['rev-parse', `${record.sha}^{tree}`])).trim().toLowerCase()}`;
 }
@@ -136,10 +144,10 @@ export async function requiredCaseIds(git: AsyncGit, sha: string): Promise<strin
  * candidate for production only when its recorded validation passed every required case the
  * candidate's own commit declares, on exactly this source, identity and artifact (`promotionRefusals`).
  */
-export async function exactPromotionGate(ports: ExactCandidatePorts, git: AsyncGit, record: ReleaseCandidate): Promise<string[]> {
+export async function exactPromotionGate(ports: ExactCandidatePorts, git: AsyncGit, record: ReleaseCandidate, byDigests = false): Promise<string[]> {
   if (!record.exact) return [`${record.id} is not an exact candidate the plane cut, so no combined validation binds it`];
   const answer = await ports.promote(record.exact.id, { environment: 'production', release: record.id, sha: record.sha, identity: record.exact.identity,
-    artifact: await candidateArtifact(git, record), required: await requiredCaseIds(git, record.sha) });
+    artifact: await candidateArtifact(git, record, byDigests), required: await requiredCaseIds(git, record.sha) });
   return 'refused' in answer ? [answer.refused] : [];
 }
 
@@ -304,7 +312,7 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
     const listed = await ports.list();
     for (const candidate of listed.filter(entry => !entry.validation)) {
       const record = ledger.candidates.find(entry => entry.exact?.id === candidate.id), judged = record && ledger.uat.find(entry => entry.id === record.id);
-      if (record?.exact && judged) await ports.validated(candidate.id, exactValidation({ ...record, exact: record.exact }, judged, await candidateArtifact(git, record)));
+      if (record?.exact && judged) await ports.validated(candidate.id, exactValidation({ ...record, exact: record.exact }, judged, await candidateArtifact(git, record, !!digests.deploy)));
     }
     const untagged = listed.filter(entry => !entry.validation && !ledger.candidates.some(record => record.exact?.id === entry.id)).at(-1);
     if (untagged) return untagged;
@@ -319,7 +327,7 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
     if (!ports) return validation;
     const record = (await readLedgerAsync(git)).candidates.find(entry => entry.id === id);
     if (record?.exact) {
-      try { await ports.validated(record.exact.id, exactValidation({ ...record, exact: record.exact }, validation.record, await candidateArtifact(git, record))); }
+      try { await ports.validated(record.exact.id, exactValidation({ ...record, exact: record.exact }, validation.record, await candidateArtifact(git, record, !!digests.deploy))); }
       catch (error) { console.error(`Candidate ${id}'s verdict was not recorded on exact candidate ${record.exact.id}; the next cut records it: ${error instanceof Error ? error.message : String(error)}`); }
     }
     return validation;
@@ -365,7 +373,7 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
       // GY-1905: with the plane's exact candidates, the plane selects the candidate last, only if it passed every combined required case.
       const exact = options.plane?.candidates;
       const result = await promoteAsync(git, id, { base, push: true, now: new Date(now()), deployDigests: digests.deploy, imports: read ? candidate => promotionImports(read, candidate) : undefined,
-        seal: seal ? candidate => sealedImports(seal, candidate) : undefined, gate: exact ? candidate => exactPromotionGate(exact, git, candidate) : undefined });
+        seal: seal ? candidate => sealedImports(seal, candidate) : undefined, gate: exact ? candidate => exactPromotionGate(exact, git, candidate, !!digests.deploy) : undefined });
       return result.promoted ? { promoted: true, sha: result.sha } : { promoted: false, refusals: result.refusals };
     },
     verify: async sha => {

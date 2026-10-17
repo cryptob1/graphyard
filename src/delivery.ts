@@ -91,8 +91,10 @@ export const rollbackSettleSchema = z.object({ rollbackId: z.uuid(), operationId
 export const rollbackResolveSchema = z.object({ rollbackId: z.uuid(), operationId: z.uuid().optional(), outcome: z.enum(['applied', 'failed', 'cancelled']), reason: z.string().trim().min(1).max(2000), evidence: z.url().max(2000).optional() }).strict();
 export interface EnvironmentDelivery {
   environmentId: string; generation: number;
-  /** The selected release; `sourceSha` (GY-1905) names the commit it was built from, so the expected release reads as the exact merge it ships. */
-  expected: { releaseId: string; releaseRevision: number; sourceSha?: string; manifestHash: string; buildId: string; policyRevision: number; approvalId: string | null; selectedAt: string; selectedBy: string } | null;
+  /** In `status()`, the environment's id again, and `candidate` when the selection is an exact candidate's promotion (GY-1905). */
+  id?: string; source?: 'release' | 'candidate';
+  /** The selected release; `sourceSha` (GY-1905) names the commit it was built from, so the expected release reads as the exact merge it ships. A candidate's selection names its `candidate` and `artifact`. */
+  expected: { releaseId: string; releaseRevision: number; sourceSha?: string; manifestHash: string; buildId: string; policyRevision: number; approvalId: string | null; selectedAt: string; selectedBy: string; candidate?: string; artifact?: string } | null;
   history: ReleaseSelection[];
   /** Folded from the current generation's authoritative observations only. `segments` is matched history; `latest` is the most recently observed state. */
   coverage: Record<string, { segments: Interval[]; latest: { observationId: string; observedAt: string; validTo: string; state: ServiceState; reasons: string[] } | null }>;
@@ -110,6 +112,24 @@ const same = isDeepStrictEqual;
 // This is the content address src/attribution.ts matches observed targets against.
 const manifestHash = digestHash;
 export const historyLimit = 100, incidentLimit = 100, segmentLimit = 200, leaseMs = 60_000;
+/** GY-1905: the event `POST /api/candidates/ID/promotion` appends when it selects an exact candidate for an environment. */
+export const candidatePromotionKind = 'release.candidate.promotion';
+type CandidateSelection = { candidate: string; promotion: { environment: string; releaseId: string; sourceSha: string; artifact: string; at: string; by: string } };
+/**
+ * GY-1905: the delivery state an environment with no release-backed selection reads from its exact
+ * candidates' promotions, newest last: each one selected the next generation, the newest is expected.
+ * The git ledger, not delivery observations, observes these, so the verification stays unobserved.
+ */
+export function candidateEnvironment(environmentId: string, selections: CandidateSelection[]): EnvironmentDelivery {
+  const history: ReleaseSelection[] = selections.map((entry, index) => ({ generation: index + 1, releaseId: entry.promotion.releaseId, releaseRevision: 1, policyRevision: 0, selectedAt: entry.promotion.at, selectedBy: entry.promotion.by,
+    outcome: index === selections.length - 1 ? 'selected' : 'skipped', ...(index < selections.length - 1 ? { supersededAt: selections[index + 1].promotion.at } : {}) }));
+  const newest = selections.at(-1)!;
+  return { environmentId, id: environmentId, source: 'candidate', generation: selections.length,
+    expected: { releaseId: newest.promotion.releaseId, releaseRevision: 1, sourceSha: newest.promotion.sourceSha, manifestHash: newest.promotion.artifact, buildId: `candidate:${newest.candidate}`, policyRevision: 0, approvalId: null,
+      selectedAt: newest.promotion.at, selectedBy: newest.promotion.by, candidate: newest.candidate, artifact: newest.promotion.artifact },
+    history: history.slice(-historyLimit), coverage: {}, incidents: [], cursor: 0,
+    verification: { generation: selections.length, status: 'unobserved', reasons: [`Selected from exact candidate ${newest.candidate}; the release ledger, not delivery observations, observes it`], interval: null, evaluatedAt: newest.promotion.at, verifiedAt: null } };
+}
 
 /** Union of intervals: merge every pair that overlaps or touches, keep the newest when bounded. */
 const ms = Date.parse;
@@ -759,8 +779,17 @@ export class Delivery {
       await save(db, work, 'graphyard', 'delivery.verified', now, { delivery, mergeSha: member.mergeSha });
     }
   }
+  /**
+   * Every environment's delivery state. One with a release-backed selection reads it; one whose only
+   * selections are exact candidates' promotions (GY-1905) reads those, so a promoted candidate is the
+   * expected release, bound to its source, and a refused one leaves the previous selection expected.
+   */
   async status() {
-    const environments: EnvironmentDelivery[] = (await this.store.pool.query('SELECT document FROM delivery_environments ORDER BY environment_id')).rows.map(r => r.document);
+    const recorded: EnvironmentDelivery[] = (await this.store.pool.query('SELECT document FROM delivery_environments ORDER BY environment_id')).rows.map(r => ({ ...r.document, id: r.document.environmentId, source: 'release' }));
+    const promotions = (await this.store.pool.query(`SELECT payload FROM (SELECT seq, payload FROM events WHERE kind=$1 AND work_id IS NULL ORDER BY seq DESC LIMIT $2) newest ORDER BY seq`, [candidatePromotionKind, historyLimit])).rows.map(r => r.payload as CandidateSelection);
+    const byEnvironment = new Map<string, CandidateSelection[]>();
+    for (const entry of promotions.filter(entry => !recorded.some(state => state.environmentId === entry.promotion.environment))) byEnvironment.set(entry.promotion.environment, [...byEnvironment.get(entry.promotion.environment) ?? [], entry]);
+    const environments = [...recorded, ...[...byEnvironment].map(([id, selections]) => candidateEnvironment(id, selections))].sort((a, b) => a.environmentId.localeCompare(b.environmentId));
     const releases: Release[] = (await this.store.pool.query('SELECT document FROM releases ORDER BY id,revision DESC')).rows.map(r => r.document);
     const rollbacks: RollbackRequest[] = (await this.store.pool.query('SELECT document FROM delivery_rollbacks ORDER BY created_at DESC,id DESC LIMIT 200')).rows.map(r => r.document);
     const now = (await this.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
