@@ -45,7 +45,7 @@ const signingRuleset = () => ({ id: 22322930, name: 'signed commits', target: 'b
 function fakeGitHub(rulesets: any[] = [mainRuleset(), stagingRuleset(), signingRuleset()]) {
   const state = {
     rulesets: new Map(rulesets.map(ruleset => [ruleset.id, structuredClone(ruleset)])), classic: null as any, classicAnswer: null as GhAnswer | null,
-    pulls: new Map<number, any>([[42, { number: 42, head: { sha: SHA }, base: { ref: 'main' } }]]), runs: [] as any[], movesHead: false, pullReads: 0,
+    pulls: new Map<number, any>([[42, { number: 42, head: { sha: SHA }, base: { ref: 'main' } }]]), runs: [] as any[], statuses: [] as any[], movesHead: false, pullReads: 0,
     // What the App has published on main's head: by default Graphyard / merge, so the add may require it.
     baseRuns: [{ id: 1, name: 'Graphyard / merge', status: 'completed', conclusion: 'success', app: { id: APP } }] as any[],
     calls: [] as string[][], writes: [] as { path: string; body: any }[], onPut: null as null | ((id: number, body: any, count: number) => any),
@@ -76,6 +76,8 @@ function fakeGitHub(rulesets: any[] = [mainRuleset(), stagingRuleset(), signingR
       return ok(state.rulesets.get(id));
     }
     if (path === 'repos/owner/project/rules/branches/main') return ok(effective());
+    // The pull requests into a base, most recently updated first, as the publication search lists them.
+    if (path.startsWith('repos/owner/project/pulls?')) return ok([...state.pulls.values()].filter(found => path.includes(`base=${found.base.ref}`)));
     const pull = /^repos\/owner\/project\/pulls\/(\d+)$/.exec(path);
     if (pull) {
       const found = state.pulls.get(Number(pull[1]));
@@ -84,6 +86,7 @@ function fakeGitHub(rulesets: any[] = [mainRuleset(), stagingRuleset(), signingR
     }
     if (path.startsWith('repos/owner/project/commits/main/check-runs')) return ok({ total_count: state.baseRuns.length, check_runs: state.baseRuns });
     if (path.startsWith(`repos/owner/project/commits/${SHA}/check-runs`)) return ok({ total_count: state.runs.length, check_runs: state.runs });
+    if (path.startsWith(`repos/owner/project/commits/${SHA}/status?`)) return ok({ sha: SHA, total_count: state.statuses.length, statuses: state.statuses });
     return missing(`unexpected gh ${args.join(' ')}`);
   };
   const run = (_command: string, args: string[], input?: string) => {
@@ -235,12 +238,21 @@ test('unit:protection-adds-graphyard-checks-to-operator-ruleset — --apply adds
     // Before the App has published Graphyard / merge on main, --apply refuses rather than require a check that never comes.
     const fresh = fakeGitHub();
     fresh.state.baseRuns = [{ id: 1, name: 'ci', status: 'completed', conclusion: 'success', app: { id: CI } }];
-    await assert.rejects(applyProtection(config, [work], fresh.run, [], { snapshots, now: 4_000 }), /App 1234 has not yet published Graphyard \/ merge on main, so requiring it in operator ruleset 22322922 \(main\) would block every pull request; nothing was written/);
+    await assert.rejects(applyProtection(config, [work], fresh.run, [], { snapshots, now: 4_000 }), /App 1234 has not yet published Graphyard \/ merge on main or on the head of any of its 30 most recently updated pull requests, so requiring it in operator ruleset 22322922 \(main\) would block every pull request; nothing was written/);
     assert.deepEqual(fresh.state.writes, []);
+    // A run from another App on a pull request's head is not the App's publication either.
+    fresh.state.runs = [run('Graphyard / merge', 999, 'success', 2)];
+    await assert.rejects(applyOperatorRulesetAdd(fresh.gh, { ...config, snapshots, now: 4_100 }), /App 1234 has not yet published Graphyard \/ merge on main or on the head of any/);
+    assert.deepEqual(fresh.state.writes, []);
+    // Graphyard publishes its merge check on pull-request heads, not on the base tip: one there suffices.
+    fresh.state.runs = [run('Graphyard / merge', APP, 'failure', 3)];
+    const viaPull: any = await applyOperatorRulesetAdd(fresh.gh, { ...config, snapshots, now: 4_200 });
+    assert.equal(viaPull.applied, true);
+    assert.deepEqual(fresh.puts().map(write => write.path), ['PUT repos/owner/project/rulesets/22322922']);
     // The App's own install-verification check is not Graphyard / merge: with only that published, the add still refuses.
     const verifiedOnly = fakeGitHub();
     verifiedOnly.state.baseRuns = [{ id: 2, name: 'Graphyard / install verification', status: 'completed', conclusion: 'neutral', app: { id: APP } }];
-    await assert.rejects(applyProtection(config, [work], verifiedOnly.run, [], { snapshots, now: 4_500 }), /App 1234 has not yet published Graphyard \/ merge on main, so requiring it in operator ruleset 22322922 \(main\) would block every pull request; nothing was written/);
+    await assert.rejects(applyProtection(config, [work], verifiedOnly.run, [], { snapshots, now: 4_500 }), /App 1234 has not yet published Graphyard \/ merge on main or on the head of any of its 30 most recently updated pull requests, so requiring it in operator ruleset 22322922 \(main\) would block every pull request; nothing was written/);
     assert.deepEqual(verifiedOnly.state.writes, []);
     assert.deepEqual(verifiedOnly.state.rulesets.get(22322922), mainRuleset());
 
@@ -378,6 +390,28 @@ test('unit:protection-retires-only-proven-check — --retire removes one named n
     assert.ok(existsSync(retired.snapshot));
     assert.deepEqual(github.state.rulesets.get(22322921), stagingRuleset());
     assert.ok(!github.state.writes.some(write => write.path.includes('/protection')), 'classic protection is never touched');
+
+    // A staying check any source may satisfy (integration_id null) is proven by a successful commit status of its context.
+    const legacy = mainRuleset();
+    (legacy.rules[3] as any).parameters.required_status_checks.push({ context: 'legacy', integration_id: null });
+    const statusGitHub = fakeGitHub([legacy, stagingRuleset(), signingRuleset()]);
+    await applyOperatorRulesetAdd(statusGitHub.gh, { ...config, snapshots, now: 7 });
+    statusGitHub.state.runs = [run('ci', CI, 'success', 1), run('work-context', CI, 'success', 2), run('Graphyard / merge', APP, 'success', 3), run('graphyard/landable', APP, 'success', 4)];
+    const retireGuard = (now: number) => retireOperatorRulesetCheck(statusGitHub.gh, { ...config, snapshots, now, check: { context: 'guard', integration_id: CI }, proof: 42 });
+    await assert.rejects(retireGuard(8), /legacy@any has no run or commit status/);
+    statusGitHub.state.statuses = [{ context: 'legacy', state: 'failure' }];
+    await assert.rejects(retireGuard(8), /legacy@any has commit status failure/);
+    statusGitHub.state.statuses = [{ context: 'legacy', state: 'success' }];
+    statusGitHub.state.runs.push(run('legacy', CI, 'failure', 5));
+    await assert.rejects(retireGuard(8), /legacy@any reads completed\/failure/, 'a failing run of the same context still refuses beside a successful status');
+    statusGitHub.state.runs.pop();
+    // A status never satisfies a check bound to an App.
+    statusGitHub.state.runs = statusGitHub.state.runs.filter(entry => entry.name !== 'ci');
+    statusGitHub.state.statuses.push({ context: 'ci', state: 'success' });
+    await assert.rejects(retireGuard(8), /ci@15368 has no run/);
+    statusGitHub.state.runs.push(run('ci', CI, 'success', 6));
+    const statusRetired: any = await retireGuard(9);
+    assert.equal(statusRetired.retired, `guard@${CI}`);
   } finally { await rm(snapshots, { recursive: true, force: true }); }
 });
 
@@ -409,14 +443,15 @@ test('unit:protection-restores-ruleset-snapshot — --restore puts a saved snaps
 });
 
 /** The installer's gh against the same fake, with the harness's own answers for everything else. */
-function installResponses(github: ReturnType<typeof fakeGitHub>, published = true) {
+function installResponses(github: ReturnType<typeof fakeGitHub>, published: 'base' | 'pull' | false = 'base') {
   const defaults = githubResponses({ installed: false, protection: null, deliveries: [], hookConfig: null });
+  // Where the App's merge check stands: on main's tip, only on pull request #42's head, or nowhere.
   github.state.runs = published ? [run('Graphyard / merge', GRAPHYARD_APP_ID, 'success', 1)] : [];
   const answer = (line: string, input?: string) => {
     const args = line.replace(/^gh /, '').split(' ');
     const path = args.find(arg => arg.startsWith('repos/')) ?? '';
-    if (path.includes('/commits/main/check-runs')) return JSON.stringify({ check_runs: [{ name: 'ci', app: { id: CI } }, ...(published ? [{ name: 'Graphyard / merge', app: { id: GRAPHYARD_APP_ID } }] : [])] });
-    if (path.startsWith('repos/owner/project/') && !path.includes('/commits/') || path === 'repos/owner/project') {
+    if (path.includes('/commits/main/check-runs')) return JSON.stringify({ check_runs: [{ name: 'ci', app: { id: CI } }, ...(published === 'base' ? [{ name: 'Graphyard / merge', app: { id: GRAPHYARD_APP_ID } }] : [])] });
+    if (path.startsWith('repos/owner/project/') && !path.includes('/commits/main/') || path === 'repos/owner/project') {
       if (line.includes('PATCH repos/owner/project ')) { github.state.writes.push({ path: 'PATCH repos/owner/project', body: null }); return '{}'; }
       return github.gh(args, { input });
     }
@@ -488,6 +523,16 @@ test('unit:install-preserves-operator-rulesets — install plans and applies the
     await assert.rejects(applyInstall(session, plan), /main is governed by operator ruleset\(s\) 22322922 \(main\), 22322930 \(signed commits\), so the installer writes no classic protection there, and adding Graphyard's checks was refused: App \d+ has not yet published Graphyard \/ merge on main/);
     assert.deepEqual(unpublished.state.writes.filter(write => write.path !== 'PATCH repos/owner/project'), []);
   } finally { await first.cleanup(); }
+
+  // Graphyard publishes its merge check on pull-request heads: one on #42's head, none on main's tip, is enough to add the checks.
+  const viaPull = fakeGitHub();
+  const pulled = await harness({ provider: 'railway', extraResponses: installResponses(viaPull, 'pull') as any });
+  try {
+    const session = await prepareInstall(pulled.root, { repository: REPOSITORY, provider: 'railway' }, pulled.deps);
+    const summary: any = await applyInstall(session, await buildPlan(session));
+    assert.match(summary.protection, /operator ruleset 22322922 \(main\) now requires Graphyard \/ merge and graphyard\/landable/);
+    assert.deepEqual(viaPull.state.writes.filter(write => write.path !== 'PATCH repos/owner/project').map(write => write.path), ['PUT repos/owner/project/rulesets/22322922']);
+  } finally { await pulled.cleanup(); }
 
   // An inherited organization ruleset alone: the installer plans no classic write, names the ruleset's source, and stops.
   const inherited = fakeGitHub([organizationRuleset()]);

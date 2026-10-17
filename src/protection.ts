@@ -698,6 +698,25 @@ async function restoreDocument(api: GhApi, repository: string, document: any) {
 }
 
 export interface RulesetWriteConfig { repository: string; baseBranch: string; githubAppId: number; snapshots: string; now: number }
+/** How many of the base's most recently updated pull requests are searched for the App's merge check. */
+const publicationPulls = 30;
+/**
+ * Whether App APP has published Graphyard / merge where a pull request into BRANCH reads it: on the
+ * branch's tip (a merge-queue run) or on the head of one of its most recently updated pull requests,
+ * where GitHubClient.publish writes it. Only a run of that name from the App counts: its
+ * install-verification check publishes independently of it. Any failed read refuses.
+ */
+async function mergeCheckPublished(api: GhApi, repository: string, branch: string, app: number) {
+  const carries = async (ref: string) => {
+    const answer = await confirmedGet(api, `repos/${repository}/commits/${ref}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&app_id=${app}&filter=all&per_page=100`, `the ${CHECK_NAME} runs on ${repository}@${ref}`);
+    return (answer?.check_runs ?? []).some((run: any) => run?.name === CHECK_NAME && Number(run?.app?.id) === app);
+  };
+  if (await carries(branch)) return true;
+  const pulls = await confirmedGet(api, `repos/${repository}/pulls?state=all&base=${encodeURIComponent(branch)}&sort=updated&direction=desc&per_page=${publicationPulls}`, `the pull requests into ${repository}@${branch}`);
+  const heads = new Set((Array.isArray(pulls) ? pulls : []).filter(pull => pull?.base?.ref === branch).map(pull => String(pull?.head?.sha ?? '')).filter(sha => /^[0-9a-f]{40}$/.test(sha)));
+  for (const sha of heads) if (await carries(sha)) return true;
+  return false;
+}
 /** AC-2's add: both Graphyard checks from the App joined to the one operator ruleset requiring checks on the base. Writes nothing when both stand. */
 export async function applyOperatorRulesetAdd(api: GhApi, config: RulesetWriteConfig) {
   const { rulesets } = await readOperatorRulesets(api, config.repository, config.baseBranch);
@@ -710,9 +729,7 @@ export async function applyOperatorRulesetAdd(api: GhApi, config: RulesetWriteCo
   if (inherited) throw new Error(inherited);
   // Requiring a check the App has never published would block every pull request, so the add waits for it.
   if (missing.some(entry => entry.context === CHECK_NAME)) {
-    // Only a run named Graphyard / merge from the App counts: its install-verification check publishes independently of it.
-    const published = await confirmedGet(api, `repos/${config.repository}/commits/${config.baseBranch}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&app_id=${config.githubAppId}&filter=all&per_page=100`, `the ${CHECK_NAME} runs on ${config.repository}@${config.baseBranch}`);
-    if (!(published?.check_runs ?? []).some((run: any) => run?.name === CHECK_NAME && Number(run?.app?.id) === config.githubAppId)) throw new Error(`App ${config.githubAppId} has not yet published ${CHECK_NAME} on ${config.baseBranch}, so requiring it in operator ruleset ${target.id} (${target.name}) would block every pull request; nothing was written. Once Graphyard has published it on a pull request, rerun graphyard master protection --apply`);
+    if (!await mergeCheckPublished(api, config.repository, config.baseBranch, config.githubAppId)) throw new Error(`App ${config.githubAppId} has not yet published ${CHECK_NAME} on ${config.baseBranch} or on the head of any of its ${publicationPulls} most recently updated pull requests, so requiring it in operator ruleset ${target.id} (${target.name}) would block every pull request; nothing was written. Once Graphyard has published it on a pull request into ${config.baseBranch}, rerun graphyard master protection --apply`);
   }
   const written = await writeRulesetEdit(api, { repository: config.repository, branch: config.baseBranch, id: target.id, snapshots: config.snapshots, now: config.now,
     describe: missing.map(entry => `${entry.context}@${entry.integration_id}`).join(' and ') + ' added',
@@ -765,9 +782,25 @@ export async function retireOperatorRulesetCheck(api: GhApi, config: RulesetWrit
     runs.push(...entries);
     if (entries.length < 100) break;
   }
+  // A required check any source may satisfy (integration_id null) is also satisfied by a commit
+  // status of that context, which the check-runs read never sees; the combined status holds the latest per context.
+  const statuses: any[] = [];
+  for (let page = 1; ; page++) {
+    const answer = await confirmedGet(api, `repos/${config.repository}/commits/${sha}/status?per_page=100&page=${page}`, `page ${page} of the commit statuses on ${sha}`);
+    const entries = Array.isArray(answer?.statuses) ? answer.statuses : [];
+    statuses.push(...entries);
+    if (entries.length < 100) break;
+  }
+  /** Why CHECK is not proven on the proof head, or null: it has a run or status, and every one that reports it reads success. */
+  const unprovenBy = (check: { context: string; integration_id?: number | null }) => {
+    const run = latestRun(runs, check), status = check.integration_id == null ? statuses.find(entry => entry?.context === check.context) : undefined;
+    if (!run && !status) return check.integration_id == null ? 'has no run or commit status' : 'has no run';
+    const failed = [...(run && !(run.status === 'completed' && run.conclusion === 'success') ? [`reads ${run.status}/${run.conclusion}`] : []), ...(status && status.state !== 'success' ? [`has commit status ${status.state}`] : [])];
+    return failed.length ? failed.join(' and ') : null;
+  };
   /** Every check DOCUMENT keeps after the removal must have succeeded on the proof head. */
   const prove = (document: any) => {
-    const unproven = checksOf(document).filter(check => !sameCheck(check, config.check)).flatMap(check => { const run = latestRun(runs, check); return run?.status === 'completed' && run?.conclusion === 'success' ? [] : [`${check.context}@${check.integration_id ?? 'any'} ${run ? `reads ${run.status}/${run.conclusion}` : 'has no run'}`]; });
+    const unproven = checksOf(document).filter(check => !sameCheck(check, config.check)).flatMap(check => { const reason = unprovenBy(check); return reason ? [`${check.context}@${check.integration_id ?? 'any'} ${reason}`] : []; });
     if (unproven.length) refuse(`on #${config.proof}'s head ${sha} the latest run of ${unproven.join('; ')}`);
   };
   prove(target);

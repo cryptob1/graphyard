@@ -1655,19 +1655,18 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
     // The App-bound merge check is added only once Graphyard has published it; requiring a
     // context that does not exist yet would block every pull request on the repository.
     mergeCheckExists = (current?.required_status_checks?.checks ?? []).some((check: any) => check.context === CHECK_NAME)
-      || operator.rulesets.some(ruleset => !missingGraphyardChecks(ruleset, facts.appId).some(entry => entry.context === CHECK_NAME))
       || (await detectCiAppIds(gh, session.inputs.repository, session.inputs.baseBranch, null)).some(entry => entry.appId === facts.appId);
     if (operator.rulesets.length) {
       // GY-1926: an operator ruleset governs the base, so no classic protection is recorded or written.
       const governing = operator.rulesets.map(ruleset => `${ruleset.id} (${ruleset.name})`).join(', ');
       await writeOperatorRulesetNote(session.directory, { repository: session.inputs.repository, branch: session.inputs.baseBranch, rulesets: operator.rulesets.map(ruleset => ({ id: ruleset.id, name: ruleset.name })), snapshots: protectionSnapshots(session.root), now: deps.now() });
       const refused = (reason: string) => new Error(`${session.inputs.baseBranch} is governed by operator ruleset(s) ${governing}, so the installer writes no classic protection there, and adding Graphyard's checks was refused: ${reason}`);
-      // Requiring a check App ${facts.appId} has never published would block every pull request, so
-      // the add waits for it, and the install stops naming that refusal rather than finishing unprotected.
-      if (!mergeCheckExists) throw refused(`App ${facts.appId} has not yet published ${CHECK_NAME} on ${session.inputs.baseBranch}, so requiring it would block every pull request; once Graphyard has published it on a pull request, rerun install --apply (or graphyard master protection --apply)`);
+      // The add itself waits until the App has published its merge check on the base or a pull
+      // request into it, and the install stops naming that refusal rather than finishing unprotected.
       const added = await applyOperatorRulesetAdd(gh, { repository: session.inputs.repository, baseBranch: session.inputs.baseBranch, githubAppId: facts.appId, snapshots: protectionSnapshots(session.root), now: deps.now() })
         .catch((error: any) => { throw refused(error.message); });
       protectionDetail = added.result;
+      mergeCheckExists = true;
     } else {
     const satisfied = protectionSatisfied(protectionInputs, current);
     // Before the first write, the protection, auto-merge and queue ruleset found are recorded once,
