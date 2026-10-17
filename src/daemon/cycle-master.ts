@@ -9,6 +9,7 @@ import { message } from './state.js';
 import { emptyMasterSession, type MasterSessionState } from './state.js';
 import { sessionCapMs } from '../model/registry-sessions.js';
 import { masterHandover, masterSessionBudgetMs, masterHeartbeatIntervalMs, masterWakeText, masterProfile } from '../master/master-session.js';
+import { PromptNotAcceptedError } from '../master/launch.js';
 import { outputReadDue } from './cycle-sessions.js';
 import type { HerdrAgent } from '../master/herdr.js';
 import type { Cycle } from './cycle.js';
@@ -22,8 +23,12 @@ export const masterWakeHeldKey = 'wake:master:held';
 export const masterSetupKey = 'master:setup';
 /** The standing record of registry sessions the loop still owes the registry an end for. */
 export const masterReleaseKey = 'master:release';
-/** The rotation causes: the session exited, its account is spent, or it passed its budget. */
-export type MasterRotationCause = 'exited' | 'exhausted' | 'budget';
+/** The rotation causes: the session exited, its account is spent, it passed its budget, or it can no longer hear the loop. */
+export type MasterRotationCause = 'exited' | 'exhausted' | 'budget' | 'deaf';
+/** GY-1863: consecutive `deaf` ends the loop answers with a replacement before it stops and holds the wake failed. */
+export const masterDeafRotationBound = 3;
+/** The one record of the loop's own master session's wakes: a `deaf` end held at the bound stands failed here until a delivery is accepted. */
+export const masterWakeKey = 'master:wake';
 /** How long past its budget a rotation waits for a guarded merge in flight: never longer than this. */
 export const masterMergeDeferralMs = 30 * 60_000;
 
@@ -195,9 +200,47 @@ async function masterSessionStepWithin(cycle: Cycle) {
       }
       const held = state.actions[masterWakeHeldKey];
       if (held?.state === 'waiting') performed.push(await record(state, masterWakeHeldKey, { kind: 'wake', work: null, principal: null, state: 'done', detail: 'The master wake went through once the dialog holding it was answered or closed', attempts: held.attempts, cycle: state.cycle }, now(), effects.persist, null));
-      await effects.promptSession!(agent, masterWakeText(config.cliPath, keys, heartbeat, Math.round(quietMs / 60_000)));
+      try {
+        await effects.promptSession!(agent, masterWakeText(config.cliPath, keys, heartbeat, Math.round(quietMs / 60_000)));
+      } catch (error) {
+        // GY-1863: a wake the session never visibly accepted leaves the loop's own master deaf — it
+        // hears nothing of any changed subject until its budget rotates it hours later, and the
+        // delivery's stall triple repeats every cycle (the production master took 17 while its pane
+        // sat on a dialog). The delivery error has promised a close and relaunch since GY-93; the
+        // rotation is that promise kept, and the replacement inherits the standing subjects from
+        // the durable handover. Handled here, it is the wake step's own resolution of its session —
+        // recorded done, never a standing session-liveness failure of a session it just replaced.
+        if (!(error instanceof PromptNotAcceptedError)) throw error;
+        // The remedy is bounded: some panes stay deaf whatever replaces them (a Herdr regression, a
+        // dialog the notice catalogue does not know), so after masterDeafRotationBound consecutive
+        // `deaf` ends without an accepted wake the loop stops replacing the session — every further
+        // cycle would otherwise close a pane, end a registry session and launch a replacement, with
+        // both records done and no fault reading any of it. The wake stands failed on masterWakeKey
+        // instead: one action:wake instance the class counts, exactly the surface the same condition
+        // had before the rotation existed, until a session accepts a delivery.
+        const streak = deafStreak(state.master);
+        if (streak >= masterDeafRotationBound) {
+          performed.push(await record(state, masterWakeKey, { kind: 'wake', work: null, principal: null, state: 'failed',
+            detail: `The wake for ${keys.join(', ') || 'its heartbeat'} was not visibly accepted by master session ${live.agentName} (${message(error)})`
+              + `; ${masterDeafRotationBound} consecutive deaf ends were each answered with a replacement already, so the loop stops rotating on this bound and the wake stands failed until a session accepts a delivery`,
+            attempts: Math.min(1000, (state.actions[masterWakeKey]?.attempts ?? 0) + 1), cycle: state.cycle }, now(), effects.persist));
+          return;
+        }
+        const rotated = await rotateMasterSession(cycle, 'deaf', message(error), null, streak + 1);
+        performed.push(await record(state, `wake:master:${state.cycle}`, { kind: 'wake', work: null, principal: null, state: 'done',
+          detail: `The wake for ${keys.join(', ') || 'its heartbeat'} was not visibly accepted by master session ${live.agentName} (${message(error)})`
+            + `; the session was ${rotated ? 'rotated — closed, and the role relaunches from the durable handover' : 'left in place, its rotation refused'} rather than kept deaf`,
+          attempts: 1, cycle: state.cycle }, now(), effects.persist));
+        return;
+      }
       live.lastWake = { at, causes: keys, heartbeat };
       for (const subject of subjects) live.subjects[subject.key] = promptDigest(subject.detail);
+      // The accepted delivery also ends the bound's standing failure, so the class counts one
+      // instance per deaf episode and the record reads the recovery, never a failure for ever.
+      if (state.actions[masterWakeKey]?.state === 'failed')
+        performed.push(await record(state, masterWakeKey, { kind: 'wake', work: null, principal: null, state: 'done',
+          detail: `Master session ${live.agentName} accepted its wake; the standing deaf-bound failure ends`,
+          attempts: Math.min(1000, (state.actions[masterWakeKey]?.attempts ?? 0) + 1), cycle: state.cycle }, now(), effects.persist));
       performed.push(await record(state, `wake:master:${state.cycle}`, { kind: 'wake', work: null, principal: null, state: 'done',
         detail: (heartbeat ? `Woke master session ${live.agentName}: no material event for ${Math.round(quietMs / 60_000)} minutes (the heartbeat fallback)`
           : `Woke master session ${live.agentName} for changed subjects: ${keys.join(', ')}`)
@@ -258,6 +301,22 @@ async function masterWakeDialog(cycle: Cycle, name: string, agent: HerdrAgent): 
 }
 
 /**
+ * GY-1863: how many consecutive `deaf` ends stand without a wake a master session accepted. The
+ * count travels on the master session's own record, never on the action rows: pruneDaemonState
+ * retires resolved rows oldest first, so a persistently deaf episode outlived by ordinary traffic
+ * would lose its rotation rows, and the bound with them. A session that accepted a wake (its
+ * `lastWake`, which a rotation never carries over) ends the streak; otherwise the streak is the
+ * one its predecessor's end recorded, which every rotation — `deaf` or another cause, since the
+ * role was not heard from either way — writes on `lastEnd`, the record the replacement keeps.
+ */
+const deafStreakText = (streak: number) => `; ${streak} consecutive deaf end${streak === 1 ? '' : 's'} without an accepted wake`;
+export function deafStreak(master: Pick<MasterSessionState, 'lastWake' | 'lastEnd'>): number {
+  if (master.lastWake) return 0;
+  const carried = master.lastEnd ? /; (\d+) consecutive deaf ends? without an accepted wake$/.exec(master.lastEnd.detail) : null;
+  return carried ? Number(carried[1]) : 0;
+}
+
+/**
  * End the live master session for `cause`: its registry session is given back, an exhausted
  * account is held until it resets, its pane is closed — an exit in place leaves the pane behind,
  * and a pane Herdr no longer lists was already gone — so the configured name frees for the
@@ -265,10 +324,15 @@ async function masterWakeDialog(cycle: Cycle, name: string, agent: HerdrAgent): 
  * handover. The subject digests are kept: the replacement inherits the same standing subjects,
  * which the handover names, so a rotation never reads as a wake.
  */
-async function rotateMasterSession(cycle: Cycle, cause: MasterRotationCause, detail: string, resetsAt: string | null = null): Promise<boolean> {
+async function rotateMasterSession(cycle: Cycle, cause: MasterRotationCause, detail: string, resetsAt: string | null = null, deafEnds = 0): Promise<boolean> {
   const { state, effects, now, clock, performed } = cycle;
   const master = state.master;
-  const reason = `master session ${master.agentName} ended (${cause}): ${detail.slice(0, 300)}`;
+  // Every end names the deaf streak it leaves (deafStreak reads it off lastEnd), so the bound
+  // travels on the record the replacement keeps and survives pruning and restarts alike.
+  const carried = cause === 'deaf' ? deafEnds : deafStreak(master);
+  const streak = carried > 0 ? deafStreakText(carried) : '';
+  const composed = `${detail.slice(0, 500 - streak.length)}${streak}`;
+  const reason = `master session ${master.agentName} ended (${cause}): ${composed.slice(0, 300)}`;
   const released = master.session && effects.endRegistrySession ? await effects.endRegistrySession(master.session, reason).then(() => true, () => false) : true;
   // A hold carried past its bound is owed: the next start of the step writes it again, joining the call in flight.
   if (cause === 'exhausted' && master.account) {
@@ -280,12 +344,12 @@ async function rotateMasterSession(cycle: Cycle, cause: MasterRotationCause, det
     try { await effects.closeSession(master.pane); }
     catch (error) { if (!paneAlreadyGone(error)) throw error; }
   }
-  const ended = { cause, at: new Date(clock).toISOString(), detail: detail.slice(0, 500) };
+  const ended = { cause, at: new Date(clock).toISOString(), detail: composed.slice(0, 500) };
   state.master = { ...emptyMasterSession(), rotations: master.rotations, lastEnd: ended, subjects: master.subjects, unreleased: master.unreleased };
   // A release the registry refused is kept, never forgotten: the next cycle ends it before relaunching.
   if (!released && master.session) owe(state.master, master.session, clock, reason);
   performed.push(await record(state, `master:rotate:${ended.at}`, { kind: 'failover', work: null, principal: null, state: 'done',
-    detail: `Ended master session ${master.agentName ?? '(unknown)'} (${cause}): ${detail}. The role relaunches from the durable handover`
+    detail: `Ended master session ${master.agentName ?? '(unknown)'} (${cause}): ${composed}. The role relaunches from the durable handover`
       + `${cause === 'exhausted' && master.account ? `; account ${master.account} is held until it resets` : ''}`,
     attempts: 1, cycle: state.cycle }, now(), effects.persist));
   return true;

@@ -44,9 +44,11 @@ export function verifyRunnerReport(inventory: unknown, execution: unknown) {
  * never reached it), `skipped` (the producer chose not to run it; GY-1860) and `failed` (it ran and
  * failed). Beside the verdicts the format carries the run's provenance (GY-1860): the producer's
  * tool version, the catalog or source commit it ran from, and per run and per case the original
- * result value the tool reported, kept beside the verdict it was mapped to. Like `runnerReport` the
+ * result value the tool reported, kept byte for byte beside the verdict it was mapped to, with
+ * each evidence pointer's id kept byte for byte the same way (GY-1869). Like `runnerReport` the
  * schema refuses what it does not understand: unknown fields, an unknown verdict, a blocked case
- * without its reason, a case id or producer name with control characters, and a run naming neither
+ * without its reason, a case id or producer name with control characters, a result or evidence id
+ * that is blank, over 200 characters or carries control characters, and a run naming neither
  * a head nor a digest are refused, never guessed or dropped.
  */
 export const externalRunFormat = 'graphyard-external-run-v1';
@@ -54,15 +56,16 @@ export const externalVerdicts = ['passed', 'failed', 'flaky', 'blocked', 'unrun'
 export type ExternalVerdict = (typeof externalVerdicts)[number];
 
 const externalName = z.string().trim().min(1).max(200).refine(value => !/[\x00-\x1f\x7f]/.test(value));
-/** A result value the producer's tool reported: refused when blank or carrying control characters, else kept byte for byte. */
-const externalResult = z.string().max(200).refine(value => value.trim().length > 0 && !/[\x00-\x1f\x7f]/.test(value));
+/** A value kept byte for byte as the producer's tool gave it — a run or case result, an evidence pointer's id: refused when blank, over 200 characters or carrying control characters, else never trimmed. */
+const verbatimValue = z.string().max(200).refine(value => value.trim().length > 0 && !/[\x00-\x1f\x7f]/.test(value));
 /** A commit the producer names as provenance: hex, abbreviated or full, kept exactly as given. */
 const provenanceCommit = z.string().regex(/^[a-f0-9]{7,64}$/);
 /**
- * An opaque, authenticated pointer to evidence the producer keeps (GY-1860 N3): its evidence id and
- * the storage key it lives under, kept exactly as given and never turned into a URL.
+ * An opaque, authenticated pointer to evidence the producer keeps (GY-1860 N3): its evidence id —
+ * kept byte for byte like a result, since it names a row of the producer's own records — and the
+ * storage key it lives under, never turned into a URL.
  */
-const evidencePointer = z.object({ evidenceId: externalName.optional(), storageKey: z.string().min(1).max(1000).refine(value => !/[\x00-\x1f\x7f]/.test(value)).optional() }).strict()
+const evidencePointer = z.object({ evidenceId: verbatimValue.optional(), storageKey: z.string().min(1).max(1000).refine(value => !/[\x00-\x1f\x7f]/.test(value)).optional() }).strict()
   .refine(pointer => pointer.evidenceId !== undefined || pointer.storageKey !== undefined, 'an evidence pointer names its evidence id or storage key');
 
 export const externalRun = z.object({
@@ -85,7 +88,7 @@ export const externalRun = z.object({
    */
   catalogCommitSha: provenanceCommit.optional(),
   /** The run's overall result exactly as the producer's tool reported it, before any mapping. */
-  result: externalResult.optional(),
+  result: verbatimValue.optional(),
   cases: z.array(z.object({
     id: externalName,
     verdict: z.enum(externalVerdicts),
@@ -101,7 +104,7 @@ export const externalRun = z.object({
     /** Where the run's own record of the case lives (trace, log, report): HTTP(S) links or opaque pointers. */
     evidence: z.array(z.union([evidenceLink, evidencePointer])).max(100).optional(),
     /** The case's result exactly as the producer's tool reported it, kept beside the verdict it maps to. */
-    result: externalResult.optional(),
+    result: verbatimValue.optional(),
     /** The executed case-definition version, when the producer knows it. */
     caseVersion: externalName.optional(),
   }).strict()).max(10_000),

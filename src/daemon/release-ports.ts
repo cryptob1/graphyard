@@ -9,17 +9,20 @@ import { pendingAtCut } from '../release-pending.js';
 import { installIdFor } from '../install/types.js';
 import { candidateSettings, mergeWriterSettings, shadowGateSettings } from '../master/merge-writer-settings.js';
 import { parseVerificationMap, type VerificationMap } from '../model/verification-maps.js';
-import { contractFile, parseContract } from '../e2e/case.js';
+import { contractFile, loadContract, parseContract } from '../e2e/case.js';
+import type { E2eReport } from '../e2e/runner.js';
 import { deployKeySshCommand, firstParentHolds, pushArgs, pushEnvironment, runMergeTrial, staleLeaseRejection } from '../merge-writer/executor.js';
 import { trialAuthor } from '../merge-writer/trial.js';
 import {
-  awaitServing, cutAsync, deployToUatAsync, promoteAsync, readLedgerAsync, syncLedgerAsync, uatValidationWindowMs,
-  findCandidate, uatServedDigests, validateAndRecord, type AsyncGit, type ReleaseCandidate, type UatRecord,
+  awaitServing, cutAsync, deployToUatAsync, promoteAsync, readLedgerAsync, recordsArguments, syncLedgerAsync, uatValidationWindowMs,
+  findCandidate, uatServedDigests, validateAndRecord, type AsyncGit, type Git, type HoldOutcome, type ReleaseCandidate, type UatRecord,
 } from '../release-candidate.js';
 import { promotionImports } from '../validation-import.js';
-import { validateProjectCandidate } from '../release-project.js';
+import { projectCaseSuite, validateProjectCandidate } from '../release-project.js';
+import { holdTagPrefix, releaseHolds } from '../release-holds.js';
 import { commandDigestAdapter, digestCommandTimeoutMs, uatDigestSuite, verifyProductionDigests } from '../release-digests.js';
-import { revertCandidateItem, type CandidateItemDelta, type RevertContract, type RevertPorts, type RevertRecordEvent } from '../release-revert.js';
+import { revertCandidateItem, type CandidateItemDelta, type RevertContract, type RevertOutcome, type RevertPorts, type RevertRecordEvent } from '../release-revert.js';
+import { checkoutRepositoryPolicy } from '../model/repository-policy.js';
 import type { CutCommit } from './candidate-cut.js';
 import type { LocalCandidate, LocalReleasePorts, LocalValidation } from './promotion-local.js';
 
@@ -68,7 +71,10 @@ export function lastJson(output: string): unknown {
  * CLI (GY-1535): its candidate's own required cases run in-process through `validateProjectCandidate`
  * from a checkout of the candidate SHA, against UAT or the static site's loopback server, and the
  * follow-up is filed through `file`. The revert is built in a trial
- * checkout under `base` and landed through `revertCandidateItem`, recorded by `record`.
+ * checkout under `base` and landed through `revertCandidateItem`, recorded by `record`. The release
+ * failure-action policy is the checkout's own declaration (GY-1848): `graphyard.json` at `root`,
+ * never the plane's `GRAPHYARD_REPOSITORY_POLICY` — the repository chooses what its failed
+ * candidate does, and `ports.release` carries it to the promotion drive.
  */
 export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run' | 'repository' | 'credentialFile'>, root: string, run: ChildRun,
   options: { base: string; record: (work: Pick<Work, 'id' | 'key'>, event: RevertRecordEvent) => Promise<unknown>; environment?: NodeJS.ProcessEnv; now?: () => number; trial?: RevertPorts['trial'];
@@ -84,6 +90,9 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
   const uatUrl = environment[localReleaseVariables.uatUrl], productionUrl = environment[localReleaseVariables.productionUrl], uatStatic = environment[localReleaseVariables.uatStatic];
   if (!uatUrl && !uatStatic) return null;
   const settings = candidateSettings(config.run), writer = mergeWriterSettings(config.run, installIdFor(config.repository)), shadow = shadowGateSettings(config.run);
+  // GY-1848: the candidate repository's own release failure-action policy (revert by default), read
+  // from the coordinator checkout's graphyard.json, never from the plane's deployment variable.
+  const release = checkoutRepositoryPolicy(root).release;
   const base = config.baseBranch, ref = `refs/remotes/origin/${base}`, now = options.now ?? Date.now;
   const env = { ...environment, GIT_SSH_COMMAND: deployKeySshCommand(writer.deployKeyFile) };
   const git: AsyncGit = async args => String(await run('git', args, { cwd: root, env, maxBuffer: 64 * 1024 * 1024, timeoutMs: 4 * 3_600_000 }));
@@ -131,22 +140,50 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
     record: options.record,
   };
   // GY-1535: a managed repository's candidate, validated in-process from a checkout of its exact SHA.
+  // The release holds over async git, as a managed repository's validation runs them: the hold
+  // records are read ahead and answered to the holds' own sync read, and the hold tags they write
+  // are kept in order and written through `git` when the outcome's `write` runs.
+  const asyncHolds = (options: Parameters<typeof releaseHolds>[1]) => async (candidate: ReleaseCandidate, record: UatRecord): Promise<HoldOutcome> => {
+    const read = recordsArguments(holdTagPrefix), listed = await git(read), writes: string[][] = [];
+    const replay: Git = args => {
+      if (args.join('\0') === read.join('\0')) return listed;
+      if (!args.includes('tag') && args[0] !== 'push') throw new Error(`the release holds ran git ${args.join(' ')}, which is not a hold record's read or write`);
+      writes.push(args);
+      return '';
+    };
+    const outcome = await releaseHolds(replay, options)(candidate, record);
+    return { ...outcome, write: async () => { outcome.write(); for (const args of writes) await git(args); } };
+  };
   const validateManaged = async (id: string): Promise<LocalValidation> => {
     await syncLedgerAsync(git, base);
     const ledger = await readLedgerAsync(git), candidate = findCandidate(ledger, id);
-    // GY-1844: a candidate UAT serves by digest is attested first, like the CLI's validate: an instance on any other digest records
-    // the candidate's UAT verdict failed on that suite, so its cases never pass digests they did not test.
+    // GY-1844: a candidate UAT serves by digest is attested first, like the CLI's validate: an
+    // instance on any other digest records the candidate's UAT verdict failed on that suite, so its
+    // cases never pass digests they did not test. GY-1868: a matched attestation rides the
+    // validating call as its own suite, so the recorded verdict names exactly the digests the
+    // observation backed; with no observer the verdict names none and digest promotion refuses,
+    // naming GRAPHYARD_INSTANCE_DIGESTS, instead of accepting digests nothing observed.
     const served = uatServedDigests(ledger, candidate);
-    if (served && digests.instances && uatUrl) {
-      const suite = uatDigestSuite(served, digests.instances);
-      if (!(await suite.run(uatUrl, candidate)).passed) {
-        const result = await validateAndRecord(git, id, uatUrl, [suite], { base, push: true, timeoutMs: localServeWaitSeconds * 1000, file: options.file });
-        return { record: result.record, followUp: result.followUp ?? null };
-      }
+    const attested = served && digests.instances && uatUrl ? { url: uatUrl, suite: uatDigestSuite(served, digests.instances) } : null;
+    if (attested && !(await attested.suite.run(attested.url, candidate)).passed) {
+      const result = await validateAndRecord(git, id, attested.url, [attested.suite], { base, push: true, timeoutMs: localServeWaitSeconds * 1000, file: options.file });
+      return { record: result.record, followUp: result.followUp ?? null };
     }
     const checkout = mkdtempSync(join(options.base, 'candidate-cases-'));
     try {
       await git(['worktree', 'add', '--detach', checkout, candidate.sha]);
+      if (attested) {
+        // GY-1868: the attested candidate validates with its attestation among the suites, composed
+        // exactly as a managed repository's validation composes them, so its verdict records the
+        // observed digests and the cases ran under them.
+        const contract = existsSync(join(checkout, contractFile)) ? await loadContract(checkout).catch(error => { console.error(`No release holds: ${error.message}`); return null; }) : null;
+        let report: E2eReport | null = null;
+        const result = await validateAndRecord(git, id, attested.url, [
+          projectCaseSuite(checkout, environment[localReleaseVariables.uatToken] ?? '', { contract, report: value => { report = value; } }), attested.suite,
+        ], { base, push: true, timeoutMs: localServeWaitSeconds * 1000, file: options.file,
+          holds: asyncHolds({ contract, push: true, file: options.file, report: async () => report }) });
+        return { record: result.record, followUp: result.followUp ?? null };
+      }
       const result = await validateProjectCandidate(git, id, { checkout, base, push: true, timeoutMs: localServeWaitSeconds * 1000, file: options.file,
         token: environment[localReleaseVariables.uatToken] ?? '',
         uat: uatUrl ? { url: uatUrl } : { static: { directory: uatStatic!, build: environment[localReleaseVariables.uatBuild] ?? null } } });
@@ -159,6 +196,7 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
   const passedUat = async (id: string) => { await syncLedgerAsync(git, base); return (await readLedgerAsync(git)).uat.find(record => record.id === id && record.result === 'passed') ?? null; };
   return {
     settings,
+    release,
     cut: async due => {
       await syncLedgerAsync(git, base);
       const ledger = await readLedgerAsync(git), newest = ledger.candidates[0];
@@ -231,8 +269,11 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
       const contract: RevertContract = existsSync(join(root, contractFile)) ? { ...parseContract(readFileSync(join(root, contractFile), 'utf8')), cases: readCaseTags(root) } : { outcomes: [], cases: readCaseTags(root) };
       return { items, maps, contract };
     },
-    // The route finds the item by key as it does by id, so the revert names the key alone.
-    revert: target => revertCandidateItem(revertPorts, { id: target.key, key: target.key }, target),
+    // The route finds the item by key as it does by id, so the revert names the key alone. Under
+    // release.onFailure hold (GY-1848) this port reverts nothing even if it is called directly.
+    revert: target => release.onFailure === 'hold'
+      ? Promise.resolve({ outcome: 'refused' as const, reason: `revert refused: release.onFailure hold reverts nothing for candidate ${target.candidate} (${target.key})` } satisfies RevertOutcome)
+      : revertCandidateItem(revertPorts, { id: target.key, key: target.key }, target),
   };
 }
 

@@ -46,7 +46,7 @@ export async function createWorktree(context: CliContext, work: any) {
   const epoch = Number(args[0]); const root = context.repositoryRoot();
   const status = await api('status');
   assertRepository((await discover(root)).repository, status.repository);
-  const branch = work.submission ? work.workspaces.find((w: any) => w.epoch === work.submission.epoch)?.branch : `graphyard/${work.key.toLowerCase()}-${epoch}`;
+  const branch = work.submission ? work.workspaces.find((w: any) => w.epoch === work.submission.epoch)?.branch : work.prAdoption?.branch ?? `graphyard/${work.key.toLowerCase()}-${epoch}`;
   if (!branch) throw new Error('Submitted workspace branch is missing');
   const path = resolve(root, '.graphyard/worktrees', `${work.key}-${epoch}`);
   let startPoint = args[1] ?? 'HEAD';
@@ -55,6 +55,27 @@ export async function createWorktree(context: CliContext, work: any) {
     // GY-860 AC-2: an unfetchable or moved PR branch is a workspace failure, so no attempt is spent.
     const refused = await submittedBranchRefusal(root, branch, remoteBranch, work.candidate?.sha, runChild);
     if (refused) { await releaseUnderFailure(mutate, epoch, refused); throw new Error(`${refused}. The claim was released as a workspace failure, so the attempt costs nothing.`); }
+    startPoint = remoteBranch;
+  } else if (work.prAdoption) {
+    // GY-1849: an adopted item's attempt works the adopted pull request's own branch from its
+    // existing commits: it starts where origin carries that branch, never from this checkout's
+    // HEAD. A branch that cannot be fetched, or that no longer lives at the adopted head, is a
+    // workspace failure that costs no attempt: the master re-adopts naming the live head, and
+    // the next dispatch starts there.
+    const remoteBranch = `refs/remotes/origin/${branch}`;
+    let refused: string | null = null;
+    try {
+      await runChild('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:${remoteBranch}`], { cwd: root });
+      const remoteSha = String(await runChild('git', ['rev-parse', '--verify', remoteBranch], { cwd: root })).trim();
+      if (remoteSha !== work.prAdoption.head) refused = `the adopted branch ${branch} lives at ${remoteSha.slice(0, 12)}, not the adopted head ${work.prAdoption.head.slice(0, 12)}; adopt naming the live head, then dispatch again`;
+    } catch (error) {
+      refused = `fetching it failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    if (refused) {
+      const failure = `Git worktree creation failed for the adopted pull request's branch: ${refused}`;
+      await releaseUnderFailure(mutate, epoch, failure);
+      throw new Error(`${failure}. The claim was released as a workspace failure, so the attempt costs nothing.`);
+    }
     startPoint = remoteBranch;
   }
   // GY-860: an earlier attempt's hold is recorded with the reservation and released; the branch never moves.
@@ -69,7 +90,7 @@ export async function createWorktree(context: CliContext, work: any) {
     if (exists) reclaimed = reclaimBranchHolders(root, branch, path, work, now, { checkouts: !!work.submission });
     for (const entry of reclaimed) console.error(`Reclaimed ${entry.path}, which held ${branch}${entry.epoch !== null ? ` for ${entry.key} epoch ${entry.epoch}` : ''}: ${entry.action}`);
     if (!released?.reused) gitOrThrow(exists ? ['worktree', 'add', path, branch] : ['worktree', 'add', '-b', branch, path, startPoint]);
-    if (work.submission) gitOrThrow(['-C', path, 'reset', '--hard', startPoint]);
+    if (work.submission || work.prAdoption) gitOrThrow(['-C', path, 'reset', '--hard', startPoint]);
   }
   catch (error) { await workspaceFailure(mutate, epoch, error); } // GY-860: the host failed, not the attempt
   // A checkout whose lockfile the reachable install does not match gets its own install, under heartbeats
