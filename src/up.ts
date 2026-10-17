@@ -585,7 +585,17 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     const entry = { step, sentence, url: link.url ?? null, code: link.code ?? null };
     handoffs.push(entry); deps.emit({ kind: 'handoff', ...entry });
   };
-  const checklist = async () => (last = setupChecklist(await deps.status().catch(() => null), { supervised, merger: controlPlaneMerger ? 'control-plane' : 'github' }));
+  /** GY-1850: what the accounts step's `master environments --apply` wrote, as its own report counts it; null until it has run this pass. */
+  let writtenProfiles: { workers: number; reviewers: number } | null = null;
+  /** GY-1850: the accounts lines answer for the profiles master.json holds, not only for the fleet's accounts: a fleet whose accounts are all connected still cannot launch a review when the write found no profile to make, so a green line is held back while either count is zero. A report that names no counts (an older CLI, or the write not run yet) leaves the line judging as before. */
+  // Supervised mode launches no reviewer (`up --local`), so only its worker profile is required.
+  const profileMissing = () => !!writtenProfiles && (writtenProfiles.workers === 0 || (!supervised && writtenProfiles.reviewers === 0));
+  const withWrittenProfiles = async (items: SetupItem[]) => {
+    if (!profileMissing()) return items;
+    return items.map(item => (item.id === 'account:worker' || item.id === 'account:reviewer') && item.done ? { ...item, done: false, action: null,
+      line: 'The account is connected, but the coordinator has no agent profile for it yet; setup writes one once the account is signed in where the coordinator runs.' } : item);
+  };
+  const checklist = async () => (last = await withWrittenProfiles(setupChecklist(await deps.status().catch(() => null), { supervised, merger: controlPlaneMerger ? 'control-plane' : 'github' })));
   let reached = false;
   /**
    * GY-1477: the dashboard's address from the operator's other devices, worked out once a server is
@@ -1052,15 +1062,50 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       return `${carried} published in ${published.pullRequest}${state.onboardingWork ? `, filed as ${state.onboardingWork} for the loop to review and merge` : ''}`;
     });
 
+    // GY-1850: the profile write `master environments --apply` runs, where the loop runs: on this
+    // machine's configured checkout, or on a self-contained host (its loop, login homes and master.json
+    // live there) through `install --profiles-only`, as `install --herdr-only` sets Herdr up there. Its
+    // report, not a file, is what the account checklist lines judge. A failed write stops the run,
+    // resumed or fresh; a pass with no configured checkout yet writes nothing and judges as before.
+    const remoteProfiles = remoteLoop || !!state.identitiesHost;
+    const writeProfiles = async () => {
+      let report: any;
+      if (remoteProfiles) report = parseJson(await run('accounts', [...installArgs('--apply'), '--profiles-only'].filter(arg => arg !== '--no-herdr' && arg !== '--herdr-instance' && arg !== '--fresh-cursor')))?.profiles;
+      else if (existsSync(resolve(deps.root, '.graphyard/master.json'))) report = parseJson(await run('accounts', ['master', 'environments', '--apply']));
+      const counts = report?.counts;
+      if (counts) writtenProfiles = { workers: counts.workers ?? 0, reviewers: counts.reviewers ?? 0 };
+    };
+    const accountIds: SetupItemId[] = supervised ? ['account:worker'] : ['account:worker', 'account:reviewer'];
+    // The registry's first fold may lag the apply by a poll; only a role still empty after it is asked for:
+    // handed off in agent mode, on the Setup page interactively. A profile still missing is written
+    // again on each wait, and a wait that polled at all is followed by one more write: an account
+    // signed in during it (say B, while A's profiles already made both counts nonzero) gets its own
+    // profile before the lines are taken as green, and a write that still leaves one missing waits again.
+    const awaitAccounts = async () => {
+      for (;;) {
+        let waited = false;
+        await waitGreen(accountIds, true, async (pending, polls) => {
+          waited = true;
+          if (profileMissing()) await writeProfiles();
+          if (request.agent && polls > 0) handoff('accounts')(`Sign in to an AI coding account for ${pending.map(id => id.slice('account:'.length)).join(' and ')}: approve its browser login on your device`, { url: setupUrl });
+        }, 1);
+        if (!waited) return;
+        await writeProfiles();
+        if (!profileMissing()) return;
+      }
+    };
+    // A run resuming over an earlier pass's completed accounts step still writes the profiles it may
+    // lack, and waits for them here with the same rewrite, never in a later wait that writes nothing.
+    if (state.completed.includes('accounts')) { await writeProfiles(); await awaitAccounts(); }
     await step('accounts', async () => {
-      const accounts: SetupItemId[] = supervised ? ['account:worker'] : ['account:worker', 'account:reviewer'];
       // In either mode (GY-1477), login homes and keys already on this host become the fleet; nothing is signed in here.
       await run('accounts', ['master', 'registry', 'propose', '--apply']);
-      // The registry's first fold may lag the apply by a poll; only a role still empty after it is asked for:
-      // handed off in agent mode, on the Setup page interactively.
-      await waitGreen(accounts, true, request.agent ? async (pending, polls) => {
-        if (polls > 0) handoff('accounts')(`Sign in to an AI coding account for ${pending.map(id => id.slice('account:'.length)).join(' and ')}: approve its browser login on your device`, { url: setupUrl });
-      } : undefined, 1);
+      // GY-1850: and the profiles, so master.json holds a reviewer and a worker profile for every
+      // logged-in environment before the loop starts; without one, the loop's first review launch is
+      // refused for an unknown reviewer profile. The lines are green only once both exist (one worker
+      // profile under supervised setup, which launches no reviewer).
+      await writeProfiles();
+      await awaitAccounts();
     });
 
     await step('harness', async () => { await run('harness', ['master', 'harness', request.master, '--apply']); });
