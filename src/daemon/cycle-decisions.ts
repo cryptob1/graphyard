@@ -8,7 +8,7 @@ import { recordSettledDecision } from '../model/project-memory.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, type DaemonState, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
+import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, observationWakeDue, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
 import {
   bindHeldSupervisedAsk, clearCoveringAdoptIfGone, coveringAdoptLeftAskOpen, coveringScopeAdoptWatch, heldAdoptWatch, heldDecisionRefusal, heldDecisionNamedIn, heldWaitDetail, heldWaitMarker, heldWaitScope,
   approvedResumePendingDetail, markHeldScopeAsk, clearHeldScopeAsk, syncHeldScopeAskMarks, staleRevisionDecideRefusal, staleRevisionDecideNote, staleRevisionDecideDetail,
@@ -20,13 +20,15 @@ import { adoptedWatch, refusedOnOtherGrounds } from './rework-grounds.js';
 import type { FaultKind } from '../model/fault-classes.js';
 import type { Cycle } from './cycle.js';
 import { baseRefreshConflict } from '../merge-queue.js'; import { docsSyncRoute } from './docs-sync-route.js';
-import { throughputDecisionAdopts, throughputRoutineDecision, wakeObservationJob } from './cycle-delivery.js';
+import { throughputDecisionAdopts, throughputRoutineDecision } from './cycle-delivery.js';
 import { createApproverSupervisor } from './cycle-approvers.js';
-import { boundedDecisions, decisionBudget, decisionCallCarried, deferredFirst, settleDeferred } from './decision-budget.js'; import { boundedCalls, recordCarried, stepCallCarried } from './step-budget.js';
+import { boundedDecisions, decisionBudget, decisionCallCarried, deferredFirst, settleDeferred } from './decision-budget.js'; import { boundedCalls, callKey, recordCarried, stepCallCarried } from './step-budget.js';
 import { staleReleaseStep } from './stale-releases.js';
 import { closeStanding, closingItems, recordingWrites, staleCloseStep } from './stale-closes.js';
 /** The approval-watch key prefix of a hand-launched approver, re-exported for the blocker step (GY-403); `approverCalls`: the approvers step's calls (cycle-approvers.ts), bounded like the decisions step's own `decide` (GY-1774), a launch on the launcher beside the cycle using the effects beneath the bound; `agents` is the runtime inventory the step reads in place of an absent `herdr`, bounded the same. */
 export { handWatchPrefix }; const approverCalls: readonly (keyof DaemonEffects)[] = ['approver', 'endRegistrySession', 'resume', 'withdraw', 'closeSession', 'herdr', 'agents', 'approverLaunches', 'approverLaunch', 'sessionOutput', 'recordSession', 'holdAccount', 'reportCapacity', 'reconcileSessions'];
+/** GY-1865: the decisions step's observation wakes — the rework waker's `observe` and the waiting refusal's `wakeObservation` — are the same slow `resync` write the decisions wait behind, so they wait under the step's bound with every other call it makes: one past the bound is carried to the next cycle, which joins it or consumes its answer so a wake starts once, and a spent budget wakes nothing new, so a slow control plane can no longer stack one 30s resync POST after another inside the step and hold the cycle past its 60s bound. */
+const wakeCalls: readonly (keyof DaemonEffects)[] = ['observe', 'wakeObservation'];
 const holdBounds = new WeakMap<DaemonState, Map<string, number>>(); // GY-1622: per loop cursor, each held item's docs-sync hold bound on the local clock; an item the step did not reach this cycle (put off by its budget) keeps the one it last left; one already passed locally while its hold stood is a zero wait, so the next cycle re-reads it; one exactly a wait away still binds, so the guard's time comes off it. `bound` is the earliest bound when it ends this wait, `next` the earliest whether or not it does: one just beyond the wait still caps the sleep left after the checkout guard
 export const holdBoundWait = (state: DaemonState, wait: number, at: number) => { const bounds = holdBounds.get(state); const next = bounds?.size ? Math.min(...bounds.values()) : null; return next !== null && next - at <= wait ? { wait: Math.max(0, next - at), bound: next, next } : { wait, bound: null, next }; };
 /** Step 4c: request and supervise the routine decisions. */
@@ -34,7 +36,9 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const { config, state, now, snapshot, clock, clockOffset, performed, isolate, agents, open } = cycle;
   // The items this step writes, which the stale-close step leaves to the next cycle's read (GY-1439).
   const written = new Set<string>(); let budgetLeft = (): number => Number.POSITIVE_INFINITY; // the step budget every call below is capped by, bound where the budget is made; no decide call runs before it
-  const effects = recordingWrites(boundedDecisions(boundedCalls(await decisionReads(cycle.effects, cycle.heldDecisions, snapshot.work, Object.values(state.approvals), clock, cycle.effects.decisionReadDeadlineMs), cycle.heldDecisions, now, () => budgetLeft(), { step: 'approvers', calls: approverCalls }), cycle.heldDecisions, now, () => budgetLeft()), written);
+  // GY-1865: the wake is the item's — the waker's remaining wait (`observe`'s second argument) moves between retries, so the key drops it and a retry joins the wake still in flight instead of starting a second one.
+  const wakeBound = (base: DaemonEffects) => boundedCalls(base, cycle.heldDecisions, now, () => budgetLeft(), { step: 'decisions', calls: wakeCalls, key: (call, args) => callKey(call, [args[0]]), wording: (_call, args) => ({ what: `${(args[0] as Work | undefined)?.key ?? 'the item'}'s observation wake`, owed: 'wake', per: 'call' }) });
+  const effects = recordingWrites(boundedDecisions(boundedCalls(await decisionReads(wakeBound(cycle.effects), cycle.heldDecisions, snapshot.work, Object.values(state.approvals), clock, cycle.effects.decisionReadDeadlineMs), cycle.heldDecisions, now, () => budgetLeft(), { step: 'approvers', calls: approverCalls }), cycle.heldDecisions, now, () => budgetLeft()), written);
   // 4c. Routine decisions: request with the master's operator-agent identity, launch an independent approver, supervise every cycle (see `approvalStep`).
   const stamp = new Date(clock).toISOString(), bounds = holdBounds.get(state) ?? new Map<string, number>(); holdBounds.set(state, bounds); for (const id of bounds.keys()) if (!snapshot.work.some(work => work.id === id)) bounds.delete(id);
   const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now(), faultKind?: FaultKind | null) =>
@@ -422,6 +426,20 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const noteWait = async (item: Work, detail: string) => { const waitKey = `wait:rework:${item.id}`; if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
   // GY-1436: one stable wait per held item, naming the docs-sync session, head, base and the end of its bound; that bound, reached or still ahead, ends the loop's idle wait (GY-1622), kept at the latest local time the control plane can reach it (the read's upper clock offset): the cycle it wakes finds the hold ended, at most one round trip late.
   const noteHold = async (item: Work, { wait: detail, deadline }: { wait: string; deadline: string }) => { const bound = Date.parse(deadline); const waitKey = `wait:docs-sync:${item.id}`; if (bound >= clock) bounds.set(item.id, bound + clockOffset.max); if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
+  // GY-1865: the waiting refusal's wake is this step's own bounded `wakeObservation` call — its `resync` once held the step for one 30s timeout after another, one waiting item at a time. A wake past the bound is carried to the next cycle (recorded waiting on its row, no fault), which joins the wake still in flight or consumes its answer; anything else fails the row as the delivery step's wake did.
+  const wakeJob = async (item: Work, why: string) => {
+    if (!effects.wakeObservation) return;
+    const key = `wake:observation:${item.id}`, previous = state.actions[key];
+    if (previous?.state === 'failed' ? !readyToRetry(previous, state.cycle) : !observationWakeDue(item, previous?.at, clock, pause)) return;
+    const noteWake = async (outcome: 'done' | 'failed', detail: string, at: number) =>
+      performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: outcome, detail, attempts: outcome === 'failed' ? (previous?.state === 'failed' ? previous.attempts : 0) + 1 : 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist));
+    try { await effects.wakeObservation(item); }
+    catch (error) {
+      if (stepCallCarried(error)) { await recordCarried(cycle, key, { kind: 'refresh', work: item.key, epoch: item.epoch }, error, `Waking ${item.key}'s observation job`); return; }
+      return void await noteWake('failed', `Could not wake the observation job of ${item.key}: ${message(error)}`, now());
+    }
+    await noteWake('done', `Woke the observation job of ${item.key}: its ${why} waits for an observation newer than ${item.observation?.at ?? 'none'}`, clock);
+  };
   const mechanicalRead = effects.mechanicalFixes ? await effects.mechanicalFixes().then(read => read, () => null) : null, mechanical = mechanicalRead?.requests ?? []; // GY-971 planned bot rounds; GY-1764: reported to the review gate, an unreported plan holds its item's decision
   const planUnreported = await reportMechanicalPlans(snapshot.work, mechanical, effects, clock, planReportSink(state, note), effects.mechanicalFixes ? mechanicalRead : undefined); // GY-1814: the plans and the answered approvals come from this one ledger read. GY-1795: a write the gate's freshness already supersedes fails visibly but counts no decision fault, and an item delivered meanwhile settles its report (mechanical-plan-report.ts)
   const routinePass = budget.pass(), attestPass = budget.pass();
@@ -468,7 +486,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // A docs-sync stopped at the loop-owned rework's cutoff (GY-1434) gives the conflict up on a reading taken since: woken here at
     // once, or by the observation job for the next cycle. That reading is the one the rework is then decided from.
     const synced: { work: Work | null } = { work: null };
-    const observe = async (work: Work) => { synced.work = wake ? await wake(work, clock) : null; if (!synced.work) await wakeObservationJob(cycle, work, 'docs-sync give-up'); return synced.work; };
+    const observe = async (work: Work) => { synced.work = wake ? await wake(work, clock) : null; if (!synced.work) await wakeJob(work, 'docs-sync give-up'); return synced.work; };
     const docsConflict = (subject: Work, routine: RoutineDecision) => routine.action === 'rework' && !state.approvals[decisionKey(subject, routine)] && !!baseRefreshConflict(subject) && routine.binding === `${subject.candidate!.sha}:conflict`;
     const hold = docsConflict(item, decision) ? await docsSync.hold(item, observe) : null;
     if (hold?.held) return noteHold(item, hold); released.at = true;
@@ -495,7 +513,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       await noteWait(item, wait);
       // The refusal wakes the item's observation job at once (GY-710); rework is decided once it lands.
       // Its one-per-item wake:observation entry stays for guarded merge; pruneDaemonState bounds it.
-      return wakeObservationJob(cycle, item, 'rework');
+      // GY-1865: the wake runs on this step's bound, so its `resync` cannot hold the cycle past the step's budget.
+      return wakeJob(item, 'rework');
     }
     // Settled watches are done; GY-1701 re-requests when a covering adopt's revision later vanishes.
     if (watch) {
