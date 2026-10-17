@@ -4,6 +4,7 @@ import { emptyDaemonState, runDaemon, type DaemonEffects, type DaemonState } fro
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { noteCycleStalls, retainedStepStalls, stallBackoffMs, stallCycleBound, stallHeldEffects, stallSubjectKey, stallWakeSubjects } from '../src/daemon/step-stalls.js';
 import { daemonSummary } from '../src/daemon/run.js';
+import { stallStatusAttention, stallUpstreamActionKey, type StallUpstreamItemInput } from '../src/daemon/stall-upstream.js';
 import type { StepStallRemedyKind } from '../src/stall-remedies.js';
 import type { Work } from '../src/model.js';
 import type { HerdrAgent } from '../src/master/herdr.js';
@@ -35,6 +36,10 @@ import { clearReviewerProfileRefusal, readReviewerProfileRefusal, recordReviewer
 // runs: one the same unbound way every cycle, one with a 401 whose remedy the loop refuses because
 // the refused credential is the coordinator's. Each wakes the master once, beside the failed
 // cycles, and retries the read once per five minutes.
+//
+// GY-1855 adds two days of upstream filing: a reclaim stall that stands past its bound, clears and
+// re-forms under the same signature files exactly one item for it, and a filer that refuses every
+// ask is asked again only on the loop's widening, capped backoff, always with the same key and body.
 
 const minute = 60_000, hour = 60 * minute, interval = 2 * minute, dayMs = Number(process.env.SOAK_DAY_MS ?? 8 * hour);
 const start = Date.parse('2026-10-15T00:00:00.000Z');
@@ -91,6 +96,8 @@ interface Day {
   reviewsLanded: number[];
   /** Each profile write the remedy made. */
   profileWrites: number[];
+  /** Each upstream filing ask (GY-1855): when, on which cycle, under which key, with which body. */
+  filings: { at: number; cycle: number; key: string; input: StallUpstreamItemInput }[];
   state: DaemonState;
 }
 
@@ -111,13 +118,17 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
   /** The cycle's own credential read fails this way on every cycle from `after` milliseconds into the day: the cycle fails before its master-session step. */
   credentialFailure?: { text: string; after: number };
   /** The dispatcher beside the loop launches a review asking for this reviewer profile after every cycle; the profile remedy's write configures it when `writes`. */
-  reviewerProfile?: { name: string; writes: boolean } }): Promise<Day> {
+  reviewerProfile?: { name: string; writes: boolean };
+  /** The host reclaim succeeds, rather than failing the day's way, while this answers true for the time into the day. */
+  reclaimLands?: (elapsed: number) => boolean;
+  /** The day's upstream filer refuses every ask this way (GY-1855); absent, it files each ask as GY-UP-N. */
+  upstreamFailure?: string }): Promise<Day> {
   const files = options.credentials ?? (options.reviewerProfile ? await (async () => {
     const directory = await temporaryDirectory('gy-1854-soak-reviewer-');
     return { coordinator: join(directory, 'coordinator.token'), worker: join(directory, 'worker-a.token') };
   })() : undefined);
   const dayConfig = () => config(files);
-  const result: Day = { cycles: 0, launches: [], landed: [], reclaims: [], mergerReads: [], credentialReads: [], records: [], prompts: [], remedies: [], remedyHistory: [], waits: [], cursorStalls: 'null', cursorMergeWriter: 'null', logs: [], reviewRefusals: [], reviewsLanded: [], profileWrites: [], state: emptyDaemonState(dayConfig()) };
+  const result: Day = { cycles: 0, launches: [], landed: [], reclaims: [], mergerReads: [], credentialReads: [], records: [], prompts: [], remedies: [], remedyHistory: [], waits: [], cursorStalls: 'null', cursorMergeWriter: 'null', logs: [], reviewRefusals: [], reviewsLanded: [], profileWrites: [], filings: [], state: emptyDaemonState(dayConfig()) };
   // The reviewer profiles the day's configuration carries: the remedy's write adds the asked-for one when the day says it does.
   const reviewers: string[] = [];
   /**
@@ -154,10 +165,14 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
       // A launch a standing stall admitted reads its own admission on the cursor: the window it armed was written before the launch was made.
       const standing = Object.values(result.state.stepStalls).find(run => run.step === 'dispatch' && run.stalledAt);
       if (standing) assert.equal((JSON.parse(result.cursorStalls) as Record<string, { attemptAt: string | null }>)[standing.signature]?.attemptAt, standing.attemptAt, `the admission at +${Math.round((now - start) / minute)}min is on the cursor before the launch`);
-      if (options.credentials && (await readFile(profile.credentialFile!, 'utf8')).trim() === options.credentials.good) { result.landed.push(now - start); return {}; }
+      if ((options.credentials && (await readFile(profile.credentialFile!, 'utf8')).trim() === options.credentials.good)) { result.landed.push(now - start); return {}; }
       throw new Error(options.dispatchFailure ?? 'no dispatch was due');
     },
-    ...(options.reclaimFailure ? { reclaim: async () => { result.reclaims.push(now - start); throw new Error(options.reclaimFailure); } } : {}),
+    ...(options.reclaimFailure ? { reclaim: async () => {
+      result.reclaims.push(now - start);
+      if (options.reclaimLands?.(now - start)) return { root: '/outside/repo', at: new Date(now).toISOString(), applied: true, scanned: 0, idleMs: 0, removed: [], kept: [], freeBefore: null, freeAfter: null, freedBytes: 0, errors: [] };
+      throw new Error(options.reclaimFailure);
+    } } : {}),
     requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {},
@@ -192,6 +207,12 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
       apply: async () => { result.profileWrites.push(now - start); if (options.reviewerProfile?.writes) reviewers.push(options.reviewerProfile.name); return { applied: true, profiles: [{ name: 'worker-a' }], skipped: [], next: 'wrote the worker and reviewer profiles from the logged-in environments' }; },
       configured: async () => ({ reviewers: reviewers.map(name => ({ name })) as MasterConfig['reviewers'] }),
     }),
+    // The upstream filer (GY-1855): one item per idempotency key, as the plane answers a re-ask with the item already filed.
+    stallUpstream: async (input: StallUpstreamItemInput, key: string) => {
+      result.filings.push({ at: now - start, cycle: result.state.cycle, key, input });
+      if (options.upstreamFailure) throw new Error(options.upstreamFailure);
+      return { key: `GY-UP-${new Set(result.filings.map(filing => filing.key)).size}` } as Work;
+    },
     // A failed cycle's backoff is waited out on the same simulated clock.
     delay: async (wait: number) => { await runOptions.wake.sleep(wait); },
     wake: { sleep: async (wait: number) => {
@@ -214,7 +235,8 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
     assert.deepEqual(Object.keys(result.state.actions).filter(key => key.startsWith('isolated:') && !(options.mergerFailure && key === 'isolated:merge:merge writer')), [], `${phase}: no step isolated a failure`);
     // The day's scripted failures are the only ones: the dispatch refusal, the merge record the
     // plane refuses as reused, and the one deployment line an unconfigured endpoint answers with.
-    const scripted = (action: { kind: string; detail: string }) => action.kind === 'dispatch' || action.kind === 'merge' || (action.kind === 'reclaim' && !!options.reclaimFailure)
+    const scripted = (action: { kind: string; detail: string }) => action.kind === 'dispatch'
+      || (action.kind === 'fault' && !!options.upstreamFailure && action.detail.includes(options.upstreamFailure)) || action.kind === 'merge' || (action.kind === 'reclaim' && !!options.reclaimFailure)
       || (action.kind === 'deployment' && /unverified: not configured/.test(action.detail));
     const failed = Object.values(result.state.actions).filter(action => action.state === 'failed' && !scripted(action));
     assert.deepEqual(failed.map(action => `${action.kind}: ${action.detail}`), [], `${phase}: no step but the day's scripted ones failed`);
@@ -607,4 +629,49 @@ test('unit:soak-step-stalls-structured-port — a day whose shadow gate\u2019s v
   const gaps = records.slice(stallCycleBound).map((at, index) => at - records[stallCycleBound - 1 + index]);
   assert.ok(gaps.every(gap => gap >= stallBackoffMs), 'every write past the stall waits a full window');
   assert.equal(explanations, cycles, 'the port\u2019s other methods are made every cycle');
+});
+
+test('unit:soak-step-stalls-upstream-once — a day whose reclaim stall stands past its bound, clears, and re-forms under the same signature: exactly one upstream item is filed per signature, carrying its evidence, and none after the re-formed stall passes the bound again, every invariant holding', { timeout: 600_000 }, async () => {
+  const clearFrom = dayMs / 4, failAgain = dayMs / 2;
+  const result = await runDay({ reclaimFailure: 'EACCES', reclaimLands: elapsed => elapsed >= clearFrom && elapsed < failAgain });
+  const standing = Object.values(result.state.stepStalls).find(run => run.step === 'reclaim');
+  assert.ok(standing?.stalledAt, 'the reclaim stall re-formed after the reclaims succeeded');
+  assert.ok(Date.parse(standing.stalledAt!) - start >= failAgain, 'the standing stall is the re-formed run, not the first');
+  assert.ok(standing.count >= 6, `the re-formed stall passed the six-cycle bound too (${standing.count} cycles)`);
+
+  // Exactly one filing per signature over the whole day: the reclaim's first run filed it, and its re-formed run past the bound files nothing more.
+  const keys = result.filings.map(filing => filing.key);
+  assert.equal(keys.length, new Set(keys).size, `one filing per signature: ${keys.join(', ')}`);
+  const reclaim = result.filings.filter(filing => filing.input.title.includes('the reclaim call'));
+  assert.equal(reclaim.length, 1, `one filing for the reclaim signature: ${reclaim.map(filing => `+${Math.round(filing.at / minute)}min`).join(', ')}`);
+  assert.ok(reclaim[0].at < clearFrom, 'the one filing came from the first run');
+  assert.ok(reclaim[0].input.description.includes(standing.signature), 'the item names the signature');
+  assert.match(reclaim[0].input.description, /Consecutive failing cycles: \d+/);
+  assert.match(reclaim[0].input.description, /Last error: .*EACCES/);
+  assert.match(reclaim[0].input.description, /Remedy: none/);
+
+  // master status lists the re-formed stall with the item its signature already filed.
+  const listed = stallStatusAttention(result.state, 'graphyard').find(item => item.subject === stallSubjectKey(standing.signature));
+  assert.match(listed?.text ?? '', /Its upstream item is GY-UP-\d+/);
+  assert.deepEqual(result.state.stallUpstream.pending, {}, 'nothing waits to be filed');
+});
+
+test('unit:soak-step-stalls-upstream-backoff — a day whose upstream filer refuses every ask: the filing is asked again on the loop\u2019s widening backoff, never once per cycle, with the same key and body, every invariant holding', { timeout: 600_000 }, async () => {
+  const refusal = 'Graphyard refused work (403): forbidden';
+  const result = await runDay({ dispatchFailure: 'Graphyard refused /api/work/work-7/claim (502): upstream unavailable', upstreamFailure: refusal });
+  const standing = stallOf(result);
+  assert.ok(standing?.stalledAt && standing.count >= 6, 'the stall stood past its bound');
+  assert.ok(result.filings.length >= 3, `the refused filing is asked again (${result.filings.length} ask(s))`);
+  assert.equal(new Set(result.filings.map(filing => filing.key)).size, 1, 'every ask carries the one signature key');
+  assert.equal(new Set(result.filings.map(filing => JSON.stringify(filing.input))).size, 1, 'every ask resends the body first composed');
+
+  // Bounded backoff: the gap in cycles between asks widens (1, 2, 4 …) and never passes the loop's 30-cycle cap.
+  const gaps = result.filings.slice(1).map((filing, index) => filing.cycle - result.filings[index].cycle);
+  assert.ok(gaps.every((gap, index) => index === 0 || gap >= gaps[index - 1]), `the backoff never narrows: ${gaps.join(', ')} cycles`);
+  assert.ok(gaps.every(gap => gap <= 30), `the backoff is capped: ${gaps.join(', ')} cycles`);
+  assert.ok(result.filings.length <= 6 + result.cycles / 30, `${result.filings.length} asks over ${result.cycles} cycles is the backoff, not once per cycle`);
+  const row = result.state.actions[stallUpstreamActionKey(standing.signature)];
+  assert.equal(row?.state, 'failed');
+  assert.equal(row?.attempts, result.filings.length, 'the cursor counts every ask');
+  assert.match(stallStatusAttention(result.state, 'graphyard')[0].text, /upstream filing is on its backoff/);
 });
