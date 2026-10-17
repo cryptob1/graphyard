@@ -14,9 +14,10 @@ import type { Work } from '../src/model.js';
  * control-plane merge writer running in the real step order. Items are submitted every quarter
  * hour; automatic merging is switched off and on again each day; while it is off a third of the
  * held heads are released by an applied merge decision another identity approved, bound to their
- * exact head, base and policy revision, and some of those then move to a new head, which is held
- * again until a decision binds it too. Twice the hold is recorded while a trial runs, after the
- * writer selected the head from a snapshot that showed none, and the loop is restarted from its
+ * exact head, base and policy revision, and some of those move to a new head before the writer can
+ * select the released one, which is held again until a decision binds it too. Twice the hold is
+ * recorded while a trial runs, after the writer selected the head from a snapshot that showed none,
+ * and the loop is restarted from its
  * persisted state every eight hours. No head may be pushed while the hold stands over it, every
  * item is delivered exactly once with one push, the plane refuses every intent it is sent under a
  * hold, the writer asks the plane for the hold at most twice per merge, the state stays bounded,
@@ -47,7 +48,7 @@ interface Submission { n: number; head: string; submittedAt: number; attempt: nu
 interface Decision { action: 'merge'; state: 'applied'; input: { sha: string; baseSha: string; policyRevision: number }; requestedBy: string; approvedBy: string }
 class World {
   main = [base];
-  pushes: { mergeSha: string; head: string; n: number }[] = [];
+  pushes: { mergeSha: string; head: string; n: number; releasedBy: 'automatic' | 'decision' }[] = [];
   recorded = new Map<number, MergeRecordEvent[]>();
   submissions = new Map<number, Submission>();
   decisions = new Map<number, Decision[]>();
@@ -113,7 +114,7 @@ class World {
         const n = [...world.submissions.values()].find(submission => sha(`merge:${submission.head}:${baseTip}`) === mergeSha)!.n;
         if (world.hold(n)) world.pushedUnderHold.push(`GY-${n}`);
         if (baseTip !== world.tip()) return 'rejected';
-        world.main.unshift(mergeSha); world.pushes.push({ mergeSha, head: world.submissions.get(n)!.head, n });
+        world.main.unshift(mergeSha); world.pushes.push({ mergeSha, head: world.submissions.get(n)!.head, n, releasedBy: world.autoMerge ? 'automatic' : 'decision' });
         return 'pushed';
       },
       holds: async commit => world.main.includes(commit),
@@ -139,7 +140,7 @@ test('unit:soak-merge-hold — three simulated days of the real loop with automa
     recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
     github: githubDouble, merge: githubDouble, shadow: null, mergeWriter: world.ports(), decide: async () => { throw new Error('no rework is owed in this soak'); } } as unknown as DaemonEffects);
   let state: DaemonState = emptyDaemonState(config), loopEffects = effects(), restarts = 0;
-  const heldPassedThrough = new Set<string>();
+  const heldPassedThrough = new Set<string>(), replacements = new Set<number>();
   for (let cycle = 0; cycle < cycles; cycle++) {
     now = start + cycle * cycleMs;
     // The day's switch, recorded by the operator (a hold the trial recorded early stands until the switch turns it back on).
@@ -148,12 +149,17 @@ test('unit:soak-merge-hold — three simulated days of the real loop with automa
     for (const entry of world.submissions.values()) {
       if (entry.submittedAt > now || !released(entry.n) || world.ledger(entry.n)?.state === 'reconciled') continue;
       if (!world.autoMerge && world.hold(entry.n)) heldPassedThrough.add(`${entry.n}:${entry.head}`);
-      if (!world.autoMerge && world.hold(entry.n) && now >= entry.submittedAt + 30 * minute) world.decisions.set(entry.n, [...world.decisions.get(entry.n) ?? [], { action: 'merge', state: 'applied', input: { sha: entry.head, baseSha: base, policyRevision: 1 }, requestedBy: 'graphyard-master', approvedBy: 'graphyard-approver' }]);
-    }
-    // A released head that moves before it merges is held again: the worker pushes a new head an hour after its first decision.
-    for (const entry of world.submissions.values()) {
-      if (!movesAfterRelease(entry.n) || entry.attempt !== 1 || !world.decisions.get(entry.n)?.length || world.ledger(entry.n)?.state === 'reconciled') continue;
-      if (now >= entry.submittedAt + 90 * minute) world.submit(entry.n, 2, now);
+      if (!world.autoMerge && world.hold(entry.n) && now >= entry.submittedAt + 30 * minute) {
+        world.decisions.set(entry.n, [...world.decisions.get(entry.n) ?? [], { action: 'merge', state: 'applied', input: { sha: entry.head, baseSha: base, policyRevision: 1 }, requestedBy: 'graphyard-master', approvedBy: 'graphyard-approver' }]);
+        // A released head that moves before it merges is held again: the worker pushes a new head in the cycle its decision is
+        // applied, before the writer can select the released one, so the old decision is all that stands for the new head.
+        if (movesAfterRelease(entry.n) && entry.attempt === 1) {
+          world.submit(entry.n, 2, now);
+          replacements.add(entry.n);
+          const hold = world.hold(entry.n), served = world.snapshot().find(item => item.key === `GY-${entry.n}`) as Work & { mergeHold?: string };
+          assert.ok(hold && served.mergeHold === hold, `GY-${entry.n}: the decision bound to its first head does not release the replacement head`);
+        }
+      }
     }
     // The loop restarts from its persisted state every eight hours, with fresh effects.
     if (cycle && cycle % restartEvery === 0) {
@@ -177,11 +183,21 @@ test('unit:soak-merge-hold — three simulated days of the real loop with automa
   assert.ok(heldPassedThrough.size > 20, `heads were held: ${heldPassedThrough.size}`);
   const releasedPushes = world.pushes.filter(push => world.decisions.get(push.n)?.some(decision => decision.input.sha === push.head));
   assert.ok(releasedPushes.length > 10, `exact-candidate decisions released heads while the hold stood: ${releasedPushes.length}`);
-  for (const n of [...world.decisions.keys()].filter(movesAfterRelease)) {
-    const moved = world.submissions.get(n)!;
-    if (moved.attempt !== 2) continue;
+  // Replacement heads really occurred, their first heads never landed, and each replacement was held until a decision bound
+  // that replacement or automatic merging was restored: no push happened under the hold, and some were released by their own decision.
+  assert.ok(replacements.size >= 5, `released heads moved before they merged: ${[...replacements].join(', ')}`);
+  let replacementsReleasedByOwnDecision = 0;
+  for (const n of replacements) {
+    assert.equal(world.submissions.get(n)!.attempt, 2, `GY-${n} moved to a second head`);
     assert.ok(!world.pushes.some(push => push.n === n && push.head === sha(`head${n}-1`)), `GY-${n}'s first head, moved after its decision, was never pushed`);
+    const push = world.pushes.find(entry => entry.n === n)!;
+    assert.equal(push.head, sha(`head${n}-2`), `GY-${n} was delivered on its replacement head`);
+    if (push.releasedBy === 'decision') {
+      assert.ok(world.decisions.get(n)!.some(decision => decision.input.sha === push.head), `GY-${n}'s replacement was pushed under the hold only with a decision bound to it`);
+      replacementsReleasedByOwnDecision += 1;
+    }
   }
+  assert.ok(replacementsReleasedByOwnDecision >= 1, `a replacement head stayed held until a decision bound it: ${replacementsReleasedByOwnDecision}`);
   assert.deepEqual(world.trialHolds.sort((a, b) => a - b), [...holdDuringTrial].sort((a, b) => a - b), 'the hold landed under both scripted trials');
   for (const n of holdDuringTrial) {
     const refusals = (world.recorded.get(n) ?? []).filter(event => event.kind === 'refused').map(event => (event as { reason: string }).reason);
