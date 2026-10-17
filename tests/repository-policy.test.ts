@@ -188,13 +188,15 @@ test('unit:repo-review-and-pending-policy — review.normalChanges pre-merge hol
   const postMerge = resolveRepositoryPolicy({ review: { normalChanges: 'post-merge' } });
   assert.deepEqual(postMerge.review, defaultRepositoryPolicy.review, 'post-merge is the default');
   const normal = planeHead('GY-5', ['src/feature.ts']);
+  /** The built head as the control plane serves it: with the review gate its evaluation under the policy in force gives. */
+  const served = () => ({ ...normal, gates: [...normal.gates, reviewGate(normal)] }) as Work;
   await under(preMerge, () => {
     assert.equal(reviewedBeforeMerge('normal'), true);
     const gate = reviewGate(normal);
     assert.equal(gate.passed, false, 'a normal change waits for its approval');
     assert.equal(evaluate(normal, [normal], new Date(at), []).postMergeReview, undefined, 'and owes no post-merge review');
     assert.equal(reviewedAfterMerge(normal), false, 'the loop launches its pre-merge reviewer');
-    assert.equal(mergeQueue([normal], {}, Date.parse(at)).next, null, 'the merge writer does not trial it unreviewed');
+    assert.equal(mergeQueue([served()], {}, Date.parse(at)).next, null, 'the merge writer does not trial it unreviewed');
   });
   await under(postMerge, () => {
     assert.equal(reviewedBeforeMerge('normal'), false);
@@ -202,8 +204,11 @@ test('unit:repo-review-and-pending-policy — review.normalChanges pre-merge hol
     assert.deepEqual(reviewGate(normal).reasons, [], 'GY-1525: a normal change merges on its trial');
     assert.equal(evaluate(normal, [normal], new Date(at), []).postMergeReview, 'owed');
     assert.equal(reviewedAfterMerge(normal), true);
-    assert.equal(mergeQueue([normal], {}, Date.parse(at)).next?.key, 'GY-5', 'the merge writer trials it without its review');
+    assert.equal(mergeQueue([served()], {}, Date.parse(at)).next?.key, 'GY-5', 'the merge writer trials it without its review');
   });
+  // The loop's checkout may declare another policy than the deployment's: the writer follows the served review gate.
+  const servedPreMerge = await under(preMerge, served);
+  await under(postMerge, () => assert.equal(mergeQueue([servedPreMerge], {}, Date.parse(at)).next, null, 'a server pre-merge gate holds it under a post-merge checkout'));
 });
 
 test('unit:repo-review-and-pending-policy — e2e.pendingOutcomes blocking makes a pending-outcome case block like any required case; non-blocking keeps GY-1802', async () => {
