@@ -11,13 +11,14 @@ import { harness } from './install-harness.js';
 const LINK = '/home/operator/.config/graphyard/owner-project/railway';
 const SOURCE = '/srv/graphyard-checkout';
 const MANAGED = '/home/operator/code/huck';
+const SHA = '0123456789abcdef0123456789abcdef01234567';
 // Imported when a test runs, so an exercise against the base fails these cases rather than the file.
 const adapters = () => import('../src/install/adapters.js');
 
 function context(overrides: Partial<AdapterContext>, responses: Parameters<typeof fakeTransport>[0] = {}) {
   const transport = fakeTransport(responses);
   const vault = new Vault();
-  const ctx = { provider: 'railway', service: 'graphyard-owner-project', sourceRoot: SOURCE, railwayDir: LINK, managedRoot: MANAGED, vault, transport, ...overrides } as AdapterContext;
+  const ctx = { provider: 'railway', service: 'graphyard-owner-project', sourceRoot: SOURCE, railwayDir: LINK, managedRoot: MANAGED, sourceCommit: null, vault, transport, ...overrides } as AdapterContext;
   return { ctx, transport, vault };
 }
 
@@ -86,4 +87,29 @@ test('unit:railway-upload-receipts-and-source — a failed upload is a failed st
     assert.equal(railway.at(-1)!.args[0], 'up', 'the apply continued past the failed upload');
     assert.ok(railway.at(-1)!.args.includes('--path-as-root'));
   } finally { await fixture.cleanup(); }
+});
+
+test('unit:railway-upload-stamps-build-sha — the upload sets GRAPHYARD_BUILD_SHA to the pinned source commit before `railway up`, a rerun on a deployed app restamps and redeploys, and the plan names it', async () => {
+  const { railwayAdapter, railwayUploadReceipts, railwaySourceCommit, emptyObservation } = await adapters();
+  const { ctx, transport } = context({ sourceCommit: SHA });
+  await railwayAdapter.deploy(ctx);
+  // A rerun on an install whose app is already deployed runs the same deploy step again.
+  await railwayAdapter.deploy(ctx);
+  const stamp = ['variables', '--service', 'graphyard-owner-project', '--skip-deploys', '--set', `GRAPHYARD_BUILD_SHA=${SHA}`];
+  assert.deepEqual(transport.commands.map(command => command.args[0]), ['variables', 'up', 'variables', 'up'], 'the variable was not set before each upload');
+  for (const command of transport.commands) assert.equal(command.cwd, LINK);
+  assert.deepEqual(transport.commands[0].args, stamp);
+  assert.deepEqual(transport.commands[2].args, stamp);
+  assert.deepEqual(railwayUploadReceipts(ctx).map(receipt => receipt.buildSha), [SHA, SHA]);
+
+  // The commit defaults to the source checkout's HEAD: this repository is one.
+  const head = (await import('../src/protocol-version.js')).cliCommit(process.cwd());
+  assert.ok(head, 'this checkout has no readable HEAD');
+  assert.equal(railwaySourceCommit({ sourceRoot: process.cwd() }), head);
+
+  // The plan names the variable and the commit it will carry.
+  const app = railwayAdapter.plan(ctx, { ...emptyObservation(), compute: true, database: true, app: true, installed: true })
+    .find(action => action.id === 'provider.provision.app')!;
+  assert.match(app.title, new RegExp(`GRAPHYARD_BUILD_SHA to ${SHA}`));
+  assert.deepEqual(app.values, [{ name: 'GRAPHYARD_BUILD_SHA', value: SHA, secret: false }]);
 });
