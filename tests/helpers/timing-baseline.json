@@ -550,6 +550,7 @@
     "tests/master-browser.test.ts": 14502,
     "tests/master-config-retired-keys.test.ts": 525,
     "tests/master-daemon.test.ts": 1912,
+    "tests/master-init-keeps-identities.test.ts": 600,
     "tests/master-defer-sets-observation-window.test.ts": 3777,
     "tests/master-harness-merge-endpoints.test.ts": 608,
     "tests/master-harness-remedy.test.ts": 1660,
