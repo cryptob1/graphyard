@@ -17,6 +17,9 @@ const IMPORTED_SECRET = 'imported-webhook-secret-for-tests-5a6b7c8d';
 const OBSERVE_ONLY_HELD = 'held by observation-only (--observe-only)';
 const APP_VARIABLES = ['GITHUB_APP_ID', 'GITHUB_INSTALLATION_ID', 'GITHUB_PRIVATE_KEY', 'GITHUB_WEBHOOK_SECRET', 'GITHUB_CI_APP_IDS'];
 const ARGS = ['--provider', 'railway', '--repo', REPOSITORY, '--observe-only'];
+/** App bind's Railway redeploy (GY-1908): --json so applyVariables can await that deployment id. */
+const REDEPLOY = `railway redeploy --service ${SERVICE} --yes --json`;
+const DEPLOY_TITLE = /Redeploy the serving SUCCESS deployment with the App variables \(refuse when latest is a newer failed attempt; no source upload or GRAPHYARD_BUILD_SHA stamp\) and wait for that redeploy and the bound App to serve/;
 
 /** A Railway account that remembers what the installer created. */
 function statefulRailway() {
@@ -45,17 +48,26 @@ const releaseCandidate = deliveryPolicySchema.parse({
 const variablesSet = (lines: string[]) => lines.flatMap(line => line.startsWith('railway variables ') ? [...line.matchAll(/--set ([A-Z_]+)=/g)].map(match => match[1]) : /^railway variable set .* --stdin ([A-Z_]+)$/.exec(line)?.slice(1) ?? []);
 const mutations = [/git\/refs/, /\/protection/, /rulesets/, /allow_auto_merge|auto-merge|merge_queue/i, /^railway environment/, /^herdr /, /systemctl/, / master init/];
 
-async function observeOnlyInstallation(options: { ciVisible?: boolean } = {}) {
+async function observeOnlyInstallation(options: {
+  ciVisible?: boolean;
+  /** First-match Railway deployment/redeploy responses (GY-1908 serving-check and await). */
+  railwayDeploy?: { match: string; result: string | { stdout: string; stderr: string; code: number } | ((line: string, input?: string) => string | { stdout: string; stderr: string; code: number }) }[];
+  /** Status reads before /api/status reports the App after variables are written (delayed readiness). */
+  statusDelay?: number;
+} = {}) {
   const ci: { visible: boolean; added?: number } = { visible: options.ciVisible ?? true };
   // The served App is the one whose GITHUB_APP_ID the deployment was given, unless the server fails to load it.
   const server = { loadsApp: true };
   let fixture: Awaited<ReturnType<typeof harness>>;
+  let statusReads = 0;
   // The App's installation, whose selected repositories the gh PUT the bind runs adds the repository back to.
   const app: FakeApp = { appId: APP_ID, slug: SLUG, installationId: INSTALLATION_ID, deselected: false };
   const addRepository = { match: `gh api --method PUT /user/installations/${INSTALLATION_ID}/repositories/${REPOSITORY_ID}`, result: () => { app.deselected = false; return ''; } };
-  fixture = await harness({ provider: 'railway', extraResponses: [addRepository, ciChecks(ci), ...statefulRailway()], apps: [app],
+  fixture = await harness({ provider: 'railway', extraResponses: [...(options.railwayDeploy ?? []), addRepository, ciChecks(ci), ...statefulRailway()], apps: [app],
     statusBody: () => {
-      const bound = server.loadsApp && fixture.allCommandLines().some(line => line.includes(`--set GITHUB_APP_ID=${APP_ID}`));
+      const written = server.loadsApp && fixture.allCommandLines().some(line => line.includes(`--set GITHUB_APP_ID=${APP_ID}`));
+      if (written) statusReads++;
+      const bound = written && (options.statusDelay === undefined || statusReads > options.statusDelay);
       return { actor: { id: 'owner-project-operator', role: 'admin' }, repository: REPOSITORY, github: bound, githubAppId: bound ? APP_ID : null, githubInstallationId: bound ? INSTALLATION_ID : null };
     } });
   await writeFile(join(fixture.root, 'graphyard.json'), JSON.stringify({ documentation: { paths: ['README.md'], changelog: null }, delivery: releaseCandidate }));
@@ -91,7 +103,7 @@ test('unit:railway-app-bind-preserves-deployed-source — a real Railway adapter
   try {
     await importApp();
     const plan = await bindPlan();
-    assert.match(plan.actions.find(action => action.id === 'provider.deploy')!.title, /Redeploy the current deployment with the App variables \(no source upload or GRAPHYARD_BUILD_SHA stamp\)/);
+    assert.match(plan.actions.find(action => action.id === 'provider.deploy')!.title, DEPLOY_TITLE);
     const mark = fixture.allCommandLines().length;
     const summary = await bindApply();
     assert.equal(summary.health, true);
@@ -99,7 +111,8 @@ test('unit:railway-app-bind-preserves-deployed-source — a real Railway adapter
     assert.deepEqual(summary.github, { appId: APP_ID, installationId: INSTALLATION_ID, slug: SLUG, ciAppIds: [CI_APP_ID] });
     const lines = fixture.allCommandLines().slice(mark);
     assert.deepEqual(variablesSet(lines).sort(), [...APP_VARIABLES].sort());
-    assert.equal(lines.filter(line => line === `railway redeploy --service ${SERVICE} --yes`).length, 1);
+    assert.equal(lines.filter(line => line === REDEPLOY).length, 1);
+    assert.ok(lines.some(line => line.includes('railway deployment list')), 'the bind did not list deployments before redeploying');
     assert.ok(!lines.some(line => /^railway up/.test(line) || /GRAPHYARD_BUILD_SHA/.test(line) || /--image\b/.test(line)), 'the bind uploaded source, stamped a build or changed an image');
     assert.ok(fixture.requests.slice(-20).some(request => request.url.endsWith('/healthz')));
     assert.equal(fixture.state.hookConfig?.url, `${summary.url}/api/github/webhook`);
@@ -117,8 +130,8 @@ test('unit:railway-app-bind-plan-matches-redeploy — the supported app-bind pla
   assert.ok(docs.split('\n').some(line =>
     line.includes('app bind SLUG')
     && line.includes('GITHUB_APP_ID') && line.includes('GITHUB_INSTALLATION_ID') && line.includes('GITHUB_PRIVATE_KEY') && line.includes('GITHUB_WEBHOOK_SECRET') && line.includes('GITHUB_CI_APP_IDS')
-    && /Railway current-deployment redeploy\/no-source-upload\/no-`GRAPHYARD_BUILD_SHA`/.test(line)
-    && /else deploy/.test(line)), 'docs/install.md does not state Railway app bind changes only the five App variables and redeploys the current deployment without source upload or GRAPHYARD_BUILD_SHA');
+    && /Railway serving-SUCCESS redeploy \(refuse latest≠SUCCESS\)\/await\/no-source-upload\/no-`GRAPHYARD_BUILD_SHA`/.test(line)
+    && /else deploy/.test(line)), 'docs/install.md does not state Railway app bind changes only the five App variables, redeploys the serving SUCCESS deployment (refusing a newer failed latest), awaits that redeploy, and never uploads or stamps GRAPHYARD_BUILD_SHA');
   const { fixture, bindPlan, bindApply, importApp } = await observeOnlyInstallation();
   try {
     let mark = fixture.allCommandLines().length;
@@ -136,13 +149,85 @@ test('unit:railway-app-bind-plan-matches-redeploy — the supported app-bind pla
     lines = fixture.allCommandLines().slice(mark);
     assert.ok(!lines.some(line => /^railway (up|redeploy|variables|variable set|init|add)/.test(line) || /--method (POST|PUT|PATCH|DELETE)/.test(line)), `plan mutated: ${lines.find(line => /^railway |--method/.test(line))}`);
     assert.deepEqual(plan.actions.find(action => action.id === 'github.env')!.values!.map(value => value.name), APP_VARIABLES);
-    assert.match(plan.actions.find(action => action.id === 'provider.deploy')!.title, /^Redeploy the current deployment with the App variables \(no source upload or GRAPHYARD_BUILD_SHA stamp\) and wait for it to become healthy$/);
+    assert.match(plan.actions.find(action => action.id === 'provider.deploy')!.title, DEPLOY_TITLE);
     mark = fixture.allCommandLines().length;
     await bindApply();
     lines = fixture.allCommandLines().slice(mark);
     assert.deepEqual(variablesSet(lines).sort(), [...APP_VARIABLES].sort());
-    assert.equal(lines.filter(line => line === `railway redeploy --service ${SERVICE} --yes`).length, 1);
+    assert.equal(lines.filter(line => line === REDEPLOY).length, 1);
     assert.ok(!lines.some(line => /^railway up/.test(line) || /GRAPHYARD_BUILD_SHA/.test(line)));
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:railway-app-bind-awaits-redeploy — after railway redeploy the bind waits for that deployment id to become SUCCESS and for /api/status to report the App before changing the webhook or recording the binding; a redeploy that fails while the old instance stays healthy refuses without webhook or record (GY-1908)', async () => {
+  let redeployed: string | null = null;
+  let polls = 0;
+  const delayed = await observeOnlyInstallation({
+    statusDelay: 2,
+    railwayDeploy: [
+      { match: 'railway deployment list', result: () => {
+        if (!redeployed) return JSON.stringify([{ id: 'dep-serving', status: 'SUCCESS' }]);
+        polls++;
+        const status = polls < 3 ? 'DEPLOYING' : 'SUCCESS';
+        return JSON.stringify([{ id: redeployed, status }, { id: 'dep-serving', status: 'SUCCESS' }]);
+      } },
+      { match: 'railway redeploy', result: () => { redeployed = 'dep-new'; polls = 0; return JSON.stringify({ id: redeployed }); } },
+    ],
+  });
+  try {
+    await delayed.importApp();
+    const mark = delayed.fixture.allCommandLines().length;
+    const hooksBefore = delayed.fixture.requests.filter(request => request.method === 'PATCH' && request.url.endsWith('/app/hook/config')).length;
+    const summary = await delayed.bindApply();
+    assert.equal(summary.status.githubAppId, APP_ID);
+    assert.equal((await delayed.readRecord()).github.appId, APP_ID);
+    assert.ok(polls >= 3, `redeploy was not polled until SUCCESS (polls=${polls})`);
+    assert.ok(delayed.fixture.requests.filter(request => request.method === 'PATCH' && request.url.endsWith('/app/hook/config')).length > hooksBefore);
+    const lines = delayed.fixture.allCommandLines().slice(mark);
+    assert.equal(lines.filter(line => line === REDEPLOY).length, 1);
+    assert.ok(lines.filter(line => line.includes('railway deployment list')).length >= 4, 'serving check plus await polls');
+  } finally { await delayed.fixture.cleanup(); }
+
+  let failedId: string | null = null;
+  const failed = await observeOnlyInstallation({
+    railwayDeploy: [
+      { match: 'railway deployment list', result: () => !failedId
+        ? JSON.stringify([{ id: 'dep-serving', status: 'SUCCESS' }])
+        : JSON.stringify([{ id: failedId, status: 'FAILED' }, { id: 'dep-serving', status: 'SUCCESS' }]) },
+      { match: 'railway redeploy', result: () => { failedId = 'dep-failed'; return JSON.stringify({ id: failedId }); } },
+    ],
+  });
+  try {
+    await failed.importApp();
+    const mark = failed.fixture.allCommandLines().length;
+    const hooksBefore = failed.fixture.requests.filter(request => request.method === 'PATCH' && request.url.endsWith('/app/hook/config')).length;
+    await assert.rejects(failed.bindApply(), /redeployed deployment dep-failed is FAILED/);
+    assert.equal((await failed.readRecord()).github, null);
+    assert.equal(failed.fixture.requests.filter(request => request.method === 'PATCH' && request.url.endsWith('/app/hook/config')).length, hooksBefore, 'failed redeploy changed the webhook');
+    const lines = failed.fixture.allCommandLines().slice(mark);
+    assert.deepEqual(variablesSet(lines).sort(), [...APP_VARIABLES].sort(), 'variables were not written before the failed redeploy');
+    assert.equal(lines.filter(line => line === REDEPLOY).length, 1);
+    assert.ok(failed.fixture.requests.some(request => request.url.endsWith('/healthz')), 'old instance health was still probed');
+  } finally { await failed.fixture.cleanup(); }
+});
+
+test('unit:railway-app-bind-refuses-non-serving-latest — when a newer failed deployment exists while an older SUCCESS still serves, app bind refuses before any variable write, upload or redeploy (GY-1908)', async () => {
+  const { fixture, bindApply, importApp, readRecord } = await observeOnlyInstallation({
+    railwayDeploy: [
+      { match: 'railway deployment list', result: JSON.stringify([{ id: 'dep-failed', status: 'FAILED' }, { id: 'dep-serving', status: 'SUCCESS' }]) },
+      { match: 'railway redeploy', result: () => { throw new Error('redeploy must not run when latest is not serving'); } },
+    ],
+  });
+  try {
+    await importApp();
+    const mark = fixture.allCommandLines().length;
+    const hooksBefore = fixture.requests.filter(request => request.method === 'PATCH' && request.url.endsWith('/app/hook/config')).length;
+    await assert.rejects(bindApply(), /latest deployment dep-failed is FAILED, while dep-serving \(SUCCESS\) is still serving/);
+    const lines = fixture.allCommandLines().slice(mark);
+    assert.deepEqual(variablesSet(lines), []);
+    assert.ok(!lines.some(line => /^railway (up|redeploy|variables|variable set)/.test(line)), `refusal mutated: ${lines.find(line => /^railway/.test(line))}`);
+    assert.equal(fixture.requests.filter(request => request.method === 'PATCH' && request.url.endsWith('/app/hook/config')).length, hooksBefore);
+    assert.equal((await readRecord()).github, null);
   } finally { await fixture.cleanup(); }
 });
 
@@ -187,7 +272,7 @@ test('unit:observe-only-bind-app-writes-only-app-variables — graphyard app bin
     assert.deepEqual(written.sort(), [...APP_VARIABLES].sort());
     assert.ok(!written.includes('GRAPHYARD_BUILD_SHA'), 'the bind stamped GRAPHYARD_BUILD_SHA');
     assert.ok(bindLines.filter(line => line.startsWith('railway variable')).every(line => line.includes(`--service ${SERVICE}`)), 'a variable was written outside the control-plane service');
-    assert.equal(bindLines.filter(line => line === `railway redeploy --service ${SERVICE} --yes`).length, 1, 'the bind did not redeploy exactly once');
+    assert.equal(bindLines.filter(line => line === REDEPLOY).length, 1, 'the bind did not redeploy exactly once');
     assert.ok(!bindLines.some(line => /^railway up/.test(line)), 'the bind uploaded source');
     assert.ok(!bindLines.some(line => /^railway (init|add)/.test(line)), 'the bind provisioned again');
     assert.equal(bindLines.filter(line => line === `gh api --method PUT /user/installations/${INSTALLATION_ID}/repositories/${REPOSITORY_ID}`).length, 1, 'the repository was not added to the App installation exactly once');
@@ -322,7 +407,7 @@ test('app bind refuses an installation not applied with --observe-only, records 
     assert.deepEqual(second.github?.ciAppIds, [CI_APP_ID]);
     const lines = fixture.allCommandLines().slice(mark);
     assert.ok(lines.some(line => line.includes(`--set GITHUB_CI_APP_IDS=${CI_APP_ID}`)), 'GITHUB_CI_APP_IDS was not written');
-    assert.equal(lines.filter(line => line === `railway redeploy --service ${SERVICE} --yes`).length, 1);
+    assert.equal(lines.filter(line => line === REDEPLOY).length, 1);
     assert.ok(!lines.some(line => /^railway up/.test(line) || variablesSet(lines).includes('GRAPHYARD_BUILD_SHA')), 'the CI-App write uploaded or stamped');
     assert.deepEqual((await readRecord()).github.ciAppIds, [CI_APP_ID]);
   } finally { await fixture.cleanup(); }
@@ -407,7 +492,7 @@ test('app bind binds a re-imported App again: a rotated key and new webhook secr
     assert.equal(rebound.github?.appId, APP_ID);
     let lines = fixture.allCommandLines().slice(mark);
     assert.deepEqual(variablesSet(lines).sort(), [...APP_VARIABLES].sort());
-    assert.equal(lines.filter(line => line === `railway redeploy --service ${SERVICE} --yes`).length, 1, 'the rebind did not redeploy exactly once');
+    assert.equal(lines.filter(line => line === REDEPLOY).length, 1, 'the rebind did not redeploy exactly once');
     assert.ok(!lines.some(line => /^railway up/.test(line)), 'the rebind uploaded source');
     assert.equal(fixture.requests.filter(request => request.method === 'PATCH').length, patches + 1, 'the webhook secret was not set again');
     assert.equal(fixture.state.hookConfig?.secret, ROTATED);
@@ -434,7 +519,7 @@ test('app bind binds a re-imported App again: a rotated key and new webhook secr
     assert.deepEqual([...widened.github!.ciAppIds].sort(), [CI_APP_ID, 424_242].sort());
     lines = fixture.allCommandLines().slice(mark);
     assert.ok(lines.some(line => /--set GITHUB_CI_APP_IDS=/.test(line) && line.includes('424242')), 'GITHUB_CI_APP_IDS was not written with the new publisher');
-    assert.equal(lines.filter(line => line === `railway redeploy --service ${SERVICE} --yes`).length, 1);
+    assert.equal(lines.filter(line => line === REDEPLOY).length, 1);
     assert.ok(!lines.some(line => /^railway up/.test(line)), 'the CI widen uploaded source');
     assert.deepEqual([...(await readRecord()).github.ciAppIds].sort(), [CI_APP_ID, 424_242].sort());
   } finally { await fixture.cleanup(); }

@@ -59,6 +59,12 @@ export interface AdapterContext {
   managedRoot?: string | null;
   /** The commit a Railway upload stamps as GRAPHYARD_BUILD_SHA (GY-1864); read from the source checkout, else GRAPHYARD_BUILD_SHA, when absent. */
   sourceCommit?: string | null;
+  /**
+   * App bind (GY-1908): Railway `applyVariables` must redeploy the serving SUCCESS deployment, not a
+   * newer failed attempt (`railway redeploy` always targets latest), and must wait for that redeploy
+   * to become SUCCESS before the bind records the App or changes the webhook.
+   */
+  preserveServingDeployment?: boolean;
   /** Spend consent for a server this install creates: a monthly cap, or the exact price confirmed. */
   spend: { maxMonthly: number | null; confirmPrice: number | null };
   wait: (ms: number) => Promise<void>;
@@ -711,6 +717,76 @@ export async function railwayUpload(ctx: AdapterContext): Promise<RailwayUploadR
 /** How long the health check waits for the uploaded build to be served: 200 × 3 s, ten minutes. */
 const RAILWAY_SERVE_ATTEMPTS = 200;
 
+/** A row from `railway deployment list --json` (newest first). */
+export interface RailwayDeployment { id: string; status: string }
+
+/**
+ * The service's recent deployments, newest first. Null when the CLI cannot list them (too old, or
+ * unlinked): app bind that preserves the serving deployment then refuses rather than guessing.
+ */
+export async function railwayDeploymentList(ctx: AdapterContext): Promise<RailwayDeployment[] | null> {
+  const result = await runRailway(ctx, ['deployment', 'list', '--service', ctx.service, '--json', '--limit', '20'], { allowFailure: true, timeout: 180_000 });
+  if (result.code !== 0) return null;
+  try {
+    const parsed = JSON.parse(result.stdout);
+    if (!Array.isArray(parsed)) return null;
+    return parsed.map((entry: any) => ({ id: String(entry?.id ?? ''), status: String(entry?.status ?? '').toUpperCase() })).filter((entry: RailwayDeployment) => entry.id);
+  } catch { return null; }
+}
+
+/**
+ * `railway redeploy` always targets `latest_deployment`, not the serving one. When a newer failed
+ * or crashed attempt exists while an older SUCCESS still serves, redeploying would rebuild that
+ * failed source. Refuse before any variable write (GY-1908).
+ */
+export async function assertRailwayServingIsLatest(ctx: AdapterContext): Promise<void> {
+  const list = await railwayDeploymentList(ctx);
+  if (!list) throw new Error(`provider.applyVariables refused: the Railway CLI could not list deployments for ${ctx.service} (need a CLI that supports railway deployment list --json); app bind cannot tell whether latest is the serving deployment`);
+  if (!list.length) throw new Error(`provider.applyVariables refused: ${ctx.service} has no Railway deployment to redeploy`);
+  const latest = list[0]!;
+  const serving = list.find(entry => entry.status === 'SUCCESS');
+  if (!serving) throw new Error(`provider.applyVariables refused: ${ctx.service} has no SUCCESS deployment serving; latest is ${latest.id} (${latest.status})`);
+  if (latest.id !== serving.id) {
+    throw new Error(`provider.applyVariables refused: latest deployment ${latest.id} is ${latest.status}, while ${serving.id} (SUCCESS) is still serving; railway redeploy would rebuild the latest attempt rather than the live source. Remove or roll back the failed attempt, or wait until a SUCCESS is latest, then rerun`);
+  }
+}
+
+/** The new deployment id `railway redeploy --json` prints, or null when the CLI printed none. */
+export function parseRailwayRedeployId(stdout: string): string | null {
+  try {
+    const parsed = JSON.parse(stdout.trim() || 'null');
+    const id = parsed && typeof parsed === 'object' ? parsed.id : null;
+    return typeof id === 'string' && id ? id : null;
+  } catch { return null; }
+}
+
+const railwayFailed = new Set(['FAILED', 'CRASHED', 'REMOVED', 'SKIPPED']);
+
+/**
+ * Wait until the redeployed deployment is SUCCESS. `railway redeploy` returns after the mutation;
+ * without this wait the previous healthy instance still answers /healthz (GY-1908).
+ */
+export async function waitForRailwayRedeploy(ctx: AdapterContext, redeployedId: string | null): Promise<void> {
+  let target = redeployedId;
+  let served = target ? `deployment ${target} not listed yet` : 'no redeploy id';
+  for (let attempt = 0; attempt < RAILWAY_SERVE_ATTEMPTS; attempt++) {
+    const list = await railwayDeploymentList(ctx);
+    if (!list) throw new Error(`provider.applyVariables failed: the Railway CLI could not list deployments for ${ctx.service} while waiting for the redeploy`);
+    if (!target) {
+      const pending = list.find(entry => entry.status !== 'SUCCESS' && entry.status !== 'REMOVED') ?? list[0];
+      target = pending?.id ?? null;
+    }
+    const row = target ? list.find(entry => entry.id === target) : undefined;
+    if (row?.status === 'SUCCESS') return;
+    if (row && railwayFailed.has(row.status)) {
+      throw new Error(`provider.applyVariables failed: redeployed deployment ${row.id} is ${row.status} while the previous instance may still be healthy; the App variables were written but are not served. Inspect: railway logs --service ${ctx.service}`);
+    }
+    served = row ? `deployment ${row.id} is ${row.status}` : target ? `deployment ${target} not listed yet` : 'no redeploy id';
+    await ctx.wait(3_000);
+  }
+  throw new Error(`provider.applyVariables failed: ${ctx.service} still reports ${served} after the redeploy; the new instance did not become SUCCESS. Inspect: railway logs --service ${ctx.service}`);
+}
+
 /**
  * Railway's health is the uploaded build's, not the service's: `railway up --detach` returns once
  * the build is queued, and on a rerun the previous deployment keeps answering /healthz, so a
@@ -820,9 +896,14 @@ export const railwayAdapter: ProviderAdapter = {
   async applyVariables(ctx, values) {
     // Railway sets variables one by one and keeps the rest; the running build restarts once with
     // them all. App bind (GY-1908) uses this path so a bind never uploads source or stamps
-    // GRAPHYARD_BUILD_SHA — only `install --apply`'s deploy does that.
+    // GRAPHYARD_BUILD_SHA — only `install --apply`'s deploy does that. When preserving the serving
+    // deployment, refuse a newer failed latest before any write, redeploy with --json, and wait for
+    // that specific redeploy to become SUCCESS (plain `railway redeploy` returns after the mutation).
+    if (ctx.preserveServingDeployment) await assertRailwayServingIsLatest(ctx);
     await railwayAdapter.setEnv(ctx, values);
-    await runRailway(ctx, ['redeploy', '--service', ctx.service, '--yes'], { timeout: 600_000 });
+    const redeploy = ['redeploy', '--service', ctx.service, '--yes', ...(ctx.preserveServingDeployment ? ['--json'] : [])];
+    const result = await runRailway(ctx, redeploy, { timeout: 600_000 });
+    if (ctx.preserveServingDeployment) await waitForRailwayRedeploy(ctx, parseRailwayRedeployId(result.stdout));
   },
   async deploy(ctx) {
     // The source is the Graphyard checkout the CLI runs from — never the process cwd, which

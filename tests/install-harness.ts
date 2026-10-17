@@ -110,6 +110,9 @@ export function providerResponses(provider: Provider, state: { installed: boolea
       ...compose,
     ];
   }
+  // App bind (GY-1908) lists deployments so it can refuse a newer failed latest and wait for the
+  // redeployed id; a single SUCCESS is both serving and latest until redeploy prepends another.
+  let deployments: { id: string; status: string }[] = [{ id: 'dep-serving', status: 'SUCCESS' }];
   return [
     { match: 'railway --version', result: 'railway 3.11.0' },
     // The account's workspaces, as `railway whoami --json` reports them; one by default so a
@@ -117,6 +120,12 @@ export function providerResponses(provider: Provider, state: { installed: boolea
     { match: 'railway whoami --json', result: JSON.stringify({ name: 'installer', email: 'installer@example.test', workspaces: state.workspaces ?? RAILWAY_WORKSPACES.slice(0, 1) }) },
     { match: 'railway whoami', result: 'installer@example.test' },
     { match: 'railway status --json', result: state.installed ? JSON.stringify({ name: 'graphyard-owner-project', services: { edges: [{ node: { name: 'Postgres' } }, { node: { name: state.service } }] } }) : { stdout: '', stderr: 'no linked project', code: 1 } },
+    { match: 'railway deployment list', result: () => JSON.stringify(deployments) },
+    { match: 'railway redeploy', result: () => {
+      const id = `dep-redeployed-${deployments.length}`;
+      deployments = [{ id, status: 'SUCCESS' }, ...deployments];
+      return JSON.stringify({ id });
+    } },
     { match: 'railway variables', result: state.installed ? (state.envFile ?? '{}') : '{}' },
     { match: 'railway domain', result: 'https://graphyard-owner-project.up.railway.app' },
   ];
