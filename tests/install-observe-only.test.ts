@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { applyInstall, buildPlan, fullPlanCommand, installRequestFromArgs, prepareInstall, resumeCommand, type InstallDependencies } from '../src/install/index.js';
 import type { LocalSupervisor } from '../src/install/local.js';
 import { fingerprint } from '../src/install/secrets.js';
 import { deliveryPolicySchema } from '../src/model/delivery-policy.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { allText, harness, REPOSITORY } from './install-harness.js';
 
 // The repository's own Railway variables, as a value-printing listing would show them: none may
@@ -140,7 +140,7 @@ test('unit:install-observe-only-redacted-resumable — the Railway observation r
 
 test('unit:install-observe-only-changes-nothing — the local provider, which would install a systemd supervisor unit, is refused before anything is written, and the full-plan command keeps every input but --observe-only', async () => {
   assert.throws(() => installRequestFromArgs(['--provider', 'local', '--repo', REPOSITORY, '--observe-only', '--apply']), /--observe-only changes nothing the repository owns.*--provider local/);
-  const unitDirectory = await mkdtemp(join(tmpdir(), 'gy-observe-units-'));
+  const unitDirectory = await temporaryDirectory('observe-units');
   const calls: string[][] = [];
   const supervisor: LocalSupervisor = { systemd: { unitDirectory }, reason: null, systemctl: async args => { calls.push(args); return ''; },
     detach: async () => { throw new Error('observation-only starts nothing'); }, kill: async () => {} };
@@ -150,7 +150,7 @@ test('unit:install-observe-only-changes-nothing — the local provider, which wo
     assert.deepEqual(calls, []);
     assert.deepEqual(await readdir(unitDirectory), []);
     assert.ok(!fixture.allCommandLines().some(line => /systemctl (--user )?(enable|daemon-reload)/.test(line)));
-  } finally { await fixture.cleanup(); await rm(unitDirectory, { recursive: true, force: true }); }
+  } finally { await fixture.cleanup(); }
 
   const { request } = installRequestFromArgs(['--provider', 'railway', '--repo', REPOSITORY, '--observe-only', '--workspace', 'team-a', '--base-branch', 'trunk', '--domain', 'gy.example.com', '--apply']);
   const command = fullPlanCommand({ inputs: { ...request, baseBranch: 'trunk' } as any });
