@@ -673,6 +673,7 @@
     "tests/release-project.test.ts": 1500,
     "tests/release-revert.test.ts": 4000,
     "tests/release-uat-compose-preview-target.test.ts": 25000,
+    "tests/release-uat-declared-app-previews.test.ts": 25000,
     "tests/release-uat-preview-target.test.ts": 9000,
     "tests/repair-lane.test.ts": 446,
     "tests/report-adapters.test.ts": 740,
