@@ -22,7 +22,7 @@ Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/gr
 - `railway`: `npm i -g @railway/cli`, `railway login`. Stamps `GRAPHYARD_BUILD_SHA` (unknown/dirty refuses), uploads `--path-as-root`; failed upload/unserved commit (10 min) fails `provider.deploy`.
 - `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; `--ssh-key NAME`, `--domain`. `manual:…install…-live` coordinators need `HCLOUD_TOKEN`, `HETZNER_SPEND_CAP_USD_MONTHLY` in repo-root `.env` (`0600`, uncommitted); optional `HETZNER_SSH_KEY` (else throwaway).
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; `--ssh-host`, `--domain`.
-- `compose` (local): `curl -fsSL https://get.docker.com | sh`. Polls GitHub, skipping webhook steps; publishes `127.0.0.1:4310`, else first free port ≤4329, kept on reruns; a taken `--port N` fails preflight. A stale `already exists in network` endpoint is disconnected, `up` retried once.
+- `compose` (local): `curl -fsSL https://get.docker.com | sh`. Polls GitHub (no webhook); publishes `127.0.0.1:4310`, else first free port ≤4329, kept on reruns; a taken `--port N` fails preflight. A stale `already exists in network` endpoint is disconnected, `up` retried once.
 - `local` (`graphyard up --local`, not with another `--provider`): no Docker; embedded Postgres (`npm install` without `--omit=optional`), cluster `INSTALL/postgres`; user unit `graphyard-local-INSTALL.service` starts, migrates (`db migrate`), serves (no systemd: foreground command). Polls GitHub like compose.
 
 ## Step 1: plan and approve
@@ -55,13 +55,13 @@ Skip with `--no-github-app` until App binds; else dispatch [small item](onboardi
 
 ## Principal roster
 
-`install.json` is the roster; `--apply` reconciles it, keeping `principal add` entries (and tokens) and, under `--observe-only`, recorded workers/producers. `node "$GRAPHYARD_CLI" principal add ID --role ROLE [--session-kind ai|human] [--grant external-runs:import]...`/`principal remove ID`: one credential and entry, `GRAPHYARD_PRINCIPALS` alone (bundles rewritten unchanged), `/api/principals` readback; repeats no-op; installer ids refused. Producers need `--grant`; `external-runs:import` admits only `POST /api/validation/import`, never evidence.
+`install.json` is the roster; `--apply` reconciles it, keeping `principal add` entries (and tokens) and, under `--observe-only`, recorded workers/producers. `node "$GRAPHYARD_CLI" principal add ID --role ROLE [--session-kind ai|human] [--grant external-runs:import]...`/`principal remove ID`: one credential and entry, `GRAPHYARD_PRINCIPALS` alone (bundles rewritten), `/api/principals` readback; repeats no-op; installer ids refused. Producers need `--grant`; `external-runs:import` admits only `POST /api/validation/import`, never evidence.
 
 ## Self-contained host
 
-`--target host --ssh-host HOST` (or `--target hetzner`): server/Postgres/loop/executors/Herdr/runtimes on one systemd machine; credentials in `~graphyard/.config/graphyard/<install>/`. Public IPv4 serves `<ip>.sslip.io`; else `--domain`. Unpullable images build at installer's commit. Workers push/open PRs as App (one-hour tokens). `--apply --profiles-only`: `master environments --apply` there.
+`--target host --ssh-host HOST` (or `--target hetzner`): server/Postgres/loop/executors/Herdr/runtimes on one systemd machine; credentials in `~graphyard/.config/graphyard/<install>/`. Public IPv4 serves `<ip>.sslip.io`; else `--domain`. Unpullable images build there. Workers push/open PRs as App (one-hour tokens). `--apply --profiles-only`: `master environments --apply` there.
 
-Price: `--confirm-price`/`--max-monthly`. Saved Apps (`--github-app FILE`/this install's/`.graphyard/github-app.json`) are reused; `--reuse-app SLUG` (or App page) reuses host-saved Apps. `--migrate` stops loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`), restores; logins move.
+Price: `--confirm-price`/`--max-monthly`. Saved Apps (`--github-app FILE`/this install's/`.graphyard/github-app.json`) are reused; `--reuse-app SLUG` reuses host-saved Apps. `--migrate` stops loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`), restores; logins move.
 
 ## Upgrading an existing installation
 
@@ -86,6 +86,6 @@ Price: `--confirm-price`/`--max-monthly`. Saved Apps (`--github-app FILE`/this i
 
 Run steps 1–5 (1,2,4 with `--no-github-app`/`--observe-only`); never weaken gates.
 
-## Manual fallback (unsupported platforms)
+## Manual fallback (other platforms)
 
 [Deployment](deployment.md#manual-fallback).
