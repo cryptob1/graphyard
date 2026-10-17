@@ -335,7 +335,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # The production job holds no plane credential, so the hold the candidate's imported external runs
-    # leave (GY-1860) is read here, in the uat environment that holds it, and handed to promotion.
+    # leave (GY-1860) is read here, in the uat environment that holds it, and handed to promotion; a released
+    # hold is sealed as it is read, so no import binds to the candidate before the production job promotes.
     environment: uat
     outputs:
       hold: ${{ steps.read.outputs.hold }}
@@ -345,7 +346,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '24', cache: npm }
       - run: npm ci
-      - name: Read the hold the candidate's imported external runs leave
+      - name: Read, and seal once released, the hold the candidate's imported external runs leave
         id: read
         shell: bash
         run: |
@@ -372,7 +373,7 @@ jobs:
       - name: Promote the UAT-passed candidate to production by its exact SHA
         run: node bin/graphyard.mjs release promote "${{ needs.candidate.outputs.id }}"
         env:
-          # A hold that is missing, or read for another candidate, refuses promotion.
+          # A hold that is missing, read for another candidate, or released but unsealed refuses promotion.
           GRAPHYARD_PROMOTION_IMPORTS: ${{ needs.imports.outputs.hold }}
       - name: Confirm production serves the promoted SHA
         run: node bin/graphyard.mjs release verify --url "$PRODUCTION_URL" --wait 1200

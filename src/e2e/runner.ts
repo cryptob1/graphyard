@@ -7,7 +7,7 @@ import { candidateTagPrefix, contractPendingCases, gitIn, readRecords, servedRev
 import { contractFile, describeStep, loadCases, loadContract, registeredRevision, scenarioDefinition, type Api, type CaseFile, type E2eStep, type ReleaseContract } from './case.js';
 import { checkoutRepositoryPolicy, repositoryPolicy, type RepositoryPolicy } from '../model/repository-policy.js';
 import { installSecretsDirectory, loadSecrets, redact, redactValues, runAgentStep, runCommandStep, runProcess, stepEnvironment, type ProcessRunner, type StepRecord } from './steps.js';
-import type { ExternalRunResult, ExternalVerdict } from '../runner-report.js';
+import type { ExternalEvidence, ExternalRunResult, ExternalVerdict } from '../runner-report.js';
 import { importedEvidenceArtifacts, type EvidenceArtifact } from '../model/evidence.js';
 
 /**
@@ -341,8 +341,11 @@ export function releaseVerdict(report: Pick<E2eReport, 'runId' | 'sha' | 'cases'
   };
 }
 
-/** One blocking case of an imported run: its verdict as given, why a blocked one could not run, and where its own record lives. */
-export interface ImportedBlockingCase { id: string; verdict: ExternalVerdict; reason?: string; evidence: EvidenceArtifact[] }
+/**
+ * One blocking case of an imported run: its verdict as given, why a blocked one could not run, and
+ * where its own record lives — its links as external artifacts, its opaque pointers (GY-1860) as given.
+ */
+export interface ImportedBlockingCase { id: string; verdict: ExternalVerdict; reason?: string; evidence: EvidenceArtifact[]; evidencePointers?: Exclude<ExternalEvidence, string>[] }
 
 /**
  * The release verdict of an imported run (GY-1842, `graphyard-external-run-v1`). The import keeps
@@ -365,7 +368,8 @@ export function importedRunVerdict(run: ExternalRunResult, acceptances: readonly
   const wouldBlock = (outcome: ExternalRunResult['cases'][number]) => outcome.required && (outcome.verdict === 'failed' || outcome.verdict === 'blocked' || outcome.verdict === 'unrun' || outcome.verdict === 'skipped'
     || (outcome.verdict === 'flaky' && !accepted(outcome.id)));
   const listed = (outcome: ExternalRunResult['cases'][number]): ImportedBlockingCase => ({ id: outcome.id, verdict: outcome.verdict,
-    ...(outcome.reason ? { reason: outcome.reason } : {}), evidence: importedEvidenceArtifacts(outcome.evidence) });
+    ...(outcome.reason ? { reason: outcome.reason } : {}), evidence: importedEvidenceArtifacts(outcome.evidence.filter(entry => typeof entry === 'string')),
+    ...(outcome.evidence.some(entry => typeof entry !== 'string') ? { evidencePointers: outcome.evidence.filter(entry => typeof entry !== 'string') } : {}) });
   const blocking = run.cases.filter(outcome => wouldBlock(outcome) && !pendingCases.includes(outcome.id));
   return { passed: blocking.length === 0, blocking: blocking.map(listed), pending: run.cases.filter(outcome => wouldBlock(outcome) && pendingCases.includes(outcome.id)).map(listed) };
 }

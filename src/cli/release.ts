@@ -12,11 +12,11 @@ import {
 import { commandDigestAdapter, shellRun, uatDigestSuite, verifyProductionDigests } from '../release-digests.js';
 import { acceptancesFrom, foldHolds, foldRecord, holdItemsFor, holdTag, holdTagPrefix, releaseHolds, type HoldRecord } from '../release-holds.js';
 import { pendingFromPlane, readPlane, servingStage } from '../release-pending.js';
-import { handedImports, handedImportsVariable, promotionImports } from '../validation-import.js';
+import { handedImports, handedImportsVariable, promotionImports, sealedImports } from '../validation-import.js';
 import { checkRepositoryContract, contractFile, loadContract } from '../e2e/case.js';
 
 const switches = new Set(['no-push', 'api']);
-const subcommands = new Set(['contract', 'cut', 'status', 'uat', 'validate', 'follow-up', 'holds', 'fold', 'promote', 'verify', 'soak']);
+const subcommands = new Set(['contract', 'cut', 'status', 'uat', 'validate', 'follow-up', 'holds', 'fold', 'promote', 'verify', 'soak', 'imports']);
 /** Flags after the subcommand: `--name value` pairs, repeatable, and bare `--flag` switches. */
 function flags(args: string[]) {
   const values = new Map<string, string[]>(); const positional: string[] = [];
@@ -68,6 +68,8 @@ export const releaseCommands = defineCommands([
       '  release fold OUTCOME --decision ID',
       '                                Fold an outcome\'s open hold into another\'s, as the applied fold',
       '                                decision ID on its hold item (another agent approved) names',
+      '  release imports ID|latest     The hold the candidate\'s imported external runs leave; a released',
+      '                                hold is sealed, so no import binds to the candidate afterwards',
       '  release promote ID|latest     Deploy a UAT-passed candidate to production by its exact SHA, or',
       '                                by its recorded digests (never a rebuild) under GRAPHYARD_DEPLOY_DIGESTS;',
       '                                flaky required cases need applied evidence decisions at that SHA',
@@ -134,7 +136,8 @@ export const releaseCommands = defineCommands([
       if (id === 'imports') {
         syncLedger(git, base);
         const candidate = findCandidate(readLedger(git), target);
-        return print({ candidate: candidate.id, sha: candidate.sha, imports: await promotionImports(path => api(path), candidate) });
+        // GY-1860: a released hold is sealed on the plane as it is read, so the production job it is handed to promotes on the plane's hold.
+        return print({ candidate: candidate.id, sha: candidate.sha, imports: await sealedImports((path, data) => api(path, data), candidate) });
       }
       if (id === 'promote') {
         syncLedger(git, base);
@@ -142,7 +145,7 @@ export const releaseCommands = defineCommands([
         // Only a candidate held by flaky cases alone reads the control plane's evidence decisions; an unreachable one leaves it held.
         const acceptances = uat && unacceptedFlaky(candidate, uat)?.length ? await acceptancesOf(api, git, candidate.id).catch(error => { console.error(`Could not read evidence decisions: ${error.message}`); return []; }) : [];
         // GY-1860: the candidate's imported external runs hold it; a hold the plane cannot answer refuses promotion.
-        // A production job, which holds no plane credential, is handed the hold `release imports` read in the job before it.
+        // A production job, which holds no plane credential, is handed the hold `release imports` read and sealed in the job before it.
         const handed = process.env[handedImportsVariable];
         const imports = async (candidate: ReleaseCandidate) => handed !== undefined ? handedImports(handed, candidate) : promotionImports(path => api(path), candidate);
         const result = await promoteAsync(asyncGit, target, { base, push, now: new Date(), acceptances, deployDigests: digests.deploy, imports });

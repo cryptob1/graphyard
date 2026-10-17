@@ -42,8 +42,9 @@ export const operatorAgentRouteGuard: Route = {
       || /^\/api\/retro(?:\/standing|\/[0-9a-f-]{36}\/(?:approve|refuse))?$/.test(url.pathname)
       // E2E case recording (GY-1614): the registry and its run route, only for a holder of e2e:record.
       || (/^\/api\/scenarios(?:\/[^/]+\/runs)?$/.test(url.pathname) && !!actor.capabilities?.includes('e2e:record'))
-      // A candidate's imported runs and hold (GY-1860), read only: the promotion workflows read it as the release-filing identity.
-      || (req.method === 'GET' && /^\/api\/validation\/import\/[a-f0-9]{40}$/.test(url.pathname)),
+      // A candidate's imported runs and hold (GY-1860): the promotion workflows read it, and seal a released one, as the release-filing identity; never import.
+      || (req.method === 'GET' && /^\/api\/validation\/import\/[a-f0-9]{40}$/.test(url.pathname))
+      || (req.method === 'POST' && /^\/api\/validation\/import\/[a-f0-9]{40}\/seal$/.test(url.pathname)),
       'Route is not available to operator agents', 403);
     return Next;
   },

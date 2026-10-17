@@ -48,7 +48,7 @@ test('unit:external-results-imported — an imported run keeps every verdict as 
   assert.equal(imported.environment, 'uat');
   assert.equal(imported.sha, sha);
   assert.equal(imported.digest, digest);
-  assert.deepEqual(imported.cases.find(entry => entry.verdict === 'failed'), { id: 'search-facet', verdict: 'failed', attempts: 2, durationMs: 9180, required: true, evidence: ['https://artifacts.example.test/trace.zip'], result: null, caseVersion: null });
+  assert.deepEqual(imported.cases.find(entry => entry.verdict === 'failed'), { id: 'search-facet', verdict: 'failed', attempts: 2, durationMs: 9180, reportRows: null, required: true, evidence: ['https://artifacts.example.test/trace.zip'], result: null, caseVersion: null });
   // A run that tested a deployment names the digest instead of a head, and both are kept when given.
   const digestOnly = importExternalRun({ ...handIn, sha: undefined, digest });
   assert.equal(digestOnly.digest, digest);

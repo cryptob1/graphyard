@@ -22,15 +22,19 @@ const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
 const reader: Principal = { id: 'auditor', role: 'reader' };
 const producer: Principal = { id: 'huck-producer', role: 'producer' };
+// A second producer principal: a candidate the first producer bound refuses its imports (N4).
+const otherProducer: Principal = { id: 'ci-collector', role: 'producer' };
 // The identity GRAPHYARD_RELEASE_TOKEN is provisioned as (src/master/release-filing.ts): the promotion workflows read the hold with it.
 const releaseFiler: Principal = { id: releaseFilingIdentity.id, role: 'operator-agent', capabilities: [...releaseFilingIdentity.capabilities], scope: { repositories: ['owner/project'], workItems: [] } };
-const principals = [operator, worker, reader, producer, releaseFiler];
+const principals = [operator, worker, reader, producer, otherProducer, releaseFiler];
 const tokens = new Map(principals.map(p => [p.id, `${p.id}-${'t'.repeat(40)}`]));
 
-// Three candidates cut at three heads; `elsewhere` is a commit no candidate holds.
+// Six candidates cut at six heads; `elsewhere` is a commit no candidate holds.
 const boundSha = 'a'.repeat(40), holdSha = 'b'.repeat(40), versionSha = 'c'.repeat(40), elsewhere = 'd'.repeat(40);
+const unknownSha = 'f'.repeat(40), pointerSha = 'ab'.repeat(20), producerSha = 'cd'.repeat(20);
 const candidates = [
   { id: '20261017T010000Z', sha: boundSha }, { id: '20261017T020000Z', sha: holdSha }, { id: '20261017T030000Z', sha: versionSha },
+  { id: '20261017T040000Z', sha: unknownSha }, { id: '20261017T050000Z', sha: pointerSha }, { id: '20261017T060000Z', sha: producerSha },
 ].map(entry => ({ ...entry, cutAt: `${entry.id.slice(0, 4)}-${entry.id.slice(4, 6)}-${entry.id.slice(6, 8)}T${entry.id.slice(9, 11)}:00:00.000Z`, trigger: 'manual', since: null, items: [] })) as Pick<ReleaseCandidate, 'id' | 'sha' | 'cutAt'>[];
 const tagObject = (index: number) => String(index + 1).repeat(40);
 /** The GitHub reads the import makes: the `rc/` tag refs, and each annotated tag carrying its candidate record. `down` fails every read. */
@@ -65,11 +69,11 @@ async function call(path: string, actor: Principal, data?: unknown) {
   const response = await fetch(`${url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${tokens.get(actor.id)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: data === undefined ? undefined : JSON.stringify(data) });
   return { status: response.status, body: await response.json() as any };
 }
-const imported = async (data: unknown) => { const result = await call('validation/import', producer, data); assert.equal(result.status, 200, JSON.stringify(result.body)); return result.body; };
+const imported = async (data: unknown, actor = producer) => { const result = await call('validation/import', actor, data); assert.equal(result.status, 200, JSON.stringify(result.body)); return result.body; };
 const hold = async (sha: string) => (await call(`validation/import/${sha}`, reader)).body.hold;
-/** `GET /api/PATH` as the CLI's api reads it: a refusal throws with its status. */
-const readAs = (actor: Principal) => async (path: string) => {
-  const { status, body } = await call(path, actor);
+/** `GET /api/PATH` (or POST with `data`) as the CLI's api calls it: a refusal throws with its status. */
+const readAs = (actor: Principal) => async (path: string, data?: unknown) => {
+  const { status, body } = await call(path, actor, data);
   if (status >= 400) throw Object.assign(new Error(JSON.stringify(body)), { status });
   return body;
 };
@@ -84,7 +88,7 @@ async function repository() {
   for (const [key, value] of [['user.name', 'test'], ['user.email', 'test@example.test'], ['commit.gpgsign', 'false'], ['tag.gpgsign', 'false']]) git(work, 'config', key, value);
   git(work, 'commit', '-q', '--allow-empty', '-m', 'initial');
   git(work, 'push', '-q', 'origin', 'HEAD:main');
-  return { origin, git: gitIn(work) };
+  return { origin, work, git: gitIn(work) };
 }
 
 const run = (sha: string, runId: string, cases: readonly Record<string, unknown>[], over: Record<string, unknown> = {}) =>
@@ -232,17 +236,39 @@ test('unit:validation-import-feeds-hold — a required failed, blocked or unrun 
   assert.equal(unread.promotable, false, 'a hold that cannot be read is never read as released');
   assert.match(unread.refusals.join('\n'), /could not be read \(plane unreachable\)/);
 
-  // A production job holds no plane credential: the job before it runs `release imports`, and promote is handed what it printed.
-  const { handedImports } = await import('../src/validation-import.js');
-  const handedNow = async (at = candidate) => handedImports(JSON.stringify({ candidate: at.id, sha: at.sha, imports: await promotionImports(readAs(reader), candidate) }), candidate);
-  assert.deepEqual(await handedNow(), await promotionImports(readAs(reader), candidate), 'a hold handed for this candidate is the hold the plane serves');
-  assert.equal((await handedNow() as any).held, true);
-  assert.match((await handedNow({ ...candidate, id: '20261001T000000Z' }) as any).unread, /was read for candidate 20261001T000000Z/, 'a hold read for another candidate counts for nothing');
+  // A production job holds no plane credential: the job before it runs `release imports` as the
+  // release-filing identity — the real command dispatch — and promote is handed what it printed.
+  const { handedImports, sealedImports } = await import('../src/validation-import.js');
+  const { releaseCommands } = await import('../src/cli/release.js');
+  const releaseImports = async () => {
+    let printed: any;
+    const context = { command: 'release', id: 'imports', args: [candidate.id, '--base', 'main'], rest: [], base: url, connection: null, api: readAs(releaseFiler),
+      print: (value: unknown) => { printed = value; }, repositoryRoot: () => repo.work } as any;
+    await releaseCommands[0].run(context, undefined);
+    return printed;
+  };
+  const heldOut = await releaseImports();
+  assert.deepEqual([heldOut.candidate, heldOut.sha], [candidate.id, candidate.sha], '`release imports` is a release step, never the lease release of a work item named imports');
+  assert.equal(heldOut.imports.held, true);
+  assert.equal(heldOut.imports.sealed, false, 'a held candidate is never sealed, so a passing import can still release it');
+  assert.deepEqual(handedImports(JSON.stringify(heldOut), candidate), await promotionImports(readAs(reader), candidate), 'a held hand-off is the hold the plane serves');
+  const handedFor = (imports: unknown, at = candidate) => handedImports(JSON.stringify({ candidate: at.id, sha: at.sha, imports }), candidate);
+  assert.match((handedFor(heldOut.imports, { ...candidate, id: '20261001T000000Z' }) as any).unread, /was read for candidate 20261001T000000Z/, 'a hold read for another candidate counts for nothing');
   assert.match((handedImports('', candidate) as any).unread, /not the JSON/, 'an empty hand-off is unread, never released');
-  assert.equal((handedImports(JSON.stringify({ candidate: candidate.id, sha: candidate.sha, imports: { unread: 'plane down' } }), candidate) as any).unread, 'plane down');
+  assert.equal((handedFor({ unread: 'plane down' }) as any).unread, 'plane down');
+  for (const actor of [reader, producer]) assert.equal((await call(`validation/import/${candidate.sha}/seal`, actor, { candidate: candidate.id })).status, 403, `${actor.role} cannot seal`);
 
   await imported(run(candidate.sha, 'promote-3', [passing('login'), passing('pay')]));
-  assert.deepEqual(await handedNow(), { held: false, cases: [] }, 'the handed hold releases once a passing import covers the case');
+  assert.match((handedFor(await promotionImports(readAs(reader), candidate)) as any).unread, /did not seal/, 'a released hold read without the seal is never trusted across jobs');
+  const sealed = await releaseImports();
+  assert.deepEqual(sealed.imports, { held: false, cases: [], sealed: true }, 'a released hold is sealed as it is read');
+  assert.equal((await call(`validation/import/${candidate.sha}?candidate=${candidate.id}`, reader)).body.sealed, true);
+  // A required failure arriving between the workflow's read and the production job is refused, so the handed hold is still the plane's.
+  const late = await call('validation/import', producer, run(candidate.sha, 'promote-late', [{ id: 'pay', verdict: 'failed', attempts: 1, durationMs: 100, required: true }]));
+  assert.equal(late.status, 409, JSON.stringify(late.body));
+  assert.match(late.body.error, /sealed for promotion/);
+  assert.deepEqual(handedImports(JSON.stringify(sealed), candidate), await promotionImports(readAs(reader), candidate), 'the sealed hand-off is the plane hold at promotion');
+  assert.deepEqual(await sealedImports(readAs(releaseFiler), candidate), sealed.imports, 'sealing again answers the standing seal');
   const promoted = await promoteNow();
   assert.equal(promoted.promoted, true, 'a covering passing import releases the restriction');
   assert.equal(productionTip(), candidate.sha);
@@ -260,4 +286,73 @@ test('unit:validation-import-case-version-not-inferred — catalogCommitSha is s
     assert.equal(record.cases[0].caseVersion, null, 'no case version given: it stays null, never inferred from the catalog commit');
     assert.equal(record.cases[1].caseVersion, 'pay@7', 'a given case version is kept as given');
   }
+});
+
+test('unit:validation-import-unknown-duration-attempts — omitted or null durationMs and attempts are stored as null, never 0, and a report-row count stays apart from attempts', async () => {
+  const result = await imported(run(unknownSha, 'unknown-1', [
+    { id: 'login', verdict: 'passed', required: true },
+    { id: 'pay', verdict: 'failed', attempts: null, durationMs: null, required: true, reportRows: 3 },
+  ]));
+  assert.deepEqual(result.imported.candidate, { id: candidates[3].id, sha: unknownSha }, 'the run still binds to its candidate');
+  const stored = (await call(`validation/import/${unknownSha}`, reader)).body.runs[0].run;
+  for (const record of [result.imported.run, stored]) {
+    for (const entry of record.cases) {
+      assert.equal(entry.attempts, null, `${entry.id}: unknown attempts stay null`);
+      assert.equal(entry.durationMs, null, `${entry.id}: unknown duration stays null`);
+    }
+    assert.equal(record.cases[0].reportRows, null);
+    assert.equal(record.cases[1].reportRows, 3, 'the report-row count is kept as its own field, never read as attempts');
+  }
+  assert.deepEqual(result.hold.cases.map((entry: any) => [entry.id, entry.verdict]), [['pay', 'failed']], 'the run still feeds the hold');
+  assert.equal((await hold(unknownSha)).held, true);
+});
+
+test('unit:validation-import-opaque-evidence — opaque evidence pointers and absent evidence are stored as given and never reported as public links', async () => {
+  const pointer = { evidenceId: 'ev-41', storageKey: 'huck/runs/r-41/checkout/trace.zip' };
+  const actionsRun = 'https://github.com/owner/project/actions/runs/123456';
+  const result = await imported(run(pointerSha, 'pointer-1', [
+    { id: 'checkout', verdict: 'failed', attempts: 1, durationMs: 10, required: true, evidence: [pointer] },
+    { id: 'search', verdict: 'failed', attempts: 1, durationMs: 10, required: true },
+    { id: 'profile', verdict: 'failed', attempts: 1, durationMs: 10, required: true, evidence: [actionsRun] },
+  ]));
+  const stored = (await call(`validation/import/${pointerSha}`, reader)).body.runs[0].run;
+  for (const record of [result.imported.run, stored]) {
+    assert.deepEqual(record.cases[0].evidence, [pointer], 'the pointer is stored exactly as given, never turned into a URL');
+    assert.deepEqual(record.cases[1].evidence, [], 'no evidence given, none stored');
+    assert.deepEqual(record.cases[2].evidence, [actionsRun]);
+  }
+  const held = new Map<string, any>((await hold(pointerSha)).cases.map((entry: any) => [entry.id, entry]));
+  assert.deepEqual(held.get('checkout').evidencePointers, [pointer], 'the hold names the pointer as given');
+  for (const id of ['checkout', 'search']) {
+    assert.deepEqual(held.get(id).evidence, [], `${id} carries no link artifact`);
+    assert.doesNotMatch(JSON.stringify(held.get(id)), /"url"|public/, `${id} is never reported as a public link`);
+  }
+  // A GitHub Actions run link is an external location only: never available, never trusted proof, never labelled public.
+  assert.deepEqual(held.get('profile').evidence, [{ kind: 'report', label: 'imported case evidence', availability: 'external', url: actionsRun }]);
+  assert.equal((await call('validation/import', producer, run(pointerSha, 'pointer-bad', [{ id: 'c', verdict: 'passed', attempts: 1, durationMs: 1, evidence: [{}] }]))).status, 400, 'a pointer naming nothing is refused');
+});
+
+test('unit:validation-import-bound-producer — the first import binds the candidate to its producer principal; another producer is refused 409, and only the bound producer passing a case clears it', async () => {
+  const first = await imported(run(producerSha, 'bound-1', [
+    { id: 'login', verdict: 'passed', attempts: 1, durationMs: 1, required: true },
+    { id: 'pay', verdict: 'failed', attempts: 1, durationMs: 1, required: true },
+  ], { producer: 'shared-name' }));
+  assert.equal(first.imported.importedBy, producer.id);
+
+  // Another producer principal — even under the same free-text producer name — is refused, and changes nothing.
+  for (const document of [run(producerSha, 'other-1', [{ id: 'pay', verdict: 'passed', attempts: 1, durationMs: 1, required: true }], { producer: 'shared-name' }),
+    run(producerSha, 'bound-1', [{ id: 'login', verdict: 'passed', attempts: 1, durationMs: 1, required: true }, { id: 'pay', verdict: 'failed', attempts: 1, durationMs: 1, required: true }], { producer: 'shared-name' })]) {
+    const refused = await call('validation/import', otherProducer, document);
+    assert.equal(refused.status, 409, JSON.stringify(refused.body));
+    assert.match(refused.body.error, new RegExp(`bound to producer ${producer.id}`));
+  }
+  const afterRefusal = (await call(`validation/import/${producerSha}`, reader)).body;
+  assert.equal(afterRefusal.runs.length, 1, 'a refused producer records nothing');
+  assert.deepEqual(afterRefusal.hold.cases.map((entry: any) => [entry.id, entry.verdict]), [['pay', 'failed']], 'the earlier required failure still holds');
+
+  // A later run from the bound producer that omits the case does not clear it; only its pass does.
+  const omitted = await imported(run(producerSha, 'bound-2', [{ id: 'login', verdict: 'passed', attempts: 1, durationMs: 1, required: true }]));
+  assert.deepEqual(omitted.hold.cases.map((entry: any) => [entry.id, entry.runId]), [['pay', 'bound-1']], 'an omitted case stays held by the run that last reported it');
+  const passed = await imported(run(producerSha, 'bound-3', [{ id: 'pay', verdict: 'passed', attempts: 1, durationMs: 1, required: true }]));
+  assert.deepEqual(passed.hold, { held: false, cases: [], runs: 3 });
 });

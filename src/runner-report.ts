@@ -1,8 +1,12 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 const id = z.string().regex(/^[a-f0-9]{64}$/);
-/** Imported evidence links meet the artifact boundary (src/engine.ts): HTTP(S) and free of credentials. */
-const publicEvidenceUrl = z.string().url().max(2000).refine(value => { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password; }, 'evidence links are HTTP(S) and carry no credentials');
+/**
+ * Imported evidence links meet the artifact boundary (src/engine.ts): HTTP(S) and free of credentials.
+ * A link names where the producer's record lives, which may need its own sign-in (a GitHub Actions
+ * run of a private repository): it is never public proof.
+ */
+const evidenceLink = z.string().url().max(2000).refine(value => { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password; }, 'evidence links are HTTP(S) and carry no credentials');
 const status = z.enum(['passed', 'failed', 'timedOut', 'skipped', 'interrupted']);
 export const runnerReport = z.object({
   format: z.literal('graphyard-playwright-v1'),
@@ -54,6 +58,12 @@ const externalName = z.string().trim().min(1).max(200).refine(value => !/[\x00-\
 const externalResult = z.string().max(200).refine(value => value.trim().length > 0 && !/[\x00-\x1f\x7f]/.test(value));
 /** A commit the producer names as provenance: hex, abbreviated or full, kept exactly as given. */
 const provenanceCommit = z.string().regex(/^[a-f0-9]{7,64}$/);
+/**
+ * An opaque, authenticated pointer to evidence the producer keeps (GY-1860 N3): its evidence id and
+ * the storage key it lives under, kept exactly as given and never turned into a URL.
+ */
+const evidencePointer = z.object({ evidenceId: externalName.optional(), storageKey: z.string().min(1).max(1000).refine(value => !/[\x00-\x1f\x7f]/.test(value)).optional() }).strict()
+  .refine(pointer => pointer.evidenceId !== undefined || pointer.storageKey !== undefined, 'an evidence pointer names its evidence id or storage key');
 
 export const externalRun = z.object({
   format: z.literal(externalRunFormat),
@@ -79,14 +89,17 @@ export const externalRun = z.object({
   cases: z.array(z.object({
     id: externalName,
     verdict: z.enum(externalVerdicts),
-    attempts: z.number().int().min(0).max(1000),
-    durationMs: z.number().finite().min(0),
+    /** How many times the case was tried; omitted or null when the producer does not know (N1/N2), never filled in. */
+    attempts: z.number().int().min(0).max(1000).nullable().optional(),
+    durationMs: z.number().finite().min(0).nullable().optional(),
+    /** How many rows the producer's report held for the case; a count of its own, never read as attempts. */
+    reportRows: z.number().int().min(0).max(1_000_000).nullable().optional(),
     /** Required cases decide the release verdict; a case without the flag is optional. */
     required: z.boolean().optional(),
     /** Why a case could not run: demanded for `blocked`, the precondition or environment it missed. */
     reason: z.string().trim().min(1).max(1000).optional(),
-    /** Where the run's own record of the case lives (trace, log, report); public locations only. */
-    evidence: z.array(publicEvidenceUrl).max(100).optional(),
+    /** Where the run's own record of the case lives (trace, log, report): HTTP(S) links or opaque pointers. */
+    evidence: z.array(z.union([evidenceLink, evidencePointer])).max(100).optional(),
     /** The case's result exactly as the producer's tool reported it, kept beside the verdict it maps to. */
     result: externalResult.optional(),
     /** The executed case-definition version, when the producer knows it. */
@@ -99,11 +112,13 @@ export const externalRun = z.object({
 });
 
 /**
- * One imported case, with the import's defaults filled in: optional unless declared, no links, and
- * its provenance explicit — `result` and `caseVersion` are null when the producer gave none, so a
- * reader never mistakes an absent version for one.
+ * One imported case, with the import's defaults filled in: optional unless declared, no evidence,
+ * and its provenance explicit — `result`, `caseVersion`, `attempts`, `durationMs` and `reportRows`
+ * are null when the producer gave none, so a reader never mistakes an absent value for one.
  */
-export interface ExternalCaseResult { id: string; verdict: ExternalVerdict; attempts: number; durationMs: number; required: boolean; reason?: string; evidence: string[]; result: string | null; caseVersion: string | null }
+export interface ExternalCaseResult { id: string; verdict: ExternalVerdict; attempts: number | null; durationMs: number | null; reportRows: number | null; required: boolean; reason?: string; evidence: ExternalEvidence[]; result: string | null; caseVersion: string | null }
+/** One piece of a case's evidence as the producer gave it: a link, or an opaque pointer (never a URL). */
+export type ExternalEvidence = string | { evidenceId?: string; storageKey?: string };
 export interface ExternalRunResult { producer: string; runId: string; sha?: string; digest?: string; environment?: string; toolVersion: string | null; catalogCommitSha: string | null; result: string | null; cases: ExternalCaseResult[] }
 
 /**
@@ -121,7 +136,7 @@ export function importExternalRun(input: unknown): ExternalRunResult {
     runId: run.runId ?? `external-${createHash('sha256').update(JSON.stringify(run)).digest('hex').slice(0, 16)}`,
     ...(run.sha ? { sha: run.sha } : {}), ...(run.digest ? { digest: run.digest } : {}), ...(run.environment ? { environment: run.environment } : {}),
     toolVersion: run.toolVersion ?? null, catalogCommitSha: run.catalogCommitSha ?? null, result: run.result ?? null,
-    cases: run.cases.map(entry => ({ id: entry.id, verdict: entry.verdict, attempts: entry.attempts, durationMs: entry.durationMs, required: entry.required ?? false,
+    cases: run.cases.map(entry => ({ id: entry.id, verdict: entry.verdict, attempts: entry.attempts ?? null, durationMs: entry.durationMs ?? null, reportRows: entry.reportRows ?? null, required: entry.required ?? false,
       ...(entry.reason ? { reason: entry.reason } : {}), evidence: entry.evidence ?? [], result: entry.result ?? null, caseVersion: entry.caseVersion ?? null })),
   };
 }

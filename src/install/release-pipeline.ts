@@ -217,7 +217,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # The production job holds no plane credential, so the hold the candidate's imported external runs
-    # leave (GY-1860) is read here, in the uat environment that holds it, and handed to promotion.
+    # leave (GY-1860) is read here, in the uat environment that holds it, and handed to promotion; a released
+    # hold is sealed as it is read, so no import binds to the candidate before the production job promotes.
     environment: uat
     outputs:
       hold: \${{ steps.read.outputs.hold }}
@@ -226,7 +227,7 @@ jobs:
         with: { ref: ${base}, fetch-depth: 0 }
       - uses: actions/setup-node@v4
         with: { node-version: '24' }
-      - name: Read the hold the candidate's imported external runs leave
+      - name: Read, and seal once released, the hold the candidate's imported external runs leave
         id: read
         shell: bash
         run: |
@@ -259,7 +260,7 @@ jobs:
           echo "sha=$(node -p "require('./promote.json').sha")" >> "$GITHUB_OUTPUT"
         env:
           CANDIDATE: \${{ inputs.candidate }}
-          # A hold that is missing, or read for another candidate, refuses promotion.
+          # A hold that is missing, read for another candidate, or released but unsealed refuses promotion.
           GRAPHYARD_PROMOTION_IMPORTS: \${{ needs.imports.outputs.hold }}
 ${deployStep(policy, 'production', '${{ steps.promote.outputs.sha }}')}
       - name: Confirm production serves the promoted SHA
