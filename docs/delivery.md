@@ -9,15 +9,14 @@ Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`
 
 - `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N merges (`GRAPHYARD_RC_MAX_PRS`=10).
 - `POST /api/candidates` (`admin`/`coordinator`/`intent:create`; Idempotency-Key; `trigger`/`waitMinutes`/`since`/`sinceSha`): ≤5 oldest uncut → `C-N` (`members`/`sourceSha`/`identity`); `schedule` waits five/`waitMinutes`; floor: newest `rc/`. Scoped `workItems` refuse out-of-scope writes. Tags `rc/ID` at `sourceSha`; one validation (identical replays, else 409). `everyMerges`>5→5. `POST /api/candidates/ID/promotion` selects once on ≤4h validation passing all required cases at `sha`/`identity`/`artifact`/`release`, else 409; `/api/delivery` keeps last.
-- `release uat ID` deploys `uat`, refused while unjudged <4h candidates serve.
+- `release uat ID` deploys `uat`, refused while unjudged <4h candidates serve; a verdictless job tags `rc-uat/ID` cancelled (git-only; unpromotable).
 - `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint/API (`GRAPHYARD_UAT_TOKEN`)/`browser`/suites ([validation](validation.md#release-verdicts); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`.
-- `release promote ID` (or [accepted flakes](validation.md#release-verdicts)) deploys `rc-production/ID`; `release verify --url URL` confirms, then tags `YYYY.M.D[.N]` and `stable`, `version`/`/healthz` report (else `unreleased SHA`), installs pull. Direct promotion seals its [imported-run hold](validation.md#release-verdicts); `admin`/`operator-agent` seal **released** holds only ([filing credential](#release-filing-credential)); unsealable refuses; operator-agent-less planes promote unsealed.
-- `upgrade` (`scripts/upgrade-from-stable.mjs`) gates promote: `stable` compose install, seeded, upgrades intact; none: skipped.
+- `release promote ID` (or [accepted flakes](validation.md#release-verdicts)) deploys `rc-production/ID`; `release verify --url URL` confirms; workflow tags `YYYY.M.D[.N]` and `stable`, `version`/`/healthz` report (else `unreleased SHA`), installs pull. Direct promotion seals [imported-run hold](validation.md#release-verdicts); `admin`/`operator-agent` seal **released** holds only ([filing credential](#release-filing-credential)); unsealable refuses; operator-agent-less planes promote unsealed.
 - `GRAPHYARD_RELEASE_BUILD` records digests; with `GRAPHYARD_DEPLOY_DIGESTS` `uat`/`promote` deploy them, else SHA. A recorded build promotes by digest, never rebuilt, once UAT names it.
 - Failures file [holds](validation.md#release-holds) per outcome, else `release follow-up ID`.
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records `rc-soak/ID`.
 
-**The master loop promotes** once main differs from the last `rc-production/`/cut SHAs, nothing queued, `graphyard master config promoteEveryMinutes=N` passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 5, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`/`GRAPHYARD_PRODUCTION_URL`; no workflow; managed repositories run [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. `release.onFailure` `hold` (default `revert`) names each failing case, step and would-be target or `no map matched`, reverting/reopening nothing; `release.revertUnmatched: false` holds an unmatched failure instead of the newest item. `GRAPHYARD_UAT_STATIC` [merge-writer](delivery-redesign.md#merge-writer) trials run required/uat cases uncredentialed: failing, secret-declaring or unrunnable fail; timeouts re-queue. `release status` lists; `release GY-N EPOCH` leases. Tip mismatch: both SHAs in `master status` (off skips stuck).
+**The master loop promotes** once main differs from last `rc-production/`/cut SHAs, nothing queued, `graphyard master config promoteEveryMinutes=N` passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 5, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`/`GRAPHYARD_PRODUCTION_URL`; no workflow; managed repositories run [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. `release.onFailure` `hold` (default `revert`) names each failing case, step and would-be target or `no map matched`, reverting/reopening nothing; `release.revertUnmatched: false` holds an unmatched failure instead of the newest item. `GRAPHYARD_UAT_STATIC` [merge-writer](delivery-redesign.md#merge-writer) trials run required/uat cases uncredentialed: failing, secret-declaring or unrunnable fail; timeouts re-queue. `release status` lists; `release GY-N EPOCH` leases. Tip mismatch: both SHAs in `master status` (off skips stuck).
 
 ### Release filing credential
 
@@ -25,7 +24,7 @@ UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds/follow-ups as `g
 
 ### Pre-merge gate and release-candidate validation
 
-Required: `typecheck`, `test`; per candidate `releaseCandidateTests`/container/chart; UAT's `zero-touch` merges a first item.
+Required: `typecheck`, `test`; per candidate `releaseCandidateTests`/container/chart/`upgrade` (`scripts/upgrade-from-stable.mjs`: seeded `stable` compose install upgrades intact; none: skipped); UAT's `zero-touch` merges an item.
 
 `deploy/helm/exercise.sh` forwards a kubectl-chosen free port, re-forwarding a lost or foreign one within `FORWARD_BUDGET` seconds; waits for the rollout's new Ready pod, retrying transient API failures (empty reply, reset, stall, non-2xx, bodiless 2xx), else ending `api METHOD /api/PATH failed after 15 attempts: status STATUS, body: BODY`.
 
@@ -35,7 +34,7 @@ Exact-head gates merge; [candidates](#release-candidates) deploy. Only Graphyard
 
 ### Main guard
 
-Every 30s the guard reverts merges failing checks parents passed; the [revert approver App](deployment.md#variables) approves only green exact inverses; three refusals abandon. A revert failing the merge's named tests closes `base-failure`; later merges failing only those are `coveredBy` until main passes. Failing trial files rerun (merge, base): [flakes](validation.md#flake-ledger) land; base failures file P0.
+Every 30s the guard reverts merges failing parent-passed checks; the [revert approver App](deployment.md#variables) approves only green exact inverses; three refusals abandon. Reverts failing the merge's named tests close `base-failure`; later merges failing only those are `coveredBy` until main passes. Failing trial files rerun (merge, base): [flakes](validation.md#flake-ledger) land; base failures file P0.
 
 ## Managed repositories
 
@@ -45,7 +44,7 @@ Every 30s the guard reverts merges failing checks parents passed; the [revert ap
 
 Bound cases preview items (head/main; `GRAPHYARD_PREVIEW_TITLE`): static builds publish `/preview/KEY/`; Compose apps run isolated (own project/state/database/images; no `.env`/`include`/`extends`; refuse credentials/sockets/privileges/outside paths; `GRAPHYARD_PREVIEW_CPUS`/`_MEMORY_MB`/`_PIDS`/`_LIFETIME_MINUTES`/`_COMPOSE_LIMIT`/`_SERVICES`); `GRAPHYARD_PREVIEW_ORIGIN` serves, else sandboxed; endings/restarts remove containers/volumes/networks/images before recording.
 
-**`graphyard.json` policy**: `risk.sensitive` `{rule,glob}`, else generic; `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; `release.onFailure` `revert`/`hold`; deployed `GRAPHYARD_REPOSITORY_POLICY`; `doctor` prints it.
+**`graphyard.json` policy**: `risk.sensitive` `{rule,glob}` (else generic); `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; `release.onFailure` `revert`/`hold`; deployed `GRAPHYARD_REPOSITORY_POLICY`; `doctor` prints it.
 
 ```json
 {"kind":"environment","id":"production","expectedRevision":0,"repository":"owner/repository","url":"https://app.example.test","instance":"production-cluster","immutable":true,"services":["api","web"],"resources":["production-smoke-account"],"delivery":{"freshnessSeconds":300,"approvalRequired":true}}

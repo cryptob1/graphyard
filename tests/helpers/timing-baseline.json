@@ -678,6 +678,7 @@
     "tests/release-follow-up.test.ts": 500,
     "tests/release-project.test.ts": 1500,
     "tests/release-revert.test.ts": 4000,
+    "tests/release-uat-cancelled.test.ts": 500,
     "tests/release-uat-compose-preview-target.test.ts": 25000,
     "tests/release-uat-declared-app-previews.test.ts": 25000,
     "tests/release-uat-preview-target.test.ts": 9000,
