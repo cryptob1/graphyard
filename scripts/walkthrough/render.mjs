@@ -2,10 +2,14 @@
 // usage: node render.mjs HTML OUTDIR FPS
 //
 // The committed assets (docs/diagrams/how-graphyard-works.gif and .mp4) are these frames encoded
-// with ffmpeg. To reproduce them byte-comparable, render at FPS 10 and run from OUTDIR:
+// with the commands below. To reproduce them byte-comparable, render at FPS 10 and run from OUTDIR:
 //   MP4: ffmpeg -framerate 10 -i frames/f%05d.png -vf scale=1200:-2:flags=lanczos,format=yuv420p -c:v libx264 -crf 24 -preset slow -movflags +faststart docs/diagrams/how-graphyard-works.mp4
-//   GIF: ffmpeg -framerate 10 -i frames/f%05d.png -vf "scale=800:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=64:stats_mode=diff[p];[b][p]paletteuse=dither=none:diff_mode=rectangle" -fps_mode cfr docs/diagrams/how-graphyard-works.gif
-// The GIF needs -fps_mode cfr: without it ffmpeg 9 drops repeated frames and the GIF plays in 60 s.
+//   GIF: uv run --no-project --with pillow python -I scripts/walkthrough/makegif.py frames 10 800 docs/diagrams/how-graphyard-works.gif
+// makegif.py merges identical consecutive frames into one longer frame, quantises to one shared
+// 96-colour palette with no dithering, and writes opaque frames with disposal 1 and loop 0, so its
+// first frame paints the whole stage and browsers composite every patch onto kept pixels. (The
+// ffmpeg GIF this replaced drew every changed rectangle as a transparent patch over a blank
+// transition first frame, so browsers froze on a blank stage that ffmpeg's own decoder hid.)
 import { chromium } from 'playwright';
 const [html, out, fpsArg] = process.argv.slice(2);
 const fps = Number(fpsArg || 10);
