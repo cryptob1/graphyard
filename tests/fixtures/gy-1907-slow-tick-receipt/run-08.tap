@@ -1,0 +1,22 @@
+TAP version 13
+# Subtest: unit:slow-tick-names-cause — a tick past the bound names the keys and face fields that made it full, or the interval, and the event-loop lag it ran under
+ok 1 - unit:slow-tick-names-cause — a tick past the bound names the keys and face fields that made it full, or the interval, and the event-loop lag it ran under
+  ---
+  duration_ms: 3412.760136
+  type: 'test'
+  ...
+# Subtest: unit:own-write-no-full-pass — a face the tick's own write moved makes the next pass evaluate only its readers; a face a request moved still makes it full
+ok 2 - unit:own-write-no-full-pass — a face the tick's own write moved makes the next pass evaluate only its readers; a face a request moved still makes it full
+  ---
+  duration_ms: 402.455754
+  type: 'test'
+  ...
+1..2
+# tests 2
+# suites 0
+# pass 2
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 5708.362166
