@@ -807,3 +807,90 @@ test('unit:up-replaces-host-loop-on-other-code — a host install\'s loop and sl
   const recorded = JSON.parse(await readFile(join(root, '.graphyard', 'up.json'), 'utf8')).hostInstall;
   assert.deepEqual(recorded, seen[0], 'the route to the host is recorded, so doctor reads the host\'s units too');
 });
+
+test('unit:up-rejected-reading-never-green — a loop-code reading that was rejected or came back empty re-opens a recorded master-loop step and fails an unfinished one, naming why, and nothing is rewritten or restarted on it', async () => {
+  const { runUp } = await up();
+  // The host session failed before any unit was read (preparing the install, reaching the host).
+  const rejecting = (w: UpWorld) => async (): Promise<LoopCodeReading | null> => { w.calls.push({ args: ['loop-code'] }); throw new Error('ssh: connect to host acme-host port 22: Connection refused'); };
+  for (const [label, rootOf] of [['recorded', recordedRoot], ['unfinished', resumedRoot]] as const) {
+    const root = await rootOf(`graphyard-up-loop-rejected-${label}`);
+    const w = world([cleanReading()]);
+    const events: UpEvent[] = [];
+    const run = await runUp(request(), { ...dependencies(root, events, w), loopCode: rejecting(w) });
+    assert.equal(run.exitCode, 1, `${label}: ${run.next}`);
+    assert.match(run.next, /^master-loop: what the install's loop and executor units run could not be read: ssh: connect to host acme-host port 22: Connection refused/, label);
+    assert.deepEqual(w.calls.filter(call => call.args[0] === 'master' || call.args[0] === 'align-executors'), [], `${label}: a rejected reading rewrites and restarts nothing`);
+    const state = JSON.parse(await readFile(join(root, '.graphyard', 'up.json'), 'utf8'));
+    assert.ok(!state.completed.includes('master-loop'), `${label}: the step is not recorded done on a rejected reading`);
+  }
+  // An empty answer judged nothing either.
+  const emptyRoot = await recordedRoot('graphyard-up-loop-empty-recorded');
+  const empty = world([null]);
+  const emptyRun = await runUp(request(), dependencies(emptyRoot, [], empty));
+  assert.equal(emptyRun.exitCode, 1, emptyRun.next);
+  assert.match(emptyRun.next, /could not be read: no reading came back/);
+  // With no reader at all, the recorded step stands as an earlier run left it.
+  const noReaderRoot = await recordedRoot('graphyard-up-loop-no-reader');
+  const noReader = world([cleanReading()]);
+  const noReaderRun = await runUp(request(), { ...dependencies(noReaderRoot, [], noReader), loopCode: undefined });
+  assert.equal(noReaderRun.exitCode, 0, noReaderRun.next);
+  assert.deepEqual(noReader.calls, [], 'without a reader the recorded step is skipped as before');
+});
+
+test('unit:up-final-reading-judges-both — the post-repair wait is green only on a reading where the loop reports this commit and no executor runs other code, whichever of the two started the repair', async () => {
+  const { runUp } = await up();
+  const slotStale = () => reading({
+    loop: { unit: MASTER_UNIT, path: MASTER_UNIT_PATH, checkout: CLI_ROOT }, executor: { unit: EXECUTOR_TEMPLATE, path: EXECUTOR_PATH, checkout: CLI_ROOT },
+    loopCommit: COMMIT, loopStale: null, executorStale: `graphyard-executor-acme-shop@1.service runs ${OLD_COMMIT.slice(0, 12)}, not this checkout's ${COMMIT.slice(0, 12)}`,
+  });
+  const attempt = async (label: string, readings: LoopCodeReading[]) => {
+    const w = world(readings);
+    return runUp(request(), { ...dependencies(await resumedRoot(label), [], w), machineWaitMs: 20 });
+  };
+
+  // Executor-only repair; the final reading finds the loop on other code: not green.
+  const loopNowStale = await attempt('graphyard-up-final-executor-loop-stale', [slotStale(), reading({ loopCommit: COMMIT, executorStale: null })]);
+  assert.equal(loopNowStale.exitCode, 1, loopNowStale.next);
+  assert.match(loopNowStale.next, /the loop still runs other code: /);
+  // Executor-only repair; the final reading's loop reports no commit: not green.
+  const loopSilent = await attempt('graphyard-up-final-executor-loop-silent', [slotStale(), { ...cleanReading(), loopCommit: null }]);
+  assert.equal(loopSilent.exitCode, 1, loopSilent.next);
+  assert.match(loopSilent.next, /its cursor records no commit/);
+  // Loop-only repair; the final reading finds a slot on other code: not green.
+  const slotNowStale = await attempt('graphyard-up-final-loop-slot-stale', [reading({ executorStale: null }), slotStale()]);
+  assert.equal(slotNowStale.exitCode, 1, slotNowStale.next);
+  assert.match(slotNowStale.next, /the executors still run other code: graphyard-executor-acme-shop@1\.service/);
+  // Either repair goes green once one reading shows both current.
+  assert.equal((await attempt('graphyard-up-final-executor-green', [slotStale(), cleanReading()])).exitCode, 0);
+  assert.equal((await attempt('graphyard-up-final-loop-green', [reading({ executorStale: null }), cleanReading()])).exitCode, 0);
+});
+
+test('unit:up-validates-the-checkout-it-installs — the clean-checkout preflight judges this CLI\'s checkout, the one the loop is rewritten onto, never the obsolete checkout master.json still records', async () => {
+  const { upDependencies } = await up();
+  const base = await temporaryDirectory('graphyard-up-cli-checkout');
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const checkout = async (name: string) => {
+    const root = join(base, name);
+    await mkdir(join(root, 'bin'), { recursive: true });
+    await writeFile(join(root, 'bin', 'graphyard.mjs'), '// cli\n');
+    git(root, 'init', '-q');
+    git(root, '-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '.');
+    git(root, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'cli');
+    return root;
+  };
+  const a = await checkout('graphyard-a'), b = await checkout('graphyard-b');
+  const dirty = (root: string) => writeFile(join(root, 'bin', 'graphyard.mjs'), '// uncommitted\n');
+  const repository = join(base, 'repository');
+  await mkdir(join(repository, '.graphyard'), { recursive: true });
+  // master.json still records the obsolete checkout A; this run is CLI B.
+  await writeFile(join(repository, '.graphyard', 'master.json'), JSON.stringify({ url: SERVER, cliPath: join(a, 'bin', 'graphyard.mjs') }));
+  const read = () => upDependencies(repository, join(b, 'bin', 'graphyard.mjs'), request(), () => {}, () => null, () => null).cliCheckout!();
+
+  // Clean B, dirty obsolete A: the migration is not refused for A's work.
+  await dirty(a);
+  assert.deepEqual(await read(), { root: b, dirty: [] }, 'dirty work in the obsolete recorded checkout stops nothing');
+  // Dirty B, clean A: B is what is installed, so its work stops the run.
+  git(a, 'checkout', '--', '.');
+  await dirty(b);
+  assert.deepEqual(await read(), { root: b, dirty: ['bin/graphyard.mjs'] }, 'dirty work in this CLI\'s own checkout is found');
+});

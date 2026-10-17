@@ -1119,9 +1119,17 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     // A host install's units are read on the host, through the install's transport, never this machine's.
     const hostLoop = remoteLoop ? installArgs('--plan') : null;
     if (hostLoop && JSON.stringify(state.hostInstall ?? null) !== JSON.stringify(hostLoop)) { state.hostInstall = hostLoop; await writeState(deps.root, state); }
+    // A reading that was rejected, or came back empty, is a failed reading too: the host session
+    // can fail before any unit is read (preparing the install, reaching the host), and that judged
+    // nothing. Only a run with no reader at all keeps the step as recorded.
+    const readLoopCode = async () => {
+      if (!deps.loopCode) return null;
+      const read = await deps.loopCode(hostLoop).then(answer => answer ?? 'no reading came back', (error: any) => String(error?.message ?? error).split('\n')[0].slice(0, 400) || 'the reading was rejected');
+      return typeof read === 'string' ? { error: read, reading: null } : { error: read.error, reading: read };
+    };
     if (state.completed.includes('master-loop') && deps.loopCode) {
-      const recorded = await deps.loopCode(hostLoop).catch(() => null);
-      if (recorded?.loopStale || recorded?.executorStale || recorded?.error) {
+      const recorded = await readLoopCode();
+      if (recorded?.error || recorded?.reading?.loopStale || recorded?.reading?.executorStale) {
         state.completed = state.completed.filter(name => name !== 'master-loop');
         await writeState(deps.root, state);
       }
@@ -1133,9 +1141,10 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // serving the repository may be a process an earlier checkout left: every fix since merged is
       // invisible to it, and setup kept saying nothing was needed. Read the units against this CLI
       // first; a loop or executor on other code is rewritten to this CLI and restarted.
-      const reading = deps.loopCode ? await deps.loopCode(hostLoop).catch(() => null) : null;
-      // A reading that failed judged nothing: the step is never green on code it could not read.
-      if (reading?.error) throw new UpStop(`master-loop: what the install's loop and executor units run could not be read: ${reading.error}; fix that, then rerun ${rerun()}`, upExitCodes.failed);
+      const read = await readLoopCode();
+      // A reading that failed, was rejected or came back empty judged nothing: the step is never green on code it could not read.
+      if (read?.error) throw new UpStop(`master-loop: what the install's loop and executor units run could not be read: ${read.error}; fix that, then rerun ${rerun()}`, upExitCodes.failed);
+      const reading = read?.reading ?? null;
       const loopStale = reading?.loopStale ?? null, executorStale = deps.alignExecutors ? reading?.executorStale ?? null : null;
       // A unit that starts another checkout is rewritten; one on this checkout whose process loaded other code is restarted.
       const rewriteLoop = !!loopStale && reading?.loopReplace !== 'restart';
@@ -1205,8 +1214,11 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         for (let polls = 0; ; polls++) {
           const now = deps.loopCode ? await deps.loopCode(hostLoop).catch(() => null) : null;
           const read = now && !now.error ? now : null;
+          // Both components are judged on every poll, whichever mismatch started the repair: an
+          // executor-only repair is not green while the loop reads as other code or reports no
+          // commit, nor a loop-only one while a slot reads as other code.
           const reported = read && !read.loopStale ? read.loopCommit : null;
-          const loopDone = !loopStale || !!reported, executorsDone = !executorStale || (!!read && !read.executorStale);
+          const loopDone = !!reported, executorsDone = !!read && !read.executorStale;
           if (read && loopDone && executorsDone) {
             if (loopStale) deps.emit({ kind: 'note', text: `master-loop: replaced ${loopStale}; the loop now runs ${read.cli.root} at ${reported!.slice(0, 12)}.` });
             if (executorStale) deps.emit({ kind: 'note', text: `master-loop: replaced ${executorStale}; every executor slot now runs ${read.cli.root}${read.cli.commit ? ` at ${read.cli.commit.slice(0, 12)}` : ''}.` });
@@ -1215,7 +1227,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
           if (deps.now() >= deadline) {
             const detail = !now ? 'the loop\'s code could not be read again'
               : now.error ? `the loop\'s code read failed again: ${now.error}`
-              : !loopDone ? (now.loopCommit ? `it still reports ${now.loopCommit.slice(0, 12)} instead of this checkout's ${now.cli.commit ? now.cli.commit.slice(0, 12) : 'commit'}` : 'its cursor records no commit')
+              : !loopDone ? (now.loopStale && (!now.loopCommit || now.loopCommit === now.cli.commit) ? `the loop still runs other code: ${now.loopStale}` : now.loopCommit ? `it still reports ${now.loopCommit.slice(0, 12)} instead of this checkout's ${now.cli.commit ? now.cli.commit.slice(0, 12) : 'commit'}` : 'its cursor records no commit')
               : `the executors still run other code: ${now.executorStale}`;
             throw new UpStop(`master-loop: ${[loopStale, executorStale].filter(Boolean).join('; ')}; the units were rewritten and restarted, but ${detail}; rerun ${rerun()}`, upExitCodes.failed);
           }
@@ -1947,7 +1959,11 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
   return {
     root, emit, serverUrl, masterToken, children,
     publishOnboarding: workflows => publishOnboarding(root, request.repository, (program, args, env) => execFileSync(program, args, { cwd: root, encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env: { ...process.env, ...env } } : {}) }), workflows),
-    cliCheckout: async () => { const checkout = await loopCheckout(); return { root: checkout.root, dirty: dirtyCheckoutPaths(checkout) }; },
+    // GY-1859: the checkout judged clean is the one this run installs — this CLI's, the same cliPath
+    // the loop's code is judged against — never the one master.json still records: a migration from
+    // checkout A to this CLI rewrites the loop onto this CLI, so uncommitted work in the obsolete A
+    // stops nothing, and work in this CLI's own checkout stops the run before anything is installed.
+    cliCheckout: async () => { const checkout = await readCoordinatorCheckout(coordinatorCheckoutRoot(cliPath)); return { root: checkout.root, dirty: dirtyCheckoutPaths(checkout) }; },
     loopRefusal: async () => coordinatorCheckoutRefusal(await loopCheckout(), 'the master loop'),
     // GY-1859: the loop and executor units are judged against the CLI running up, whose launcher and checkout are this run's.
     // A host install's loop and executors run on the host, from the checkout install keeps there at
