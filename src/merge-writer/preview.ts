@@ -1,8 +1,8 @@
 // Concern: the merge preview (GY-1718) — a passing trial merge built and served as a throwaway static site, the repository's required and uat E2E cases run against it before the merge lands.
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { lstat, mkdir, mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm } from 'node:fs/promises';
+import { extname, join } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { loadCases, type CaseFile } from '../e2e/case.js';
 import { releaseVerdict, type E2eLauncher, type E2eReport } from '../e2e/runner.js';
@@ -10,7 +10,7 @@ import { docsOnlyPaths, testOnlyPaths } from '../model/policy.js';
 import { serveStaticSite, type ReleaseCandidate, type StaticUat } from '../release-candidate.js';
 import { hostPassthrough } from '../e2e/steps.js';
 import { buildStaticSite, projectCaseSuite, type StaticBuildShell } from '../release-project.js';
-import { previewDemand, previewEnded, previewEndReason, previewPath, type ItemPreview, type PreviewCaseResult, type PreviewEndReason } from '../project-previews.js';
+import { previewDemand, previewEnded, previewEndReason, previewPath, previewSiteByteLimit, previewSiteFileLimit, previewSitePathSchema, type ItemPreview, type PreviewCaseResult, type PreviewEndReason, type PreviewSiteFile } from '../project-previews.js';
 import type { ProjectDelivery } from '../project-applications.js';
 import type { Work } from '../model/work.js';
 import { heldEntries, heldOpenPaths, readTempOwner, tempOwnerGone, tempOwnerJudgeable, tempOwnerMarker, tmpReclaimMinAgeMs, treeLastWritten, writeTempOwner } from '../tmp-reclaim.js';
@@ -181,8 +181,8 @@ export interface PreviewOptions {
   /** Cancels the preview from outside, as its budget running out does. */
   signal?: AbortSignal;
 }
-/** A preview that passed and is still served: its loopback origin, and `close`, which ends the server and removes the checkout. */
-export interface OpenedPreview { verdict: PreviewVerdict; url: string | null; close(): Promise<void> }
+/** A preview that passed and is still served: its loopback origin, the built site's directory it serves, and `close`, which ends the server and removes the checkout. */
+export interface OpenedPreview { verdict: PreviewVerdict; url: string | null; site?: string | null; close(): Promise<void> }
 
 /**
  * The preview of one passing trial merge: in a free slot (at most `previewConcurrency` at once), a
@@ -280,7 +280,7 @@ export async function openPreview(input: PreviewInput, options: PreviewOptions &
     running = preview();
     const first = await Promise.race([running, expired, stopped]);
     if (first === 'stopped') return { verdict: outcome = verdict('error', 'the preview was cancelled'), url: null, close };
-    if (first !== 'expired') return { verdict: outcome = first, url: (served as StaticUat | null)?.url ?? null, close };
+    if (first !== 'expired') return { verdict: outcome = first, url: (served as StaticUat | null)?.url ?? null, site: served ? join(directory, 'checkout', input.site.directory) : null, close };
     // Past the budget: the run is cancelled, and its slot is not freed until it has ended (finally).
     cancel.abort();
     return { verdict: outcome = verdict('timeout', `the preview ran past its ${Math.round(input.timeoutMs / 60_000)}-minute budget`), url: null, close };
@@ -321,8 +321,8 @@ export interface LivePreview {
   stop: AbortController;
   /** Set once it is being ended: why, and whether its cleaned record reached the server. */
   ending: PreviewEndReason | null;
-  /** Records the server has not confirmed yet, oldest first; retried each step. */
-  owed: ItemPreview[];
+  /** Records the server has not confirmed yet, oldest first, a running one with its built site; retried each step. */
+  owed: { record: ItemPreview; site?: PreviewSiteFile[] }[];
   failures: number;
 }
 /** What the step reads and writes: the loop's delivery declaration, its checkout and the server. */
@@ -331,8 +331,8 @@ export interface ItemPreviewPorts {
   delivery(): ProjectDelivery | null;
   /** The base branch's tip, previewed for an item that has no submitted head yet. */
   baseTip(): Promise<string>;
-  /** Writes the record on the item (`POST /api/work/:id/merge-record`, kind `preview`). */
-  record(item: { id: string; key: string }, preview: ItemPreview): Promise<unknown>;
+  /** Writes the record on the item (`POST /api/work/:id/merge-record`, kind `preview`), a running one publishing its built `site`. */
+  record(item: { id: string; key: string }, preview: ItemPreview, site?: PreviewSiteFile[]): Promise<unknown>;
   run?: ChildRun; shell?: StaticBuildShell; launcher?: E2eLauncher; fetcher?: typeof fetch; stepTimeoutMs?: number; hostEnvironment?: NodeJS.ProcessEnv; now?: () => number;
   slots?: ReturnType<typeof previewSlots>; procRoot?: string;
   open?: typeof openPreview;
@@ -343,17 +343,46 @@ export const previewRecordAttempts = 10;
 /** Sends what `entry` owes, oldest first, stopping at the first that fails. */
 async function settleRecords(entry: LivePreview, ports: ItemPreviewPorts) {
   while (entry.owed.length) {
-    try { await ports.record({ id: entry.work, key: entry.key }, entry.owed[0]!); entry.owed.shift(); entry.failures = 0; }
+    try { await ports.record({ id: entry.work, key: entry.key }, entry.owed[0]!.record, entry.owed[0]!.site); entry.owed.shift(); entry.failures = 0; }
     catch (error) {
       entry.failures += 1;
       if (entry.failures < previewRecordAttempts) return false;
-      console.error(`The preview record of ${entry.key} (${entry.owed[0]!.state}) is dropped after ${entry.failures} refusals: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`The preview record of ${entry.key} (${entry.owed[0]!.record.state}) is dropped after ${entry.failures} refusals: ${error instanceof Error ? error.message : String(error)}`);
       entry.owed.shift(); entry.failures = 0;
     }
   }
   return true;
 }
-const owe = (entry: LivePreview, record: ItemPreview) => { entry.record = record; entry.owed.push(record); };
+const owe = (entry: LivePreview, record: ItemPreview, site?: PreviewSiteFile[]) => { entry.record = record; entry.owed.push(site ? { record, site } : { record }); };
+
+const mediaTypes: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.map': 'application/json', '.txt': 'text/plain; charset=utf-8', '.xml': 'application/xml', '.svg': 'image/svg+xml',
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.avif': 'image/avif', '.ico': 'image/x-icon',
+  '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.otf': 'font/otf', '.wasm': 'application/wasm', '.webmanifest': 'application/manifest+json' };
+/**
+ * The built site under `directory` as a preview publishes it (GY-1902): every regular file, by its
+ * path under the site, media type and content. A symbolic link is never followed, so nothing outside
+ * the build output is published. A site past `previewSiteFileLimit` files or `previewSiteByteLimit`
+ * bytes, or naming a file no link can address, is refused, naming why.
+ */
+export async function readPreviewSite(directory: string): Promise<PreviewSiteFile[]> {
+  const files: PreviewSiteFile[] = [];
+  let bytes = 0;
+  const walk = async (relative: string) => {
+    for (const entry of await readdir(join(directory, relative), { withFileTypes: true })) {
+      const path = relative ? `${relative}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) { await walk(path); continue; }
+      if (!entry.isFile()) continue;
+      if (!previewSitePathSchema.safeParse(path).success) throw new Error(`the built site's file ${JSON.stringify(path)} has no path the preview link can serve`);
+      if (files.length >= previewSiteFileLimit) throw new Error(`the built site has more than ${previewSiteFileLimit} files, more than a preview publishes`);
+      const content = await readFile(join(directory, path));
+      if ((bytes += content.length) > previewSiteByteLimit) throw new Error(`the built site is larger than the ${previewSiteByteLimit} bytes a preview publishes`);
+      files.push({ path, mediaType: mediaTypes[extname(path).toLowerCase()] ?? 'application/octet-stream', content: content.toString('base64') });
+    }
+  };
+  await walk('');
+  return files.sort((a, b) => a.path < b.path ? -1 : 1);
+}
 const caseResults = (verdict: PreviewVerdict): PreviewCaseResult[] => verdict.cases.slice(0, 100).map(entry =>
   ({ case: entry.case, result: entry.verdict === 'passed' ? 'pass' : entry.verdict === 'unrun' ? 'unrun' : 'fail', ...(entry.reason ? { reason: entry.reason } : {}) }));
 
@@ -362,8 +391,9 @@ const caseResults = (verdict: PreviewVerdict): PreviewCaseResult[] => verdict.ca
  * cite a case bound to a declared static application (`previewDemand`) gets a preview of its
  * submitted head, or of the base tip while it has none: `starting` is recorded, the change is checked
  * out, built, served on loopback and its declared cases run against it (`openPreview`, kept served on
- * a pass), and the outcome recorded — `running` with the origin the server proxies `/preview/KEY` to
- * and every case passed, or `failed` with the case results, its server and checkout already removed.
+ * a pass), and the outcome recorded — `running` with every case passed and the built site published
+ * with it (`readPreviewSite`), which the server serves at `/preview/KEY/` wherever this loop runs, or
+ * `failed` with the case results (or why the site could not be published), its server and checkout already removed.
  * A preview whose item moves to a new head is `superseded`, and one whose item is closed, delivered
  * or no longer cites such a case is ended: a starting one is cancelled, a served one's server closed
  * and checkout removed, and then it is recorded `cleaned` with why. A record this process does not
@@ -375,10 +405,11 @@ export async function itemPreviewStep(live: Map<string, LivePreview>, work: read
   let delivery: ProjectDelivery | null;
   try { delivery = ports.delivery(); } catch { delivery = null; }
   // A preview that ended once it settled (a failed case, or ended while starting) leaves once the
-  // server holds its last record; this step's snapshot may predate that record, so it is not stale.
-  const endedNow = new Set<string>();
+  // server holds its last record; this step's snapshot may predate that record, so the item's
+  // preview is read as that record (by key): it is not stale, and a failed commit is not started again.
+  const endedNow = new Map<string, ItemPreview>();
   for (const entry of [...live.values()]) {
-    if (await settleRecords(entry, ports) && entry.opened && previewEnded(entry.record)) { live.delete(entry.key); endedNow.add(entry.record.id); }
+    if (await settleRecords(entry, ports) && entry.opened && previewEnded(entry.record)) { live.delete(entry.key); endedNow.set(entry.key, entry.record); }
   }
   const ended = (record: ItemPreview, reason: PreviewEndReason, detail: string): ItemPreview => ({ ...record, state: previewEnded(record) ? record.state : 'cleaned', origin: null, cleanedAt: record.cleanedAt ?? at(), endReason: record.endReason ?? reason, detail: cut(detail) });
   const end = async (entry: LivePreview, reason: PreviewEndReason) => {
@@ -394,18 +425,19 @@ export async function itemPreviewStep(live: Map<string, LivePreview>, work: read
   let tip: string | null | undefined;
   for (const item of work) {
     const demand = previewDemand(item, delivery), reason = previewEndReason(item, !!demand);
-    const head = item.candidate?.sha?.toLowerCase() ?? null, recorded = item.preview ?? null;
+    const head = item.candidate?.sha?.toLowerCase() ?? null;
     let entry = live.get(item.key);
     if (entry && (reason || entry.ending || (head && entry.record.sha !== head))) {
       const why = entry.ending ?? reason ?? 'superseded';
-      endedNow.add(entry.record.id);
       if (await end(entry, why)) notes.push(`Ended ${item.key}'s preview of ${entry.record.sha.slice(0, 12)} (${why}): its server closed and its checkout removed`);
       if (live.has(item.key)) continue;
+      endedNow.set(item.key, entry.record);
       entry = undefined;
     }
     if (entry) continue;
+    const recorded = endedNow.get(item.key) ?? item.preview ?? null;
     // A record no preview of this process backs: the loop that served it is gone, so it is recorded ended before anything new starts.
-    const stale = recorded && !previewEnded(recorded) && !endedNow.has(recorded.id) ? recorded : null;
+    const stale = recorded && !previewEnded(recorded) ? recorded : null;
     if (stale) {
       try { await ports.record(item, ended(stale, reason ?? 'restarted', `${reason ? 'ended' : 'no live preview backs it after a restart'}`)); notes.push(`Recorded ${item.key}'s preview ${stale.id} cleaned: ${reason ?? 'restarted'}`); }
       catch (error) { notes.push(`Could not record ${item.key}'s stale preview cleaned: ${error instanceof Error ? error.message : String(error)}`); continue; }
@@ -420,25 +452,34 @@ export async function itemPreviewStep(live: Map<string, LivePreview>, work: read
 
   async function start(item: Work, sha: string, source: 'head' | 'base', demand: NonNullable<ReturnType<typeof previewDemand>>) {
     const record: ItemPreview = { id: randomUUID(), path: previewPath(item.key), state: 'starting', runner: 'local', application: demand.application.id, sha, source, origin: null,
-      cases: demand.cases.map(id => ({ case: id, result: 'unrun' as const })), detail: '', startedAt: at(), readyAt: null, cleanedAt: null, endReason: null };
+      cases: demand.cases.map(id => ({ case: id, result: 'unrun' as const })), detail: demand.omitted.length ? cut(`not previewed, bound to another static application: ${demand.omitted.join(', ')}`) : '', startedAt: at(), readyAt: null, cleanedAt: null, endReason: null };
     const entry: LivePreview = { key: item.key, work: item.id, record, opened: null, stop: new AbortController(), ending: null, owed: [], failures: 0 };
     owe(entry, record);
     live.set(item.key, entry);
     const variables = { GRAPHYARD_PREVIEW_KEY: item.key, GRAPHYARD_PREVIEW_TITLE: item.title, GRAPHYARD_PREVIEW_SHA: sha };
+    const omitted = demand.omitted.length ? `; not previewed, bound to another static application: ${demand.omitted.join(', ')}` : '';
     // `starting` reaches the server before the build begins and before any outcome is recorded after it.
     await settleRecords(entry, ports);
     void (async () => {
-      while (!await settleRecords(entry, ports) && !entry.stop.signal.aborted) await new Promise(accept => setTimeout(accept, 1000));
+      // An unconfirmed `starting` is retried each second, and no longer once the preview is ended: it then settles as cancelled at once.
+      while (!await settleRecords(entry, ports) && !entry.stop.signal.aborted) {
+        await new Promise<void>(accept => { const timer = setTimeout(accept, 1000); entry.stop.signal.addEventListener('abort', () => { clearTimeout(timer); accept(); }, { once: true }); });
+      }
       const opened = await (ports.open ?? openPreview)({ root: ports.root, base: ports.base, mergeSha: sha, site: { directory: demand.application.directory, build: demand.application.build }, timeoutMs: ports.timeoutMs,
         run: ports.run, shell: ports.shell, launcher: ports.launcher, fetcher: ports.fetcher, stepTimeoutMs: ports.stepTimeoutMs, now: ports.now, slots: ports.slots, procRoot: ports.procRoot, hostEnvironment: ports.hostEnvironment },
       { keep: true, cases: demand.cases, variables, signal: entry.stop.signal })
         .catch((error: unknown): OpenedPreview => ({ verdict: { result: 'error', mergeSha: sha, cases: [], failed: [], detail: cut(`the preview could not run: ${error instanceof Error ? error.message : String(error)}`), durationMs: 0 }, url: null, close: async () => {} }));
       const cases = opened.verdict.cases.length ? caseResults(opened.verdict) : record.cases;
-      if (entry.ending || !opened.url || opened.verdict.result !== 'pass') {
+      // The link serves the site the cases passed on: its built files, published with the running record.
+      let site: PreviewSiteFile[] | null = null, unpublished = '';
+      if (!entry.ending && opened.url && opened.verdict.result === 'pass') {
+        try { site = await readPreviewSite(opened.site!); } catch (error) { unpublished = `; not published: ${error instanceof Error ? error.message : String(error)}`; }
+      }
+      if (entry.ending || !opened.url || opened.verdict.result !== 'pass' || !site) {
         await opened.close();
         const why = entry.ending ?? 'failed';
-        owe(entry, { ...entry.record, state: why === 'failed' ? 'failed' : 'cleaned', cases, origin: null, detail: cut(opened.verdict.detail), cleanedAt: at(), endReason: why });
-      } else owe(entry, { ...entry.record, state: 'running', cases, origin: opened.url, detail: cut(opened.verdict.detail), readyAt: at() });
+        owe(entry, { ...entry.record, state: why === 'failed' ? 'failed' : 'cleaned', cases, origin: null, detail: cut(`${opened.verdict.detail}${unpublished}${omitted}`), cleanedAt: at(), endReason: why });
+      } else owe(entry, { ...entry.record, state: 'running', cases, origin: opened.url, detail: cut(`${opened.verdict.detail}${omitted}`), readyAt: at() }, site);
       entry.opened = opened;
       await settleRecords(entry, ports);
     })();

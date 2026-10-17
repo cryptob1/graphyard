@@ -806,6 +806,7 @@
     "tests/soak-master-lock-refusal.test.ts": 30150,
     "tests/soak-master-role-blockers.test.ts": 6834,
     "tests/soak-merge-preview.test.ts": 14000,
+    "tests/soak-item-preview.test.ts": 7000,
     "tests/soak-merge-verdict.test.ts": 30000,
     "tests/soak-merge-writer.test.ts": 4000,
     "tests/soak-observation-window.test.ts": 45000,

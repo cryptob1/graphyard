@@ -48,7 +48,7 @@ const caseMarks = { pass: marker.passed, fail: marker.failed, unrun: marker.unme
 export function PreviewPanel({ preview }: { preview: ItemPreview }) {
   return <section className="panel item-preview" aria-label="Preview"><h2>Preview <small>{previewWords[preview.state]}</small></h2>
     <dl className="facts">
-      <div><dt>Link</dt><dd>{preview.state === 'running' ? <a href={preview.path} target="_blank" rel="noopener noreferrer">{preview.path} ↗</a> : <span className="mono">{preview.path}</span>}</dd></div>
+      <div><dt>Link</dt><dd>{preview.state === 'running' ? <a href={`${preview.path}/`} target="_blank" rel="noopener noreferrer">{preview.path}/ ↗</a> : <span className="mono">{preview.path}</span>}</dd></div>
       <div><dt>State</dt><dd>{previewWords[preview.state]}{preview.endReason ? ` · ${preview.endReason}` : ''}{preview.cleanedAt ? ` · cleaned ${new Date(preview.cleanedAt).toLocaleString()}` : ''}</dd></div>
       <div><dt>Commit</dt><dd><span className="mono">{preview.sha.slice(0, 12)}</span>{preview.source === 'base' ? ' · the base branch, until a pull request is submitted' : ''}</dd></div>
       <div><dt>Application</dt><dd>{preview.application} · {preview.runner} runner</dd></div>

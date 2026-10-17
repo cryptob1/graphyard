@@ -10,7 +10,7 @@ import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { submittedAtOf } from './shadow.js';
 import { runTrial, trialAttempts, TrialCleanupError, type RunTrialInput, type TrialNoVerdict, type TrialNoVerdictOutcome, type TrialPhase, type TrialPhaseDurations, type TrialRun } from './trial.js';
 import { previewFailureReason, type PreviewVerdict } from './preview.js';
-import type { ItemPreview } from '../project-previews.js';
+import type { ItemPreview, PreviewSiteFile } from '../project-previews.js';
 
 /**
  * A proof's cases in a TAP stream, attributed by title prefix, as `graphyard verify` counts them
@@ -118,8 +118,8 @@ export type MergeRecordEvent =
  * route and record port as the ledger's steps; it moves no merge state and is no ledger event, so
  * it stays outside `MergeRecordEvent` and rides the port as `previewRecordEvent` makes it.
  */
-export interface PreviewRecordEvent { kind: 'preview'; preview: ItemPreview }
-export const previewRecordEvent = (preview: ItemPreview) => ({ kind: 'preview', preview } satisfies PreviewRecordEvent) as unknown as MergeRecordEvent;
+export interface PreviewRecordEvent { kind: 'preview'; preview: ItemPreview; site?: PreviewSiteFile[] }
+export const previewRecordEvent = (preview: ItemPreview, site?: PreviewSiteFile[]) => ({ kind: 'preview', preview, ...(site ? { site } : {}) } satisfies PreviewRecordEvent) as unknown as MergeRecordEvent;
 const previewEvent = (event: MergeRecordEvent): PreviewRecordEvent | null => (event as { kind: string }).kind === 'preview' ? event as unknown as PreviewRecordEvent : null;
 /** The ledger kind each recorded step writes; `trial` is the executor's own record beside the ledger, which the fold ignores. */
 export const mergeRecordKinds = { ...mergeLedgerKinds, trial: 'merge.trial' } as const;

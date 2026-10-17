@@ -118,7 +118,7 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
     },
     // GY-1902: an item citing a case bound to a declared static application is previewed from the coordinator checkout, its record written through the merge-record route.
     itemPreviews: { root, base: options.base, timeoutMs: shadow.timeoutMinutes * 60_000, run, hostEnvironment: options.environment, now: options.now,
-      delivery: () => loadProjectDelivery(options.environment ?? process.env, root), baseTip: tip, record: (item, preview) => options.record(item, previewRecordEvent(preview)), ...options.itemPreviews },
+      delivery: () => loadProjectDelivery(options.environment ?? process.env, root), baseTip: tip, record: (item, preview, site) => options.record(item, previewRecordEvent(preview, site)), ...options.itemPreviews },
     // Only git's own stale-lease wording is a rejection the executor re-reads the tip for; a remote's refusal (a branch rule, a hook) or a transport failure is thrown as it came.
     push: async (mergeSha, baseTip) => {
       try { await run('git', ['-C', root, ...pushArgs(base, baseTip, mergeSha)], { env: pushEnvironment(settings.deployKeyFile, options.environment) }); return 'pushed'; }

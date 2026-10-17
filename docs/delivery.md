@@ -41,7 +41,7 @@ Every 30s the guard reverts merges failing checks parents passed; the [revert ap
 
 `mode: local` (`control-plane` merger's default): `{"previews":"local","candidateMaxChanges":5,"productionVerification":true}`, `command` adapter, generated-workflows removed; `delivery.applications` `{id,kind:"static",directory,build}`/`{id,kind:"compose",file,service,port}`; `delivery.cases` case→application (tag/sole one); invalid ones refuse `init`/`install`/`/api/status` (`project.error`); **Delivery** shows `project.delivery` (`GRAPHYARD_PROJECT_DELIVERY`).
 
-Static-application cases preview their item (head, else main; build sees `GRAPHYARD_PREVIEW_TITLE`) sandboxed at `/preview/KEY`; `preview` records state/cases; new heads/closures clean it.
+Static-application cases preview their item (head, else main; build sees `GRAPHYARD_PREVIEW_TITLE`); passing builds publish to the server, sandboxed at `/preview/KEY/`; `preview` records state/cases; new heads/closures clean it.
 
 **`graphyard.json` policy**: `risk.sensitive` `{rule,glob}`, else generic; `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; `release.onFailure` `revert`/`hold`; deployed `GRAPHYARD_REPOSITORY_POLICY`; `doctor` prints it.
 

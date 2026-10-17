@@ -17,7 +17,7 @@ import { masterConfigSchema } from '../src/master.js';
 import { emptyDaemonState } from '../src/daemon/state-cursor.js';
 import { mergeWriterReads, mergeWriterStep } from '../src/daemon/cycle-merge-writer.js';
 import { mergeRecordKey, type MergeRecordEvent } from '../src/merge-writer/executor.js';
-import { previewCheckoutPrefix } from '../src/merge-writer/preview.js';
+import { openPreview, previewCheckoutPrefix } from '../src/merge-writer/preview.js';
 import { previewPath, type ItemPreview } from '../src/project-previews.js';
 import { defaultChildRun } from '../src/child-runner.js';
 import type { Cycle } from '../src/daemon/cycle.js';
@@ -54,7 +54,8 @@ async function fixture() {
   await write('e2e/cases/fixture-static-home.json', { id: 'fixture-static-home', title: "The fixture static site's home shows the change", tags: ['fixture', 'preview'], target: 'any', required: false,
     steps: [{ kind: 'http', name: 'read the heading', method: 'GET', path: '/home.json', status: 200, expect: [{ path: 'heading', equals: 'Fixture static site' }] }] });
   const commit = async (name: string, heading: string, body: string) => {
-    await write('site/home.json', { heading }); await write('site/index.html', `<h1>${heading}</h1>\n<p>${body}</p>\n`);
+    await write('site/home.json', { heading }); await write('site/index.html', `<link rel="stylesheet" href="style.css">\n<h1>${heading}</h1>\n<p>${body}</p>\n<a href="about">About</a>\n<script src="app.js"></script>\n`);
+    await write('site/app.js', `document.title = ${JSON.stringify(body)};\n`); await write('site/style.css', 'h1 { color: teal; }\n'); await write('site/about/index.html', '<a href="../">Home</a>\n');
     git('add', '-A'); git('commit', '-q', '-m', name); shas[name] = git('rev-parse', 'HEAD');
   };
   await commit('main', 'Fixture static site', 'The base branch');
@@ -104,14 +105,16 @@ async function submit(item: Work, name: string) {
 }
 
 /** The loop's merge-writer step as the daemon wires it, its records written through the server as the coordinator, its snapshot read from the server. */
-function loop() {
+function loop(options: { remote?: boolean } = {}) {
   const state = emptyDaemonState(config);
   const record = async (work: Pick<Work, 'id' | 'key'>, event: MergeRecordEvent) => {
     const answer = await call('POST', `work/${work.id}/merge-record`, 'coordinator', event, mergeRecordKey(work, event));
     if (answer.status !== 200) throw new Error(`${answer.status}: ${answer.body.error}`);
     return answer.body;
   };
-  const reads = { ...mergeWriterReads(config, repo, defaultChildRun, { base, record, merger: async () => 'github', environment: { PATH: process.env.PATH } }), advisory: undefined };
+  // A remote loop runs on another host than the server, as a workstation loop beside a hosted server does: the loopback origin it records is one the server cannot reach.
+  const open: typeof openPreview = async (input, opened) => { const preview = await openPreview(input, opened); return options.remote && preview.url ? { ...preview, url: unreachable } : preview; };
+  const reads = { ...mergeWriterReads(config, repo, defaultChildRun, { base, record, merger: async () => 'github', environment: { PATH: process.env.PATH }, itemPreviews: { open } }), advisory: undefined };
   const step = async (ids: string[]) => {
     const work = await Promise.all(ids.map(read));
     await mergeWriterStep({ state, effects: { mergeWriter: reads, persist: async () => {} }, now: Date.now, snapshot: { work }, performed: [] } as unknown as Cycle);
@@ -128,11 +131,15 @@ async function until(run: ReturnType<typeof loop>, ids: string[], target: string
   }
   assert.fail(`${target}'s preview never settled: ${JSON.stringify((await read(target)).preview)}`);
 }
+/** A loopback origin nothing on the server's host answers. */
+let unreachable = '';
+before(async () => { unreachable = `http://127.0.0.1:${await freePort()}`; });
+const files = async (id: string) => Number((await store.pool.query('SELECT count(*) AS n FROM item_preview_files WHERE work_id=$1', [id])).rows[0].n);
 const checkouts = async () => (await readdir(base)).filter(name => name.startsWith(previewCheckoutPrefix) && !name.endsWith('.owner'));
-const open = (key: string, path = '') => fetch(`${url}${previewPath(key)}${path}`);
+const open = (key: string, path = '/', init?: RequestInit) => fetch(`${url}${previewPath(key)}${path}`, init);
 
 test('integration:goal-static-item-preview — a submitted change citing a declared static application case is previewed automatically: the item names an openable link serving that exact change, its case results are durable on the item, and a failed case leaves no passing preview', { timeout: 120_000 }, async () => {
-  const run = loop();
+  const run = loop({ remote: true });
   const item = await change('Static preview of change A');
   await submit(item, 'changeA');
   const work = await until(run, [item.id], item.id, preview => preview?.state === 'running');
@@ -146,14 +153,32 @@ test('integration:goal-static-item-preview — a submitted change citing a decla
   assert.ok(preview.readyAt && !preview.cleanedAt && !preview.endReason);
 
   // The link opens without a token and serves that change, built with the item's own title, sandboxed away from the dashboard's origin.
-  const served = await open(item.key);
+  // The loop that built it runs where the server cannot reach its loopback: the link serves the site it published with its record.
+  await assert.rejects(fetch(preview.origin!), 'the server cannot reach the loop\'s own origin');
+  assert.equal(await files(item.id), 5, 'the built site is published with the running record');
+  const bare = await open(item.key, '?from=dashboard', { redirect: 'manual' });
+  assert.equal(bare.status, 308, 'the link redirects to its directory URL');
+  assert.equal(bare.headers.get('location'), `/preview/${item.key}/?from=dashboard`, 'keeping the query');
+  const served = await open(item.key, '');
   assert.equal(served.status, 200);
+  assert.equal(served.url, `${url}/preview/${item.key}/`);
   const page = await served.text();
   assert.match(page, /Change A is live/);
   assert.match(page, /<p>Static preview of change A<\/p>/);
   assert.match(served.headers.get('content-security-policy') ?? '', /^sandbox allow-scripts/);
+  assert.match(served.headers.get('content-type') ?? '', /^text\/html/);
+  // The page's relative script, style and navigation resolve, as a browser resolves them against the opened URL, under the item's preview.
+  for (const [pattern, type, body] of [[/src="([^"]+)"/, /^text\/javascript/, /Change A is live/], [/href="([^"]+\.css)"/, /^text\/css/, /teal/], [/href="(about)"/, /^text\/html/, /Home/]] as const) {
+    const asset = await fetch(new URL(pattern.exec(page)![1]!, served.url));
+    assert.equal(asset.status, 200, String(pattern));
+    assert.ok(asset.url.startsWith(`${url}/preview/${item.key}/`), asset.url);
+    assert.match(asset.headers.get('content-type') ?? '', type);
+    assert.match(await asset.text(), body);
+  }
+  assert.equal((await open(item.key, '/about', { redirect: 'manual' })).headers.get('location'), `/preview/${item.key}/about/`, 'a directory named without its slash is redirected to it');
   assert.deepEqual(await (await open(item.key, '/home.json')).json(), { heading: 'Fixture static site' });
-  assert.deepEqual(await (await open(item.key, '//example.com/home.json')).json(), { heading: 'Fixture static site' }, 'a // path stays a path on the preview origin');
+  assert.equal((await open(item.key, '//example.com/home.json')).status, 404, 'a // path names no file of the site and reaches no other origin');
+  assert.equal((await open(item.key, '/%2e%2e%2f%2e%2e%2fpackage.json')).status, 404, 'no path leaves the site');
 
   // Durable: the record is the stored document's, as every later read and the coordination snapshot see it.
   assert.deepEqual((await store.workDocument(item.id))!.preview, preview);
@@ -167,6 +192,7 @@ test('integration:goal-static-item-preview — a submitted change citing a decla
   assert.deepEqual(failed.cases.map(entry => [entry.case, entry.result]), [['fixture-static-home', 'fail']]);
   assert.deepEqual({ origin: failed.origin, endReason: failed.endReason, sha: failed.sha }, { origin: null, endReason: 'failed', sha: shas.broken });
   assert.equal((await open(broken.key)).status, 404, 'a failed preview serves nothing');
+  assert.equal(await files(broken.id), 0, 'a failed preview publishes no site');
   assert.equal((await checkouts()).length, 1, 'only the running preview keeps a checkout');
   // A failed preview is not retried on the same commit, and no passing record can be written over a failing case.
   await run.step([item.id, broken.id]);
@@ -180,6 +206,7 @@ test('integration:goal-static-item-preview — a submitted change citing a decla
   assert.equal((await call('POST', `work/${item.id}/close`, 'operator', { kind: 'obsolete', reason: 'Previewed' }, 'close-first')).status, 200);
   await until(run, [item.id, broken.id], item.id, value => value?.state === 'cleaned');
   assert.deepEqual(await checkouts(), []);
+  assert.equal(await files(item.id), 0, 'a cleaned preview\'s published site is deleted');
 });
 
 test('integration:goal-static-preview-lifecycle — superseding or cancelling a preview removes its process and checkout and records its final state; Work details show the link, state and case results; workers gain no producer authority', { timeout: 120_000 }, async () => {
@@ -208,7 +235,7 @@ test('integration:goal-static-preview-lifecycle — superseding or cancelling a 
 
   // Work details: the link, the state and the actual case results; an ended preview names why.
   const panel = renderToStaticMarkup(createElement(PreviewPanel, { preview: second }));
-  for (const text of [`href="/preview/${item.key}"`, 'Running', 'fixture-static-home passed', shas.changeA2!.slice(0, 12), 'site · local runner']) assert.ok(panel.includes(text), text);
+  for (const text of [`href="/preview/${item.key}/"`, 'Running', 'fixture-static-home passed', shas.changeA2!.slice(0, 12), 'site · local runner']) assert.ok(panel.includes(text), text);
   assert.ok(renderToStaticMarkup(createElement(PreviewPanel, { preview: superseded })).includes('Cleaned up · superseded'));
 
   // No producer authority: a worker cannot write a preview record, and the record is no evidence.
@@ -225,6 +252,7 @@ test('integration:goal-static-preview-lifecycle — superseding or cancelling a 
   assert.ok(cleaned.cleanedAt);
   assert.deepEqual(cleaned.cases, second.cases, 'the final state keeps the case results');
   assert.equal((await open(item.key)).status, 404);
+  assert.equal(await files(item.id), 0, 'the cancelled preview\'s published site is deleted');
   await assert.rejects(fetch(second.origin!));
   assert.ok(!serving.some(name => existsSync(join(base, name))));
 
