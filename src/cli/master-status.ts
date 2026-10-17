@@ -12,7 +12,7 @@ import { baseFailureAttention, daemonSummary, loopAttention, readDaemonState } f
 import { timeToMergeBySize } from '../decomposition.js';
 import { stalledReviewCapAttention } from '../daemon/cycle-review-cap.js';
 import { slowCycleAttention } from '../daemon/liveness.js';
-import { promotionSummaryWithLag } from '../daemon/deployment.js';
+import { promotionSummaryWithLag } from '../daemon/promotion-stale.js';
 import { sealRefusalAttention } from '../validation-import.js';
 import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, loopMemoryAttention, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
@@ -113,7 +113,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device.
   const sudo = administration.sudo;
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing refused,
-  // nothing relaunches until it is named here with the answering command; a review settled on a dismissal
+  // nothing relaunches till it is named here with the answering command; a review settled on a dismissal
   // is the stronger statement (GY-100), reported once as the review unobtainable on that commit.
   const unobtainable = unobtainableReviewAttention(status.work, reviews.completed as SettledReviewSession[]);
   const unanswered = unansweredRequestAttention(status.work);

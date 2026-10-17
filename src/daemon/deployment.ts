@@ -10,7 +10,6 @@ import type { MergerMode } from '../merger-mode.js';
 import { localPromotionCycle, type LocalReleasePorts, type LocalRunOutcome } from './promotion-local.js';
 import { actionableIntervalMs } from './liveness.js';
 import { pinningVerify, retryPendingPin } from '../master/known-good.js';
-import type { AttentionItem } from '../master/attention.js';
 import { installDirectory } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
 import { boundDeployment, type ContainmentRetention, type DeploymentObservation, deploymentObservationSchema, message, type PromotionState, retainedContainments } from './state.js';
@@ -607,39 +606,15 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
 }
 
 /**
- * GY-1894: the master status promotion summary crossed with the release-lag read. `tip` is the base
- * tip the lag report read, `awaiting` the deliveries awaiting promotion on it, `now` the reading's
- * time, `intervalMs` the loop's interval: the ledger is reused for the window `promotionReadWindows`
- * grants, so the attention fires only once that window has passed — never while the drive reads on
- * schedule. Past it, a ledger naming a tip the base ref moved past while deliveries wait is the stuck drive: the attention names both SHAs and the waiting deliveries; an up-to-date reason gives way.
- */
-function stalePromotionTip(state: PromotionState, observed: { tip: string | null; awaiting?: readonly string[]; now?: number; intervalMs?: number } | null | undefined) {
-  const awaiting = observed?.awaiting ?? [], tip = observed?.tip ?? null, now = observed?.now ?? Date.now(), ledgerMs = promotionReadWindows(observed?.intervalMs ?? 0).ledgerMs;
-  if (!tip || !state.mainSha || !awaiting.length || tip.startsWith(state.mainSha) || state.mainSha.startsWith(tip) || (state.ledgerReadAt && now - Date.parse(state.ledgerReadAt) < ledgerMs)) return null;
-  const short = (sha: string) => sha.slice(0, 12), waiting = `${awaiting.join(', ')} await promotion on the base tip ${short(tip)} the checkout reads now`;
-  const attention: AttentionItem = { subject: 'promotion', role: 'master', approvedBy: null, human: false, humanOnly: null,
-    text: `The loop's promotion ledger, last read ${state.ledgerReadAt ?? 'never'}, still names ${short(state.mainSha)} the base branch tip and ${short(state.promotedSha ?? state.mainSha)} production, while ${waiting}: the drive is past its ${Math.round(ledgerMs / 60_000)}-minute read window without seeing the move, so no candidate is cut for it`,
-    next: `Read the promotion line in master status; a cycling loop re-reads the tip and cuts within one window, else restart it (systemctl --user restart graphyard-master) or dispatch ${promotionWorkflow} with promote=true by hand` };
-  return { attention, reason: state.reason?.startsWith(promotionUpToDateReason) ? `The ledger last read ${short(state.mainSha)} as the base tip; past its read window the checkout names ${short(tip)}, where ${waiting}` : state.reason };
-}
-
-/**
  * What `master status` reports of the promotion drive: the last promoted SHA, how far production is
  * behind, when the next promotion is due, and the newest candidates with each one's PR count, the
- * merges queued behind it and its advisory soak (GY-1513): `running` while its run is, else the run's
- * conclusion; null when no soak run of that SHA has been read. `observed` crosses it with the lag read (GY-1894).
+ * merges queued behind it and its advisory soak (GY-1513): `running` while its run is, else the
+ * run's conclusion; null when no soak run of that SHA has been read.
  */
-export function promotionStatus(state: PromotionState | null | undefined, observed?: { tip: string | null; awaiting?: readonly string[]; now?: number; intervalMs?: number } | null) {
-  if (!state) return { lastPromotedSha: null, promotedAt: null, behind: null, nextDueAt: null, inFlight: false, checkedAt: null, candidates: [], reason: 'The loop has not checked promotion yet', attention: null };
-  const stale = stalePromotionTip(state, observed);
+export function promotionStatus(state: PromotionState | null | undefined) {
+  if (!state) return { lastPromotedSha: null, promotedAt: null, behind: null, nextDueAt: null, inFlight: false, checkedAt: null, candidates: [], reason: 'The loop has not checked promotion yet' };
   return { lastPromotedSha: state.promotedSha, promotedAt: state.promotedAt, behind: state.behind, nextDueAt: state.nextDueAt, inFlight: state.inFlight, checkedAt: state.checkedAt,
-    candidates: (state.candidates ?? []).map(candidate => ({ id: candidate.id, sha: candidate.sha, prs: candidate.prs, queued: candidate.queued, soak: soakOf(state.soaks, candidate) })), reason: stale?.reason ?? state.reason, attention: stale?.attention ?? null };
-}
-
-export function promotionSummaryWithLag(state: PromotionState | null | undefined, lag: { baseTip: string | null; promotion?: { pending: string[] } | null }, attention: AttentionItem[], now: number, intervalMs?: number) {
-  const summary = promotionStatus(state, { tip: lag.baseTip, awaiting: lag.promotion?.pending, now, intervalMs });
-  if (summary.attention) attention.push(summary.attention);
-  return summary;
+    candidates: (state.candidates ?? []).map(candidate => ({ id: candidate.id, sha: candidate.sha, prs: candidate.prs, queued: candidate.queued, soak: soakOf(state.soaks, candidate) })), reason: state.reason };
 }
 
 /**
