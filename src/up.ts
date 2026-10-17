@@ -231,7 +231,7 @@ export interface UpDependencies {
    * coordinator, operator-agent and approver) at a status read; one that drew no answer is left out.
    * Absent, nothing is judged stale; the real dependencies read recordedCredentialAnswers.
    */
-  credentialAnswers?(adminToken: string | null): Promise<{ identity: string; status: number; listed?: boolean }[]>;
+  credentialAnswers?(adminToken: string | null): Promise<{ identity: string; status: number; listed?: boolean | null }[]>;
   /**
    * GY-1851: stop the master loop and wait until its process has exited, so nothing holds the old
    * cursor in memory to write it again; answers the systemd unit it stopped, or null for a loop run
@@ -449,14 +449,16 @@ const masterJson = (root: string) => readFile(resolve(root, '.graphyard/master.j
  * GY-1851: GET /api/status at SERVER with each credential master.json records (the coordinator's,
  * the operator-agent's and the approver's), answering the HTTP status of each. A credential with no
  * readable file, or a request that drew no answer, is left out: only the plane's answer judges it.
- * With ADMIN, a refused agent identity the plane still lists (revoked, say) is marked `listed`: its
- * database row stands, so the database is not fresh.
+ * A refused agent identity carries `listed`: true when the plane's operator-agent listing (read with
+ * ADMIN) still holds it (revoked, say: its database row stands, so the database is not fresh), false
+ * when the listing confirms it absent, and null when no listing was read (no ADMIN, or the request
+ * failed): its absence is then unknown.
  */
 export async function recordedCredentialAnswers(root: string, server: string, fetcher: typeof fetch = fetch, admin: string | null = null) {
   const config = await masterJson(root);
   const recorded = [['coordinator', null, config?.credentialFile], ['operator-agent', config?.operatorAgent?.id, config?.operatorAgent?.credentialFile], ['approver', config?.approver?.id, config?.approver?.credentialFile]] as const;
   const call = (path: string, token: string) => fetcher(`${server.replace(/\/+$/, '')}/api/${path}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000) });
-  const answers: { identity: string; status: number; listed?: boolean }[] = [];
+  const answers: { identity: string; status: number; listed?: boolean | null }[] = [];
   let listing: unknown[] | null | undefined;
   for (const [identity, id, file] of recorded) {
     if (typeof file !== 'string') continue;
@@ -464,9 +466,10 @@ export async function recordedCredentialAnswers(root: string, server: string, fe
     if (token.length < 32) continue;
     const status = await call('status', token).then(response => response.status, () => null);
     if (status === null) continue;
-    if (status === 401 && admin && typeof id === 'string') {
-      listing ??= await call('operator-agents', admin).then(async response => response.ok ? await response.json() as unknown[] : null, () => null);
-      if (Array.isArray(listing)) { answers.push({ identity, status, listed: listing.some((entry: any) => entry?.id === id) }); continue; }
+    if (status === 401 && typeof id === 'string') {
+      if (admin) listing ??= await call('operator-agents', admin).then(async response => response.ok ? await response.json().catch(() => null) as unknown[] | null : null, () => null);
+      answers.push({ identity, status, listed: Array.isArray(listing) ? listing.some((entry: any) => entry?.id === id) : null });
+      continue;
     }
     answers.push({ identity, status });
   }
@@ -806,13 +809,16 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     // GY-1851: an install whose recorded credentials the control plane refuses (401) is a fresh
     // database behind a kept install directory: a new installation. Its credentials are re-issued
     // through the install, master init and master autonomy, and the loop starts a fresh cursor.
-    // An identity the plane still lists (revoked, say) is no fresh database, and is left to master autonomy's own refusal.
+    // An identity the plane still lists (revoked, say) is no fresh database, and is left to master autonomy's own refusal;
+    // a refused identity whose absence no listing confirmed leaves the state untouched, so a later run judges it again.
     if (state.completed.includes('control-plane') && !state.reissue?.length && deps.credentialAnswers) {
       const admin = await deps.operatorToken?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
       const answers = await deps.credentialAnswers(admin).catch(() => []);
       const refused = answers.filter(answer => answer.status === 401).map(answer => answer.identity);
-      const listed = answers.filter(answer => answer.status === 401 && answer.listed).map(answer => answer.identity);
+      const listed = answers.filter(answer => answer.status === 401 && answer.listed === true).map(answer => answer.identity);
+      const unknown = answers.filter(answer => answer.status === 401 && answer.listed === null).map(answer => answer.identity);
       if (listed.length) deps.emit({ kind: 'note', text: `The control plane refused the recorded ${listed.join(', ')} credential${listed.length > 1 ? 's' : ''} (401) but still lists the identit${listed.length > 1 ? 'ies' : 'y'}: its database is not fresh (a revoked or rotated identity), so nothing is re-issued; restore it through the operator-agent API or choose another identity in .graphyard/master.json.` });
+      else if (unknown.length) deps.emit({ kind: 'note', text: `The control plane refused the recorded ${unknown.join(', ')} credential${unknown.length > 1 ? 's' : ''} (401), but its operator-agent listing could not be read (${admin ? 'GET /api/operator-agents failed' : "the operator's admin credential is not on this machine"}), so nothing confirms a fresh database and nothing is re-issued; rerun graphyard up once the listing answers.` });
       else if (refused.length) {
         state.reissue = refused;
         state.completed = state.completed.filter(name => !reissueSteps.includes(name));

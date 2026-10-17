@@ -83,14 +83,15 @@ test('unit:reinstall-reissues-stale-credentials — up re-issues the coordinator
     if (joined === 'master restart') { await stopLoop(); await startLoop(); return { code: 0, stdout: '{}' }; }
     return { code: 0, stdout: '{}' };
   };
-  let clock = 0, stops = 0;
+  let clock = 0, stops = 0, admin = true, listingFails = false;
+  const fetcher = (): typeof fetch => async (input, init) => listingFails && String(input).endsWith('/api/operator-agents') ? new Response('{}', { status: 503 }) : planeFetch(plane)(input, init);
   const deps = (events: UpEvent[]): UpDependencies => ({
     root, pollMs: 1, emit: event => { events.push(event); }, cli,
     now: () => clock, sleep: async ms => { clock += ms; await yieldTurn(); },
     serverUrl: async () => SERVER, masterToken: async () => MASTER,
-    operatorToken: async file => file === OPERATOR_TOKEN ? ADMIN : null,
+    operatorToken: async file => file === OPERATOR_TOKEN && admin ? ADMIN : null,
     status: async () => green(loop !== null),
-    credentialAnswers: admin => recordedCredentialAnswers(root, SERVER, planeFetch(plane), admin),
+    credentialAnswers: token => recordedCredentialAnswers(root, SERVER, fetcher(), token),
     stopLoop: async () => { stops++; await stopLoop(); return { unit: null }; },
     publishOnboarding: async () => null, onboardingMerged: async () => true,
   });
@@ -163,4 +164,23 @@ test('unit:reinstall-reissues-stale-credentials — up re-issues the coordinator
   assert.equal(await credential('approver'), kept.approver);
   assert.equal(stops, 1); assert.equal((await archives()).length, 1);
   assert.ok(revoked.some(event => event.kind === 'note' && /refused the recorded approver credential \(401\) but still lists the identity: its database is not fresh/.test(event.text)), JSON.stringify(revoked));
+
+  // With no admin credential, or a failed listing, the revoked identity's absence is unknown: nothing
+  // is re-issued and up.json keeps its steps, so the run after the listing answers again still sees it listed.
+  const upState = async () => JSON.parse(await readFile(join(root, '.graphyard/up.json'), 'utf8'));
+  for (const [noAdmin, fails, why] of [[true, false, /admin credential is not on this machine/], [false, true, /GET \/api\/operator-agents failed/]] as const) {
+    admin = !noAdmin; listingFails = fails;
+    const blind: UpEvent[] = [], kept = { calls: calls.length, state: await upState() };
+    await runUp(request, deps(blind));
+    assert.deepEqual(calls.slice(kept.calls).filter(args => args[0] === 'install' || ['init', 'autonomy', 'restart'].includes(args[1])), []);
+    assert.equal((await upState()).reissue ?? null, null); assert.deepEqual((await upState()).completed, kept.state.completed);
+    assert.equal((await upState()).goal ?? null, kept.state.goal ?? null); assert.equal((await upState()).onboardingWork ?? null, kept.state.onboardingWork ?? null);
+    assert.ok(blind.some(event => event.kind === 'note' && /refused the recorded approver credential \(401\), but its operator-agent listing could not be read/.test(event.text) && why.test(event.text)), JSON.stringify(blind));
+    assert.equal(stops, 1); assert.equal((await archives()).length, 1);
+  }
+  admin = true; listingFails = false;
+  const recovered: UpEvent[] = [], kept2 = calls.length;
+  assert.equal((await runUp(request, deps(recovered))).exitCode, 0);
+  assert.deepEqual(calls.slice(kept2).filter(args => args[0] === 'install' || ['init', 'autonomy', 'restart'].includes(args[1])), []);
+  assert.ok(recovered.some(event => event.kind === 'note' && /still lists the identity: its database is not fresh/.test(event.text)), JSON.stringify(recovered));
 });
