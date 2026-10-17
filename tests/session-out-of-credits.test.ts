@@ -9,7 +9,6 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { emptyDaemonState, failoverKey, runCycle, type DaemonEffects, type DaemonState, type LaunchedSession } from '../src/master-daemon.js';
 import { approverRoleHealth, approverSessionName, masterConfigSchema, observedExhaustions, recordObservedExhaustion, selectAccount, selectApproverAccount, unknownResetHoldMs, type MasterConfig } from '../src/master.js';
-import { outOfCreditsScreen } from '../src/fleet.js';
 import { detectRuntimeExhaustion } from '../src/master/environments.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -38,6 +37,8 @@ const notice = "You're out of usage credits. Run /usage-credits to keep using Fa
 
 test('unit:out-of-credits-session-fails-over-at-once — the screen is the account\'s exhaustion wherever the runtime draws it, its first line alone is not the screen, and a reviewer session stopped on it is failed over in one cycle: account held for the bounded hour, request relaunched on the next eligible account, no never-started attempt, and the fleet reads the account ineligible', async () => {
   // Detection first, as the loop judges it: the stopped-session read of a claude pane.
+  // Imported here so a checkout without the detection fails this case rather than the file's load.
+  const { outOfCreditsScreen } = await import('../src/fleet.js');
   const judged = outOfCreditsScreen(screen)!;
   assert.deepEqual(judged, { reason: notice, resetsAt: null }, 'the screen names no reset, so the hold is bounded');
   assert.deepEqual(detectRuntimeExhaustion(screen, 'claude', Date.now()), judged, 'the loop\'s stopped-session judge reads the screen');
