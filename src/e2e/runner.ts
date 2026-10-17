@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { candidateTagPrefix, contractPendingCases, gitIn, readRecords, servedRevision, type ReleaseCandidate } from '../release-candidate.js';
 import { contractFile, describeStep, loadCases, loadContract, registeredRevision, scenarioDefinition, type Api, type CaseFile, type E2eStep, type ReleaseContract } from './case.js';
 import { installSecretsDirectory, loadSecrets, redact, redactValues, runAgentStep, runCommandStep, runProcess, stepEnvironment, type ProcessRunner, type StepRecord } from './steps.js';
+import type { ExternalRunResult, ExternalVerdict } from '../runner-report.js';
+import { importedEvidenceArtifacts, type EvidenceArtifact } from '../model/evidence.js';
 
 /**
  * The E2E case runner (GY-1351): runs repository cases (src/e2e/case.ts) against one base URL with
@@ -325,6 +327,28 @@ export function releaseVerdict(report: Pick<E2eReport, 'runId' | 'sha' | 'cases'
     acceptedFlaky: of('flaky').filter(outcome => outcome.required && accepted(outcome.id)),
     optionalFailures: report.cases.filter(outcome => !outcome.required && (outcome.verdict === 'failed' || outcome.verdict === 'flaky')),
   };
+}
+
+/** One blocking case of an imported run: its verdict as given, why a blocked one could not run, and where its own record lives. */
+export interface ImportedBlockingCase { id: string; verdict: ExternalVerdict; reason?: string; evidence: EvidenceArtifact[] }
+
+/**
+ * The release verdict of an imported run (GY-1842, `graphyard-external-run-v1`). The import keeps
+ * every verdict as the producer gave it — nothing is dropped or read as failed — and it blocks
+ * exactly as the runner's own result would: a required case that failed blocks, a flaky one blocks
+ * unless an evidence decision accepts it (bound to the case, the run id and the exact head, never
+ * to a digest-only run, the same rule `releaseVerdict` holds), and optional cases never block. A
+ * required `blocked` case blocks like a failed one: it did not run to a pass, and its missing
+ * precondition is the producer's own record of why. A required `unrun` case blocks on its own
+ * too: an import has no `stoppedBy` chain, so the run that stopped before reaching it would have
+ * carried the required failure it stopped at, and either way the head is not releasable.
+ */
+export function importedRunVerdict(run: ExternalRunResult, acceptances: readonly FlakyAcceptance[] = []) {
+  const accepted = (id: string) => !!run.sha && acceptances.some(entry => entry.case === id && entry.runId === run.runId && entry.sha === run.sha);
+  const blocking = run.cases.filter(outcome => outcome.required && (outcome.verdict === 'failed' || outcome.verdict === 'blocked' || outcome.verdict === 'unrun'
+    || (outcome.verdict === 'flaky' && !accepted(outcome.id))));
+  return { passed: blocking.length === 0, blocking: blocking.map((outcome): ImportedBlockingCase => ({ id: outcome.id, verdict: outcome.verdict,
+    ...(outcome.reason ? { reason: outcome.reason } : {}), evidence: importedEvidenceArtifacts(outcome.evidence) })) };
 }
 
 /** The run id one attempt is recorded under: the run's own for a single attempt, `RUN:attempt-N` when a case took several. */
