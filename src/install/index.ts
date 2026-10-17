@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
-import { chmod, readdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, link, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 import { dirname, resolve } from 'node:path';
@@ -1253,11 +1253,18 @@ export async function applyInstall(session: InstallSession, plan: InstallPlan): 
   if (session.restore) {
     // Exactly the reviewed plan's writes, then a re-read that must match the record.
     const restore = plan as unknown as ProtectionRestorePlan;
-    const { verified } = await applyRestore(githubCli(session.context.transport), session.restore, restore.changes);
-    return { ...restore, restored: true, verified } as unknown as InstallSummary;
+    const release = await acquireApplyLock(session.directory, session.deps.now());
+    try {
+      const { verified } = await applyRestore(githubCli(session.context.transport), session.restore, restore.changes);
+      return { ...restore, restored: true, verified } as unknown as InstallSummary;
+    } finally { await release(); }
   }
-  try { return await performInstall(session, plan); }
-  catch (error: any) {
+  try {
+    refuseUnready(session, plan);
+    await prepareInstallDirectory(session.directory, session.root);
+    const release = await acquireApplyLock(session.directory, session.deps.now());
+    try { return await performInstall(session, plan); } finally { await release(); }
+  } catch (error: any) {
     if (error instanceof InstallPaused) throw error;
     const message = session.vault.scrub(String(error?.message ?? error));
     throw message === error?.message ? error : new Error(message);
@@ -1283,14 +1290,61 @@ async function observeOnlyCreated(session: InstallSession) {
   } catch { return false; }
 }
 
-async function performInstall(session: InstallSession, plan: InstallPlan): Promise<InstallSummary> {
-  const { adapter, context, deps, vault } = session;
+/**
+ * The gate comes before anything is written, so "changed nothing" is literally true: at this point
+ * not even the install directory, its lock or a credential file exists yet for a first install.
+ */
+function refuseUnready(session: InstallSession, plan: InstallPlan) {
   if (session.mode !== 'apply') throw new Error('Apply requires a session prepared in apply mode; --plan sessions create nothing');
-  const log = (line: string) => deps.log(vault.scrub(line));
-  // The gate comes before anything is written, so "changed nothing" is literally true: at this
-  // point not even a credential file exists yet for a first install.
   const blocked = plan.preflight.filter(item => !item.ok);
   if (blocked.length) throw new Error(`Preflight is incomplete; the installer changed nothing.\n${blocked.map(item => `- ${item.name}: ${item.detail}${item.fix ? `\n  ${item.fix.startsWith('HUMAN:') ? '' : 'Run: '}${item.fix}` : ''}`).join('\n')}`);
+}
+
+/** The exclusive lock an `install --apply` holds on its installation directory for the whole apply (GY-1876). */
+export const applyLockFile = (directory: string) => resolve(directory, 'apply.lock');
+const processAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error: any) { return error?.code === 'EPERM'; } };
+/** A holder on another machine cannot be probed, so only one on this machine whose process is gone is stale. */
+function liveHolder(text: string): { pid: number; host: string; startedAt: string } | null {
+  let holder: any;
+  try { holder = JSON.parse(text); } catch { return null; }
+  if (!Number.isSafeInteger(holder?.pid) || holder.pid <= 0 || typeof holder.host !== 'string') return null;
+  return holder.host !== hostname() || processAlive(holder.pid) ? holder : null;
+}
+
+/**
+ * Takes the apply lock, or refuses naming the pid that holds it, before this apply writes anything
+ * under the directory or to GitHub, the vault or the provider. The lock is published whole with
+ * link(), which never replaces; one left by a process that is gone is moved aside and reclaimed,
+ * and put back if a live apply took it in between. Answers the release, which removes only this
+ * apply's own lock.
+ */
+async function acquireApplyLock(directory: string, now: number): Promise<() => Promise<void>> {
+  const file = applyLockFile(directory);
+  const content = `${JSON.stringify({ pid: process.pid, host: hostname(), startedAt: new Date(now).toISOString(), nonce: randomBytes(8).toString('hex') })}\n`;
+  const temporary = `${file}.${randomBytes(8).toString('hex')}.tmp`;
+  await writeFile(temporary, content, { mode: 0o600, flag: 'wx' });
+  try {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        await link(temporary, file);
+        return async () => { if (await readFile(file, 'utf8').catch(() => null) === content) await unlink(file).catch(() => {}); };
+      } catch (error: any) { if (error?.code !== 'EEXIST') throw error; }
+      const standing = await readFile(file, 'utf8').catch(() => null);
+      if (standing === null) continue;
+      const holder = liveHolder(standing);
+      if (holder) throw new Error(`Another install --apply (pid ${holder.pid} on ${holder.host}, since ${holder.startedAt}) holds the lock ${file}, so this apply wrote nothing; let it finish, then apply again`);
+      const aside = `${file}.${randomBytes(8).toString('hex')}.stale`;
+      try { await rename(file, aside); } catch (error: any) { if (error?.code === 'ENOENT') continue; throw error; }
+      if (await readFile(aside, 'utf8') !== standing) await link(aside, file).catch(() => {});
+      await unlink(aside);
+    }
+  } finally { await unlink(temporary).catch(() => {}); }
+  throw new Error(`Could not take the lock ${file}: other applies kept taking it; apply again`);
+}
+
+async function performInstall(session: InstallSession, plan: InstallPlan): Promise<InstallSummary> {
+  const { adapter, context, deps, vault } = session;
+  const log = (line: string) => deps.log(vault.scrub(line));
   await materializeInstall(session);
 
   const observation = await adapter.observe(context);
