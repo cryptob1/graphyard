@@ -9,6 +9,7 @@ import { pendingCaseChanges } from './master-status-case-changes.js';
 import { installationMerger } from '../executor.js';
 import { leftBehindCheckoutAttention, readHeldCli } from '../daemon/upgrade.js';
 import { baseFailureAttention, daemonSummary, loopAttention, readDaemonState } from '../master-daemon.js';
+import { timeToMergeBySize } from '../decomposition.js';
 import { stalledReviewCapAttention } from '../daemon/cycle-review-cap.js';
 import { slowCycleAttention } from '../daemon/liveness.js';
 import { promotionStatus } from '../daemon/deployment.js';
@@ -41,7 +42,7 @@ export { cycleBudget } from '../daemon/metrics.js';
 export { approveScopeRequest } from './master-scope.js';
 
 // The queue-head observation lag, lease health and stall composition live in `stall-attention.ts`;
-// the report and the tests read them from here, as they always have.
+// the report and the tests read them from here.
 export { observationThroughputStatus } from './stall-attention.js';
 // The attention builders live in `status-attention.ts`; the report reads them from here.
 export { approverLaunchAttention, mergeStallAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
@@ -85,7 +86,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const worktrees = worktreesDirectory(root);
   const inventory = await timedStep('worktrees', () => statusWorktreeInventory(root).catch(() => ({ entries: [], at: null, cached: false }))), trees = inventory.entries, reclaimPlan = planWorktreeReclaim(trees, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
   const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
-  // The loop's latest pass and the standing disk line, from the cursor, decide whether a low reading is answered and where it recovers (GY-1784).
+  // The loop's latest pass and the standing disk line decide whether a low reading is answered and where it recovers (GY-1784).
   const cursor = 'error' in daemonState ? null : daemonState;
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan, { reclaimable: 'unreadable' in inventory && inventory.unreadable ? null : reclaimableNow(reclaimPlan, trees, snapshot.work, { idleMs: reclaimIdleMs(master), now: Date.now(), held: 'held' in inventory ? inventory.held : undefined }), pass: worktreePassOf(cursor?.reclaim), standing: standingDiskLine(cursor?.faults.open, 'disk-pressure'), now: Date.now() });
   // The managed root, often its own volume, has its own minimum and budget.
@@ -106,6 +107,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // A failed check a since-fixed base breakage explains names the refresh that clears it (GY-793).
   // GY-1810: a review-gate row saying the loop relaunches the review on its own gives way to the stalled review-cap step wherever the step, not a review, holds the head.
   const status = nameBaseBreaks(stalledReviewCapAttention(pipelined, snapshot.work, cursor, master.reviewRoundCap, Date.parse(snapshot.now)), snapshot.work);
+  // Time to merge by planned source-file band (GY-1858), over the timelines attached above.
+  const itemSize = timeToMergeBySize(snapshot.work, Date.parse(snapshot.now));
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device.
   const sudo = administration.sudo;
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
@@ -114,8 +117,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // request (GY-100), reported once as the review that cannot be obtained on that commit.
   const unobtainable = unobtainableReviewAttention(status.work, reviews.completed as SettledReviewSession[]);
   const unanswered = unansweredRequestAttention(status.work);
-  // An open item the control plane names no action for. Those waiting on another item or on a
-  // live session are accounted and raise nothing; what is left is named, with what is missing.
+  // An open item the control plane names no action for. Waiting on another item or a live
+  // session raises nothing; what is left is named, with what is missing.
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
   const liveness = livenessStatus(snapshot); // GY-201: open items holding no obligation, with ages
   // Requests, conflicts, stalls, executors, owed judgments: derivedAttention, which the loop reads too.
@@ -124,7 +127,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // The slow intervention report: the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, executors: releases.executors, promotion: 'error' in daemonState ? null : promotionWait(daemonState) }));
-  // GY-1773: a loop running a held snapshot ahead of the dirty checkout it left behind, named beside the lag while the pin stands.
+  // GY-1773: a loop running a held snapshot ahead of the dirty checkout it left behind, named beside the lag.
   lag.attention.push(...leftBehindCheckoutAttention(cycling?.upgrade?.snapshot, readHeldCli(root), root));
   // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406),
   // queue-head lag (GY-492), slow renewals (GY-558) and conflict hotspots (GY-566).
@@ -161,18 +164,19 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     runtime, reviewRuntime, humanOnly, masterApi, decisions, approvals: cycling?.approvals ?? [],
   });
   return {
-    // The merger setting (src/merger-mode.ts): first in the report while the control plane is the merge writer.
+    // The merger setting (src/merger-mode.ts): first in the report.
     ...mergeWriterLine(coordinator),
     ...status, ...attributed, ...faulted(attributeAttention(attributed.attentionItems, resources.readings)), resources: resources.report,
     unavailable: sections.unavailable,
     pendingCaseChanges: caseChanges,
     docsBudget: docs,
-    // GY-1511: the Herdr server holding this install's agents, and the one command that opens them on this host.
+    // GY-1511: the Herdr server holding this install's agents, and the command that opens them.
     herdr: { instance: master.herdrInstance ?? null, attach: herdrAttachCommand(master.herdrInstance ?? null), running: runtime.available },
     delivery: delivery.report,
-    // The loop's promotion drive (GY-1302): the last promoted SHA, merges production is behind, the next due promotion.
+    // The promotion drive (GY-1302): last promoted SHA, production lag, next due promotion.
     promotion: promotionStatus('error' in daemonState ? null : daemonState.promotion),
     launches: { prepare: launches.prepare }, // GY-1836: the day's worktree preparation p50/p90
+    itemSize,
     // Every open item the control plane names no action for, with the account it names and how
     // long it has held its failing gate.
     actionless: { bound: stallBoundMs, items: actionless },
@@ -183,7 +187,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // Commits no reviewer session ever got a verdict on, with the dismissed review.
     unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
     ...sectionsReport,
-    // Open goals (GY-1417) with their stage and who acts next: acceptance drafting, awaiting approval, planned, delivering.
+    // Open goals (GY-1417) with their stage and who acts next.
     goals: await sections.optional('goals', 'GET /api/goals', async () => (await masterApi('goals?open=1&view=summary')).goals, () => null),
     // Doctor runs: accepted, else cursor's.
     doctor: coordinator?.doctor?.length ? coordinator.doctor : cycling?.doctor?.recent ?? null,
