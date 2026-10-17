@@ -1289,15 +1289,40 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       if (onboarding) onboarding = { ...onboarding, waitingFor: [], merged: true };
       state.onboardingPullRequest = null; await writeState(deps.root, state);
     }
+    /**
+     * GY-1915: the credential the goal step files with. Recording a goal needs admin or an operator
+     * agent holding intent:create, and since GY-1885 this install's own default credential is a
+     * worker: handing the child no token filed with that worker and died with 403. The operator's
+     * admin credential (as merger-setting resolves it: the saved file, else a host install's one-time
+     * claim redeemed here once and held in memory), else the master's operator-agent identity
+     * master-autonomy issued earlier in the run. Null when this machine holds neither.
+     */
+    const goalCredential = async (): Promise<string | null> => {
+      let admin = await deps.operatorToken?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
+      if (!admin && claim && !operator && deps.redeemClaim) { operator = await deps.redeemClaim(claim).catch(() => null); if (operator) claim = null; }
+      admin ??= operator;
+      if (admin) return admin;
+      const file = (await masterJson(deps.root))?.operatorAgent?.credentialFile;
+      const token = typeof file === 'string' ? (await readFile(resolve(file), 'utf8').catch(() => '')).trim() : '';
+      return token.length >= 32 ? token : null;
+    };
     if (request.goalFile) {
       await step('goal', async () => {
         // A goal record, as `graphyard goal FILE` submits it, so the acceptance and planner roles run (GY-1443).
         const goal = goalSubmission(await readFile(resolve(deps.root, request.goalFile!), 'utf8'));
         const file = resolve(deps.root, '.graphyard/up-goal.json');
         await writeFile(file, `${JSON.stringify(goal, null, 2)}\n`, { mode: 0o600 });
+        // The credential is resolved before the request id is minted, so a missing one stops here
+        // without touching the state the rerun replays (the merger-setting step resolves first too).
+        const credential = await goalCredential();
+        if (!credential) {
+          const missing = `neither the operator's admin credential nor the master's operator-agent credential (intent:create) is on this machine${state.operatorTokenFile ? ` (${state.operatorTokenFile} is unreadable)` : ''}, and the install's worker credential holds no intent:create, so the goal cannot be filed`;
+          const where = state.identitiesHost ? `run graphyard goal ${request.goalFile} with it on ${state.identitiesHost}` : 'place one on this machine';
+          throw new UpStop(`goal: ${missing}; ${where} and rerun ${rerun()}`, upExitCodes.prerequisite);
+        }
         // The request id is saved before the first try: a rerun replays the same create, which the control plane answers once.
         if (!state.goalRequest) { state.goalRequest = randomUUID(); await writeState(deps.root, state); }
-        const created = parseJson(await run('goal', ['goal', file], { env: { GRAPHYARD_REQUEST_ID: state.goalRequest } }));
+        const created = parseJson(await run('goal', ['goal', file], { env: { GRAPHYARD_TOKEN: credential, GRAPHYARD_REQUEST_ID: state.goalRequest } }));
         state.goal = created?.key ?? 'created';
         return `submitted as ${state.goal}`;
       });
