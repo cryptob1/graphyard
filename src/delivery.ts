@@ -69,6 +69,8 @@ const notificationSchema = z.object({ environment: name, provider: z.string().tr
 export interface ObservedIdentity { environment: string; releaseId: string | null; sourceSha: string; artifact: string | null; observedAt: string; observer: string; source: 'endpoint' | 'producer' }
 /** The event every changed reading of an environment's live identity appends. */
 export const identityObservedKind = 'delivery.identity-observed';
+/** The newest identity is the latest observed; insertion order only breaks ties. */
+const identityNewest = `(payload->>'observedAt')::timestamptz DESC, seq DESC`;
 /** What a live identity endpoint answers: the release record it runs, its source commit and artifact. */
 export const liveIdentitySchema = z.object({ release: name.optional(), sourceSha: sha, artifact: candidateArtifact.optional() });
 export type LiveIdentity = (environment: string) => Promise<z.infer<typeof liveIdentitySchema>>;
@@ -757,10 +759,13 @@ export class Delivery {
   /**
    * GY-1906: append an environment's observed live identity when it differs from the newest one
    * recorded, or that one predates the environment's newest candidate selection, so the identity
-   * history holds every change and nothing else.
+   * history holds every change and nothing else. Newest means latest observed, not latest written:
+   * a delayed reading older than the newest is not appended, and under concurrent writers the view
+   * still reads the latest observed, so an older exact match never erases newer drift.
    */
   private async recordIdentity(db: pg.PoolClient, reading: ObservedIdentity) {
-    const latest = (await db.query('SELECT payload FROM events WHERE kind=$1 AND work_id IS NULL AND payload->>\'environment\'=$2 ORDER BY seq DESC LIMIT 1', [identityObservedKind, reading.environment])).rows[0]?.payload as ObservedIdentity | undefined;
+    const latest = (await db.query(`SELECT payload FROM events WHERE kind=$1 AND work_id IS NULL AND payload->>'environment'=$2 ORDER BY ${identityNewest} LIMIT 1`, [identityObservedKind, reading.environment])).rows[0]?.payload as ObservedIdentity | undefined;
+    if (latest && Date.parse(reading.observedAt) < Date.parse(latest.observedAt)) return false;
     const selectedAt = (await db.query(`SELECT payload->'promotion'->>'at' AS at FROM events WHERE kind=$1 AND work_id IS NULL AND payload->'promotion'->>'environment'=$2 ORDER BY seq DESC LIMIT 1`, [candidatePromotionKind, reading.environment])).rows[0]?.at as string | undefined;
     const same = latest && latest.sourceSha === reading.sourceSha && latest.releaseId === reading.releaseId && latest.artifact === reading.artifact;
     if (same && !(selectedAt && Date.parse(latest.observedAt) < Date.parse(selectedAt))) return false;
@@ -893,7 +898,7 @@ export class Delivery {
       entry.selections.push(row.payload as CandidateSelection); byEnvironment.set(row.environment, entry);
     }
     // GY-1906: each candidate-selected environment's newest observed live identity.
-    const identities = byEnvironment.size ? (await this.store.pool.query(`SELECT DISTINCT ON (payload->>'environment') payload FROM events WHERE kind=$1 AND work_id IS NULL AND payload->>'environment' = ANY($2::text[]) ORDER BY payload->>'environment', seq DESC`,
+    const identities = byEnvironment.size ? (await this.store.pool.query(`SELECT DISTINCT ON (payload->>'environment') payload FROM events WHERE kind=$1 AND work_id IS NULL AND payload->>'environment' = ANY($2::text[]) ORDER BY payload->>'environment', ${identityNewest}`,
       [identityObservedKind, [...byEnvironment.keys()]])).rows.map(row => row.payload as ObservedIdentity) : [];
     const environments = [...recorded.filter(state => !byEnvironment.has(state.environmentId)), ...[...byEnvironment].map(([id, { selections, total }]) => candidateEnvironment(id, selections, total, identities.find(entry => entry.environment === id) ?? null))].sort((a, b) => a.environmentId.localeCompare(b.environmentId));
     const releases: Release[] = (await this.store.pool.query('SELECT document FROM releases ORDER BY id,revision DESC')).rows.map(r => r.document);

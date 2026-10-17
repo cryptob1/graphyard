@@ -731,7 +731,8 @@ export function promotionReads(config: MasterConfig, root: string, run: ChildRun
   return {
     ...(options.merger ? { merger: options.merger } : {}), ...(local !== undefined ? { local } : {}),
     ledger: async () => {
-      await git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:refs/remotes/origin/${config.baseBranch}`, '+refs/tags/rc-production/*:refs/tags/rc-production/*', '+refs/tags/rc/*:refs/tags/rc/*', '+refs/tags/rc-soak/*:refs/tags/rc-soak/*', '+refs/tags/rc-seal-check/*:refs/tags/rc-seal-check/*');
+      await git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:refs/remotes/origin/${config.baseBranch}`, '+refs/tags/rc-production/*:refs/tags/rc-production/*', '+refs/tags/rc/*:refs/tags/rc/*', '+refs/tags/rc-soak/*:refs/tags/rc-soak/*', '+refs/tags/rc-seal-check/*:refs/tags/rc-seal-check/*',
+        '+refs/tags/rc-uat/*:refs/tags/rc-uat/*', '+refs/tags/rc-hold/*:refs/tags/rc-hold/*'); // GY-1906: the onboarding-target reader's UAT and hold records.
       const mainSha = (await git('rev-parse', `refs/remotes/origin/${config.baseBranch}^{commit}`)).trim().toLowerCase() || null;
       let promotedSha: string | null = null, promotedAt: string | null = null;
       try {

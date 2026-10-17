@@ -214,6 +214,17 @@ test('integration:goal-exact-live-verification — production observed through t
   const again = await observeSha(first.record.sha, { release: first.record.id, artifact: first.artifact });
   assert.equal(again.status, 200); assert.equal(again.body.duplicate, true, 'the sha observation itself is recorded once');
   assert.equal((await view()).verification.status, 'verified');
+  // A delayed exact reading older than newer drift never erases it: the view reads the latest observed, not the latest written.
+  const tick = () => new Promise(resolve => setTimeout(resolve, 5));
+  await tick(); const delayedAt = new Date(); await tick(); const driftAt = new Date(); await tick();
+  assert.equal((await observeSha(before, { release: 'rc-previous', observedAt: driftAt.toISOString() })).status, 200);
+  assert.equal((await observeSha(first.record.sha, { release: first.record.id, artifact: first.artifact, observedAt: delayedAt.toISOString() })).status, 200);
+  production = await view();
+  assert.equal(production.verification.status, 'mismatched', 'the older exact match does not displace the newer drift');
+  assert.equal(production.observed!.observedAt, driftAt.toISOString());
+  assert.match(production.verification.reasons.join(' '), new RegExp(`Production serves source ${before}, not ${first.record.sha}.*The expected release is still candidate`));
+  assert.equal((await observeSha(first.record.sha, { release: first.record.id, artifact: first.artifact })).status, 200);
+  assert.equal((await view()).verification.status, 'verified');
   const malformed = await observeSha(first.record.sha, { artifact: 'built-somehow' });
   assert.equal(malformed.status, 400, 'an artifact that names no digest or tree is refused');
 
@@ -319,6 +330,11 @@ test('integration:goal-loop-verifies-onboarding-hold-clearance — the loop read
   await unavailable(repair, /no UAT execution of the clearing candidate/, misattributed);
   const unclear = { ...ports, holdRecords: async () => (await ports.holdRecords()).filter(record => record.kind !== 'clear') };
   await unavailable(repair, /has no clear record \(it is open\)/, unclear);
+  // The criterion names GY-1909: with its hold absent, a later cleared hold (GY-1950, cleared at next with exact executions and ancestry) never stands in for it.
+  const substitute = { ...ports, holdRecords: async () => (await ports.holdRecords()).filter(record => !['20261017T132854Z', '20261017T153000Z'].includes(record.candidate ?? '')) };
+  const unnamed = await onboardingTargetReading({ proof: onboardingTargetProof, parent, item: { key: 'GY-1911' } as never, criterion: { ...onboardingCriterion, text: 'onboarding-delivery-defaults passes on the serving release.' }, release: next, now: new Date() }, substitute);
+  assert.equal((unnamed as { result?: string } | null)?.result, 'pass', JSON.stringify(unnamed));
+  await unavailable(next, /holds no onboarding-default-path release hold of GY-1909, the hold the criterion names, so no clear record of it exists/, substitute);
 
   // Registered on the loop: the production reading effects read this checkout's ledger, so the loop's reading of GY-1911 passes on the exact release.
   const effects = readingEffects(() => ({ cliPath: 'graphyard' }) as never, async () => ({}), async () => ({}), { root: ledger, run: defaultChildRun });

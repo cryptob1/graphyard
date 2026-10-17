@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { createServer as netServer, type AddressInfo } from 'node:net';
+import { createServer as httpServer } from 'node:http';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { readLedgerAsync, uatTagPrefix, writeRecordAsync, type AsyncGit } from '../src/release-candidate.js';
@@ -32,7 +33,11 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * `rc` recorded; and the cut and validation work stays one per candidate. GY-1905: every candidate's
  * checkout declares two combined required cases and each UAT run reports both; production advances,
  * one selection at a time and in cut order, only to candidates that passed both, while a failed one
- * is held and production keeps the previous passing release, through the plane restart.
+ * is held and production keeps the previous passing release, through the plane restart. GY-1906:
+ * every cycle the plane's own sweep reads production's identity endpoint (GRAPHYARD_PRODUCTION_IDENTITY_URL)
+ * once a candidate is selected: a stable identity is verified and appends nothing, drift windows are
+ * mismatched while the newest selection stays expected, a failing endpoint records nothing and keeps
+ * the last verdict, and identity events and reads stay one per change and one per sweep, through the restart.
  */
 const minute = 60_000, day = 24 * 60 * minute, soakStep = 10 * minute, start = Date.parse('2030-06-01T00:00:00Z'), waitMinutes = 15;
 const freePort = async () => { const probe = netServer(); await new Promise<void>(done => probe.listen(0, '127.0.0.1', done)); const { port } = probe.address() as AddressInfo; await new Promise<void>(done => probe.close(() => done())); return port; };
@@ -50,6 +55,12 @@ test('unit:soak-exact-candidates — two simulated days of the real promotion cy
   const pgPort = await freePort();
   const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('soak-exact-candidates-pg'), user: 'graphyard', password: 'testing-only', port: pgPort, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('soak_exact');
+  // GY-1906: production's identity endpoint, answering what the test's deployment serves; the plane reads it on every sweep.
+  let identity: { status: number; body?: unknown } = { status: 500 }, identityReads = 0;
+  const endpoint = httpServer((_request, response) => { identityReads += 1; response.writeHead(identity.status, { 'Content-Type': 'application/json' }).end(JSON.stringify(identity.body ?? {})); });
+  await new Promise<void>(done => endpoint.listen(0, '127.0.0.1', done));
+  const identityUrl = process.env.GRAPHYARD_PRODUCTION_IDENTITY_URL;
+  process.env.GRAPHYARD_PRODUCTION_IDENTITY_URL = `http://127.0.0.1:${(endpoint.address() as AddressInfo).port}/identity`;
   let store: Store, http: ReturnType<typeof server>, url = '';
   const startPlane = async () => {
     store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${pgPort}/soak_exact`); await store.init();
@@ -74,6 +85,7 @@ test('unit:soak-exact-candidates — two simulated days of the real promotion cy
     await writeFile(join(checkout, 'graphyard.json'), `${JSON.stringify({ release: { onFailure: 'hold' } })}\n`);
     for (const id of requiredCases) await writeFile(join(checkout, 'e2e', 'cases', `${id}.json`), `${JSON.stringify({ id, title: id, tags: ['soak'], target: 'uat', required: true, steps: [{ kind: 'browser', action: 'open', path: '/' }] })}\n`);
     git('add', '.'); git('commit', '-q', '-m', 'base'); git('push', '-q', 'origin', 'main'); git('fetch', '-q', 'origin');
+    const baseSha = git('rev-parse', 'HEAD');
 
     // The plane's client as the loop's: the coordinator posts under a request id, and a refusal is thrown as master's client throws it.
     const api = async (method: string, path: string, credential: string, body?: unknown, key?: string) => {
@@ -148,6 +160,8 @@ test('unit:soak-exact-candidates — two simulated days of the real promotion cy
     let crashed: ExactCandidate | null = null, cycles = 0;
     const productionTip = () => { try { return execFileSync('git', ['-C', origin, 'rev-parse', '--verify', '--quiet', 'refs/heads/release/production'], { encoding: 'utf8' }).trim(); } catch { return null; } };
     const served: (string | null)[] = [];
+    type Selection = { candidate: string; promotion: { releaseId: string; sourceSha: string; artifact: string } };
+    const live = { sweeps: 0, failures: 0, drifts: 0, recorded: 0, verified: 0, recovered: 0, drifted: false, lastKey: null as string | null, lastRecordedFor: null as string | null, last: null as { candidate: string; status: string } | null };
     for (const [index, schedule] of days.entries()) {
       const dayStart = start + (index + 1) * day;
       const pending = [...schedule];
@@ -170,6 +184,41 @@ test('unit:soak-exact-candidates — two simulated days of the real promotion cy
         state = result.state; cycles += 1;
         assert.equal(state.inFlight, false, 'every cycle settles its candidate');
         served.push(productionTip());
+
+        // GY-1906: the plane's sweep reads production's live identity; the endpoint answers what release/production serves,
+        // drifts to another release for two cycles in every 31, and fails one cycle in every 13.
+        const selections = (await store!.pool.query("SELECT payload FROM events WHERE kind='release.candidate.promotion' ORDER BY seq")).rows.map(row => row.payload as Selection);
+        const newest = selections.at(-1) ?? null, tipNow = served.at(-1);
+        const mode = cycles % 13 === 7 ? 'fail' : cycles % 31 === 20 || cycles % 31 === 21 ? 'drift' : 'serve';
+        const runs = [...selections].reverse().find(entry => entry.promotion.sourceSha === tipNow) ?? null;
+        const body = mode === 'drift' ? { release: 'rc-drifted', sourceSha: baseSha, artifact: newest?.promotion.artifact } : runs ? { release: runs.promotion.releaseId, sourceSha: runs.promotion.sourceSha, artifact: runs.promotion.artifact } : { sourceSha: baseSha };
+        identity = mode === 'fail' ? { status: 500 } : { status: 200, body };
+        const readsBefore = identityReads;
+        const swept = await api('POST', 'delivery/sweep', operator.token, {}, `sweep-${cycles}`);
+        const view = (await api('GET', 'delivery', coordinator.token)).environments.find((entry: { id: string }) => entry.id === 'production');
+        const when = new Date(clock).toISOString();
+        if (!newest) { assert.equal(swept.live, undefined, `${when}: nothing selected, nothing read`); assert.equal(identityReads, readsBefore); continue; }
+        live.sweeps += 1;
+        assert.equal(identityReads, readsBefore + 1, `${when}: one identity read a sweep`);
+        assert.deepEqual([view.expected.candidate, view.expected.sourceSha], [newest.candidate, newest.promotion.sourceSha], `${when}: the newest selection stays expected`);
+        const status = view.verification.status as string;
+        if (mode === 'fail') {
+          live.failures += 1;
+          assert.match(swept.live.error, /answered 500/); assert.equal(swept.live.recorded, false);
+          assert.equal(status, live.last?.candidate === newest.candidate ? live.last.status : 'unobserved', `${when}: a failed read keeps the last verdict`);
+        } else {
+          const key = JSON.stringify(body), recorded = key !== live.lastKey || live.lastRecordedFor !== newest.candidate;
+          assert.equal(swept.live.recorded, recorded, `${when}: an identity is appended only when it changes or a newer selection awaits it`);
+          if (recorded) { live.recorded += 1; live.lastKey = key; live.lastRecordedFor = newest.candidate; }
+          if (mode === 'drift') {
+            live.drifts += 1;
+            assert.equal(status, 'mismatched', `${when}: drift`);
+            assert.match(view.verification.reasons.join(' '), new RegExp(`Production serves source ${baseSha}, not ${newest.promotion.sourceSha}.*The expected release is still candidate ${newest.candidate}`));
+          } else assert.equal(status, tipNow === newest.promotion.sourceSha ? 'verified' : 'mismatched', `${when}: production serves ${tipNow}`);
+        }
+        if (status === 'verified') { live.verified += 1; if (live.drifted) live.recovered += 1; }
+        if (mode !== 'fail') live.drifted = mode === 'drift' || (live.drifted && status !== 'verified');
+        live.last = { candidate: newest.candidate, status };
       }
     }
 
@@ -226,10 +275,18 @@ test('unit:soak-exact-candidates — two simulated days of the real promotion cy
     // Bounded work: one UAT validation a candidate, and plane calls bounded by the cycles.
     assert.deepEqual([...validated].sort(), ledger.candidates.map(entry => entry.id).sort(), 'each rc ran UAT exactly once');
     assert.ok(requests <= cycles * 4 + plane.length * 5, `plane requests stay bounded (${requests} over ${cycles} cycles)`);
+    // GY-1906: the live identity reads judged stable identities, drift and endpoint failures, and stayed one read a sweep and one event a change.
+    assert.ok(live.failures >= 3 && live.drifts >= 2 && live.recovered >= 1 && live.verified >= live.sweeps / 2, JSON.stringify(live));
+    assert.equal(identityReads, live.sweeps, 'one identity read per sweep with a selection, none before');
+    assert.equal((await store!.pool.query("SELECT count(*)::int AS n FROM events WHERE kind='delivery.identity-observed'")).rows[0].n, live.recorded, 'identity events are exactly the changes');
+    assert.ok(live.recorded <= promoted.length + 2 * live.drifts + 1, `identity events stay bounded by selections and drift: ${live.recorded}`);
+    assert.equal(delivery.verification.status, live.last!.status, 'the delivery view reads the last sweep\'s verdict');
     const events = await store!.pool.query("SELECT kind, count(*)::int AS n FROM events WHERE kind LIKE 'release.candidate%' GROUP BY kind ORDER BY kind");
     assert.deepEqual(events.rows, [{ kind: 'release.candidate', n: plane.length }, { kind: 'release.candidate.promotion', n: promoted.length }, { kind: 'release.candidate.validation', n: plane.length }], 'one immutable cut and one verdict a candidate, one selection a promoted one');
   } finally {
     await stopPlane().catch(() => {});
+    await new Promise<void>(done => endpoint.close(() => done()));
+    if (identityUrl === undefined) delete process.env.GRAPHYARD_PRODUCTION_IDENTITY_URL; else process.env.GRAPHYARD_PRODUCTION_IDENTITY_URL = identityUrl;
     await database.stop();
     await rm(root, { recursive: true, force: true });
   }

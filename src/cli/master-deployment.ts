@@ -21,8 +21,8 @@ const parsed = <T>(out: string): T[] => out.split('\0\0').map(entry => entry.rep
 /**
  * The ports over the coordinator checkout's own ledger tags and object store: `rc-uat/` and `rc-hold/`
  * records as the release jobs wrote them, and `merge-base --is-ancestor` over commits already held.
- * Nothing is fetched (one door to the remote): the release drive keeps the tags current, and a
- * commit this checkout does not hold is ancestry it cannot tell, never a pass.
+ * Nothing is fetched here (one door to the remote): the promotion drive's ledger fetch brings these
+ * tags, and a commit this checkout does not hold is ancestry it cannot tell, never a pass.
  */
 export function ledgerPorts(git: AsyncGit): OnboardingTargetPorts {
   return {
@@ -44,13 +44,17 @@ const exactRun = (records: readonly UatRecord[], sha: string, id?: string) => re
 const verdictOf = (record: UatRecord | null, id: string) => record?.e2e?.cases.find(entry => entry.case === id)?.verdict ?? null;
 
 /**
- * The onboarding-default-path hold the parent repairs: the one whose item the parent's criterion
- * names (GY-1909), else the newest that covers the outcome.
+ * The onboarding-default-path hold the parent repairs. A criterion naming items (GY-1909) names the
+ * hold: only a covering hold of a named item is it, and no other hold ever stands in for it. A
+ * criterion naming none reads the newest covering hold.
  */
-function repairedHold(holds: readonly Hold[], text: string): Hold | null {
+function repairedHold(holds: readonly Hold[], text: string, own: readonly string[]): { hold: Hold | null; named: string[] } {
   const covering = holds.filter(hold => hold.outcomes.includes(onboardingOutcome));
-  const named = covering.filter(hold => hold.item && new RegExp(`\\b${hold.item}\\b`).test(text));
-  return (named.length ? named : covering).at(-1) ?? null;
+  // Item keys of this board's own prefix, other than the parent's and the follow-up's own.
+  const prefix = own[0]?.replace(/-\d+$/, '') ?? '';
+  const named = [...new Set(text.match(/\b[A-Z][A-Z0-9]*-\d+\b/g) ?? [])].filter(key => key.startsWith(`${prefix}-`) && !own.includes(key));
+  if (!named.length) return { hold: covering.at(-1) ?? null, named };
+  return { hold: covering.filter(hold => hold.item && named.includes(hold.item)).at(-1) ?? null, named };
 }
 
 /**
@@ -73,8 +77,8 @@ export async function onboardingTargetReading(input: PostDeployReadingInput, por
   let holds: Hold[], records: UatRecord[];
   try { holds = foldHolds(await ports.holdRecords()); records = await ports.uatRecords(); }
   catch (error) { return unproven(`the release ledger could not be read: ${error instanceof Error ? error.message : String(error)}`); }
-  const hold = repairedHold(holds, input.criterion?.text ?? '');
-  if (!hold) return unproven(`the ledger holds no ${onboardingOutcome} release hold`);
+  const { hold, named } = repairedHold(holds, input.criterion?.text ?? '', [input.parent.key, input.item?.key].filter((key): key is string => !!key));
+  if (!hold) return unproven(named.length ? `the ledger holds no ${onboardingOutcome} release hold of ${named.join(', ')}, the hold the criterion names, so no clear record of it exists` : `the ledger holds no ${onboardingOutcome} release hold`);
   const clear = hold.records.find(record => record.kind === 'clear');
   if (hold.state !== 'cleared' || !hold.cleared || !clear?.candidate || !clear.sha) return unproven(`the ${onboardingOutcome} hold${hold.item ? ` ${hold.item}` : ''} has no clear record (it is ${hold.state})`);
   const clearing = { candidate: clear.candidate, sha: clear.sha.toLowerCase() };
