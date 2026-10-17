@@ -61,6 +61,8 @@ export function mergeQueue(work: readonly Work[], ledger: Readonly<Record<string
     // The served review gate is the control plane's verdict under the deployment's policy, never this process's
     // own reading of graphyard.json, which an unapplied edit or an older checkout makes diverge (GY-1843).
     if (!gate(item, 'review')) return false;
+    // GY-1927: a candidate the automatic-merging hold stands over waits for the merge decision that releases it.
+    if (item.mergeHold) return false;
     const state = ledger[item.key];
     if (state && state.head === candidate.sha.toLowerCase() && state.state === 'refused' && state.refusal?.kind === 'merge' && state.refusal.reason.startsWith(trialFailurePrefix)) return false;
     if (state && state.head === candidate.sha.toLowerCase() && state.state === 'reconciled') return false;
@@ -452,6 +454,13 @@ export interface MergePorts {
   push(mergeSha: string, baseTip: string): Promise<'pushed' | 'rejected'>;
   /** Whether the base branch's first-parent history holds `sha`, as last fetched. */
   holds(sha: string): Promise<boolean>;
+  /**
+   * GY-1927: the automatic-merging hold standing over the item's candidate, read afresh from the
+   * plane (`GET /api/auto-merge?work=ID`), or null. Asked before a merge opens and again just
+   * before its push, so a merge selected from an older snapshot lands nothing once the hold is
+   * recorded. Absent, nothing is held here (the plane still refuses an intent under a hold).
+   */
+  hold?(item: Pick<Work, 'id' | 'key'>): Promise<string | null>;
   /** Records one step on the coordinator (`POST /api/work/:id/merge-record`), idempotent under `mergeRecordKey`, under the attempt `item` names (GY-1852). */
   record(item: Pick<Work, 'id' | 'key'> & { mergeAttempt?: MergeAttempt | null }, event: MergeRecordEvent): Promise<unknown>;
 }
@@ -496,6 +505,10 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     }
     if (state.state === 'pushed') throw new Error(`${item.key}: ${state.mergeSha.slice(0, 12)} is recorded pushed but ${ports.baseBranch} does not hold it`);
   }
+  // GY-1927: a head the automatic-merging hold stands over opens no merge; it stays queued for the decision that releases it.
+  const held = async () => ports.hold ? ports.hold(item) : null;
+  const opening = await held();
+  if (opening) return { outcome: 'requeued', reason: opening, pushes: 0 };
   let pushes = 0, baseTip = await ports.fetch();
   for (let attempt = 0; attempt <= ports.retrials; attempt++) {
     const merged = await ports.merge(head, baseTip);
@@ -531,6 +544,12 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
       await ports.record(item, { kind: 'refused', head, reason: failure });
       if (baseHeld || preview?.result === 'timeout' || preview?.result === 'error') return { outcome: 'requeued', reason: failure, pushes };
       return { outcome: 'refused', reason: failure, trial: run, conflict: [], ...(preview ? { preview } : {}) };
+    }
+    // The landing boundary (GY-1927): a hold recorded while the trial ran refuses the push, so nothing lands under it.
+    const landing = await held();
+    if (landing) {
+      await ports.record(item, { kind: 'refused', head, reason: landing });
+      return { outcome: 'requeued', reason: landing, pushes };
     }
     pushes += 1;
     const pushed = await ports.push(mergeSha, baseTip);

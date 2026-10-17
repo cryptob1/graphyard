@@ -175,6 +175,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   let publishedEnvironment: string | null = null, publishedMergeQueue: string | null = null;
   /** GY-1524: the recorded merger, read from /api/status afresh for every merge decision (AC-6), never cached: a switch to `github` stops the next merge, not the one after a window. */
   const recordedMerger = () => readMergeWriter(current(), deps.fetcher);
+  /** GY-1927: the automatic-merging hold over one item, read from the plane afresh before the writer opens a merge and before it pushes; a plane without the route (404) records no hold, and any other failure stops the merge. */
+  const recordedHold = async (work: { id: string }) => {
+    try { return ((await asCoordinator(`auto-merge?work=${encodeURIComponent(work.id)}`)) as { hold?: string | null }).hold ?? null; }
+    catch (error) { if (error instanceof RefusedResponse && error.status === 404) return null; throw error; }
+  };
   // The shared project memory (GY-1125) is mirrored to its own file only when it changed.
   let writtenMemory: string | null = null;
   const persistLoop = async (state: DaemonState) => {
@@ -363,7 +368,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       });
     },
     // GY-1524: the executor merges in this checkout's object store, pushes with the install's deploy key alone, records each step as the coordinator under one key per (step, commits), and acts only while the recorded merger is control-plane (read before every merge decision).
-    get mergeWriter() { const config = current(); return mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger }); },
+    get mergeWriter() { const config = current(); return mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger, hold: recordedHold }); },
     publishProductionEnvironment: async () => {
       const environment = deploymentEnvironmentName(current(), root);
       if (environment === publishedEnvironment) return;
@@ -424,7 +429,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get diagnostician() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? diagnosticianEffects(config, root, asOperatorAgent, run) : undefined; },
     // GY-1535: under a control-plane merger (read afresh before each draft) the draft is committed here and landed by the merge writer's reads, with no pull request.
     get acceptance() { const config = current(); return config.operatorAgent && config.approver ? acceptanceEffects(config, root, { run, fetcher, asCoordinator, asOperatorAgent, merger: recordedMerger,
-      writer: mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger }) }) : undefined; },
+      writer: mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger, hold: recordedHold }) }) : undefined; },
     get planner() { const config = current(); return config.operatorAgent && config.approver ? plannerEffects(config, root, { fetcher, asCoordinator, asOperatorAgent }) : undefined; },
     // GY-1706: fault-class filing derives plannedFiles like master create; chores with their own plans are left alone.
     get fileFaultClass() {
