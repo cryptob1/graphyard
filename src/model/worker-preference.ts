@@ -40,13 +40,25 @@ export const sensitiveSurfaces = surfacesOf();
 
 /**
  * Whether one planned entry may change a sensitive file: an exact path when a sensitive rule matches
- * it (`classifyRisk`), a directory scope when it overlaps a rule's surface as well. The literal test
+ * it (`classifyRisk`), a directory scope when it overlaps a rule's surface as well (`surfaceOverlaps`). The literal test
  * runs for a directory scope too, so a scope inside a sensitive tree (`src/store/x/`) is sensitive by
  * the rule itself.
  */
 export const plannedEntrySensitive = (entry: string, policy: RepositoryPolicy = repositoryPolicy()): boolean =>
   classifyRisk([{ path: entry }], policy).risk === 'sensitive'
-    || !!pathScope(entry).prefix && Object.values(surfacesOf(policy)).some(surfaces => surfaces.some(surface => !surface || pathScopesOverlap(entry, surface)));
+    || !!pathScope(entry).prefix && riskRules(policy).some(({ globs }) => globs.some(glob => surfaceOverlaps(entry, glob)));
+/**
+ * Whether a directory scope overlaps one glob's surface. A literal glob's surface is a path, judged by
+ * `pathScopesOverlap`; a wildcard's literal head may end mid-segment (`packages/api*` → `packages/api`),
+ * so it is a string prefix: the scope overlaps when either begins with the other, and `packages/api-v2/`
+ * is sensitive under `packages/api*\/secrets.json` as `packages/` is.
+ */
+const surfaceOverlaps = (entry: string, glob: string) => {
+  const surface = globSurface(glob);
+  if (surface === glob.replace(/^\.\//, '')) return pathScopesOverlap(entry, surface);
+  const scope = pathScope(entry).path;
+  return scope.startsWith(surface) || surface.startsWith(scope);
+};
 
 /** What the preference reads of an item: the change it plans and the attempts already made. The path lane is not among them. */
 export interface PreferenceWork { /** Accepted so a whole item can be handed over; never read (GY-1772). */ lane?: string | null; plannedFiles?: readonly string[] | null; pipeline?: { reworkRounds?: number; attempts?: unknown[] } | null; reworkRounds?: number; attemptCount?: number }

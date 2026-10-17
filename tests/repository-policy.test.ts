@@ -98,6 +98,14 @@ test('unit:repo-risk-policy — a declared risk.sensitive classifies exactly the
     assert.equal(determineLane(['app/payments/charge.rb']), 'high');
     assert.equal(determineLane(['src/store/x.ts']), 'low');
   });
+  // A wildcard within a segment: a directory plan its literal head may reach is strong, a sibling it cannot reach stays fast.
+  const partial = resolveRepositoryPolicy({ risk: { sensitive: [{ rule: 'api secrets', glob: 'packages/api*/secrets.json' }, { rule: 'payments', glob: 'app/pay*/secret.ts' }] } });
+  await under(partial, () => {
+    for (const plan of ['packages/api-v2/', 'packages/api/', 'packages/', 'app/payments/', 'app/pay/**', 'packages/api-v2/secrets.json'])
+      assert.equal(workerPreference({ plannedFiles: [plan] }), 'strong', `${plan} may change a sensitive file`);
+    for (const plan of ['packages/web/', 'app/models/', 'packages/api-v2/readme.md'])
+      assert.equal(workerPreference({ plannedFiles: [plan] }), 'fast', `${plan} cannot`);
+  });
   // `only` narrows an entry to the class or to the lane.
   const narrowed = resolveRepositoryPolicy({ risk: { sensitive: [{ rule: 'ci', glob: '.ci/', only: 'risk' }, { rule: 'schema', glob: 'schema/', only: 'lane' }] } });
   assert.equal(classifyRisk([{ path: '.ci/run.sh' }], narrowed).risk, 'sensitive');
