@@ -1,6 +1,8 @@
 <!-- page: Operate Graphyard | 2 | App, protection. -->
 # GitHub enforcement
 
+Organization repositories register Apps at `https://github.com/organizations/ORG/settings/apps/new`.
+
 ## App permissions
 
 Control-plane App (`src/github-permissions.ts`):
@@ -30,7 +32,7 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 
 ## Reusing an App
 
-`--reuse-app SLUG` needs a saved key (returned once); else generate one in its settings, then `graphyard app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo OWNER/NAME]` proves it (App JWT), saves `0600` (`imported-app-SLUG.json`, install directory), refusing a control-plane App whose webhook serves another install; `graphyard app list` names reusable roles or why not.
+`--reuse-app SLUG` needs a saved key (returned once); else generate one in its settings, then `graphyard app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo OWNER/NAME]` proves it (App JWT), saves `0600` (`imported-app-SLUG.json`, install directory), refusing a control-plane App whose webhook serves another install; `graphyard app list` names reusable roles.
 
 Refused workflow syncs: `sync GY-N --push-via-control-plane COMMIT` (`POST /api/work/:id/sync-push`) pushes COMMIT fast-forwarded, merged with `origin/BASE` (`sync.workflow-push`).
 
