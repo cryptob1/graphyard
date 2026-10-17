@@ -1,4 +1,5 @@
 import { refuseCiProducer } from '../../model/ci-proofs.js';
+import { importRun, readImports, sealImports } from '../../validation-import.js';
 import { Next, Sent, defineRoutes, parseJson } from '../routes.js';
 
 /** The validation runner protocol: artifacts, definitions, candidates, attempts and commands. */
@@ -19,6 +20,11 @@ export const validationRoutes = defineRoutes('validation', [
       return Sent;
     },
   },
+  // GY-1860: a producer imports an external run bound to the release candidate at the run's exact head; anyone authenticated reads a head's imports and hold.
+  { method: 'POST', path: '/api/validation/import', handle: async context => importRun({ store: context.services.engine.store, github: context.services.github }, context.actor, await parseJson(context, 11_200_000)) },
+  { method: 'GET', path: /^\/api\/validation\/import\/([a-f0-9]{40})$/, handle: ({ services, url }, [sha]) => readImports({ store: services.engine.store }, sha, url.searchParams.get('candidate')) },
+  // A promotion workflow reads a candidate's hold and, released, seals it so no import lands before its production job promotes.
+  { method: 'POST', path: /^\/api\/validation\/import\/([a-f0-9]{40})\/seal$/, handle: async (context, [sha]) => sealImports({ store: context.services.engine.store }, context.actor, sha, await parseJson(context, 10_000)) },
   { method: 'GET', path: '/api/validation', handle: ({ url, services }) => services.validation.list(url.searchParams.get('cursor') ?? undefined) },
   // D4: runner capacity, queue dwell, reserved resources and a diagnosed next step per live request.
   { method: 'GET', path: '/api/validation/capacity', handle: ({ services }) => services.validation.capacity() },

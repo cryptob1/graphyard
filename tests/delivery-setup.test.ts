@@ -207,6 +207,13 @@ test('unit:setup-generates-candidate-and-promotion-workflows — the generated w
     assert.match(promote, adapter === 'railway' ? /tracks release\/production/ : / {10}\.\/deploy\.sh production\n/);
     assert.ok(promote.indexOf('release promote') < promote.indexOf('GRAPHYARD_CANDIDATE_SHA'), 'production deploys only after promotion accepted the candidate');
     assert.match(promote, /release verify --base main --url "\$PRODUCTION_URL"/);
+    // GY-1860: the production job holds no plane credential; the uat-environment job before it reads the candidate's import hold and hands it on.
+    const imports = jobsOf(promotion).get('imports')!;
+    assert.match(imports, /environment: uat/);
+    assert.match(imports, /release imports "\$\{CANDIDATE:-latest\}" --base main/);
+    assert.match(imports, /GRAPHYARD_URL: \$\{\{ vars\.GRAPHYARD_URL \}\}\n {10}GRAPHYARD_TOKEN: \$\{\{ secrets\.GRAPHYARD_RELEASE_TOKEN \}\}/);
+    assert.match(promote, /needs: imports/);
+    assert.match(promote, /GRAPHYARD_PROMOTION_IMPORTS: \$\{\{ needs\.imports\.outputs\.hold \}\}/);
   }
 
   // The command adapter never invents a deploy command.
