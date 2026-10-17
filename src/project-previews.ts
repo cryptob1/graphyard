@@ -15,8 +15,8 @@ import type { Work } from './model/work.js';
 
 export const itemPreviewStates = ['starting', 'running', 'failed', 'cleaned'] as const;
 export type ItemPreviewState = (typeof itemPreviewStates)[number];
-/** Why a preview ended: a newer head replaced it, the item was closed or delivered, a case failed, or the loop that served it restarted. */
-export const previewEndReasons = ['superseded', 'cancelled', 'delivered', 'failed', 'restarted'] as const;
+/** Why a preview ended: a newer head replaced it, the item was closed or delivered, a case failed, the loop that served it restarted, or the server did not confirm its record. */
+export const previewEndReasons = ['superseded', 'cancelled', 'delivered', 'failed', 'restarted', 'unconfirmed'] as const;
 export type PreviewEndReason = (typeof previewEndReasons)[number];
 /** How many ended previews an item keeps beside its current one, newest last. */
 export const previewHistoryLimit = 5;

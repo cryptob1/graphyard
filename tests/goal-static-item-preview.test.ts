@@ -55,7 +55,8 @@ async function fixture() {
     steps: [{ kind: 'http', name: 'read the heading', method: 'GET', path: '/home.json', status: 200, expect: [{ path: 'heading', equals: 'Fixture static site' }] }] });
   const commit = async (name: string, heading: string, body: string) => {
     await write('site/home.json', { heading }); await write('site/index.html', `<link rel="stylesheet" href="style.css">\n<h1>${heading}</h1>\n<p>${body}</p>\n<a href="about">About</a>\n<script src="app.js"></script>\n`);
-    await write('site/app.js', `document.title = ${JSON.stringify(body)};\n`); await write('site/style.css', 'h1 { color: teal; }\n'); await write('site/about/index.html', '<a href="../">Home</a>\n');
+    // The site loads its own data with a relative request and counts visits in its own storage, as an ordinary static application does.
+    await write('site/app.js', `document.title = ${JSON.stringify(body)};\nfetch('home.json').then(response => response.json()).then(home => {\n  let visits;\n  try { visits = Number(localStorage.getItem('visits') ?? 0) + 1; localStorage.setItem('visits', String(visits)); } catch { visits = 'no storage'; }\n  document.body.dataset.loaded = home.heading + '; visits ' + visits;\n}).catch(error => { document.body.dataset.loaded = 'failed: ' + error; });\n`); await write('site/style.css', 'h1 { color: teal; }\n'); await write('site/about/index.html', '<a href="../">Home</a>\n');
     git('add', '-A'); git('commit', '-q', '-m', name); shas[name] = git('rev-parse', 'HEAD');
   };
   await commit('main', 'Fixture static site', 'The base branch');
@@ -166,6 +167,7 @@ test('integration:goal-static-item-preview — a submitted change citing a decla
   assert.match(page, /Change A is live/);
   assert.match(page, /<p>Static preview of change A<\/p>/);
   assert.match(served.headers.get('content-security-policy') ?? '', /^sandbox allow-scripts/);
+  assert.equal(served.headers.get('access-control-allow-origin'), '*', 'the sandboxed site may still read its own files');
   assert.match(served.headers.get('content-type') ?? '', /^text\/html/);
   // The page's relative script, style and navigation resolve, as a browser resolves them against the opened URL, under the item's preview.
   for (const [pattern, type, body] of [[/src="([^"]+)"/, /^text\/javascript/, /Change A is live/], [/href="([^"]+\.css)"/, /^text\/css/, /teal/], [/href="(about)"/, /^text\/html/, /Home/]] as const) {
@@ -279,4 +281,53 @@ test('integration:goal-static-preview-lifecycle — superseding or cancelling a 
   await until(fresh, [restarted.id], restarted.id, preview => preview?.state === 'cleaned');
   await until(run, [restarted.id], restarted.id, preview => preview?.state === 'cleaned');
   assert.deepEqual(await checkouts(), []);
+});
+
+/** Chromium, as Playwright installs it, else the host's Chrome; null when neither launches. */
+async function launchBrowser() {
+  const { chromium } = await import('@playwright/test');
+  for (const options of [{}, { channel: 'chrome' }]) { try { return await chromium.launch({ headless: true, ...options }); } catch { /* try the next */ } }
+  return null;
+}
+
+test('integration:goal-static-preview-origin — in a browser the preview link runs the change as a static host would, on an origin of its own: it reads its own data and keeps its own storage, and never reaches the dashboard\'s', { timeout: 120_000 }, async t => {
+  const browser = await launchBrowser();
+  if (!browser) { assert.ok(!process.env.CI, 'CI opens the preview link in a browser'); t.skip('no Chromium or Chrome to open the preview link in'); return; }
+  const previews = `http://localhost:${new URL(url).port}`;
+  try {
+    const item = await change('Static preview on its own origin');
+    await submit(item, 'changeA');
+    const run = loop({ remote: true });
+    await until(run, [item.id], item.id, preview => preview?.state === 'running');
+    const page = await (await browser.newContext()).newPage();
+    const loaded = async (link: string) => { await page.goto(link); await page.waitForFunction(() => document.body?.dataset.loaded); return page.evaluate(() => document.body.dataset.loaded); };
+    // The dashboard's origin keeps its sign-in in its storage.
+    await page.goto(`${url}/healthz`);
+    await page.evaluate(() => localStorage.setItem('graphyard-token', 'the dashboard credential'));
+
+    // Without a preview origin the link is sandboxed: the site reads its own data, but has no storage.
+    assert.equal(await loaded(`${url}${previewPath(item.key)}`), 'Fixture static site; visits no storage');
+
+    process.env.GRAPHYARD_PREVIEW_ORIGIN = previews;
+    const moved = await open(item.key, '/about?from=dashboard', { redirect: 'manual' });
+    assert.equal(moved.status, 308);
+    assert.equal(moved.headers.get('location'), `${previews}${previewPath(item.key)}/about?from=dashboard`, 'the dashboard\'s link moves to the preview origin');
+    const there = await fetch(`${previews}${previewPath(item.key)}/`);
+    assert.equal(there.headers.get('content-security-policy'), "frame-ancestors 'none'", 'unsandboxed on its own origin');
+    const dashboard = await fetch(`${previews}/`);
+    assert.equal(dashboard.status, 404, 'the preview origin serves no dashboard to sign in to');
+    assert.match(await dashboard.text(), /serves previews only/);
+
+    // Opened from the dashboard's link, the site runs on the preview origin: its own data, its own storage kept across loads, and none of the dashboard's.
+    assert.equal(await loaded(`${url}${previewPath(item.key)}`), 'Fixture static site; visits 1');
+    assert.equal(page.url(), `${previews}${previewPath(item.key)}/`);
+    assert.equal(await loaded(page.url()), 'Fixture static site; visits 2');
+    assert.equal(await page.evaluate(() => localStorage.getItem('graphyard-token')), null, 'the preview never reads the dashboard\'s storage');
+    assert.equal(await page.evaluate(() => document.title), 'Change A is live');
+    assert.equal((await call('POST', `work/${item.id}/close`, 'operator', { kind: 'obsolete', reason: 'Opened in a browser' }, 'close-origin')).status, 200);
+    await until(run, [item.id], item.id, preview => preview?.state === 'cleaned');
+  } finally {
+    delete process.env.GRAPHYARD_PREVIEW_ORIGIN;
+    await browser.close();
+  }
 });

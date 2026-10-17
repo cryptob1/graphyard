@@ -337,7 +337,12 @@ export interface ItemPreviewPorts {
   slots?: ReturnType<typeof previewSlots>; procRoot?: string;
   open?: typeof openPreview;
 }
-/** How many times an unconfirmed record is sent before it is dropped as refused. */
+/**
+ * How many sends in a row an unconfirmed record may fail before its preview stops serving. A record
+ * is never dropped: its server and checkout are then removed and a terminal record (`unconfirmed`)
+ * replaces any running one, owed, in order, behind the starting record the server may still lack,
+ * until the server confirms it or shows the preview already ended.
+ */
 export const previewRecordAttempts = 10;
 
 /** Sends what `entry` owes, oldest first, stopping at the first that fails. */
@@ -345,13 +350,29 @@ async function settleRecords(entry: LivePreview, ports: ItemPreviewPorts) {
   while (entry.owed.length) {
     try { await ports.record({ id: entry.work, key: entry.key }, entry.owed[0]!.record, entry.owed[0]!.site); entry.owed.shift(); entry.failures = 0; }
     catch (error) {
-      entry.failures += 1;
-      if (entry.failures < previewRecordAttempts) return false;
-      console.error(`The preview record of ${entry.key} (${entry.owed[0]!.record.state}) is dropped after ${entry.failures} refusals: ${error instanceof Error ? error.message : String(error)}`);
-      entry.owed.shift(); entry.failures = 0;
+      if (++entry.failures >= previewRecordAttempts && !entry.ending) await abandon(entry, error, ports);
+      return false;
     }
   }
   return true;
+}
+/** The record of `record` ended: cleaned, unless it already ended, naming when and why. */
+const endedRecord = (record: ItemPreview, reason: PreviewEndReason, detail: string, at: string): ItemPreview =>
+  ({ ...record, state: previewEnded(record) ? record.state : 'cleaned', origin: null, cleanedAt: record.cleanedAt ?? at, endReason: record.endReason ?? reason, detail: cut(detail) });
+/**
+ * Stops a preview the server has not confirmed for `previewRecordAttempts` sends: one still starting
+ * is cancelled and settles `unconfirmed` once stopped (`start`); a served one's server and checkout
+ * are removed at once, and its unconfirmed running record, never published now, gives way to its
+ * cleaned one, which keeps its case results.
+ */
+async function abandon(entry: LivePreview, error: unknown, ports: Pick<ItemPreviewPorts, 'now'>) {
+  entry.ending = 'unconfirmed';
+  entry.stop.abort();
+  console.error(`The server has not confirmed ${entry.key}'s preview record (${entry.owed[0]!.record.state}) after ${entry.failures} sends, so the preview stops serving: ${error instanceof Error ? error.message : String(error)}`);
+  if (!entry.opened || previewEnded(entry.record)) return;
+  await entry.opened.close();
+  entry.owed = entry.owed.filter(owed => owed.record.state === 'starting');
+  owe(entry, endedRecord(entry.record, 'unconfirmed', `${entry.record.detail ? `${entry.record.detail}; ` : ''}ended: the server did not confirm it`, new Date((ports.now ?? Date.now)()).toISOString()));
 }
 const owe = (entry: LivePreview, record: ItemPreview, site?: PreviewSiteFile[]) => { entry.record = record; entry.owed.push(site ? { record, site } : { record }); };
 
@@ -411,7 +432,7 @@ export async function itemPreviewStep(live: Map<string, LivePreview>, work: read
   for (const entry of [...live.values()]) {
     if (await settleRecords(entry, ports) && entry.opened && previewEnded(entry.record)) { live.delete(entry.key); endedNow.set(entry.key, entry.record); }
   }
-  const ended = (record: ItemPreview, reason: PreviewEndReason, detail: string): ItemPreview => ({ ...record, state: previewEnded(record) ? record.state : 'cleaned', origin: null, cleanedAt: record.cleanedAt ?? at(), endReason: record.endReason ?? reason, detail: cut(detail) });
+  const ended = (record: ItemPreview, reason: PreviewEndReason, detail: string) => endedRecord(record, reason, detail, at());
   const end = async (entry: LivePreview, reason: PreviewEndReason) => {
     if (!entry.ending) {
       entry.ending = reason;
@@ -427,6 +448,8 @@ export async function itemPreviewStep(live: Map<string, LivePreview>, work: read
     const demand = previewDemand(item, delivery), reason = previewEndReason(item, !!demand);
     const head = item.candidate?.sha?.toLowerCase() ?? null;
     let entry = live.get(item.key);
+    // The server already holds this preview ended, as an owed terminal record whose reply was lost leaves it: that record is confirmed.
+    if (entry?.opened && previewEnded(entry.record) && item.preview?.id === entry.record.id && previewEnded(item.preview)) entry.owed = [];
     if (entry && (reason || entry.ending || (head && entry.record.sha !== head))) {
       const why = entry.ending ?? reason ?? 'superseded';
       if (await end(entry, why)) notes.push(`Ended ${item.key}'s preview of ${entry.record.sha.slice(0, 12)} (${why}): its server closed and its checkout removed`);
