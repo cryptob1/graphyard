@@ -506,12 +506,12 @@ export interface TmpReclaimReport {
   kept: number;
   errors: string[];
   /**
-   * Entries the pass settled as kept residue (GY-1967) instead of reporting an error: a removal
+   * Entries the pass held as kept residue (GY-1967) instead of reporting an error: a removal
    * EACCES or EPERM refused for directories the pass may not change — another account's, planted
-   * inside a tree that is otherwise this user's own. Each is kept (counted in `kept` where the
-   * root's accounting holds them), marked beside, and skipped by later passes with one stat until
-   * its obstruction is gone; no pass reports it again, so none faults on it. Absent while no pass
-   * of this report settled one.
+   * inside a tree that is otherwise this user's own — settled this pass, or carried on a marker an
+   * earlier pass wrote and honoured in the scan. Each is kept (counted in `kept` where the root's
+   * accounting holds them), marked beside, and skipped with one stat a pass until its obstruction
+   * is gone; no pass reports it again, so none faults on it. Absent while this report holds none.
    */
   residue?: number;
   /**
@@ -775,11 +775,10 @@ async function makeOwnerWritable(path: string, uid: number | undefined): Promise
   return changed;
 }
 /**
- * The removal of an entry the pass owns was refused by what it may not change: a directory another
- * user owns inside the tree (`obstruction` naming the shallowest one, GY-1967), or an `EACCES` or
- * `EPERM` no writable bit of this user's would cure (`obstruction` null). The calling sweep settles
- * the entry as kept residue instead of reporting the error, so one stuck entry never becomes a
- * fault every pass repeats.
+ * The removal of an entry the pass owns was refused by a directory another user owns inside the
+ * tree, `obstruction` naming the shallowest one (GY-1967). The calling sweep settles the entry as
+ * kept residue instead of reporting the error, so one stuck entry never becomes a fault every
+ * pass repeats.
  */
 export class ForeignSubtreeError extends Error {
   constructor(readonly obstruction: string | null) { super(obstruction === null ? 'the entry holds directories this pass may not change' : `the entry holds a directory another user owns: ${obstruction}`); this.name = 'ForeignSubtreeError'; }
@@ -835,6 +834,10 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
   // A marker goes with its directory, never as an entry of its own; a symlink is never followed or taken.
   // A tsx cache is never a whole-tree candidate, whatever a caller's prefixes: its sockets and per-cycle bound are the cache sweep's.
   const candidate = (entry: Dirent) => (entry.isDirectory() || entry.isFile()) && !entry.name.endsWith('.owner') && !entry.name.endsWith(tempResidueSuffix) && !tsxCachePattern.test(entry.name) && minAge(entry.name) !== null;
+  // The residue markers this scan can see, by the entry each names: the readdir above already
+  // listed them, so honouring one costs a marker read and one stat on the obstruction it names —
+  // never a probe per candidate and never a tree walk (GY-1967).
+  const residueMarks = new Set(dirents.filter(entry => entry.name.endsWith(tempResidueSuffix)).map(entry => entry.name.slice(0, -tempResidueSuffix.length)));
   const removable: { path: string; mtime: number; kind: TmpReclaimClass }[] = [];
   let held: Set<string> | null = null;
   for (const entry of dirents) {
@@ -851,6 +854,16 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
     if (entry.name.endsWith(tempResidueSuffix) && !existsSync(path.slice(0, -tempResidueSuffix.length))) {
       try { await rm(path, { force: true }); } catch { /* the next pass tries again */ }
       continue;
+    }
+    // An entry a previous pass settled as residue is honoured here, before any aging: the marker
+    // read and one stat on the obstruction it names are the whole cost — no last-written walk, no
+    // holder check, no tree read, and no share of the pass's limit — and the kept count carries it
+    // (GY-1967). A marker whose obstruction no longer stands goes, and the entry is due again this
+    // same pass, judged like any other below.
+    if (candidate(entry) && residueMarks.has(entry.name)) {
+      const residue = await readTempResidue(path);
+      if (residue && await tempResidueStands(residue, pass.uid)) { report.scanned++; report.residue = (report.residue ?? 0) + 1; report.kept++; continue; }
+      await rm(tempResidueMarker(path), { force: true }).catch(() => { /* gone already, or the next pass takes it */ });
     }
     // A name the pass knows is judged by that name's bound; any other directory of this user's is an
     // agent's stale checkout if it is a git checkout or linked worktree, judged by the agent scratch
