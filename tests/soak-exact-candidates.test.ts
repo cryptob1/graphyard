@@ -29,10 +29,14 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * exactly one candidate of at most five, the sixth only in the next; every `rc` record is tagged at
  * its exact candidate's source and carries exactly its members; a partial batch is cut only after the
  * wait; the crashed cut is tagged, not cut past; every candidate holds exactly one verdict, the one its
- * `rc` recorded; and the cut and validation work stays one per candidate.
+ * `rc` recorded; and the cut and validation work stays one per candidate. GY-1905: every candidate's
+ * checkout declares two combined required cases and each UAT run reports both; production advances,
+ * one selection at a time and in cut order, only to candidates that passed both, while a failed one
+ * is held and production keeps the previous passing release, through the plane restart.
  */
 const minute = 60_000, day = 24 * 60 * minute, soakStep = 10 * minute, start = Date.parse('2030-06-01T00:00:00Z'), waitMinutes = 15;
 const freePort = async () => { const probe = netServer(); await new Promise<void>(done => probe.listen(0, '127.0.0.1', done)); const { port } = probe.address() as AddressInfo; await new Promise<void>(done => probe.close(() => done())); return port; };
+const requiredCases = ['soak-home', 'soak-sign-in'];
 const operator = { id: 'operator', role: 'admin' as const, token: `operator-${'o'.repeat(40)}` }, coordinator = { id: 'graphyard', role: 'coordinator' as const, token: `coordinator-${'c'.repeat(40)}` };
 
 /** Merges per simulated day, at minutes after midnight; 'crash' cuts on the plane alone, as a loop that died before tagging; 'restart' restarts the plane. */
@@ -41,7 +45,7 @@ const days: (number | 'crash' | 'restart')[][] = [
   [10 * 60, 10 * 60, 10 * 60, 10 * 60, 11 * 60 + 50, 'crash', 'restart', 15 * 60, 15 * 60, 15 * 60, 15 * 60, 15 * 60, 15 * 60, 15 * 60],
 ];
 
-test('unit:soak-exact-candidates — two simulated days of the real promotion cycle cut exact candidates of at most five through the plane, tag each rc at its source, wait out partial batches, resume a crashed cut, survive a plane restart and record one verdict a candidate', { timeout: 300_000 }, async () => {
+test('unit:soak-exact-candidates — two simulated days of the real promotion cycle cut exact candidates of at most five through the plane, tag each rc at its source, wait out partial batches, resume a crashed cut, survive a plane restart, record one verdict a candidate and promote only candidates passing every combined required case', { timeout: 300_000 }, async () => {
   const root = await realpath(await temporaryDirectory('soak-exact-candidates'));
   const pgPort = await freePort();
   const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('soak-exact-candidates-pg'), user: 'graphyard', password: 'testing-only', port: pgPort, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
@@ -64,6 +68,11 @@ test('unit:soak-exact-candidates — two simulated days of the real promotion cy
     const asyncGit: AsyncGit = async args => git(...args);
     for (const [key, value] of [['user.email', 't@example.com'], ['user.name', 'T'], ['commit.gpgsign', 'false'], ['tag.gpgsign', 'false']]) git('config', key, value);
     await writeFile(join(checkout, 'README.md'), '# Fixture\n');
+    // GY-1905: the two combined required cases every candidate's own checkout declares.
+    await mkdir(join(checkout, 'e2e', 'cases'), { recursive: true });
+    // A failed candidate is held, not reverted: the soak judges promotion, and the revert path has its own tests (release-failure-action).
+    await writeFile(join(checkout, 'graphyard.json'), `${JSON.stringify({ release: { onFailure: 'hold' } })}\n`);
+    for (const id of requiredCases) await writeFile(join(checkout, 'e2e', 'cases', `${id}.json`), `${JSON.stringify({ id, title: id, tags: ['soak'], target: 'uat', required: true, steps: [{ kind: 'browser', action: 'open', path: '/' }] })}\n`);
     git('add', '.'); git('commit', '-q', '-m', 'base'); git('push', '-q', 'origin', 'main'); git('fetch', '-q', 'origin');
 
     // The plane's client as the loop's: the coordinator posts under a request id, and a refusal is thrown as master's client throws it.
@@ -123,8 +132,11 @@ test('unit:soak-exact-candidates — two simulated days of the real promotion cy
         const entry = (await readLedgerAsync(asyncGit)).candidates.find(candidate => candidate.id === id)!;
         validated.push(id);
         const passed = validated.length % 4 !== 0;
+        // Every combined required case runs; a failed candidate fails the sign-in case alone.
+        const cases = requiredCases.map(name => ({ case: name, verdict: passed || name !== 'soak-sign-in' ? 'passed' as const : 'failed' as const, required: true, attempts: 1, failingStep: null }));
         const record = { id, sha: entry.sha, result: passed ? 'passed' as const : 'failed' as const, deployedSha: entry.sha, at: new Date(clock).toISOString(),
-          suites: [{ name: 'e2e', passed, detail: passed ? 'ok' : 'sign-in failed' }], followUp: null };
+          suites: [{ name: 'e2e', passed, detail: passed ? 'ok' : 'sign-in failed' }], followUp: null,
+          e2e: { runId: `run-${validated.length}`, sha: entry.sha, blocking: passed ? [] : ['soak-sign-in'], cases } };
         await writeRecordAsync(asyncGit, `${uatTagPrefix}${id}`, entry.sha, record, true);
         return { record, followUp: null };
       },
@@ -134,6 +146,8 @@ test('unit:soak-exact-candidates — two simulated days of the real promotion cy
 
     let state = null as Awaited<ReturnType<typeof settleLocalPromotion>>['state'] | null;
     let crashed: ExactCandidate | null = null, cycles = 0;
+    const productionTip = () => { try { return execFileSync('git', ['-C', origin, 'rev-parse', '--verify', '--quiet', 'refs/heads/release/production'], { encoding: 'utf8' }).trim(); } catch { return null; } };
+    const served: (string | null)[] = [];
     for (const [index, schedule] of days.entries()) {
       const dayStart = start + (index + 1) * day;
       const pending = [...schedule];
@@ -155,6 +169,7 @@ test('unit:soak-exact-candidates — two simulated days of the real promotion cy
         assert.equal(result.failure, null, `${new Date(clock).toISOString()}: ${result.state.reason ?? ''}`);
         state = result.state; cycles += 1;
         assert.equal(state.inFlight, false, 'every cycle settles its candidate');
+        served.push(productionTip());
       }
     }
 
@@ -191,11 +206,28 @@ test('unit:soak-exact-candidates — two simulated days of the real promotion cy
       assert.deepEqual(candidate.validation && { release: candidate.validation.release, sha: candidate.validation.sha, identity: candidate.validation.identity, result: candidate.validation.result },
         { release: record.id, sha: record.sha, identity: candidate.identity, result: uat.result === 'passed' ? 'pass' : 'fail' });
     }
+    // GY-1905: production advances only to candidates whose every combined required case passed, each selected once, in cut order;
+    // a failed candidate is never selected and production keeps the previous passing release, through the plane restart.
+    const passing = plane.filter(candidate => candidate.validation?.result === 'pass'), failing = plane.filter(candidate => candidate.validation?.result === 'fail');
+    assert.ok(passing.length >= 3 && failing.length >= 1, `the soak judged both outcomes: ${passing.length} passing, ${failing.length} failing`);
+    const promotions = (await store!.pool.query("SELECT payload FROM events WHERE kind='release.candidate.promotion' ORDER BY seq")).rows.map(row => row.payload as { candidate: string; sequence: number; promotion: { sourceSha: string; required: string[] } });
+    const promoted = promotions.map(entry => entry.candidate);
+    assert.ok(promoted.every(id => passing.some(candidate => candidate.id === id)), `only passing candidates were selected: ${promoted.join(', ')}`);
+    assert.equal(new Set(promoted).size, promoted.length, 'each candidate selected at most once');
+    assert.deepEqual(promotions.map(entry => entry.sequence), [...promotions.map(entry => entry.sequence)].sort((a, b) => a - b), 'selections advance in cut order, never back');
+    assert.ok(promotions.every(entry => JSON.stringify(entry.promotion.required) === JSON.stringify(requiredCases)), 'each selection names every combined required case');
+    assert.ok(promoted.length >= passing.length - 1, `production kept up with passing candidates: ${promoted.length} of ${passing.length} selected`);
+    const shipped = new Set(promotions.map(entry => entry.promotion.sourceSha));
+    assert.ok(served.every(sha => sha === null || shipped.has(sha)), 'production only ever served a selected passing candidate');
+    assert.equal(served.at(-1), promotions.at(-1)!.promotion.sourceSha, 'production serves the newest selection');
+    for (const candidate of failing) assert.ok(!shipped.has(candidate.sourceSha), `failed ${candidate.id} never served`);
+    const delivery = (await api('GET', 'delivery', coordinator.token)).environments.find((entry: { id: string }) => entry.id === 'production');
+    assert.equal(delivery.expected.sourceSha, promotions.at(-1)!.promotion.sourceSha, 'the delivery view expects the newest passing selection');
     // Bounded work: one UAT validation a candidate, and plane calls bounded by the cycles.
     assert.deepEqual([...validated].sort(), ledger.candidates.map(entry => entry.id).sort(), 'each rc ran UAT exactly once');
-    assert.ok(requests <= cycles * 4 + plane.length * 4, `plane requests stay bounded (${requests} over ${cycles} cycles)`);
+    assert.ok(requests <= cycles * 4 + plane.length * 5, `plane requests stay bounded (${requests} over ${cycles} cycles)`);
     const events = await store!.pool.query("SELECT kind, count(*)::int AS n FROM events WHERE kind LIKE 'release.candidate%' GROUP BY kind ORDER BY kind");
-    assert.deepEqual(events.rows, [{ kind: 'release.candidate', n: plane.length }, { kind: 'release.candidate.validation', n: plane.length }], 'one immutable cut and one verdict a candidate');
+    assert.deepEqual(events.rows, [{ kind: 'release.candidate', n: plane.length }, { kind: 'release.candidate.promotion', n: promoted.length }, { kind: 'release.candidate.validation', n: plane.length }], 'one immutable cut and one verdict a candidate, one selection a promoted one');
   } finally {
     await stopPlane().catch(() => {});
     await database.stop();
