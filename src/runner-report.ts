@@ -50,6 +50,8 @@ export const externalVerdicts = ['passed', 'failed', 'flaky', 'blocked', 'unrun'
 export type ExternalVerdict = (typeof externalVerdicts)[number];
 
 const externalName = z.string().trim().min(1).max(200).refine(value => !/[\x00-\x1f\x7f]/.test(value));
+/** A result value the producer's tool reported: refused when blank or carrying control characters, else kept byte for byte. */
+const externalResult = z.string().max(200).refine(value => value.trim().length > 0 && !/[\x00-\x1f\x7f]/.test(value));
 /** A commit the producer names as provenance: hex, abbreviated or full, kept exactly as given. */
 const provenanceCommit = z.string().regex(/^[a-f0-9]{7,64}$/);
 
@@ -73,7 +75,7 @@ export const externalRun = z.object({
    */
   catalogCommitSha: provenanceCommit.optional(),
   /** The run's overall result exactly as the producer's tool reported it, before any mapping. */
-  result: externalName.optional(),
+  result: externalResult.optional(),
   cases: z.array(z.object({
     id: externalName,
     verdict: z.enum(externalVerdicts),
@@ -86,7 +88,7 @@ export const externalRun = z.object({
     /** Where the run's own record of the case lives (trace, log, report); public locations only. */
     evidence: z.array(publicEvidenceUrl).max(100).optional(),
     /** The case's result exactly as the producer's tool reported it, kept beside the verdict it maps to. */
-    result: externalName.optional(),
+    result: externalResult.optional(),
     /** The executed case-definition version, when the producer knows it. */
     caseVersion: externalName.optional(),
   }).strict()).max(10_000),

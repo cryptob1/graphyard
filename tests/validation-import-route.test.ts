@@ -9,7 +9,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal } from '../src/model.js';
-import { assessPromotion, cut, deployToUat, gitIn, productionBranch, promote, validateAndRecord, type ReleaseCandidate, type UatRecord } from '../src/release-candidate.js';
+import { assessPromotion, cut, deployToUat, gitIn, productionBranch, promote, releaseFilingIdentity, validateAndRecord, type ReleaseCandidate, type UatRecord } from '../src/release-candidate.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1860: a producer imports an external run through POST /api/validation/import. The plane binds
@@ -22,7 +22,9 @@ const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
 const reader: Principal = { id: 'auditor', role: 'reader' };
 const producer: Principal = { id: 'huck-producer', role: 'producer' };
-const principals = [operator, worker, reader, producer];
+// The identity GRAPHYARD_RELEASE_TOKEN is provisioned as (src/master/release-filing.ts): the promotion workflows read the hold with it.
+const releaseFiler: Principal = { id: releaseFilingIdentity.id, role: 'operator-agent', capabilities: [...releaseFilingIdentity.capabilities], scope: { repositories: ['owner/project'], workItems: [] } };
+const principals = [operator, worker, reader, producer, releaseFiler];
 const tokens = new Map(principals.map(p => [p.id, `${p.id}-${'t'.repeat(40)}`]));
 
 // Three candidates cut at three heads; `elsewhere` is a commit no candidate holds.
@@ -123,7 +125,6 @@ test('unit:validation-import-route-binds-by-sha — POST /api/validation/import 
   const read = (await call(`validation/import/${boundSha}`, reader)).body;
   assert.equal(read.runs.length, 1);
   assert.deepEqual(read.runs[0].run, record, 'the persisted record keeps the run as imported');
-
   const again = await imported(handIn);
   assert.equal(again.replayed, true, 'the same run again replays its record');
   assert.deepEqual(again.imported, first.imported);
@@ -146,6 +147,24 @@ test('unit:validation-import-route-binds-by-sha — POST /api/validation/import 
     const fresh = await call('validation/import', producer, { ...handIn, runId: 'huck-run-new' });
     assert.notEqual(fresh.status, 200, 'a first import needs the ledger read');
   } finally { github.down = false; }
+
+  // The release-filing identity the promotion workflows hold reads the same record and hold; it still cannot import.
+  const filed = await call(`validation/import/${boundSha}`, releaseFiler);
+  assert.equal(filed.status, 200, JSON.stringify(filed.body));
+  assert.deepEqual(filed.body, read, 'the release-filing identity reads what any reader reads');
+  assert.equal((await call('validation/import', releaseFiler, { ...handIn, runId: 'filer-run' })).status, 403, 'the release-filing identity never imports');
+
+  // Original results are kept byte for byte, surrounding whitespace included, for the run and each case.
+  const spaced = await imported(run(boundSha, 'huck-run-spaced', [{ id: 'checkout-guest', verdict: 'passed', attempts: 1, durationMs: 1, result: ' PASS ' }], { result: '  OK\t'.replace('\t', ' ') }));
+  assert.equal(spaced.imported.run.result, '  OK ');
+  assert.equal(spaced.imported.run.cases[0].result, ' PASS ');
+  const persisted = (await call(`validation/import/${boundSha}`, reader)).body.runs.find((entry: any) => entry.run.runId === 'huck-run-spaced').run;
+  assert.equal(persisted.result, '  OK ', 'the run result persists untrimmed');
+  assert.equal(persisted.cases[0].result, ' PASS ', 'the case result persists untrimmed');
+  const unspaced = await call('validation/import', producer, run(boundSha, 'huck-run-spaced', [{ id: 'checkout-guest', verdict: 'passed', attempts: 1, durationMs: 1, result: 'PASS' }], { result: '  OK ' }));
+  assert.equal(unspaced.status, 409, 'documents differing only in result whitespace are distinct');
+  assert.equal((await call('validation/import', producer, run(boundSha, 'huck-run-blank', [], { result: '   ' }))).status, 400, 'a blank result is refused');
+
 });
 
 test('unit:validation-import-feeds-hold — a required failed, blocked or unrun case holds the candidate, an all-passing run releases it, and skipped follows the required-case rule', async () => {
@@ -185,7 +204,7 @@ test('unit:validation-import-feeds-hold — a required failed, blocked or unrun 
   const released = await imported(run(holdSha, 'hold-3', ['login', 'pay', 'ship', 'refund', 'export'].map(passing)));
   assert.equal(released.verdict.passed, true);
   assert.deepEqual(released.hold, { held: false, cases: [], runs: 4 }, 'an all-passing run releases the candidate');
-  assert.equal((await hold(boundSha)).runs, 1, 'the hold is per candidate: another head counts only its own imports');
+  assert.equal((await hold(boundSha)).runs, 2, 'the hold is per candidate: another head counts only its own two imports');
 
   // The hold feeds promotion: a real candidate, cut, deployed and passed on UAT, is refused production while an import holds it.
   const { promotionImports } = await import('../src/validation-import.js');

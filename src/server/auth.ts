@@ -30,7 +30,7 @@ export const operatorVisible = <T extends { id: string; key: string }>(actor: Pr
  */
 export const operatorAgentRouteGuard: Route = {
   method: '*', path: /^\/api\//,
-  async handle({ actor, url }) {
+  async handle({ actor, url, req }) {
     if (actor.role === 'operator-agent') demand(
       url.pathname === '/api/status' || url.pathname === '/api/work-snapshot' || url.pathname === '/api/work' || url.pathname === '/api/events'
       || url.pathname === '/api/delegation' || url.pathname === '/api/intake' || /^\/api\/work(?:\/[^/]+(?:\/[a-z]+)?)?$/.test(url.pathname)
@@ -41,7 +41,9 @@ export const operatorAgentRouteGuard: Route = {
       // Retro artefacts are judged by an independent agent identity holding decision:approve (GY-970).
       || /^\/api\/retro(?:\/standing|\/[0-9a-f-]{36}\/(?:approve|refuse))?$/.test(url.pathname)
       // E2E case recording (GY-1614): the registry and its run route, only for a holder of e2e:record.
-      || (/^\/api\/scenarios(?:\/[^/]+\/runs)?$/.test(url.pathname) && !!actor.capabilities?.includes('e2e:record')),
+      || (/^\/api\/scenarios(?:\/[^/]+\/runs)?$/.test(url.pathname) && !!actor.capabilities?.includes('e2e:record'))
+      // A candidate's imported runs and hold (GY-1860), read only: the promotion workflows read it as the release-filing identity.
+      || (req.method === 'GET' && /^\/api\/validation\/import\/[a-f0-9]{40}$/.test(url.pathname)),
       'Route is not available to operator agents', 403);
     return Next;
   },
