@@ -8,7 +8,7 @@ import { candidateKey } from './reconcile.js';
 import { canonicalJson } from '../onboarding.js';
 import { decisionInput } from '../master.js';
 import { readyToRetry } from './sessions.js';
-import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, githubPause, observationWakeDue, standingVerdict, type RoutineDecision } from './decisions.js';
+import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, standingVerdict, type RoutineDecision } from './decisions.js';
 import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { defaultDeploymentReuseMinutes, defaultPromoteEveryMinutes, deploymentDetail, deploymentStepBudgetMs, promotionCycle, promotionWorkflow, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
@@ -16,23 +16,6 @@ import { mainGuardAttention } from '../main-guard.js';
 import { promotionFreeze } from './main-watch.js';
 import { readingDueNow, readingsStep } from './cycle-readings.js';
 import { openThroughputOwner, throughputAnsweredAt, throughputClaim, throughputDecisionCause, throughputDecisionRelease, throughputHandAsked, throughputOwnerAnsweredBy, throughputOwnerClosure, throughputOwnerItem, throughputRemeasureAt, throughputSelfAsked, throughputStallText, type ThroughputStall } from '../throughput.js';
-
-/**
- * GY-710. Wake the item's observation job for a step refused on a stale observation — a rework —
- * through the effects' `resync`. One wake stands until an observation newer than it
- * lands (`observationWakeDue`); it is stamped on the snapshot's clock, the one the observation's
- * time is on. A wake that failed stamps no standing wake: it is sent again on the cycle backoff.
- */
-export async function wakeObservationJob(cycle: Cycle, item: Work, why: string) {
-  const { state, effects, now, snapshot, clock, performed } = cycle;
-  if (!effects.wakeObservation) return;
-  const key = `wake:observation:${item.id}`, previous = state.actions[key];
-  if (previous?.state === 'failed' ? !readyToRetry(previous, state.cycle) : !observationWakeDue(item, previous?.at, clock, githubPause(snapshot.jobs, clock))) return;
-  const note = async (outcome: 'done' | 'failed', detail: string, at: number) =>
-    performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: outcome, detail, attempts: outcome === 'failed' ? (previous?.state === 'failed' ? previous.attempts : 0) + 1 : 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist));
-  try { await effects.wakeObservation(item); await note('done', `Woke the observation job of ${item.key}: its ${why} waits for an observation newer than ${item.observation?.at ?? 'none'}`, clock); }
-  catch (error) { await note('failed', `Could not wake the observation job of ${item.key}: ${message(error)}`, now()); }
-}
 
 /** Step 5: shepherd reviews for submitted candidates. */
 export async function shepherdStep(cycle: Cycle) {
