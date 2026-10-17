@@ -8,7 +8,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { delegationLimitDrift, validateDelegationPrincipals, defaultDelegationLimits } from '../src/delegation.js';
+import { delegationLimitDrift, validateDelegationPrincipals, defaultDelegationLimits, withRecordedProofs } from '../src/delegation.js';
 import type { Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -87,6 +87,9 @@ const refusedRoutes: [string, string, unknown?][] = [
   ['GET', 'work/GY-1/decisions'],
   ['GET', 'validation'],
   ['GET', 'proof-grants'],
+  // Public /api/ routes too: the lane credential is held to its lane before they run.
+  ['POST', 'sign-in', {}],
+  ['POST', 'signin/claim', { code: 'x'.repeat(32) }],
 ];
 const laneRefusal = /outside the external-runs:import lane of producer/;
 
@@ -153,6 +156,13 @@ test('unit:lane-producer-not-a-reviewer-slot — a roster at GRAPHYARD_MAX_REVIE
   const over = [...atLimit, third];
   assert.deepEqual(delegationLimitDrift(over, env).map(entry => [entry.variable, entry.required]), [['GRAPHYARD_MAX_REVIEWERS', '3']], 'a third proof producer is over the limit');
   assert.throws(() => validateDelegationPrincipals(over, { ...defaultDelegationLimits, maxReviewers: 2 }, [admin.id, proofProducer.id, second.id, lane.id]), /Independent review\/proof agent limit exceeded: 3\/2; set GRAPHYARD_MAX_REVIEWERS=3 on the deployment before adding proof-producer-3/);
+  // Only proof grants hold a slot: a producer with no proofs and no import grant, or one whose recorded grant was revoked to none, holds none.
+  const proofless: Principal = { id: 'proofless', role: 'producer', proofs: [] };
+  const revoked = withRecordedProofs([{ id: 'revoked', role: 'producer', proofs: ['unit:*'] } as Principal], new Map([['revoked', []]]));
+  for (const extra of [proofless, ...revoked]) {
+    assert.deepEqual(delegationLimitDrift([...atLimit, extra], env), [], `${extra.id} holds no reviewer slot`);
+    assert.deepEqual(validateDelegationPrincipals([...atLimit, extra].map(p => ({ ...p })), { ...defaultDelegationLimits, maxReviewers: 2 }).attention, []);
+  }
 });
 
 // A lane producer's proof authority is Graphyard state: the grant store, not the environment allowlist, decides it.

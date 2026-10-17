@@ -60,9 +60,10 @@ export type DelegationLimitVariable = typeof delegationLimitVariables[number];
 const limitDefaults: Record<DelegationLimitVariable, number> = { GRAPHYARD_MAX_SLICE_LEADS: 3, GRAPHYARD_MAX_ENGINEERS_PER_LEAD: 2, GRAPHYARD_MIN_REVIEWERS: 1, GRAPHYARD_MAX_REVIEWERS: 2 };
 const countLeads = (principals: Roster) => principals.filter(p => p.role === 'slice-lead').length;
 type Roster = readonly Pick<Principal, 'id' | 'role' | 'grants' | 'proofs' | 'deploymentProviders'>[];
-// A reviewer slot is a producer that can review or prove: a lane-only producer (GY-1879) reviews nothing and holds none.
+// A reviewer slot is held only by a producer holding proof grants (GY-1879): a lane-only producer, a
+// producer configured with no proofs and one whose recorded grant was revoked to none hold none.
 // Callers holding the grant store pass the roster through `withRecordedProofs`, so a recorded grant decides it.
-const proofProducer = (p: Roster[number]) => p.role === 'producer' && !laneOnlyProducer(p);
+export const proofProducer = (p: Pick<Principal, 'role' | 'proofs'>) => p.role === 'producer' && !!p.proofs?.length;
 /**
  * The roster with each producer's proofs as Graphyard's grant store records them (proof-grants.ts: a
  * record supersedes the environment seed), so a reviewer slot is counted from effective proof
@@ -211,7 +212,8 @@ export function delegationSnapshot(principals: Principal[], work: Work[], now: n
       workers: workers.map(w => ({ key: w.key, ...identify(w.lease!.owner) })),
       bottlenecks: items.filter(w => w.blocker || standingEscalations(w).length || w.leadHold || w.gates.some(g => !g.passed))
         .map(w => ({ key: w.key, reason: w.blocker ?? standingEscalations(w)[0]?.reason ?? leadHoldRefusal(w) ?? w.gates.find(g => !g.passed)?.reasons[0] ?? 'Awaiting a gate decision' })) };
-  }), reviewers: principals.filter(proofProducer).map(p => identify(p.id)) };
+  // The snapshot lists every producer that is not lane-only; the reviewer limits count only proof holders.
+  }), reviewers: principals.filter(p => p.role === 'producer' && !laneOnlyProducer(p)).map(p => identify(p.id)) };
 }
 
 export function enforceLeadCapacity(actor: Principal, work: Work[], now: number, limits: DelegationLimits) {

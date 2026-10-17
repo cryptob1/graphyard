@@ -2058,10 +2058,13 @@ export async function applyRosterChange(session: InstallSession, record: Install
     // so an unredeemed dashboard link keeps working and only GRAPHYARD_PRINCIPALS changes.
     context.host.claim = null;
   } else {
-    for (const [principal, token] of await ensureTokens(session.directory, roster.filter(principal => principal.id !== change.id), vault, false)) session.tokens.set(principal, token);
-    const missing = roster.filter(principal => principal.id !== change.id && !session.tokens.has(principal.id));
+    // An unchanged add mints nothing: the deployment keeps the credential it holds, so a lost token file is refused, not replaced.
+    const standing = change.changed ? roster.filter(principal => principal.id !== change.id) : roster;
+    for (const [principal, token] of await ensureTokens(session.directory, standing, vault, false)) session.tokens.set(principal, token);
+    if (change.entry && !change.changed && !session.tokens.has(change.id)) throw new Error(`No credential is saved for ${change.id} under ${session.directory}, though the deployment serves it unchanged; nothing was minted or written. To issue it a new credential, run graphyard principal remove ${change.id}, then add it again`);
+    const missing = standing.filter(principal => !session.tokens.has(principal.id));
     if (missing.length) throw new Error(`No credential is saved for ${missing.map(principal => principal.id).join(', ')} under ${session.directory}; rerun graphyard install --apply before editing the roster`);
-    if (change.entry) for (const [principal, token] of await ensureTokens(session.directory, [change.entry], vault, true)) session.tokens.set(principal, token);
+    if (change.entry && change.changed) for (const [principal, token] of await ensureTokens(session.directory, [change.entry], vault, true)) session.tokens.set(principal, token);
   }
   session.principals = roster;
   const merges = typeof adapter.applyVariables === 'function';

@@ -89,6 +89,14 @@ test('unit:principal-upsert-remove-single-entry-readback — principal add write
     assert.equal(variableWrites(fixture).length, writesBefore + 1); assert.equal(redeploys(fixture), redeploysBefore + 1);
     assert.equal(await readFile(join(directory, 'install.json'), 'utf8'), recordText);
     assert.equal((await readFile(file, 'utf8')).trim(), deployed.token, 'the credential never rotates');
+    // An unchanged add whose token file was lost mints nothing: a fresh token would be one the deployment never serves.
+    await rm(file);
+    await assert.rejects(principal(fixture, ['add', 'huck-engineer', '--role', 'producer', '--grant', GRANT]), /No credential is saved for huck-engineer .* nothing was minted or written/);
+    await assert.rejects(stat(file), { code: 'ENOENT' }, 'no replacement credential is written');
+    assert.equal(variableWrites(fixture).length, writesBefore + 1); assert.equal(redeploys(fixture), redeploysBefore + 1);
+    assert.equal(await readFile(join(directory, 'install.json'), 'utf8'), recordText);
+    assert.deepEqual(deployedRoster(fixture.transport), after, 'the deployed credential stands');
+    await writeFile(file, `${deployed.token}\n`, { mode: 0o600 });
 
     // Remove: only that entry goes, the served roster no longer lists it, and its credential leaves this machine.
     const removed = await principal(fixture, ['remove', 'huck-engineer']);
@@ -168,6 +176,26 @@ test('unit:installer-roster-keeps-named-external-producer-across-apply — a lat
   const observeOnlyPlan = plannedPrincipals('owner-project').filter(entry => entry.role !== 'worker' && entry.role !== 'producer');
   assert.deepEqual(reconcileRoster(observeOnlyPlan, recorded, { observeOnly: true }).map(entry => entry.id), ['owner-project-operator', 'owner-project-master', 'owner-project-dashboard', 'owner-project-worker-1', 'owner-project-worker-2', 'huck-engineer']);
   assert.deepEqual(reconcileRoster(plannedPrincipals('owner-project', { workers: 1 }), recorded).map(entry => entry.id), ['owner-project-operator', 'owner-project-master', 'owner-project-worker-1', 'owner-project-dashboard', 'huck-engineer']);
+
+  // A registered entry the plan would produce under the same id is refused, full or observation-only, never replaced by the planned principal.
+  const registeredCi = { id: 'owner-project-ci', role: 'producer' as const, sessionKind: 'ai' as const, grants: [GRANT], source: 'principal' as const };
+  assert.throws(() => reconcileRoster(plannedPrincipals('owner-project', { producerProofs: ['unit:*'] }), [registeredCi]), /owner-project-ci is registered by graphyard principal add as producer with grants external-runs:import, and this apply plans its own producer under the same id; nothing was written/);
+  const registeredOperator = { id: 'owner-project-operator', role: 'reader' as const, sessionKind: 'ai' as const, source: 'principal' as const };
+  assert.throws(() => reconcileRoster(observeOnlyPlan, [registeredOperator], { observeOnly: true }), /owner-project-operator is registered by graphyard principal add as reader/);
+});
+
+test('unit:installer-roster-keeps-named-external-producer-across-apply — an apply whose plan produces the id of an entry principal add registered is refused before any write: an import-only producer is never replaced by the planned proof producer while its token stands', async () => {
+  const first = await harness({ provider: 'railway' });
+  try {
+    const session = await prepareInstall(first.root, { repository: REPOSITORY, provider: 'railway' }, first.deps);
+    await applyInstall(session, await buildPlan(session));
+    assert.equal((await principal(first, ['add', 'owner-project-ci', '--role', 'producer', '--grant', GRANT])).changed, true);
+    const recordText = await readFile(join(session.directory, 'install.json'), 'utf8'), roster = deployedRoster(first.transport), writes = variableWrites(first).length;
+    await assert.rejects(prepareInstall(first.root, { repository: REPOSITORY, provider: 'railway', producerProofs: ['unit:*'] }, first.deps), /owner-project-ci is registered by graphyard principal add as producer with grants external-runs:import.*graphyard principal remove owner-project-ci/);
+    assert.equal(await readFile(join(session.directory, 'install.json'), 'utf8'), recordText, 'install.json is unchanged');
+    assert.deepEqual(deployedRoster(first.transport), roster, 'the registered entry keeps its role and grant and gains no proofs');
+    assert.equal(variableWrites(first).length, writes);
+  } finally { await first.cleanup(); }
 });
 
 // --- The import route: the grant admits a run, its absence is refused by name, and it authorizes nothing else. ---

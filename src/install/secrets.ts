@@ -165,6 +165,10 @@ export function recordedRoster(record: Pick<InstallRecord, 'principals'> | null)
  * only a full apply's own plan (`--workers`, `--producer-proof`) retires the installer's entries.
  */
 export function reconcileRoster(planned: RosterPrincipal[], recorded: RosterPrincipal[], options: { observeOnly?: boolean } = {}): RosterPrincipal[] {
+  // A registered entry whose id the plan now produces is refused, never replaced: its holder's token
+  // would carry the planned role and proofs, widening a lane credential into authority nobody granted.
+  const collision = recorded.find(entry => entry.source === 'principal' && planned.some(principal => principal.id === entry.id));
+  if (collision) throw new Error(`${collision.id} is registered by graphyard principal add as ${collision.role}${collision.grants?.length ? ` with grants ${collision.grants.join(', ')}` : ''}, and this apply plans its own ${planned.find(principal => principal.id === collision.id)!.role} under the same id; nothing was written. Run graphyard principal remove ${collision.id} first, or apply without the option that plans it`);
   const kept = recorded.filter(entry => !planned.some(principal => principal.id === entry.id) && (entry.source === 'principal' || !!options.observeOnly));
   return [...planned, ...kept];
 }

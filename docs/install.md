@@ -55,7 +55,7 @@ Skip until an App binds; else dispatch [small item](onboarding.md#4-prove-the-fi
 
 ## Principal roster
 
-`principal add ID --role ROLE [--grant external-runs:import]...`/`principal remove ID`: one non-installer `install.json` entry, kept by `--apply`; writes only `GRAPHYARD_PRINCIPALS`, reads back, idempotent, under `apply.lock`; producers need `--grant` ([lane](validation.md#release-verdicts)).
+`principal add ID --role ROLE [--grant external-runs:import]...`/`principal remove ID`: one non-installer `install.json` entry, kept by `--apply` (planned-ID collisions refuse); writes only `GRAPHYARD_PRINCIPALS`, reads back, idempotent, under `apply.lock`; producers need `--grant` ([lane](validation.md#release-verdicts)).
 
 ## Self-contained host
 

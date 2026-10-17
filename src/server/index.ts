@@ -10,7 +10,7 @@ import { OperatorAgents } from '../operator-agent.js';
 import { assembleDelegationLimits } from './limits.js';
 import { ProofGrants } from '../proof-grants.js';
 import type { Store } from '../store.js';
-import { withRecordedProofs } from '../delegation.js';
+import { proofProducer, withRecordedProofs } from '../delegation.js';
 import { AgentRegistry } from '../agent-registry.js';
 import { ProductionDelivery } from '../production-delivery.js';
 import { artifactCapacityFromEnv, type ArtifactBackend } from '../artifacts.js';
@@ -18,7 +18,7 @@ import { buildIdentity } from '../protocol-version.js';
 import type { ProductionWatch } from '../production-watch.js';
 import { responderFromEnv, type Responder } from '../closed-question.js';
 import { Next, Sent, matchRoute, registerApiRoutes, requestFailure, type RouteContext, type RouteModule, type Services } from './routes.js';
-import { authenticate, laneProducerScope, operatorAgentRouteGuard, operatorVisible } from './auth.js';
+import { authenticate, configuredActor, laneProducerScope, operatorAgentRouteGuard, operatorVisible } from './auth.js';
 import { laneOnlyProducer, type Credential } from './principals.js';
 import { healthRoutes } from './routes/health.js';
 import { signinClaimFromEnv, signinRoutes } from './routes/signin.js';
@@ -106,7 +106,7 @@ export function assembleServices(engine: Engine, credentials: Credential[], gith
 async function recordedProofs(store: Store): Promise<Map<string, string[]>> {
   return new Map((await store.pool.query('SELECT document FROM proof_grants')).rows.map(row => [row.document.principalId, row.document.patterns]));
 }
-const proofProducers = (principals: readonly Principal[]) => principals.filter(p => p.role === 'producer' && !laneOnlyProducer(p)).length;
+const proofProducers = (principals: readonly Principal[]) => principals.filter(proofProducer).length;
 
 /**
  * The delegation report recomputed from effective proof authority (GY-1879): a reviewer slot is
@@ -128,8 +128,8 @@ async function refreshDelegationLimits(services: Services, credentials: Credenti
 }
 
 /**
- * The grant store with reviewer capacity enforced (GY-1879): proof patterns granted to a lane-only
- * producer make it a proof producer holding a reviewer slot, so the grant is refused once every slot
+ * The grant store with reviewer capacity enforced (GY-1879): proof patterns granted to a producer
+ * holding none make it a proof producer holding a reviewer slot, so the grant is refused once every slot
  * GRAPHYARD_MAX_REVIEWERS allows is held; every grant or revoke then recomputes the delegation report.
  */
 class SlotCountedProofGrants extends ProofGrants {
@@ -139,7 +139,7 @@ class SlotCountedProofGrants extends ProofGrants {
     if (actor.role === 'admin' && target) {
       const effective = withRecordedProofs(this.configured, await recordedProofs(this.grantStore));
       const held = proofProducers(effective);
-      demand(!laneOnlyProducer(effective.find(p => p.id === id)!) || held < this.maxReviewers(),
+      demand(target.role !== 'producer' || proofProducer(effective.find(p => p.id === id)!) || held < this.maxReviewers(),
         `Granting proofs to ${id} makes it an independent review/proof agent, and all ${held} slots GRAPHYARD_MAX_REVIEWERS=${this.maxReviewers()} allows are held; set GRAPHYARD_MAX_REVIEWERS=${held + 1} on the deployment first`, 409);
     }
     const result = await super.grant(actor, id, input, key);
@@ -185,7 +185,10 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         }
         return false;
       };
-      if (await dispatch(publicRoutes)) return;
+      // A lane-only producer's credential is held to its lane before any public /api/ handler runs (GY-1879):
+      // sign-in and claim answer it with the lane refusal, while an unauthenticated request reaches them as before.
+      const lane = url.pathname.startsWith('/api/') ? configuredActor(services, req.headers.authorization) : null;
+      if (!(lane && laneOnlyProducer(lane)) && await dispatch(publicRoutes)) return;
       if (url.pathname.startsWith('/api/')) {
         context.actor = await authenticate(services, req.headers.authorization, services.repository, req.method, url.pathname);
         if (await dispatch([laneProducerScope, ...apiRoutes])) return;

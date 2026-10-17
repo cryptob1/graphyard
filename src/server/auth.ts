@@ -15,12 +15,19 @@ export async function authenticate(services: Services, authorization: string | u
   const lease = leaseCommandRequest(method, pathname);
   const token = String(authorization ?? '').replace(/^Bearer /, '');
   const hash = createHash('sha256').update(token).digest();
-  const configured = services.principals.find(p => timingSafeEqual(p.hash, hash));
+  const configured = configuredCredential(services, hash);
   if (configured) await services.operatorAgents.assertConfiguredPrincipalSafe({ id: configured.actor.id, tokenHash: hash.toString('hex') }, { lease });
   const actor = configured?.actor ?? humanSignIn(services).authenticate(token) ?? await services.operatorAgents.authenticate(token);
   demand(actor, 'A valid Graphyard bearer token is required', 401);
   if (actor.role === 'operator-agent') demand(actor.scope?.repositories.includes(repository), 'Repository is outside operator-agent scope', 403);
   return actor;
+}
+
+const configuredCredential = (services: Services, hash: Buffer) => services.principals.find(p => timingSafeEqual(p.hash, hash));
+/** The configured principal a bearer token names, read without any effect; null without one. */
+export function configuredActor(services: Services, authorization: string | undefined): Principal | null {
+  if (!authorization) return null;
+  return configuredCredential(services, createHash('sha256').update(authorization.replace(/^Bearer /, '')).digest())?.actor ?? null;
 }
 
 /** One scope rule for every scoped read, so a route cannot answer with data its own authorization would refuse. */
