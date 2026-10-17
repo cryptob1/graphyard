@@ -325,6 +325,30 @@ jobs:
           GRAPHYARD_CANDIDATE_ID: ${{ needs.candidate.outputs.id }}
           GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
           GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
+      - name: Record a cancelled verdict when the suites recorded none
+        # GY-1965: a uat job cancelled or failed before the suites above wrote rc-uat/ID would leave UAT
+        # reading the candidate as a validation in progress, refusing every later candidate for the
+        # whole window. `cancelled` concludes it and never promotes. This step uses only curl and jq on
+        # GitHub's git API, from this workflow's own text, so a failed checkout or npm ci, or a candidate
+        # whose code predates it, still records it; an existing rc-uat/ID is kept, never replaced.
+        if: ${{ always() }}
+        env:
+          CANDIDATE_ID: ${{ needs.candidate.outputs.id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="rc-uat/$CANDIDATE_ID" api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/git"
+          auth=(-H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json')
+          status="$(curl -sS -o /dev/null -w '%{http_code}' "${auth[@]}" "$api/ref/tags/$tag")"
+          if [[ $status == 200 ]]; then echo "$tag already holds a verdict; kept"; exit 0; fi
+          [[ $status == 404 ]] || { echo "::error::reading $tag answered HTTP $status" >&2; exit 1; }
+          record="$(jq -cn --arg id "$CANDIDATE_ID" --arg sha "$CANDIDATE_SHA" --arg at "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
+            '{id: $id, sha: $sha, result: "cancelled", deployedSha: null, at: $at, suites: [], followUp: null}')"
+          object="$(jq -n --arg tag "$tag" --arg message "$record" --arg sha "$CANDIDATE_SHA" \
+            '{tag: $tag, message: $message, object: $sha, type: "commit", tagger: {name: "graphyard-release", email: "release@graphyard.invalid"}}' \
+            | curl -fsS "${auth[@]}" -X POST "$api/tags" --data @- | jq -r .sha)"
+          jq -n --arg ref "refs/tags/$tag" --arg sha "$object" '{ref: $ref, sha: $sha}' | curl -fsS "${auth[@]}" -X POST "$api/refs" --data @- > /dev/null
+          echo "$tag records cancelled"
       - name: Record the E2E case runs on the control plane's Tests page
         # Best effort and after the verdict: recording never decides promotion. The suite command
         # never holds a control-plane credential, so this step records the report it wrote. It uses
