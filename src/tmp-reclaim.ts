@@ -25,7 +25,7 @@
 import { existsSync, readFileSync, readlinkSync, type Dirent, type Stats } from 'node:fs';
 import { chmod, lstat, opendir, readdir, readFile, readlink, realpath, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, sep } from 'node:path';
 
 /** How old an ownerless directory must be before the pass removes it: the tsx cache's bound, and the default for a caller's own prefixes. */
 export const tmpReclaimMinAgeMs = 6 * 3_600_000;
@@ -156,15 +156,33 @@ export const tempResidueSuffix = '.foreign';
 export const tempResidueMarker = (directory: string) => `${directory}${tempResidueSuffix}`;
 /** What a settled entry's marker records: the directory inside it another account owns whose modes the pass may not change, or null when no single one was found, and that directory's owner. */
 export interface TempResidue { obstruction: string | null; uid: number | null; at: string }
-export const readTempResidue = async (directory: string): Promise<TempResidue | null> => {
-  const marker = tempResidueMarker(directory);
-  // Most candidates carry no marker at all: a stat beats the read's exception on a scan of thousands.
-  if (!existsSync(marker)) return null;
+/**
+ * The marker a pass of `uid` wrote beside `directory`, or null for anything else: a marker is
+ * honoured only as a regular file that account owns, holding every field a pass writes, its
+ * obstruction a directory inside the entry. On a sticky world-writable /tmp any account may create
+ * the sibling name; one it planted — or a `.foreign` file of another tool's — is no marker at all.
+ */
+export const readTempResidue = async (directory: string, uid = process.getuid?.()): Promise<TempResidue | null> => {
+  const marker = tempResidueMarker(directory), info = await lstat(marker).catch(() => null);
+  if (!info?.isFile() || (uid !== undefined && info.uid !== uid)) return null;
   try {
     const parsed = JSON.parse(await readFile(marker, 'utf8')) as Partial<TempResidue>;
-    return typeof parsed?.obstruction === 'string' || parsed?.obstruction === null ? { obstruction: parsed.obstruction, uid: typeof parsed.uid === 'number' ? parsed.uid : null, at: typeof parsed.at === 'string' ? parsed.at : '' } : null;
+    const inside = parsed?.obstruction === null || (typeof parsed?.obstruction === 'string' && parsed.obstruction.startsWith(`${directory}${sep}`));
+    return inside && (parsed.uid === null || typeof parsed.uid === 'number') && typeof parsed.at === 'string' ? { obstruction: parsed.obstruction!, uid: parsed.uid!, at: parsed.at } : null;
   } catch { return null; }
 };
+/**
+ * Whether `path` is a residue marker of `uid`'s, the pass's bookkeeping rather than an entry of its
+ * own; one whose entry is gone is taken back here, wherever it lies — a temporary root, a compile
+ * cache, a runtime scratch root — since its obstruction left with the entry and it names nothing now.
+ */
+async function residueBookkeeping(path: string, uid: number | undefined): Promise<boolean> {
+  if (!path.endsWith(tempResidueSuffix)) return false;
+  const entry = path.slice(0, -tempResidueSuffix.length);
+  if (!await readTempResidue(entry, uid)) return false;
+  if (!existsSync(entry)) await rm(path, { force: true }).catch(() => { /* the next pass tries again */ });
+  return true;
+}
 /** Settle `directory` as kept residue: write its marker naming `obstruction`, best-effort, for later passes to honour. */
 export const writeTempResidue = async (directory: string, obstruction: string | null, now = Date.now()): Promise<TempResidue> => {
   const uid = obstruction === null ? null : (await lstat(obstruction).catch(() => null))?.uid ?? null;
@@ -605,7 +623,7 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
   const storeAge = options.prefixes ? null : options.maxAgeMs ?? packageStoreMinAgeMs;
   const pass: PassState = { now, minAge, cacheAge, agentAge, storeAge, runtimeRoots, cap: null, written: new Map(), limit: options.limit ?? tmpReclaimLimitPerCycle, uid: process.getuid?.(), held: options.held ?? null, mounts: options.mounts,
     workMs: options.workMs ?? Number.POSITIVE_INFINITY, started: null, unfinished: options.unfinished ?? unfinishedRemovals, retryMs: options.retryMs ?? tmpReclaimRetryMs,
-    registrations: options.registrations ?? unfinishedRegistrations };
+    registrations: options.registrations ?? unfinishedRegistrations, residues: new Set() };
   for (const path of pass.unfinished) if (!existsSync(path)) pass.unfinished.delete(path);
   // A registration is kept apart from its checkout's path: once the checkout is gone that path is
   // dropped above, and a registration left behind would keep `git worktree add` refusing the path.
@@ -744,7 +762,7 @@ export async function tmpCensus(roots: string | readonly string[], bound = tmpCo
 }
 
 /** `cap`: the runtime scratch cap of the sweep under way, set only below headroom; `written`: each runtime scratch entry's tree write time, read once per pass. */
-interface PassState { now: number; minAge: (name: string) => number | null; cacheAge: number | null; agentAge: number | null; storeAge: number | null; runtimeRoots: readonly string[]; cap: number | null; written: Map<string, number>; limit: number; uid: number | undefined; held: Set<string> | null; mounts: readonly string[] | null | undefined; workMs: number; started: number | null; unfinished: Set<string>; retryMs: number; registrations: Map<string, string> }
+interface PassState { now: number; minAge: (name: string) => number | null; cacheAge: number | null; agentAge: number | null; storeAge: number | null; runtimeRoots: readonly string[]; cap: number | null; written: Map<string, number>; limit: number; uid: number | undefined; held: Set<string> | null; mounts: readonly string[] | null | undefined; workMs: number; started: number | null; unfinished: Set<string>; retryMs: number; registrations: Map<string, string>; residues: Set<string> }
 /** Record one removal of `kind` in `report`. */
 function took(report: TmpReclaimReport, kind: TmpReclaimClass, path: string, bytes: number) {
   report.removed.push({ path, bytes });
@@ -788,11 +806,16 @@ export class ForeignSubtreeError extends Error {
  * beside it naming `obstruction` where one was found. True when `error` was such a refusal, so the
  * caller carries no unfinished removal and reports no error the action record would fail on.
  */
-export async function settleForeignResidue(path: string, error: unknown, report: { residue?: number }): Promise<boolean> {
+export async function settleForeignResidue(path: string, error: unknown, report: { residue?: number }, residues = new Set<string>()): Promise<boolean> {
   if (!(error instanceof ForeignSubtreeError)) return false;
   if (error.obstruction !== null) await writeTempResidue(path, error.obstruction).catch(() => { /* the next pass meets the refusal again and settles it there */ });
-  report.residue = (report.residue ?? 0) + 1;
+  heldAsResidue(path, report, residues);
   return true;
+}
+/** Count `path` as kept residue once a pass, however many sweeps of it meet the entry: an escalating pass revisits every settled entry. */
+function heldAsResidue(path: string, report: { residue?: number }, residues: Set<string>) {
+  residues.add(path);
+  report.residue = residues.size;
 }
 /**
  * Remove `path` recursively, retrying while its tree refills or is still being released, for at
@@ -807,7 +830,7 @@ export async function settleForeignResidue(path: string, error: unknown, report:
  * obstruction no longer stands, and the entry is due again this same pass.
  */
 async function removeTree(path: string, retryMs: number, uid: number | undefined) {
-  const residue = await readTempResidue(path);
+  const residue = await readTempResidue(path, uid);
   if (residue) {
     if (await tempResidueStands(residue, uid)) throw new ForeignSubtreeError(residue.obstruction);
     await rm(tempResidueMarker(path), { force: true }).catch(() => { /* gone already, or the next pass takes it */ });
@@ -849,21 +872,18 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
       try { await rm(path, { force: true }); } catch { /* the next pass tries again */ }
       continue;
     }
-    // A residue marker whose entry is gone is clutter the same way: its obstruction took the entry
-    // with it, or a keeper elsewhere freed it, and the marker names nothing now (GY-1967).
-    if (entry.name.endsWith(tempResidueSuffix) && !existsSync(path.slice(0, -tempResidueSuffix.length))) {
-      try { await rm(path, { force: true }); } catch { /* the next pass tries again */ }
-      continue;
-    }
+    // A residue marker is the pass's bookkeeping, taken back once its entry is gone (GY-1967); a
+    // `.foreign` file no pass of this user's wrote is never touched.
+    if (entry.isFile() && await residueBookkeeping(path, uid)) continue;
     // An entry a previous pass settled as residue is honoured here, before any aging: the marker
     // read and one stat on the obstruction it names are the whole cost — no last-written walk, no
     // holder check, no tree read, and no share of the pass's limit — and the kept count carries it
     // (GY-1967). A marker whose obstruction no longer stands goes, and the entry is due again this
     // same pass, judged like any other below.
     if (candidate(entry) && residueMarks.has(entry.name)) {
-      const residue = await readTempResidue(path);
-      if (residue && await tempResidueStands(residue, pass.uid)) { report.scanned++; report.residue = (report.residue ?? 0) + 1; report.kept++; continue; }
-      await rm(tempResidueMarker(path), { force: true }).catch(() => { /* gone already, or the next pass takes it */ });
+      const residue = await readTempResidue(path, uid);
+      if (residue && await tempResidueStands(residue, uid)) { report.scanned++; heldAsResidue(path, report, pass.residues); report.kept++; continue; }
+      if (residue) await rm(tempResidueMarker(path), { force: true }).catch(() => { /* gone already, or the next pass takes it */ });
     }
     // A name the pass knows is judged by that name's bound; any other directory of this user's is an
     // agent's stale checkout if it is a git checkout or linked worktree, judged by the agent scratch
@@ -951,7 +971,7 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
       // (GY-1967) — is settled as kept residue: the entry stays, a marker beside it names what
       // holds it, later passes honour the marker instead of meeting the refusal again, and no
       // error the action record would fail on is reported. Any other failure is carried and named.
-      if (!await settleForeignResidue(path, error, report)) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
+      if (!await settleForeignResidue(path, error, report, pass.residues)) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
     }
   }
   report.kept += Math.max(0, removable.length - (report.removed.length - removedBefore));
@@ -1080,8 +1100,10 @@ async function reclaimCompileCaches(root: string, real: string, pass: PassState,
   const stale: { path: string; mtime: number }[] = [];
   let held: Set<string> | null = null;
   for (const entry of await readdir(cache, { withFileTypes: true }).catch(() => [] as Dirent[])) {
-    if (!entry.isDirectory()) continue;
     const path = join(cache, entry.name);
+    // A settled version's marker lies in the cache beside it: taken back here once the version is gone.
+    if (entry.isFile()) await residueBookkeeping(path, pass.uid);
+    if (!entry.isDirectory()) continue;
     let info;
     try { info = await lstat(path); } catch { continue; }
     // Another user's version is theirs; one on another device is another volume's.
@@ -1109,7 +1131,7 @@ async function reclaimCompileCaches(root: string, real: string, pass: PassState,
       pass.unfinished.delete(path);
       took(report, 'compileCache', path, bytes);
     } catch (error) {
-      if (!await settleForeignResidue(path, error, report)) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
+      if (!await settleForeignResidue(path, error, report, pass.residues)) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
     }
   }
 }
@@ -1141,6 +1163,8 @@ async function reclaimRuntimeScratch(root: string, real: string, pass: PassState
     for (const entry of await readdir(scratch, { withFileTypes: true }).catch(() => [] as Dirent[])) {
       if (!entry.isDirectory() && !entry.isFile()) continue;
       const path = join(scratch, entry.name);
+      // A settled entry's marker is bookkeeping, never ranked against the cap nor removed as scratch.
+      if (entry.isFile() && await residueBookkeeping(path, pass.uid)) continue;
       let info;
       try { info = await lstat(path); } catch { continue; }
       // Another user's entry is theirs; one on another device is another volume's, and neither counts against the cap.
@@ -1189,7 +1213,7 @@ async function reclaimRuntimeScratch(root: string, real: string, pass: PassState
         pass.unfinished.delete(path); pass.written.delete(path);
         took(report, 'runtimeScratch', path, bytes);
       } catch (error) {
-        if (!await settleForeignResidue(path, error, report)) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
+        if (!await settleForeignResidue(path, error, report, pass.residues)) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
       }
     }
   }
