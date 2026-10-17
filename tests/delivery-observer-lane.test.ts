@@ -17,7 +17,7 @@ import type { Observation, Principal, Work } from '../src/model.js';
 import { principalCommand } from '../src/cli/install.js';
 import { applyInstall, buildPlan, prepareInstall } from '../src/install/index.js';
 import { fingerprint, reconcileRoster, rosterEntry, tokenFile } from '../src/install/secrets.js';
-import { externalRunsImportGrant, observeShaGrant } from '../src/server/principals.js';
+import { externalRunsImportGrant } from '../src/server/principals.js';
 import { freePort } from '../src/cli/test-isolation.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { recordLegacyMerger } from './helpers/legacy-merger.js';
@@ -28,6 +28,8 @@ import { deployedRoster, harness, REPOSITORY, type Harness } from './install-har
 // no ledger and holds no reviewer slot. Deployed is what its observation can say; Production verified
 // still needs an independently authorized, applicable passing smoke at the exact observed release.
 
+// A literal, so the file still loads (and its cases fail) against a base without the grant.
+const observeShaGrant = 'delivery:observe-sha';
 const observer: Principal = { id: 'huck-observer', role: 'producer', sessionKind: 'ai', grants: [observeShaGrant] };
 const importer: Principal = { id: 'huck-engineer', role: 'producer', sessionKind: 'ai', grants: [externalRunsImportGrant] };
 const proofProducer: Principal = { id: 'proof-producer', role: 'producer', proofs: ['integration:claim-safety'] };
