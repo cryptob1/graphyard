@@ -7,7 +7,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { gitBranchName } from '../src/model/pr-adoption.js';
 import { saveDocument, Store } from '../src/store.js';
-import { mergerEventKind } from '../src/merger-mode.js';
+import { MergerSettings, mergerEventKind } from '../src/merger-mode.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { recordLegacyMerger } from './helpers/legacy-merger.js';
 import { FakeGitHub } from './helpers/fake-github.js';
@@ -269,6 +269,34 @@ test('unit:pr-adoption-exact-head-complete — complete on an adopted item is re
     assert.equal((await eventsOf(item, 'adopt')).length, 2, 'the rebind is its own recorded fact');
     const completed = await engine.execute(worker, 'submit', item.id, { epoch: attempt.epoch, pr: pull.number }, randomUUID());
     assert.deepEqual(completed.submission, { epoch: attempt.epoch, pr: pull.number });
+  } finally {
+    engine.submissionObserver = null;
+  }
+});
+
+test('unit:pr-adoption-merger-switch-keeps-pr — an adoption made under the github writer still completes only as its pull request after a real switch to the control-plane writer: a head is refused, and nothing is recorded until the writer is github again', async () => {
+  const { head, pull } = externalPull('feature/huck-switch');
+  const item = await adopt(await released(), pull.number, head);
+  const attempt = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
+  await engine.execute(worker, 'workspace', item.id, { epoch: attempt.epoch, host: 'machine-d', path: `/tmp/adopted-4/${item.id}`, branch: 'feature/huck-switch' }, randomUUID());
+  const settings = new MergerSettings(store);
+  await settings.change(operator, { merger: 'control-plane', reason: 'this test switches the writer after an adoption' }, randomUUID());
+  try {
+    // The adopted head itself, submitted as a head, would be a newly allocated change: refused naming the adopted pull request.
+    await refused(engine.execute(worker, 'submit', item.id, { epoch: attempt.epoch, head }, randomUUID()),
+      new RegExp(`adopted pull request #${pull.number} and completes only as that pull request, never as a head`));
+    await refused(engine.execute(worker, 'submit', item.id, { epoch: attempt.epoch, pr: pull.number }, randomUUID()), 'A pull request is submitted only while GitHub is the merge writer');
+    const held = await reload(item);
+    assert.equal(held.submission ?? null, null, 'no submission was recorded under the control-plane writer');
+    assert.equal(held.candidate ?? null, null, 'no synthetic change was bound');
+    assert.equal(held.prAdoption!.pr, pull.number, 'the adoption still binds its pull request');
+  } finally {
+    await settings.change(operator, { merger: 'github', reason: 'this test exercises the legacy github merger' }, randomUUID());
+  }
+  engine.submissionObserver = observeFromFake;
+  try {
+    const completed = await engine.execute(worker, 'submit', item.id, { epoch: attempt.epoch, pr: pull.number }, randomUUID());
+    assert.deepEqual(completed.submission, { epoch: attempt.epoch, pr: pull.number }, 'it completes as the adopted pull request once github writes again');
   } finally {
     engine.submissionObserver = null;
   }

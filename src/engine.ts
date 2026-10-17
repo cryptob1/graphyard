@@ -1077,7 +1077,8 @@ export class Engine {
     // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
     const work = (await lockedWork(this.store.leasePool, [id])).find(w => w.id === id || w.key === id);
     const workspace = work?.workspaces.find(w => w.epoch === data.epoch);
-    if (!work || work.stage === 'done' || !workspace) return null;
+    // GY-1849: an adopted item never completes as a head (the transaction refuses it), so no git is read for one.
+    if (!work || work.stage === 'done' || !workspace || work.prAdoption) return null;
     if (this.gitRunner === undefined) this.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd());
     demand(this.gitRunner, 'The control plane has no checkout to read a submitted head from; a head submission needs the merge writer checkout', 503);
     return observeLocalHead(this.gitRunner, { head: data.head, base: this.baseBranch, branch: workspace.branch, author: actor.id });
@@ -1970,6 +1971,9 @@ export class Engine {
         else demand(merger !== 'control-plane', `A pull request is submitted only while GitHub is the merge writer; this install's merger is ${merger}, so complete ${work.key} ${data.epoch} --head instead`, 409);
         let observed = observation, number: number;
         if (data.head !== undefined) {
+          // GY-1849: an adoption binds its pull request's own number, and that binding outlives a later
+          // switch of the merge writer: a head would complete it as a newly allocated change instead.
+          demand(!work.prAdoption, `${work.key} adopted pull request #${work.prAdoption?.pr} and completes only as that pull request, never as a head; switch the writer back to github with graphyard master merger, then complete ${work.key} ${data.epoch} ${work.prAdoption?.pr}`, 409);
           demand(observation?.source === 'control-plane' && observation.candidate.sha === data.head, `${data.head.slice(0, 12)} was not observed by the control plane (the merger changed while it was read); complete ${work.key} ${data.epoch} --head again`, 409);
           // One change number per (item, head), allocated under the item lock this transaction holds:
           // the candidate, the submission and the number commit together, and a retried or repeated
