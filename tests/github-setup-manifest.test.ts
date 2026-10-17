@@ -60,7 +60,7 @@ test('unit:manifest-no-loopback-hook — a control-plane App is created although
   // GY-1476: a hosted origin too keeps the App GitHub already created; install writes the secret to its webhook.
   for (const [deployment, created] of [['http://127.0.0.1:4310', true], ['https://graphyard.example', true]] as const) {
     const root = await temporaryDirectory('manifest-setup'); execFileSync('git', ['init', '-q', root]);
-    const page = await startGithubSetup(root, 'owner/scratch', deployment, 0, { convert: async () => ({ id: 123, slug: 'graphyard-scratch', pem: 'test-only-private-key', webhook_secret: null }) });
+    const page = await startGithubSetup(root, 'owner/scratch', deployment, 0, { convert: async () => ({ id: 123, slug: 'graphyard-scratch', pem: 'test-only-private-key', webhook_secret: null }), ownerType: async () => 'User' });
     try {
       const state = (await (await fetch(page.url)).text()).match(/state=([a-f0-9]+)/)![1];
       const response = await fetch(`${page.url}/created?code=example&state=${state}`, { redirect: 'manual' });

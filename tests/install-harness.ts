@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { fakeTransport, type BundleFileRecord, type Transport } from '../src/install/transport.js';
 import type { InstallDependencies } from '../src/install/index.js';
 import type { Provider } from '../src/install/types.js';
+import { controlPlanePermissions, requiredPermissions } from '../src/github-permissions.js';
 import { installUnitsFile, legacyInstallUnits, perInstallUnits } from '../src/install/units.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2024-01-01 deprecation announcement is Hetzner server-type fixture data the pricing reads for presence only; Date.now() is the install's handed clock and stamps tokens and deliveries nothing ages.
@@ -128,11 +129,23 @@ export function githubResponses(state: FakeState, repository = REPOSITORY, branc
     { match: `gh api repos/${repository}/commits/${branch}`, result: JSON.stringify({ sha: HEAD_SHA }) },
     { match: '--method PUT', result: '{}' },
     { match: `gh api repos/${repository}/branches/${branch}/protection`, result: state.protection ? JSON.stringify(state.protection) : { stdout: '', stderr: 'Branch not protected', code: 1 } },
-    // The repository and its rulesets as GitHub answers them, which the protection record reads (GY-1870); any other line under them answers empty, as an unmatched one does.
-    { match: `gh api repos/${repository}`, result: (line: string) => line === `gh api repos/${repository}` ? JSON.stringify({ full_name: repository, owner: { type: 'User' }, allow_auto_merge: false })
+    // The repository itself, as --reuse-app and app bind read it with the host's gh login (GY-1877) and the
+    // protection record reads it with its rulesets (GY-1870); any other line under them answers empty, as an unmatched one does.
+    { match: `gh api repos/${repository}`, result: (line: string) => line === `gh api repos/${repository}` ? JSON.stringify({ id: REPOSITORY_ID, full_name: repository, owner: { login: repository.split('/')[0], type: 'User' }, allow_auto_merge: false })
       : line.startsWith(`gh api repos/${repository}/rulesets?includes_parents=false`) ? '[]' : '' },
   ];
 }
+/** The managed repository's GitHub id, as `gh api repos/OWNER/NAME` reports it. */
+export const REPOSITORY_ID = 9001;
+
+/** An App whose key is saved on the host (`app import`, GY-1877), as GitHub's App endpoints answer the App itself. */
+export interface FakeApp { appId: number; slug: string; installationId: number; account?: string; repositorySelection?: 'all' | 'selected'; permissions?: Record<string, string>;
+  /** The repository is not among its selected repositories (GY-1877); GitHub's GET /repos/{repo}/installation answers 404. */
+  deselected?: boolean }
+/** The App a JWT names (`iss`), read without verifying its signature: the harness checks flows, not keys. */
+const appOfJwt = (apps: FakeApp[], authorization: string) => {
+  try { return apps.find(app => String(app.appId) === String(JSON.parse(Buffer.from(authorization.replace(/^Bearer /, '').split('.')[1], 'base64url').toString()).iss)) ?? null; } catch { return null; }
+};
 
 export const satisfiedProtection = (appId: number | null, reviewCount = 1) => ({
   // `strict` off is part of a satisfied branch: a candidate merges on the base it was built on (GY-191).
@@ -167,6 +180,7 @@ export interface HarnessOptions {
   envFile?: string;
   service?: string;
   workdir?: string;
+  /** GET /api/status's body, or a function answering it per request (GY-1877: a server that reports the App once it is written). */
   statusBody?: unknown;
   healthy?: boolean;
   /** The commit /healthz reports; the pinned Graphyard source's by default, so a Railway upload is served. */
@@ -186,6 +200,8 @@ export interface HarnessOptions {
   extraResponses?: { match: string; result: string | { stdout: string; stderr: string; code: number } | ((line: string, input?: string) => string | { stdout: string; stderr: string; code: number }) }[];
   /** The agent registry the fake server holds (GET /api/agent-registry/document). */
   registry?: any;
+  /** Apps GitHub knows, for `/app`, `/app/installations` and the repository read as the App (GY-1877); none by default. */
+  apps?: FakeApp[];
 }
 
 /**
@@ -235,8 +251,13 @@ export async function harness(options: HarnessOptions): Promise<Harness> {
     // The served roster (GET /api/principals), as the control plane lists it: ids, roles, kinds and grants, never tokens.
     if (url.endsWith('/api/principals')) return json(200, { principals: deployedRoster(transport, remotes).map(principal => ({ id: principal.id, role: principal.role, sessionKind: principal.sessionKind ?? null, grants: principal.grants ?? [], leases: [] })) });
     if (url.endsWith('/api/agent-registry/apply') && method === 'POST') return json(200, { applied: true });
-    if (url.endsWith('/api/status')) return json(200, options.statusBody ?? { actor: { id: `${installId}-operator`, role: 'admin' }, repository, github: true, githubAppId: GRAPHYARD_APP_ID, githubInstallationId: 500 });
+    if (url.endsWith('/api/status')) return json(200, typeof options.statusBody === 'function' ? options.statusBody() : options.statusBody ?? { actor: { id: `${installId}-operator`, role: 'admin' }, repository, github: true, githubAppId: GRAPHYARD_APP_ID, githubInstallationId: 500 });
     if (url.includes('/app/installations/') && url.endsWith('/access_tokens')) return json(201, { token: 'installation-token-for-tests', expires_at: new Date(Date.now() + 3_600_000).toISOString() });
+    const app = appOfJwt(options.apps ?? [], String((init.headers ?? {}).Authorization ?? ''));
+    if (app && url.endsWith('/app')) return json(200, { id: app.appId, slug: app.slug, owner: { login: app.account ?? repository.split('/')[0] }, permissions: app.permissions ?? requiredPermissions(controlPlanePermissions) });
+    if (app && url.includes('/app/installations')) return json(200, [{ id: app.installationId, account: { login: app.account ?? repository.split('/')[0] }, permissions: app.permissions ?? requiredPermissions(controlPlanePermissions), repository_selection: app.repositorySelection ?? 'selected', suspended_at: null }]);
+    if (app && url.endsWith(`/repos/${repository}/installation`)) return app.deselected ? json(404, { message: 'Not Found' }) : json(200, { id: app.installationId });
+    if (url.endsWith(`/repos/${repository}`)) return json(200, { id: REPOSITORY_ID, full_name: repository, owner: { login: repository.split('/')[0] } });
     if (url.endsWith('/app/hook/config') && method === 'PATCH') { state.hookConfig = JSON.parse(String(init.body)); return json(200, state.hookConfig); }
     if (url.endsWith('/app/hook/config')) return json(200, state.hookConfig ?? { url: '', content_type: 'json' });
     if (url.includes('/app/hook/deliveries')) return json(200, state.deliveries);
