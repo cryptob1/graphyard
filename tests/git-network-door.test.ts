@@ -14,8 +14,9 @@ import { fileURLToPath } from 'node:url';
 // `ls-remote`, in every spawn form the codebase uses — argv arrays (`run('git', ['fetch', …])`,
 // including the `-C ROOT` prefix and a bare `['push', …]` array passed to a runner), variadic git
 // helpers (`git('fetch', …)`, `gitAsync('fetch', …)`), `/bin/sh -c` scripts that run them (the
-// blocker probes, the installer's host checkout) and a replay wrapper's subcommand guard
-// (`args[0] !== 'push'`) — and fails, naming the file and line, on any spawner the allowlist does
+// blocker probes, the installer's host checkout), a replay wrapper's subcommand guard
+// (`args[0] !== 'push'`) and a shared argument helper executed at its call site
+// (`run('git', ['-C', root, ...pushArgs(…)])`, charged to the caller, not the defining file) — and fails, naming the file and line, on any spawner the allowlist does
 // not list. A file that stops spawning them fails the other way: a stale entry is removed, so the
 // list only shrinks. Each entry names the subcommands it runs (the test checks them against the
 // scan), the process that runs them and the credential they use. unit:git-network-door-baseline
@@ -33,7 +34,7 @@ export const networkSubcommands = ['clone', 'fetch', 'ls-remote', 'pull', 'push'
 const networkGroup = '(fetch|push|pull|clone|ls-remote)';
 
 /** Where a spawn was seen: the 1-based line, the form the codebase used, the subcommands it reaches the remote with. */
-export interface SpawnFinding { line: number; form: 'argv-array' | 'variadic-helper' | 'shell-script' | 'subcommand-guard'; subcommands: string[] }
+export interface SpawnFinding { line: number; form: 'argv-array' | 'variadic-helper' | 'shell-script' | 'subcommand-guard' | 'argument-helper'; subcommands: string[] }
 
 /** Comments dropped (prose names commands), strings kept (a `-c` script is a string, and it spawns). */
 export function stripComments(source: string): string {
@@ -82,8 +83,23 @@ function scriptAfterDashC(text: string, offset: number): string | null {
   return text.match(new RegExp(`(?:const|let|var)\\s+${safe}\\s*=\\s*(?:"((?:[^"\\\\]|\\\\.)*)"|'((?:[^'\\\\]|\\\\.)*)'|\`([^\`]*)\`)`))?.slice(1).find(kept => kept !== undefined) ?? null;
 }
 
+/**
+ * The argument helpers a source defines: a function whose result is a network argument array
+ * (`export const pushArgs = (…) => ['push', …]`, `function fetchArgs(…) { return ['fetch', …]; }`),
+ * by name, with the subcommand it builds. A file that executes one spawns that subcommand itself.
+ */
+export function argumentHelpers(source: string): Map<string, string[]> {
+  const text = stripComments(source), helpers = new Map<string, string[]>();
+  const definitions = [
+    new RegExp(`\\b(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:async\\s*)?(?:\\([^)]*\\)|[A-Za-z_$][\\w$]*)\\s*(?::[^=]*)?=>\\s*\\[\\s*['"\`]${networkGroup}['"\`]`, 'g'),
+    new RegExp(`\\bfunction\\s+([A-Za-z_$][\\w$]*)\\s*\\([^)]*\\)[^{]*\\{\\s*return\\s*\\[\\s*['"\`]${networkGroup}['"\`]`, 'g'),
+  ];
+  for (const definition of definitions) for (const match of text.matchAll(definition)) helpers.set(match[1], [...new Set([...(helpers.get(match[1]) ?? []), match[2]])]);
+  return helpers;
+}
+
 /** Every git network subcommand the source spawns, with the line and the form of each spawn site. */
-export function findNetworkSpawns(source: string): SpawnFinding[] {
+export function findNetworkSpawns(source: string, helpers: ReadonlyMap<string, string[]> = new Map()): SpawnFinding[] {
   const text = stripComments(source);
   const findings: SpawnFinding[] = [], seen = new Map<string, SpawnFinding>();
   const record = (offset: number, form: SpawnFinding['form'], found: string[]) => {
@@ -119,6 +135,16 @@ export function findNetworkSpawns(source: string): SpawnFinding[] {
   // subcommand-guard: a replay wrapper naming the one network subcommand its git runner may be
   // asked to execute (`if (!args.includes('tag') && args[0] !== 'push') throw …`).
   for (const match of text.matchAll(new RegExp(`\\[0\\]\\s*!==\\s*['"\`]${networkGroup}['"\`]`, 'g'))) record(match.index, 'subcommand-guard', [match[1]]);
+  // argument-helper: a network argument helper — defined in any scanned file, imported under its
+  // own name or an alias — executed here: spread into an argv (`run('git', ['-C', root,
+  // ...pushArgs(…)])`) or passed whole to git or a runner (`run('git', pushArgs(…))`, `git(fetchArgs(…))`).
+  // The helper's own file is caught by its literal; this catches every file that runs it.
+  const called = new Map(helpers);
+  for (const [name, subcommands] of helpers) for (const alias of text.matchAll(new RegExp(`\\b${name.replace(/\$/g, '\\$&')}\\s+as\\s+([A-Za-z_$][\\w$]*)`, 'g'))) called.set(alias[1], subcommands);
+  for (const [name, subcommands] of called) {
+    const safe = name.replace(/\$/g, '\\$&');
+    for (const match of text.matchAll(new RegExp(`(?:\\.\\.\\.\\s*|\\(\\s*'git'\\s*,\\s*|\\b(?:git|run)[A-Za-z0-9_$]*\\s*\\(\\s*)${safe}\\s*\\(`, 'g'))) record(match.index, 'argument-helper', subcommands);
+  }
   return findings.sort((a, b) => a.line - b.line);
 }
 
@@ -160,7 +186,7 @@ export const allowlist: Record<string, AllowlistEntry> = {
   'src/conflicts.ts': { subcommands: ['fetch'], runs: 'the master status pipeline probing candidate conflicts', credential: 'the coordinator checkout\'s own git credential' },
   'src/daemon/acceptance.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s acceptance step drafting a goal\'s acceptance (base read, acceptance-branch push)', credential: 'the coordinator checkout\'s own git credential' },
   'src/daemon/blocker-probes.ts': { subcommands: ['ls-remote', 'push'], runs: 'the loop\'s blocker probes: the confined credential script (`/bin/sh -c`) and the base-tip read', credential: 'whatever credential the confined worker holds — the probe exists to test it; the base-tip read uses the coordinator checkout\'s own' },
-  'src/daemon/cycle-merge-writer.ts': { subcommands: ['fetch'], runs: 'the loop\'s merge-writer cycle (the base read; its push is spawned from pushArgs)', credential: 'the merge writer\'s deploy key alone (pushEnvironment, GIT_SSH_COMMAND)' },
+  'src/daemon/cycle-merge-writer.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s merge-writer cycle (the base read, and the leased push it executes from pushArgs)', credential: 'the merge writer\'s deploy key alone (pushEnvironment, GIT_SSH_COMMAND)' },
   'src/daemon/cycle-shadow.ts': { subcommands: ['fetch'], runs: 'the loop\'s shadow-gate reads', credential: 'the coordinator checkout\'s own git credential' },
   'src/daemon/deployment.ts': { subcommands: ['fetch'], runs: 'the loop\'s deployment observation and promotion reads (base tip and rc tags)', credential: 'the coordinator checkout\'s own git credential' },
   'src/daemon/held-cli.ts': { subcommands: ['clone'], runs: 'the loop pinning a held CLI snapshot', credential: 'none: a --shared clone of the checkout\'s own object store' },
@@ -230,9 +256,10 @@ export const subcommandsOf = (findings: SpawnFinding[]) => [...new Set(findings.
 
 /** The door over one checkout's sources: every refusal names the file, and a spawn names its line. */
 export function audit(files: ReadonlyMap<string, string>, listed: Readonly<Record<string, AllowlistEntry>> = allowlist): { refusals: string[]; detected: Map<string, SpawnFinding[]> } {
-  const detected = new Map<string, SpawnFinding[]>();
+  const detected = new Map<string, SpawnFinding[]>(), helpers = new Map<string, string[]>();
+  for (const source of files.values()) for (const [name, subcommands] of argumentHelpers(source)) helpers.set(name, [...new Set([...(helpers.get(name) ?? []), ...subcommands])]);
   for (const [path, source] of files) {
-    const findings = findNetworkSpawns(source);
+    const findings = findNetworkSpawns(source, helpers);
     if (findings.length) detected.set(path, findings);
   }
   const refusals: string[] = [];
@@ -294,6 +321,25 @@ test('unit:git-network-door — each spawn form the codebase uses is caught and 
     `const events = ['pull_request', 'push', 'check_run'];`,
     `run('git', ['rev-parse', 'HEAD']);`,
   ]) assert.deepEqual(findNetworkSpawns(quiet), [], `prose and reads spawn nothing: ${quiet.slice(0, 48)}`);
+});
+
+test('unit:git-network-door — a file executing a shared argument helper spawns its subcommand, and off the allowlist it is refused at the call', () => {
+  const helper = `export const pushArgs = (base: string, tip: string, sha: string) => ['push', 'origin', \`--force-with-lease=refs/heads/\${base}:\${tip}\`, \`\${sha}:refs/heads/\${base}\`];\nexport function fetchArgs(ref: string) { return ['fetch', '--quiet', 'origin', ref]; }`;
+  assert.deepEqual([...argumentHelpers(helper)], [['pushArgs', ['push']], ['fetchArgs', ['fetch']]]);
+  const listed = { 'src/merge-writer/executor.ts': { subcommands: ['fetch', 'push'], runs: 'the merge writer defining its leased argument helpers', credential: 'the leased deploy key' } };
+  for (const [shape, caller, subcommands] of [
+    ['spread into an argv', `import { pushArgs } from './merge-writer/executor.js';\nawait run('git', ['-C', root, ...pushArgs(base, baseTip, mergeSha)], { env });`, ['push']],
+    ['passed whole to git', `import { fetchArgs } from './merge-writer/executor.js';\nawait run('git', fetchArgs(base));`, ['fetch']],
+    ['passed to a git runner', `import { fetchArgs } from './merge-writer/executor.js';\nconst out = git(fetchArgs(base), root);`, ['fetch']],
+    ['imported under an alias', `import { pushArgs as leasedPush } from './merge-writer/executor.js';\nawait run('git', [...leasedPush(base, tip, sha)]);`, ['push']],
+  ] as const) {
+    const { refusals, detected } = audit(new Map([['src/merge-writer/executor.ts', helper], ['src/example.ts', caller]]), listed);
+    assert.deepEqual(subcommandsOf(detected.get('src/example.ts') ?? []), [...subcommands], `a helper ${shape} spawns its subcommand from the caller`);
+    assert.equal(refusals.length, 1, `an unallowlisted caller with a helper ${shape} is refused`);
+    assert.match(refusals[0], /^git-network-door: src\/example\.ts:2 spawns git (push|fetch) \(argument-helper\)/, `the refusal of a helper ${shape} names the caller's file and the line that executes it`);
+  }
+  // Naming the helper is not executing it: a re-export, a reference or a test of its shape spawns nothing.
+  assert.deepEqual(findNetworkSpawns(`export { pushArgs } from './executor.js';\nassert.deepEqual(pushArgs('main', 'a', 'b')[0], 'push');`, argumentHelpers(helper)), []);
 });
 
 test('unit:git-network-door — an allowlist entry whose file no longer spawns a network subcommand is refused as stale', () => {
