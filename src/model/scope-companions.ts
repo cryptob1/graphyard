@@ -8,6 +8,8 @@
 // (GY-945, GY-883). These rules ground them per path, so the loop grants them with no approver, and
 // `derivePlannedFiles` plans them at authoring time.
 import { documentationGlobMatches } from './documentation-glob.js';
+import type { FaultClass } from './fault-classes.js';
+import { ciCheckName } from './ci-refusal.js';
 import type { WorkOrigin } from './interventions.js';
 import { namedPaths, pathScope, pathScopeContains, testFile } from './scope.js';
 
@@ -38,6 +40,28 @@ export const timingBaseline = (path: string) => !pathScope(path).prefix && /(?:^
 export const noWallClockGatePath = 'tests/no-wall-clock-time-bombs.test.ts';
 export const noWallClockGate = (path: string) => path === noWallClockGatePath;
 const testScope = (entry: string) => testFile(entry) || pathScope(entry).prefix && /(?:^|\/)(?:tests?|__tests__)\/$/.test(pathScope(entry).path);
+
+/** The item fields the failed-check ground reads: the current candidate, the check runs observed on it, and the gates the last evaluation stamped. */
+export interface GateRecord { name: string; passed: boolean; reasons: readonly string[] }
+export interface FailedCheckSource { candidate?: { sha: string } | null; observation?: { candidate?: { sha: string } | null; checks?: readonly { name: string; result: string }[] } | null; gates?: readonly GateRecord[] }
+/**
+ * Where each fault class's own machinery lives (GY-1893): the modules an instance of the class is
+ * produced and answered in. A fault-class item's criterion — the shared cause found and removed at
+ * the candidate — cannot be met without editing its class's machinery, yet the filing plans only
+ * the proof test and its gates (GY-1706), so GY-1888's worker had to ask for the three decision
+ * modules its instances named and stood refused past the fifteen-minute bound. The catalogue is a
+ * companion table like the gates above: `impliedScopes` grants an item the modules of its own
+ * class, `plannedCompanions` plans them at filing, and the proof test keeps every path in the tree.
+ * A class enters as its instances show the filing under-covers it: decision (GY-1888's ask) and
+ * scope (GY-1893's own); later instances link in and widen the table.
+ */
+export const faultClassMachinery: Partial<Record<FaultClass, readonly string[]>> = {
+  decision: ['src/daemon/decision-text.ts', 'src/daemon/cycle-decisions.ts', 'src/daemon/cycle-approvers.ts'],
+  scope: ['src/review-scope.ts', 'src/daemon/cycle-scope.ts', 'src/model/scope.ts', 'src/model/scope-companions.ts', 'src/model/scope-collapse.ts'],
+};
+/** The machinery modules of the fault class an item closes, or none when it closes no class. */
+export const machineryOf = (origin?: WorkOrigin | null): readonly string[] =>
+  origin?.faultClass ? faultClassMachinery[origin.faultClass.class] ?? [] : [];
 /** A test path's directory, stem and suffix, or null — used to match a shorter ask to a proof-named file. */
 const testStemParts = (path: string) => {
   const match = /^((?:[^/]+\/)*)([^/]+?)(\.(?:test|spec)\.[cm]?[jt]sx?)$/.exec(pathScope(path).path);
@@ -133,14 +157,32 @@ export async function peerModuleGround(path: string, text: string | null, planne
 }
 
 /**
+ * GY-1893: the existing test file the failed required check on the item's own candidate names, as
+ * the ask's own reason quotes the failure (the GY-1881 instance: a live wall-clock bomb on the
+ * base, a one-line clock answer, refused and standing past the fifteen-minute bound). The evidence
+ * is the item's own record — a check run that failed on the current candidate, whose failure the
+ * item's test gate holds — and the ask naming both that check and the file. A red gate alone
+ * grants nothing (an item that has not run yet carries the same refusal), a story about a check the
+ * record does not hold grants nothing, and only a test file is granted: the item answers the check
+ * inside its attempt instead of waiting out the bound on an approver.
+ */
+export function failedCheckTestGround(path: string, item: FailedCheckSource, reason?: string): string | null {
+  if (!reason || !testFile(path) || !item.candidate || !namedPaths(reason).includes(path)) return null;
+  if (item.observation?.candidate?.sha !== item.candidate.sha) return null;
+  const failed = [...new Set((item.observation?.checks ?? []).filter(check => check.result === 'failure').map(check => check.name)
+    .filter(name => (item.gates ?? []).some(gate => !gate.passed && gate.reasons.some(held => ciCheckName(held) === name))))];
+  return failed.length ? `${path} is the test file the failed required check ${failed.join(' and ')} on this item's current candidate names, which the item answers within its attempt` : null;
+}
+/**
  * The ground a requested path stands on as a companion the item's own record implies, or null. These
  * need no file read: the documentation-budget gate, when the ask or the plan holds documentation;
- * the test-duration baseline, when it holds a test file; the test file named for the criteria's proofs (`proofTestFiles`); and a single file under `web/`
- * when a criterion describes a change in the web UI (GY-945's page and stylesheet). The engine's rule grants
+ * the test-duration baseline, when it holds a test file; the test file named for the criteria's proofs (`proofTestFiles`); a single file under `web/`
+ * when a criterion describes a change in the web UI (GY-945's page and stylesheet); and — GY-1893 — the existing test file a failed required check on the
+ * item's own candidate names, which the ask's `reason` quotes. The engine's rule grants
  * these; what needs the base branch — imports, and which proofs a file already holds — is the
  * loop's (`importingTestGround`, `newProofTestGround`, `peerModuleGround`).
  */
-export function companionGround(path: string, item: { plannedFiles?: readonly string[]; criteria: readonly CompanionCriterion[]; origin?: WorkOrigin | null; description?: string | null }, ask: readonly string[], documentation: readonly string[]): string | null {
+export function companionGround(path: string, item: { plannedFiles?: readonly string[]; criteria: readonly CompanionCriterion[]; origin?: WorkOrigin | null; description?: string | null } & FailedCheckSource, ask: readonly string[], documentation: readonly string[], reason?: string): string | null {
   if (pathScope(path).prefix) return null;
   if (documentationBudgetGate(path)) {
     const documented = [...ask, ...(item.plannedFiles ?? [])].find(entry => entry !== path && documentationPath(entry, documentation));
@@ -163,7 +205,7 @@ export function companionGround(path: string, item: { plannedFiles?: readonly st
   // The feature a criterion describes in the web UI is a page, component or stylesheet under web/: one file, never the tree.
   const described = path.startsWith('web/') && !testFile(path) ? item.criteria.find(criterion => webUi.test(criterion.text)) : undefined;
   if (described) return `${path} is the web UI ${described.id} describes`;
-  return null;
+  return failedCheckTestGround(path, item, reason);
 }
 
 /**
@@ -307,5 +349,9 @@ export function plannedCompanions(item: { plannedFiles: readonly string[]; crite
   if (item.origin?.reviewFollowUps)
     for (const file of followUpPaths(item.origin.reviewFollowUps.findings ?? [], item.description))
       if (tree.has(file) && !covered(file)) added.push({ path: file, criterion: 'FOLLOWUP', why: 'the file a review follow-up names' });
+  const closed = item.origin?.faultClass;
+  if (closed)
+    for (const file of machineryOf(item.origin))
+      if (tree.has(file) && !covered(file)) added.push({ path: file, criterion: 'AC-1', why: `the ${closed.class} fault class's machinery, where the shared cause AC-1 removes lives` });
   return added;
 }

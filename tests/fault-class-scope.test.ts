@@ -12,14 +12,17 @@ import { cycleFaults, emptyDaemonState, runCycle, type DaemonEffects } from '../
 import { workFaults } from '../src/model/fault-classes.js';
 import { scopeRequestAttention } from '../src/cli/owed-report.js';
 import { decideScopeRequest, followUpPaths, impliedScopes, namedPaths, plannedCompanions, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
-import { peerModuleGround, importingTestGround, noWallClockGatePath } from '../src/model/scope-companions.js';
+import { machineryOf, faultClassMachinery, noWallClockGatePath, peerModuleGround, importingTestGround } from '../src/model/scope-companions.js';
 import { automaticScopeGrounds, scopeRefusalFault, transientScopeRefusal } from '../src/daemon/cycle-scope.js';
+import { ciCheckRefusal } from '../src/model/ci-refusal.js';
+import { ChildProcessError } from '../src/child-runner.js';
+import { baseFetchAttempts, refLockContention, successionReader } from '../src/review-scope.js';
 import { faultClassPolicyDefaults } from '../src/model/fault-classes.js';
 import { trackFaults, type FaultRecord } from '../src/model/fault-record.js';
 import { derivePlannedFiles } from '../src/model/work.js';
 import { RefusedResponse } from '../src/model/refusal.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): the 2026-10-01..06 scope-request stamps are ledger fixtures judged on Date.parse(observedAt) handed to cycleFaults, runCycle and workFaults; the one new Date() stamps a request judged by paths alone. GY-1706's 11 October instances are derived as offsets from those stamps, never written as calendar literals. GY-1788's 14 October instances (action:scope|GY-1773 twice, scope-request|GY-1785) are replayed from the item's own record at the stamps the loop recorded them, judged on Date.parse of those fixture strings beside clocks the tests hand the cycle, never against the wall clock.
+// Time-bomb allowance (GY-1694): the 2026-10-01..06 scope-request stamps are ledger fixtures judged on Date.parse(observedAt) handed to cycleFaults, runCycle and workFaults; the one new Date() stamps a request judged by paths alone. GY-1706's 11 October instances are derived as offsets from those stamps, never written as calendar literals. GY-1788's 14 October instances (action:scope|GY-1773 twice, scope-request|GY-1785) and GY-1893's 16–17 October instances (action:scope|GY-1384, scope-request|GY-1881, scope-request|GY-1888) are replayed from the item's own record at the stamps the loop recorded them, judged on Date.parse of those fixture strings beside clocks the tests hand the cycle and the succession reader, never against the wall clock.
 
 // GY-1085 names this file for its proof: manual:fault-class-scope. The master loop filed 9 scope
 // faults in 24 hours on 1 October 2026. Every one was a live attempt's scope request that the
@@ -570,4 +573,222 @@ test(`manual:fault-class-scope — scope-request|GY-1785|${gy1785ObservedAt}: th
   const scopeCount = record.instances.filter(instance => instance.faultClass === 'scope').length;
   assert.equal(scopeCount, 1);
   assert.ok(scopeCount < faultClassPolicyDefaults.threshold, `the window's genuine count (${scopeCount}) no longer reaches the threshold (${faultClassPolicyDefaults.threshold})`);
+});
+
+// GY-1893 — three scope-class instances inside 24 hours on 17 October 2026, the first since the
+// 14 October window. Shared causes, each product-side and each removed at the candidate:
+//
+//   - action:scope|GY-1384 (07:48:54.813Z) was the succession reader's base fetch losing a ref-lock
+//     race to a concurrent fetch — git answered "cannot lock ref 'refs/remotes/origin/main': is at
+//     7294e773… but expected 28e56336…" — so the re-plan step failed without judging anything about
+//     GY-1384's scope, and because a git failure read as no transport failure the race counted as an
+//     action:scope fault. The candidate retries the fetch in place (review-scope.ts fetchBase), so
+//     the step sees the read land and files no instance; a race no retry survives still counts.
+//   - scope-request|GY-1881 (09:29:12.213Z) stood refused on an ask the rule under-covers: an
+//     existing test file that the failed required check on the item's own candidate named, a live
+//     wall-clock bomb on the base the item could answer in one line outside its plannedFiles. The
+//     candidate grounds exactly that ask (companionGround's failed-check ground): the item's own
+//     record holds the red required check, and the ask's reason names the check and the file.
+//   - scope-request|GY-1888 (09:37:00.242Z) stood refused the same way: a fault-class item's fix
+//     lives in its own class's machinery, which the filing plans nothing of (GY-1706 plans the
+//     proof test and its gates only). The candidate carries a machinery table beside the fault
+//     catalogue (scope-companions.ts faultClassMachinery), granted through impliedScopes and
+//     planned at filing, so the item the loop files never asks.
+//
+// Each instance is replayed from the item's own record at the stamps the loop recorded it, with
+// GY-1384's error quoted verbatim. The base (main's tip when GY-1893 was claimed) still refuses
+// both asks and counts the race; the candidate settles each inside its bound.
+const gy1893BaseSha = '1fa5a2b96437c21db207ea86fd690a76f272fe2d';
+type Gy1893Base = {
+  review: { successionReader: typeof successionReader };
+  scope: { decideScopeRequest: typeof decideScopeRequest };
+  cycle: { transientScopeRefusal: typeof transientScopeRefusal };
+};
+let gy1893Base: Gy1893Base;
+before(async () => {
+  try { execFileSync('git', ['cat-file', '-e', `${gy1893BaseSha}^{commit}`], { cwd: process.cwd(), stdio: 'ignore' }); }
+  catch { execFileSync('git', ['fetch', '--no-tags', '--depth=1', '--quiet', 'origin', gy1893BaseSha], { cwd: process.cwd() }); }
+  const directory = await temporaryDirectory('gy1893-base');
+  execFileSync('tar', ['-x', '-C', directory], { input: execFileSync('git', ['archive', '--format=tar', gy1893BaseSha, 'src'], { cwd: process.cwd(), maxBuffer: 256 * 1024 * 1024 }), maxBuffer: 256 * 1024 * 1024 });
+  await fs.symlink(gy1706NodeModules, join(directory, 'node_modules'), 'dir');
+  const [review, scope, cycle] = await Promise.all([
+    import(join(directory, 'src/review-scope.ts')),
+    import(join(directory, 'src/model/scope.ts')),
+    import(join(directory, 'src/daemon/cycle-scope.ts')),
+  ]);
+  gy1893Base = { review, scope, cycle } as unknown as Gy1893Base;
+});
+
+// The instance's own record, quoted verbatim from GY-1893's filing; the ref the race left behind is
+// the tip the fake git answers with, so the retry reads what the other fetch left.
+const gy1384At = '2026-10-17T07:48:54.813Z';
+const gy1893FetchError = () => new ChildProcessError('git', ['-C', '/home/vish/code/graphyard', 'fetch', '--quiet', '--no-tags', 'origin', '+refs/heads/main:refs/remotes/origin/main'],
+  { stdout: '', status: 128, signal: null, timedOut: false, stderr: `error: cannot lock ref 'refs/remotes/origin/main': is at 7294e773c81937da46dda6189dc3a5f0fda3914f but expected 28e56336dcc07b1b176c46da8cf14e30480c30e8` });
+const gy1893Tip = '7294e773c81937da46dda6189dc3a5f0fda3914f';
+/** The loop's git, as the race left it: the first `fetchFailures` fetches answer with the lock error, the rest read the base. */
+const gy1893Git = (fetchFailures: number) => {
+  let fetches = 0;
+  const run = async (_command: string, args: string[]): Promise<string> => {
+    const sub = args[0] === '-C' ? args[2] : args[0];
+    if (sub === 'fetch') return fetches++ < fetchFailures ? Promise.reject(gy1893FetchError()) : '';
+    if (sub === 'rev-parse' || sub === 'rev-list') return `${gy1893Tip}\n`;
+    if (sub === 'log' || sub === 'ls-tree') return '';
+    throw new Error(`the fake git does not answer ${args.join(' ')}`);
+  };
+  return { run, count: () => fetches };
+};
+
+test(`manual:fault-class-scope — action:scope|GY-1384|${gy1384At}: the succession reader answers a lost ref-lock race by retrying it, so the re-plan's fetch no longer fails`, async () => {
+  const error = gy1893FetchError();
+  assert.ok(refLockContention.test(error.message), `the instance's error is the race this change names`);
+  // Against the base the instance reproduces: the reader loses the race on the first try and throws,
+  // and the re-plan step counts such a failure as an action:scope fault (it judged nothing, but a
+  // git failure read as no transport failure, and the step's teeth are kept that way).
+  const baseReader = gy1893Base.review.successionReader(root, 'main', gy1893Git(1).run, () => 0);
+  await assert.rejects(baseReader(gy1384At), /cannot lock ref/);
+  assert.equal(gy1893Base.cycle.transientScopeRefusal(error), null);
+  // The candidate retries the contended fetch in place: the read the loop asked for lands, the
+  // fetches counted are the race and its retry, and no failure reaches the step at all.
+  const contended = gy1893Git(1), read = await successionReader(root, 'main', contended.run, () => 0)(gy1384At);
+  assert.equal(contended.count(), 2, 'the contended fetch was retried once, in place');
+  assert.deepEqual(read.successions, []);
+  // A race that loses every retry is still thrown, and still counts — the class keeps its teeth for
+  // a base fetch that fails without judging anything, however it fails.
+  await assert.rejects(successionReader(root, 'main', gy1893Git(baseFetchAttempts).run, () => 0)(gy1384At), /cannot lock ref/, 'a race every attempt loses is thrown for the step to count');
+  assert.equal(transientScopeRefusal(gy1893FetchError()), null);
+  assert.equal(scopeRefusalFault(null, undefined), undefined);
+});
+
+test(`manual:fault-class-scope — action:scope|GY-1384|${gy1384At} replayed through the loop: the reader's retry answers the race, and the step's teeth hold for one no retry survives`, async () => {
+  const work = standing({ id: 'GY-1384', subject: 'GY-1384', observedAt: gy1384At, epoch: 2, requestedAt: gy1384At,
+    paths: [], plannedFiles: ['src/daemon/decisions.ts'], settled: 'the reader retried the race and the read landed' });
+  work.scopeRequest = null; work.blocker = null;
+  const effects = (fetchFailures: number) => ({
+    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [work], now: gy1384At }), closeSession: () => {}, dispatch: async () => {},
+    requestProof: () => {}, observeDeployment: async () => ({ source: 'unavailable', sha: null, at: gy1384At, reason: 'replay', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    basePaths: async (paths: string[]) => new Set(paths),
+    // The production effect is the reader itself: a base fetch that loses the race once is retried
+    // inside it, so the step sees the read land, exactly as the instance's single race now resolves.
+    baseSuccessions: () => successionReader(root, 'main', gy1893Git(fetchFailures).run, () => Date.parse(gy1384At))(gy1384At),
+    replan: async () => { throw new Error('the succession read fails before any re-plan is posted'); },
+  }) as unknown as DaemonEffects;
+  const answered = emptyDaemonState(config());
+  await runCycle(config(), answered, effects(1), () => Date.parse(gy1384At));
+  assert.deepEqual(Object.values(answered.actions).filter(action => action.kind === 'scope'), [], 'the race never reaches the re-plan step as a failure');
+  assert.deepEqual(answered.faults.instances.filter(instance => instance.faultClass === 'scope'), [], `the instance's single race files no scope instance on the candidate`);
+  // The same step, its reader having lost every retry: the failure stands recorded and counts, so a
+  // base fetch that never answers is never silent (GY-1293's teeth, unchanged by the retry).
+  const contended = emptyDaemonState(config());
+  await runCycle(config(), contended, effects(baseFetchAttempts), () => Date.parse(gy1384At));
+  const replan = Object.entries(contended.actions).filter(([key]) => key.startsWith('successors:')).map(([, row]) => row);
+  assert.equal(replan.length, 1, 'the re-plan action stands, failed');
+  assert.equal(replan[0]?.state, 'failed');
+  assert.match(replan[0]?.detail ?? '', /Could not re-plan GY-1384 onto the successors of its planned files: [\s\S]*cannot lock ref/);
+  assert.deepEqual(contended.faults.instances.filter(instance => instance.faultClass === 'scope').map(instance => instance.kind), ['action:scope'], 'and it counts, as any read that reaches the step failing does');
+});
+
+// The two scope-request instances, replayed from the ledger with each ask's own reason and refusal.
+const gy1881At = '2026-10-17T09:29:12.213Z', gy1881AskedAt = '2026-10-17T09:14:01.170Z', gy1881RefusedAt = '2026-10-17T09:14:10.069Z';
+const gy1881Reason = `CI point: the required test check failed on candidate 552d4fbeedff — test shard 6 fails at tests/pi-provider-limit-exhaustion.test.ts:199 ('the spent account is held until the UTC reset': actual undefined, expected 2026-10-17T08:27:35.000Z), again on rerun, and identically on base c30a233fdea2 with no diff applied. Root cause: the assertion calls observedExhaustions(config) without the file's fixed clock, so the hold's until (the provider reset 2026-10-17T08:27:35Z) is filtered against the real wall clock, and once real time passed 08:27:35Z today the hold expires and the assertion reads undefined — a live wall-clock time bomb independent of this PR's diff (the PR touches only the host executor installer). The one-line answer is observedExhaustions(config, now()) in that file, which lies outside plannedFiles, so the CI point cannot be answered inside the planned scope.`;
+const gy1888At = '2026-10-17T09:37:00.242Z', gy1888AskedAt = '2026-10-17T09:21:58.272Z', gy1888RefusedAt = '2026-10-17T09:22:07.128Z';
+const gy1888Ask = ['src/daemon/decision-text.ts', 'src/daemon/cycle-decisions.ts', 'src/daemon/cycle-approvers.ts'];
+const gy1888Reason = `AC-1 removes the decision faults' shared cause in the loop's decision machinery: the put path must adopt an applied rework the item already holds instead of re-putting a request the control plane refuses every retry (the GY-1846 instance), and the approver launch path must recover a session name a leftover pane holds instead of repeating the refused launch (the GY-1884 instance, which also kept GY-1834's new-head decision standing past its bound). All three are src/daemon modules: decision-text.ts holds the refusal matchers beside standingNamedIn, cycle-decisions.ts is step 4c's request path, cycle-approvers.ts is the approver launch path.`;
+const gy1888Origin: WorkOrigin = { faultClass: { class: 'decision', threshold: 3, windowHours: 24, count: 3, detectedAt: '2026-10-17T08:25:44.598Z', instances: [
+  { id: 'owed-decision|GY-1834|2026-10-16T22:35:33.279Z', kind: 'owed-decision', subject: 'GY-1834', at: '2026-10-16T22:35:33.279Z' },
+  { id: 'action:decision|GY-1846|2026-10-17T02:57:31.390Z', kind: 'action:decision', subject: 'GY-1846', at: '2026-10-17T02:57:31.390Z' },
+  { id: 'action:decision|GY-1884|2026-10-17T08:25:26.339Z', kind: 'action:decision', subject: 'GY-1884', at: '2026-10-17T08:25:26.339Z' } ] } };
+const gy1881Fixture = {
+  id: `scope-request|GY-1881|${gy1881At}`, subject: 'GY-1881', observedAt: gy1881At, epoch: 2, requestedAt: gy1881AskedAt, refusedAt: gy1881RefusedAt,
+  paths: ['tests/pi-provider-limit-exhaustion.test.ts'],
+  plannedFiles: ['src/up.ts', 'src/repository-setup.ts', 'tests/up-host-executor-repair.test.ts', baseline, noWallClockGatePath],
+  reason: gy1881Reason, settled: `the rule granted the failed check's own test file, with no approver`,
+  criteria: [{ id: 'AC-1', text: 'In tests/up-host-executor-repair.test.ts, with a host layout whose executor unit template starts another Graphyard checkout, `up` runs the real installExecutorSupervision path (not a stubbed --install). A unit whose launcher is not a Graphyard executor at all is still refused with ForeignUnitRefusal. The repair lives in src/up.ts and src/repository-setup.ts', proofs: ['unit:up-host-executor-repair-real-installer'] }],
+};
+const gy1888Fixture = {
+  id: `scope-request|GY-1888|${gy1888At}`, subject: 'GY-1888', observedAt: gy1888At, epoch: 2, requestedAt: gy1888AskedAt, refusedAt: gy1888RefusedAt,
+  paths: gy1888Ask, plannedFiles: ['tests/fault-class-decision.test.ts', baseline, noWallClockGatePath],
+  reason: gy1888Reason, settled: `the rule granted the decision class's own machinery, with no approver`,
+  criteria: [{ id: 'AC-1', text: 'The shared cause of the recurring decision faults is found and removed at the candidate: each instance listed on this item is reproduced against the base and shown not to recur against the candidate, by a test the change adds', proofs: ['manual:fault-class-decision'] }],
+  origin: gy1888Origin,
+};
+/** The instance's item as the loop held it: GY-1881 carries the failed required check run its candidate holds, its gate the refusal for it. */
+const standing1893 = (entry: typeof gy1881Fixture | typeof gy1888Fixture) => {
+  const work = standing(entry);
+  if (entry === gy1881Fixture) {
+    work.candidate = { sha: '552d4fbeedff', baseSha: 'c30a233fdea2', pr: 1247, branch: 'graphyard/gy-1881-1', author: 'graphyard-cursor-2' };
+    work.observation = { checks: [{ name: 'test', result: 'failure', appId: 15368 }], candidate: work.candidate } as Work['observation'];
+    work.gates = [{ name: 'test', passed: false, reasons: [ciCheckRefusal('test')] }];
+  }
+  return work;
+};
+/** The item as the applied widening leaves it: the ask answered, nothing standing to count. */
+const settled1893 = (work: Work) => ({ ...work, scopeRequest: null, blocker: null, plannedFiles: [...(work.plannedFiles ?? []), ...(work.scopeRequest?.paths ?? [])] }) as Work;
+
+test(`manual:fault-class-scope — scope-request|GY-1881|${gy1881At}: the failed required check's own test file is the item's to answer, with no approver`, () => {
+  const work = standing1893(gy1881Fixture);
+  // Against the base the ask reproduces: the rule refuses it and the standing refusal is the fault.
+  assert.equal(gy1893Base.scope.decideScopeRequest(work, work.scopeRequest!).state, 'refused', 'the base refuses the ask');
+  assert.deepEqual(scopeFaults(standing1893(gy1881Fixture), gy1881At).map(fault => fault.kind), ['scope-request']);
+  // The candidate grounds it from the item's own record: a check run that failed on the current
+  // candidate, its gate holding the refusal, and an ask naming that check and the failed file.
+  const verdict = decideScopeRequest(work, work.scopeRequest!);
+  assert.equal(verdict.state, 'approved', verdict.reason);
+  assert.match(verdict.reason, /tests\/pi-provider-limit-exhaustion\.test\.ts is the test file the failed required check test on this item's current candidate names/);
+  assert.deepEqual(scopeFaults(settled1893(work), gy1881At).map(fault => fault.kind), [], 'the granted ask never stands to become the fault');
+  // What the rule still refuses: an item that has not run the check (the same refusal a fresh item
+  // carries), a run read on another candidate, a run the gate does not hold, an ask that names no
+  // file, a check the story does not name, and a path that is no test file.
+  const unrun = standing1893(gy1881Fixture);
+  unrun.candidate = null; unrun.observation = null;
+  assert.equal(decideScopeRequest(unrun, unrun.scopeRequest!).state, 'refused', 'a red gate without a failing run is the no-candidate refusal, not a ground');
+  const stale = standing1893(gy1881Fixture);
+  stale.observation = { checks: [{ name: 'test', result: 'failure', appId: 15368 }], candidate: { ...stale.candidate!, sha: 'older-sha' } } as Work['observation'];
+  assert.equal(decideScopeRequest(stale, stale.scopeRequest!).state, 'refused', 'the ground is the run on the current candidate, not one an older observation read');
+  const unheld = standing1893(gy1881Fixture);
+  unheld.observation = { checks: [{ name: 'typecheck', result: 'failure', appId: 15368 }], candidate: unheld.candidate } as Work['observation'];
+  assert.equal(decideScopeRequest(unheld, unheld.scopeRequest!).state, 'refused', 'the ground is the run the gate holds, not any failing run');
+  const unnamed = standing1893(gy1881Fixture);
+  unnamed.scopeRequest = { ...unnamed.scopeRequest!, reason: 'The change reads better with this file refactored.' };
+  assert.equal(decideScopeRequest(unnamed, unnamed.scopeRequest).state, 'refused');
+  const source = standing1893(gy1881Fixture);
+  source.scopeRequest = { ...source.scopeRequest!, paths: ['src/up.ts'] };
+  assert.equal(decideScopeRequest(source, source.scopeRequest).state, 'refused', 'only a test file is granted: the item answers the check, it does not take new source scope');
+});
+
+test(`manual:fault-class-scope — scope-request|GY-1888|${gy1888At}: a fault-class item's own machinery is implied scope, granted and planned at filing`, () => {
+  const work = standing1893(gy1888Fixture);
+  // Against the base the ask reproduces: the rule refuses it and the standing refusal is the fault.
+  assert.equal(gy1893Base.scope.decideScopeRequest(work, work.scopeRequest!).state, 'refused', 'the base refuses the ask');
+  assert.deepEqual(scopeFaults(standing1893(gy1888Fixture), gy1888At).map(fault => fault.kind), ['scope-request']);
+  // The candidate implies the machinery of the item's own class, so the ask is granted…
+  const verdict = decideScopeRequest(work, work.scopeRequest!);
+  assert.equal(verdict.state, 'approved', verdict.reason);
+  assert.match(verdict.reason, /is the decision fault class's machinery, where the shared cause AC-1 removes lives/);
+  assert.deepEqual(scopeFaults(settled1893(work), gy1888At).map(fault => fault.kind), [], 'the granted ask never stands to become the fault');
+  // …and the filing plans it up front, so the item the loop files never asks (GY-1085's shape).
+  const tree = new Set(['tests/fault-class-decision.test.ts', baseline, noWallClockGatePath, ...gy1888Ask]);
+  const derived = derivePlannedFiles({ plannedFiles: [], criteria: gy1888Fixture.criteria, origin: gy1888Origin, description: '' }, tree);
+  for (const path of [...gy1888Ask, 'tests/fault-class-decision.test.ts', baseline, noWallClockGatePath])
+    assert.ok(derived.plannedFiles.includes(path), `the filing plans ${path}`);
+  // The grant stays bounded: a non-fault-class item, another class's machinery, and a module outside
+  // the class's machinery are refused exactly as before.
+  const untabled = standing({ id: 'GY-9998', subject: 'GY-9998', observedAt: gy1888At, epoch: 1, requestedAt: gy1888AskedAt, paths: gy1888Ask, plannedFiles: gy1888Fixture.plannedFiles, settled: 'untabled class' });
+  assert.equal(decideScopeRequest(untabled, untabled.scopeRequest!).state, 'refused', 'a non-fault-class item implies no machinery');
+  const other = standing({ ...gy1888Fixture, id: 'GY-9997', subject: 'GY-9997', origin: { faultClass: { ...gy1888Origin.faultClass!, class: 'scope' } } });
+  assert.equal(decideScopeRequest(other, other.scopeRequest!).state, 'refused', 'a scope-class item implies the scope machinery, not the decision machinery');
+  const outside = standing({ ...gy1888Fixture, id: 'GY-9996', subject: 'GY-9996' });
+  outside.scopeRequest = { ...outside.scopeRequest!, paths: ['src/daemon/metrics.ts'] };
+  assert.equal(decideScopeRequest(outside, outside.scopeRequest).state, 'refused', `a module outside the class's machinery is refused, so the table is the bound`);
+});
+
+test('manual:fault-class-scope — the fault-class machinery table names files the tree holds, and no class outside it grants anything', async () => {
+  for (const [faultClass, files] of Object.entries(faultClassMachinery)) {
+    assert.ok(files, `${faultClass} lists its machinery`);
+    assert.ok(files.length >= 1, `${faultClass} lists its machinery`);
+    for (const file of files) assert.ok(await readFile(file), `${faultClass} machinery ${file} exists in the tree`);
+  }
+  assert.deepEqual(machineryOf(undefined), [], 'no origin implies no machinery');
+  assert.deepEqual(machineryOf({ faultClass: { class: 'loop', threshold: 3, windowHours: 24, count: 3, detectedAt: '2026-10-17T08:25:44.598Z', instances: [] } }), [], 'a class the table does not cover grants nothing');
+  assert.deepEqual(machineryOf({ faultClass: { ...gy1888Origin.faultClass! } }), gy1888Ask, `the decision class's machinery is GY-1888's ask, in the table's own order`);
 });

@@ -1,5 +1,5 @@
 import { documentationGlobMatches } from './documentation-glob.js';
-import { companionGround as recordCompanionGround, followUpPaths, timingBaseline, type FollowUpSource } from './scope-companions.js';
+import { companionGround as recordCompanionGround, followUpPaths, machineryOf, timingBaseline, type FollowUpSource, type GateRecord } from './scope-companions.js';
 export { followUpPaths, plannedCompanions } from './scope-companions.js';
 import { addsTestFile, timingBaselinePath } from './timing-companion.js';
 import { type NonRepositoryPath, nonRepositoryReason } from './scope-repository.js';
@@ -130,9 +130,13 @@ export interface ScopeImplication { scope: string; kind: 'criteria' | 'documenta
  * review follow-up (GY-1116), the files its findings and description name.
  */
 export function impliedScopes(criteria: readonly ScopeCriterion[], documentation: readonly string[] = documentationScopes, origin?: FollowUpSource['origin'], description?: string | null): ScopeImplication[] {
+  const closed = origin?.faultClass;
   return [
     ...criteria.flatMap(criterion => namedPaths(criterion.text).map(scope => ({ scope, kind: 'criteria' as const, why: `${criterion.id} names ${scope}` }))),
     ...(origin?.reviewFollowUps ? followUpPaths(origin.reviewFollowUps.findings ?? [], description) : []).map(scope => ({ scope, kind: 'criteria' as const, why: `review follow-up names ${scope}` })),
+    // GY-1893: a fault-class item's criterion — the shared cause found and removed at the candidate —
+    // is the machinery of its own class, where that cause lives.
+    ...(closed ? machineryOf(origin).map(scope => ({ scope, kind: 'criteria' as const, why: `${scope} is the ${closed.class} fault class's machinery, where the shared cause AC-1 removes lives` })) : []),
     ...documentation.map(scope => ({ scope, kind: 'documentation' as const, why: `${scope} is documentation this repository requires updating when behaviour changes` })),
   ];
 }
@@ -183,8 +187,8 @@ export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; p
  * audited reason; everything else is refused with the reason it was refused for.
  */
 export function decideScopeRequest(
-  item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; observation?: { files?: readonly string[] } | null } & FollowUpSource,
-  request: Pick<ScopeRequestState, 'paths' | 'remove' | 'criteria'>,
+  item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; observation?: { files?: readonly string[]; checks?: readonly { name: string; result: string }[] } | null; candidate?: { sha: string } | null; gates?: readonly GateRecord[] } & FollowUpSource,
+  request: Pick<ScopeRequestState, 'paths' | 'remove' | 'criteria'> & { reason?: string },
   options: { documentation?: readonly string[]; documentationConsumers?: readonly string[]; nonRepository?: readonly NonRepositoryPath[]; treeRead?: boolean } = {},
 ): ScopeVerdict {
   // Paths the current planned scope already covers are no widening at all, so the decision is
@@ -205,7 +209,7 @@ export function decideScopeRequest(
   // GY-955: a companion the change inevitably carries — the documentation-budget gate beside a
   // documentation path, the test file named for a criterion's proofs — is implied as well.
   const documentation = options.documentation ?? itemDocumentationPaths(item);
-  const companion = (path: string): ScopeImplication | null => { const why = companionGround(path, item, paths, documentation); return why ? { scope: path, kind: path === timingBaselinePath ? 'timing-companion' : 'companion', why } : null; };
+  const companion = (path: string): ScopeImplication | null => { const why = companionGround(path, item, paths, documentation, request.reason); return why ? { scope: path, kind: path === timingBaselinePath ? 'timing-companion' : 'companion', why } : null; };
   const matched = paths.map(path => ({ path, by: scopeImplication(path, implied) ?? companion(path) }));
   const outside = matched.filter(entry => !entry.by).map(entry => entry.path);
   if (outside.length) return refused(`${outside.join(', ')} ${outside.length === 1 ? 'is' : 'are'} outside what this item's own criteria and the repository's documentation rule imply; an operator decides scope the item does not already carry`);
