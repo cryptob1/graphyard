@@ -177,3 +177,11 @@ export const repositoryPolicySource = (): Source => (inForce ??= loadRepositoryP
 export function setRepositoryPolicy(policy: RepositoryPolicy | null, source: Source = 'graphyard.json') {
   inForce = policy ? { policy, source } : null;
 }
+
+/** What doctor prints of the policy in force at `root`: its sensitive rules, review timing, pending-outcome rule and source. */
+export function doctorRepositoryPolicy(root: string) {
+  try {
+    const { policy, source } = loadRepositoryPolicy(undefined, root);
+    return { source, sensitive: policy.risk.declared ? policy.risk.sensitive : 'generic default', review: policy.review, e2e: policy.e2e, variable: repositoryPolicyVariable };
+  } catch (error: any) { return { error: error.message as string }; }
+}

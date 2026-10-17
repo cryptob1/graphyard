@@ -96,6 +96,16 @@ export function documentationDrift(committed: DocumentationPolicy | null, deploy
     attention: `${repositoryConfigFile} declares documentation ${JSON.stringify(committed)} but the control plane serves ${JSON.stringify(deployed)}: set ${assignment.line} on the deployment` };
 }
 
+/**
+ * Doctor's documentation entry (GY-293): the committed policy (or why it could not be read) beside
+ * the deployed one, and their drift: the control plane reads only GRAPHYARD_DOCUMENTATION, so an
+ * unredeployed graphyard.json edit is drift.
+ */
+export function doctorDocumentation(committed: DocumentationPolicy | null | { error: string }, deployed: DocumentationPolicy | null) {
+  if (committed && 'error' in committed) return { committed: null, deployed, drift: null, error: committed.error };
+  return { committed, deployed, drift: deployed ? documentationDrift(committed, deployed)?.attention ?? null : null };
+}
+
 /** The standard criterion's short name, as the control plane stamps it on every feature and bug. */
 export const documentationCriterionTitle = 'Documentation reflects this change';
 export const documentationCriterionId = 'DOCS';
