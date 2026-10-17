@@ -283,9 +283,11 @@ export const candidateRoutes = defineRoutes('candidates', [
     const listed = await listCandidates(pool);
     const waiting = await candidateBacklog(pool, listed[0] ? listed[0].floor ?? null : null, candidateCap());
     const production = await promotedTo(pool, 'production');
+    // The summary names the promoted candidate, so it is shown only to a reader that may read that candidate.
+    const promoted = production && (await pool.query('SELECT payload FROM events WHERE kind=$1 AND work_id IS NULL AND payload->>\'id\' = $2 LIMIT 1', [exactCandidateKind, production.candidate])).rows[0]?.payload as ExactCandidate | undefined;
     return { candidates: listed.filter(candidate => visible(context.actor, candidate)), waiting: waiting.total,
       next: waiting.members.filter(member => operatorScopeIncludes(context.actor, { id: member.workId, key: member.key })), cap: candidateCap(),
-      production: production ? { candidate: production.candidate, ...production.promotion } : null };
+      production: production && promoted && visible(context.actor, promoted) ? { candidate: production.candidate, ...production.promotion } : null };
   } },
   { method: 'POST', path: '/api/candidates', handle: async context => {
     cutter(context);

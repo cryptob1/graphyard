@@ -17,6 +17,7 @@ import { buildStaticSite, projectCaseSuite, validateProjectCandidate } from '../
 import * as releasePorts from '../src/daemon/release-ports.js';
 import type { E2eLauncher, E2eReport } from '../src/e2e/runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { candidatePromotionKind, historyLimit } from '../src/delivery.js';
 
 // GY-1905 (GOAL-1, candidate-gates-promotion): an exact candidate is selected for production only
 // when its combined required cases — every required case its own checkout declares, run through the
@@ -26,7 +27,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const operator: Principal = { id: 'operator', role: 'admin' }, coordinator: Principal = { id: 'graphyard', role: 'coordinator' };
 const reader: Principal = { id: 'reader-1', role: 'reader' };
-const tokens = { operator: `operator-${'o'.repeat(40)}`, coordinator: `coordinator-${'c'.repeat(40)}`, reader: `reader-${'r'.repeat(40)}` };
+const tokens = { operator: `operator-${'o'.repeat(40)}`, coordinator: `coordinator-${'c'.repeat(40)}`, reader: `reader-${'r'.repeat(40)}`, scoped: `scoped-${'s'.repeat(40)}` };
 const credentials = [{ ...operator, token: tokens.operator }, { ...coordinator, token: tokens.coordinator }, { ...reader, token: tokens.reader }];
 
 let database: EmbeddedPostgres, connection: string, store: Store, http: ReturnType<typeof server>, url: string, origin: string, checkout: string, root: string;
@@ -150,7 +151,7 @@ const selected = async () => (await call('GET', 'candidates', 'reader')).body.pr
 const expectedProduction = async () => {
   const answer = await call('GET', 'delivery', 'reader');
   assert.equal(answer.status, 200, JSON.stringify(answer.body));
-  const environment = answer.body.environments[0];
+  const environment = answer.body.environments.find((entry: { id: string }) => entry.id === 'production');
   return environment && { id: environment.id, releaseId: environment.expected?.releaseId, sourceSha: environment.expected?.sourceSha };
 };
 
@@ -332,4 +333,37 @@ test('integration:goal-failed-candidate-retained — a change that passes its ow
   await retained('after the retry after the restart');
   const promotions = await store.pool.query("SELECT count(*) AS n FROM events WHERE kind='release.candidate.promotion' AND payload->>'candidate' = $1", [failing.candidate.id]);
   assert.equal(Number(promotions.rows[0].n), 0, 'no promotion was ever recorded for the failed candidate');
+});
+
+test('integration:goal-candidate-selection-retained — the delivery view keeps each environment\'s current candidate selection past the history window and over an unselected recorded state, and a scoped reader sees no production summary for a candidate outside its scope', { timeout: 120_000 }, async () => {
+  const current = await selected();
+  assert.ok(current, 'an earlier case selected a production candidate');
+  const productionGeneration = async () => (await call('GET', 'delivery', 'reader')).body.environments.find((entry: { id: string }) => entry.id === 'production').generation as number;
+  const generation = await productionGeneration();
+  // More promotions to other environments than the history window holds, interleaved: production's selection and generation stand.
+  for (let index = 0; index < historyLimit + 20; index++) {
+    const environment = index % 2 ? 'canary' : 'staging';
+    await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', candidatePromotionKind,
+      JSON.stringify({ candidate: current!.candidate, sequence: 1, promotion: { environment, releaseId: `rc-${environment}-${index}`, sourceSha: current!.sourceSha, artifact: `tree:${index}`, at: new Date(clock += 1000).toISOString(), by: 'graphyard' } })]);
+  }
+  const view = (await call('GET', 'delivery', 'reader')).body;
+  assert.deepEqual(view.environments.map((entry: { id: string }) => entry.id), ['canary', 'production', 'staging']);
+  assert.equal((await expectedProduction())?.releaseId, current!.releaseId, 'production is still expected to run its selected candidate');
+  assert.equal(await productionGeneration(), generation, 'production\'s generation counts its own selections only');
+  const staging = view.environments.find((entry: { id: string }) => entry.id === 'staging');
+  assert.equal(staging.generation, (historyLimit + 20) / 2, 'a generation counts every selection, not only the window');
+  assert.equal(staging.history.length, (historyLimit + 20) / 2);
+  assert.equal(staging.history.at(-1).generation, staging.generation);
+  // A recorded state with nothing selected (a provider notification before any selection) does not hide the candidate selection.
+  await store.pool.query('INSERT INTO delivery_environments(environment_id,document) VALUES($1,$2)', ['production', JSON.stringify({ environmentId: 'production', generation: 0, expected: null, history: [], coverage: {}, incidents: [], cursor: 0,
+    verification: { generation: 0, status: 'unobserved', reasons: [], interval: null, evaluatedAt: null, verifiedAt: null } })]);
+  assert.equal((await expectedProduction())?.releaseId, current!.releaseId, 'an unselected recorded state yields to the candidate selection');
+  // An operator agent scoped away from the promoted candidate's members gets no production summary naming it.
+  const created = await call('POST', 'operator-agents', 'operator', { id: 'scoped-agent', displayName: 'scoped-agent', capabilities: ['intent:create'], scope: { repositories: ['owner/fixture'], workItems: ['GY-99999'] }, token: tokens.scoped, reason: 'A scoped agent' });
+  assert.equal(created.status, 200, JSON.stringify(created.body));
+  const scoped = await call('GET', 'candidates', 'scoped');
+  assert.equal(scoped.status, 200, JSON.stringify(scoped.body));
+  assert.equal(scoped.body.production, null, 'the summary is withheld from a reader that may not read the candidate');
+  assert.equal((await call('GET', `candidates/${current!.candidate}`, 'scoped')).status, 403);
+  assert.deepEqual(await selected(), current, 'an unscoped reader still sees it');
 });

@@ -118,17 +118,19 @@ type CandidateSelection = { candidate: string; promotion: { environment: string;
 /**
  * GY-1905: the delivery state an environment with no release-backed selection reads from its exact
  * candidates' promotions, newest last: each one selected the next generation, the newest is expected.
+ * `selections` may be the newest window of `total` promotions; generations count all of them.
  * The git ledger, not delivery observations, observes these, so the verification stays unobserved.
  */
-export function candidateEnvironment(environmentId: string, selections: CandidateSelection[]): EnvironmentDelivery {
-  const history: ReleaseSelection[] = selections.map((entry, index) => ({ generation: index + 1, releaseId: entry.promotion.releaseId, releaseRevision: 1, policyRevision: 0, selectedAt: entry.promotion.at, selectedBy: entry.promotion.by,
+export function candidateEnvironment(environmentId: string, selections: CandidateSelection[], total = selections.length): EnvironmentDelivery {
+  const earlier = total - selections.length;
+  const history: ReleaseSelection[] = selections.map((entry, index) => ({ generation: earlier + index + 1, releaseId: entry.promotion.releaseId, releaseRevision: 1, policyRevision: 0, selectedAt: entry.promotion.at, selectedBy: entry.promotion.by,
     outcome: index === selections.length - 1 ? 'selected' : 'skipped', ...(index < selections.length - 1 ? { supersededAt: selections[index + 1].promotion.at } : {}) }));
   const newest = selections.at(-1)!;
-  return { environmentId, id: environmentId, source: 'candidate', generation: selections.length,
+  return { environmentId, id: environmentId, source: 'candidate', generation: total,
     expected: { releaseId: newest.promotion.releaseId, releaseRevision: 1, sourceSha: newest.promotion.sourceSha, manifestHash: newest.promotion.artifact, buildId: `candidate:${newest.candidate}`, policyRevision: 0, approvalId: null,
       selectedAt: newest.promotion.at, selectedBy: newest.promotion.by, candidate: newest.candidate, artifact: newest.promotion.artifact },
     history: history.slice(-historyLimit), coverage: {}, incidents: [], cursor: 0,
-    verification: { generation: selections.length, status: 'unobserved', reasons: [`Selected from exact candidate ${newest.candidate}; the release ledger, not delivery observations, observes it`], interval: null, evaluatedAt: newest.promotion.at, verifiedAt: null } };
+    verification: { generation: total, status: 'unobserved', reasons: [`Selected from exact candidate ${newest.candidate}; the release ledger, not delivery observations, observes it`], interval: null, evaluatedAt: newest.promotion.at, verifiedAt: null } };
 }
 
 /** Union of intervals: merge every pair that overlaps or touches, keep the newest when bounded. */
@@ -786,10 +788,18 @@ export class Delivery {
    */
   async status() {
     const recorded: EnvironmentDelivery[] = (await this.store.pool.query('SELECT document FROM delivery_environments ORDER BY environment_id')).rows.map(r => ({ ...r.document, id: r.document.environmentId, source: 'release' }));
-    const promotions = (await this.store.pool.query(`SELECT payload FROM (SELECT seq, payload FROM events WHERE kind=$1 AND work_id IS NULL ORDER BY seq DESC LIMIT $2) newest ORDER BY seq`, [candidatePromotionKind, historyLimit])).rows.map(r => r.payload as CandidateSelection);
-    const byEnvironment = new Map<string, CandidateSelection[]>();
-    for (const entry of promotions.filter(entry => !recorded.some(state => state.environmentId === entry.promotion.environment))) byEnvironment.set(entry.promotion.environment, [...byEnvironment.get(entry.promotion.environment) ?? [], entry]);
-    const environments = [...recorded, ...[...byEnvironment].map(([id, selections]) => candidateEnvironment(id, selections))].sort((a, b) => a.environmentId.localeCompare(b.environmentId));
+    // Each environment keeps its own newest window and total, so promotions elsewhere never push its current selection out.
+    const promotions = (await this.store.pool.query(`SELECT environment, payload, total FROM (SELECT seq, payload, payload->'promotion'->>'environment' AS environment,
+        row_number() OVER (PARTITION BY payload->'promotion'->>'environment' ORDER BY seq DESC) AS rank, count(*) OVER (PARTITION BY payload->'promotion'->>'environment') AS total
+      FROM events WHERE kind=$1 AND work_id IS NULL) e WHERE rank <= $2 ORDER BY environment, seq`, [candidatePromotionKind, historyLimit])).rows;
+    // Only a release-backed selection overrides candidates; a recorded state with nothing expected (a notification before any selection) does not.
+    const releaseBacked = new Set(recorded.filter(state => state.expected).map(state => state.environmentId));
+    const byEnvironment = new Map<string, { selections: CandidateSelection[]; total: number }>();
+    for (const row of promotions.filter(row => !releaseBacked.has(row.environment))) {
+      const entry = byEnvironment.get(row.environment) ?? { selections: [], total: Number(row.total) };
+      entry.selections.push(row.payload as CandidateSelection); byEnvironment.set(row.environment, entry);
+    }
+    const environments = [...recorded.filter(state => !byEnvironment.has(state.environmentId)), ...[...byEnvironment].map(([id, { selections, total }]) => candidateEnvironment(id, selections, total))].sort((a, b) => a.environmentId.localeCompare(b.environmentId));
     const releases: Release[] = (await this.store.pool.query('SELECT document FROM releases ORDER BY id,revision DESC')).rows.map(r => r.document);
     const rollbacks: RollbackRequest[] = (await this.store.pool.query('SELECT document FROM delivery_rollbacks ORDER BY created_at DESC,id DESC LIMIT 200')).rows.map(r => r.document);
     const now = (await this.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
