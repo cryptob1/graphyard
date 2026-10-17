@@ -25,6 +25,7 @@ import type { Transport } from './install/transport.js';
 import { herdrAttachCommand, installHerdrInstance, type HerdrInstance } from './master/herdr.js';
 import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, HerdrSetupFailure, herdrSync, hostHerdrDeps, prepareHerdrInstance, withLocalBin, type HerdrHostDeps } from './herdr-host.js';
 import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin, readLoopCode, readHostLoopCode, alignExecutorUnits, liftLoopPins, unitLauncherCheckout, executorDeclarationFile, executorDeclarationSchema, type LoopCodeReading } from './repository-setup.js';
+import { loopCodeRoot } from './daemon/checkout-state.js';
 import { recordHerdrInstance } from './master/config.js';
 import { mergerModes, type MergerMode } from './merger-mode.js';
 
@@ -2028,7 +2029,9 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
       return hostSessionLoopCode(await hostLoopSession(hostInstall));
     },
     liftLoopPins: async hostInstall => {
-      if (!hostInstall) return liftLoopPins(root, { repository: request.repository });
+      // GY-1899: the held snapshot's pointer lives under the checkout this CLI runs from, where the
+      // loop's holdCliAt wrote it — a lift that read the managed repository would remove nothing.
+      if (!hostInstall) return liftLoopPins(root, { repository: request.repository, heldRoot: loopCodeRoot(cliPath, root) });
       // On the host the install directory is the one its environment names (GRAPHYARD_CONFIG_HOME):
       // the same two files are moved there, by the user the loop runs as.
       const host = await hostLoopSession(hostInstall);
@@ -2038,7 +2041,9 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
       return lifted.stdout.trim() ? lifted.stdout.trim().split('|').map(phrase => `${phrase} on ${host.remote.description}`) : [];
     },
     alignExecutors: async (options = {}, hostInstall) => {
-      if (!hostInstall) return alignExecutorUnits(root, options);
+      // GY-1899: while the pin stands a slot starts the entry held in the snapshot, read under this
+      // CLI's checkout; the managed root keeps owning the units the alignment rewrites.
+      if (!hostInstall) return alignExecutorUnits(root, { ...options, heldRoot: loopCodeRoot(cliPath, root) });
       return alignHostExecutors(await hostLoopSession(hostInstall), options.template ?? null);
     },
     replaceHostLoop: async (hostInstall, { unit, rewrite }) => {
