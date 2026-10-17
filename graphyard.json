@@ -3,5 +3,36 @@
     "paths": ["docs/", "README.md", "AGENTS.md"],
     "changelog": null,
     "wordBudget": { "total": 16000, "perPage": 1200, "paths": ["README.md", "docs/"] }
-  }
+  },
+  "risk": {
+    "sensitive": [
+      {"rule": "persistence layer", "glob": "src/store/"},
+      {"rule": "server auth, principals, API assembler, bootstrap or routes", "glob": "src/server/auth**"},
+      {"rule": "server auth, principals, API assembler, bootstrap or routes", "glob": "src/server/principals**"},
+      {"rule": "server auth, principals, API assembler, bootstrap or routes", "glob": "src/server/index**"},
+      {"rule": "server auth, principals, API assembler, bootstrap or routes", "glob": "src/server/main**"},
+      {"rule": "server auth, principals, API assembler, bootstrap or routes", "glob": "src/server/routes**"},
+      {"rule": "operator agent", "glob": "src/operator-agent.ts"},
+      {"rule": "proof grants", "glob": "src/proof-grants.ts"},
+      {"rule": "installation", "glob": "src/install/"},
+      {"rule": "deployment", "glob": "deploy/"},
+      {"rule": "Dockerfile", "glob": "Dockerfile**"},
+      {"rule": "compose file", "glob": "compose.yml"},
+      {"rule": "compose file", "glob": "compose.yaml"},
+      {"rule": "CI configuration", "glob": ".github/", "only": "risk"},
+      {"rule": "dependencies", "glob": "package.json", "only": "risk"},
+      {"rule": "dependencies", "glob": "package-lock.json", "only": "risk"},
+      {"rule": "merge path", "glob": "src/merge-queue.ts", "only": "risk"},
+      {"rule": "merge path", "glob": "src/direct-merge.ts", "only": "risk"},
+      {"rule": "merge path", "glob": "src/merger-mode.ts", "only": "risk"},
+      {"rule": "merge path", "glob": "src/main-guard.ts", "only": "risk"},
+      {"rule": "merge path", "glob": "src/regression-guard.ts", "only": "risk"},
+      {"rule": "merge writer", "glob": "src/merge-writer/", "only": "risk"},
+      {"rule": "migrations", "glob": "migrations/", "only": "risk"},
+      {"rule": "database schema", "glob": "migrations/schema**", "only": "lane"},
+      {"rule": "credentials", "glob": "auth/credentials**", "only": "lane"}
+    ]
+  },
+  "review": { "normalChanges": "post-merge" },
+  "e2e": { "pendingOutcomes": "non-blocking" }
 }

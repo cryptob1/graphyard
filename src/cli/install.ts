@@ -13,7 +13,7 @@ import { ciProducerProvisioningSteps, readRoster, registerCiProducer } from '../
 import { completionProfiles, readinessChecklist, summarizeDefinitions, type CompletionProfile } from '../readiness.js';
 import { defineCommands } from './registry.js';
 import { readSecretFromStdin } from './context.js';
-import { documentationDrift } from '../model/documentation.js';
+import { doctorDocumentation } from '../model/documentation.js'; import { doctorRepositoryPolicy } from '../model/repository-policy.js';
 import { agentEnvironmentRoot } from '../master/environments.js';
 import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
 import { mergerDoctorLine } from './merger.js'; import { upCommand, upHelpRequested, upUsage } from '../up.js'; import { mergerFromStatus } from './install-merger.js'; import { coordinatorDoctor } from '../master/known-good.js';
@@ -237,11 +237,7 @@ export const installCommands = defineCommands([
       const setup = await readSetupStatus(root).catch((error: any) => ({ error: error.message }));
       const stored = await loadProposal(root).catch(() => null);
       const appPermissions = live?.appPermissions ?? null;
-      // The committed documentation policy against the deployed one (GY-293): the control plane
-      // reads only GRAPHYARD_DOCUMENTATION, so an unredeployed graphyard.json edit is drift.
-      const committedDocumentation = await readDocumentationConfig(root).catch((error: any) => ({ error: error.message as string }));
-      const documentation = committedDocumentation && 'error' in committedDocumentation ? { committed: null, deployed: live?.documentation ?? null, drift: null, error: committedDocumentation.error }
-        : { committed: committedDocumentation, deployed: live?.documentation ?? null, drift: live?.documentation ? documentationDrift(committedDocumentation, live.documentation)?.attention ?? null : null };
+      const documentation = doctorDocumentation(await readDocumentationConfig(root).catch((error: any) => ({ error: error.message as string })), live?.documentation ?? null);
       // Capacity drift and production lag, which a deploy can break silently: the server reports both.
       const delegationLimits = live?.delegationLimits ?? null, production = live?.production ?? null;
       // Validation definitions are readable by operators and readers; every other credential
@@ -278,6 +274,7 @@ export const installCommands = defineCommands([
         delegationLimits: delegationLimits ? { limits: delegationLimits.limits, deployed: delegationLimits.deployed, drift: delegationLimits.drift, attention: delegationLimits.attention } : null,
         production: production ? { provider: production.provider, serving: production.serving, running: production.running, aheadBy: production.ahead?.by ?? null, incidents: production.incidents, attention: production.attention, error: production.error } : null,
         documentation,
+        repositoryPolicy: doctorRepositoryPolicy(root),
         setupFromZero,
         readiness,
         next,
