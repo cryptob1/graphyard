@@ -426,21 +426,28 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const detail = `${item.key} needs a${decision.action === 'attest' ? 'n' : ''} ${decision.action} decision: ${decision.reason} This loop runs without the decision effects, so it cannot request one: graphyard master decide ${item.key} ${decision.action}${input} REASON, then graphyard master approver ${item.key} DECISION`;
     if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   };
-  const wake = effects.observe && observationWaker(effects.observe);
+  // GY-1865 review: an `observe` past its bound is recorded carried on the item's wake row before the waker reads it as no reading, so the cycle sends no `wakeObservation` resync beside the one still in flight, and the next cycle's retry joins that `observe` flight.
+  const observeWake = (work: Work) => `Observing ${work.key}'s reading`;
+  const wake = effects.observe && observationWaker((work, waitMs) => effects.observe!(work, waitMs).catch(async (error: unknown) => {
+    if (stepCallCarried(error)) await recordCarried(cycle, `wake:observation:${work.id}`, { kind: 'refresh', work: work.key, epoch: work.epoch }, error, observeWake(work));
+    throw error;
+  }));
   const noteWait = async (item: Work, detail: string) => { const waitKey = `wait:rework:${item.id}`; if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
   // GY-1436: one stable wait per held item, naming the docs-sync session, head, base and the end of its bound; that bound, reached or still ahead, ends the loop's idle wait (GY-1622), kept at the latest local time the control plane can reach it (the read's upper clock offset): the cycle it wakes finds the hold ended, at most one round trip late.
   const noteHold = async (item: Work, { wait: detail, deadline }: { wait: string; deadline: string }) => { const bound = Date.parse(deadline); const waitKey = `wait:docs-sync:${item.id}`; if (bound >= clock) bounds.set(item.id, bound + clockOffset.max); if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
   // GY-1865: the waiting refusal's wake is this step's own bounded `wakeObservation` call — its `resync` once held the step for one 30s timeout after another, one waiting item at a time. A wake past the bound is carried to the next cycle (recorded waiting on its row, no fault), which joins the wake still in flight or consumes its answer; anything else fails the row as the delivery step's wake did.
   // GY-1865 review: a carried wake is owed its retry — due on the very next cycle, joining the call in flight, consuming its kept answer, or making the first send a spent budget never made. It is never held for the re-wake interval as a finished wake would be: its row's `at` stamps a carry, not a wake.
+  // A row carried this very cycle is the next cycle's to retry: retried now, it would wait a second per-call bound on the same resync. A carried `observe` is retried as `observe`, so the retry joins its flight or consumes its answer instead of sending a second resync.
   const wakeJob = async (item: Work, why: string) => {
-    if (!effects.wakeObservation) return;
-    const key = `wake:observation:${item.id}`, previous = state.actions[key];
-    if (previous && !carriedRow(previous) && (previous.state === 'failed' ? !readyToRetry(previous, state.cycle) : !observationWakeDue(item, previous?.at, clock, pause))) return;
+    const key = `wake:observation:${item.id}`, previous = state.actions[key], carried = carriedRow(previous), observed = carried && !!effects.observe && previous!.detail.startsWith(observeWake(item));
+    if (!effects.wakeObservation && !observed) return;
+    if (carried && previous!.cycle === state.cycle) return;
+    if (previous && !carried && (previous.state === 'failed' ? !readyToRetry(previous, state.cycle) : !observationWakeDue(item, previous?.at, clock, pause))) return;
     const noteWake = async (outcome: 'done' | 'failed', detail: string, at: number) =>
       performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: outcome, detail, attempts: outcome === 'failed' ? (previous?.state === 'failed' ? previous.attempts : 0) + 1 : 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist));
-    try { await effects.wakeObservation(item); }
+    try { await (observed ? effects.observe!(item, 0) : effects.wakeObservation!(item)); }
     catch (error) {
-      if (stepCallCarried(error)) { await recordCarried(cycle, key, { kind: 'refresh', work: item.key, epoch: item.epoch }, error, `Waking ${item.key}'s observation job`); return; }
+      if (stepCallCarried(error)) { await recordCarried(cycle, key, { kind: 'refresh', work: item.key, epoch: item.epoch }, error, observed ? observeWake(item) : `Waking ${item.key}'s observation job`); return; }
       return void await noteWake('failed', `Could not wake the observation job of ${item.key}: ${message(error)}`, now());
     }
     await noteWake('done', `Woke the observation job of ${item.key}: its ${why} waits for an observation newer than ${item.observation?.at ?? 'none'}`, clock);
