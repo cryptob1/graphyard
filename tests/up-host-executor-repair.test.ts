@@ -225,6 +225,15 @@ test('unit:up-host-executor-foreign-refused — a unit whose launcher is not a G
   assert.match(refusal.message, new RegExp(quote(direct.foreignTree)), 'the refusal names the foreign checkout');
   assert.equal(await readFile(direct.unitFile, 'utf8'), untouched, 'a refused unit is never rewritten');
 
+  // A unit naming no WorkingDirectory whose launcher is another Graphyard checkout's executor is not
+  // provably this install's, so it is refused rather than rebound (review thread on #1279).
+  const unanchored = executorUnitText(direct.repo, direct.staleCheckout).replace(/^WorkingDirectory=.*\n/m, '');
+  await writeFile(direct.unitFile, unanchored);
+  const unanchoredRefusal = await installExecutorSupervision(direct.repo, { run: () => '', unitDirectory: direct.unitDirectory }).catch((error: any) => error);
+  assert.equal(unanchoredRefusal?.name, 'ForeignUnitRefusal', `a unit with no WorkingDirectory is refused: ${unanchoredRefusal?.message}`);
+  assert.match(unanchoredRefusal.message, new RegExp(quote(direct.staleCheckout)), 'the refusal names the checkout its launcher starts');
+  assert.equal(await readFile(direct.unitFile, 'utf8'), unanchored, 'the unanchored unit is never rewritten');
+
   // The same layout through up: the repair runs the real installer, is refused, and the step fails
   // naming the refusal — never a silent rewrite of another program's unit.
   const layout = await hostLayout('graphyard-up-host-executor-foreign-up', ({ foreignTree }) => foreignUnitText(foreignTree));

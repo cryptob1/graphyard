@@ -1134,16 +1134,17 @@ export function executorMergeKinds(kinds: NextActionKind[] | null, loop: { name:
  * a unit an earlier Graphyard checkout of this install wrote for this repository, which the
  * installer may rebind onto this checkout (GY-1881) — `up`'s host executor alignment runs the real
  * installer for exactly this rewrite. Null for every other unit: one whose WorkingDirectory is
- * another checkout is that install's, whatever its launcher starts, and one whose launcher is no
+ * absent or another checkout may be another install's, whatever its launcher starts, and one whose launcher is no
  * Graphyard executor script at all is nobody's Graphyard unit — `assertUnitOwned` refuses both
  * (GY-1441), exactly as it refuses a unit that is absent.
  */
 export function staleExecutorLauncherCheckout(text: string, root: string, home = homedir()): string | null {
   const { workingDirectory, execStart } = unitCheckout(text, home);
-  // Only a unit that works in ROOT may be this install's fleet: one working in another checkout is
-  // that install's, and the launcher naming a Graphyard checkout cannot make it ROOT's.
-  if (workingDirectory && canonicalPath(workingDirectory) !== canonicalPath(root)) return null;
-  const script = execStart?.split(/\s+/).find(part => /\/scripts\/graphyard-executor\.mjs$/.test(part));
+  // Only a unit that names ROOT as its WorkingDirectory may be this install's fleet: one working in
+  // another checkout, or naming none, may be another install's, and the launcher naming a Graphyard
+  // checkout cannot make it ROOT's.
+  if (!workingDirectory || canonicalPath(workingDirectory) !== canonicalPath(root)) return null;
+  const script = execStart ? systemdCommandLineWords(execStart).find(part => /\/scripts\/graphyard-executor\.mjs$/.test(part)) : undefined;
   if (!script) return null;
   const checkout = canonicalPath(dirname(dirname(script)));
   return checkout === canonicalPath(root) ? null : checkout;
