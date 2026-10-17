@@ -62,6 +62,9 @@ export async function intentCommand(session: MasterSession): Promise<unknown> {
   }
   if (id === 'withdraw') {
     // Runs under the operator-agent identity that made the request; the server resolves GY-N.
+    // The option form (`master withdraw --repo OWNER/NAME --apply`, GY-1871's merge-intent take-back
+    // beside `master protection`) is fleet's, not a decision on an item: defer it to the next concern.
+    if (args[0]?.startsWith('-')) return unhandled;
     if (!args[0] || !args[1] || !args.slice(2).join(' ').trim()) throw new Error('Use master withdraw GY-N DECISION REASON');
     return print(await masterMutation(`work/${encodeURIComponent(args[0])}/decide`, { action: 'withdraw', decision: args[1], reason: args.slice(2).join(' ') }, randomUUID(), await agentToken(root, master, 'operatorAgent')));
   }
