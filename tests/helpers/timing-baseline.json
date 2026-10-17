@@ -351,6 +351,7 @@
     "tests/dispatch-collision.test.ts": 1679,
     "tests/dispatch-failure-reclaim.test.ts": 12438,
     "tests/dispatch-overlap.test.ts": 1364,
+    "tests/dispatch-rework-first.test.ts": 761,
     "tests/dispatch-race-guard.test.ts": 34959,
     "tests/dispatch-recovers-from-jam.test.ts": 998,
     "tests/dispatch-reservation-followups.test.ts": 268,
