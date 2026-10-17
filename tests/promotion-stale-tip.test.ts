@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { promotionCycle, promotionLedgerReadMs, promotionUpToDateReason, promotionWorkflow, type PromotionLedger, type PromotionReads, type PromotionRun } from '../src/daemon/deployment.js';
+import { promotionCycle, promotionFrozenReason, promotionLedgerReadMs, promotionOffReason, promotionUpToDateReason, promotionWorkflow, type PromotionLedger, type PromotionReads, type PromotionRun } from '../src/daemon/deployment.js';
 import { observedPromotionStatus, promotionSummaryWithLag } from '../src/daemon/promotion-stale.js';
 import type { AttentionItem } from '../src/master/attention.js';
 import { promotionStateSchema, type PromotionState } from '../src/daemon/state.js';
@@ -12,8 +12,10 @@ import { promotionStateSchema, type PromotionState } from '../src/daemon/state.j
 // 'Production runs the base branch tip; nothing to promote' while `master status` reported a
 // candidate in validation and the release lag named the delivery awaiting promotion. The cycle now
 // settles an in-flight flag against the runs before it concludes nothing to promote, and master
-// status's promotion summary raises attention and drops the up-to-date claim once the ledger is past
-// its read window on a tip the checkout's base ref has moved past.
+// status's promotion summary raises attention naming both SHAs and drops the up-to-date claim whenever
+// the lag tip differs from the ledger while deliveries wait — a read-window allowance never preserves
+// a known false claim. Past the window the attention is the stuck drive; intentionally disabled
+// promotion stays truthful about the tips with no stuck-drive diagnosis.
 // The instants below are explicit `now` arguments to a pure cycle; the file never reads the wall clock.
 
 const promoSha = (seed: string) => seed.repeat(40).slice(0, 40);
@@ -83,10 +85,46 @@ test('unit:promotion-reads-moved-tip-after-promotion — a promotion cycle whose
     assert.equal(state.reads, 1, 'no runs read while nothing is in flight and the ledger is fresh');
     assert.equal(promotionStateSchema.parse(next.state).reason, promotionUpToDateReason);
   }
+  // After an in-flight conclusion refreshes the ledger to a tip the watch has not classified, the cycle
+  // re-applies the watched-tip gate and does not dispatch that unclassified tip in the same cycle.
+  {
+    let dispatches = 0;
+    const WATCHED = PROMOTED;
+    const cycleReads = {
+      ledger: async () => ({ mainSha: MOVED, promotedSha: PROMOTED, promotedAt: iso(T - 30_000), behind: 1, candidates: [] }),
+      runs: async () => concludedRun(),
+      dispatch: async () => { dispatches++; },
+    } as unknown as PromotionReads;
+    const result = await promotionCycle(stuckState(), cycleReads, {
+      now: T + minute, everyMinutes: every, intervalMs: 20_000, watchedTip: WATCHED,
+    });
+    const parsed = promotionStateSchema.parse(result.state);
+    assert.equal(dispatches, 0, 'an unclassified refreshed tip is not dispatched');
+    assert.equal(result.dispatched, false);
+    assert.equal(parsed.mainSha, MOVED);
+    assert.match(parsed.reason ?? '', /has not classified the base branch tip/);
+    assert.match(parsed.reason ?? '', new RegExp(MOVED.slice(0, 12)));
+  }
+  // The same sequence under an active freeze: the refreshed tip waits; no dispatch rides out ahead of the watch.
+  {
+    let dispatches = 0;
+    const frozen = { sha: promoSha('f'), since: iso(T - minute) };
+    const cycleReads = {
+      ledger: async () => ({ mainSha: MOVED, promotedSha: PROMOTED, promotedAt: iso(T - 30_000), behind: 1, candidates: [] }),
+      runs: async () => concludedRun(),
+      dispatch: async () => { dispatches++; },
+    } as unknown as PromotionReads;
+    const result = await promotionCycle(stuckState(), cycleReads, {
+      now: T + minute, everyMinutes: every, intervalMs: 20_000, frozen, watchedTip: PROMOTED,
+    });
+    assert.equal(dispatches, 0);
+    assert.equal(result.dispatched, false);
+    assert.equal(promotionStateSchema.parse(result.state).reason, promotionFrozenReason(frozen));
+  }
 });
 
 test('unit:promotion-reason-agrees-with-release-lag — master status\'s promotion summary raises attention naming both SHAs when the lag names a delivery awaiting promotion on a base tip the recorded ledger does not name, and the reason never claims the promoted SHA is the base tip while they differ', () => {
-  // The incident: the ledger stuck past its read window naming the promoted SHA the base tip, while the checkout's base ref has moved and a delivery awaits promotion on the move.
+  // The incident: the ledger naming the promoted SHA the base tip, while the checkout's base ref has moved and a delivery awaits promotion on the move.
   const pastWindow = { ledgerReadAt: iso(T - 20 * minute), checkedAt: iso(T - minute) };
   const summary = observedPromotionStatus(stuckState(pastWindow), { tip: LAG_TIP, awaiting: ['GY-1872'], now: T });
   assert.ok(summary.attention, 'the stuck drive is named');
@@ -94,32 +132,54 @@ test('unit:promotion-reason-agrees-with-release-lag — master status\'s promoti
   assert.match(summary.attention!.text, new RegExp(PROMOTED.slice(0, 12)), 'the recorded ledger tip is named');
   assert.match(summary.attention!.text, new RegExp(LAG_TIP.slice(0, 12)), 'the base tip the lag read is named');
   assert.match(summary.attention!.text, /GY-1872/, 'the delivery awaiting promotion is named');
-  assert.doesNotMatch(summary.reason ?? '', /Production runs the base branch tip/, 'the up-to-date claim gives way once the window has passed on a moved tip');
+  assert.match(summary.attention!.text, /past its .*read window/, 'past the window the stuck drive is named');
+  assert.doesNotMatch(summary.reason ?? '', /Production runs the base branch tip/, 'the up-to-date claim gives way on a moved tip');
   assert.match(summary.reason ?? '', new RegExp(PROMOTED.slice(0, 12)));
   assert.match(summary.reason ?? '', new RegExp(LAG_TIP.slice(0, 12)));
   assert.match(summary.reason ?? '', /GY-1872/);
-  // Inside the read window the staleness is the design: no attention, the reason as the loop wrote it.
+  // Inside the read window: attention still names both SHAs (AC-2), the up-to-date claim is gone, and the
+  // stuck-drive / restart diagnosis is reserved for a ledger past its window.
   const inWindow = observedPromotionStatus(stuckState({ ledgerReadAt: iso(T - minute), checkedAt: iso(T - minute) }), { tip: LAG_TIP, awaiting: ['GY-1872'], now: T });
-  assert.equal(inWindow.attention, null);
-  assert.equal(inWindow.reason, promotionUpToDateReason);
-  // A moved tip past the window with nothing awaiting promotion is not the stuck drive.
+  assert.ok(inWindow.attention, 'an observed mismatch raises attention inside the window too');
+  assert.match(inWindow.attention!.text, new RegExp(PROMOTED.slice(0, 12)));
+  assert.match(inWindow.attention!.text, new RegExp(LAG_TIP.slice(0, 12)));
+  assert.doesNotMatch(inWindow.attention!.text, /past its .*read window/, 'inside the window the drive is not blamed as stuck');
+  assert.doesNotMatch(inWindow.attention!.next ?? '', /systemctl|dispatch .* by hand/, 'no restart or manual-dispatch instruction while the drive is on schedule');
+  assert.doesNotMatch(inWindow.reason ?? '', /Production runs the base branch tip/, 'a known false up-to-date claim never stands');
+  assert.match(inWindow.reason ?? '', new RegExp(PROMOTED.slice(0, 12)));
+  assert.match(inWindow.reason ?? '', new RegExp(LAG_TIP.slice(0, 12)));
+  // A moved tip with nothing awaiting promotion is not the stuck drive.
   const nothingAwaiting = observedPromotionStatus(stuckState(pastWindow), { tip: LAG_TIP, awaiting: [], now: T });
   assert.equal(nothingAwaiting.attention, null);
-  // The staleness bound is the loop's own ledger window at its interval (`promotionReadWindows`), not the
-  // fixed five-minute minimum: at a 300s interval the loop keeps its ledger 15 minutes, so a ledger six
-  // minutes old on a moved tip is a drive still reading on schedule, never a false restart instruction.
+  // The stuck-drive bound is the loop's own ledger window at its interval (`promotionReadWindows`):
+  // at a 300s interval the loop keeps its ledger 15 minutes, so a ledger six minutes old on a moved
+  // tip is still on schedule for the restart diagnosis — but AC-2 still names both SHAs and drops the
+  // up-to-date claim.
   const longInterval = observedPromotionStatus(stuckState({ ledgerReadAt: iso(T - 6 * minute), checkedAt: iso(T - minute) }), { tip: LAG_TIP, awaiting: ['GY-1872'], now: T, intervalMs: 300_000 });
-  assert.equal(longInterval.attention, null, 'inside the interval-granted window the loop is on schedule');
-  assert.equal(longInterval.reason, promotionUpToDateReason);
+  assert.ok(longInterval.attention, 'mismatch attention fires inside the interval-granted window');
+  assert.doesNotMatch(longInterval.attention!.text, /past its .*read window/, 'inside the interval-granted window the stuck diagnosis stays off');
+  assert.doesNotMatch(longInterval.reason ?? '', /Production runs the base branch tip/);
   const pastLongWindow = observedPromotionStatus(stuckState({ ledgerReadAt: iso(T - 16 * minute), checkedAt: iso(T - minute) }), { tip: LAG_TIP, awaiting: ['GY-1872'], now: T, intervalMs: 300_000 });
   assert.ok(pastLongWindow.attention, 'past the interval-granted window the stuck drive is named');
   assert.match(pastLongWindow.attention!.text, /15-minute read window/, 'the window named is the interval-granted one');
   // `promotionSummaryWithLag` passes the interval through, so master status judges by the loop's own window.
   const lagAttention: AttentionItem[] = [];
   promotionSummaryWithLag(stuckState({ ledgerReadAt: iso(T - 6 * minute), checkedAt: iso(T - minute) }), { baseTip: LAG_TIP, promotion: { pending: ['GY-1872'] } }, lagAttention, T, 300_000);
-  assert.equal(lagAttention.length, 0, 'the summary inside the interval-granted window raises nothing');
+  assert.equal(lagAttention.length, 1, 'the summary inside the interval-granted window still raises mismatch attention');
+  assert.doesNotMatch(lagAttention[0]!.text, /past its .*read window/);
   promotionSummaryWithLag(stuckState({ ledgerReadAt: iso(T - 16 * minute), checkedAt: iso(T - minute) }), { baseTip: LAG_TIP, promotion: { pending: ['GY-1872'] } }, lagAttention, T, 300_000);
-  assert.equal(lagAttention.length, 1, 'the summary past the interval-granted window raises the attention');
+  assert.equal(lagAttention.length, 2, 'the summary past the interval-granted window raises the stuck-drive attention');
+  assert.match(lagAttention[1]!.text, /15-minute read window/);
+  // Intentionally disabled promotion retains its ledger: tips are named, no stuck-drive / restart alert.
+  const disabled = observedPromotionStatus(stuckState({
+    ...pastWindow, reason: promotionOffReason, inFlight: false,
+  }), { tip: LAG_TIP, awaiting: ['GY-1872'], now: T });
+  assert.equal(disabled.attention, null, 'disabled promotion never raises a stuck-drive attention');
+  assert.ok((disabled.reason ?? '').startsWith(promotionOffReason), 'disabled reason stays named');
+  assert.match(disabled.reason ?? '', new RegExp(PROMOTED.slice(0, 12)));
+  assert.match(disabled.reason ?? '', new RegExp(LAG_TIP.slice(0, 12)));
+  assert.match(disabled.reason ?? '', /GY-1872/);
+  assert.doesNotMatch(disabled.reason ?? '', /Production runs the base branch tip/);
   // A reason that makes no claim about the tip stands as written; the attention still names the disagreement.
   const validating = stuckState({ ...pastWindow, reason: 'A release candidate is still in validation; the next promotion is dispatched as soon as it concludes' });
   const otherReason = observedPromotionStatus(validating, { tip: LAG_TIP, awaiting: ['GY-1872'], now: T });

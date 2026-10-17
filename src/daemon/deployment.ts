@@ -547,13 +547,13 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
   }
   const base = { checkedAt: at, ...ledger, ...carried, ...await soakRefresh(carried, ledger.candidates ?? [], reads, options.now, windows.runsMs) };
   if (!ledger.mainSha) return done(base, 'The base branch tip could not be read, so nothing is promoted', false);
-  // GY-1894: an in-flight flag the previous cycle carried is settled by the runs read below, never by
-  // this answer: a merge may have landed since — the early return skipped the runs read that clears it.
+  // GY-1894: a carried in-flight flag is settled by the runs read below, never by this early return.
   if (ledger.mainSha === ledger.promotedSha && !carried.inFlight) return done(base, promotionUpToDateReason, false);
-  // GY-1519: the main watch's freeze holds every dispatch; a tip it has not classified waits for it.
-  // GY-1894: with an in-flight flag still carried, these answer ahead of the runs read that settles it: the flag stays up and the reason stops saying up to date until the freeze lifts.
-  if (options.frozen) return done(base, promotionFrozenReason(options.frozen), false);
-  if (options.watchedTip !== undefined && options.watchedTip !== ledger.mainSha) return done(base, `The main watch has not classified the base branch tip ${ledger.mainSha.slice(0, 12)} yet; promotion waits for its verdict`, true);
+  // GY-1519 / GY-1894: freeze or unclassified tip holds dispatch (also re-checked after a post-conclusion ledger refresh).
+  const watchHold = <S extends Omit<PromotionState, 'nextDueAt' | 'reason'>>(s: S) => options.frozen ? done(s, promotionFrozenReason(options.frozen), false)
+    : options.watchedTip !== undefined && s.mainSha && options.watchedTip !== s.mainSha
+      ? done(s, `The main watch has not classified the base branch tip ${s.mainSha.slice(0, 12)} yet; promotion waits for its verdict`, true) : null;
+  { const held = watchHold(base); if (held) return held; }
   const sinceLast = base.lastDispatchAt ? options.now - Date.parse(base.lastDispatchAt) : Number.POSITIVE_INFINITY;
   const gapReason = (since: number) => `The last promotion was dispatched ${Math.round(since / 60_000)} minute(s) ago; the next is due no sooner than ${options.everyMinutes} minute(s) after it`;
   // GY-1513: in flight, the runs are read once an interval, so the conclusion the next dispatch waits for is seen within one.
@@ -580,6 +580,7 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
       }
       if (!state.mainSha) return done(state, 'The base branch tip could not be read, so nothing is promoted', false);
       if (state.mainSha === state.promotedSha) return done(state, promotionUpToDateReason, false);
+      { const held = watchHold(state); if (held) return held; }
     }
     // GY-1513: the gap spaces candidates that fail fast; one that promoted since the last dispatch (about 8 minutes in, the soak no longer in its run) is followed at once.
     const promotedSince = !state.inFlight && !!state.promotedAt && !!state.lastDispatchAt && Date.parse(state.promotedAt) >= Date.parse(state.lastDispatchAt);
@@ -587,7 +588,7 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
     if (since < everyMs && !promotedSince) return done(state, `A release candidate was started ${Math.round(since / 60_000)} minute(s) ago; the next promotion is due no sooner than ${options.everyMinutes} minute(s) after it`, true);
   }
   if (state.inFlight) return done(state, 'A release candidate is still in validation; the next promotion is dispatched as soon as it concludes', true);
-  // GY-1894: the flag above is settled here: production at the tip with no run left is this answer, whatever carried it in.
+  // GY-1894: settled flag — production at the tip with no run left is this answer.
   if (state.mainSha && state.mainSha === state.promotedSha) return done(state, promotionUpToDateReason, false);
   // The candidate the last run cut, when it stopped short of main's tip at the PR cap: the merges queued behind it need no new merge to go out.
   // It is told by its id differing from the newest candidate at the loop's last dispatch, not by clocks, so a run that cut nothing re-dispatches nothing.
