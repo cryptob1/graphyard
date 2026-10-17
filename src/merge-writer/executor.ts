@@ -112,16 +112,25 @@ export type MergeRecordEvent =
 /** The ledger kind each recorded step writes; `trial` is the executor's own record beside the ledger, which the fold ignores. */
 export const mergeRecordKinds = { ...mergeLedgerKinds, trial: 'merge.trial' } as const;
 /**
- * The idempotency key one step keeps across retries: the item, the step and the commits it names.
- * An attempt's intent, trial and refusal also name the ledger it started from (its event count,
- * GY-1718): a head requeued on the same tip (a preview timeout, an unmoved-tip refusal) is merged
- * again by a later cycle, whose fresh trial commit and verdict are a new attempt, not a replay.
+ * GY-1852: the attempt a record belongs to: an id the loop persists before the attempt's first
+ * write, and the write's place in it. A retry of that write replays its exact first input under the
+ * same key; any new attempt has a new id, so no key is ever sent again with other input.
  */
-export const mergeRecordKey = (work: Pick<Work, 'id'> & { mergeLedger?: Pick<MergeLedgerState, 'events'> | null }, event: MergeRecordEvent) => {
+export interface MergeAttempt { id: string; write: number }
+/**
+ * The idempotency key one step keeps across retries. Under an attempt (GY-1852) it is the item, the
+ * attempt id, the write's place in it and the step. Without one (a caller that names none) it is the
+ * item, the step and the commits it names; an intent, trial or refusal also names the ledger it
+ * started from (its event count, GY-1718).
+ */
+export const mergeRecordKey = (work: Pick<Work, 'id'> & { mergeLedger?: Pick<MergeLedgerState, 'events'> | null; mergeAttempt?: MergeAttempt | null }, event: MergeRecordEvent) => {
+  if (work.mergeAttempt) return `merge-record:${work.id}:${work.mergeAttempt.id}:${work.mergeAttempt.write}:${event.kind}`;
   if (event.kind === 'pushed' || event.kind === 'reconciled') return `merge-record:${work.id}:${event.kind}:${event.mergeSha}`;
   const attempt = work.mergeLedger?.events ? `#${work.mergeLedger.events}` : '';
   return `merge-record:${work.id}:${event.kind}:${event.head}:${'baseTip' in event ? event.baseTip : 'refused'}${attempt}`;
 };
+/** Whether a record write failed because the server already holds its key with other input: replaying it can never succeed. */
+export const keyReusedRefusal = (error: unknown) => /Idempotency key reused with different input/.test(error instanceof Error ? error.message : String(error));
 
 /** The refusal a failed trial records: the conflicting paths, the failing build step, or the failing test files (AC-3). */
 export function trialFailureReason(trial: { conflict?: readonly string[]; run?: Pick<TrialRun, 'build' | 'tests'> | null }): string | null {
@@ -428,8 +437,8 @@ export interface MergePorts {
   push(mergeSha: string, baseTip: string): Promise<'pushed' | 'rejected'>;
   /** Whether the base branch's first-parent history holds `sha`, as last fetched. */
   holds(sha: string): Promise<boolean>;
-  /** Records one step on the coordinator (`POST /api/work/:id/merge-record`), idempotent under `mergeRecordKey`. */
-  record(item: Pick<Work, 'id' | 'key'>, event: MergeRecordEvent): Promise<unknown>;
+  /** Records one step on the coordinator (`POST /api/work/:id/merge-record`), idempotent under `mergeRecordKey`, under the attempt `item` names (GY-1852). */
+  record(item: Pick<Work, 'id' | 'key'> & { mergeAttempt?: MergeAttempt | null }, event: MergeRecordEvent): Promise<unknown>;
 }
 export type MergeOutcome =
   | { outcome: 'merged'; mergeSha: string; baseTip: string; observedTip: string; pushes: number }
