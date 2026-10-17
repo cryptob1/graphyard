@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   assessPromotion, assessUat, candidateTagPrefix, cut, deployToUat, deployToUatAsync, ledgerStatus, productionBranch, promote, promoteAsync,
-  recordCandidateBuild, uatBranch, uatTagPrefix, validate, validateAndRecord, type AsyncGit, type CandidateBuild, type Git, type Ledger, type ReleaseCandidate, type Suite, type UatRecord,
+  recordCandidateBuild, uatBranch, uatDeployTagPrefix, uatTagPrefix, uatValidationWindowMs, validate, validateAndRecord,
+  type AsyncGit, type CandidateBuild, type Git, type Ledger, type ReleaseCandidate, type Suite, type UatDeployRecord, type UatRecord,
 } from '../src/release-candidate.js';
 import type { Manifest } from '../src/delivery.js';
 import { verifyPromotedDigests } from '../src/production-delivery.js';
@@ -42,7 +43,7 @@ function ledgerGit(ledger: Partial<Ledger>, handlers: Record<string, (args: stri
     if (handlers[args[0]]) return handlers[args[0]](args);
     if (args[0] === 'for-each-ref') {
       const prefix = args[3].slice('refs/tags/'.length);
-      const key = prefix.startsWith('rc-production/') ? 'production' : prefix.startsWith(candidateTagPrefix) ? 'candidates' : prefix.startsWith(uatTagPrefix) ? 'uat' : 'soak';
+      const key = prefix.startsWith('rc-production/') ? 'production' : prefix.startsWith(candidateTagPrefix) ? 'candidates' : prefix.startsWith(uatTagPrefix) ? 'uat' : prefix.startsWith(uatDeployTagPrefix) ? 'uatDeploys' : 'soak';
       return ((ledger[key] ?? []) as { id: string }[]).map(record => `${prefix}${record.id}\0${JSON.stringify(record, null, 2)}`).join('\0\0\n');
     }
     return '';
@@ -105,13 +106,13 @@ test('unit:candidate-promotes-recorded-digests — a candidate records one build
   assert.deepEqual(asyncDeployed, { candidate: candidate.id, sha: tip, branch: uatBranch, mode: 'digest', digests: built.artifacts });
   assert.equal(asyncDeploys, 2);
 
-  // Deploying to UAT by digest deploys the recorded digests and moves no branch.
+  // Deploying to UAT by digest deploys the recorded digests, moves no branch, and records what it serves.
   const uatRepo = ledgerGit({ candidates: [candidate] });
   let uatDeploys = 0;
   const uatResult = deployToUat(uatRepo.git, candidate.id, 'main', now, () => { uatDeploys++; });
   assert.deepEqual(uatResult, { candidate: candidate.id, sha: tip, branch: uatBranch, mode: 'digest', digests: built.artifacts });
   assert.equal(uatDeploys, 1);
-  assert.deepEqual(uatRepo.pushes(), []);
+  assert.deepEqual(uatRepo.pushes(), [`push origin refs/tags/${uatDeployTagPrefix}${candidate.id}`], 'the digest deploy publishes its record — the trace a branch move would leave — and pushes nothing else');
 
   // Without a digest deployer the adapter keeps sha promotion: the branch move names no mode.
   const shaRepo = ledgerGit({ candidates: [candidate], uat: [passedUat] });
@@ -120,11 +121,11 @@ test('unit:candidate-promotes-recorded-digests — a candidate records one build
   assert.ok(shaRepo.pushes().some(push => push.includes(`refs/heads/${productionBranch}`)), 'sha promotion moves release/production');
 
   // Status reports which way each candidate promotes and what ran in production.
-  const status = ledgerStatus({ candidates: [candidate], uat: [passedUat], production: [{ id: candidate.id, sha: tip, at: iso, digests: built.artifacts }], soak: [] });
+  const status = ledgerStatus({ candidates: [candidate], uat: [passedUat], uatDeploys: [], production: [{ id: candidate.id, sha: tip, at: iso, digests: built.artifacts }], soak: [] });
   assert.equal(status[0].promotion, 'digest');
   assert.deepEqual(status[0].build?.digests, built.artifacts);
   assert.deepEqual(status[0].productionDigests, built.artifacts);
-  assert.equal(ledgerStatus({ candidates: [{ ...candidate, build: undefined }], uat: [], production: [], soak: [] })[0].promotion, 'sha', 'a candidate without a build is reported as sha promotion');
+  assert.equal(ledgerStatus({ candidates: [{ ...candidate, build: undefined }], uat: [], uatDeploys: [], production: [], soak: [] })[0].promotion, 'sha', 'a candidate without a build is reported as sha promotion');
 });
 
 test('unit:production-digest-verified — production verification compares every recorded running digest with the promoted digest, fails naming the service on any other digest, passes when all match, and reports a promotion without digests as sha-promoted', () => {
@@ -152,4 +153,74 @@ test('unit:production-digest-verified — production verification compares every
   assert.deepEqual(verifyPromotedDigests({ sha: tip }, running), { mode: 'sha-promoted', verified: true, mismatches: [] });
   assert.equal(verifyPromotedDigests({ sha: tip, digests: [] }, running).mode, 'sha-promoted');
   assert.equal(verifyPromotedDigests({ sha: tip, digests: null }, running).mode, 'sha-promoted');
+});
+
+const digestServed = (candidate: ReleaseCandidate, at: string): UatDeployRecord => ({ id: candidate.id, sha: candidate.sha, at, digests: built.artifacts });
+
+/* The in-flight validation guard review finding: a digest UAT deploy must not replace UAT under a
+ * validation that has no verdict yet — its own or a sha deploy's — and must leave the record a
+ * branch move would leave, so later deploys see the validation in flight. */
+test('unit:uat-digest-deploy-guarded — a digest UAT deploy records what it serves as rc-uat-deploy/ID and honors the same in-flight validation guard as the branch move', () => {
+  const later = { ...candidate, id: '20261001T130000Z', sha: 'd'.repeat(40) };
+
+  // Deploying by digest writes and publishes the record a branch move would otherwise leave.
+  const first = ledgerGit({ candidates: [later, candidate] });
+  let deploys = 0;
+  const deployed = deployToUat(first.git, candidate.id, 'main', now, () => { deploys++; });
+  assert.equal(deployed.mode, 'digest');
+  assert.equal(deploys, 1);
+  assert.deepEqual(first.tags().find(entry => entry.id === candidate.id), digestServed(candidate, iso), 'the record names the candidate and the digests it put into UAT');
+  assert.ok(first.pushes().some(push => push.includes(`refs/tags/${uatDeployTagPrefix}${candidate.id}`)), 'the record is published, so every later deploy sees the validation in flight');
+  assert.ok(first.pushes().every(push => !push.includes('refs/heads/')), 'a digest deploy still moves no branch');
+
+  // Another digest deploy while that validation has no verdict yet is refused before the deployer runs.
+  const guard = ledgerGit({ candidates: [later, candidate], uatDeploys: [digestServed(candidate, iso)] });
+  assert.throws(() => deployToUat(guard.git, later.id, 'main', new Date(uatValidationWindowMs - 60_000), () => { deploys++; }),
+    new RegExp(`UAT serves candidate ${candidate.id}'s recorded digests .*no verdict yet`));
+  assert.equal(deploys, 1, 'the refused deploy never reaches the deployer: the running validation is not broken');
+
+  // A sha deploy is refused by the same guard: moving the branch would replace UAT all the same.
+  const shaBlocked = ledgerGit({ candidates: [later, candidate], uatDeploys: [digestServed(candidate, iso)] });
+  assert.throws(() => deployToUat(shaBlocked.git, later.id, 'main', now), /recorded digests.*no verdict yet/);
+  assert.ok(shaBlocked.pushes().every(push => !push.includes(`refs/heads/${uatBranch}`)), 'nothing was pushed');
+
+  // And the digest deploy is refused while a sha-deployed candidate's validation runs.
+  const branchGuard = ledgerGit({ candidates: [later, candidate] }, { 'ls-remote': () => `${tip}\trefs/heads/${uatBranch}` });
+  assert.throws(() => deployToUat(branchGuard.git, later.id, 'main', now, () => { deploys++; }), /moving release\/uat now would fail it/);
+  assert.equal(deploys, 1);
+
+  // A verdict lifts the refusal: the newest record then names what UAT serves now.
+  const judged = ledgerGit({ candidates: [later, candidate], uat: [passedUat], uatDeploys: [digestServed(candidate, iso)] });
+  const redeployed = deployToUat(judged.git, later.id, 'main', now, () => { deploys++; });
+  assert.equal(redeployed.mode, 'digest');
+  assert.equal(deploys, 2);
+  assert.deepEqual(judged.tags().find(entry => entry.id === later.id), digestServed(later, iso), 'the newest record now names the candidate UAT serves');
+
+  // A validation whose window passed without a verdict no longer blocks, exactly as for branch moves.
+  const expired = ledgerGit({ candidates: [later, candidate], uatDeploys: [digestServed(candidate, iso)] });
+  assert.equal(deployToUat(expired.git, later.id, 'main', new Date(uatValidationWindowMs + 60_000), () => { deploys++; }).mode, 'digest', 'an abandoned validation is waited out, not forever');
+  assert.equal(deploys, 3);
+});
+
+/* The wedged-lease review finding: a digest promotion moves no branch, so the newest production
+ * record can name a SHA the branch never held — a later sha promotion leasing on it is rejected
+ * forever. It leases on the branch's last sha-mode position instead. */
+test('unit:sha-promotion-leases-past-digest-promotions — a sha promotion after digest promotions leases on the branch\'s last sha-mode position, so the digest records never wedge it', () => {
+  const branchSha = '1'.repeat(40), digestSha = '2'.repeat(40), nextSha = '3'.repeat(40);
+  const bySha: ReleaseCandidate = { id: '20261001T120000Z', sha: branchSha, cutAt: iso, trigger: 'manual', since: null, items: [] };
+  const byDigest: ReleaseCandidate = { ...candidate, id: '20261001T130000Z', sha: digestSha };
+  const next: ReleaseCandidate = { id: '20261001T140000Z', sha: nextSha, cutAt: iso, trigger: 'manual', since: null, items: [] };
+  const uatFor = (entry: ReleaseCandidate): UatRecord => ({ id: entry.id, sha: entry.sha, result: 'passed', deployedSha: entry.sha, at: iso, suites: [{ name: 'endpoints', passed: true, detail: 'ok' }], followUp: null, ...(entry.build ? { digests: built.artifacts } : {}) });
+  const repo = ledgerGit({
+    candidates: [next, byDigest, bySha],
+    uat: [uatFor(next), uatFor(byDigest)],
+    production: [{ id: byDigest.id, sha: digestSha, at: iso, digests: built.artifacts }, { id: bySha.id, sha: branchSha, at: iso }],
+  });
+  const promoted = promote(repo.git, next.id, { base: 'main', push: false, now });
+  assert.deepEqual(promoted, { promoted: true, candidate: next.id, sha: nextSha, branch: productionBranch }, 'the sha promotion is not refused or rejected because digests were promoted before it');
+  const branchPush = repo.pushes().find(push => push.includes(`refs/heads/${productionBranch}`));
+  assert.ok(branchPush, 'the sha promotion moves release/production');
+  assert.ok(branchPush.includes(`--force-with-lease=refs/heads/${productionBranch}:${branchSha}`), `the lease names the branch's last sha-mode position (${branchSha.slice(0, 8)}…), not the digest record's SHA (${digestSha.slice(0, 8)}…), which the branch never held`);
+  assert.ok(!branchPush.includes(digestSha));
+  assert.ok(!('digests' in repo.tags().find(entry => entry.id === next.id)), 'a sha promotion still records no digests');
 });
