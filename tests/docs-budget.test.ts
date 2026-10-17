@@ -85,6 +85,8 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   ['docs/validation.md', /`secrets: \["NAME"\]` from `~\/\.config\/graphyard\/INSTALL\/e2e-secrets\.TARGET\.env` \(0600, uncommitted\) as variables and `\{\{secret:NAME\}\}`, redacted/],
   // GY-1526 AC-6: the loop-driven cut and the related-item revert of control-plane mode.
   ['docs/delivery.md', /Under a `control-plane` merger the loop cuts \(`run\.candidates\.everyMerges` 10, `idleMinutes` 15\), validates, promotes and verifies .*no workflow.*a failed required E2E case reverts the newest candidate item a matching verification map covers \(`candidateReverts`; reopened\); a main-watch freeze holds all/],
+  // GY-1848: the repository's release failure-action keys and their defaults.
+  ['docs/delivery.md', /`release\.onFailure` \(`graphyard\.json`\) picks `revert` \(default\) or `hold`: `hold` names each failing case, step and would-be target \(or `no map matched`\), reverts and reopens nothing; `release\.revertUnmatched` \(default `true`\) `false` holds an unmatched failure instead of the newest item/],
   // GY-1555 AC-6: setup-from-zero's control-plane merger subsection; steps 5 and 7 fold into step 4, where doctor's fixes point.
   ['docs/setup-from-zero.md', /### Control-plane merger\n\n`up --merger control-plane` creates an ed25519 deploy key, registers it read-write on OWNER\/REPO .*no App, no branch protection/],
   ['docs/setup-from-zero.md', /## 4\. Register the GitHub App\n\n.*Reviewer and revert-approver Apps: .*Branch protection: /],

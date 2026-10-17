@@ -5,7 +5,7 @@ Releases ([rollback](recovery.md#rollback)): `admin` sets policy; `builder`s bui
 
 ## Release candidates
 
-Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`/`release/production` (moved by `graphyard release`) to candidate SHAs.
+Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`/`release/production` to candidate SHAs.
 
 - `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N new first-parent merges (`GRAPHYARD_RC_MAX_PRS`=10; rest queue); `.github/workflows/release-candidate.yml` cuts on loop dispatch.
 - `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*`); refused while an unjudged <4h candidate serves.
@@ -15,11 +15,11 @@ Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`
 - Failures file a [hold](validation.md#release-holds) per outcome, else `release follow-up ID` ([filing credential](#release-filing-credential)).
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records `rc-soak/ID` (advisory).
 
-**The master loop promotes** (`promote=true`) once main differs from the last `rc-production/`/cut SHAs, nothing queued, `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`; 10, `0` off) passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`/`GRAPHYARD_PRODUCTION_URL`; no workflow; managed repositories run [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. A `GRAPHYARD_UAT_STATIC` site's [merge-writer](delivery-redesign.md#merge-writer) trials run required/uat cases uncredentialed: a failing or secret-declaring required one, or none runnable, fails; timeouts re-queue (`mergeLedger.trial.preview`). `release status` lists; `release GY-N EPOCH` leases; needs `vars.UAT_URL`/`PRODUCTION_URL`.
+**The master loop promotes** (`promote=true`) once main differs from the last `rc-production/`/cut SHAs, nothing queued, `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`; 10, `0` off) passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`/`GRAPHYARD_PRODUCTION_URL`; no workflow; managed repositories run [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. `release.onFailure` (`graphyard.json`) picks `revert` (default) or `hold`: `hold` names each failing case, step and would-be target (or `no map matched`), reverts and reopens nothing; `release.revertUnmatched` (default `true`) `false` holds an unmatched failure instead of the newest item. A `GRAPHYARD_UAT_STATIC` site's [merge-writer](delivery-redesign.md#merge-writer) trials run required/uat cases uncredentialed: a failing or secret-declaring required one, or none runnable, fails; timeouts re-queue (`mergeLedger.trial.preview`). `release status` lists; `release GY-N EPOCH` leases; needs `vars.UAT_URL`/`PRODUCTION_URL`.
 
 ### Release filing credential
 
-UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds/follow-ups as `graphyard-release-follow-up` (only `intent:create`, work items `*`). The loop's hourly `master setup --apply` keeps it with the admin token (issues/rotates/stores); else `master status` names the administrator's step (`graphyard operator-agent setup FILE --token-stdin`, FILE `{"id":"graphyard-release-follow-up","displayName":"Release follow-up","capabilities":["intent:create"],"scope":{"repositories":["OWNER/REPO"],"workItems":["*"]},"reason":"..."}`). `doctor`: `FAIL release-filing`. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` with only `e2e:record`, never admin.
+UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds/follow-ups as `graphyard-release-follow-up` (only `intent:create`, work items `*`). The loop's hourly `master setup --apply` keeps it (issues/rotates/stores); else `master status` names the administrator's step (`graphyard operator-agent setup FILE --token-stdin`, FILE `{"id":"graphyard-release-follow-up","displayName":"Release follow-up","capabilities":["intent:create"],"scope":{"repositories":["OWNER/REPO"],"workItems":["*"]},"reason":"..."}`). `doctor`: `FAIL release-filing`. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` with only `e2e:record`, never admin.
 
 ### Pre-merge gate and release-candidate validation
 
@@ -39,7 +39,7 @@ Every 30s the guard reruns, reverting merges failing checks parents passed; the 
 
 `init --scan` splits checks (`delivery.mergeGate`/per-candidate); `--apply` renders `graphyard-release-candidate.yml` (`candidateSchedule`/`--candidate-cron CRON|off`), `graphyard-promotion.yml`. `deploy.adapter`: `railway` (`deploy.project`), `command` (`deploy.uat`/`deploy.production` with `GRAPHYARD_CANDIDATE_SHA`; unset: none). `--delivery per-pr` keeps per-PR checks; `install --plan` lists resources.
 
-**`graphyard.json` policy**: `risk.sensitive` `{rule,glob}` (`only`: `risk`/`lane`), else generic; `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; deployed `GRAPHYARD_REPOSITORY_POLICY`; `doctor` prints it.
+**`graphyard.json` policy**: `risk.sensitive` `{rule,glob}` (`only`: `risk`/`lane`), else generic; `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; `release.onFailure` `revert`/`hold`; deployed `GRAPHYARD_REPOSITORY_POLICY`; `doctor` prints it.
 
 ```json
 {"kind":"environment","id":"production","expectedRevision":0,"repository":"owner/repository","url":"https://app.example.test","instance":"production-cluster","immutable":true,"services":["api","web"],"resources":["production-smoke-account"],"delivery":{"freshnessSeconds":300,"approvalRequired":true}}
@@ -87,4 +87,4 @@ Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery swee
 
 `POST /api/validation/result` binds manifest/signature/measurements; mismatches void passes as `attribution-undermined` (`GET /api/analytics/attribution`).
 
-A loop-owned post-deploy observation item never dispatches: deployment verification reads it; a pass closes it `delivered-observation`, a fail escalates; no-smoke deliveries backfill five per pass.
+A loop-owned post-deploy observation item never dispatches: deployment verification reads it, closing it `delivered-observation` on a pass and escalating on a fail; no-smoke deliveries backfill five per pass.
