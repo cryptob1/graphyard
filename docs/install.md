@@ -55,7 +55,7 @@ Skip until an App binds; else dispatch [small item](onboarding.md#4-prove-the-fi
 
 ## Principal roster
 
-`principal add ID --role ROLE [--grant external-runs:import]...`/`principal remove ID`: one non-installer `install.json` entry, kept by `--apply` (planned-ID collisions refuse); writes only `GRAPHYARD_PRINCIPALS`, reads back, idempotent, under `apply.lock`; producers need `--grant` ([lane](validation.md#release-verdicts)).
+`principal add ID --role ROLE [--grant external-runs:import|delivery:observe-sha]`/`principal remove ID`: one non-installer `install.json` entry, kept by `--apply` (planned-ID collisions refuse); writes only `GRAPHYARD_PRINCIPALS`, reads back, idempotent, under `apply.lock`; producers need `--grant` ([lanes](validation.md#release-verdicts)). `delivery:observe-sha` is held alone, by a dedicated principal (`principal add huck-observer --role producer --grant delivery:observe-sha`); an existing principal's grants never change to or from it. Both the target server and its CLI must include GY-1912 first; older ones refuse the grant.
 
 ## Self-contained host
 
