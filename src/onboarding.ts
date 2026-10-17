@@ -440,7 +440,8 @@ export function proposeDelivery(input: ScanInput, deploy: DeployDetection, stack
   // A repository with no deploy target has no UAT or production to promote a candidate to, so
   // under the GitHub merger each pull request is its own delivery (setup-from-zero step 12).
   const mode = overrides.mode ?? committed?.mode ?? (overrides.merger === 'control-plane' ? 'local' : deploy.target === 'none' ? 'per-pr' : 'release-candidate');
-  const mergeGate = committed?.mergeGate ?? (hasNoCi(input) ? deliveryWorkflowGate(classifyChecks(input, stack), mode) : classifyChecks(input, stack));
+  // The local mode generates no workflow, so a repository without CI gets no graphyard-gate to wait on either.
+  const mergeGate = committed?.mergeGate ?? (hasNoCi(input) && mode !== 'local' ? deliveryWorkflowGate(classifyChecks(input, stack), mode) : classifyChecks(input, stack));
   // The local mode deploys through commands the operator names, never a Railway adapter it would depend on.
   const adapter = mode === 'local' || deploy.target !== 'railway' ? 'command' : 'railway';
   const local = mode === 'local' ? { ...localDeliveryDefaults, ...detectApplications(input.files, input.contents, stack.commands.find(command => command.check === 'build')?.command ?? null) } : {};
@@ -449,7 +450,8 @@ export function proposeDelivery(input: ScanInput, deploy: DeployDetection, stack
     mode,
     mergeGate,
     candidateSchedule: overrides.candidateSchedule !== undefined ? overrides.candidateSchedule : committed ? committed.candidateSchedule : defaultCandidateSchedule,
-    deploy: committed?.deploy ?? { adapter, project: null, uat: null, production: null },
+    // Switching a committed Railway pipeline to local drops the adapter that belonged to the old mode.
+    deploy: committed?.deploy && !(mode === 'local' && committed.deploy.adapter === 'railway') ? committed.deploy : { adapter, project: null, uat: null, production: null },
     ...local, ...kept,
   });
 }
@@ -534,8 +536,9 @@ export function buildProposal(input: ScanInput, options: { repository?: string |
   const checks = [...new Set([...stack.commands.map(command => command.check), ...(stack.commands.length ? [] : fallbackJobs)])].slice(0, 12);
   const delivery = proposeDelivery(input, deploy, stack, options.delivery);
   // Under the candidate model a pull request waits only for the pre-merge set. A repository with no
-  // CI waits for what the generated delivery workflow reports (GY-1480), never a script's name.
-  const policyChecks = hasNoCi(input) ? requiredPullRequestChecks(delivery).slice(0, 12)
+  // CI waits for what the generated delivery workflow reports (GY-1480), never a script's name; under
+  // the local mode (GY-1901) it has no workflow, so no GitHub check is required at all.
+  const policyChecks = hasNoCi(input) ? (delivery.mode === 'local' ? [] : requiredPullRequestChecks(delivery).slice(0, 12))
     : delivery.mode === 'per-pr' ? checks : checks.filter(check => delivery.mergeGate.preMerge.some(entry => entry.check === check));
   const proofs = [
     ...stack.commands.filter(command => command.purpose !== 'build').map(command => ({ name: proofName(command.purpose, command.check), command: command.command, check: command.check })),

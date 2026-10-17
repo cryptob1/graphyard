@@ -454,7 +454,8 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   // for its stack, then Graphyard's gate job — in the onboarding change; it is reported among the
   // workflows only once it is on disk. It decides "no CI" itself, so a rerun that finds only
   // Graphyard's own workflows still reports it, matching the gate the proposed policy requires.
-  const deliveryWorkflow = delivery ? await writeDeliveryWorkflow(root) : null;
+  // The local mode (GY-1901) generates no GitHub Actions workflow, delivery workflow included.
+  const deliveryWorkflow = delivery && proposal.delivery?.mode !== 'local' ? await writeDeliveryWorkflow(root) : null;
   // An operator's edit to it is drift: the edited file is kept, and still published as the workflow.
   if (delivery && deliveryWorkflow) {
     if (deliveryWorkflow.state === 'drift') drift.push(`${deliveryWorkflow.path} differs from the generated workflow; the edited file was kept`);

@@ -16,7 +16,7 @@ import { applyProtection, applyRestore, observeRestore, protectionRecordFile, re
 import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
 import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
 import { repositoryPolicyAssignment } from '../model/repository-policy.js';
-import { projectDeliveryAssignment, projectDeliveryVariable } from '../project-applications.js';
+import { applicationProblems, caseIdsOf, projectDeliveryAssignment, projectDeliveryVariable } from '../project-applications.js';
 import { delegationLimitAssignments, delegationLimitVariables } from './limits.js';
 import { assertOutsideRepository, configHome, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalsVariable, readInstallRecord, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord } from './secrets.js';
 import { AppStepPending, readAppFile, readSavedApp, readUninstalledApp, type SavedApp } from './manifest.js';
@@ -280,8 +280,12 @@ export async function repositoryDelivery(root: string, merger: string | null = n
   let committed: DeliveryPolicy | undefined;
   try { committed = text === null ? undefined : parseRepositoryConfig(text).delivery; }
   catch (error: any) { throw new Error(Array.isArray(error?.issues) ? error.issues.map((issue: any) => `${issue.path.join('.')}: ${issue.message}`).join('; ') : error.message); }
+  const input = await collectScanInput(root);
+  // A committed binding names a case file the checkout must hold, as init checks it (GY-1901).
+  const unknownCases = committed ? applicationProblems(committed, caseIdsOf(input.files)) : [];
+  if (unknownCases.length) throw new Error(unknownCases.join('; '));
   if (committed) return { policy: committed, committed: true };
-  const input = await collectScanInput(root), stack = detectStack(input);
+  const stack = detectStack(input);
   return { policy: proposeDelivery(input, detectDeploy(input, stack), stack, { merger }), committed: false };
 }
 
@@ -538,8 +542,10 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
     repositoryPolicy = { assignment: repositoryPolicyAssignment(text === null ? null : JSON.parse(text)), error: null };
   } catch (error: any) { repositoryPolicy = { assignment: null, error: `${repositoryConfigFile}'s risk, review and e2e policy does not parse: ${error.message}` }; }
   const reviewPolicy = rawInputs.reviewPolicy ?? 'github';
-  // A new install's control plane merges (GY-1833); one that observes only, or already exists, keeps the model it had.
-  const delivery = await repositoryDelivery(root, !record && !rawInputs.observeOnly ? 'control-plane' : null).catch((error: any) => { throw new Error(`${repositoryConfigFile}'s delivery policy cannot be installed: ${error.message}. Correct it (docs/delivery.md#managed-repositories), then rerun`); });
+  // A non-observe install proposes the local mode under the control-plane merger (GY-1833, GY-1901), including an
+  // idempotent retry after the install record exists but before graphyard.json is committed; a committed policy
+  // is its own choice and ignores this. Observation-only leaves the merger unread so it keeps whatever it had.
+  const delivery = await repositoryDelivery(root, rawInputs.observeOnly ? null : 'control-plane').catch((error: any) => { throw new Error(`${repositoryConfigFile}'s delivery policy cannot be installed: ${error.message}. Correct it (docs/delivery.md#managed-repositories), then rerun`); });
   let detectedBase = rawInputs.baseBranch;
   if (!detectedBase && existsSync(resolve(root, '.git'))) {
     try { detectedBase = detectedBaseBranch(execFileSync('git', ['-C', root, 'branch', '-r'], { encoding: 'utf8' })) ?? undefined; } catch {}
@@ -724,8 +730,10 @@ export function coreEnv(session: InstallSession): EnvValue[] {
     // The repository's sensitive paths, review timing and pending-outcome rule (GY-1843): the image
     // carries no graphyard.json, so the deployed gates read them from here.
     ...(session.repositoryPolicy?.assignment ? [{ name: session.repositoryPolicy.assignment.variable, value: session.repositoryPolicy.assignment.value, secret: false }] : []),
-    // The committed delivery defaults, applications and case bindings (GY-1901), which /api/status shows as project.delivery.
-    ...(session.delivery.committed ? [{ name: projectDeliveryVariable, value: projectDeliveryAssignment(session.delivery.policy).value, secret: false }] : []),
+    // The delivery defaults, applications and case bindings (GY-1901), which /api/status shows as project.delivery:
+    // the committed policy when graphyard.json has one, else the scan's proposal so a fresh up serves them before
+    // onboarding commits the file (the control plane image carries no checkout).
+    { name: projectDeliveryVariable, value: projectDeliveryAssignment(session.delivery.policy).value, secret: false },
     ...(context.repoCheckout ? [{ name: 'GRAPHYARD_REPOSITORY_ROOT', value: '/repo', secret: false }] : []),
   ];
 }

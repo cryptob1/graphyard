@@ -39,9 +39,12 @@ const fixtureFiles: Record<string, string> = {
   'e2e/cases/fixture-compose-app.json': JSON.stringify({ id: 'fixture-compose-app', title: 'App', tags: ['fixture', 'app'], target: 'any', required: false, steps: [] }),
 };
 
-async function fixtureRepository(extra: Record<string, string> = {}) {
+/** `extra` values of `null` omit a fixture file (a repository with no CI of its own). */
+async function fixtureRepository(extra: Record<string, string | null> = {}) {
+  const files = { ...fixtureFiles };
+  for (const [path, text] of Object.entries(extra)) { if (text === null) delete files[path]; else files[path] = text; }
   const root = join(await temporaryDirectory('goal-onboarding'), 'repo');
-  for (const [path, text] of Object.entries({ ...fixtureFiles, ...extra })) { await mkdir(join(root, path, '..'), { recursive: true }); await writeFile(join(root, path), text); }
+  for (const [path, text] of Object.entries(files)) { await mkdir(join(root, path, '..'), { recursive: true }); await writeFile(join(root, path), text); }
   const git = (...args: string[]) => execFileSync('git', args, { cwd: root, stdio: 'ignore' });
   git('init', '-q', '-b', 'main'); git('remote', 'add', 'origin', 'git@github.com:owner/fixture.git');
   return root;
@@ -125,6 +128,16 @@ test('integration:goal-local-delivery-onboarding — normal init of a fixture re
   const kept = await fixtureRepository({ 'graphyard.json': `${JSON.stringify({ documentation: github.config.documentation, delivery: committedPolicy }, null, 2)}\n` });
   const keptOnboarding = await onboard(kept, 'control-plane');
   assert.deepEqual(keptOnboarding.config.delivery, committedPolicy);
+
+  // A repository with no CI of its own under the local mode still gets no workflow and no graphyard-gate requirement.
+  const noCi = await fixtureRepository({ '.github/workflows/ci.yml': null });
+  const bare = await onboard(noCi, 'control-plane');
+  assert.equal(bare.config.delivery.mode, 'local');
+  assert.equal(bare.scanned.proposal.ci.system, 'none');
+  for (const path of [...generatedWorkflowFiles, deliveryWorkflowFile]) assert.equal(await exists(join(noCi, path)), false, `${path} is not generated without CI`);
+  assert.ok(!bare.config.delivery.mergeGate.preMerge.some((entry: { check: string }) => entry.check === 'graphyard-gate'));
+  assert.ok(!bare.config.delivery.mergeGate.perCandidate.some((entry: { check: string }) => entry.check === 'graphyard-gate'));
+  assert.deepEqual(bare.scanned.proposal.policy.checks, [], 'local mode requires no GitHub check when the repository has no CI');
   await rm(join(root, '..'), { recursive: true, force: true });
 });
 
@@ -193,7 +206,8 @@ test('integration:goal-delivery-defaults-visible — /api/status and the Deliver
     assert.equal(await exists(join(undeclared, '.graphyard/setup-proposal.json')), false);
     const missing = await committed({ 'no-such-case': 'site' });
     await assert.rejects(runCli(missing, ['init', '--scan'], env), /binds case "no-such-case", but e2e\/cases\/no-such-case\.json does not exist/);
-    // and the install refuses it before planning anything.
+    // and the install refuses both an undeclared application and a binding whose case file is missing.
     await assert.rejects(repositoryDelivery(undeclared), /binds case "fixture-static-home" to application "ghost"/);
+    await assert.rejects(repositoryDelivery(missing), /binds case "no-such-case", but e2e\/cases\/no-such-case\.json does not exist/);
   } finally { await stub.close(); }
 });
