@@ -15,6 +15,7 @@ import { faultRecurrenceReport } from './faults.js';
 import { diagnosisReport } from './diagnosis.js';
 import { latencyBudget, silenceReport } from './metrics.js';
 import { boundedPersist, cycleCost, cycleTimes, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
+import { isStallHold, noteStepsSucceeded, stallHold, type StallHold } from './step-stalls.js';
 import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
 import { holdBoundWait } from './cycle-decisions.js';
@@ -30,6 +31,8 @@ import { shadowGateSummary } from './cycle-shadow.js';
 import { adoptLoopRelease, fileSlowLoopItem } from './slow-loop-item.js';
 import { mergeWriterSummary } from './cycle-merge-writer.js';
 import { noteCycleStalls, noteStepFailure, remedyStalledSteps, type StepStallRemedyRunner } from './step-stalls.js';
+import { mergeRecordKey } from '../merge-writer/executor.js';
+import { DispatchReservedError } from '../master/dispatch-reservation.js';
 import { setupAgentEnvironments } from '../master/environments.js';
 import type { StepStallRemedyOutcome } from '../stall-remedies.js';
 import { detachRuns } from '../runner/registry.js';
@@ -221,17 +224,31 @@ export function profileRemedyOutcome(report: { applied?: boolean; profiles?: unk
 }
 
 /**
- * Adopts the server's merge ledger for a refused merge record (GY-1854): the item's folded ledger
- * is read back from the snapshot — the executor reads the same fold every cycle, so the attempt
- * key it derives next carries the server's own event count — and the stale in-flight merge is
- * cleared, so the refused head starts a new attempt instead of replaying its idempotency key.
+ * Adopts the server's merge ledger for a refused merge record (GY-1854), and answers whether the
+ * next attempt records under a key that was never sent. The refused attempt is named by the failed
+ * merge action that carries the refusal: its item key, its head, and the instant the refusal was
+ * recorded. The adoption reads the item's folded ledger back from the snapshot — the executor
+ * reads the same fold every cycle, so the queue and the attempt key it derives next are the
+ * server's truth — clears the refused attempt's own persisted in-flight marker, and refuses to
+ * touch a marker naming any other item or head, or one started after the refusal was recorded:
+ * a merge of another item, or a later attempt of the same one, is a live or newer flight whose
+ * crash-recovery marker is its own, never cleared from the remedy.
  */
-export function mergeLedgerAdoption(state: DaemonState, work: readonly { key: string; mergeLedger?: { events?: number } | null }[], refused: string | null): StepStallRemedyOutcome {
-  const key = refused ? /(?:^|[^A-Za-z0-9])([A-Za-z]+-\d+)\b/.exec(refused)?.[1] ?? null : null;
-  const events = work.find(entry => entry.key === key)?.mergeLedger?.events ?? null;
-  state.mergeWriter.inFlight = null;
-  return { outcome: 'applied', verified: events !== null,
-    detail: `Adopted the server's merge ledger for ${key ?? 'the refused record'} (${events === null ? 'no folded ledger read' : `${events} events`}) and cleared the stale in-flight merge, so the next attempt records under a fresh key`.slice(0, 2000) };
+export function mergeLedgerAdoption(state: DaemonState, work: readonly { key: string; id: string; mergeLedger?: { events: number } | null }[], refused: { key: string; head: string; at: string } | null): StepStallRemedyOutcome {
+  if (!refused) return { outcome: 'refused', verified: false, detail: 'No failed merge action carrying a reused record key stands on the cursor, so nothing was adopted' };
+  const item = work.find(entry => entry.key === refused.key);
+  const events = item?.mergeLedger?.events ?? null;
+  const marker = state.mergeWriter.inFlight;
+  const stale = !!marker && marker.key === refused.key && marker.head === refused.head && Date.parse(marker.startedAt) < Date.parse(refused.at);
+  if (stale) state.mergeWriter.inFlight = null;
+  // A replay of the item's writes would send the refused key again: until its answer is settled, the adoption cannot claim a fresh key. The refused attempt's own marker never stands past this
+  // function: it was either cleared above or belonged to no refused flight (started after the
+  // refusal was recorded, so a later attempt's), and a later attempt always mints a fresh id.
+  const replay = state.mergeWriter.unconfirmed?.find(entry => entry.key === refused.key) ?? null;
+  const verified = events !== null && !replay;
+  const derivation = item && events ? ` — the next attempt-free record for it derives ${mergeRecordKey({ id: item.id, mergeLedger: item.mergeLedger ?? null }, { kind: 'refused', head: refused.head, reason: 'adopted' })}, a derivation the pre-adoption ledger never gave` : '';
+  return { outcome: 'applied', verified,
+    detail: `Adopted the server's merge ledger for ${refused.key} (${events === null ? 'no folded ledger read' : `${events} events`})${derivation}; the refused attempt's in-flight marker is ${stale ? 'cleared' : 'already gone'}, so the next flight mints a fresh attempt id${replay ? `; a replay of its writes still stands, so the refused key may be sent once more` : ' and no replay of its writes stands, so the refused key is never sent again'}`.slice(0, 2000) };
 }
 
 /**
@@ -249,11 +266,40 @@ export function stallRemedyRunner(config: () => Pick<MasterConfig, 'url'>, state
       } }));
     }
     if (kind === 'merge-record-idempotency') {
-      const refused = Object.values(state().actions).filter(action => action.kind === 'merge' && action.state === 'failed' && /Idempotency key reused with different input/i.test(action.detail)).at(-1);
-      return mergeLedgerAdoption(state(), (await read()).work, refused?.detail ?? null);
+      // The refused attempt is the newest failed merge action that carries the refusal — the
+      // writer's settle wording ("a record key reused") or the engine's ("Idempotency key
+      // reused") — and its detail names the item and the head the flight was merging.
+      const refused = Object.values(state().actions)
+        .filter(action => action.kind === 'merge' && action.state === 'failed' && /key reused with different input/i.test(action.detail))
+        .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0] ?? null;
+      const named = refused ? /Merge of (\S+) head ([0-9a-f]+)/i.exec(refused.detail) : null;
+      return mergeLedgerAdoption(state(), (await read()).work, refused && named ? { key: named[1], head: named[2].toLowerCase(), at: refused.at } : null);
     }
     throw new Error('this loop holds no port that re-issues a refused credential; the master session runs the install\'s bootstrap path for it');
   };
+}
+
+/**
+ * The stalled calls' hold, composed over the loop's own effects (GY-1854 AC-1): while a step's
+ * stall stands inside its five-minute window, its owning call is attempted at most once per
+ * window. The dispatcher's launch is refused before anything is claimed, exactly as a dispatch
+ * another dispatcher holds is — `DispatchReservedError` with the item as the held resource, which
+ * the dispatch step answers by passing the item over and recording no failure — and the merge
+ * writer reads a merger that is not `control-plane`, which starts no new merge while the window
+ * stands (a settled flight is still recorded, replays and owed reworks still run). Every other
+ * effect passes through untouched, and past the window each call is due again.
+ */
+export function stallHeldEffects<T extends DaemonEffects>(effects: T, state: () => DaemonState, now: () => number): T {
+  const dispatch = effects.dispatch, mergeWriter = effects.mergeWriter;
+  return {
+    ...effects,
+    ...(dispatch ? { dispatch: async (work, profile, agents, snapshot) => {
+      const hold = stallHold(state(), 'dispatch', now());
+      if (hold) throw new DispatchReservedError('work', work.key, hold.reason);
+      return dispatch(work, profile, agents, snapshot);
+    } } : {}),
+    ...(mergeWriter ? { mergeWriter: { ...mergeWriter, merger: async () => stallHold(state(), 'merge', now()) ? 'github' as const : await mergeWriter.merger() } } : {}),
+  } as T;
 }
 
 /**
@@ -326,7 +372,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
       if (property === 'diagnostician') { const diagnostician = target.diagnostician; return diagnostician && scratchDirectory ? { ...diagnostician, cwd: scratchDirectory } : undefined; }
       return Reflect.get(target, property, receiver);
     } });
-    const effects = boundedPersist(namedEffects(scoped));
+    const effects = boundedPersist(namedEffects(stallHeldEffects(scoped, () => state, now)));
     acquireDaemonLock(state, options.identity, now(), interval());
     // GY-437: the release is this process's, never the cursor's: a loop re-executed onto a moved
     // checkout must not report the release the process before it loaded.
@@ -419,11 +465,15 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           // GY-1854: the stall step. Every action the cycle recorded failed — the dispatcher's
           // failures among them — signs its call; three consecutive cycles with one signature are
           // one stall; a bound remedy is applied once and verified; and a cycle that failed
-          // nowhere ends the runs it did not fail in.
-          for (const note of noteCycleStalls(state, result.actions, result.metrics.cycle, now()))
+          // nowhere ends the runs it did not fail in. Whatever the bookkeeping moved is persisted
+          // at once, so a `master run --once` and a restart both read it.
+          const stalls = noteCycleStalls(state, result.actions, result.metrics.cycle, now());
+          for (const note of stalls.notes)
             if (note.stalled) log(`[graphyard-master] cycle ${result.metrics.cycle} recorded one ${note.bound ? `stall bound to the ${note.bound.kind} remedy` : 'stall no remedy binds to'}: ${note.run.signature}`);
-          for (const { signature, record } of await remedyStalledSteps(state, stallRunner, now()))
+          const applied = await remedyStalledSteps(state, stallRunner, now());
+          for (const { signature, record } of applied)
             log(`[graphyard-master] the ${record.kind} stall remedy ${record.outcome}${record.verified ? ', verified' : ', unverified'}: ${record.detail} (${signature.slice(0, 160)})`);
+          if (stalls.notes.length || stalls.cleared || applied.length) await effects.persist(state);
           for (const action of result.actions) log(`[graphyard-master] cycle ${result.metrics.cycle} ${action.kind} ${action.state}: ${action.detail}`);
           // Both halves of every cycle: what it could act on, and what it did about it — and where its
           // time went: its three slowest steps and its slowest external call (GY-377).
@@ -441,15 +491,28 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           const failure = await noteCycleFailure(state, error, phase, { now: now(), intervalMs: interval(), ceilingMs: cycleFailureCeiling(watchdog.windowMs), persist: effects.persist });
           failed.push({ cycle: failure.cycle, call: failure.call, reason: failure.reason, delayMs: failure.delayMs });
           log(`[graphyard-master] cycle ${failure.cycle} failed in ${describeFailingCall(failure)}: ${failure.reason}; ${state.failures.consecutive} consecutive failure(s), the next cycle runs in ${Math.round(failure.delayMs / 1000)}s at ${failure.nextAt}`);
-          // GY-1854: the failed cycle signs its failing call like any loop step, and a bound remedy
-          // is applied once for the stall it records. The stalled call backs off to once per five
-          // minutes through the tracker's attempt window; the loop's own retry schedule converges
-          // to the same bound (cycleFailureCeilingMs).
+          // GY-1854: the failed cycle signs its failing call like any loop step, and the runs of
+          // every call this failed cycle did not fail in end with it, so alternating causes never
+          // accumulate toward the bound. A bound remedy is applied once for the stall it records.
+          // The stalled call backs off to once per five minutes through the tracker's attempt
+          // window; the loop's own retry schedule converges to the same bound
+          // (cycleFailureCeilingMs).
           const stall = noteStepFailure(state, failure.call ?? 'cycle', failure.reason, now(), failure.cycle);
+          const cleared = noteStepsSucceeded(state, failure.cycle, now());
           if (stall.stalled) log(`[graphyard-master] cycle ${failure.cycle} recorded one ${stall.bound ? `stall bound to the ${stall.bound.kind} remedy` : 'stall no remedy binds to'}: ${stall.run.signature}`);
-          for (const { record } of await remedyStalledSteps(state, stallRunner, now()))
+          const stallApplied = await remedyStalledSteps(state, stallRunner, now());
+          for (const { record } of stallApplied)
             log(`[graphyard-master] the ${record.kind} stall remedy ${record.outcome}${record.verified ? ', verified' : ', unverified'}: ${record.detail}`);
+          if (stall.counted || cleared || stallApplied.length) await effects.persist(state);
           wait = failure.delayMs;
+          // GY-1854: the stalled call's five-minute window holds the failed cycle's next run of it
+          // too: the later of the failed-cycle backoff and the window ends the wait, so neither
+          // schedule shortens the other.
+          const held = stallHold(state, failure.call ?? 'cycle', now());
+          if (held && held.until - now() > wait) {
+            wait = held.until - now();
+            log(`[graphyard-master] the stalled ${held.step} call holds the next cycle to ${new Date(held.until).toISOString()}: ${held.reason}`);
+          }
         }
         // GY-437: between cycles — never mid-cycle — align this checkout with the verified deployed
         // release. An alignment that re-executes the loop through its supervisor ends this process

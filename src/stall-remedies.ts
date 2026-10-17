@@ -229,9 +229,13 @@ export const stepStallRemedyRegistry: readonly { kind: StepStallRemedyKind; bind
   },
   {
     // recordMergeEvent (src/server/merge-record.ts) refuses a reused idempotency key with different
-    // input this way, and the record that met the refusal is one the executor wrote (GY-1524).
+    // input this way, and the record that met the refusal is one the merge writer wrote (GY-1524);
+    // the writer's own settle and replay records name the same refusal as "a record key reused".
+    // The same refusal is every module's (delegation, agent-registry, proof grants, delivery), so
+    // the bind names the merge step: only a stall signed `merge: …` runs the merge-writer remedy;
+    // the same refusal on any other step stays unbound and wakes the master.
     kind: 'merge-record-idempotency',
-    bind: signature => /Idempotency key reused with different input/i.test(signature)
+    bind: signature => /^merge: .*key reused with different input/i.test(signature)
       ? { kind: 'merge-record-idempotency', remedy: 'adopt the server\'s merge ledger for the refused record (read the item\'s folded ledger back and take its event count into the attempt key) and start a new attempt' }
       : null,
   },

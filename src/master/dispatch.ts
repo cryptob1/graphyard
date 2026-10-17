@@ -35,7 +35,6 @@ import { readProjectMemory } from '../project-memory.js';
 import { readVerificationMaps, verificationMapDigest, type VerificationMap } from '../verification-maps.js';
 import { appliedReworkBrief, readReworkDecisions, reworkBriefSection, type AppliedRework, type ReworkDecisionRow } from './rework-brief.js';
 import { workerBeforePushSection, workerFastGatesPresent } from './worker-fast-gates.js';
-import { stallSignature } from '../daemon/step-stalls.js';
 
 /** The launcher's own runner: the CLI as a child, and git. `stdio` is honoured for the streams a child may inherit; the rest is captured. */
 type WorkerCommand = (command: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv; stdio?: ('ignore' | 'pipe' | 'inherit')[] }) => string | Buffer | Promise<string | Buffer>;
@@ -178,14 +177,6 @@ export function assertClaimDeadline(key: string, claimBy: number | undefined, no
     throw new Error(`${key}: the hand launch did not reach its lease claim before the item's backed-off dispatch action is offered to the executor again, so it claims nothing; the loop's dispatcher launches the item`);
 }
 export const describeOverlap = (overlap: ReturnType<typeof concurrentOverlap>) => overlap.map(ahead => `${ahead.key} (${ahead.state}, ${ahead.stage}) on ${ahead.paths.join(', ')}`).join('; ');
-
-/** GY-1854: the stall signature a dispatcher call's failure signs — the same normalisation a loop
- * step's failure signs (`stallSignature`), under the `dispatch` step — so a dispatch call that
- * fails the same way on three consecutive cycles is one stall exactly like a loop step's, whose
- * bound remedies (unknown profile, 401 credential, merge-record idempotency reuse) read the same
- * normalised text either way. The loop's stall step signs the failed dispatch actions it reads on
- * the cursor with this signature. */
-export const dispatchStallSignature = (error: unknown): string => stallSignature('dispatch', error);
 export function assertDispatchable(work: Work, allWork: Work[], observedAt: string) {
   const now = Date.parse(observedAt);
   if (!Number.isFinite(now)) throw new Error('Dispatch requires a valid Graphyard snapshot clock');
