@@ -321,7 +321,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     // loaded. Either refusal is an escalation naming the dirty paths and which live leases' planned
     // files they match: those matches are the checkout's writes attributed to the attempts most
     // likely to have made them.
-    const stallUpstream = options.stallUpstream ?? stallUpstreamFiler(config, () => options.repository ?? coordinatorCheckoutRoot(config.cliPath));
+    const stallUpstream = options.stallUpstream ?? stallUpstreamFiler(() => config, () => options.repository ?? coordinatorCheckoutRoot(config.cliPath));
     const checkoutOf = async () => options.checkout?.() ?? await readCoordinatorCheckout(coordinatorCheckoutRoot(config.cliPath));
     const guard = coordinatorCheckoutGuard({ state: () => state, read: checkoutOf, agents: raw.agents, snapshot: raw.snapshot, persist: effects.persist, now, log, recover: effects.recoverHead, runsSnapshot: () => snapshot,
       diverged: (checkout, loaded) => divergedHead(checkout.root, { base: `refs/remotes/origin/${config.baseBranch}`, loaded }).then(head => head === checkout.commit) });

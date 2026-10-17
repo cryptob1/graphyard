@@ -44,6 +44,8 @@ import { clearReviewerProfileRefusal, readReviewerProfileRefusal, recordReviewer
 // twenty-five filings waiting through an upstream outage, their stalls clearing meanwhile, are each
 // kept and filed once it recovers; and the same through an upstream whose every answer takes 29 s
 // and whose asks time out for three hours: one unanswered ask per cycle, each pass within its budget.
+// Two more days file through the production filer after a master.json reload that names an upstream
+// or provisions the operator-agent before the stall falls due: the filing follows the reloaded file.
 
 const minute = 60_000, hour = 60 * minute, interval = 2 * minute, dayMs = Number(process.env.SOAK_DAY_MS ?? 8 * hour);
 const start = Date.parse('2026-10-15T00:00:00.000Z');
@@ -144,12 +146,15 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
   /** Each upstream answer, refusal or item, arrives this long after its ask, on the simulated clock. */
   upstreamAnswerMs?: number;
   /** The cursor the day starts on holds this many distinct stalls past their upstream bound, the i-th (from 1) held by a window ending i × windowMs into the day, so each clears once its window ends. */
-  seededStalls?: { count: number; windowMs: number } }): Promise<Day> {
+  seededStalls?: { count: number; windowMs: number };
+  /** The day files through the loop's own production filer, not an injected one, and its master.json reload answers with this configuration from the second reload on (GY-1855). */
+  reloadTo?: { config: MasterConfig; repository: string; initial?: MasterConfig } }): Promise<Day> {
   const files = options.credentials ?? (options.reviewerProfile ? await (async () => {
     const directory = await temporaryDirectory('gy-1854-soak-reviewer-');
     return { coordinator: join(directory, 'coordinator.token'), worker: join(directory, 'worker-a.token') };
   })() : undefined);
-  const dayConfig = () => config(files);
+  const dayConfig = () => options.reloadTo?.initial ?? config(files);
+  let reloads = 0;
   const result: Day = { cycles: 0, launches: [], landed: [], reclaims: [], mergerReads: [], credentialReads: [], records: [], prompts: [], remedies: [], remedyHistory: [], waits: [], cursorStalls: 'null', cursorMergeWriter: 'null', logs: [], reviewRefusals: [], reviewsLanded: [], profileWrites: [], filings: [], closes: [], state: emptyDaemonState(dayConfig()) };
   for (let index = 1; index <= (options.seededStalls?.count ?? 0); index++) {
     const signature = `seeded: the soak's seeded failure number ${'x'.repeat(index)}`, at = new Date(start).toISOString();
@@ -234,8 +239,13 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
       apply: async () => { result.profileWrites.push(now - start); if (options.reviewerProfile?.writes) reviewers.push(options.reviewerProfile.name); return { applied: true, profiles: [{ name: 'worker-a' }], skipped: [], next: 'wrote the worker and reviewer profiles from the logged-in environments' }; },
       configured: async () => ({ reviewers: reviewers.map(name => ({ name })) as MasterConfig['reviewers'] }),
     }),
+    ...(options.reloadTo ? { repository: options.reloadTo.repository, reload: async () => {
+      reloads += 1;
+      const next = reloads > 1 ? options.reloadTo!.config : dayConfig();
+      return { config: next, changed: reloads === 2 ? ['upstream', 'operatorAgent'] : [], refused: null, at: new Date(now).toISOString() };
+    } } : {}),
     // The upstream filer (GY-1855): one item per idempotency key, as the plane answers a re-ask with the item already filed.
-    stallUpstream: async (input: StallUpstreamItemInput, key: string) => {
+    stallUpstream: options.reloadTo ? undefined : async (input: StallUpstreamItemInput, key: string) => {
       result.filings.push({ at: now - start, cycle: result.state.cycle, key, input });
       now += options.upstreamAnswerMs ?? 0;
       if (options.upstreamFailure && !(options.upstreamRecoversAt !== undefined && now - start >= options.upstreamRecoversAt)) throw new Error(options.upstreamFailure);
@@ -683,6 +693,45 @@ test('unit:soak-step-stalls-upstream-once — a day whose reclaim stall stands p
   const listed = stallStatusAttention(result.state, 'graphyard').find(item => item.subject === stallSubjectKey(standing.signature));
   assert.match(listed?.text ?? '', /Its upstream item is GY-UP-\d+/);
   assert.deepEqual(result.state.stallUpstream.pending, {}, 'nothing waits to be filed');
+});
+
+/**
+ * A reclaim-stall day filed through the production filer (GY-1855): fetch answers every POST /api/work
+ * with one item per idempotency key, recording where each ask went and under which credential.
+ */
+async function reloadedFilingDay(reloadTo: (files: { operator: string; upstream: string }) => { initial: MasterConfig; config: MasterConfig }) {
+  const home = await temporaryDirectory('gy-1855-soak-reload');
+  const files = { operator: join(home, 'operator.token'), upstream: join(home, 'upstream.token') };
+  await writeFile(files.operator, `${'o'.repeat(40)}\n`, { mode: 0o600 });
+  await writeFile(files.upstream, `${'u'.repeat(40)}\n`, { mode: 0o600 });
+  const asks: { url: string; token: string; key: string }[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init?: { headers?: Record<string, string> }) => {
+    if (!String(url).endsWith('/api/work')) throw new Error(`the day files only through /api/work, not ${url}`);
+    asks.push({ url: String(url), token: (init?.headers?.Authorization ?? '').replace('Bearer ', ''), key: init?.headers?.['Idempotency-Key'] ?? '' });
+    return new Response(JSON.stringify({ key: `GY-UP-${new Set(asks.map(ask => ask.key)).size}` }), { status: 201 });
+  }) as typeof fetch;
+  try { return { result: await runDay({ reclaimFailure: 'EACCES', reloadTo: { ...reloadTo(files), repository: process.cwd() } }), asks }; }
+  finally { globalThis.fetch = original; }
+}
+
+test('unit:soak-step-stalls-upstream-reload — a self-filing day whose master.json names an upstream install before its reclaim stall falls due: the production filer reads the reloaded configuration, so the one item goes to the upstream under its credential and never to this install', { timeout: 600_000 }, async () => {
+  const { result, asks } = await reloadedFilingDay(files => {
+    const initial = masterConfigSchema.parse({ ...config(), operatorAgent: { id: 'operator-agent', credentialFile: files.operator } });
+    return { initial, config: masterConfigSchema.parse({ ...initial, upstream: { url: 'https://upstream.example', credentialFile: files.upstream } }) };
+  });
+  assert.ok(stallOf(result)?.stalledAt, 'the reclaim stall stood');
+  assert.ok(asks.length >= 1, 'the stall was filed');
+  assert.deepEqual([...new Set(asks.map(ask => `${ask.url} ${ask.token}`))], [`https://upstream.example/api/work ${'u'.repeat(40)}`], 'every ask went to the reloaded upstream under its credential');
+  assert.equal(Object.keys(result.state.stallUpstream.filed).length, 1, 'one item filed');
+});
+
+test('unit:soak-step-stalls-upstream-operator-provisioned — a self-filing day started without an operator-agent identity that a reload then provisions before the reclaim stall falls due: the production filer files the one item into this install as the newly provisioned identity, never refusing for the missing one', { timeout: 600_000 }, async () => {
+  const { result, asks } = await reloadedFilingDay(files => ({ initial: config(), config: masterConfigSchema.parse({ ...config(), operatorAgent: { id: 'operator-agent', credentialFile: files.operator } }) }));
+  assert.ok(stallOf(result)?.stalledAt, 'the reclaim stall stood');
+  assert.deepEqual([...new Set(asks.map(ask => `${ask.url} ${ask.token}`))], [`https://graphyard.example/api/work ${'o'.repeat(40)}`], 'the ask went to this install as the provisioned operator-agent');
+  assert.equal(Object.keys(result.state.stallUpstream.filed).length, 1, 'one item filed');
+  assert.ok(!Object.values(result.state.actions).some(action => /operator-agent identity is provisioned/.test(action.detail)), 'no ask refused for the identity the reload provisioned');
 });
 
 test('unit:soak-step-stalls-upstream-backoff — a day whose upstream filer refuses every ask: the filing is asked again on the loop\u2019s widening backoff, never once per cycle, with the same key and body, every invariant holding', { timeout: 600_000 }, async () => {
