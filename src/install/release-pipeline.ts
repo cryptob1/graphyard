@@ -220,6 +220,9 @@ jobs:
     # leave (GY-1860) is read here, in the uat environment that holds it, and handed to promotion; a released
     # hold is sealed as it is read, so no import binds to the candidate before the production job promotes.
     environment: uat
+    # GY-1882: the seal check records its answer on the candidate (rc-seal-check/ID.AT), which master status reads.
+    permissions:
+      contents: write
     outputs:
       hold: \${{ steps.read.outputs.hold }}
     steps:
@@ -227,6 +230,12 @@ jobs:
         with: { ref: ${base}, fetch-depth: 0 }
       - uses: actions/setup-node@v4
         with: { node-version: '24' }
+      - name: Check GRAPHYARD_RELEASE_TOKEN may seal the candidate's imports, before any seal
+        run: ${cli} release seal-check "\${CANDIDATE:-latest}" --base ${base}
+        env:
+          CANDIDATE: \${{ inputs.candidate }}
+          GRAPHYARD_URL: \${{ vars.GRAPHYARD_URL }}
+          GRAPHYARD_TOKEN: \${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
       - name: Read, and seal once released, the hold the candidate's imported external runs leave
         id: read
         shell: bash

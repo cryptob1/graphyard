@@ -3,11 +3,11 @@
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Wakes dismiss autocompact suggestions (`esc`/"Not now"), re-read; unconfirmed/unanswerable dialogs hold (`wake:master:held`).
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Wakes dismiss autocompact suggestions (`esc`/"Not now"), re-read; unconfirmed/unanswerable dialogs hold (`wake:master:held`). `daemon.stepStalls`: 3-cycle signatures: one verified remedy (unknown-profile/401/merge-key-reuse), else master wake; 5min retries.
 
 ### Dispatch order
 
-Within a priority: an item with a submitted attempt (a returned rework) precedes items without one, ahead of starvation/cold/scope; `master status`'s schedule follows.
+Within a priority: a submitted attempt (returned rework) precedes unsubmitted items, ahead of starvation/cold/scope; `master status`'s schedule follows.
 
 ### Perpetual master loop
 
@@ -23,11 +23,11 @@ Leases expire 120s after last heartbeat (recorded renewal fault, plane stall: 30
 
 ## Submitted implementation needs rework
 
-Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits. `scripts/rework-causes.mjs` classifies last 100 deliveries' rounds (55% own-change/33% conflicts; raw median 2); `speed.reworkRounds.ownChange` excludes out-of-item causes.
+Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits. `scripts/rework-causes.mjs` classifies 100 deliveries' rounds (55% own-change/33% conflicts; raw median 2); `speed.reworkRounds.ownChange` excludes out-of-item causes.
 
 ## Base-sync conflicts
 
-`graphyard sync GY-N` resolves a conflicted `tests/helpers/timing-baseline.json`: base tip's file plus the branch's test-file lines, staged, listed under `regenerated`.
+`graphyard sync GY-N` resolves a conflicted `tests/helpers/timing-baseline.json`: base tip's file plus branch test-file lines, staged under `regenerated`.
 
 ## Retro synthesis
 
