@@ -6,7 +6,7 @@ All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#th
 `POST /api/work` ([example](../../examples/work.json)): `title`, `criteria`; optionally `dependencies`, `exclusiveResources`, `plannedFiles`, `split` ([decomposition](#splitting-an-item) opt-out/in), `producerProofs` (producer-runnable `manual:` proofs); `parent`/`children` only split sets. Others: `POST /api/work/KEY/COMMAND`:
 
 - `requirements`: document, `expectedPolicyRevision`, `reason`; `admin` (operator agents additively); omitted `split` kept; stale revisions refused before lease/quarantine checks. `rule: "successor"` (operator agents, additive) marks loop's re-plan onto split or renamed files; interventions skip it.
-- `decomposition` (coordinator): `{event:"started"|"decided"|"failed",…}`; `started` carries `maxPlannedFiles`; `decided` (`payload.children`) [splits](#splitting-an-item).
+- `decomposition` (coordinator): `{event:"started"|"decided"|"failed",…}`; `decided` (`payload.children`) [splits](#splitting-an-item).
 - `ready`, `unblock`: `{"reason":…}` (operator agents: `expectedRevision`; `master unblock` retries stale ≤3). Two-party `release`/`unblock`/pinned `close` decisions survive bookkeeping; others settle `stale`. `ready`/`release`/dispatch refuse loop-owned items. Head-bound `rework` (`input.binding` `SHA:GROUNDS`) refused while another candidate stands, approval settling `stale`.
 - `resolve`: `{"trigger":…,"expectedRevision":…,"reason":…}`; human `admin`, or `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` explaining `lease-loss`.
 - `rework`, `recover` (delivered quarantine): `admin`, `{"reason":…,"previousWorkerStopped":true}`.
@@ -21,7 +21,7 @@ No endpoint sets lifecycle state.
 
 ## Splitting an item
 
-Before first dispatch, items over `run.decomposition` bounds (4 criteria, 2 root directories, 5 planned source files, ~600 lines) get a read-only Pi session (`run.research`; `concurrency` 4, `timeoutMinutes` 10) proposing 2–10 children; `"split": false`, keep-whole answers, refused splits and failed runs dispatch unchanged; `"split": true` forces it. Each criterion goes to one child, `plannedFiles` inside the parent's, within the bound, no source directory; `after` orders children; they inherit release, dependencies, `exclusiveResources`, policy and docs criterion. Unclaimed parents refuse requirements revisions; children only add criteria; last delivery delivers the parent.
+Never-dispatched items over `run.decomposition` bounds (4 criteria, 2 root directories, 5 source files (`maxPlannedFiles`; tests/docs exempt), ~600 lines) get a read-only Pi session (`run.research`; `concurrency` 4, `timeoutMinutes` 10) proposing 2–10 children; `"split": false`, keep-whole answers, refused splits, failed runs dispatch unchanged; `"split": true` forces it. Each criterion goes to one child, `plannedFiles` inside the parent's, within the bound; `after` orders children; they inherit release, dependencies, `exclusiveResources`, policy and docs criterion. Unclaimed parents refuse requirements revisions; children only add criteria; last delivery delivers the parent. `master status` `itemSize`: 7-day median first-claim-to-merge minutes/attempts per band (1-2/3-5/6-10/>10 source files; `directoryScoped` apart).
 
 ## Other commands and routes
 
