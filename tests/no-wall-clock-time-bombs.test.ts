@@ -858,7 +858,6 @@ export const allowances: Record<string, Allowance> = {
   'tests/harness-apply-checkout.test.ts': { why: 'the 2026-10-10T18:00Z observedAt is the clock handed to each cycle (now: () => clock, later = clock + 1h)', dates: ['2026-10-10'], readings: 2 },
   'tests/headless-restart.test.ts': { why: 'the 2030-01-01 records are sessionRetry fixtures judged on the now handed beside them', dates: ['2030-01-01'], readings: 6 },
   'tests/helpers/review-fleet.ts': { why: 'the 2026-10-01T10:00Z at stamps createdAt, stageEnteredAt and evidence of fixture items', dates: ['2026-10-01'], readings: 4 },
-  'tests/helpers/slow-tick-repeat-receipt.ts': { why: 'The retained receipt\'s stamps are the executed runs\' own records, ordered among themselves and never against a clock; Date.now() and new Date() stamp each run and the receipt as the execution runs', dates: ['2026-10-17'], readings: 3 },
   'tests/helpers/soak-plane.ts': { why: 'start is the simulated day\'s clock, installed by soakControlPlanes\' before hook; failoverInstalled\'s Date.now() runs inside a soak test, after that hook', dates: ['2031-06-02'], readings: 1 },
   'tests/human-decisions-ui.test.ts': { why: 'the 2026-09-26 and 2026-10-02 instants are clocks handed to HumanSignIn', dates: ['2026-09-26', '2026-10-02'], readings: 3 },
   'tests/install-harness.ts': { why: 'the 2024-01-01 deprecation announcement is Hetzner server-type fixture data the pricing reads for presence only', dates: ['2024-01-01'], readings: 3 },

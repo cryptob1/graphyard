@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
-  executeSlowTickReceiptRuns, pinnedProofFile, pinnedSourceSha, pinnedSourceTree,
-  requiredPasses, retainedSlowTickReceipt, slowTickProof, verifySlowTickReceipt,
+  executeSlowTickReceiptRuns, pinnedProofFile, pinnedSourceSha, pinnedSourceTree, requiredPasses,
+  retainedFailedSlowTickAttempts, retainedReceiptDirectory, retainedSlowTickReceipt, runLogName,
+  slowTickProof, verifyRetainedArtifact, verifySlowTickReceipt,
   type SlowTickReceipt, type SlowTickReceiptRun,
 } from './helpers/slow-tick-repeat-receipt.js';
 
@@ -28,7 +29,7 @@ const aReceipt = (overrides: Partial<SlowTickReceipt> = {}, runs: SlowTickReceip
   recordedAt: at(requiredPasses),
   environment: { node: 'v24.5.0', platform: 'linux', arch: 'x64', cpus: 24, ci: false },
   runs, passed: runs.length, consecutivePasses: runs.length,
-  artifact: '/some/retained/run-logs', ...overrides,
+  artifact: 'tests/fixtures/some-retained-run-logs', ...overrides,
 });
 const faultsOf = (receipt: SlowTickReceipt) => verifySlowTickReceipt(receipt).faults;
 const includesFault = (faults: string[], expected: string) => faults.some(fault => fault.includes(expected));
@@ -84,7 +85,28 @@ test('unit:slow-tick-receipt-retained — the retained receipt verifies against 
   for (const run of retainedSlowTickReceipt.runs) {
     assert.equal(run.exitCode, 0, `run ${run.run} exited 0`);
     assert.ok(run.executed >= 1 && run.failed === 0 && run.skipped === 0, `run ${run.run} executed the proof cleanly`);
-    assert.ok(retainedSlowTickReceipt.artifact.trim(), 'the receipt names where its run logs are retained');
+  }
+});
+
+test('unit:slow-tick-receipt-durable-artifact — the receipt\'s artifact is a committed repository path whose run logs match their digests; a host path or a log that does not match is refused, and the failed attempt is retained beside it', () => {
+  assert.equal(retainedSlowTickReceipt.artifact, retainedReceiptDirectory);
+  const durable = verifyRetainedArtifact(retainedSlowTickReceipt, { tracked: true });
+  assert.deepEqual(durable.faults, [], `every run log is committed and matches its digest: ${durable.faults.join(' | ')}`);
+  const hostPath = faultsOf(aReceipt({ artifact: '/home/someone/.graphyard/worktrees/GY-1907-2/.graphyard/receipts/slow-tick' }));
+  assert.ok(includesFault(hostPath, 'absolute host path'), `a workstation path is refused: ${hostPath.join(' | ')}`);
+  const escaping = faultsOf(aReceipt({ artifact: '../elsewhere/run-logs' }));
+  assert.ok(includesFault(escaping, 'leaves the repository'), `a path outside the repository is refused: ${escaping.join(' | ')}`);
+  const tampered = verifyRetainedArtifact({ ...retainedSlowTickReceipt, runs: retainedSlowTickReceipt.runs.with(4, { ...retainedSlowTickReceipt.runs[4], logDigest: 'a'.repeat(64) }) });
+  assert.ok(includesFault(tampered.faults, 'run 5\'s retained log digests to') && includesFault(tampered.faults, 'is not this receipt'), `a digest the retained log does not match is refused: ${tampered.faults.join(' | ')}`);
+  const unretained = verifyRetainedArtifact(aReceipt());
+  assert.ok(includesFault(unretained.faults, `run 1's log is not retained at tests/fixtures/some-retained-run-logs/${runLogName(1)}`), `a reference that resolves to nothing is refused: ${unretained.faults.join(' | ')}`);
+  // A failure breaks the sequence and is retained: the first execution's receipt and logs are committed and refused as a twenty-pass claim.
+  assert.ok(retainedFailedSlowTickAttempts.length >= 1);
+  for (const attempt of retainedFailedSlowTickAttempts) {
+    const kept = verifyRetainedArtifact(attempt, { tracked: true });
+    assert.deepEqual(kept.faults, [], `the failed attempt at ${attempt.artifact} is retained intact: ${kept.faults.join(' | ')}`);
+    assert.equal(attempt.pinnedSource, pinnedSourceSha);
+    assert.ok(includesFault(faultsOf(attempt), 'a failure breaks the sequence'), 'the failed attempt is refused as a twenty-pass receipt');
   }
 });
 
@@ -97,9 +119,11 @@ test('integration:slow-tick-exact-head-twenty-consecutive — an independent exe
     assert.equal(execution.receipt.runs.length, requiredPasses);
     assert.equal(execution.receipt.consecutivePasses, requiredPasses);
     // The retention is real: the first and last runs' TAP output is readable at the artifact reference.
-    const first = await readFile(join(execution.receipt.artifact, 'run-01.log'), 'utf8');
+    const first = await readFile(join(process.cwd(), execution.receipt.artifact, runLogName(1)), 'utf8');
     assert.ok(first.includes(`ok 1 - ${slowTickProof}`), 'the first run\'s retained log holds the passing case');
+    const logs = verifyRetainedArtifact(execution.receipt, { root: process.cwd() });
+    assert.deepEqual(logs.faults, [], `every executed run's log matches its digest: ${logs.faults.join(' | ')}`);
     const retained = verifySlowTickReceipt(retainedSlowTickReceipt);
     assert.deepEqual(retained.faults, [], `the retained receipt still verifies: ${retained.faults.join(' | ')}`);
-  } finally { await execution.release(); }
+  } finally { await execution.release({ logs: true }); }
 });

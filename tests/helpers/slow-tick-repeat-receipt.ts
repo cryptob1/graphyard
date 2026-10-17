@@ -1,8 +1,10 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { cpus } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, normalize, relative } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
 import { mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { temporaryDirectory } from './temp-dirs.js';
 import { abnormalTestExit, isolatedTestEnvironment, reserveTestPorts, testPortEnvironment } from '../../src/cli/test-isolation.js';
@@ -16,7 +18,8 @@ import { countProofCases } from '../../src/cli/verify.js';
 // 6d2aabbb31952557c2772935b2f18ba52fb38322 (GY-1886's reviewed head, whose tree is pinned beside
 // it); integration:slow-tick-exact-head-twenty-consecutive independently re-executes the same
 // twenty passes and refuses a receipt that binds another head, holds fewer runs, loses its order
-// or records a failure. The retained receipt's stamps are the executed runs' own records, ordered among themselves and never against a clock; Date.now() and new Date() stamp each run and the receipt as the execution runs.
+// or records a failure. The retained receipt, its run logs and the failed first attempt are
+// committed under tests/fixtures/gy-1907-slow-tick-receipt, so every checkout can resolve them.
 
 /** The proof the receipt is about, and the source it must have run against. */
 export const slowTickProof = 'unit:slow-tick-names-cause';
@@ -57,8 +60,19 @@ export interface SlowTickReceipt {
   passed: number;
   /** The leading runs that passed before the first failure: a failure breaks the sequence here. */
   consecutivePasses: number;
-  /** Where the runs' full TAP output and this receipt are retained. */
+  /** Where the runs' full TAP output and this receipt are retained: a directory relative to the repository root. */
   artifact: string;
+}
+
+/** A run's retained TAP output, named by its position in the sequence. */
+export const runLogName = (run: number) => `run-${String(run).padStart(2, '0')}.tap`;
+
+/** A reference only this host can resolve is no durable reference: it must be repository-relative and stay inside the repository. */
+function artifactReferenceFault(artifact: unknown): string | null {
+  if (typeof artifact !== 'string' || !artifact.trim()) return 'the receipt names no durable artifact reference for its run logs';
+  if (isAbsolute(artifact) || /^[A-Za-z]:[\\/]/.test(artifact)) return `the receipt's artifact ${JSON.stringify(artifact)} is an absolute host path, not a durable repository-relative reference`;
+  if (normalize(artifact).split(/[\\/]/)[0] === '..') return `the receipt's artifact ${JSON.stringify(artifact)} leaves the repository`;
+  return null;
 }
 
 /**
@@ -97,7 +111,8 @@ export function verifySlowTickReceipt(receipt: SlowTickReceipt, options: { sha?:
   if (!Array.isArray(receipt.command) || receipt.command.length < 2 || !receipt.command.includes(pinnedProofFile)) fault(`the receipt's command ${JSON.stringify(receipt.command)} does not run ${pinnedProofFile}`);
   for (const field of ['node', 'platform', 'arch'] as const) if (typeof receipt.environment?.[field] !== 'string' || !receipt.environment[field]) fault(`the receipt's runner environment names no ${field}`);
   if (!(receipt.environment?.cpus > 0)) fault(`the receipt's runner environment names no processors: ${JSON.stringify(receipt.environment?.cpus)}`);
-  if (typeof receipt.artifact !== 'string' || !receipt.artifact.trim()) fault('the receipt names no durable artifact reference for its run logs');
+  const reference = artifactReferenceFault(receipt.artifact);
+  if (reference) fault(reference);
   const runs = receipt.runs;
   if (!Array.isArray(runs) || runs.length !== passes) fault(`the receipt holds ${runs?.length ?? 0} run(s), not the required ${passes} in sequence`);
   else {
@@ -143,7 +158,7 @@ async function nearestNodeModules(from: string): Promise<string> {
  * that names no artifact directory of its own retains its runs beside the retained receipt's, under
  * its own `runs-<pid>`, so a later execution never overwrites an earlier receipt's logs.
  */
-export async function executeSlowTickReceiptRuns(options: { runs?: number; root?: string; artifactDirectory?: string; onRun?: (run: SlowTickReceiptRun) => void } = {}): Promise<{ receipt: SlowTickReceipt; release: () => Promise<void> }> {
+export async function executeSlowTickReceiptRuns(options: { runs?: number; root?: string; artifactDirectory?: string; onRun?: (run: SlowTickReceiptRun) => void } = {}): Promise<{ receipt: SlowTickReceipt; release: (drop?: { logs?: boolean }) => Promise<void> }> {
   const runs = options.runs ?? requiredPasses;
   const root = options.root ?? process.cwd();
   // The scratch lives beside the artifact, under the worktree's own .graphyard state, not the host's
@@ -156,7 +171,9 @@ export async function executeSlowTickReceiptRuns(options: { runs?: number; root?
   await mkdir(scratchParent, { recursive: true });
   const scratch = await temporaryDirectory('execution', scratchParent);
   const childTmp = await temporaryDirectory('child-tmp', scratchParent);
-  const release = () => rm(scratchParent, { recursive: true, force: true });
+  // An execution that is not retained (the integration proof) also drops its run logs; the
+  // command-line execution keeps them for committing beside the retained receipt.
+  const release = (drop: { logs?: boolean } = {}) => rm(drop.logs && !options.artifactDirectory ? stateRoot : scratchParent, { recursive: true, force: true });
   try {
     if (git(root, ['cat-file', '-e', `${pinnedSourceSha}^{commit}`]).status !== 0) {
       const fetched = git(root, ['fetch', '--no-tags', '--depth=1', 'origin', pinnedSourceSha], 120_000);
@@ -183,7 +200,7 @@ export async function executeSlowTickReceiptRuns(options: { runs?: number; root?
           { cwd: tree, encoding: 'utf8', env: isolatedTestEnvironment({ ...process.env, TMPDIR: childTmp }, testPortEnvironment(reservation.base)), maxBuffer: 64 * 1024 * 1024, timeout: 300_000 });
         const endedMs = Date.now();
         const tap = String(run.stdout ?? '');
-        await writeFile(join(artifactDirectory, `run-${String(index).padStart(2, '0')}.log`), tap);
+        await writeFile(join(artifactDirectory, runLogName(index)), tap);
         const counted = countProofCases(tap, slowTickProof);
         const abnormal = run.error ? `the test process could not run: ${run.error.message}` : abnormalTestExit(tap, run.status, run.signal);
         const record: SlowTickReceiptRun = {
@@ -200,284 +217,59 @@ export async function executeSlowTickReceiptRuns(options: { runs?: number; root?
         options.onRun?.(record);
       }
     } finally { reservation.release(); }
-    const receipt = buildSlowTickReceipt({ runs: records, artifact: artifactDirectory, at: new Date(records.at(-1)!.endedAt) });
+    const receipt = buildSlowTickReceipt({ runs: records, artifact: relative(root, artifactDirectory), at: new Date(records.at(-1)!.endedAt) });
     await writeFile(join(artifactDirectory, 'receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`);
     return { receipt, release };
   } catch (error) { await release(); throw error; }
 }
 
+/** Where the retained receipts live, relative to the repository root: committed, so every checkout and CI runner resolves them. */
+export const retainedReceiptDirectory = 'tests/fixtures/gy-1907-slow-tick-receipt';
+const readRetained = (directory: string): SlowTickReceipt =>
+  JSON.parse(readFileSync(fileURLToPath(new URL(`../../${directory}/receipt.json`, import.meta.url)), 'utf8'));
+
 /**
  * The retained receipt: executed by this module against the pinned source, its runs' full TAP
- * output retained at the artifact reference, verified before it was kept. GY-1886's record stays
- * immutable; this receipt is the execution its AC-1 asked for, kept beside the code that judges it.
+ * output committed beside it at its artifact reference, verified before it was kept. GY-1886's
+ * record stays immutable; this receipt is the execution its AC-1 asked for.
  */
-export const retainedSlowTickReceipt: SlowTickReceipt = {
-    "schema": 1,
-    "proof": "unit:slow-tick-names-cause",
-    "pinnedSource": "6d2aabbb31952557c2772935b2f18ba52fb38322",
-    "pinnedTree": "18677ba6b73eb275c9dc6118697536b0c1945144",
-    "command": [
-      "node",
-      "--import",
-      "tsx",
-      "--test",
-      "--test-reporter=tap",
-      "tests/reconcile-tick-cause.test.ts"
-    ],
-    "recordedAt": "2026-10-17T11:59:31.860Z",
-    "environment": {
-      "node": "v24.5.0",
-      "platform": "linux",
-      "arch": "x64",
-      "cpus": 24,
-      "ci": false
-    },
-    "runs": [
-      {
-        "run": 1,
-        "startedAt": "2026-10-17T11:57:36.914Z",
-        "endedAt": "2026-10-17T11:57:43.227Z",
-        "exitCode": 0,
-        "durationMs": 6313,
-        "executed": 1,
-        "failed": 0,
-        "skipped": 0,
-        "passed": true,
-        "logDigest": "6d7a9f8d086cad9e89c5faec95e6503b5076df415d6f14ba69a3bbf038adf125"
-      },
-      {
-        "run": 2,
-        "startedAt": "2026-10-17T11:57:43.230Z",
-        "endedAt": "2026-10-17T11:57:48.340Z",
-        "exitCode": 0,
-        "durationMs": 5110,
-        "executed": 1,
-        "failed": 0,
-        "skipped": 0,
-        "passed": true,
-        "logDigest": "8f9e34e90da1a6cc42121b639f8d4e99efe522c1be4e8081d51113590ec6aded"
-      },
-      {
-        "run": 3,
-        "startedAt": "2026-10-17T11:57:48.341Z",
-        "endedAt": "2026-10-17T11:57:54.311Z",
-        "exitCode": 0,
-        "durationMs": 5970,
-        "executed": 1,
-        "failed": 0,
-        "skipped": 0,
-        "passed": true,
-        "logDigest": "1a4506c2de1440cf89fcc98ab5b51fbf6a3da88651558097321c2d1496a41a54"
-      },
-      {
-        "run": 4,
-        "startedAt": "2026-10-17T11:57:54.312Z",
-        "endedAt": "2026-10-17T11:57:59.131Z",
-        "exitCode": 0,
-        "durationMs": 4819,
-        "executed": 1,
-        "failed": 0,
-        "skipped": 0,
-        "passed": true,
-        "logDigest": "ab6da5b162caeb0bddc4b601ae1a63d8486bd8cb24a93392b7ce9f459a920d20"
-      },
-      {
-        "run": 5,
-        "startedAt": "2026-10-17T11:57:59.132Z",
-        "endedAt": "2026-10-17T11:58:05.047Z",
-        "exitCode": 0,
-        "durationMs": 5915,
-        "executed": 1,
-        "failed": 0,
-        "skipped": 0,
-        "passed": true,
-        "logDigest": "bc4c1ebe24fa5f260fa3af0cc77eed8b4b7e04277e600670975aea4d4ebd16e2"
-      },
-      {
-        "run": 6,
-        "startedAt": "2026-10-17T11:58:05.048Z",
-        "endedAt": "2026-10-17T11:58:10.494Z",
-        "exitCode": 0,
-        "durationMs": 5446,
-        "executed": 1,
-        "failed": 0,
-        "skipped": 0,
-        "passed": true,
-        "logDigest": "5825f5295eda019a8c2db7f671e3969ed4f424c856ae62677920be176dba4873"
-      },
-      {
-        "run": 7,
-        "startedAt": "2026-10-17T11:58:10.495Z",
-        "endedAt": "2026-10-17T11:58:16.434Z",
-        "exitCode": 0,
-        "durationMs": 5939,
-        "executed": 1,
-        "failed": 0,
-        "skipped": 0,
-        "passed": true,
-        "logDigest": "dfece16522427183a143293ecba4b0af0fb7810334c24f08142f0ec4595c9974"
-      },
-      {
-        "run": 8,
-        "startedAt": "2026-10-17T11:58:16.434Z",
-        "endedAt": "2026-10-17T11:58:22.170Z",
-        "exitCode": 0,
-        "durationMs": 5736,
-        "executed": 1,
-        "failed": 0,
-        "skipped": 0,
-        "passed": true,
-        "logDigest": "803d212e69b856a5c6bdfdbd5e6f86fd3e7d5812983b9238be9685491dabf637"
-      },
-      {
-        "run": 9,
-        "startedAt": "2026-10-17T11:58:22.172Z",
-        "endedAt": "2026-10-17T11:58:27.923Z",
-        "exitCode": 0,
-        "durationMs": 5751,
-        "executed": 1,
-        "failed": 0,
-        "skipped": 0,
-        "passed": true,
-        "logDigest": "4dbf07008c9b10b5011321c8ea8260f39cbf1220953e3e65b8de071fb14aa85e"
-      },
-      {
-        "run": 10,
-        "startedAt": "2026-10-17T11:58:27.924Z",
-        "endedAt": "2026-10-17T11:58:33.591Z",
-        "exitCode": 0,
-        "durationMs": 5667,
-        "executed": 1,
-        "failed": 0,
-        "skipped": 0,
-        "passed": true,
-        "logDigest": "37f30b3493de39f8232f7d3f16b8005c857f53dde38a658bd9e82bd2f3a82f40"
-      },
-      {
-        "run": 11,
-        "startedAt": "2026-10-17T11:58:33.593Z",
-        "endedAt": "2026-10-17T11:58:39.162Z",
-        "exitCode": 0,
-        "durationMs": 5569,
-        "executed": 1,
-        "failed": 0,
-        "skipped": 0,
-        "passed": true,
-        "logDigest": "8c80ea7933a29963780ebd62d62d7877521c55a3a0dffa6ea87cd325ced6e3cb"
-      },
-      {
-        "run": 12,
-        "startedAt": "2026-10-17T11:58:39.162Z",
-        "endedAt": "2026-10-17T11:58:47.535Z",
-        "exitCode": 0,
-        "durationMs": 8373,
-        "executed": 1,
-        "failed": 0,
-        "skipped": 0,
-        "passed": true,
-        "logDigest": "d030d5e2483f4f72228c1a60736daf3874f02e94f5272760c59e4244b8c0f295"
-      },
-      {
-        "run": 13,
-        "startedAt": "2026-10-17T11:58:47.535Z",
-        "endedAt": "2026-10-17T11:58:53.457Z",
-        "exitCode": 0,
-        "durationMs": 5922,
-        "executed": 1,
-        "failed": 0,
-        "skipped": 0,
-        "passed": true,
-        "logDigest": "25fc1c51983569842ea0faf042a9ff6f696b81d01a65464d7210daf28e0231f2"
-      },
-      {
-        "run": 14,
-        "startedAt": "2026-10-17T11:58:53.458Z",
-        "endedAt": "2026-10-17T11:58:59.194Z",
-        "exitCode": 0,
-        "durationMs": 5736,
-        "executed": 1,
-        "failed": 0,
-        "skipped": 0,
-        "passed": true,
-        "logDigest": "08ded707846971d7441992ab668520683c5612825a4ef4992e7c274cb9fff5ea"
-      },
-      {
-        "run": 15,
-        "startedAt": "2026-10-17T11:58:59.195Z",
-        "endedAt": "2026-10-17T11:59:04.738Z",
-        "exitCode": 0,
-        "durationMs": 5543,
-        "executed": 1,
-        "failed": 0,
-        "skipped": 0,
-        "passed": true,
-        "logDigest": "4f1bc3b3206270acbd21eae6f92c3b63b8f74f63ecb00f5cb561d693b798fb57"
-      },
-      {
-        "run": 16,
-        "startedAt": "2026-10-17T11:59:04.738Z",
-        "endedAt": "2026-10-17T11:59:10.234Z",
-        "exitCode": 0,
-        "durationMs": 5496,
-        "executed": 1,
-        "failed": 0,
-        "skipped": 0,
-        "passed": true,
-        "logDigest": "1addd05485826723fae6a3a0999858055119d6c906b61c7a9cb2ed6858d91307"
-      },
-      {
-        "run": 17,
-        "startedAt": "2026-10-17T11:59:10.234Z",
-        "endedAt": "2026-10-17T11:59:15.744Z",
-        "exitCode": 0,
-        "durationMs": 5510,
-        "executed": 1,
-        "failed": 0,
-        "skipped": 0,
-        "passed": true,
-        "logDigest": "14ce04d437f6581a6fcfad6703138107178d9a2fd15e65229a256158db5da30e"
-      },
-      {
-        "run": 18,
-        "startedAt": "2026-10-17T11:59:15.745Z",
-        "endedAt": "2026-10-17T11:59:21.246Z",
-        "exitCode": 0,
-        "durationMs": 5501,
-        "executed": 1,
-        "failed": 0,
-        "skipped": 0,
-        "passed": true,
-        "logDigest": "9af346320e90cdf2fe7bb07243f4d17c10fdcf177a022112525f7c21be2b1113"
-      },
-      {
-        "run": 19,
-        "startedAt": "2026-10-17T11:59:21.246Z",
-        "endedAt": "2026-10-17T11:59:26.592Z",
-        "exitCode": 0,
-        "durationMs": 5346,
-        "executed": 1,
-        "failed": 0,
-        "skipped": 0,
-        "passed": true,
-        "logDigest": "8b56b5495878720225f295fb93fd77a7f8aeab38b874d31753888bf6b277f3c3"
-      },
-      {
-        "run": 20,
-        "startedAt": "2026-10-17T11:59:26.596Z",
-        "endedAt": "2026-10-17T11:59:31.860Z",
-        "exitCode": 0,
-        "durationMs": 5264,
-        "executed": 1,
-        "failed": 0,
-        "skipped": 0,
-        "passed": true,
-        "logDigest": "6e57a9efb29463da8af36727b0ba94acb2fdc7a698e54d3eae3e23a44d846f36"
-      }
-    ],
-    "passed": 20,
-    "consecutivePasses": 20,
-    "artifact": "/home/vish/code/graphyard/.graphyard/worktrees/GY-1907-2/.graphyard/receipts/slow-tick-repeat-6d2aabbb3195"
-  };
+export const retainedSlowTickReceipt: SlowTickReceipt = readRetained(retainedReceiptDirectory);
+
+/**
+ * The executions that broke the sequence, retained because a failure must be: the first execution
+ * died of a host reclaim pass deleting its tmpdir scratch (run 1 failed, runs 2-20 never ran),
+ * which is why executions now keep their scratch under the worktree's .graphyard state.
+ */
+export const retainedFailedSlowTickAttempts: SlowTickReceipt[] = [readRetained(`${retainedReceiptDirectory}/failed-attempt-1`)];
+
+/**
+ * Resolve a receipt's artifact reference against the repository root and check that it retains
+ * what the receipt claims: each run's TAP output, whose sha256 must match its logDigest, and the
+ * receipt itself. `tracked` also requires every file to be committed, so the reference outlives
+ * the checkout that executed it.
+ */
+export function verifyRetainedArtifact(receipt: SlowTickReceipt, options: { root?: string; tracked?: boolean } = {}): { ok: boolean; faults: string[] } {
+  const root = options.root ?? fileURLToPath(new URL('../..', import.meta.url));
+  const faults: string[] = [];
+  const reference = artifactReferenceFault(receipt.artifact);
+  if (reference) return { ok: false, faults: [reference] };
+  const directory = join(root, receipt.artifact);
+  const files = [...receipt.runs.map(run => runLogName(run.run)), 'receipt.json'];
+  for (const run of receipt.runs) {
+    let log: Buffer;
+    try { log = readFileSync(join(directory, runLogName(run.run))); } catch { faults.push(`run ${run.run}'s log is not retained at ${receipt.artifact}/${runLogName(run.run)}`); continue; }
+    const digest = createHash('sha256').update(log).digest('hex');
+    if (digest !== run.logDigest) faults.push(`run ${run.run}'s retained log digests to ${digest}, not the receipt's ${run.logDigest}`);
+  }
+  try {
+    if (!isDeepStrictEqual(JSON.parse(readFileSync(join(directory, 'receipt.json'), 'utf8')), receipt)) faults.push(`the receipt retained at ${receipt.artifact}/receipt.json is not this receipt`);
+  } catch { faults.push(`no receipt is retained at ${receipt.artifact}/receipt.json`); }
+  if (options.tracked) {
+    const listed = new Set(git(root, ['ls-files', '--', receipt.artifact]).stdout.split('\n').filter(Boolean));
+    for (const file of files) if (!listed.has(`${receipt.artifact}/${file}`)) faults.push(`${receipt.artifact}/${file} is not committed: the reference does not outlive this checkout`);
+  }
+  return { ok: faults.length === 0, faults };
+}
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   // The default test runner that temp-dirs' hook starts prints its own summary on stdout, so this
@@ -485,7 +277,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const execution = await executeSlowTickReceiptRuns({ onRun: run => console.error(`run ${run.run}: exit ${run.exitCode}, ${run.executed} executed, ${run.failed} failed, ${run.durationMs} ms${run.passed ? '' : ' FAILED'}`) });
   try {
     const verdict = verifySlowTickReceipt(execution.receipt);
-    console.error(`receipt: ${join(execution.receipt.artifact, 'receipt.json')}`);
+    console.error(`receipt: ${join(execution.receipt.artifact, 'receipt.json')} (copy the directory under ${retainedReceiptDirectory} to retain it)`);
     if (!verdict.ok) { console.error(`the executed receipt does not verify:\n${verdict.faults.map(fault => `  - ${fault}`).join('\n')}`); process.exitCode = 1; }
     else console.error(`the executed receipt verifies: ${execution.receipt.passed} consecutive passed runs of ${pinnedSourceSha}`);
   } finally { await execution.release(); }
