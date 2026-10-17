@@ -5,10 +5,10 @@ Releases ([rollback](recovery.md#rollback)): `admin` sets policy; `builder`s bui
 
 ## Release candidates
 
-Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`, `release/production` (moved only by `graphyard release`) to candidates' SHAs.
+Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`, `release/production` (moved by `graphyard release`) to candidates' SHAs.
 
-- `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N new first-parent merges (`GRAPHYARD_RC_MAX_PRS`, 10; rest queue); `.github/workflows/release-candidate.yml` cuts on loop dispatch (cron fallback).
-- `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*` credentials); refused while an unjudged candidate <4h old serves.
+- `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N new first-parent merges (`GRAPHYARD_RC_MAX_PRS`, 10; rest queue); `.github/workflows/release-candidate.yml` cuts on loop dispatch.
+- `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*` credentials); refused while an unjudged <4h candidate serves.
 - `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser`, suites ([below](#pre-merge-gate-and-release-candidate-validation); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`; [pending](validation.md#release-verdicts) cases block only if `e2e.pendingOutcomes: blocking`.
 - `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`; `release verify --url URL` confirms.
 - Failed candidates file a [hold](validation.md#release-holds) per outcome, else a `release follow-up ID` as the [filing credential](#release-filing-credential).
@@ -54,13 +54,13 @@ Every 30 s the guard reruns, then reverts merges failing checks parents passed; 
 {"registration":{"id":"production-builder","revision":1},"sourceSha":"0123456789abcdef0123456789abcdef01234567","buildInputsDigest":"sha256:5b8e0d3a7f21c94e6082d5b1a3f7c0e94d26b8a15f309c7e4b1d02a6f8395c7e","artifacts":[{"service":"api","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},{"service":"web","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"}],"provenanceUrl":"https://ci.example.test/builds/812"}
 ```
 
-`POST /api/delivery/release` (reverted members `included:false`):
+`POST /api/delivery/release`:
 
 ```json
 {"id":"2026.09.18-1","expectedRevision":0,"environment":{"id":"production","revision":1},"sourceSha":"0123456789abcdef0123456789abcdef01234567","buildId":"5d7c6b7e-8c35-4b3f-9c4a-0a1f2e3d4c5b","manifest":[{"service":"api","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},{"service":"web","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"}],"members":[{"workId":"2f7d1a5e-3b8c-4d9e-8f10-1a2b3c4d5e6f","mergeSha":"89abcdef0123456789abcdef0123456789abcdef","included":true},{"workId":"3a8e2b6f-4c9d-4eaf-9021-2b3c4d5e6f70","mergeSha":"9abcdef0123456789abcdef0123456789abcdef0","included":false,"note":"Reverted"}]}
 ```
 
-`POST /api/delivery/approve`, select (per generation):
+`POST /api/delivery/approve`, select:
 
 ```json
 {"environment":{"id":"production","revision":1},"release":{"id":"2026.09.18-1","revision":1},"expectedGeneration":3,"approvalId":"0c1d2e3f-4a5b-4c6d-8e7f-90a1b2c3d4e5"}
@@ -74,9 +74,15 @@ Every 30 s the guard reruns, then reverts merges failing checks parents passed; 
 {"registration":{"id":"production-observer","revision":1},"epoch":4,"environment":{"id":"production","revision":1},"expectedGeneration":4,"snapshotId":"railway:snapshot:01J8Q4Z0Y3","observedAt":"2026-09-18T20:15:07Z","validFrom":"2026-09-18T20:12:31Z","validTo":"2026-09-18T20:15:07Z","services":[{"service":"api","complete":true,"deployment":{"id":"dep-a1","status":"success","deployedAt":"2026-09-18T20:12:31Z"},"instances":[{"instance":"api-1","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","measurement":"host-attestation","healthy":true}]},{"service":"web","complete":true,"deployment":{"id":"dep-w7","status":"success","deployedAt":"2026-09-18T20:12:40Z"},"instances":[{"instance":"web-1","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","measurement":"host-attestation","healthy":true}]}]}
 ```
 
+`POST /api/delivery/observe-sha` (producer; idempotent; all production services; paged) deploys merges:
+
+```json
+{"environment":{"id":"production","revision":1},"sha":"0123456789abcdef0123456789abcdef01234567","services":["api","web"],"observedAt":"2026-09-18T20:15:07Z"}
+```
+
 Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery sweep` per `freshnessSeconds`; `graphyard delivery` shows state.
 
-`master status` `delivery`: `readyToMerged`, `mergedToProduction`, `stages` p50/p90; 7-day p90 over `deliverySpeed` (2h; 45min to production) alerts.
+`master status` `delivery`: `readyToMerged`, `mergedToProduction`, `stages` p50/p90; 7-day p90 over `deliverySpeed` (2h; 45min deployed) alerts.
 
 `POST /api/validation/result` binds manifest, signature, measurements; mismatches void passes as `attribution-undermined` (`GET /api/analytics/attribution`).
 
