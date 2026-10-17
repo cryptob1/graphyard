@@ -1,5 +1,5 @@
 import { refuseCiProducer } from '../../model/ci-proofs.js';
-import { importRun, readImports, sealImports } from '../../validation-import.js';
+import { importRun, readImports, sealAuthority, sealImports } from '../../validation-import.js';
 import { Next, Sent, defineRoutes, parseJson } from '../routes.js';
 
 /** The validation runner protocol: artifacts, definitions, candidates, attempts and commands. */
@@ -22,6 +22,8 @@ export const validationRoutes = defineRoutes('validation', [
   },
   // GY-1860: a producer imports an external run bound to the release candidate at the run's exact head; anyone authenticated reads a head's imports and hold.
   { method: 'POST', path: '/api/validation/import', handle: async context => importRun({ store: context.services.engine.store, github: context.services.github }, context.actor, await parseJson(context, 11_200_000)) },
+  // GY-1882: whether the caller may seal, read-only, so a promotion workflow checks its credential before it relies on a seal.
+  { method: 'GET', path: '/api/validation/import/seal-authority', handle: async ({ actor }) => sealAuthority(actor) },
   { method: 'GET', path: /^\/api\/validation\/import\/([a-f0-9]{40})$/, handle: ({ services, url }, [sha]) => readImports({ store: services.engine.store }, sha, url.searchParams.get('candidate')) },
   // A promotion workflow reads a candidate's hold and, released, seals it so no import lands before its production job promotes.
   { method: 'POST', path: /^\/api\/validation\/import\/([a-f0-9]{40})\/seal$/, handle: async (context, [sha]) => sealImports({ store: context.services.engine.store }, context.actor, sha, await parseJson(context, 10_000)) },
