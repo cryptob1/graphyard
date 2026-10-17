@@ -99,16 +99,22 @@ function trailingDialog(lines: string[]): { lines: string[]; question: string[] 
   return { lines: [...question, ...lines.slice(first, last + 1)], question };
 }
 
+/** A line the runtime draws as the session's own transcript (Claude Code's assistant and tool-result bullets), never part of a dialog below it. */
+const transcriptLine = /^[●⏺⎿]/;
 /**
  * The settings-suggestion dialog the screen ends on (GY-1872): the lines that ask its question —
- * those within `consentQuestionLines` of the footer above it — or null. The footer must be the
- * screen's last line, so a session that merely quotes the dialog above its ordinary prompt ends on
- * the prompt, not on a menu, and is not a dialog waiting for a keystroke.
+ * those within `consentQuestionLines` of the footer above it, below the last transcript line among
+ * them — or null. The footer must be the screen's last line, so a session that merely quotes the
+ * dialog above its ordinary prompt ends on the prompt, not on a menu, and is not a dialog waiting
+ * for a keystroke. The session's own output above the dialog ("Implemented login handling") is
+ * not what the keystroke answers, so it is not read for a credential or a payment.
  */
 function trailingSettingsSuggestion(lines: string[]): string[] | null {
   const last = lines.length - 1;
   if (last < 1 || !settingsSuggestionAnswer.asks.test(lines[last])) return null;
-  return lines.slice(Math.max(0, last - consentQuestionLines), last);
+  const window = lines.slice(Math.max(0, last - consentQuestionLines), last);
+  const transcript = window.findLastIndex(line => transcriptLine.test(line));
+  return window.slice(transcript + 1);
 }
 
 /**
@@ -192,10 +198,14 @@ export function detectNoticeDialog(screen: string | null | undefined): NoticeDia
   if (!screen) return null;
   const tail = screen.split('\n').map(line => line.replace(/\s+/g, ' ').trim()).filter(Boolean).slice(-noticeScreenLines);
   if (tail.length < 2 || !noticeHint.test(tail.slice(-noticeHintLines).join(' '))) return null;
-  // A consent dialog the screen ends on is never a notice, whatever else it offers.
-  if (detectConsentPrompt(tail.join('\n'))) return null;
+  // A consent dialog the screen ends on is never a notice, whatever else it offers — except the
+  // settings-suggestion prompt (GY-1872), which is this notice named by its footer: its one answer
+  // is the no-change key, so it is put away here as the master wake puts it away, by the kind the
+  // catalogue names, or as a settings notice when the catalogue names none.
+  const consent = detectConsentPrompt(tail.join('\n'));
+  if (consent && consent.kind !== 'settings') return null;
   const found = noticeDialogs.find(dialog => dialog.asks.test(tail.join('\n')));
-  if (!found) return null;
+  if (!found) return consent?.keys ? { kind: 'settings', text: consent.text, keys: consent.keys } : null;
   // The notice is the tail from the first line that names it: output the session printed above it
   // ("Implemented login handling") asks nothing and is no reason to leave the overlay up, while a
   // consent question inside the notice's own lines still keeps it for a human.

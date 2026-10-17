@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { masterConfigSchema, type MasterConfig, type MasterRun } from '../src/master.js';
 import type { HerdrAgent } from '../src/master/herdr.js';
 import { emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
-import { detectConsentPrompt } from '../src/consent-prompt.js';
+import { detectConsentPrompt, detectNoticeDialog } from '../src/consent-prompt.js';
+import { deliverPrompt, PromptNotAcceptedError } from '../src/master.js';
 import { masterSessionStep, masterWakeHeldKey } from '../src/daemon/cycle-master.js';
 import { emptyMasterSession } from '../src/daemon/state.js';
 
@@ -18,7 +19,9 @@ import { emptyMasterSession } from '../src/daemon/state.js';
 // their company: unit:settings-suggestion-dialog-dismissed, unit:master-wake-answers-dialog-first,
 // unit:master-wake-holds-unanswerable-dialog, unit:master-wake-holds-dialog-still-showing,
 // unit:master-wake-holds-settings-warning, unit:master-wake-holds-unclassified-menu,
-// unit:master-wake-holds-dialog-after-esc.
+// unit:master-wake-holds-dialog-after-esc, unit:master-wake-hold-outlives-failed-send,
+// unit:settings-dialog-delivered-as-notice (the merge with GY-1863: a prompt delivery puts the
+// same dialog away with its own key instead of refusing it as a consent dialog).
 
 // Fixed clock for every step run; the loop's own stamps derive from it, and this file reads the
 // wall clock never.
@@ -252,4 +255,55 @@ test('unit:master-wake-holds-dialog-after-esc — a settings dialog answered wit
   assert.match(held?.detail ?? '', /Not now \(settings unchanged\)/);
   assert.match(held?.detail ?? '', /then showed/);
   assert.match(held?.detail ?? '', /settings warning/);
+});
+
+test('unit:master-wake-hold-outlives-failed-send — a hold is retired only by the wake that went through: a send that fails after the dialog cleared leaves it standing, and the next delivered wake retires it', async () => {
+  const pane = new MasterPane(credentialDialog);
+  const { state, step } = stepOver(pane);
+  await step(clock);
+  assert.equal(state.actions[masterWakeHeldKey]?.state, 'waiting');
+  // The dialog clears, but the delivery itself fails: the hold is not recorded as a wake that went.
+  pane.screen = cleanScreen;
+  const sending = pane.prompt;
+  pane.prompt = () => { throw new Error('herdr: the pane vanished mid-delivery'); };
+  await assert.rejects(step(clock + minute), /vanished mid-delivery/);
+  assert.equal(state.master.lastWake, null, 'nothing was delivered');
+  assert.equal(state.actions[masterWakeHeldKey]?.state, 'waiting', 'the hold stands until a wake goes through');
+  pane.prompt = sending;
+  await step(clock + 2 * minute);
+  assert.equal(pane.prompts.length, 1);
+  assert.ok(state.master.lastWake);
+  assert.equal(state.actions[masterWakeHeldKey]?.state, 'done', 'the delivered wake retires the hold');
+});
+
+/** A settings-suggestion dialog the notice catalogue names no kind for: the same footer, another preference. */
+const themeDialog = ['Try the new high-contrast theme?', '', '❯ Switch to high contrast', '  Keep the current theme', '', '↑/↓ choose · enter confirm · esc not now'].join('\n');
+const herdrOk = JSON.stringify({ result: {} });
+test('unit:settings-dialog-delivered-as-notice — a prompt delivery onto the autocompact suggestion puts it away with esc and delivers, as GY-1863 does, now that the dialog is also a settings consent prompt; a credential dialog is still refused', async () => {
+  const notice = detectNoticeDialog(compactDialog);
+  assert.equal(notice?.kind, 'autocompact', 'the catalogue still names the dialog the consent classifier now answers');
+  assert.deepEqual(notice?.keys, ['esc']);
+  assert.equal(detectNoticeDialog(themeDialog)?.kind, 'settings', 'a settings-suggestion footer the catalogue does not name is a notice put away with its own key');
+  assert.equal(detectNoticeDialog(credentialDialog), null, 'a credential dialog is never a notice');
+  // The session's own transcript above the dialog is not read for a credential: GY-1863's fixture, a bullet naming a login above the notice.
+  assert.equal(detectConsentPrompt(['● Implemented login handling for the settings page', '  Tests pass.', ...compactDialog.split('\n')].join('\n'))?.kind, 'settings');
+  assert.equal(detectConsentPrompt(['● Done.', ...credentialDialog.split('\n')].join('\n'))?.kind, 'credential', 'the dialog\'s own words still name a credential');
+  const log: string[][] = [];
+  let reads = 0;
+  const run = (_command: string, args: string[]) => {
+    log.push(args);
+    const sub = `${args[0]} ${args[1]}`;
+    if (sub === 'agent read') return reads++ === 0 ? compactDialog : cleanScreen;
+    return herdrOk;
+  };
+  const delivered = await deliverPrompt('w1V:pQ8A', 'the wake text', run, { acceptMs: 1_000, pauseMs: 0 });
+  assert.equal(delivered.accepted, true);
+  assert.deepEqual(delivered.dismissed, ['autocompact']);
+  assert.deepEqual(log.map(args => `${args[0]} ${args[1]}`), ['agent read', 'agent send-keys', 'agent prompt'], 'the pane is read, esc is sent, and only then the text is submitted');
+  assert.deepEqual(log[1]!.slice(2), ['w1V:pQ8A', 'esc']);
+  const refused: string[][] = [];
+  await assert.rejects(deliverPrompt('w1V:pQ8A', 'the wake text', (_command: string, args: string[]) => { refused.push(args); return `${args[0]} ${args[1]}` === 'agent read' ? credentialDialog : herdrOk; }, { acceptMs: 1_000, pauseMs: 0 }),
+    (error: unknown) => error instanceof PromptNotAcceptedError && /credential consent dialog/.test(error.message));
+  assert.ok(!refused.some(args => `${args[0]} ${args[1]}` === 'agent send-keys'), 'no keystroke reaches a credential dialog');
+  assert.ok(!refused.some(args => `${args[0]} ${args[1]}` === 'agent prompt'), 'nothing is submitted into it');
 });

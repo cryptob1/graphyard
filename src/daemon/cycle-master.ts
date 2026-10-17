@@ -198,8 +198,6 @@ async function masterSessionStepWithin(cycle: Cycle) {
         if (detailChanged(state.actions[masterWakeHeldKey], dialog.detail)) performed.push(await record(state, masterWakeHeldKey, { kind: 'wake', work: null, principal: null, state: 'waiting', detail: dialog.detail, attempts: 1, cycle: state.cycle }, now(), effects.persist, null));
         return;
       }
-      const held = state.actions[masterWakeHeldKey];
-      if (held?.state === 'waiting') performed.push(await record(state, masterWakeHeldKey, { kind: 'wake', work: null, principal: null, state: 'done', detail: 'The master wake went through once the dialog holding it was answered or closed', attempts: held.attempts, cycle: state.cycle }, now(), effects.persist, null));
       try {
         await effects.promptSession!(agent, masterWakeText(config.cliPath, keys, heartbeat, Math.round(quietMs / 60_000)));
       } catch (error) {
@@ -235,6 +233,10 @@ async function masterSessionStepWithin(cycle: Cycle) {
       }
       live.lastWake = { at, causes: keys, heartbeat };
       for (const subject of subjects) live.subjects[subject.key] = promptDigest(subject.detail);
+      // A wake a dialog held is retired only now, once this delivery went through: a send that
+      // failed after the dialog cleared leaves the hold standing, never a record of a wake that went.
+      const held = state.actions[masterWakeHeldKey];
+      if (held?.state === 'waiting') performed.push(await record(state, masterWakeHeldKey, { kind: 'wake', work: null, principal: null, state: 'done', detail: 'The master wake went through once the dialog holding it was answered or closed', attempts: held.attempts, cycle: state.cycle }, now(), effects.persist, null));
       // The accepted delivery also ends the bound's standing failure, so the class counts one
       // instance per deaf episode and the record reads the recovery, never a failure for ever.
       if (state.actions[masterWakeKey]?.state === 'failed')
