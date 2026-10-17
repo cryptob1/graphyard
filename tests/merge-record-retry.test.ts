@@ -144,3 +144,17 @@ test('unit:merge-record-reuse-recovers — a merge record the server refuses as 
   assert.ok(flight.sent.every(entry => attemptOf(entry.key) !== attemptOf(refused[0]!)), 'the next attempt runs under a new attempt id');
   assert.equal(live.mergeWriter.unconfirmed, undefined, 'a refused key is never kept for replay');
 });
+
+test('unit:merge-record-persist-recovers — a persist of the attempt id that fails before the attempt\'s first write leaves nothing in flight, so once persistence recovers a later cycle starts the merge afresh and delivers it', async () => {
+  const world = coordinator();
+  let failures = 1;
+  world.effects.persist = async state => { if (state.mergeWriter.inFlight && failures-- > 0) throw new Error('EIO: write failed'); };
+  const state = emptyDaemonState(config);
+  const details = await cyclesUntilDelivered(state, world);
+  assert.ok(failures < 1, 'the pre-launch persist failed once');
+  assert.ok(details.some(detail => /EIO: write failed/.test(detail)), `the failed persist is reported: ${details.join(' | ')}`);
+  assert.equal(world.ledger()?.state, 'reconciled', `a later cycle merges once persistence recovers: ${details.join(' | ')}`);
+  assert.equal(world.pushes(), 1, 'the merge commit is pushed once');
+  await runCycle(config, state, world.effects, () => start);
+  assert.equal(state.mergeWriter.inFlight, null, 'nothing is left in flight');
+});

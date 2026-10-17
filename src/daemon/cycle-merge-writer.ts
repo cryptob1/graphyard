@@ -478,11 +478,11 @@ export async function mergeWriterStep(cycle: Cycle) {
         if (due?.candidate) {
           const head = due.candidate.sha.toLowerCase();
           const entry: Flight = { key: due.key, id: due.id, head, startedAt: at(), settled: null };
-          flights.set(state, entry);
-          // GY-1852: the attempt id is on the persisted state before the attempt's first write.
+          // GY-1852: the attempt id is on the persisted state before the attempt's first write; the flight is published only once it is, so a failed persist leaves nothing in flight and a later cycle starts afresh.
           const attempt = randomUUID();
           writer.inFlight = { key: due.key, id: due.id, head, startedAt: entry.startedAt, attempt }; changed = true;
-          await effects.persist(state);
+          try { await effects.persist(state); } catch (error) { writer.inFlight = null; throw error; }
+          flights.set(state, entry);
           void mergeOne({ ...reads, record: attemptRecorder(writer, reads.record, attempt, at) }, due).then(outcome => { entry.settled = { outcome, work: due }; }, error => { entry.settled = { error }; });
         }
       }
