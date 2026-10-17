@@ -790,8 +790,50 @@ export async function awaitServing(url: string, sha: string, options: { timeoutM
 }
 
 /**
+ * GY-1970: how long the post-suite UAT check re-reads `/healthz` when a read comes back unreadable,
+ * before the deployment is judged. Far under the uat job's own timeout (its ceiling is
+ * `uatValidationCeilingMs`), so a window a workflow change grows past stays loud, and long enough
+ * for a redeploy's transient blip to clear. Candidate 20261017T224540Z failed only its deployment
+ * suite on a single unreadable read — recorded as a move to no observable commit — so one read no
+ * longer judges.
+ */
+export const uatAfterReadWindowMs = 2 * 60_000;
+
+/**
+ * What UAT served after the suites ran, read within a bounded window (GY-1970): a read that comes
+ * back unreadable — a non-2xx answer, a network error, a body without a full SHA, all `readServed`
+ * nulls — is re-read every `intervalMs` until a read names a full commit or the window ends, so one
+ * unreadable moment never records a deployment the suites never saw. `readable` says whether any
+ * read named a commit: false means UAT stayed unreadable to the deadline, which its judge reports
+ * as unreadable, never as a move; a readable answer ends the window at once, whatever it names.
+ */
+export async function readServedAfterSuites(url: string, options: { timeoutMs: number; intervalMs?: number; fetcher?: typeof fetch; now?: () => number; sleep?: (ms: number) => Promise<void> }): Promise<{ served: string | null; readable: boolean }> {
+  const now = options.now ?? Date.now, sleep = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
+  const deadline = now() + options.timeoutMs;
+  for (;;) {
+    const served = await readServed(url, options.fetcher);
+    if (served !== null) return { served, readable: true };
+    if (now() >= deadline) return { served: null, readable: false };
+    await sleep(options.intervalMs ?? 15_000);
+  }
+}
+
+/**
+ * The post-suite deployment result: a readable answer that names another commit is a move, judged
+ * as before; an answer that stayed unreadable to the end of the re-read window (GY-1970) is
+ * reported as unreadable, never as a move — a window of nulls observed no deployment at all.
+ */
+const afterSuitesResult = (candidate: ReleaseCandidate, after: { served: string | null; readable: boolean }): SuiteResult => after.readable
+  ? { name: 'deployment', passed: false, detail: `UAT moved from ${candidate.sha} to ${after.served} while the suites ran` }
+  : { name: 'deployment', passed: false, detail: `UAT was unreadable after the suites ran: /healthz answered no full commit within the ${uatAfterReadWindowMs / 1000}s re-read window, so serving ${candidate.sha} could not be re-confirmed` };
+
+/**
  * Validate a candidate on UAT: wait for UAT to serve its exact SHA, run every suite against it,
  * and confirm UAT still serves that SHA afterwards so no verdict is attributed across a redeploy.
+ * That after-check re-reads `/healthz` within `uatAfterReadWindowMs` (GY-1970) before judging, so
+ * an unreadable moment between the suites' last call and the read — the failure that wasted
+ * candidate 20261017T224540Z — recovers into a pass instead of a spurious deployment failure,
+ * while a readable move still fails exactly as before.
  * A digest deployment's `digests` option — what an observation backed — is stamped on the verdict
  * (GY-1844); `validateAndRecord` stamps the served digests only when the observation suite ran and
  * passed (GY-1868).
@@ -802,8 +844,8 @@ export async function validate(candidate: ReleaseCandidate, url: string, suites:
   if (before !== candidate.sha) return assessUat(candidate, { deployedSha: before, suites: [], now: clock(), digests: options.digests });
   const results: SuiteResult[] = [];
   for (const suite of suites) results.push(await suite.run(url, candidate));
-  const after = await readServed(url, options.fetcher);
-  if (after !== candidate.sha) results.push({ name: 'deployment', passed: false, detail: `UAT moved from ${candidate.sha} to ${after ?? 'no observable commit'} while the suites ran` });
+  const after = await readServedAfterSuites(url, { timeoutMs: uatAfterReadWindowMs, fetcher: options.fetcher, sleep: options.sleep, now: () => clock().getTime() });
+  if (after.served !== candidate.sha) results.push(afterSuitesResult(candidate, after));
   return assessUat(candidate, { deployedSha: candidate.sha, suites: results, now: clock(), digests: options.digests });
 }
 
