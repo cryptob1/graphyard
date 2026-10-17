@@ -114,7 +114,11 @@ test('unit:railway-app-bind-preserves-deployed-source — a real Railway adapter
 
 test('unit:railway-app-bind-plan-matches-redeploy — the supported app-bind plan states Railway binding changes only the five App variables and redeploys the current deployment without a source upload or build stamp; plan performs no mutation, and a refusal before binding causes no variable write, upload or redeploy (GY-1908)', async () => {
   const docs = await readFile(new URL('../docs/install.md', import.meta.url), 'utf8');
-  assert.ok(docs.split('\n').some(line => line.includes('app bind SLUG') && /Railway redeploy\/no-stamp/.test(line) && /else deploy/.test(line)), 'docs/install.md does not state Railway app bind redeploys without upload/stamp');
+  assert.ok(docs.split('\n').some(line =>
+    line.includes('app bind SLUG')
+    && line.includes('GITHUB_APP_ID') && line.includes('GITHUB_INSTALLATION_ID') && line.includes('GITHUB_PRIVATE_KEY') && line.includes('GITHUB_WEBHOOK_SECRET') && line.includes('GITHUB_CI_APP_IDS')
+    && /Railway current-deployment redeploy\/no-source-upload\/no-`GRAPHYARD_BUILD_SHA`/.test(line)
+    && /else deploy/.test(line)), 'docs/install.md does not state Railway app bind changes only the five App variables and redeploys the current deployment without source upload or GRAPHYARD_BUILD_SHA');
   const { fixture, bindPlan, bindApply, importApp } = await observeOnlyInstallation();
   try {
     let mark = fixture.allCommandLines().length;
