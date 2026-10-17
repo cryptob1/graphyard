@@ -12,7 +12,7 @@ import {
 import { commandDigestAdapter, shellRun, uatDigestSuite, verifyProductionDigests } from '../release-digests.js';
 import { acceptancesFrom, foldHolds, foldRecord, holdItemsFor, holdTag, holdTagPrefix, releaseHolds, type HoldRecord } from '../release-holds.js';
 import { pendingFromPlane, readPlane, servingStage } from '../release-pending.js';
-import { handedImports, handedImportsVariable, promotionImports, sealAuthorityUnserved, sealCheckRecord, sealCheckTag, sealRoles, sealedImports, type SealAuthority } from '../validation-import.js';
+import { handedImports, handedImportsVariable, promotionImports, sealAuthorityOutOfScope, sealAuthorityUnserved, sealCheckRecord, sealCheckTag, sealRoles, sealedImports, type SealAuthority } from '../validation-import.js';
 import { checkRepositoryContract, contractFile, loadContract } from '../e2e/case.js';
 
 const switches = new Set(['no-push', 'api']);
@@ -144,6 +144,8 @@ export const releaseCommands = defineCommands([
         // A credential the plane does not accept at all (revoked, expired) may not seal either, and is recorded as such.
         const answer = await (api('validation/import/seal-authority') as Promise<SealAuthority | null>).catch((error: any) => {
           if (error?.status === 401) return { mayseal: false, role: 'unauthenticated', needed: [...sealRoles] } satisfies SealAuthority;
+          // A valid operator-agent token for another repository never reaches the route; record the denial so master status names the uat secret.
+          if (sealAuthorityOutOfScope(error)) return { mayseal: false, role: 'operator-agent (other repository)', needed: [...sealRoles] } satisfies SealAuthority;
           // A plane that predates the route (the release first carrying it is promoted by the plane before it) answers 404, or 403 to an operator agent; nothing is checked or recorded then.
           if (sealAuthorityUnserved(error)) return null;
           throw error;

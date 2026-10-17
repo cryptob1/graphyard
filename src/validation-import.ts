@@ -210,6 +210,13 @@ export const sealAuthority = (actor: Principal): SealAuthority =>
 /** Whether a seal-authority read failed only because the plane predates its route: 404, or the operator-agent guard's 403 for a route it did not yet allow. */
 export const sealAuthorityUnserved = (error: { status?: number; message?: string } | null | undefined) =>
   error?.status === 404 || (error?.status === 403 && /Route is not available to operator agents/.test(error.message ?? ''));
+/**
+ * A valid operator-agent token scoped to another repository: auth refuses 403 before the route runs
+ * (`Repository is outside operator-agent scope`). Seal-check records that as a denial — the uat secret
+ * cannot seal here — without weakening the server's scope rule.
+ */
+export const sealAuthorityOutOfScope = (error: { status?: number; message?: string } | null | undefined) =>
+  error?.status === 403 && /Repository is outside operator-agent scope/.test(error.message ?? '');
 /** Where the workflows hold the credential `release imports` seals with: the uat environment's release-filing secret. */
 export const sealCredential = { secret: 'GRAPHYARD_RELEASE_TOKEN', environment: 'uat' } as const;
 /** The ledger records `release seal-check ID` writes, one per check, on the candidate's exact SHA (`rc-seal-check/ID.AT`). */

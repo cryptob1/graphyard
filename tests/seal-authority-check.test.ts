@@ -29,11 +29,14 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const admin: Principal = { id: 'install-admin', role: 'admin' };
 const releaseFiler: Principal = { id: releaseFilingIdentity.id, role: 'operator-agent', capabilities: [...releaseFilingIdentity.capabilities], scope: { repositories: ['owner/project'], workItems: [] } };
+/** Valid operator-agent for another repository: auth 403s before seal-authority runs (AC-2). */
+const otherRepoFiler: Principal = { id: 'other-repo-release-filer', role: 'operator-agent', capabilities: [...releaseFilingIdentity.capabilities], scope: { repositories: ['other/repo'], workItems: [] } };
 const reader: Principal = { id: 'stale-release-token', role: 'reader' };
 const producer: Principal = { id: 'huck-producer', role: 'producer' };
-const principals = [admin, releaseFiler, reader, producer];
+const principals = [admin, releaseFiler, otherRepoFiler, reader, producer];
 const tokens = new Map(principals.map(p => [p.id, `${p.id}-${'t'.repeat(40)}`]));
 const needed = ['admin', 'operator-agent'];
+const outOfScopeRole = 'operator-agent (other repository)';
 
 let database: InstanceType<typeof EmbeddedPostgres>, store: Store, http: ReturnType<typeof server>, url: string, scratch: string, work: string;
 const cutCandidates: ReleaseCandidate[] = [];
@@ -184,6 +187,21 @@ test('unit:seal-authority-preflight-and-attention — both workflows run release
   }
   assert.equal(gitIn(work)(['tag', '--list', `${sealCheckTagPrefix}*`]), tagsBefore, 'an unserved check records nothing');
   await assert.rejects(sealCheck(async () => { throw Object.assign(new Error('{"error":"Forbidden"}'), { status: 403 }); }, [candidate.id, '--base', 'main']), 'any other refusal still fails the step');
+
+  // A valid operator-agent scoped to another repository: auth 403s before the route; seal-check records the denial and attention names the uat secret.
+  const scoped = await call('validation/import/seal-authority', otherRepoFiler);
+  assert.equal(scoped.status, 403);
+  assert.match(JSON.stringify(scoped.body), /Repository is outside operator-agent scope/, 'the server still enforces repository scope');
+  const outOfScope = await sealCheck(apiAs(otherRepoFiler), [candidate.id, '--base', 'main']);
+  assert.equal(outOfScope.exitCode, 1);
+  assert.deepEqual(outOfScope.printed, { mayseal: false, role: outOfScopeRole, needed });
+  read = await ledger();
+  assert.equal(read.candidates![0].sealCheck?.mayseal, false);
+  assert.equal(read.candidates![0].sealCheck?.role, outOfScopeRole);
+  const scopeLine = sealRefusalLine(read.candidates!)!;
+  assert.match(scopeLine.text, /GRAPHYARD_RELEASE_TOKEN in the uat environment authenticates as operator-agent \(other repository\)/);
+  assert.match(scopeLine.text, /needs admin or operator-agent/);
+  assert.deepEqual(sealRefusalAttention({ candidates: read.candidates }), [scopeLine]);
 
   // master status adds exactly that one line to its attention list.
   const status = await readFile(fileURLToPath(new URL('../src/cli/master-status.ts', import.meta.url)), 'utf8');
