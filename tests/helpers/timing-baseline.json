@@ -940,6 +940,7 @@
     "tests/zero-touch-control-plane.test.ts": 4000,
     "tests/zero-touch-onboarding.test.ts": 5900,
     "tests/evaluator-recovery.test.ts": 4000,
-    "tests/sync-timing-baseline.test.ts": 4000
+    "tests/sync-timing-baseline.test.ts": 4000,
+    "tests/event-loop-lag-pending.test.ts": 729
   }
 }
