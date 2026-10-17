@@ -100,4 +100,4 @@ CI workflows should cancel superseded pull-request runs: group `${{ github.workf
 
 ## 5. Inventory PRs
 
-`graphyard onboard inventory --repo OWNER/REPO [--mapping FILE] [--out FILE]` labels each open or draft PR: `continue`, `hold` (draft), `adopt` (mergeable, required checks clean) or `superseded` (base holds every head commit). Read-only; `--mapping` binds source keys.
+`graphyard onboard inventory --repo OWNER/REPO [--mapping FILE] [--out FILE]` labels open PRs and drafts: `continue`, `hold` (draft), `adopt` (mergeable; protection, ruleset checks clean per App) or `superseded` (base holds the head). Read-only; `--mapping` binds keys.

@@ -2,7 +2,7 @@ import { parseArgs } from 'node:util';
 import { readFile, writeFile } from 'node:fs/promises';
 import { defineCommands } from './registry.js';
 import { commandFailure, localTransport } from '../install/transport.js';
-import { buildImportPlan, type ImportPlan, type ImportSource, type MappingConflict, type PlannedPull } from '../model/import-plan.js';
+import { buildImportPlan, type ImportPlan, type ImportSource, type MappingConflict, type PlannedPull, type RequiredCheck } from '../model/import-plan.js';
 
 /**
  * `graphyard onboard inventory` (GY-1847): the read-only import plan for a repository that is
@@ -88,6 +88,16 @@ export function ghImportSource(gh: GhApi): ImportSource {
     const answer = JSON.parse(text);
     return answer && typeof answer === 'object' ? answer : null;
   };
+  // Every page of a listing, or null when any page cannot be read: a partial listing is unknown, never a short one.
+  const paged = async (path: (page: number) => string, pick: (answer: any) => unknown): Promise<any[] | null> => {
+    const out: any[] = [];
+    for (let page = 1; ; page++) {
+      const batch = pick(await optional(path(page)));
+      if (!Array.isArray(batch)) return null;
+      out.push(...batch);
+      if (batch.length < 100 || page >= 1_000) return out;
+    }
+  };
   return {
     async openPulls(repository) {
       const raw = await listed(gh, page => `repos/${repository}/pulls?state=open&per_page=100&page=${page}`);
@@ -95,12 +105,15 @@ export function ghImportSource(gh: GhApi): ImportSource {
       // answers it on the single-pull read, and may still be computing it there. One read each,
       // before any disposition is proposed; a read that fails, or a value still unset, stays null
       // (unknown), and the model never proposes adoption without a definite no-conflict.
+      // The detail's mergeability counts only while it describes the listed head and base: a push
+      // between the two reads leaves it describing another revision, so it is unknown instead.
       return pooled(raw, async pull => {
         const detail = await optional(`repos/${repository}/pulls/${pull.number}`);
+        const sameRevision = detail?.head?.sha === pull.head?.sha && detail?.base?.ref === pull.base?.ref;
         return {
           number: pull.number, base: pull.base?.ref, headBranch: pull.head?.ref, headSha: pull.head?.sha,
           draft: pull.draft === true, url: pull.html_url,
-          mergeable: typeof detail?.mergeable === 'boolean' ? detail.mergeable : typeof pull.mergeable === 'boolean' ? pull.mergeable : null,
+          mergeable: sameRevision && typeof detail?.mergeable === 'boolean' ? detail.mergeable : null,
         };
       });
     },
@@ -120,26 +133,33 @@ export function ghImportSource(gh: GhApi): ImportSource {
       }
       return pooled(listedWorkflows, toWorkflow.bind(null, repository, decode));
     },
+    // Classic protection (from the branch read, which an unprotected branch answers too) and every
+    // active repository or organization ruleset rule for the branch, combined with the App each
+    // check is bound to. Either read failing leaves the requirements unknown, never partial.
     async requiredChecks(repository, branch) {
-      const answer = await optional(`repos/${repository}/branches/${encodeURIComponent(branch)}/protection/required_status_checks`);
-      if (!answer) return null;
-      const checks = Array.isArray(answer.checks) ? answer.checks.map((check: any) => check?.context).filter((name: unknown): name is string => typeof name === 'string') : [];
-      const contexts = Array.isArray(answer.contexts) ? answer.contexts.filter((name: unknown): name is string => typeof name === 'string') : [];
-      return [...new Set([...checks, ...contexts])].sort();
-    },
-    async headChecks(repository, sha) {
-      const runs: any[] = [];
-      for (let page = 1; ; page++) {
-        const answer = await optional(`repos/${repository}/commits/${sha}/check-runs?per_page=100&page=${page}`);
-        if (!Array.isArray(answer?.check_runs)) return runs.length ? dedupeChecks(runs) : null;
-        runs.push(...answer.check_runs);
-        if (answer.check_runs.length < 100 || page >= 1_000) break;
+      const read = await optional(`repos/${repository}/branches/${encodeURIComponent(branch)}`);
+      if (typeof read?.protected !== 'boolean' || (read.protected && !read.protection)) return null;
+      const rules = await paged(page => `repos/${repository}/rules/branches/${encodeURIComponent(branch)}?per_page=100&page=${page}`, answer => answer);
+      if (rules === null) return null;
+      const found = new Map<string, RequiredCheck>();
+      const add = (name: unknown, appId: number | null) => { if (typeof name === 'string' && name) found.set(`${name}\u0000${appId}`, { name, appId }); };
+      const classic = read.protected ? read.protection.required_status_checks : null;
+      if (classic && classic.enforcement_level !== 'off') {
+        for (const check of Array.isArray(classic.checks) ? classic.checks : []) add(check?.context, appOf(check?.app_id));
+        const bound = new Set((Array.isArray(classic.checks) ? classic.checks : []).map((check: any) => check?.context));
+        for (const name of Array.isArray(classic.contexts) ? classic.contexts : []) if (!bound.has(name)) add(name, null);
       }
-      // A failed combined-status read leaves the head checks unknown rather than silently statusless.
-      const statuses = await optional(`repos/${repository}/commits/${sha}/status`);
-      if (!Array.isArray(statuses?.statuses)) return null;
-      runs.push(...statuses.statuses);
-      return dedupeChecks(runs);
+      for (const rule of rules) if (rule?.type === 'required_status_checks')
+        for (const check of Array.isArray(rule.parameters?.required_status_checks) ? rule.parameters.required_status_checks : []) add(check?.context, appOf(check?.integration_id));
+      return [...found.values()];
+    },
+    // Every page of check runs and of the combined status; any page that cannot be read leaves the head checks unknown.
+    async headChecks(repository, sha) {
+      const runs = await paged(page => `repos/${repository}/commits/${sha}/check-runs?per_page=100&page=${page}`, answer => answer?.check_runs);
+      if (runs === null) return null;
+      const statuses = await paged(page => `repos/${repository}/commits/${sha}/status?per_page=100&page=${page}`, answer => answer?.statuses);
+      if (statuses === null) return null;
+      return dedupeChecks(runs, statuses);
     },
   };
 }
@@ -159,22 +179,32 @@ const toWorkflow = async (repository: string, decode: (path: string) => Promise<
     ? workflowTriggers(await decode(`repos/${repository}/contents/${workflow.path.split('/').map(encodeURIComponent).join('/')}`) ?? '')
     : null,
 });
-/** Check runs decide; a commit status of the same context fills only where no check run reported. The run with the latest reported activity decides a name: a re-run in progress, or a run still queued, is that name's state until it concludes, so a pending required check is read as not yet clean instead of silently absent. */
-const dedupeChecks = (raw: any[]) => {
-  const checks = new Map<string, { at: string; result: string }>();
-  for (const entry of raw) {
-    const name = typeof entry?.name === 'string' ? entry.name : typeof entry?.context === 'string' ? entry.context : null;
-    if (name === null) continue;
-    const result = typeof entry?.conclusion === 'string' ? entry.conclusion
-      : typeof entry?.state === 'string' ? entry.state
-      : typeof entry?.status === 'string' ? entry.status : null;
-    if (result === null) continue;
-    const at = typeof entry?.completed_at === 'string' && entry.completed_at ? entry.completed_at
-      : typeof entry?.started_at === 'string' && entry.started_at ? entry.started_at : '';
-    const prior = checks.get(name);
-    if (!prior || at >= prior.at) checks.set(name, { at, result });
+/** A protection or ruleset App binding: a positive App id, or null for any provider (GitHub's -1 and an absent id). */
+const appOf = (value: unknown) => Number.isSafeInteger(value) && (value as number) > 0 ? value as number : null;
+/**
+ * One result per check run name and App, and one per commit-status context (no App). Among runs of
+ * one name and App, the latest reported activity decides: a re-run in progress, or a run still
+ * queued, is that name's state until it concludes, so a pending required check is read as not yet
+ * clean instead of silently absent. The combined status already holds each context's latest
+ * state, so its first entry per context stands. Runs and statuses of one name are both kept: the
+ * model holds a required check back when any result it accepts is unclean.
+ */
+const dedupeChecks = (runs: any[], statuses: any[]) => {
+  const checks = new Map<string, { name: string; appId: number | null; at: string; result: string }>();
+  for (const run of runs) {
+    const result = typeof run?.conclusion === 'string' ? run.conclusion : typeof run?.status === 'string' ? run.status : null;
+    if (typeof run?.name !== 'string' || result === null) continue;
+    const appId = appOf(run.app?.id), key = `run\u0000${run.name}\u0000${appId}`;
+    const at = typeof run.completed_at === 'string' && run.completed_at ? run.completed_at : typeof run.started_at === 'string' && run.started_at ? run.started_at : '';
+    const prior = checks.get(key);
+    if (!prior || at >= prior.at) checks.set(key, { name: run.name, appId, at, result });
   }
-  return [...checks.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([name, { result }]) => ({ name, result }));
+  for (const status of statuses) {
+    const key = `status\u0000${status?.context}`;
+    if (typeof status?.context === 'string' && typeof status.state === 'string' && !checks.has(key)) checks.set(key, { name: status.context, appId: null, at: '', result: status.state });
+  }
+  return [...checks.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : (a.appId ?? 0) - (b.appId ?? 0) || (a.result < b.result ? -1 : a.result > b.result ? 1 : 0)))
+    .map(({ name, appId, result }) => ({ name, result, appId }));
 };
 
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`;
@@ -206,7 +236,7 @@ export const onboardCommands = defineCommands([
       '                                release/deploy workflow triggers and required checks it detects (each fact detected',
       '                                or unknown); exactly one proposed disposition per pull request — continue (left with',
       '                                its existing controller), hold (a draft: refs preserved, nothing acts on it), adopt (not a',
-      '                                draft, mergeable with its base, no failing required check: eligible for same-PR',
+      '                                draft, mergeable, every classic or ruleset required check known and clean from its bound App: same-PR',
       '                                adoption) or superseded (only when the compare shows the base branch holds every',
       '                                commit of the head, with that evidence). Writes nothing but an explicit --out FILE.',
       '                                --mapping FILE binds external source keys and URLs to repository and pull request',

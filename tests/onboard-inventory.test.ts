@@ -25,7 +25,7 @@ interface World {
   pulls: any[];
   compares: Record<string, any>;
   workflows: any[] | null;
-  protections: Record<string, string[] | null>;
+  protections: Record<string, { name: string; appId: number | null }[] | null>;
   checks: Record<string, any[] | null>;
 }
 
@@ -45,7 +45,7 @@ const world = (): World => ({
     { name: 'ci', path: '.github/workflows/ci.yml', triggers: ['push', 'pull_request'] },
     { name: 'unreadable', path: '.github/workflows/broken.yml', triggers: null },
   ],
-  protections: { main: ['ci', 'typecheck'], release: null },
+  protections: { main: [{ name: 'ci', appId: null }, { name: 'typecheck', appId: null }], release: null },
   checks: {
     [sha(1)]: [{ name: 'ci', result: 'success' }, { name: 'typecheck', result: 'success' }],
     [sha(4)]: [{ name: 'ci', result: 'failure' }, { name: 'typecheck', result: 'success' }],
@@ -162,6 +162,32 @@ test('unit:onboard-inventory-read-only — a required check with no reported res
   assert.equal((await buildImportPlan(REPO, new FakeListing(withChecks(null)), null)).pulls[0].disposition, 'continue', 'unknown head checks are not clean');
 });
 
+test('unit:onboard-inventory-read-only — a mergeable, non-draft pull request whose required checks are unknown continues: unreadable requirements are not an empty set', async () => {
+  const { buildImportPlan } = await planModule();
+  const pull = { number: 9, base: 'release', headBranch: 'feature/nine', headSha: sha(9), draft: false, url: url(9), mergeable: true };
+  const plan = await buildImportPlan(REPO, new FakeListing({ ...world(), pulls: [pull], compares: {}, checks: { [sha(9)]: [{ name: 'ci', result: 'failure' }] } }), null);
+  assert.equal(plan.pulls[0].facts.find(fact => fact.fact === 'required-checks')!.state, 'unknown');
+  assert.equal(plan.pulls[0].disposition, 'continue', 'adoption is never proposed on requirements that could not be established');
+  // An established empty requirement set is different: nothing is required, so the clean merge adopts.
+  const none = await buildImportPlan(REPO, new FakeListing({ ...world(), pulls: [pull], compares: {}, protections: { release: [] }, checks: { [sha(9)]: [] } }), null);
+  assert.equal(none.pulls[0].disposition, 'adopt');
+});
+
+test('unit:onboard-inventory-read-only — a required check bound to an App is answered only by that App, and a same-named success from another provider never masks a failure', async () => {
+  const { buildImportPlan, failingRequired } = await planModule();
+  const pull = { number: 9, base: 'main', headBranch: 'feature/nine', headSha: sha(9), draft: false, url: url(9), mergeable: true };
+  const bound = (checks: any[]) => ({ ...world(), pulls: [pull], compares: {}, protections: { main: [{ name: 'ci', appId: 15368 }] }, checks: { [sha(9)]: checks } });
+  const masked = await buildImportPlan(REPO, new FakeListing(bound([{ name: 'ci', result: 'failure', appId: 15368 }, { name: 'ci', result: 'success', appId: 99 }])), null);
+  assert.equal(masked.pulls[0].disposition, 'continue', 'the required App failed; another App passing the same name does not adopt');
+  assert.match(masked.pulls[0].facts.find(fact => fact.fact === 'required-checks')!.detail, /ci \(app 15368\)/);
+  const absent = await buildImportPlan(REPO, new FakeListing(bound([{ name: 'ci', result: 'success', appId: 99 }])), null);
+  assert.equal(absent.pulls[0].disposition, 'continue', 'no result from the required App is not clean');
+  assert.equal((await buildImportPlan(REPO, new FakeListing(bound([{ name: 'ci', result: 'success', appId: 15368 }])), null)).pulls[0].disposition, 'adopt');
+  // An unbound requirement accepts every provider, and any unclean result of its name holds it back.
+  assert.deepEqual(failingRequired([{ name: 'ci', appId: null }], [{ name: 'ci', result: 'success', appId: 1 }, { name: 'ci', result: 'failure', appId: null }]), ['ci']);
+  assert.equal(failingRequired(null, []), null, 'unknown requirements stay unknown');
+});
+
 test('unit:onboard-inventory-read-only — release and deploy workflows are named with their triggers, and unreadable triggers are unknown', async () => {
   const { buildImportPlan } = await planModule();
   const plan = await buildImportPlan(REPO, new FakeListing(world()), null);
@@ -255,13 +281,14 @@ test('unit:onboard-inventory-read-only — through the gh client the command onl
     if (writeFlags.some(flag => args.includes(flag))) return fail(`a write flag was sent: ${path}`);
     let body: unknown;
     const singlePull = path.match(/^repos\/owner\/repo\/pulls\/(\d+)$/);
-    if (singlePull) body = { number: Number(singlePull[1]), mergeable: mergeability[Number(singlePull[1])] };
+    if (singlePull) { const listed = restPulls.find(pull => pull.number === Number(singlePull[1]))!; body = { ...listed, mergeable: mergeability[listed.number] }; }
     else if (/^repos\/owner\/repo\/pulls\?/.test(path)) body = restPulls;
     else if (/^repos\/owner\/repo\/compare\/main\.\.\./.test(path)) body = [sha(3), sha(6)].some(end => path.endsWith(end)) ? restBehind : restDiverged;
-    else if (/^repos\/owner\/repo\/branches\/main\/protection/.test(path)) body = { contexts: [], checks: [{ context: 'ci', app_id: 1 }, { context: 'typecheck', app_id: 1 }] };
-    else if (/^repos\/owner\/repo\/branches\/[^/]+\/protection/.test(path)) return fail('protection unreadable');
-    else if (/^repos\/owner\/repo\/commits\/[a-f0-9]+\/check-runs\?/.test(path)) body = { check_runs: [{ name: 'ci', conclusion: path.includes(sha(4)) ? 'failure' : 'success', status: 'completed' }, { name: 'typecheck', conclusion: 'success', status: 'completed' }] };
-    else if (/^repos\/owner\/repo\/commits\/[^/]+\/status/.test(path)) body = { statuses: [] };
+    else if (path === 'repos/owner/repo/branches/main') body = { name: 'main', protected: true, protection: { enabled: true, required_status_checks: { enforcement_level: 'everyone', contexts: ['ci'], checks: [{ context: 'ci', app_id: 1 }] } } };
+    else if (/^repos\/owner\/repo\/rules\/branches\/main\?/.test(path)) body = [{ type: 'required_status_checks', ruleset_id: 7, parameters: { required_status_checks: [{ context: 'typecheck', integration_id: 1 }] } }, { type: 'deletion' }];
+    else if (/^repos\/owner\/repo\/branches\/[^/]+$/.test(path)) return fail('branch unreadable');
+    else if (/^repos\/owner\/repo\/commits\/[a-f0-9]+\/check-runs\?/.test(path)) body = { check_runs: [{ name: 'ci', app: { id: 1 }, conclusion: path.includes(sha(4)) ? 'failure' : 'success', status: 'completed' }, { name: 'typecheck', app: { id: 1 }, conclusion: 'success', status: 'completed' }] };
+    else if (/^repos\/owner\/repo\/commits\/[^/]+\/status\?/.test(path)) body = { statuses: [] };
     else if (/^repos\/owner\/repo\/actions\/workflows\?/.test(path)) body = { workflows: [{ name: 'release', path: '.github/workflows/release.yml' }], total_count: 1 };
     else if (/^repos\/owner\/repo\/contents\//.test(path)) body = { encoding: 'base64', content: Buffer.from(releaseYaml).toString('base64') };
     else return fail(`unrouted ${path}`);
@@ -281,11 +308,15 @@ test('unit:onboard-inventory-read-only — through the gh client the command onl
   assert.equal(plan.pulls.find((pull: any) => pull.number === 5)!.facts.find((fact: any) => fact.fact === 'mergeability')!.detail, 'GitHub reports a conflict with the base branch');
   for (const [index, pull] of plan.pulls.entries()) assert.deepEqual([pull.number, pull.base, pull.headBranch, pull.headSha, pull.draft, pull.url],
     [index + 1, index === 4 ? 'release' : 'main', `feature/${['one', 'two', 'three', 'four', 'five', 'six'][index]}`, sha(index + 1), index === 1 || index === 5, url(index + 1)]);
+  assert.deepEqual(plan.requiredChecks, [
+    { branch: 'main', state: 'detected', checks: [{ name: 'ci', appId: 1 }, { name: 'typecheck', appId: 1 }] },
+    { branch: 'release', state: 'unknown', checks: [] },
+  ], 'classic protection and the active ruleset combine, each check with its App');
   assert.equal(plan.workflows.items[0].releaseDeploy, true, 'the release workflow is read from its file and named release/deploy');
   for (const call of calls) {
     assert.deepEqual(call.slice(0, 2), ['gh', 'api'], `every GitHub call is gh api, never anything else: ${call.join(' ')}`);
     assert.ok(!call.some(arg => writeFlags.includes(arg)), `no write flag is sent: ${call.join(' ')}`);
-    assert.match(call[2], /^repos\/owner\/repo\/(pulls\?|pulls\/\d+$|compare\/|branches\/[^/]+\/protection|commits\/[^/]+\/(check-runs\?|status)|actions\/workflows\?|contents\/)/, `only read endpoints are asked: ${call[2]}`);
+    assert.match(call[2], /^repos\/owner\/repo\/(pulls\?|pulls\/\d+$|compare\/|branches\/[^/]+$|rules\/branches\/[^/]+\?|commits\/[^/]+\/(check-runs\?|status\?)|actions\/workflows\?|contents\/)/, `only read endpoints are asked: ${call[2]}`);
   }
   // The written file holds exactly what was printed, and a rerun is byte-identical — through the
   // client and on disk — with nothing else created.
@@ -361,7 +392,36 @@ test('unit:onboard-inventory-read-only — a required check still in progress is
   const source = ghImportSource(async args => (/check-runs/.test(args[0]) ? JSON.stringify(runs) : JSON.stringify({ statuses: [] })));
   // The re-run in progress is ci's latest activity, so it decides, and a queued run is reported
   // rather than dropped: a required check that has not concluded is not a clean one.
-  assert.deepEqual(await source.headChecks(REPO, sha(1)), [{ name: 'ci', result: 'in_progress' }, { name: 'typecheck', result: 'queued' }]);
+  assert.deepEqual(await source.headChecks(REPO, sha(1)), [{ name: 'ci', result: 'in_progress', appId: null }, { name: 'typecheck', result: 'queued', appId: null }]);
   assert.ok(checkFailed('in_progress') && checkFailed('queued'), 'a pending required check holds adoption');
   assert.ok(!checkFailed('success'));
+});
+
+test('unit:onboard-inventory-read-only — the gh adapter combines ruleset checks, pages every status, keeps unreadable reads unknown and binds mergeability to the listed head', async () => {
+  const { ghImportSource } = await onboardModule();
+  const answers = (routes: Record<string, unknown>) => async (args: string[]) => {
+    const path = args[0];
+    return path in routes ? (routes[path] === null ? null : JSON.stringify(routes[path])) : null;
+  };
+  const rules = (page: number) => `repos/${REPO}/rules/branches/main?per_page=100&page=${page}`;
+  const branch = { protected: true, protection: { enabled: true, required_status_checks: { enforcement_level: 'everyone', contexts: ['ci'], checks: [{ context: 'ci', app_id: -1 }] } } };
+  const ruleset = [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'security', integration_id: 42 }] } }];
+  assert.deepEqual(await ghImportSource(answers({ [`repos/${REPO}/branches/main`]: branch, [rules(1)]: ruleset })).requiredChecks(REPO, 'main'),
+    [{ name: 'ci', appId: null }, { name: 'security', appId: 42 }], 'a ruleset-required check joins the classic one, App binding kept');
+  assert.deepEqual(await ghImportSource(answers({ [`repos/${REPO}/branches/main`]: { protected: false }, [rules(1)]: [] })).requiredChecks(REPO, 'main'), [], 'an unprotected branch with no rules requires nothing');
+  assert.equal(await ghImportSource(answers({ [`repos/${REPO}/branches/main`]: branch })).requiredChecks(REPO, 'main'), null, 'an unreadable ruleset read leaves the requirements unknown');
+  assert.equal(await ghImportSource(answers({ [rules(1)]: ruleset })).requiredChecks(REPO, 'main'), null, 'an unreadable branch read leaves the requirements unknown');
+  // The combined status is paged: a context on the second page is read, and a failed page is unknown.
+  const runs = `repos/${REPO}/commits/${sha(1)}/check-runs?per_page=100&page=1`;
+  const status = (page: number) => `repos/${REPO}/commits/${sha(1)}/status?per_page=100&page=${page}`;
+  const first = Array.from({ length: 100 }, (_, index) => ({ context: `c${String(index).padStart(3, '0')}`, state: 'success' }));
+  const paged = await ghImportSource(answers({ [runs]: { check_runs: [] }, [status(1)]: { statuses: first }, [status(2)]: { statuses: [{ context: 'late', state: 'failure' }] } })).headChecks(REPO, sha(1));
+  assert.equal(paged!.length, 101);
+  assert.deepEqual(paged!.find(check => check.name === 'late'), { name: 'late', result: 'failure', appId: null });
+  assert.equal(await ghImportSource(answers({ [runs]: { check_runs: [] }, [status(1)]: { statuses: first } })).headChecks(REPO, sha(1)), null, 'a failed later status page is unknown, not a short list');
+  // Mergeability counts only when the detail describes the listed head.
+  const listing = [{ number: 1, draft: false, html_url: url(1), base: { ref: 'main' }, head: { ref: 'f', sha: sha(1) } }];
+  const pulls = (detailSha: string) => ghImportSource(answers({ [`repos/${REPO}/pulls?state=open&per_page=100&page=1`]: listing, [`repos/${REPO}/pulls/1`]: { ...listing[0], head: { ref: 'f', sha: detailSha }, mergeable: true } }));
+  assert.equal((await (await pulls(sha(1))).openPulls(REPO))[0].mergeable, true);
+  assert.equal((await (await pulls(sha(2))).openPulls(REPO))[0].mergeable, null, 'a push between the reads leaves mergeability unknown');
 });

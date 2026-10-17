@@ -23,8 +23,10 @@ export interface InventoryCompare {
 }
 /** One workflow of the repository, with the triggers its `on:` block names. */
 export interface InventoryWorkflow { name: string; path: string; triggers: string[] | null }
-/** One check result on one head commit: a check-run conclusion or a commit-status state. */
-export interface InventoryCheck { name: string; result: string }
+/** One check result on one head commit: a check-run conclusion (with the App that ran it) or a commit-status state (no App). */
+export interface InventoryCheck { name: string; result: string; appId?: number | null }
+/** One required check of a base branch, from classic protection or an active ruleset: the App that must provide it, or null for any provider. */
+export interface RequiredCheck { name: string; appId: number | null }
 
 /**
  * Every read the inventory makes of GitHub — and the only thing it may ask for. There is no
@@ -35,7 +37,7 @@ export interface ImportSource {
   openPulls(repository: string): Promise<InventoryPull[]>;
   compareBaseHead(repository: string, base: string, head: string): Promise<InventoryCompare | null>;
   workflows(repository: string): Promise<InventoryWorkflow[] | null>;
-  requiredChecks(repository: string, branch: string): Promise<string[] | null>;
+  requiredChecks(repository: string, branch: string): Promise<RequiredCheck[] | null>;
   headChecks(repository: string, sha: string): Promise<InventoryCheck[] | null>;
 }
 /** The five read methods a source may be asked for; a recorded call outside them is a write. */
@@ -65,18 +67,35 @@ const byText = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 
 /** A check result that holds a required check back: anything but a clean conclusion. */
 export const checkFailed = (result: string | undefined) => result !== undefined && !['success', 'neutral', 'skipped'].includes(result);
+const describeRequired = (check: RequiredCheck) => check.appId === null ? check.name : `${check.name} (app ${check.appId})`;
+
+/**
+ * The required checks a head does not satisfy, or null when the requirements themselves are
+ * unknown. A required check bound to an App is answered only by that App's results; an unbound
+ * one by every result of its name. It is satisfied only when it has at least one result and none
+ * of them is unclean, so a same-named success from another provider never masks a failure, and a
+ * check with no result — not yet run, or head checks that could not be read — is not clean.
+ */
+export function failingRequired(required: readonly RequiredCheck[] | null, checks: readonly InventoryCheck[] | null): string[] | null {
+  if (required === null) return null;
+  return required.filter(want => {
+    const answers = (checks ?? []).filter(check => check.name === want.name && (want.appId === null || (check.appId ?? null) === want.appId));
+    return answers.length === 0 || answers.some(check => checkFailed(check.result));
+  }).map(describeRequired);
+}
 
 /**
  * Why one pull request is proposed one disposition, in priority order: a contained patch is
  * superseded; a ready, conflict-free, non-draft request is eligible for same-PR adoption; a draft
  * is held (its refs preserved, nothing acts on it); everything else continues with its existing
- * controller. A failed required check keeps a ready request from adoption, and adoption needs a
- * definite no-conflict: mergeability GitHub reports as a conflict — or has not computed at all —
- * is no evidence of a clean merge, so the request continues instead.
+ * controller. A failed required check keeps a ready request from adoption, and so do required
+ * checks that could not be established (`failing` null): adoption needs an established, satisfied
+ * requirement set. It also needs a definite no-conflict: mergeability GitHub reports as a conflict
+ * — or has not computed at all — is no evidence of a clean merge, so the request continues instead.
  */
-export function proposeDisposition(pull: InventoryPull, contained: ContainmentEvidence | null, failing: readonly string[]): ImportDisposition {
+export function proposeDisposition(pull: InventoryPull, contained: ContainmentEvidence | null, failing: readonly string[] | null): ImportDisposition {
   if (contained) return 'superseded';
-  if (!pull.draft && pull.mergeable === true && failing.length === 0) return 'adopt';
+  if (!pull.draft && pull.mergeable === true && failing !== null && failing.length === 0) return 'adopt';
   if (pull.draft) return 'hold';
   return 'continue';
 }
@@ -108,7 +127,7 @@ export interface ImportPlan {
   mode: 'read-only inventory';
   pulls: PlannedPull[];
   workflows: { state: FactState; items: PlannedWorkflow[] };
-  requiredChecks: { branch: string; state: FactState; names: string[] }[];
+  requiredChecks: { branch: string; state: FactState; checks: RequiredCheck[] }[];
   mapping: { entries: PlannedMappingEntry[]; conflicts: MappingConflict[] };
 }
 
@@ -191,8 +210,11 @@ const factOf = (fact: string, state: FactState, detail: string): ImportFact => (
 export async function buildImportPlan(repository: string, source: ImportSource, mappingText: string | null): Promise<ImportPlan> {
   const pulls = (await source.openPulls(repository)).map(raw => normalizePull(raw, repository)).sort((a, b) => a.number - b.number);
   const branches = [...new Set(pulls.map(pull => pull.base))].sort(byText);
-  const required = new Map<string, string[] | null>();
-  for (const branch of branches) required.set(branch, await source.requiredChecks(repository, branch));
+  const required = new Map<string, RequiredCheck[] | null>();
+  for (const branch of branches) {
+    const checks = await source.requiredChecks(repository, branch);
+    required.set(branch, checks === null ? null : [...checks].sort((a, b) => byText(a.name, b.name) || (a.appId ?? 0) - (b.appId ?? 0)));
+  }
   const planned: PlannedPull[] = [];
   for (const pull of pulls) {
     const [compare, checks] = await Promise.all([
@@ -200,19 +222,14 @@ export async function buildImportPlan(repository: string, source: ImportSource, 
       source.headChecks(repository, pull.headSha),
     ]);
     const names = required.get(pull.base) ?? null;
-    // A required check with no reported result — not yet run, or a head-check read that failed — is
-    // not clean either, so it withholds adoption exactly as a failed one does.
-    const failing = (names ?? []).filter(name => {
-      const result = checks?.find(check => check.name === name)?.result;
-      return result === undefined || checkFailed(result);
-    });
+    const failing = failingRequired(names, checks);
     const contained = patchContained(compare);
     const facts = [
       factOf('mergeability', pull.mergeable === null ? 'unknown' : 'detected',
         pull.mergeable === null ? 'GitHub has not computed mergeability' : pull.mergeable ? 'no conflict reported' : 'GitHub reports a conflict with the base branch'),
-      factOf('required-checks', names === null ? 'unknown' : 'detected', names === null ? 'the base branch protection could not be read' : names.length ? names.join(', ') : 'none required'),
+      factOf('required-checks', names === null ? 'unknown' : 'detected', names === null ? 'the base branch protection or rulesets could not be read' : names.length ? names.map(describeRequired).join(', ') : 'none required'),
       factOf('head-checks', checks === null ? 'unknown' : 'detected', checks === null ? 'the head checks could not be read'
-        : checks.length ? checks.map(check => `${check.name}=${check.result}`).sort(byText).join(', ') : 'none reported'),
+        : checks.length ? checks.map(check => `${check.name}${check.appId ? ` (app ${check.appId})` : ''}=${check.result}`).sort(byText).join(', ') : 'none reported'),
     ];
     planned.push({ repository, ...pull, disposition: proposeDisposition(pull, contained, failing), facts, ...(contained ? { containment: contained } : {}) });
   }
@@ -234,8 +251,8 @@ export async function buildImportPlan(repository: string, source: ImportSource, 
     pulls: planned,
     workflows: { state: listed === null ? 'unknown' : 'detected', items },
     requiredChecks: branches.map(branch => {
-      const names = required.get(branch)!;
-      return { branch, state: names === null ? 'unknown' as const : 'detected' as const, names: names ?? [] };
+      const checks = required.get(branch)!;
+      return { branch, state: checks === null ? 'unknown' as const : 'detected' as const, checks: checks ?? [] };
     }),
     mapping: {
       entries: parsed.entries.map(entry => {
