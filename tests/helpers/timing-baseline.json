@@ -444,6 +444,7 @@
     "tests/goal-planner.test.ts": 2900,
     "tests/goal-static-item-preview.test.ts": 4500,
     "tests/graphyard-up.test.ts": 4200,
+    "tests/schema-generation-guard.test.ts": 3000,
     "tests/up-loop-code.test.ts": 850,
     "tests/gy-1050-review-followups.test.ts": 833,
     "tests/gy-1053-review-followups.test.ts": 789,
