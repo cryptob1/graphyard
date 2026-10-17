@@ -220,9 +220,33 @@ ${ctx.dataPath ? '' : '  graphyard-data: {}\n'}${proxied ? '  caddy-data: {}\n  
   return files;
 }
 
+/**
+ * Docker names a container's endpoint that outlived the container: a reinstall after the
+ * containers and data volume were removed failed with `endpoint with name
+ * graphyard-…-db-1 already exists in network graphyard-…_default` (GY-1840). Only an
+ * endpoint in this project's own network is read, so another project's state is never touched.
+ */
+export function staleComposeEndpoints(message: string, project: string) {
+  const endpoints = new Map<string, { network: string; endpoint: string }>();
+  for (const match of message.matchAll(/endpoint with name (\S+?) already exists in network (\S+?)(?=[\s'":,]|$)/g)) {
+    const [, endpoint, network] = match;
+    if (network === `${project.toLowerCase()}_default`) endpoints.set(`${network}/${endpoint}`, { network, endpoint });
+  }
+  return [...endpoints.values()];
+}
+
 async function composeUp(ctx: AdapterContext, transport: Transport, pull: boolean) {
   if (pull) await transport.exec('docker', ['compose', '--project-directory', ctx.workdir, '-f', `${ctx.workdir}/compose.yaml`, 'pull', '--quiet'], { allowFailure: true, timeout: 900_000 });
-  await transport.exec('docker', ['compose', '--project-directory', ctx.workdir, '-f', `${ctx.workdir}/compose.yaml`, 'up', '-d', '--remove-orphans'], { timeout: 900_000 });
+  const up = () => transport.exec('docker', ['compose', '--project-directory', ctx.workdir, '-f', `${ctx.workdir}/compose.yaml`, 'up', '-d', '--remove-orphans'], { timeout: 900_000 });
+  try { await up(); }
+  catch (error) {
+    // A stale endpoint is cleared and compose up retried once; every other failure, and a
+    // second failure, is reported as compose gave it.
+    const stale = staleComposeEndpoints(error instanceof Error ? error.message : String(error), `graphyard-${ctx.installId}`);
+    if (!stale.length) throw error;
+    for (const { network, endpoint } of stale) await transport.exec('docker', ['network', 'disconnect', '-f', network, endpoint], { allowFailure: true, timeout: 120_000 });
+    await up();
+  }
 }
 
 export async function composeRunning(transport: Transport, ctx: AdapterContext) {
