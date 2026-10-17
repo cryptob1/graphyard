@@ -26,7 +26,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { loadCases } from '../src/e2e/case.ts';
-import { candidatePendingOutcomes, checkoutContract, failureDetail, releaseRetries, releaseVerdict, runCases, summarize } from '../src/e2e/runner.ts';
+import { candidatePendingOutcomes, checkoutContract, defaultStepTimeoutMs, failureDetail, releaseRetries, releaseVerdict, runCases, summarize } from '../src/e2e/runner.ts';
 import { contractPendingCases } from '../src/release-candidate.ts';
 import { checkoutRepositoryPolicy } from '../src/model/repository-policy.ts';
 import { repositoryDelivery } from '../src/install/index.ts';
@@ -123,9 +123,10 @@ export async function startControlPlane({ root = candidateRoot, sha, scratch, en
  * directory (a test passes its tracked temporaryDirectory). Once onboarded, the operator commits and
  * pushes what init wrote, and the loop's preview step serves the plane (`loop`); `settle(item)` waits
  * for an item's automatic preview. `close()` stops the loop and its previews, the plane and its
- * database, and removes every file the fixture made.
+ * database, and removes every file the fixture made. `launcher`, when given, opens the browser of
+ * the declared cases each preview runs, as the item-preview port of the same name.
  */
-export async function createOnboardingFixture({ root = candidateRoot, sha, dashboard = false, host = process.env, allocate = () => mkdtemp(join(tmpdir(), 'graphyard-onboarding-fixture-')) } = {}) {
+export async function createOnboardingFixture({ root = candidateRoot, sha, dashboard = false, host = process.env, launcher, allocate = () => mkdtemp(join(tmpdir(), 'graphyard-onboarding-fixture-')) } = {}) {
   const head = checkoutHead(root);
   if (sha && sha.toLowerCase() !== head) throw new Error(`the onboarding fixture builds from the checkout's HEAD ${head}, not the candidate ${sha}; check out the candidate's exact SHA`);
   if (dashboard && !existsSync(join(root, 'dist/index.html'))) throw new Error('the onboarding fixture serves the dashboard from dist/, which the checkout has not built: run npx vite build --configLoader runner first');
@@ -157,7 +158,7 @@ export async function createOnboardingFixture({ root = candidateRoot, sha, dashb
     git('add', '-A'); git('-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-q', '-m', 'Onboard with graphyard init');
     git('push', '-q', origin, 'main'); git('fetch', '-q', origin, 'main:refs/remotes/origin/main');
     const delivery = loadProjectDelivery({}, repository);
-    loop = startPreviewLoop({ url: plane.url, token: plane.coordinatorToken, root: repository, base: join(scratch, 'worktrees'), environment: { ...isolated(host), ...confinedHomes(scratch) } });
+    loop = startPreviewLoop({ url: plane.url, token: plane.coordinatorToken, root: repository, base: join(scratch, 'worktrees'), environment: { ...isolated(host), ...confinedHomes(scratch) }, launcher });
     const settle = item => settlePreview({ url: plane.url, token: plane.token, item, delivery });
     return { url: plane.url, token: plane.token, sha: head, cli, scratch, repository, config, delivery, onboarding: { scanned, applied }, loop, settle, close };
   } catch (error) { await close(); throw error; }
@@ -168,9 +169,9 @@ export async function createOnboardingFixture({ root = candidateRoot, sha, dashb
  * daemon wires (`mergeWriterReads`), run against the plane at `url` as its coordinator identity every
  * `intervalMs`: it reads the coordination snapshot and previews every item whose criteria cite a case
  * bound to a declared static application from the checkout `root`, recording each preview through
- * the plane's merge-record route. `stop()` ends the loop, then every preview it started.
+ * the plane's merge-record route, opening their browsers with `launcher` when given. `stop()` ends the loop, then every preview it started.
  */
-export function startPreviewLoop({ url, token, root, base, environment, intervalMs = 1_000 }) {
+export function startPreviewLoop({ url, token, root, base, environment, launcher, intervalMs = 1_000 }) {
   const call = async (method, path, body, key) => {
     const response = await fetch(`${url}/api/${path}`, { method, signal: AbortSignal.timeout(60_000), body: body === undefined ? undefined : JSON.stringify(body),
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(key ? { 'Idempotency-Key': key } : {}) } });
@@ -180,7 +181,7 @@ export function startPreviewLoop({ url, token, root, base, environment, interval
   };
   const config = { baseBranch: 'main', repository: fixtureRepository, run: { mergeWriter: { deployKeyFile: join(base, 'no-deploy-key') } } };
   const ports = mergeWriterReads(config, root, defaultChildRun, { base, environment, merger: async () => (await call('GET', 'merger')).mode,
-    record: (work, event) => call('POST', `work/${work.id}/merge-record`, event, mergeRecordKey(work, event)) }).itemPreviews;
+    record: (work, event) => call('POST', `work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), itemPreviews: launcher ? { launcher } : {} }).itemPreviews;
   const live = new Map(), notes = [];
   let stopped = false, wake = () => {};
   const running = (async () => {
@@ -266,8 +267,9 @@ export async function runOnboardingE2e(cases, { url, token, fixture, candidate =
           continue;
         }
       }
+      // The step that creates an item on the fixture waits for its preview to settle, so each step there has the settling budget besides its own.
       const report = await runCases([entry], { url: target.url, token: target.token, environment: 'uat', runId, retries: releaseRetries, root, pendingCases: pending, policy, launcher,
-        fetcher: target.settle ? settlingFetcher(fetcher ?? fetch, target) : fetcher, stepTimeoutMs, now });
+        fetcher: target.settle ? settlingFetcher(fetcher ?? fetch, target) : fetcher, stepTimeoutMs: target.settle ? (stepTimeoutMs ?? defaultStepTimeoutMs) + previewSettleMs : stepTimeoutMs, now });
       served.add(report.sha);
       const known = targets.find(entry => entry.url === target.url && entry.sha === report.sha);
       if (known) known.cases.push(id); else targets.push({ url: target.url, sha: report.sha, cases: [id] });

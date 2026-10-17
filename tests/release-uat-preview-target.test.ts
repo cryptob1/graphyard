@@ -68,8 +68,10 @@ test('integration:goal-release-uat-preview-target — preview-serves-change fail
       return response;
     };
     const observed: { tip?: string; work?: any[] } = {};
+    let previewLaunches = 0;
     const fixture = async () => {
-      const made = await createOnboardingFixture({ root, allocate: () => temporaryDirectory('release-uat-preview-fixture') });
+      // The fixture's preview loop opens the declared case's browser with the same launcher, counted so the test sees the preview's own case used it.
+      const made = await createOnboardingFixture({ root, launcher: { launch: (options: { headless: boolean }) => { previewLaunches += 1; return launcher.launch(options); } }, allocate: () => temporaryDirectory('release-uat-preview-fixture') });
       opened.push(made);
       const close = made.close;
       made.close = async () => {
@@ -90,6 +92,7 @@ test('integration:goal-release-uat-preview-target — preview-serves-change fail
     const [made] = opened;
     assert.deepEqual(made.config.delivery.applications.find((application: any) => application.kind === 'static'), { id: 'site', kind: 'static', directory: 'public', build: 'npm run build' });
     assert.equal(made.config.delivery.cases['fixture-static-home'], 'site');
+    assert.ok(previewLaunches > 0, 'the preview ran its declared case in a browser it opened with the launcher');
     assert.ok(made.loop.notes.some((note: string) => /^Started [A-Z]+-\d+'s preview of [0-9a-f]{12} \(site: fixture-static-home\)$/.test(note)), made.loop.notes.join('; '));
 
     // The item the case read carried the loop's own record: the base the operator pushed, built, served and judged by the declared case.
