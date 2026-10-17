@@ -38,7 +38,7 @@ Every 30 s the guard reruns, then reverts merges failing checks parents passed; 
 
 `init --scan` splits checks (`delivery.mergeGate`, per-candidate); `--apply` renders `graphyard-release-candidate.yml` (`candidateSchedule`, `--candidate-cron CRON|off`), `graphyard-promotion.yml`. `deploy.adapter`: `railway` (`deploy.project`), `command` (`deploy.uat`/`deploy.production` with `GRAPHYARD_CANDIDATE_SHA`; unset renders none). `--delivery per-pr` keeps per-PR checks; `install --plan` lists resources.
 
-**`graphyard.json` policy**: `risk.sensitive` `{rule,glob}` (`only`: `risk`/`lane`), else generic; `review.normalChanges` `post-merge`/`pre-merge`; plane: `GRAPHYARD_REPOSITORY_POLICY`; `doctor`: `repositoryPolicy`.
+**`graphyard.json` policy**: `risk.sensitive` `{rule,glob}` (`only`: `risk`/`lane`), else generic; `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; `install` deploys it as `GRAPHYARD_REPOSITORY_POLICY`; `doctor`: `repositoryPolicy`.
 
 ```json
 {"kind":"environment","id":"production","expectedRevision":0,"repository":"owner/repository","url":"https://app.example.test","instance":"production-cluster","immutable":true,"services":["api","web"],"resources":["production-smoke-account"],"delivery":{"freshnessSeconds":300,"approvalRequired":true}}

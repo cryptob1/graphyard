@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { Work } from '../src/model.js';
 import { parseRepositoryConfig } from '../src/model/documentation.js';
 import type { RepositoryPolicy } from '../src/model/repository-policy.js';
@@ -14,6 +15,7 @@ import { reviewedAfterMerge } from '../src/auto-dispatch.js';
 import { mergeQueue } from '../src/merge-writer/executor.js';
 import { failureDetail, releaseVerdict, type E2eReport } from '../src/e2e/runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { harness } from './install-harness.js';
 
 // GY-1843: each repository declares its sensitive paths, normal-change review timing and
 // pending-outcome rule in graphyard.json; a repository that declares none gets a generic default,
@@ -217,4 +219,51 @@ test('unit:repo-review-and-pending-policy — the policy schema and its defaults
   for (const needle of ['repositoryPolicySchema', 'genericSensitiveRules', 'defaultRepositoryPolicy', "'post-merge'", "'non-blocking'"]) assert.ok(source.includes(needle), needle);
   assert.throws(() => resolveRepositoryPolicy({ e2e: { pendingOutcomes: 'maybe' } }));
   assert.throws(() => resolveRepositoryPolicy({ risk: { sensitive: [{ rule: 'x', glob: '../outside' }] } }));
+});
+
+test('unit:repo-risk-policy — the installer deploys graphyard.json\'s policy as GRAPHYARD_REPOSITORY_POLICY, so a control plane whose image carries no checkout judges by the committed rules', async () => {
+  const { loadRepositoryPolicy, repositoryPolicyVariable, resolveRepositoryPolicy } = await policyModule();
+  const { coreEnv, prepareInstall } = await import('../src/install/index.js');
+  const declared = { risk: { sensitive: [{ rule: 'payments', glob: 'app/payments/**' }] }, review: { normalChanges: 'pre-merge' }, e2e: { pendingOutcomes: 'blocking' } };
+  const fixture = await harness({ provider: 'compose' });
+  try {
+    await writeFile(join(fixture.root, 'graphyard.json'), JSON.stringify({ documentation: { paths: ['docs/'], changelog: null }, ...declared }));
+    const session = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'compose' }, fixture.deps, 'plan');
+    const variable = coreEnv(session).find(value => value.name === repositoryPolicyVariable);
+    assert.ok(variable, 'the control-plane variables carry the repository policy');
+    assert.equal(variable!.secret, false);
+    // The runtime image: no graphyard.json in its working directory, only the deployed variable.
+    const image = await temporaryDirectory('graphyard-image-');
+    const served = loadRepositoryPolicy({ [repositoryPolicyVariable]: variable!.value }, image);
+    assert.deepEqual(served, { policy: resolveRepositoryPolicy(declared), source: 'environment' });
+    assert.equal(classifyRisk([{ path: 'app/payments/charge.rb' }], served.policy).risk, 'sensitive');
+    // A repository that declares none deploys `{}`, which clears a declaration since removed: the generic default.
+    await writeFile(join(fixture.root, 'graphyard.json'), JSON.stringify({ documentation: { paths: ['docs/'], changelog: null } }));
+    const bare = coreEnv(await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'compose' }, fixture.deps, 'plan')).find(value => value.name === repositoryPolicyVariable);
+    assert.equal(bare?.value, '{}');
+    assert.equal(loadRepositoryPolicy({ [repositoryPolicyVariable]: bare!.value }, image).policy.risk.declared, false);
+    // A declaration the plane would refuse is a preflight refusal, never a silent default.
+    await writeFile(join(fixture.root, 'graphyard.json'), JSON.stringify({ documentation: { paths: ['docs/'], changelog: null }, review: { normalChanges: 'sometimes' } }));
+    await assert.rejects(prepareInstall(fixture.root, { repository: 'owner/project', provider: 'compose' }, fixture.deps, 'plan'), /normalChanges/);
+  } finally { await fixture.cleanup(); }
+  // Graphyard's own deployment keeps the variable through railway.ts and sets it from its graphyard.json.
+  const railway = await readFile(new URL('../.railway/railway.ts', import.meta.url), 'utf8');
+  assert.equal(railway.match(/GRAPHYARD_REPOSITORY_POLICY: preserve\(\)/g)?.length, 2, 'production and uat both preserve it');
+  assert.match(await readFile(new URL('../scripts/configure-integrations.mjs', import.meta.url), 'utf8'), /\[policy\.variable\]: policy\.value/);
+});
+
+test('unit:repo-review-and-pending-policy — under e2e.pendingOutcomes blocking a failing pending-outcome case opens a release hold; non-blocking files none (GY-1802)', async () => {
+  const { resolveRepositoryPolicy } = await policyModule();
+  const { assessHolds, e2eRecord } = await import('../src/release-holds.js');
+  const candidate = { id: 7, sha: H, pendingOutcomes: ['outcome-a'] } as unknown as Parameters<typeof e2eRecord>[1];
+  const contract = { outcomes: [{ id: 'outcome-a', title: 'Outcome A', cases: ['pending-case'] }] } as unknown as Parameters<typeof assessHolds>[0];
+  const run = { ...report([{ id: 'pending-case', verdict: 'failed' }]), runId: `rc-${(candidate as { id: number }).id}` };
+  for (const [rule, opened] of [['blocking', 1], ['non-blocking', 0]] as const) {
+    const policy = resolveRepositoryPolicy({ e2e: { pendingOutcomes: rule } });
+    const e2e = e2eRecord(run, candidate, contract, policy)!;
+    assert.deepEqual(e2e.blocking, rule === 'blocking' ? ['pending-case'] : [], rule);
+    assert.equal(e2e.cases[0].pending, rule === 'blocking' ? undefined : true, `${rule}: the record marks the case pending only when it does not block`);
+    const holds = assessHolds(contract, candidate, { deployedSha: H, e2e }, [], at, policy);
+    assert.equal(holds.filter(entry => entry.kind === 'open').length, opened, `${rule}: ${opened} hold opened`);
+  }
 });

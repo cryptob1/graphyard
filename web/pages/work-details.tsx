@@ -118,8 +118,11 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const reviewGate = item.gates.find(g => g.name === 'review');
   // What merging it would reach and what could take it back (GY-972), from its scope and gates.
   const radius = blastRadius(item);
-  // The risk class of the delta the merge would apply, computed on read beside the path-glob lane (GY-1521).
-  const risk = riskOf(item);
+  // The risk class of the delta the merge would apply, beside the path-glob lane (GY-1521). The gates judge it by the
+  // repository's graphyard.json policy, which the browser cannot read (GY-1843): a risk the item carries is shown as is,
+  // else this page's own reading — the generic default rules in a browser — labelled as such.
+  const carried = item as Work & { risk?: 'sensitive' | 'normal'; riskReasons?: string[] };
+  const risk = carried.risk ? { risk: carried.risk, reasons: carried.riskReasons ?? [], estimated: false } : { ...riskOf(item), estimated: true };
   const review = !reviewGate || reviewGate.passed ? 'Approved' : reviewGate.reasons.some(r => r.startsWith('Outstanding change requests')) ? 'Changes requested' : 'Waiting for approval';
   return <article className="item-page" aria-label={item.title}>
     <button type="button" className="text-button back" autoFocus onClick={() => setSelected(null)}>← Back</button>
@@ -154,7 +157,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
         <div><dt><Term term="commit" focusable={false}>Commit</Term></dt><dd className="candidate-details"><CandidateSha repository={status?.repository} sha={item.candidate.sha} workKey={item.key}/></dd></div>
         {item.observation?.files && <div><dt>Changes</dt><dd>{item.observation.files.length} {item.observation.files.length === 1 ? 'file' : 'files'}</dd></div>}
         <div><dt>Lane</dt><dd className="lane-details">{item.lane ?? 'unknown'}</dd></div>
-        <div><dt>Risk</dt><dd className="risk-details">{risk.risk}{risk.reasons.length ? <small> · {risk.reasons.join(' · ')}</small> : <small> · no sensitive path in the merge delta</small>}</dd></div>
+        <div><dt>Risk</dt><dd className="risk-details">{risk.risk}{risk.reasons.length ? <small> · {risk.reasons.join(' · ')}</small> : <small> · no sensitive path in the merge delta</small>}</dd>{risk.estimated && <dd className="risk-estimate"><small>Read here by the generic default rules; the gates use this repository's <code>graphyard.json</code> policy (<code>graphyard work {item.key}</code>).</small></dd>}</div>
         <div><dt>Checks</dt><dd>{checks.length ? checks.map(check => `${check.name} ${check.state}`).join(' · ') : 'none required'}</dd></div>
         <div><dt>Review</dt><dd>{!item.policy.review ? 'not required' : review}</dd></div>
       </dl> : <p className="muted">No pull request yet.</p>}
