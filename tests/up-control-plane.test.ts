@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile as execFileCallback } from 'node:child_process';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -263,14 +263,25 @@ const upModule = () => import('../src/up.js');
 const UP_SERVER = 'http://127.0.0.1:4310';
 const UP_ADMIN = 'a'.repeat(40);
 
-/** A simulated host for the control-plane merger path: install finishes without Apps; accounts and the loop turn green. */
-function controlPlaneUpWorld() {
+/** A simulated host for the control-plane merger path: install finishes without Apps; accounts and the loop turn green.
+ *
+ * Options: `settled` starts with the plane installed, green and recording the control-plane merger
+ * (a run whose steps an earlier pass finished); `operatorToken` replaces the admin credential this
+ * machine holds (null: none). The goal command answers as the real plane does (GY-1915): it needs
+ * admin or an operator agent holding intent:create, so a child with no credential of its own — the
+ * install's worker credential — is refused, and any other credential creates the goal.
+ */
+function controlPlaneUpWorld(options: { settled?: boolean; operatorToken?: string | null } = {}) {
   const calls: string[][] = [];
   const ghCalls: string[][] = [];
-  let installed = false, accounts = false, loop = false, merger: 'github' | 'control-plane' = 'github';
+  let installed = !!options.settled, accounts = !!options.settled, loop = !!options.settled, merger: 'github' | 'control-plane' = options.settled ? 'control-plane' : 'github';
   let repoExists = false;
   const deployKeys: string[] = [];
   const mergers: { token: string; requestId: string }[] = [];
+  /** The goal submissions the run made, with the credential each carried and its request id. */
+  const goals: { token: string | null; requestId: string | null }[] = [];
+  /** The install's own worker credential: what a child with no GRAPHYARD_TOKEN falls back to. */
+  const worker = 'w'.repeat(40);
   let clock = 0;
   const status = () => installed ? {
     github: false, githubRepository: 'owner/project', appPermissions: { missing: [] }, reviewerApps: [],
@@ -285,7 +296,7 @@ function controlPlaneUpWorld() {
     now: () => clock, sleep: async ms => { clock += ms; },
     serverUrl: async () => installed ? UP_SERVER : null,
     masterToken: async () => installed ? 'm'.repeat(40) : null,
-    operatorToken: async () => UP_ADMIN,
+    operatorToken: async () => options.operatorToken !== undefined ? options.operatorToken : UP_ADMIN,
     signIn: async () => null,
     status: async () => status(),
     publishOnboarding: async () => null,
@@ -302,8 +313,14 @@ function controlPlaneUpWorld() {
       if (args[0] === 'repo' && args[1] === 'create') { repoExists = true; return { code: 0, stdout: 'Created' }; }
       return { code: 1, stdout: '', stderr: `unexpected gh ${args.join(' ')}` };
     },
-    async cli(args) {
+    async cli(args, options = {}) {
       calls.push(args);
+      if (args[0] === 'goal') {
+        const token = options.env?.GRAPHYARD_TOKEN ?? null;
+        if (!token || token === worker) return { code: 1, stdout: JSON.stringify({ error: 'owner-project-worker-1 is a worker; this goal command needs admin or coordinator or an operator agent holding intent:create' }) };
+        goals.push({ token, requestId: options.env?.GRAPHYARD_REQUEST_ID ?? null });
+        return { code: 0, stdout: JSON.stringify({ key: 'GOAL-1', stage: 'acceptance-drafting' }) };
+      }
       if (args[0] === 'install' && args.includes('--plan')) {
         return { code: 0, stdout: JSON.stringify({
           installId: 'owner-project', installDirectory: join(checkout, 'install-dir'),
@@ -320,7 +337,7 @@ function controlPlaneUpWorld() {
       return { code: 0, stdout: '{}' };
     },
   });
-  return { calls, ghCalls, deployKeys, mergers, setRepoExists: (value: boolean) => { repoExists = value; }, deps };
+  return { calls, ghCalls, deployKeys, mergers, goals, setRepoExists: (value: boolean) => { repoExists = value; }, deps };
 }
 
 test('unit:up-control-plane-steps — up --merger control-plane runs preflight, control-plane (install --no-github-app), host-supervisor, deploy-key, merger-setting, master-autonomy, onboarding, accounts, harness, master-loop, goal; needs no browser profile; creates the repository with gh repo create when missing', async () => {
@@ -416,6 +433,68 @@ test('unit:up-github-steps-unchanged — without --merger control-plane the step
   assert.ok(applies.length && applies.every(args => args.includes('--reviewer') && args.includes('claude')), 'github mode still passes --reviewer');
   assert.ok(applies.every(args => !args.includes('--no-github-app')), 'github mode never passes --no-github-app');
   assert.ok(!events.some(event => event.kind === 'step' && (event.step === 'deploy-key' || event.step === 'merger-setting')));
+});
+
+test('unit:up-goal-uses-operator-credential — the goal step files with the operator\'s admin credential (else the master\'s operator-agent identity holding intent:create) and the saved request id, and the goal is created; never with the install\'s worker credential', async () => {
+  const { runUp, upRequestFromArgs } = await upModule();
+  const request = upRequestFromArgs(['--repo', 'owner/project', '--provider', 'compose', '--agent', '--merger', 'control-plane', '--goal', 'goal.md']);
+  const goalText = 'Customers can be greeted by name when they open the application.\n';
+
+  // The operator's admin credential is on this machine (as merger-setting resolves it): the goal child carries it.
+  const checkout = await temporaryDirectory('up-goal-operator-credential');
+  await writeFile(join(checkout, 'goal.md'), goalText);
+  const world = controlPlaneUpWorld();
+  const result = await runUp(request, world.deps(checkout, []));
+  assert.equal(result.exitCode, 0, result.next);
+  assert.equal(result.goal, 'GOAL-1', 'the goal is created');
+  assert.equal(world.goals.length, 1, 'exactly one goal submission');
+  assert.equal(world.goals[0]!.token, UP_ADMIN, 'GRAPHYARD_TOKEN is the operator\'s admin credential, never the install\'s worker credential');
+  assert.ok(world.goals[0]!.requestId && world.goals[0]!.requestId!.length >= 32, 'the saved request id rides along, so a rerun replays the same create');
+
+  // No admin credential, but the master's operator-agent identity master-autonomy issued earlier in
+  // the run (its credential file is recorded in master.json): the goal child carries that instead.
+  const agentCheckout = await temporaryDirectory('up-goal-operator-agent-credential');
+  await writeFile(join(agentCheckout, 'goal.md'), goalText);
+  await mkdir(join(agentCheckout, '.graphyard'), { recursive: true });
+  const agentTokenFile = join(agentCheckout, '.graphyard', 'operator-agent.token');
+  await writeFile(agentTokenFile, `op-${'a'.repeat(40)}`, { mode: 0o600 });
+  const approverTokenFile = join(agentCheckout, '.graphyard', 'approver.token');
+  await writeFile(approverTokenFile, `ap-${'a'.repeat(40)}`, { mode: 0o600 });
+  await writeFile(join(agentCheckout, '.graphyard', 'master.json'), JSON.stringify({
+    version: 1, repository: 'owner/project',
+    operatorAgent: { id: 'owner-project-master-operator', credentialFile: agentTokenFile },
+    approver: { id: 'owner-project-approver', credentialFile: approverTokenFile },
+  }));
+  const agentWorld = controlPlaneUpWorld({ settled: true, operatorToken: null });
+  agentWorld.setRepoExists(true);
+  const agentResult = await runUp(request, agentWorld.deps(agentCheckout, []));
+  assert.equal(agentResult.exitCode, 0, agentResult.next);
+  assert.equal(agentResult.goal, 'GOAL-1', 'the goal is created as the master\'s operator-agent identity');
+  assert.equal(agentWorld.goals.length, 1);
+  assert.equal(agentWorld.goals[0]!.token, `op-${'a'.repeat(40)}`, 'the master\'s operator-agent credential (intent:create), never the worker credential');
+});
+
+test('unit:up-goal-missing-operator-credential — with neither the operator\'s admin credential nor the master\'s operator-agent identity on the machine, the goal step stops with exit 2 naming the credential and the rerun command, and never calls graphyard goal with the worker credential', async () => {
+  const { runUp, upRequestFromArgs, upControlPlaneSteps, upStateFile } = await upModule();
+  const request = upRequestFromArgs(['--repo', 'owner/project', '--provider', 'compose', '--agent', '--merger', 'control-plane', '--goal', 'goal.md']);
+  const checkout = await temporaryDirectory('up-goal-missing-operator-credential');
+  await writeFile(join(checkout, 'goal.md'), 'Customers can be greeted by name when they open the application.\n');
+  // Every step but the goal is done by an earlier run: its merger setting and master identities were
+  // provisioned with the admin credential then; this machine holds neither credential now.
+  await mkdir(join(checkout, '.graphyard'), { recursive: true });
+  await writeFile(upStateFile(checkout), `${JSON.stringify({ version: 1, repository: 'owner/project', provider: 'compose', merger: 'control-plane', completed: [...upControlPlaneSteps].filter(step => step !== 'goal'), noHerdr: false, goal: null }, null, 2)}\n`);
+  const world = controlPlaneUpWorld({ settled: true, operatorToken: null });
+  const events: UpEvent[] = [];
+  const result = await runUp(request, world.deps(checkout, events));
+  assert.equal(result.exitCode, 2, result.next);
+  assert.match(result.next, /goal: neither the operator's admin credential nor the master's operator-agent credential \(intent:create\) is on this machine/);
+  assert.match(result.next, /rerun graphyard up --repo owner\/project --provider compose/);
+  assert.equal(world.goals.length, 0, 'the goal was never filed with the worker credential');
+  assert.ok(!result.completed.includes('goal'));
+  const failed = events.find(event => event.kind === 'step-failed') as Extract<UpEvent, { kind: 'step-failed' }> | undefined;
+  assert.equal(failed?.step, 'goal');
+  assert.equal(failed?.exitCode, 2);
+  assert.match(failed?.detail ?? '', /neither the operator's admin credential nor the master's operator-agent credential/);
 });
 
 test('up --merger control-plane is refused beside --local, which provisions no master identities', async () => {
