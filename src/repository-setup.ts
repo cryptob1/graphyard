@@ -877,7 +877,7 @@ export function judgeLoopCode(facts: LoopCodeFacts): LoopCodeReading {
   const same = (commit: string | null | undefined, expected: string | null) => !!commit && !!expected && commit.toLowerCase() === expected.toLowerCase();
   let loopStale: string | null = null, loopReplace: LoopCodeReading['loopReplace'] = null;
   if (loop) {
-    if (loop.checkout && !own.has(canonical(loop.checkout))) { loopStale = `${loop.path} starts the CLI in ${loop.checkout}, not this checkout (${cli.root})`; loopReplace = 'unit'; }
+    if (loop.checkout && !own.has(canonical(loop.checkout))) { loopStale = `${loop.path} starts the CLI in ${loop.checkout}${release.commit ? ` at ${shortSha(release.commit)}` : ''}, not this checkout (${cli.root}) at ${shortSha(cli.commit)}`; loopReplace = 'unit'; }
     else if (!release.commit) { loopStale = `${loop.path} runs a loop whose cursor records no commit it loaded, so it is not known to run this checkout's ${shortSha(cli.commit)}`; loopReplace = 'restart'; }
     else if (!same(release.commit, cli.commit)) { loopStale = `${loop.path} runs ${shortSha(release.commit)}, not this checkout's ${shortSha(cli.commit)}`; loopReplace = 'restart'; }
     else if (release.dirty === true) { loopStale = `${loop.path} runs ${shortSha(release.commit)} with uncommitted changes it loaded, not this checkout's clean ${shortSha(cli.commit)}`; loopReplace = 'restart'; }

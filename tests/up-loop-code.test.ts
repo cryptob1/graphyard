@@ -43,7 +43,7 @@ const reading = (over: Partial<LoopCodeReading> = {}): LoopCodeReading => ({
   executor: { unit: EXECUTOR_TEMPLATE, path: EXECUTOR_PATH, checkout: OLD_CHECKOUT },
   cli: { root: CLI_ROOT, commit: COMMIT },
   repository: 'acme/shop',
-  loopStale: `${MASTER_UNIT_PATH} starts the CLI in ${OLD_CHECKOUT}, not this checkout (${CLI_ROOT})`,
+  loopStale: `${MASTER_UNIT_PATH} starts the CLI in ${OLD_CHECKOUT} at ${OLD_COMMIT.slice(0, 12)}, not this checkout (${CLI_ROOT}) at ${COMMIT.slice(0, 12)}`,
   executorStale: `${EXECUTOR_PATH} runs ${OLD_CHECKOUT}, not this checkout (${CLI_ROOT}) or the repository checkout (${REPOSITORY_ROOT})`,
   error: null,
   ...over,
@@ -151,10 +151,28 @@ test('unit:up-replaces-loop-on-other-code — the master-loop step rewrites a lo
   const alignedAt = replaced.calls.findIndex(call => call.args[0] === 'align-executors');
   assert.ok(initAt >= 0 && alignedAt > initAt, 'the executors are aligned after the loop unit is rewritten');
   const replacedNote = replacedEvents.find(event => event.kind === 'note' && event.text.includes('master-loop: replaced')) as { text: string } | undefined;
-  assert.match(replacedNote?.text ?? '', new RegExp(`starts the CLI in ${quote(OLD_CHECKOUT)}`), 'the step reports what it replaced');
+  assert.match(replacedNote?.text ?? '', new RegExp(`starts the CLI in ${quote(OLD_CHECKOUT)} at ${OLD_COMMIT.slice(0, 12)}`), 'the step reports what it replaced: the old checkout and the commit its cursor reported');
   assert.match(replacedNote?.text ?? '', new RegExp(`the loop now runs ${quote(CLI_ROOT)} at ${COMMIT.slice(0, 12)}`), 'and the code the restarted loop now reports');
   const done = replacedEvents.find(event => event.kind === 'step' && event.step === 'master-loop' && event.state === 'done') as { detail?: string } | undefined;
   assert.match(done?.detail ?? '', /^replaced: /, 'the step\'s own outcome names the replacement');
+
+  // The replacement as the judgement itself words it: a unit on another checkout whose cursor
+  // reports that checkout's commit is reported with both paths and both commits, so the output says
+  // which code was replaced, not only where it lived.
+  const { judgeLoopCode } = await repositorySetup();
+  const judged = judgeLoopCode({
+    cli: { root: CLI_ROOT, commit: COMMIT }, primary: REPOSITORY_ROOT, primaryCommit: null, repository: 'acme/shop',
+    loop: { unit: MASTER_UNIT, path: MASTER_UNIT_PATH, checkout: OLD_CHECKOUT }, executor: null,
+    cursor: JSON.stringify({ release: { commit: OLD_COMMIT, dirty: false } }), fleet: [], canonical: path => path,
+  });
+  assert.equal(judged.loopReplace, 'unit', 'a unit on another checkout is rewritten');
+  const judgedRoot = await resumedRoot('graphyard-up-loop-judged');
+  const judgedWorld = world([reading({ loopStale: judged.loopStale, loopReplace: judged.loopReplace, executorStale: null }), cleanReading()]);
+  const judgedEvents: UpEvent[] = [];
+  const judgedRun = await runUp(request(), dependencies(judgedRoot, judgedEvents, judgedWorld));
+  assert.equal(judgedRun.exitCode, 0, judgedRun.next);
+  const judgedNote = judgedEvents.find(event => event.kind === 'note' && event.text.includes('master-loop: replaced')) as { text: string } | undefined;
+  for (const part of [OLD_CHECKOUT, OLD_COMMIT.slice(0, 12), CLI_ROOT, COMMIT.slice(0, 12)]) assert.ok(judgedNote?.text.includes(part), `the replacement note names ${part}: ${judgedNote?.text}`);
 
   // A loop whose unit already names this CLI but whose cursor records another commit: the unit is
   // right, so it is not rewritten; the step restarts the loop itself and waits for the commit the
@@ -394,7 +412,7 @@ test('unit:doctor-flags-loop-on-other-code — the reading judges the units agai
     const foreign = await readLoopCode(root, { cliPath: join(cliCheckout, 'bin', 'graphyard.mjs'), run, units, unitDirectory, home });
     assert.equal(foreign.loop?.checkout, pilot, 'the loop unit reads as running the pilot checkout');
     assert.equal(foreign.loopCommit, OLD_COMMIT, 'the cursor records the commit the running loop loaded');
-    assert.match(foreign.loopStale ?? '', new RegExp(`${quote(MASTER_UNIT)} starts the CLI in ${quote(pilot)}, not this checkout`), 'the loop on another checkout is named with both paths');
+    assert.match(foreign.loopStale ?? '', new RegExp(`${quote(MASTER_UNIT)} starts the CLI in ${quote(pilot)} at ${OLD_COMMIT.slice(0, 12)}, not this checkout \\(${quote(cliCheckout)}\\) at ${COMMIT.slice(0, 12)}`), 'the loop on another checkout is named with both paths and both commits');
     assert.match(foreign.executorStale ?? '', new RegExp(`${quote(EXECUTOR_TEMPLATE)} runs ${quote(pilot)}, not this checkout`), 'and the executor on it');
 
     // A unit that exists but cannot be read judges nothing: the reading carries the error, never an absent unit.
