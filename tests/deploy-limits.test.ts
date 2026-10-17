@@ -17,12 +17,12 @@ import { principalNarrowing, revertApproverAssignment, revertApproverVariables a
 import type { Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-// GY-59 AC-1 / AC-2: the reviewer limit derives from the configured roster, an over-limit
+// GY-59 AC-1 / AC-2 (a reviewer slot is a producer holding proof grants, GY-1879): the reviewer limit derives from the configured roster, an over-limit
 // roster of already-running principals starts with an attention item, only a newly added
 // principal beyond the limit refuses, and installers set the variables from the principal set.
 
 const operator: Principal = { id: 'operator', role: 'admin' };
-const producers: Principal[] = ['builder', 'observer', 'promoter', 'acceptance'].map(id => ({ id, role: 'producer' as const }));
+const producers: Principal[] = ['builder', 'observer', 'promoter', 'acceptance'].map(id => ({ id, role: 'producer' as const, proofs: ['unit:*'] }));
 const lead: Principal = { id: 'lead-product', role: 'slice-lead', slice: 'product', sessionKind: 'ai' };
 const credential = (p: Principal): Credential => ({ ...p, token: `${p.id}-${'t'.repeat(32)}` });
 
@@ -58,7 +58,7 @@ test('unit:deploy-limit-derivation — an unset limit derives from the configure
   const started = validateDelegationPrincipals([operator, ...producers], explicitTwo, known);
   assert.equal(started.attention.length, 1);
   assert.match(started.attention[0], /Independent review\/proof agent limit exceeded: 4\/2; .* Set GRAPHYARD_MAX_REVIEWERS=4/);
-  assert.throws(() => validateDelegationPrincipals([operator, ...producers, { id: 'fifth', role: 'producer' }], explicitTwo, known), /limit exceeded: 5\/2; set GRAPHYARD_MAX_REVIEWERS=5 on the deployment before adding fifth/);
+  assert.throws(() => validateDelegationPrincipals([operator, ...producers, { id: 'fifth', role: 'producer', proofs: ['unit:*'] }], explicitTwo, known), /limit exceeded: 5\/2; set GRAPHYARD_MAX_REVIEWERS=5 on the deployment before adding fifth/);
   // Without a known set every principal is new: the strict check a fresh configuration gets.
   assert.throws(() => validateDelegationPrincipals([operator, ...producers], explicitTwo), /Independent review\/proof agent limit exceeded: 4\/2; set GRAPHYARD_MAX_REVIEWERS=4/);
   // A derived limit covers the roster, so nothing warns from the roster check itself.
@@ -112,7 +112,7 @@ test('integration:deploy-limit-install — installers derive the variables from 
   assert.match(integrations, /delegationLimitAssignments\(roster, deployed\)/);
   assert.match(integrations, /GRAPHYARD_PRINCIPALS: JSON\.stringify\(roster\), \.\.\.limits\.variables/);
   assert.match(integrations, /for \(const entry of limits\.drift\) console\.error\(`Drift: \$\{entry\.reason\}`\)/);
-  const generated = delegationLimitAssignments([...roster, { id: 'trusted-acceptance', role: 'producer' }], { GRAPHYARD_MAX_REVIEWERS: '4' });
+  const generated = delegationLimitAssignments([...roster, { id: 'trusted-acceptance', role: 'producer', proofs: ['unit:*'] } as Principal], { GRAPHYARD_MAX_REVIEWERS: '4' });
   assert.equal(generated.variables.GRAPHYARD_MAX_REVIEWERS, '5');
   assert.match(generated.drift[0].reason, /GRAPHYARD_MAX_REVIEWERS=4 no longer covers the 5 producer principals/);
   // The Railway IaC preserves every variable the adapters set, so `railway config apply` cannot drop them.
@@ -121,7 +121,7 @@ test('integration:deploy-limit-install — installers derive the variables from 
 
   // `init --scan --apply` prints the lines for the principals it registered and compares them with the deployment.
   const principalsFile = join(await temporaryDirectory('init-capacity'), 'principals.json');
-  await writeFile(principalsFile, JSON.stringify({ version: 1, principals: [operator, { id: 'master', role: 'coordinator' }, { id: 'worker-1', role: 'worker' }, { id: 'evidence', role: 'producer' }, { id: 'acceptance', role: 'producer' }, { id: 'observer', role: 'producer' }] }));
+  await writeFile(principalsFile, JSON.stringify({ version: 1, principals: [operator, { id: 'master', role: 'coordinator' }, { id: 'worker-1', role: 'worker' }, { id: 'evidence', role: 'producer', proofs: ['unit:*'] }, { id: 'acceptance', role: 'producer', proofs: ['unit:*'] }, { id: 'observer', role: 'producer', proofs: ['unit:*'] }] }));
   const capacity = await capacityForPrincipals(principalsFile, async () => ({ delegationLimits: { deployed: { GRAPHYARD_MAX_REVIEWERS: '2' } } }));
   assert.equal(capacity.variables.GRAPHYARD_MAX_REVIEWERS, '3');
   assert.deepEqual(capacity.lines, ['GRAPHYARD_MAX_SLICE_LEADS=3', 'GRAPHYARD_MAX_ENGINEERS_PER_LEAD=2', 'GRAPHYARD_MIN_REVIEWERS=1', 'GRAPHYARD_MAX_REVIEWERS=3']);
@@ -280,13 +280,13 @@ test('integration:deploy-limit-startup — an existing install with more produce
   assert.match(explicit.status.delegationLimits.attention[0], /limit exceeded: 4\/2; .* Set GRAPHYARD_MAX_REVIEWERS=4/);
   assert.match(explicit.status.delegationLimits.attention[1], /GRAPHYARD_MAX_REVIEWERS=2 no longer covers/);
   // Only adding a principal beyond the explicit limit is refused, naming the variable and the value to set.
-  assert.throws(() => server(new Engine(store, [15368], 120, 'owner/project'), [...credentials, credential({ id: 'fifth', role: 'producer' })], null, undefined, { env: { GRAPHYARD_MAX_REVIEWERS: '2' }, knownPrincipals: known }),
+  assert.throws(() => server(new Engine(store, [15368], 120, 'owner/project'), [...credentials, credential({ id: 'fifth', role: 'producer', proofs: ['unit:*'] })], null, undefined, { env: { GRAPHYARD_MAX_REVIEWERS: '2' }, knownPrincipals: known }),
     /Independent review\/proof agent limit exceeded: 5\/2; set GRAPHYARD_MAX_REVIEWERS=5 on the deployment before adding fifth/);
   // With the variable unset the fifth principal derives a wider limit and only drift is reported.
-  const widened = await start([...credentials, credential({ id: 'fifth', role: 'producer' })], {}, known);
+  const widened = await start([...credentials, credential({ id: 'fifth', role: 'producer', proofs: ['unit:*'] })], {}, known);
   assert.equal(widened.services.limits.maxReviewers, 5);
   assert.match(widened.status.delegationLimits.attention[0], /Set GRAPHYARD_MAX_REVIEWERS=5/);
   // Set as the drift asks, nothing needs attention.
-  const covered = await start([...credentials, credential({ id: 'fifth', role: 'producer' })], { GRAPHYARD_MAX_REVIEWERS: '5' }, known);
+  const covered = await start([...credentials, credential({ id: 'fifth', role: 'producer', proofs: ['unit:*'] })], { GRAPHYARD_MAX_REVIEWERS: '5' }, known);
   assert.deepEqual(covered.status.delegationLimits.attention, []);
 });

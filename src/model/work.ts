@@ -112,7 +112,7 @@ export interface Principal {
   // cover it: recording provider deployments requires this explicit per-provider
   // scope, so a build or test collector cannot forge production-delivery history.
   deploymentProviders?: string[];
-  slice?: SliceId; sessionKind?: 'human' | 'ai';
+  slice?: SliceId; sessionKind?: 'human' | 'ai'; grants?: string[]; // GY-1879: lane grants (server/principals.ts), never proof authority
   capabilities?: OperatorCapability[];
   scope?: { repositories: string[]; workItems: string[] };
   [operatorCredentialHash]?: string;
