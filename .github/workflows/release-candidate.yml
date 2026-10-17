@@ -248,6 +248,47 @@ jobs:
           done
       - name: Install, exercise, upgrade and restore on a real cluster
         run: bash deploy/helm/exercise.sh "graphyard:$(node -p "require('./package.json').version")"
+  upgrade:
+    name: upgrade an install of the previous stable release
+    needs: candidate
+    if: needs.candidate.outputs.sha != ''
+    env:
+      CANDIDATE_SHA: ${{ needs.candidate.outputs.sha }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    # GY-1963 (docs/delivery.md#release-candidates): the previous `stable` release is installed with the compose
+    # provider in a scratch directory, given an item, a lease and a decision through its CLI, and
+    # upgraded with its own `graphyard upgrade --to` to the candidate, built here under the date version
+    # promotion would give it; the item, its history and the decision must read back unchanged, /healthz
+    # must report the candidate, the loop must run a cycle and the generated workflows must pin the
+    # candidate. With no previous stable release the step records a skip (result=skipped), never a pass.
+    # Promote needs this job. No GitHub credential reaches either release's CLI.
+    outputs:
+      result: ${{ steps.gate.outputs.result }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ env.CANDIDATE_SHA }}', fetch-depth: 0, persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24', cache: npm }
+      - run: npm ci
+      - name: Pull Docker Hub images through the registry mirror
+        shell: bash
+        env:
+          DOCKER_HUB_IMAGES: node:24-bookworm-slim postgres:17-alpine
+        run: |
+          set -euo pipefail
+          { sudo cat /etc/docker/daemon.json 2>/dev/null || echo '{}'; } | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' > "$RUNNER_TEMP/daemon.json"
+          sudo install -m 0644 "$RUNNER_TEMP/daemon.json" /etc/docker/daemon.json
+          sudo systemctl restart docker
+          mirrors="$(docker info --format '{{json .RegistryConfig.Mirrors}}')"
+          [[ $mirrors == *'https://mirror.gcr.io'* ]] || { echo '::error::the Docker daemon is not using the registry mirror' >&2; exit 1; }
+          for image in $DOCKER_HUB_IMAGES; do
+            docker pull --quiet "mirror.gcr.io/library/$image"
+            docker tag "mirror.gcr.io/library/$image" "$image"
+          done
+      - name: Upgrade an install of the previous stable release to the candidate with its work intact
+        id: gate
+        run: node --import tsx scripts/upgrade-from-stable.mjs --previous stable --candidate "$CANDIDATE_SHA" --work "$RUNNER_TEMP/upgrade" --report "$RUNNER_TEMP/upgrade-report.json"
   uat:
     needs: [candidate, container-acceptance, container-recovery, chart]
     # Runs once the container and chart jobs finish, passed or not, so their verdicts join the
@@ -383,8 +424,9 @@ jobs:
           GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
           GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
   promote:
-    needs: [candidate, uat, imports]
-    if: needs.uat.result == 'success' && (github.event_name == 'schedule' || inputs.promote)
+    # The upgrade gate passed, or recorded a skip because no previous stable release exists yet.
+    needs: [candidate, uat, imports, upgrade]
+    if: needs.uat.result == 'success' && needs.upgrade.result == 'success' && (github.event_name == 'schedule' || inputs.promote)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
