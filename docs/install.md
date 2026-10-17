@@ -65,7 +65,7 @@ Price: `--confirm-price`/`--max-monthly`; saved Apps (`--github-app FILE`/this i
 
 ## Upgrading an existing installation
 
-`graphyard upgrade [--to VERSION|stable] [--plan]`: records release, then checkout+`npm ci`/backup/redeploy/loop+executor restart/`init --scan --apply`/`/healthz`; refuses older schema generations; failures name step/rollback. Beside `.graphyard/github-app.json`, `node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600` until `appPermissions.missing` empties. `--apply` fixes `delegationLimits` drift (`Set GRAPHYARD_MAX_REVIEWERS=N`), undeclared `sessionKind`.
+`graphyard upgrade [--to VERSION|stable] [--plan]`: needs `DATABASE_URL`+`GRAPHYARD_URL`, records release, then checkout+`npm ci`/backup/recorded-roster redeploy/loop+executor restart/rescan+apply/healthy `/healthz`; refuses older schemas; failures name step/rollback (roll-forward once migrated). Beside `.graphyard/github-app.json`, `node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600` until `appPermissions.missing` empties. `--apply` fixes `delegationLimits` drift (`Set GRAPHYARD_MAX_REVIEWERS=N`), undeclared `sessionKind`.
 
 ## Failure handling
 

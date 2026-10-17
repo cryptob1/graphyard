@@ -21,7 +21,11 @@ export interface UpgradeInputs {
   databaseSchema: number | null;
   install: InstallRecord | null; url: string | null; backupFile: string;
 }
-export interface UpgradePlan { from: Release; to: UpgradeTarget; databaseSchema: number | null; steps: UpgradeStep[]; rollback: string }
+export interface UpgradePlan {
+  from: Release; to: UpgradeTarget; databaseSchema: number | null; steps: UpgradeStep[]; rollback: string;
+  /** When the target migrates the database: what a failure at or after the redeploy names instead of the rollback, which the migrated database would refuse. */
+  rollforward: string | null;
+}
 
 const cli = (root: string, ...args: string[]) => ['node', JSON.stringify(join(root, 'bin/graphyard.mjs')), ...args].join(' ');
 
@@ -40,17 +44,22 @@ export function upgradePlan(inputs: UpgradeInputs): UpgradePlan {
   if (target.schema !== null && databaseSchema !== null && target.schema < databaseSchema)
     throw new Error(`Refusing ${target.version}: its schema generation ${target.schema} is older than the database's (${databaseSchema}); that release would refuse this database. Upgrade to a release at generation ${databaseSchema} or newer`);
   const image = `${imageRepository}:${target.version}`;
-  const redeploy = inputs.install ? cli(cliRoot, 'install', ...redeployArguments(inputs.install, image)) : `no install record for this repository: redeploy ${image} by hand`;
+  // The install preview runs first, so the redeploy prints what it changes before it applies it.
+  const install = inputs.install && redeployArguments(inputs.install, image);
+  const redeploy = install ? `${cli(cliRoot, 'install', ...install.slice(0, -1), '--plan')} && ${cli(cliRoot, 'install', ...install)}` : `no install record for this repository: redeploy ${image} by hand`;
+  const url = inputs.url ? ['--url', inputs.url] : [];
   const steps: UpgradeStep[] = [
     { id: 'checkout', title: `Check out ${target.version} (${target.revision.slice(0, 12)}) detached in the CLI checkout`, command: `git -C ${JSON.stringify(cliRoot)} checkout --detach ${target.revision}` },
     { id: 'npm-ci', title: 'Install the dependencies the target\'s lockfile names', command: `npm ci --prefix ${JSON.stringify(cliRoot)}` },
     { id: 'backup', title: `Back up the database at generation ${databaseSchema ?? 'unknown'} (DATABASE_URL) before the server migrates it`, command: `graphyard db backup ${inputs.backupFile}` },
     { id: 'redeploy', title: `Redeploy the server at ${image} through the install adapter`, command: redeploy },
     { id: 'restart', title: 'Restart the master loop and this host\'s executors on the target code', command: `${cli(cliRoot, 'master', 'restart')} && ${cli(cliRoot, 'master', 'executors', 'restart', '--all')}` },
-    { id: 'refresh', title: 'Refresh the generated workflows and the AGENTS.md managed block', command: cli(cliRoot, 'init', '--scan', '--apply', ...(inputs.url ? ['--url', inputs.url] : [])) },
-    { id: 'health', title: `Check that /healthz reports ${target.version}`, command: `GET ${inputs.url ?? 'GRAPHYARD_URL'}/healthz` },
+    { id: 'refresh', title: 'Refresh the generated workflows and the AGENTS.md managed block', command: `${cli(cliRoot, 'init', '--scan', ...url)} && ${cli(cliRoot, 'init', '--scan', '--apply', ...url)}` },
+    { id: 'health', title: `Check that /healthz answers healthy at ${target.version}`, command: `GET ${inputs.url ?? 'GRAPHYARD_URL'}/healthz` },
   ];
-  return { from: inputs.current, to: target, databaseSchema, steps, rollback: rollbackCommand(inputs.current, cliRoot) };
+  const migrates = target.schema !== null && databaseSchema !== null && target.schema > databaseSchema;
+  return { from: inputs.current, to: target, databaseSchema, steps, rollback: rollbackCommand(inputs.current, cliRoot),
+    rollforward: migrates ? `the server migrates the database from generation ${databaseSchema} to ${target.schema} when it redeploys, and ${inputs.current.version} refuses it after that: fix the failing step and rerun graphyard upgrade --to ${target.version}, or restore ${inputs.backupFile} with graphyard db restore into an empty database migrated by ${inputs.current.version} before rolling back` : null };
 }
 
 export interface UpgradeEffects {
@@ -59,6 +68,7 @@ export interface UpgradeEffects {
   run(step: UpgradeStep): Promise<void>;
 }
 export type UpgradeResult = { ok: true; steps: UpgradeStepId[] } | { ok: false; steps: UpgradeStepId[]; failed: UpgradeStepId; error: string; rollback: string };
+const migratedFrom: UpgradeStepId[] = ['redeploy', 'restart', 'refresh', 'health'];
 
 /** Run the plan's steps in order, stopping at the first that fails with its name and the rollback command. */
 export async function runUpgrade(plan: UpgradePlan, effects: UpgradeEffects): Promise<UpgradeResult> {
@@ -67,7 +77,7 @@ export async function runUpgrade(plan: UpgradePlan, effects: UpgradeEffects): Pr
   const done: UpgradeStepId[] = [];
   for (const step of plan.steps) {
     try { await effects.run(step); } catch (error: any) {
-      return { ok: false, steps: done, failed: step.id, error: String(error?.message ?? error), rollback: plan.rollback };
+      return { ok: false, steps: done, failed: step.id, error: String(error?.message ?? error), rollback: plan.rollforward && migratedFrom.includes(step.id) ? plan.rollforward : plan.rollback };
     }
     done.push(step.id);
   }
@@ -128,16 +138,23 @@ function liveEffects(inputs: UpgradeInputs, recordFile: string): UpgradeEffects 
         finally { await store.close(); }
       } else if (step.id === 'health') {
         if (!inputs.url) throw new Error('Set GRAPHYARD_URL so the upgrade can read /healthz');
-        const body = await (await fetch(`${inputs.url}/healthz`, { signal: AbortSignal.timeout(10_000) })).json() as { version?: unknown };
-        if (body.version !== inputs.target.version) throw new Error(`/healthz reports ${String(body.version)}, not ${inputs.target.version}`);
+        healthVerdict(await fetch(`${inputs.url}/healthz?strict`, { signal: AbortSignal.timeout(10_000) }), inputs.target.version);
       } else if (step.id === 'redeploy' && !inputs.install) throw new Error(step.command);
       else shell(step.command, step.id === 'checkout' || step.id === 'npm-ci' ? inputs.cliRoot : inputs.repoRoot);
     },
   };
 }
 
+/** The health step passes only on a successful answer whose verdict is healthy at the target version. */
+export async function healthVerdict(response: Pick<Response, 'ok' | 'status' | 'json'>, version: string) {
+  if (!response.ok) throw new Error(`/healthz answered HTTP ${response.status}`);
+  const body = await response.json() as { ok?: unknown; healthy?: unknown; version?: unknown; causes?: unknown };
+  if (body.ok !== true || body.healthy !== true) throw new Error(`/healthz reports the server unhealthy${Array.isArray(body.causes) && body.causes.length ? `: ${body.causes.join('; ')}` : ''}`);
+  if (body.version !== version) throw new Error(`/healthz reports ${String(body.version)}, not ${version}`);
+}
+
 export const renderPlan = (plan: UpgradePlan) => [`upgrade ${plan.from.version} -> ${plan.to.version} (schema ${plan.to.schema ?? 'unknown'}; database ${plan.databaseSchema ?? 'unknown'})`,
-  ...plan.steps.map((step, index) => `${index + 1}. ${step.id.padEnd(8)} ${step.title}\n   ${step.command}`), `rollback: ${plan.rollback}`].join('\n');
+  ...plan.steps.map((step, index) => `${index + 1}. ${step.id.padEnd(8)} ${step.title}\n   ${step.command}`), `rollback: ${plan.rollback}`, ...(plan.rollforward ? [`from the redeploy on: ${plan.rollforward}`] : [])].join('\n');
 
 export const upgradeCommands = defineCommands([{
   name: 'upgrade',
@@ -165,6 +182,9 @@ export const upgradeCommands = defineCommands([{
     const plan = upgradePlan(inputs);
     console.log(renderPlan(plan));
     if (flags.includes('--plan')) return;
+    // Every precondition a later step needs is checked before the record and the checkout move.
+    if (!process.env.DATABASE_URL) throw new Error('Set DATABASE_URL to the Graphyard database so the upgrade can back it up before the server migrates it; nothing was changed');
+    if (!url) throw new Error('Set GRAPHYARD_URL so the upgrade can read /healthz after the redeploy; nothing was changed');
     const result = await runUpgrade(plan, liveEffects(inputs, join(repoRoot, '.graphyard', 'upgrade.json')));
     if (result.ok) { console.log(`upgraded to ${target.version}`); return; }
     process.exitCode = 1;

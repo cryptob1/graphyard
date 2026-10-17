@@ -213,15 +213,21 @@ export function installRequestFromArgs(args: string[]) {
 
 /**
  * The `install` flags that redeploy a recorded installation's server at `image` (GY-1962, `graphyard
- * upgrade`): its repository, provider or target, base branch, service, domain and host, so the
- * existing adapter path redeploys what the record names and nothing else.
+ * upgrade`): its repository, provider or target, base branch, service, domain and host, and the
+ * choices the record carries — its installer-created workers and producer grants, review policy,
+ * no-App or observation-only mode — so the full apply plans the roster it has and revokes nothing.
+ * An installation with no installer-created worker was applied with --observe-only.
  */
 export function redeployArguments(record: InstallRecord, image: string) {
   const host = record.deployment;
+  const installer = record.principals.filter(principal => principal.source !== 'principal');
+  const workers = installer.filter(principal => principal.role === 'worker' && principal.id.startsWith(`${record.installId}-worker-`)).length;
+  const proofs = installer.find(principal => principal.role === 'producer' && principal.id === `${record.installId}-ci`)?.proofs ?? [];
+  const mode = !workers ? ['--observe-only'] : ['--workers', String(workers), ...proofs.flatMap(proof => ['--producer-proof', proof]), ...(record.noGithubApp ? ['--no-github-app'] : [])];
   return ['--repo', record.repository, ...(record.selfContained ? ['--target', record.provider === 'hetzner' ? 'hetzner' : 'host'] : ['--provider', record.provider]),
     '--base-branch', record.baseBranch, ...(record.service ? ['--server-name', record.service] : []), ...(record.domain ? ['--domain', record.domain] : []),
     ...(host?.sshHost ? ['--ssh-host', host.sshHost, '--ssh-user', host.sshUser] : []), ...(host?.port ? ['--port', String(host.port)] : []),
-    ...(host?.local ? ['--local'] : []), '--image', image, '--apply'];
+    ...(host?.local ? ['--local'] : []), '--review-policy', record.reviewPolicy, ...mode, '--image', image, '--apply'];
 }
 
 function restoreRequest(values: Record<string, string | boolean | string[] | undefined>): InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice & FreshCursorChoice & RestoreProtectionChoice {
