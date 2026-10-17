@@ -95,19 +95,25 @@ export function ghMergeQueueTransport(repository: string, base: string, run: Pro
   };
 }
 /**
- * Every pull request the control plane's open work items hold, deduplicated across candidate and
- * submission and ordered by number: what `master withdraw` reads and takes back (GY-1871). A
- * settled item (`done`: delivered, or closed without delivery) holds no merge intent, so its pull
- * requests are never read — the snapshot keeps every settled delivery's PR numbers, and re-probing
- * the whole ledger would spend the operator's GitHub budget on PRs that can never be queued again.
- * For the open items' PRs GitHub decides each one's state, so a merged or closed pull request
- * reads as `none` and is left untouched.
+ * Every pull request the control plane's work items may still hold on GitHub, deduplicated across
+ * candidate and submission and ordered by number: what `master withdraw` reads and takes back
+ * (GY-1871). A delivered item's pull request merged, so it is never read — the snapshot keeps every
+ * settled delivery's PR numbers, and re-probing the whole ledger would spend the operator's GitHub
+ * budget on PRs that can never be queued again. A closed item (`done` with a `closure`) is read
+ * unless GitHub reported its pull request merged or the closure already closed it: closing clears
+ * the control plane's merge authorization and nothing else, so a PR queued or armed when its item
+ * was closed stays held on GitHub until the loop reconciles it, and this command runs with the loop
+ * stopped. For every PR read GitHub decides the state, so a merged or closed pull request reads as
+ * `none` and is left untouched.
  */
-export function withdrawEntries(work: readonly { key?: string; stage?: string; candidate?: { pr?: number } | null; submission?: { pr?: number } | null }[]): WithdrawEntry[] {
+export function withdrawEntries(work: readonly WithdrawWork[]): WithdrawEntry[] {
   const entries = new Map<number, string | null>();
-  for (const item of work) { if (item.stage === 'done') continue; for (const pr of [item.candidate?.pr, item.submission?.pr]) if (typeof pr === 'number' && Number.isSafeInteger(pr) && pr > 0 && !entries.has(pr)) entries.set(pr, item.key ?? null); }
+  for (const item of work) { if (!mayHoldPullRequest(item)) continue; for (const pr of [item.candidate?.pr, item.submission?.pr]) if (typeof pr === 'number' && Number.isSafeInteger(pr) && pr > 0 && !entries.has(pr)) entries.set(pr, item.key ?? null); }
   return [...entries].map(([pr, key]) => ({ key, pr })).sort((a, b) => a.pr - b.pr);
 }
+type WithdrawWork = { key?: string; stage?: string; candidate?: { pr?: number } | null; submission?: { pr?: number } | null; closure?: { pullRequest?: { outcome?: string } | null } | null; observation?: { merged?: boolean } | null };
+/** Open, or closed without GitHub having merged or the closure having closed its pull request. */
+const mayHoldPullRequest = (item: WithdrawWork) => item.stage !== 'done' || !!item.closure && !item.observation?.merged && !/^(closed|already-closed)$/.test(item.closure.pullRequest?.outcome ?? '');
 /** Launch profiles, the master session, reviewer launches, and GitHub administration through the operator. */
 export async function fleetCommand(session: MasterSession): Promise<unknown> {
   const { id, args, print, root, master, masterApi, masterMutation, coordinator, cli } = session;
@@ -167,8 +173,11 @@ export async function fleetCommand(session: MasterSession): Promise<unknown> {
   if (id === 'withdraw') {
     const { values } = parseArgs({ args, options: { repo: { type: 'string' }, apply: { type: 'boolean' }, json: { type: 'boolean' }, 'admin-token-stdin': { type: 'boolean' } }, allowPositionals: false });
     if (!values['admin-token-stdin']) throw new Error('Withdrawing the merge intent is operator-only: pipe an admin credential to graphyard master withdraw [--repo OWNER/NAME] [--apply] [--json] --admin-token-stdin (without --apply the plan prints and nothing is written)');
+    // The pull request numbers come from this control plane's work, so the only repository they
+    // can be taken back from is the one it manages: --repo confirms it and never redirects the
+    // writes to another repository whose same-numbered pull requests Graphyard never enqueued.
     const repository = values.repo?.trim() || master.repository;
-    if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error(`${repository} does not name a repository as OWNER/NAME`);
+    if (repository.toLowerCase() !== master.repository.toLowerCase()) throw new Error(`master withdraw takes back the merge intent of the managed repository ${master.repository} only; --repo ${repository} names another repository, whose pull requests this control plane never enqueued`);
     const actor = (await masterApi('status', await readSecretFromStdin(10_000))).actor;
     const entries = withdrawEntries((await masterApi('work-snapshot')).work);
     const report = await withdrawEnqueuedPullRequests(ghMergeQueueTransport(repository, master.baseBranch), entries, actor, !!values.apply);

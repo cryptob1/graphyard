@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GitHub, withdrawEnqueuedPullRequests } from '../src/github.js';
-import { ghMergeQueueTransport, withdrawEntries } from '../src/cli/master/fleet.js';
+import { fleetCommand, ghMergeQueueTransport, withdrawEntries } from '../src/cli/master/fleet.js';
+import type { MasterSession } from '../src/cli/master/session.js';
 
 // GY-1871: `master withdraw` is the operator's take-back of Graphyard's merge intent on a managed
 // repository: every pull request a work item enqueued (merge queue) or armed (auto-merge) is taken
@@ -146,15 +147,27 @@ test('unit:withdraw-gh-transport-reads-the-recorded-envelope — the real gh pat
   assert.match(failed.rows[0].result, /GitHub refused the GraphQL read: Bad credentials/);
 });
 
-test('unit:withdraw-collects-work-prs — the pull requests withdrawn are every distinct pull request the control plane\u2019s open work items hold, deduplicated and ordered; a settled item\u2019s pull requests are never read', () => {
+test('unit:withdraw-collects-work-prs — the pull requests withdrawn are every distinct pull request the control plane\u2019s open items hold plus a closed item\u2019s GitHub has not merged, deduplicated and ordered; a delivered item\u2019s and a closed-and-merged item\u2019s are never read', () => {
   const work = [
     { key: 'GY-22', stage: 'merge', candidate: { pr: 22 }, submission: { pr: 22 } },
     { key: 'GY-11', stage: 'review', candidate: { pr: 11 }, submission: null },
     { key: 'GY-33', stage: 'build', candidate: null, submission: { pr: 33 } },
     { key: 'GY-7', stage: 'ready', candidate: null, submission: null },
     { key: 'GY-9', stage: 'backlog', candidate: { pr: 0 }, submission: { pr: null } },
-    { key: 'GY-5', stage: 'done', candidate: { pr: 44 }, submission: { pr: 55 } },
-    { key: 'GY-3', stage: 'done', candidate: { pr: 66 }, submission: null },
+    // Delivered: merged, so never read.
+    { key: 'GY-5', stage: 'done', candidate: { pr: 44 }, submission: { pr: 55 }, delivery: { sha: 'd'.repeat(40) } },
+    { key: 'GY-3', stage: 'done', candidate: { pr: 66 }, submission: null, observation: { merged: true } },
+    // Closed while its pull request may still be queued or armed: read, so a take-back reaches it.
+    { key: 'GY-2', stage: 'done', candidate: { pr: 77 }, submission: null, closure: { kind: 'obsolete' }, observation: { merged: false } },
+    // Closed, but GitHub merged it or the closure already closed it: never read.
+    { key: 'GY-1', stage: 'done', candidate: { pr: 88 }, submission: null, closure: { kind: 'superseded' }, observation: { merged: true } },
+    { key: 'GY-4', stage: 'done', candidate: { pr: 99 }, submission: null, closure: { kind: 'delivered-observation', pullRequest: { pr: 99, outcome: 'closed' } } },
   ];
-  assert.deepEqual(withdrawEntries(work as never), [{ key: 'GY-11', pr: 11 }, { key: 'GY-22', pr: 22 }, { key: 'GY-33', pr: 33 }], 'the delivered and closed items\u2019 pull requests are collected for no read');
+  assert.deepEqual(withdrawEntries(work as never), [{ key: 'GY-11', pr: 11 }, { key: 'GY-22', pr: 22 }, { key: 'GY-33', pr: 33 }, { key: 'GY-2', pr: 77 }], 'the delivered, merged and closed-on-GitHub items\u2019 pull requests are collected for no read');
+});
+
+test('unit:withdraw-binds-to-the-managed-repository — --repo naming any repository but the one the control plane manages is refused before any read, since the pull request numbers are this control plane\u2019s', async () => {
+  const session = { id: 'withdraw', args: ['--repo', 'other/project', '--admin-token-stdin'], master: { repository: 'owner/project', baseBranch: 'main' },
+    masterApi: async () => { throw new Error('nothing is read for a foreign repository'); }, print: (value: unknown) => value } as unknown as MasterSession;
+  await assert.rejects(fleetCommand(session), /managed repository owner\/project only; --repo other\/project names another repository/);
 });

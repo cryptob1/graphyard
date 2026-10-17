@@ -19,7 +19,7 @@ On worker, `graphyard master settle-containment GY-N "reason"` verifies nothing 
 
 ## Submitted implementation needs rework
 
-Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits. `scripts/rework-causes.mjs` classifies last 100 deliveries' rounds; `master status` `speed.reworkRounds.ownChange` excludes out-of-item causes.
+Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits. `scripts/rework-causes.mjs` classifies last 100 deliveries' rounds; `speed.reworkRounds.ownChange` excludes out-of-item causes.
 
 ## Retro synthesis
 
@@ -98,7 +98,7 @@ Ungated merges: permanent violations (never backfilled): repair access, file fol
 
 ## Merge-intent withdrawal
 
-`graphyard master withdraw [--repo OWNER/NAME] [--apply] [--json] --admin-token-stdin` (admin; stop the loop first) dequeues or disarms auto-merge on each open item's pull request via `gh`, reporting number, head, prior mode, result; `none` rows untouched, so reruns write nothing; failed rows exit 1. Without `--apply`: the plan.
+`graphyard master withdraw [--repo OWNER/NAME] [--apply] [--json] --admin-token-stdin` (admin; loop stopped; `--repo` only the managed repository) dequeues or disarms each open or closed-unmerged item's pull request via `gh`, reporting number, head, prior mode, result; `none` rows untouched, so reruns write nothing; failed rows exit 1; without `--apply`, the plan.
 
 ## Credentials
 
