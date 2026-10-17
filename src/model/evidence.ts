@@ -80,6 +80,15 @@ export interface Evidence {
   attestation?: EvidenceAttestation;
 }
 export interface EvidenceAttestation { decision: string; requestedBy: string; approvedBy: string }
+
+/**
+ * GY-1842: the evidence links of one imported external case as artifacts. Every link is a public
+ * external location, so none is ever treated as trusted proof — `availability: 'external'` keeps
+ * the rule EvidenceArtifact states — they only say where the producer's own record of the case lives.
+ */
+export function importedEvidenceArtifacts(links: readonly string[]): EvidenceArtifact[] {
+  return links.map(url => ({ kind: 'report', label: 'imported case evidence', availability: 'external', url }));
+}
 export interface ProofExercise {
   /**
    * The criterion the proof is attached to, e.g. `AC-1`; an inherited obligation is `KEY AC-n`.
