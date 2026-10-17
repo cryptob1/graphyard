@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 5 | loop, merges. -->
 # Master-agent operating mode
 
-The master (`coordinator`) routes and administers GitHub unasked, never implementing, reviewing or proving; it no longer hand-decomposes goals ([goal pipeline](how-graphyard-works.md#from-goal-to-work-items)). It decides all but [human-only](glossary.md#1-human-operator-human-authority) choices. `master guide` prints its role instructions, then this page; AGENTS.md carries the worker block.
+The master (`coordinator`) routes and administers GitHub unasked, never implementing, reviewing or proving; it no longer hand-decomposes goals ([goal pipeline](how-graphyard-works.md#from-goal-to-work-items)). Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); it decides the rest. `master guide` prints its role instructions, then this page; AGENTS.md carries the worker block.
 
 ## Operate
 
@@ -9,7 +9,7 @@ Keep cycling: `master status`; `master run` dispatches; merge gate-passing candi
 
 `master restart` (stalled loop) runs `systemctl --user restart graphyard-master.service` if the [unit](onboarding.md#the-loop-must-be-supervised)'s ExecStart is node `cliPath` (or pin) `master run`, else detached; never from [dirty/non-forward checkouts](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level). [Confined](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level): a loop request.
 
-**Cycle cadence.** Loop sleeps `run.intervalSeconds` (≤30s if actionable).
+Loop sleeps `run.intervalSeconds` (≤30s if actionable).
 
 ### System-driven items
 

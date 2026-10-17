@@ -1,8 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { externalRunFormat, importExternalRun } from '../src/runner-report.js';
-import { importedEvidenceArtifacts } from '../src/model/evidence.js';
-import { importedRunVerdict, releaseVerdict, type CaseOutcome, type CaseVerdict, type FlakyAcceptance } from '../src/e2e/runner.js';
+import type { CaseOutcome, CaseVerdict, FlakyAcceptance } from '../src/e2e/runner.js';
 
 // GY-1842: an external test system hands a whole run in through one documented format
 // (`graphyard-external-run-v1`, docs/validation.md). The import keeps every verdict as the
@@ -11,10 +9,23 @@ import { importedRunVerdict, releaseVerdict, type CaseOutcome, type CaseVerdict,
 // runner's own result would: a required failed, blocked or unrun case blocks, flaky follows the
 // existing flaky rule, optional cases never block.
 
+/**
+ * The modules under test, imported inside each test so that run against a tree without the import
+ * (graphyard verify's exercise) each case fails on its own assertion instead of the file failing to load.
+ */
+const load = async () => {
+  const [report, evidence, runner] = await Promise.all([import('../src/runner-report.js'), import('../src/model/evidence.js'), import('../src/e2e/runner.js')]);
+  const { importExternalRun } = report;
+  /** The hand-in with every case required, or the named cases; `over` replaces run-level fields. */
+  const allRequired = (cases: readonly Record<string, unknown>[] = handIn.cases, over: Record<string, unknown> = {}) =>
+    importExternalRun({ ...handIn, ...over, cases: cases.map(entry => ({ ...entry, required: true })) });
+  return { importExternalRun, importedEvidenceArtifacts: evidence.importedEvidenceArtifacts, importedRunVerdict: runner.importedRunVerdict, releaseVerdict: runner.releaseVerdict, allRequired };
+};
+
 const sha = 'a'.repeat(40), digest = `sha256:${'b'.repeat(64)}`;
 const reason = 'the payment sandbox was unreachable, so the case precondition never held';
 const handIn = {
-  format: externalRunFormat,
+  format: 'graphyard-external-run-v1',
   producer: 'huck-engineer',
   sha,
   cases: [
@@ -25,11 +36,9 @@ const handIn = {
     { id: 'profile-avatar', verdict: 'unrun', attempts: 0, durationMs: 0 },
   ],
 };
-/** The hand-in with every case required, or the named cases; `over` replaces run-level fields. */
-const allRequired = (cases: readonly Record<string, unknown>[] = handIn.cases, over: Record<string, unknown> = {}) =>
-  importExternalRun({ ...handIn, ...over, cases: cases.map(entry => ({ ...entry, required: true })) });
 
-test('unit:external-results-imported — an imported run keeps every verdict as the producer gave it, blocked with its reason, and names the head or digest it tested', () => {
+test('unit:external-results-imported — an imported run keeps every verdict as the producer gave it, blocked with its reason, and names the head or digest it tested', async () => {
+  const { importExternalRun } = await load();
   const imported = importExternalRun({ ...handIn, digest, environment: 'uat', runId: 'he-run-7', cases: handIn.cases.map(entry => ({ ...entry, required: true, evidence: ['https://artifacts.example.test/trace.zip'] })) });
   assert.deepEqual(imported.cases.map(entry => [entry.id, entry.verdict]),
     [['checkout-guest', 'passed'], ['search-facet', 'failed'], ['win-tic-tac-toe', 'flaky'], ['checkout-card', 'blocked'], ['profile-avatar', 'unrun']], 'every verdict is preserved as given');
@@ -53,7 +62,8 @@ test('unit:external-results-imported — an imported run keeps every verdict as 
   assert.notEqual(importExternalRun(handIn).runId, importExternalRun({ ...handIn, cases: [handIn.cases[0]] }).runId);
 });
 
-test('unit:external-results-imported — the import refuses what it does not understand: unknown verdict, blocked without its reason, neither head nor digest, unknown fields, bad links', () => {
+test('unit:external-results-imported — the import refuses what it does not understand: unknown verdict, blocked without its reason, neither head nor digest, unknown fields, bad links', async () => {
+  const { importExternalRun } = await load();
   // The format literal is refused, not sniffed; unknown fields are refused.
   assert.throws(() => importExternalRun({ ...handIn, format: 'graphyard-playwright-v1' }));
   assert.throws(() => importExternalRun({ ...handIn, extra: true }));
@@ -70,7 +80,8 @@ test('unit:external-results-imported — the import refuses what it does not und
   assert.throws(() => importExternalRun({ ...handIn, cases: [{ id: 'c', verdict: 'passed', attempts: 1, durationMs: 1, extra: 1 }] }));
 });
 
-test('unit:external-results-imported — a required failed, blocked or unrun case blocks exactly as the runner\'s own result would, and flaky follows the existing flaky rule', () => {
+test('unit:external-results-imported — a required failed, blocked or unrun case blocks exactly as the runner\'s own result would, and flaky follows the existing flaky rule', async () => {
+  const { importExternalRun, importedRunVerdict, releaseVerdict, allRequired } = await load();
   const imported = allRequired();
   const verdict = importedRunVerdict(imported);
   assert.equal(verdict.passed, false);
@@ -103,7 +114,8 @@ test('unit:external-results-imported — a required failed, blocked or unrun cas
   assert.equal(importedRunVerdict(importExternalRun({ ...handIn, cases: [{ id: 'checkout-guest', verdict: 'passed', attempts: 1, durationMs: 1, required: true }] })).passed, true);
 });
 
-test('unit:external-results-imported — a blocking case carries its evidence links as external artifacts, which are never trusted proof', () => {
+test('unit:external-results-imported — a blocking case carries its evidence links as external artifacts, which are never trusted proof', async () => {
+  const { importedEvidenceArtifacts, importedRunVerdict, allRequired } = await load();
   const imported = allRequired([{ id: 'search-facet', verdict: 'failed', attempts: 1, durationMs: 5, evidence: ['https://artifacts.example.test/search-facet/trace.zip', 'https://logs.example.test/search-facet'] }]);
   const verdict = importedRunVerdict(imported);
   assert.deepEqual(verdict.blocking, [{
