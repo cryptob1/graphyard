@@ -205,5 +205,12 @@ test('unit:other-principal-roles-retain-intended-behaviour — a lane producer l
     assert.match(String((await at.ask('GET', 'validation', granted)).body?.error), laneRefusal, 'with its proofs revoked it is a lane producer again');
     const reopened = await at.ask('POST', `proof-grants/${alsoGranted.id}/grant`, admin, { patterns: ['e2e:*'], reason: 'the slot is free again' });
     assert.equal(reopened.status, 200, JSON.stringify(reopened.body));
+    // A producer seeded with both proofs and the import grant: once the seed is fully revoked in the
+    // grant store, effective authority is empty and it is re-confined — including on public /api/ routes.
+    assert.equal((await at.ask('GET', 'validation', proofProducer)).status, 200, 'seeded proofs still authorize before revoke');
+    const seedRevoke = await at.ask('POST', `proof-grants/${proofProducer.id}/revoke`, admin, { patterns: ['unit:*'], reason: 'revoke the environment seed' });
+    assert.equal(seedRevoke.status, 200, JSON.stringify(seedRevoke.body));
+    assert.match(String((await at.ask('GET', 'validation', proofProducer)).body?.error), laneRefusal, 'revoking the seeded proofs re-confines to the import lane');
+    assert.match(String((await at.ask('POST', 'sign-in', proofProducer, {})).body?.error), laneRefusal, 'public routes re-confine after the seed revoke');
   } finally { await at.close(); }
 });

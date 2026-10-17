@@ -5,8 +5,8 @@ import { Refusal, demand, type Principal } from '../model.js';
 import type { GitHub } from '../github.js';
 import { artifactCapacityFromEnv } from '../artifacts.js';
 import { Next, Sent, matchRoute, registerApiRoutes, requestFailure, type RouteContext, type RouteModule } from './routes.js';
-import { assembleServices, authenticate, configuredActor, laneProducerScope, operatorAgentRouteGuard, operatorVisible, refreshDelegationLimits, type ArtifactOptions, type ServerOptions } from './auth.js';
-import { laneOnlyProducer, type Credential } from './principals.js';
+import { assembleServices, authenticate, configuredActor, confinedLaneProducer, laneProducerScope, operatorAgentRouteGuard, operatorVisible, refreshDelegationLimits, type ArtifactOptions, type ServerOptions } from './auth.js';
+import { type Credential } from './principals.js';
 import { healthRoutes } from './routes/health.js';
 import { signinRoutes } from './routes/signin.js';
 import { githubRoutes } from './routes/github.js';
@@ -83,8 +83,9 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
       };
       // A lane-only producer's credential is held to its lane before any public /api/ handler runs (GY-1879):
       // sign-in and claim answer it with the lane refusal, while an unauthenticated request reaches them as before.
+      // Effective authority (grant store over the env seed) decides confinement, matching the authenticated guard.
       const lane = url.pathname.startsWith('/api/') ? configuredActor(services, req.headers.authorization) : null;
-      if (!(lane && laneOnlyProducer(lane)) && await dispatch(publicRoutes)) return;
+      if (!(lane && await confinedLaneProducer(services, lane)) && await dispatch(publicRoutes)) return;
       if (url.pathname.startsWith('/api/')) {
         context.actor = await authenticate(services, req.headers.authorization, services.repository, req.method, url.pathname);
         if (await dispatch([laneProducerScope, ...apiRoutes])) return;
