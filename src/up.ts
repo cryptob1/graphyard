@@ -1093,7 +1093,6 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       const directory = deps.installDirectory?.() ?? installDirectory(installIdFor(request.repository));
       const record = await readInstallRecord(directory).catch(() => null);
       const workers = (record?.principals ?? []).filter(principal => principal.role === 'worker');
-      if (!workers.length) throw new UpStop(`accounts: ${directory} records no worker principal to issue, and the profiles write found no worker credential; rerun graphyard install --repo ${request.repository} --apply to record this install, then ${rerun()}`, upExitCodes.failed);
       const issued: string[] = [], missing: string[] = [];
       for (const principal of workers) {
         const file = resolve(directory, 'workers', `${principal.id}.token`);
@@ -1112,8 +1111,9 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
      * GY-1885: the accounts wait settles a role the checklist still holds open. While a profile is
      * missing the line stays open (withWrittenProfiles), so the settle runs inside the wait: a write
      * whose report names refused credentials stops the run naming them and the plane — a sign-in
-     * cannot fix a refused credential. Otherwise the write is handed this install's own worker
-     * identities once, and the next write makes a worker profile from each. The handoff asks for a
+     * cannot fix a refused credential. Otherwise a missing worker profile on a local install is handed
+     * this install's own worker identities once, and the next write makes a worker profile from each;
+     * any other missing profile keeps waiting. The handoff asks for a
      * sign-in only while no account is logged in at all.
      */
     const awaitAccounts = async () => {
@@ -1128,9 +1128,11 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
           if (!profileMissing()) return;
           const refused = refusedCredentials(report);
           if (refused.length) throw new UpStop(`accounts: the control plane at ${await deps.serverUrl().catch(() => null) ?? 'its recorded address'} refuses ${refused.map(entry => entry.file).join(', ')} (${refused.map(entry => String(entry.reason ?? 'refused').split('\n')[0]).join('; ')}), so no worker profile can be written; a sign-in cannot fix this. Reissue this install's worker credentials, then rerun ${rerun()}`, upExitCodes.failed);
-          if (issuedOnce || remoteProfiles) throw new UpStop(`accounts: the profiles write ${remoteProfiles ? `on ${state.identitiesHost ?? 'the host'} found no worker credential to write a worker profile from, and this machine cannot issue the install's worker identities there` : `still wrote no worker profile after this install's worker credentials were issued in ${deps.installDirectory?.() ?? installDirectory(installIdFor(request.repository))}`}; rerun ${rerun()} once that is fixed`, upExitCodes.failed);
-          const files = await issueWorkerCredentials();
+          // Only a missing worker profile is this install's to issue, once, and only where this
+          // machine holds the install directory; anything else keeps waiting as before.
+          if (issuedOnce || remoteProfiles || (writtenProfiles?.workers ?? 0) > 0) return;
           issuedOnce = true;
+          const files = await issueWorkerCredentials();
           if (files.length) deps.emit({ kind: 'note', text: `accounts: issued this install's worker credentials (${files.join(', ')}), so the profiles write makes a worker profile from each.` });
         }, 1);
         if (!waited) return;
