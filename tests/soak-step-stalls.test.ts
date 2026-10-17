@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { emptyDaemonState, runDaemon, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { stepStallSchema } from '../src/daemon/state.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { noteCycleStalls, retainedStepStalls, stallBackoffMs, stallCycleBound, stallHeldEffects, stallSubjectKey, stallWakeSubjects } from '../src/daemon/step-stalls.js';
 import { daemonSummary } from '../src/daemon/run.js';
@@ -98,8 +99,14 @@ interface Day {
   profileWrites: number[];
   /** Each upstream filing ask (GY-1855): when, on which cycle, under which key, with which body. */
   filings: { at: number; cycle: number; key: string; input: StallUpstreamItemInput }[];
+  /** Every closeSession call the day's close step actually made: the pane and the simulated minute it was made at. */
+  closes: { pane: string; at: number }[];
   state: DaemonState;
 }
+
+/** The idle worker sessions a close day lists: the launch profile's own session names with distinct all-digit tags (GY-122), so every close refusal signs the same normalised signature, and a pane of its own for each. */
+const idleWorkerSessions = (count: number): (HerdrAgent & { pane_id: string })[] =>
+  Array.from({ length: count }, (_, index) => ({ name: `agent-worker-a-${String(index + 1).padStart(8, '0')}`, pane_id: `pane-close-${index + 1}`, agent: 'claude', agent_status: 'idle' }));
 
 /**
  * One day of the real loop: runDaemon cycles on the simulated clock until the day is over, its own
@@ -113,6 +120,12 @@ interface Day {
 async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: string; withMergeWriter?: boolean; reclaimFailure?: string;
   /** The merge writer's merger read, made before any merge is admitted, fails this way on every call. */
   mergerFailure?: string;
+  /** Every closeSession call of the day's close step fails this way: one refusal shared by every pane the day lists (GY-1900). */
+  closePaneFailure?: string;
+  /** The idle worker sessions of the launch profile the day lists, all with no active assignment, so the close step sweeps them every cycle. */
+  idleWorkerSessions?: number;
+  /** The day offers no work at all: the dispatcher launches nothing, so the close refusals are the day's only failures. */
+  withoutWork?: boolean;
   /** The day's credential read and launch answer by the worker's credential file: refused (401) until it holds the issued token. */
   credentials?: { coordinator: string; worker: string; good: string };
   /** The cycle's own credential read fails this way on every cycle from `after` milliseconds into the day: the cycle fails before its master-session step. */
@@ -128,7 +141,7 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
     return { coordinator: join(directory, 'coordinator.token'), worker: join(directory, 'worker-a.token') };
   })() : undefined);
   const dayConfig = () => config(files);
-  const result: Day = { cycles: 0, launches: [], landed: [], reclaims: [], mergerReads: [], credentialReads: [], records: [], prompts: [], remedies: [], remedyHistory: [], waits: [], cursorStalls: 'null', cursorMergeWriter: 'null', logs: [], reviewRefusals: [], reviewsLanded: [], profileWrites: [], filings: [], state: emptyDaemonState(dayConfig()) };
+  const result: Day = { cycles: 0, launches: [], landed: [], reclaims: [], mergerReads: [], credentialReads: [], records: [], prompts: [], remedies: [], remedyHistory: [], waits: [], cursorStalls: 'null', cursorMergeWriter: 'null', logs: [], reviewRefusals: [], reviewsLanded: [], profileWrites: [], filings: [], closes: [], state: emptyDaemonState(dayConfig()) };
   // The reviewer profiles the day's configuration carries: the remedy's write adds the asked-for one when the day says it does.
   const reviewers: string[] = [];
   /**
@@ -147,7 +160,7 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
   let now = start;
   let stop = () => {};
   const effects: DaemonEffects = {
-    agents: () => [],
+    agents: () => options.idleWorkerSessions ? idleWorkerSessions(options.idleWorkerSessions) : [],
     herdr: () => ({ agents: [masterSession()], available: true }),
     masterSession: { launch: async () => { throw new Error('the day adopts its master session and never launches one'); }, adopt: async () => null },
     promptSession: async (_agent, text) => { result.prompts.push(text); },
@@ -158,8 +171,8 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
       if (options.credentials && (await readFile(options.credentials.worker, 'utf8')).trim() !== options.credentials.good) throw new Error('Graphyard refused /api/status for worker-a (401): credential not valid');
       return Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }]));
     },
-    snapshot: async () => ({ work: [options.withMergeWriter ? submitted(now) : claimable(now)], now: new Date(now).toISOString() }),
-    closeSession: () => {},
+    snapshot: async () => ({ work: options.withoutWork ? [] : [options.withMergeWriter ? submitted(now) : claimable(now)], now: new Date(now).toISOString() }),
+    closeSession: options.closePaneFailure ? async (pane: string) => { result.closes.push({ pane, at: now - start }); throw new Error(options.closePaneFailure); } : () => {},
     dispatch: async (_work, profile) => {
       result.launches.push(now - start);
       // A launch a standing stall admitted reads its own admission on the cursor: the window it armed was written before the launch was made.
@@ -235,8 +248,9 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
     assert.deepEqual(Object.keys(result.state.actions).filter(key => key.startsWith('isolated:') && !(options.mergerFailure && key === 'isolated:merge:merge writer')), [], `${phase}: no step isolated a failure`);
     // The day's scripted failures are the only ones: the dispatch refusal, the merge record the
     // plane refuses as reused, and the one deployment line an unconfigured endpoint answers with.
-    const scripted = (action: { kind: string; detail: string }) => action.kind === 'dispatch'
-      || (action.kind === 'fault' && !!options.upstreamFailure && action.detail.includes(options.upstreamFailure)) || action.kind === 'merge' || (action.kind === 'reclaim' && !!options.reclaimFailure)
+    const scripted = (action: { kind: string; detail: string }) => action.kind === 'dispatch' || action.kind === 'merge' || (action.kind === 'reclaim' && !!options.reclaimFailure)
+      || (action.kind === 'fault' && !!options.upstreamFailure && action.detail.includes(options.upstreamFailure))
+      || (action.kind === 'close' && !!options.closePaneFailure)
       || (action.kind === 'deployment' && /unverified: not configured/.test(action.detail));
     const failed = Object.values(result.state.actions).filter(action => action.state === 'failed' && !scripted(action));
     assert.deepEqual(failed.map(action => `${action.kind}: ${action.detail}`), [], `${phase}: no step but the day's scripted ones failed`);
@@ -675,3 +689,71 @@ test('unit:soak-step-stalls-upstream-backoff — a day whose upstream filer refu
   assert.equal(row?.attempts, result.filings.length, 'the cursor counts every ask');
   assert.match(stallStatusAttention(result.state, 'graphyard')[0].text, /upstream filing is on its backoff/);
 });
+
+test('unit:soak-step-stalls-overflow-collapse — a day whose pane closes are refused the same way for twelve idle sessions of one profile: the twelve invocations outgrow the bound the run names, so one stall holds every closeSession invocation, the call is made at most once per five minutes across the day\u2019s windows — every pane past the eighth included — the master is woken once, and the persisted run stays within its schema bound', { timeout: 600_000 }, async () => {
+  const result = await runDay({
+    closePaneFailure: 'herdr refused the pane close (503): the pane service is unreachable',
+    idleWorkerSessions: 12, withoutWork: true,
+  });
+  const standing = Object.values(result.state.stepStalls).find(run => run.step === 'close');
+  assert.ok(standing?.stalledAt, 'the day recorded the stall of the refused closes');
+  assert.equal(Object.keys(result.state.stepStalls).length, 1, 'one signature, one run, one stall — twelve panes sign the one normalised refusal');
+  assert.match(standing.signature, /^close: Could not close agent-worker-a-N: herdr refused the pane close \(N\): the pane service is unreachable$/);
+  // The twelve invocations outgrew the bound the list names: the hold is the call's own, one entry
+  // naming no resource, which holds every invocation of closeSession (GY-1900).
+  assert.deepEqual(standing.calls, [{ call: 'closeSession', async: true, resource: null }], 'the full list collapsed to the call\u2019s own hold');
+
+  // Bounded retries, the overflow panes included. The three forming cycles invoke every session —
+  // all twelve, the ones past the eighth included; from the stall on, the real closeSession is
+  // made at most once per five-minute window across all twelve together, and no pane twice in one.
+  const stalledFrom = Date.parse(standing.stalledAt!) - start;
+  const formed = result.closes.filter(close => close.at <= stalledFrom), past = result.closes.filter(close => close.at > stalledFrom);
+  const windows = (dayMs - stalledFrom) / stallBackoffMs;
+  assert.ok(windows >= 10, `the day runs many backoff windows past the stall (${Math.round(windows)})`);
+  const made = (pane: string) => result.closes.filter(close => close.pane === pane);
+  for (const session of idleWorkerSessions(12))
+    assert.equal(made(session.pane_id).filter(close => close.at <= stalledFrom).length, stallCycleBound, `${session.pane_id} is invoked on each forming cycle, the overflow panes included`);
+  assert.equal(formed.length, 12 * stallCycleBound, 'the forming cycles named every pane');
+  assert.ok(afterBound(past, windows), `${past.length} real close calls past the stall over ${result.cycles} cycles and ${Math.round(windows)} windows is one per window, not twelve and not one per cycle`);
+  const gaps = past.slice(1).map((close, index) => close.at - past[index].at);
+  assert.ok(gaps.length >= 3 && gaps.every(gap => gap >= stallBackoffMs), `every real close past the stall waits a full window: ${gaps.map(gap => Math.round(gap / minute)).join(', ')} min`);
+  for (const session of idleWorkerSessions(12)) {
+    const each = made(session.pane_id).filter(close => close.at > stalledFrom);
+    const paneGaps = each.slice(1).map((close, index) => close.at - each[index].at);
+    assert.ok(paneGaps.every(gap => gap >= stallBackoffMs), `no pane is made twice inside a window (${session.pane_id})`);
+    assert.ok(each.length <= 1 + windows, `${session.pane_id} is made ${each.length} time(s) past the stall, never once per cycle`);
+  }
+  // Eleven of the twelve panes are never made again once the stall stands: each window's one
+  // admission is the sweep's first invocation, and the hold covers every other pane with it.
+  const madePast = new Set(past.map(close => close.pane));
+  assert.ok(12 - madePast.size >= 11, `the panes never made past the stall: ${12 - madePast.size} of 12`);
+  // The held cycles count nothing: the count is the forming cycles plus the window attempts whose failures the day recorded.
+  assert.ok(standing.count >= stallCycleBound && standing.count <= stallCycleBound + past.length, `the run counted ${standing.count}: its forming cycles and its window attempts, never its held cycles`);
+
+  // Nothing binds to a pane-service refusal, so no remedy ran, and the master is woken once for
+  // the standing stall, with the signature as the subject — never once per cycle or per attempt.
+  assert.equal(standing.remedy, null, 'no remedy binds to the refusal');
+  assert.ok(result.remedyHistory.every(entry => entry === '[]'), 'the day attempted no remedy');
+  const subject = stallSubjectKey(standing.signature);
+  const stallWakes = result.prompts.filter(prompt => prompt.includes(subject));
+  assert.equal(stallWakes.length, 1, `one wake per run: ${result.prompts.filter(prompt => prompt.includes('stall:')).length} stall prompt(s) over the day`);
+  assert.match(stallWakes[0], /Changed subjects/);
+  assert.match(stallWakeSubjects(result.state, 'graphyard').find(entry => entry.key === subject)!.detail, /close call failed with one signature on 3 consecutive cycles/);
+  const served = daemonSummary(result.state, start + dayMs, interval).stepStalls.find(row => row.subject === subject);
+  assert.equal(served?.needsMaster, true, 'master status serves the stall under the key the wake names');
+
+  // The persisted state the day wrote is the live one, and stays within the schema's bound: the
+  // collapsed list is one entry, far under stepStallSchema.calls.max(8), on the cursor too.
+  assert.deepEqual(JSON.parse(result.cursorStalls), JSON.parse(JSON.stringify(result.state.stepStalls)), 'the persisted stepStalls are the live ones');
+  const persisted = Object.values(JSON.parse(result.cursorStalls) as Record<string, StepStallSchemaRun>);
+  assert.equal(persisted.length, 1);
+  assert.equal(stepStallSchema.parse(persisted[0]).calls.length, 1, 'the persisted run\u2019s held list is the collapsed one');
+});
+
+/** Whether one window's worth of attempts (with slack for the day's boundary) bounds a call's past-stall invocations. */
+function afterBound(past: { at: number }[], windows: number): boolean {
+  return past.length <= 2 + windows;
+}
+
+/** The shape of a persisted stall run the schema parse reads back. */
+type StepStallSchemaRun = Parameters<typeof stepStallSchema.parse>[0];

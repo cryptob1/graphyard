@@ -33,6 +33,8 @@ export const stallBackoffMs = 5 * 60_000;
 export const stallSignatureMax = 800;
 /** The most runs the cursor keeps: a run the current cycle failed in first, then standing stalls, then the newest; a cycle failing more distinct ways than this folds the rest into one overflow run. */
 export const retainedStepStalls = 200;
+/** The most invocations one run's calls list names before its hold becomes each failing call's own (GY-1900): the bound stepStallSchema.calls in ./state.ts keeps. */
+export const stallInvocationBound = 8;
 
 /** Everything that differs between attempts of one cause is taken out of a signature. */
 const uuids = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
@@ -203,7 +205,11 @@ export function callResource(args: readonly unknown[]): string | null {
   return null;
 }
 
-/** Whether a run's held call entry is this invocation: the same call, and the same resource unless the failing invocation named none. */
+/**
+ * Whether a run's held call entry is this invocation: the same call, and the same resource — or
+ * the entry named none, because the failing invocation named none or because the run's full list
+ * collapsed to the call's own hold (GY-1900), which holds every invocation of that call.
+ */
 const sameInvocation = (entry: StepStall['calls'][number], call: string, resource: string | null) =>
   entry.call === call && (entry.resource === null || entry.resource === resource);
 
@@ -235,7 +241,7 @@ export const stallsHolding = (state: DaemonState, call: string, resource: string
  * this invocation's failure stands inside its window, the invocation is held and the hold
  * answered; past the window it is admitted and the admission arms the next window, so the failing
  * invocation is attempted at most once per five minutes. Any other resource of the same call is
- * neither held nor admitted by it.
+ * neither held nor admitted by it — unless the list collapsed to the call's own hold (GY-1900), which holds every invocation of the call.
  */
 export function admitStalledEffect(state: DaemonState, call: string, now: number, resource: string | null = null): StallAdmission {
   const runs = stallsHolding(state, call, resource);
@@ -256,9 +262,10 @@ const callIsAsync = (state: DaemonState, call: string, resource: string | null) 
 
 /**
  * An admitted invocation that answered: it no longer fails, so the runs holding exactly it let it
- * go — another resource of the same call answering lets nothing go — and a run holding no call any
- * more ends its window, so the next cycle that does not fail its step ends the run
- * (`noteStepsSucceeded`); one that fails it again counts on, never re-forms.
+ * go — under a named hold another resource of the same call answering lets nothing go, while the
+ * call's own hold (one entry naming no resource, GY-1900) lets the whole call go — and a run
+ * holding no call any more ends its window, so the next cycle that does not fail its step ends
+ * the run (`noteStepsSucceeded`); one that fails it again counts on, never re-forms.
  */
 export function noteCallAnswered(state: DaemonState, call: string, resource: string | null = null): void {
   for (const run of Object.values(state.stepStalls)) {
@@ -406,12 +413,35 @@ export function stallWakeSubjects(state: DaemonState, cliPath: string): Actionab
 }
 
 /**
+ * Adds one failed invocation to a stalled run's held list (GY-1900): by name while the list has
+ * room; once it is full, the hold becomes each failing call's own — the list collapses to one
+ * entry per call naming no resource, which `sameInvocation` reads as every invocation of that
+ * call — so an overflow past the bound backs off with the rest instead of calling every cycle. A
+ * call arriving when even the collapsed list is at the bound stays unnamed, as before.
+ */
+const addHeldInvocation = (calls: StepStall['calls'], addition: StepStall['calls'][number]): StepStall['calls'] => {
+  // Named already, or the call's own hold covers it: nothing to add.
+  if (calls.some(entry => entry.call === addition.call && (entry.resource === null || entry.resource === addition.resource))) return calls;
+  if (calls.length < stallInvocationBound) return [...calls, addition];
+  const collapsed: StepStall['calls'] = [];
+  for (const entry of calls) {
+    const known = collapsed.find(held => held.call === entry.call);
+    if (known) known.async = known.async || entry.async;
+    else collapsed.push({ call: entry.call, async: entry.async, resource: null });
+  }
+  const known = collapsed.find(held => held.call === addition.call);
+  if (known) { known.async = known.async || addition.async; return collapsed; }
+  return collapsed.length < stallInvocationBound ? [...collapsed, addition] : collapsed;
+};
+
+/**
  * The stall bookkeeping one completed cycle owes (GY-1854), run beside the cycle's result: every
  * action the cycle recorded failed — the dispatcher's failures among them, a held call's hold
  * answer among them never counted — signs its action kind as the step, at most once per signature
  * per cycle, and names the effect calls whose thrown failure its detail carries, which the run's
- * window then holds (`admitStalledEffect`); failures past the cursor's bound fold into one overflow
- * run (`fitCycleFailures`). A stalled run of a step-held step whose admitted attempt landed — the
+ * window then holds (`admitStalledEffect`); more invocations of one call than the list names
+ * collapse it to the call's own hold (`addHeldInvocation`, GY-1900), and failures past the cursor's
+ * bound fold into one overflow run (`fitCycleFailures`). A stalled run of a step-held step whose admitted attempt landed — the
  * step recorded done this cycle and did not fail it — ends, as does every cycle-level run (the
  * completed cycle made its call), and a cycle that failed nowhere ends the runs it did not fail in. Answers what was counted and how many standing
  * runs the cycle ended, so the caller persists a cursor the bookkeeping moved.
@@ -423,8 +453,8 @@ export function noteCycleStalls(state: DaemonState, actions: readonly (Pick<Daem
   const notes = failed.map(action => {
     const note = noteStepFailure(state, action.kind, action.detail, now, cycle), detail = flatText(action.detail);
     for (const entry of calls) {
-      if (!detailCarries(detail, entry.text) || note.run.calls.some(known => known.call === entry.call && known.resource === entry.resource) || note.run.calls.length >= 8) continue;
-      note.run.calls = [...note.run.calls, { call: entry.call, async: entry.async, resource: entry.resource }];
+      if (!detailCarries(detail, entry.text)) continue;
+      note.run.calls = addHeldInvocation(note.run.calls, { call: entry.call, async: entry.async, resource: entry.resource });
     }
     return note;
   });
@@ -683,8 +713,8 @@ export function stallRemedyRunner(config: () => MasterConfig, state: () => Daemo
  * argument names (`noteCallFailure`, `callResource`), and once a stall holds that invocation, a
  * call of it inside the window answers the hold — thrown, or rejected when it failed as a promise —
  * without being made (`admitStalledEffect`); the window's one admitted invocation that answers lets
- * it go (`noteCallAnswered`), and other resources of the call are never held by it.
- *
+ * it go (`noteCallAnswered`), and other resources of the call are never held by it — unless the
+ * run's list collapsed to the call's own hold (GY-1900), which holds every invocation to one attempt per window.
  * Past each window the first call is admitted and arms the next, and the armed window is on the
  * cursor through `persist` before the admitted call is made, so a process that dies between the
  * admission and its next cursor write restarts into the window it armed, never into the expired

@@ -886,3 +886,84 @@ test('unit:loop-step-stall-upstream-retries — an interrupted filing, a failed 
   assert.equal(await U.fileStalledStepsUpstream(cleared, filer, () => clock, persist), null);
   assert.equal(asks.length, 2, 'one item per signature, even after the done row is pruned');
 });
+
+test('unit:stall-signature-overflow-invocations-held — ten panes sharing one signature from one effect are all held after the third cycle, every invocation past the eighth included, and the record stays within its bound', async () => {
+  const { S } = await load();
+  const { stepStallSchema } = await import('../src/daemon/state.js');
+  const loop = state();
+  // Ten distinct panes fail the one effect with the same normalised refusal: the text names no
+  // pane, so every invocation signs the same and the run is shared by more than the list names.
+  const panes = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'];
+  const prompted: string[] = [];
+  const held = S.stallHeldEffects({ promptSession: async (agent: { pane_id: string }) => { prompted.push(agent.pane_id); throw new Error('the pane session is gone'); } } as unknown as DaemonEffects, () => loop, () => clock,
+    async written => { for (const run of Object.values(written.stepStalls)) stepStallSchema.parse(run); });
+  const cycle = async (index: number) => {
+    const actions: { kind: 'wake'; state: 'failed' | 'done'; detail: string }[] = [];
+    for (const pane of panes) {
+      try { await held.promptSession!({ pane_id: pane } as never, 'wake'); actions.push({ kind: 'wake', state: 'done', detail: `woke ${pane}` }); }
+      catch (error) { actions.push({ kind: 'wake', state: 'failed', detail: `The wake was not delivered: ${(error as Error).message}` }); }
+    }
+    return S.noteCycleStalls(loop, actions, index, clock);
+  };
+  const made = (pane: string) => prompted.filter(entry => entry === pane).length;
+  for (const index of [1, 2, 3]) { tick(60_000); await cycle(index); }
+  const signature = Object.keys(loop.stepStalls)[0];
+  assert.ok(loop.stepStalls[signature].stalledAt, 'three consecutive cycles are one stall');
+  // The ten invocations outgrew the bound the list names: the hold is the call's own, one entry
+  // naming no resource, so the ninth and tenth are held by the same stall the first eight are.
+  assert.deepEqual(loop.stepStalls[signature].calls, [{ call: 'promptSession', async: true, resource: null }]);
+  // After the third cycle every pane is held, the ninth and tenth included: nothing is invoked
+  // again before the five-minute backoff elapses.
+  for (const index of [4, 5, 6, 7]) { tick(60_000); await cycle(index); }
+  assert.deepEqual(panes.map(made), [3, 3, 3, 3, 3, 3, 3, 3, 3, 3], 'no pane, the ninth and tenth included, is invoked again inside the window');
+  assert.equal(loop.stepStalls[signature].count, 3, 'a held cycle counts nothing');
+  // Past the window exactly one invocation of the call is admitted; the other nine, the overflow
+  // past the eighth included, wait out the window its admission armed.
+  tick(S.stallBackoffMs + 1); await cycle(8);
+  assert.deepEqual(panes.map(made), [4, 3, 3, 3, 3, 3, 3, 3, 3, 3], 'past the window one invocation of the call is made, once');
+  tick(60_000); await cycle(9);
+  assert.deepEqual(panes.map(made), [4, 3, 3, 3, 3, 3, 3, 3, 3, 3], 'the admission arms the next window: the rest stay held');
+  // Every persisted record the writes carried stayed within the schema's bound.
+  for (const run of Object.values(loop.stepStalls)) assert.equal(stepStallSchema.parse(run).calls.length, 1);
+});
+
+test('unit:stall-signature-overflow-records-once — twelve items sharing one signature still record one stall at three cycles, apply its bound remedy once and wake the master once, exactly as eight do', async () => {
+  const { S } = await load();
+  const failed = (item: string): { kind: 'dispatch'; state: 'failed'; detail: string } =>
+    ({ kind: 'dispatch', state: 'failed', detail: `Dispatch of ${item} to worker-a failed: the control plane answered HTTP 401 for ${item} epoch 1` });
+  const sharing = (items: string[]) => {
+    const loop = state();
+    for (const cycle of [1, 2]) S.noteCycleStalls(loop, items.map(failed), cycle, tick(60_000));
+    const third = S.noteCycleStalls(loop, items.map(failed), 3, tick(60_000));
+    return { loop, third, signature: Object.keys(loop.stepStalls)[0] };
+  };
+  const eight = sharing(['GY-1', 'GY-2', 'GY-3', 'GY-4', 'GY-5', 'GY-6', 'GY-7', 'GY-8']);
+  const twelve = sharing(['GY-1', 'GY-2', 'GY-3', 'GY-4', 'GY-5', 'GY-6', 'GY-7', 'GY-8', 'GY-9', 'GY-10', 'GY-11', 'GY-12']);
+  // Every resource is noted, but the shared signature is one run, and its stall is recorded once,
+  // at the third cycle, bound to the same remedy — exactly as with eight or fewer.
+  for (const one of [eight, twelve]) {
+    assert.equal(Object.keys(one.loop.stepStalls).length, 1, 'one run for the one shared signature');
+    assert.equal(one.third.notes.filter(note => note.stalled).length, 1, 'the stall is recorded once, at the third cycle');
+    assert.equal(one.loop.stepStalls[one.signature].count, 3);
+    assert.equal(one.third.notes[0].bound?.kind, 'credential-401', 'the stall binds its remedy');
+  }
+  assert.equal(eight.third.notes.length, 8);
+  assert.equal(twelve.third.notes.length, 12, 'every sharing resource is noted, and still only one stall');
+  // Its bound remedy is applied once: one attempt for the whole shared signature, never per
+  // resource, and the second sweep applies nothing.
+  let attempts = 0;
+  const runner = async (): Promise<StepStallRemedyOutcome> => { attempts += 1; return { outcome: 'refused' as const, verified: false, detail: 'outside the loop\'s authority' }; };
+  assert.equal((await S.remedyStalledSteps(eight.loop, runner, tick(1))).length, 1);
+  assert.equal((await S.remedyStalledSteps(twelve.loop, runner, tick(1))).length, 1);
+  assert.equal(attempts, 2, 'one attempt per run');
+  assert.deepEqual(await S.remedyStalledSteps(eight.loop, runner, tick(1)), [], 'the second sweep applies nothing');
+  assert.deepEqual(await S.remedyStalledSteps(twelve.loop, runner, tick(1)), []);
+  assert.equal(attempts, 2);
+  // A refused remedy wakes the master session once, with the one signature as the subject.
+  for (const one of [eight, twelve]) {
+    const subjects = S.stallWakeSubjects(one.loop, 'graphyard.mjs');
+    assert.equal(subjects.length, 1, 'one wake for the shared signature');
+    assert.equal(subjects[0].key, S.stallSubjectKey(one.signature));
+    assert.match(subjects[0].detail, /dispatch call failed with one signature on 3 consecutive cycles/);
+  }
+});

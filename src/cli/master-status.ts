@@ -12,7 +12,7 @@ import { baseFailureAttention, daemonSummary, loopAttention, readDaemonState } f
 import { timeToMergeBySize } from '../decomposition.js';
 import { stalledReviewCapAttention } from '../daemon/cycle-review-cap.js';
 import { slowCycleAttention } from '../daemon/liveness.js';
-import { promotionStatus } from '../daemon/deployment.js';
+import { promotionSummaryWithLag } from '../daemon/promotion-stale.js';
 import { sealRefusalAttention } from '../validation-import.js';
 import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, loopMemoryAttention, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
@@ -122,6 +122,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // The slow intervention report: the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, executors: releases.executors, promotion: 'error' in daemonState ? null : promotionWait(daemonState) }));
+  const promotion = promotionSummaryWithLag(cursor?.promotion, lag.report, lag.attention, Date.parse(snapshot.now), intervalMs);
   // GY-1773: a held snapshot ahead of the dirty checkout left behind; a refused seal check.
   lag.attention.push(...leftBehindCheckoutAttention(cycling?.upgrade?.snapshot, readHeldCli(root), root), ...sealRefusalAttention(cursor?.promotion, master.repository));
   // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406),
@@ -169,7 +170,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     herdr: { instance: master.herdrInstance ?? null, attach: herdrAttachCommand(master.herdrInstance ?? null), running: runtime.available },
     delivery: delivery.report,
     // The promotion drive (GY-1302): last promoted SHA, production lag, next due promotion.
-    promotion: promotionStatus('error' in daemonState ? null : daemonState.promotion),
+    promotion,
     launches: { prepare: launches.prepare }, // GY-1836: the day's worktree preparation p50/p90
     itemSize,
     // Every open item the control plane names no action for, with the account it names and how
