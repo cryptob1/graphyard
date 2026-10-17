@@ -11,7 +11,9 @@ import { GitHubChargeLedger } from '../../src/github-charges.js';
 import { type Principal, Refusal, type Work, observationWindowHold } from '../../src/model.js';
 import { type PostDeployFiler, filePostDeployFollowUps, localPostDeployChecks, verifyDeployment } from '../../src/master-verification.js';
 import { postDeployReader } from '../../src/master/post-deploy-readings.js';
-import { onboardingCase, onboardingTargetProof, type OnboardingTargetPorts } from '../../src/cli/master-deployment.js';
+import type { OnboardingTargetPorts } from '../../src/cli/master-deployment.js';
+/** GY-1906: the onboarding-target proof and the case its executions pass, as master-deployment.ts names them (a checkout without the reader still loads this helper). */
+const onboardingTargetProof = 'manual:post-deploy/onboarding-default-target', onboardingCase = 'onboarding-delivery-defaults';
 import type { HoldRecord } from '../../src/release-holds.js';
 import type { UatRecord } from '../../src/release-candidate.js';
 import type { PatternReader } from '../../src/model/observation-window.js';
