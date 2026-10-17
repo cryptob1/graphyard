@@ -3,11 +3,11 @@
 
 > install Graphyard for OWNER/REPO on PROVIDER following docs/install.md
 
-Ask only: **Which provider**; **Provider login**; **GitHub App confirmation click**, once (none with `--no-github-app`/`--observe-only`); **Approval of the printed plan**. Never invent a fifth.
+Ask only: **Which provider**; **Provider login**; **GitHub App confirmation click**, once (none with `--no-github-app`/`--observe-only`); **Approval of the printed plan**.
 
 ## Hard rules
 
-- **Never print, echo, `cat`, log, paste, or commit a credential.**
+- **Never print, `cat`, log, paste, or commit a credential.**
 - **One principal per role** (`--workers N`); never share a worker credential.
 - **Workers never receive an admin, coordinator, or producer credential.**
 - **Proof producers get explicit grants only** (`--producer-proof NAME`).
@@ -19,10 +19,10 @@ Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/gr
 
 ### Providers
 
-- `railway`: `npm i -g @railway/cli`, `railway login`.
+- `railway`: `npm i -g @railway/cli`, `railway login`. `--path-as-root` upload; failures stop `provider.deploy` (exit code, message).
 - `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; `--ssh-key NAME`, `--domain`. `manual:…install…-live` coordinators need `HCLOUD_TOKEN`, `HETZNER_SPEND_CAP_USD_MONTHLY` in repo-root `.env` (`0600`, uncommitted); optional `HETZNER_SSH_KEY` (else throwaway).
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; `--ssh-host`, `--domain`.
-- `compose` (local): `curl -fsSL https://get.docker.com | sh`. Polls GitHub, skipping webhook steps; publishes `127.0.0.1:4310`, else the first free port to 4329, kept on reruns (`up`, `master init` use it); a taken `--port N` fails preflight. Under `up`, a failed step's `next` carries its last 20 redacted lines. A stale `already exists in network` endpoint is disconnected, `up` retried once; others stand.
+- `compose` (local): `curl -fsSL https://get.docker.com | sh`. Polls GitHub, skipping webhook steps; publishes `127.0.0.1:4310`, else the first free port to 4329, kept on reruns (`up`, `master init` use it); a taken `--port N` fails preflight. Under `up`, a failed step's `next` carries its last 20 redacted lines. A stale `already exists in network` endpoint: disconnected, `up` retried once.
 - `local` (`graphyard up --local`, not with another `--provider`): no Docker; embedded Postgres (`npm install` without `--omit=optional`), cluster in `INSTALL/postgres`; user unit `graphyard-local-INSTALL.service` starts, migrates (`db migrate`) and serves it (no systemd: prints foreground command). Polls GitHub like compose.
 
 ## Step 1: plan and approve
@@ -31,7 +31,7 @@ Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/gr
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 ```
 
-`--workers N`/`--producer-proof NAME`/`--required-check NAME` ([`init --scan`](operations-reference.md#setup-proposals-and-drift)); `delivery`/`release.*` plan [candidates](delivery.md#managed-repositories). **Verify** `secretsRedacted`, `preflight[].ok` (else `fix`; a `HUMAN:` `fix` is the human's); human approves plan, `drift`. `Branch protection` fails on free-plan private repositories. A `graphyard` plugin bound elsewhere fails `Herdr plugin` until `--herdr-instance`/`--herdr-rebind`/`--no-herdr`. `--no-github-app` (not with `--target`/`--github-app`/`--reuse-app`/`--reviewer`): no App, `GITHUB_APP_*` unset, `/api/status.github` false; a bound App or Railway/local leftovers refuse. `--observe-only` (implies `--no-github-app --no-herdr`; refuses `--provider local`, recorded worker/producer rosters, unowned Railway services; replaces unrecorded docker-host/Hetzner environments) deploys only the control-plane, rest `held`; Railway variables unread; reruns: done steps `satisfied`. `up --merger control-plane` runs `install --no-github-app`, then deploy-key (each-run ruleset: key-only pushes; other read-write keys refuse, naming their delete commands; prior protection kept, reported), `POST /api/merger`. `up` prints Herdr's attach (`XDG_CONFIG_HOME=DIR herdr session attach NAME`). Own-instance session `graphyard-INSTALL` (`gy-HASH` session, then directory, within 107 socket-path bytes; else refused). No `--base-branch`: `master` if only `origin/master` exists. `compose` mounts the checkout at `/repo` (`GRAPHYARD_REPOSITORY_ROOT`) plus a worktree's Git directory; merger `control-plane` (App or not) observes heads there, reviews control-plane.
+`--workers N`/`--producer-proof NAME`/`--required-check NAME` ([`init --scan`](operations-reference.md#setup-proposals-and-drift)); `delivery`/`release.*` plan [candidates](delivery.md#managed-repositories). **Verify** `secretsRedacted`, `preflight[].ok` (else `fix`; a `HUMAN:` `fix` is the human's); human approves plan, `drift`. `Branch protection` fails on free-plan private repositories. A `graphyard` plugin bound elsewhere fails `Herdr plugin` until `--herdr-instance`/`--herdr-rebind`/`--no-herdr`. `--no-github-app` (not with `--target`/`--github-app`/`--reuse-app`/`--reviewer`): no App, `GITHUB_APP_*` unset, `/api/status.github` false; a bound App or Railway/local leftovers refuse. `--observe-only` (implies `--no-github-app --no-herdr`; refuses `--provider local`, recorded worker/producer rosters, unowned Railway services; replaces unrecorded docker-host/Hetzner environments) deploys only the control-plane, rest `held`; Railway variables unread, cwd never uploaded; reruns: done steps `satisfied`. `up --merger control-plane` runs `install --no-github-app`, then deploy-key (each-run ruleset: key-only pushes; other read-write keys refuse, naming their delete commands; prior protection kept, reported), `POST /api/merger`. `up` prints Herdr's attach (`XDG_CONFIG_HOME=DIR herdr session attach NAME`). Own-instance session `graphyard-INSTALL` (`gy-HASH` session, then directory, within 107 socket-path bytes; else refused). No `--base-branch`: `master` if only `origin/master` exists. `compose` mounts the checkout at `/repo` (`GRAPHYARD_REPOSITORY_ROOT`) plus a worktree's Git directory; merger `control-plane` (App or not) observes heads there, reviews control-plane.
 
 ## Step 2: apply
 
@@ -80,7 +80,7 @@ Price: `--confirm-price`/`--max-monthly`. Saved Apps (`--github-app FILE`/this i
 
 ## Agent execution contract
 
-Run steps 1–5 (1,2,4 with `--no-github-app`/`--observe-only`); never weaken gates.
+Run steps 1–5; never weaken gates.
 
 ## Manual fallback (unsupported platforms)
 

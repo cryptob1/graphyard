@@ -1,3 +1,4 @@
+import { isAbsolute, relative, resolve } from 'node:path';
 import { fingerprint, Vault } from './secrets.js';
 import { SERVER_CONTAINER_UID, shellQuote, type Transport } from './transport.js';
 import { SERVER_PORT, type EnvValue, type PlanAction, type PreflightItem, type Provider } from './types.js';
@@ -52,6 +53,8 @@ export interface AdapterContext {
   local?: import('./local.js').LocalSettings | null;
   /** `install --observe-only` (GY-1846): observation runs no provider command that prints variable values. */
   observeOnly?: boolean;
+  /** The managed repository's checkout; a Railway upload under --observe-only refuses a source that is it. Defaults to the process cwd. */
+  managedRoot?: string | null;
   /** Spend consent for a server this install creates: a monthly cap, or the exact price confirmed. */
   spend: { maxMonthly: number | null; confirmPrice: number | null };
   wait: (ms: number) => Promise<void>;
@@ -636,6 +639,46 @@ async function runRailway(ctx: AdapterContext, args: string[], options: { input?
   return ctx.transport.exec('railway', args, { ...options, cwd: ctx.railwayDir });
 }
 
+/** The native result of the last `railway up` an apply ran (GY-1864): its command, exit code and the CLI's scrubbed message. */
+export interface RailwayUploadReceipt { step: 'provider.deploy'; command: string; cwd: string; code: number; ok: boolean; message: string }
+const railwayUploads = new WeakMap<AdapterContext, RailwayUploadReceipt[]>();
+/** Every upload this context ran, oldest first. */
+export const railwayUploadReceipts = (ctx: AdapterContext): RailwayUploadReceipt[] => [...(railwayUploads.get(ctx) ?? [])];
+
+const insideOrEqual = (path: string, root: string) => { const away = relative(root, path); return away === '' || (!away.startsWith('..') && !isAbsolute(away)); };
+
+/**
+ * The `railway up` arguments for the Graphyard source. The CLI runs from the private link
+ * directory, and without --path-as-root it uploads a path that is not its cwd relative to the
+ * linked directory's repository and fails with "prefix not found"; with it, the named source
+ * becomes the archive root. A source that is the cwd uploads exactly as it always did.
+ */
+export function railwayUploadArgs(ctx: Pick<AdapterContext, 'sourceRoot' | 'service' | 'railwayDir'>) {
+  const args = ['up', ctx.sourceRoot, '--service', ctx.service, '--ci', '--detach'];
+  return resolve(ctx.sourceRoot) === resolve(ctx.railwayDir) ? args : [...args, '--path-as-root'];
+}
+
+/**
+ * Uploads the Graphyard source and records the CLI's own result. Under --observe-only the
+ * managed repository's tree (the process cwd the runbook requires, or `ctx.managedRoot`) is
+ * never the upload: a source that is it, or that contains it, is refused before anything runs.
+ * A non-zero exit is the failed deploy step, carrying the exit code and the scrubbed message,
+ * and it stops the apply.
+ */
+export async function railwayUpload(ctx: AdapterContext): Promise<RailwayUploadReceipt> {
+  const managed = resolve(ctx.managedRoot ?? process.cwd());
+  if (ctx.observeOnly && insideOrEqual(managed, resolve(ctx.sourceRoot))) {
+    throw new Error(`provider.deploy refused: under --observe-only the upload source ${ctx.sourceRoot} is the managed repository's tree (${managed}); only the Graphyard source is uploaded`);
+  }
+  const args = railwayUploadArgs(ctx);
+  const result = await runRailway(ctx, args, { allowFailure: true, timeout: 1_800_000 });
+  const message = ctx.vault.scrub((result.code === 0 ? result.stdout.trim() || result.stderr.trim() : result.stderr.trim() || result.stdout.trim()).split('\n').filter(Boolean).slice(-8).join('\n').slice(-2000));
+  const receipt: RailwayUploadReceipt = { step: 'provider.deploy', command: `railway ${args.join(' ')}`, cwd: ctx.railwayDir, code: result.code, ok: result.code === 0, message };
+  railwayUploads.set(ctx, [...(railwayUploads.get(ctx) ?? []), receipt]);
+  if (!receipt.ok) throw Object.assign(new Error(`provider.deploy failed: railway up exited with ${result.code}${message ? `: ${message}` : ''}`), { receipt });
+  return receipt;
+}
+
 export const railwayAdapter: ProviderAdapter = {
   provider: 'railway',
   async preflight(ctx) {
@@ -725,7 +768,7 @@ export const railwayAdapter: ProviderAdapter = {
     // The source is the Graphyard checkout the CLI runs from — never the process cwd, which
     // is the managed repository's tree: an implicit `railway up` there would build and
     // deploy the user's application (or its Nixpacks guess) as the Graphyard service.
-    await runRailway(ctx, ['up', ctx.sourceRoot, '--service', ctx.service, '--ci', '--detach'], { timeout: 1_800_000 });
+    await railwayUpload(ctx);
   },
   async url(ctx) {
     const args = ['domain', '--service', ctx.service, '--port', String(SERVER_PORT), ...(ctx.domain ? [ctx.domain] : [])];
