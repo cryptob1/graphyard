@@ -943,6 +943,7 @@
     "tests/evaluator-recovery.test.ts": 4000,
     "tests/sync-timing-baseline.test.ts": 4000,
     "tests/file-durations-status.test.ts": 257,
-    "tests/event-loop-lag-pending.test.ts": 729
+    "tests/event-loop-lag-pending.test.ts": 729,
+    "tests/install-worker-credentials.test.ts": 900
   }
 }
