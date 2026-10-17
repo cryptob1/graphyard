@@ -1,6 +1,6 @@
 // Concern: what a blocked or stopped session's runtime shows — its prompts and its provider limit notices — and the loop's answer.
 import { exhaustionNoticeLabelWords, exhaustionNoticeMaxLength, exhaustionTailLines, parseResetTime, type ExhaustionSignal } from '../model/capacity.js';
-import { outOfCreditsScreen } from '../fleet.js';
+import { exhaustionTail, outOfCreditsScreen } from '../fleet.js';
 /**
  * A runtime's own safety prompt, read off a blocked session's screen (GY-197).
  *
@@ -227,7 +227,7 @@ export function detectRuntimeExhaustion(output: string, runtime: string | null |
   const credits = outOfCreditsScreen(output);
   if (credits) return credits;
   const notices = runtimeLimitNotices(runtime);
-  const lines = output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n').map(line => line.replace(/[│┃|]\s*$/, '').trim().replace(/\s{2,}/g, ' ')).filter(Boolean).slice(-exhaustionTailLines);
+  const lines = exhaustionTail(output);
   for (let index = lines.length - 1; index >= 0; index--) {
     // The banner, with what the terminal drew before it removed and its padding collapsed (as in findExhaustion).
     const line = lines[index].replace(/^[^A-Za-z0-9]+/, '').replace(severityLabel, '');

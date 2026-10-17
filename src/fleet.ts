@@ -71,6 +71,11 @@ export const roleAtCapacity = (reason: string) => /^role \S+ is at its concurren
 /** The refusal's reason when `error` is a launch refused for its role's capacity, else null. (A tag, not a subclass: fleet.ts and master.ts import each other.) */
 export const capacityRefusal = (error: unknown): string | null => { const tag = error instanceof Error ? (error as Error & { roleAtCapacity?: unknown }).roleAtCapacity : null; return typeof tag === 'string' ? tag : null; };
 
+/** A stopped session's last `exhaustionTailLines` non-empty lines, ANSI stripped, trailing borders trimmed and padding collapsed: the tail every limit-notice judge reads. A declared function for the same load-order reason as `outOfCreditsScreen`. */
+export function exhaustionTail(output: string): string[] {
+  return output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n')
+    .map(line => line.replace(/[│┃|]\s*$/, '').trim().replace(/\s{2,}/g, ' ')).filter(Boolean).slice(-exhaustionTailLines);
+}
 /** The notice of Claude Code's out-of-usage-credits screen, wherever it stands on its line (GY-1889). */
 const outOfCreditsNotice = /\bout of usage credits\b/i;
 /** The runtime's own hint beneath that notice (`Run /usage-credits … /model to switch models`): the pair is the screen, so its first line alone — in a transcript, a summary or a report about the screen — is not one. */
@@ -90,8 +95,7 @@ const outOfCreditsHint = /\brun\s+\/usage-credits\b/i;
  * other, so only a hoisted declaration is safe at load in either order.
  */
 export function outOfCreditsScreen(output: string): ExhaustionSignal | null {
-  const lines = output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n')
-    .map(line => line.replace(/[│┃|]\s*$/, '').trim().replace(/\s{2,}/g, ' ')).filter(Boolean).slice(-exhaustionTailLines);
+  const lines = exhaustionTail(output);
   for (let index = lines.length - 1; index >= 0; index--) {
     const line = lines[index].replace(/^[^A-Za-z0-9]+/, '');
     if (line.length > exhaustionNoticeMaxLength || !outOfCreditsNotice.test(line)) continue;
