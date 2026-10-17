@@ -10,8 +10,8 @@ import { collectScanInput, detectDeploy, detectStack, discover, proposeDelivery 
 import { parseRepositoryConfig, repositoryConfigFile } from '../model/documentation.js';
 import { requiredPullRequestChecks, type DeliveryPolicy } from '../model/delivery-policy.js';
 import { applyWiring, deploymentAdapters, observeReleaseWiring, wiringActions, type DeploymentAdapter, type DeploymentContext } from './deploy-target.js';
-import { adapterFor, carriesCredential, isProviderReference, quotedPrice, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
-import { existingMachineAdapter, generateHostSecrets, hostHerdrOnly, hostLayout, hostPlan, hostTokenFile, installHostFleet, readHostSecrets, selfContainedAdapter, MIGRATE_SOURCE_VARIABLE, type HostFleetResult } from './host.js';
+import { adapterFor, carriesCredential, readRemote, isProviderReference, quotedPrice, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
+import { asUser, existingMachineAdapter, generateHostSecrets, hostHerdrOnly, hostLayout, hostPlan, hostRemote, hostTokenFile, installHostFleet, readHostSecrets, selfContainedAdapter, MIGRATE_SOURCE_VARIABLE, type HostFleetResult } from './host.js';
 import { applyProtection, appClient, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, installationClient, installationToken, protectionSatisfied, readProtection, GRAPHYARD_CHECKS, readWebhookConfig, repositoryInstallation, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
 import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
 import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
@@ -25,7 +25,7 @@ import { HerdrSetupFailure } from '../herdr-host.js';
 import { localTransport, sshTransport, type Transport } from './transport.js';
 import { localDatabaseVariable, localSettings, type LocalSupervisor } from './local.js';
 import { localPaths } from './local-runtime.js';
-import { durableCheckoutPreflight, underTestRunner } from '../supervisor.js';
+import { durableCheckoutPreflight, loopStopTimeoutSeconds, underTestRunner } from '../supervisor.js';
 import { installIdFor, providers, REDACTED, SERVER_PORT, type EnvValue, type InstallInputs, type InstallPlan, type PlanAction, type PlanDrift, type PlanValue, type PlannedPrincipal, type PreflightItem, type Provider } from './types.js';
 
 export * from './types.js';
@@ -91,6 +91,12 @@ export interface HerdrChoice { herdr?: 'rebind' | 'skip' | 'instance' }
  */
 export interface ReuseChoice { reuseApps?: string[] }
 /**
+ * GY-1851: `--fresh-cursor`, which `graphyard up` passes when it re-issues an install's credentials
+ * onto a fresh database: a self-contained host's master loop is stopped, its cursor archived beside
+ * itself, and the loop started again, on the host where it runs. Other installs run no loop here.
+ */
+export interface FreshCursorChoice { freshCursor?: boolean }
+/**
  * GY-1550: `--no-github-app` installs the control plane with no GitHub App at all. Nothing is
  * registered, reused or confirmed in a browser, and GITHUB_APP_ID, GITHUB_INSTALLATION_ID,
  * GITHUB_PRIVATE_KEY, GITHUB_WEBHOOK_SECRET and GITHUB_CI_APP_IDS stay unset, so the server
@@ -126,7 +132,7 @@ export function installRequestFromArgs(args: string[]) {
     'server-type': { type: 'string' }, location: { type: 'string' }, port: { type: 'string' }, logs: { type: 'boolean' },
     target: { type: 'string' }, local: { type: 'boolean' }, migrate: { type: 'boolean' }, 'max-monthly': { type: 'string' }, 'confirm-price': { type: 'string' },
     'github-app': { type: 'string' }, 'reuse-app': { type: 'string', multiple: true }, 'no-github-app': { type: 'boolean' },
-    'create-environments': { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' }, 'no-herdr': { type: 'boolean' }, 'herdr-instance': { type: 'boolean' }, 'herdr-only': { type: 'boolean' },
+    'create-environments': { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' }, 'no-herdr': { type: 'boolean' }, 'herdr-instance': { type: 'boolean' }, 'herdr-only': { type: 'boolean' }, 'fresh-cursor': { type: 'boolean' },
     'observe-only': { type: 'boolean' },
   }, allowPositionals: false });
   if ([values['herdr-rebind'], values['no-herdr'], values['herdr-instance']].filter(Boolean).length > 1) throw new Error('Choose one of --herdr-rebind, --no-herdr or --herdr-instance');
@@ -156,7 +162,7 @@ export function installRequestFromArgs(args: string[]) {
   // A count that silently became NaN would install a control plane with no worker principal
   // or an unusable port, so a non-numeric value stops the command instead.
   const count = (flag: string, value: string) => { const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`--${flag} takes a whole number`); return parsed; };
-  const request: InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice = { repository: values.repo,
+  const request: InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice & FreshCursorChoice = { repository: values.repo,
     ...(values['herdr-rebind'] ? { herdr: 'rebind' as const } : values['no-herdr'] ? { herdr: 'skip' as const } : values['herdr-instance'] ? { herdr: 'instance' as const } : {}), provider: provider as InstallRequest['provider'],
     ...(values.target || provider === 'host' ? { selfContained: true } : {}),
     ...(values.local ? { local: true } : {}), ...(values.migrate ? { migrate: true } : {}),
@@ -164,7 +170,7 @@ export function installRequestFromArgs(args: string[]) {
     ...(values['confirm-price'] ? { confirmPrice: money('confirm-price', values['confirm-price']) } : {}),
     ...(values['github-app'] ? { githubAppFile: values['github-app'] } : {}),
     ...(values['reuse-app']?.length ? { reuseApps: values['reuse-app'] } : {}),
-    ...(values['no-github-app'] ? { noGithubApp: true } : {}),
+    ...(values['no-github-app'] ? { noGithubApp: true } : {}), ...(values['fresh-cursor'] ? { freshCursor: true } : {}),
     ...(values['base-branch'] ? { baseBranch: values['base-branch'] } : {}),
     ...(values.domain ? { domain: values.domain } : {}), ...(values.workers ? { workers: count('workers', values.workers) } : {}),
     ...(values.port ? { port: count('port', values.port) } : {}),
@@ -195,7 +201,7 @@ export const OBSERVE_ONLY_HELD = 'held by observation-only (--observe-only)';
 const held = (action: Omit<PlanAction, 'state' | 'held'>, reason: string): PlanAction => ({ ...action, state: 'held', held: `${OBSERVE_ONLY_HELD}: ${reason}` });
 
 export interface InstallSession {
-  root: string; inputs: Required<Pick<InstallInputs, 'repository' | 'provider' | 'baseBranch'>> & InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice;
+  root: string; inputs: Required<Pick<InstallInputs, 'repository' | 'provider' | 'baseBranch'>> & InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice & FreshCursorChoice;
   installId: string; directory: string; adapter: ProviderAdapter; context: AdapterContext;
   principals: PlannedPrincipal[]; tokens: Map<string, string>; vault: Vault;
   record: InstallRecord | null; reviewers: { name: string; appId: number; botUserId: number }[];
@@ -1104,11 +1110,50 @@ export interface InstallSummary {
   webhook: WebhookProof; profiles: ProfileRegistration; drift: PlanDrift[]; nextSteps: string[];
   /** The self-contained host: its units, runtimes, accounts and Herdr workspace (GY-717). */
   host?: HostFleetResult;
+  /** GY-1851 (`--fresh-cursor`): the host's loop restarted on a fresh cursor; the old one's archive, or null when it had none. */
+  freshCursor?: HostCursorReset;
   /** The single-use dashboard sign-in for the admin; printed once, stored on the host only as a hash. */
   signIn?: string;
   release: { mode: 'release-candidate' | 'per-pr'; adapter: 'railway' | 'command'; created: string[]; pending: { id: string; command?: string; human?: string }[] };
   /** `--observe-only` (GY-1846): every action the plan held, which a later full install performs. */
   held?: { id: string; title: string; held: string }[];
+}
+
+/** GY-1851: what resetHostCursor did on the host: the loop unit it restarted and the old cursor's archive. */
+export interface HostCursorReset { host: string; unit: string; archived: { file: string; cycle: number } | null }
+
+/**
+ * GY-1851: start a self-contained host's master loop on a fresh cursor. The loop holds its cursor in
+ * memory and writes it again as it stops, and `systemctl --user enable --now` leaves a running loop
+ * running, so the unit is stopped first (systemd waits out its shutdown write), the cursor its
+ * master.json names is then set aside beside itself (`NAME.daemon.archived-STAMP.json`, never
+ * deleted), and the unit is started again, reading no cursor at all. A cursor written again after
+ * the stop means another loop still runs on it, and fails the apply naming it.
+ */
+export async function resetHostCursor(remote: Transport, checkout: string, fleet: Pick<HostFleetResult, 'host' | 'units'>, now = new Date()): Promise<HostCursorReset> {
+  const host = fleet.host, unit = fleet.units.find(entry => entry.role === 'master loop')?.name;
+  if (!unit) throw new Error(`the install on ${host} reports no master loop unit, so its cursor cannot be reset`);
+  const credentialFile = JSON.parse(await readRemote(remote, `${checkout}/.graphyard/master.json`) ?? 'null')?.credentialFile;
+  if (typeof credentialFile !== 'string') throw new Error(`${checkout}/.graphyard/master.json on ${host} records no coordinator credential file, so the loop's cursor cannot be found`);
+  const cursor = credentialFile.replace(/(\.token)?$/, '.daemon.json');
+  const systemctl = async (verb: 'stop' | 'start') => {
+    const result = await asUser(remote, checkout, 'systemctl', ['--user', verb, unit], { allowFailure: true, timeout: (loopStopTimeoutSeconds + 60) * 1000 });
+    if (result.code !== 0) throw new Error(`systemctl --user ${verb} ${unit} on ${host} exited ${result.code}: ${(result.stderr || result.stdout).trim().split('\n').slice(-1)[0] ?? ''}`);
+  };
+  await systemctl('stop');
+  const text = await readRemote(remote, cursor);
+  let archived: HostCursorReset['archived'] = null;
+  if (text !== null) {
+    let cycle = 0;
+    try { const value = Number(JSON.parse(text)?.cycle); cycle = Number.isSafeInteger(value) && value > 0 ? value : 0; } catch { /* an unreadable cursor is archived all the same */ }
+    const file = cursor.replace(/\.json$/, `.archived-${now.toISOString().replace(/[:.]/g, '-')}-${randomBytes(4).toString('hex')}.json`);
+    const moved = await asUser(remote, checkout, 'mv', ['-n', '--', cursor, file], { allowFailure: true, timeout: 60_000 });
+    if (moved.code !== 0) throw new Error(`archiving the master loop's cursor ${cursor} on ${host} failed: ${moved.stderr.trim()}`);
+    archived = { file, cycle };
+  }
+  if (await readRemote(remote, cursor) !== null) throw new Error(`the master loop's cursor ${cursor} on ${host} was written again after ${unit} stopped, so another loop still runs on the old database's cursor; stop it, then apply again`);
+  await systemctl('start');
+  return { host, unit, archived };
 }
 
 /**
@@ -1257,6 +1302,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
       github: { appId: bound.facts.appId, installationId: bound.facts.installationId, slug: bound.facts.slug, privateKey: bound.facts.privateKey, ...(bound.facts.botUserId ? { botUserId: bound.facts.botUserId } : {}) },
     })
     : null;
+  const freshCursor = fleet && session.inputs.freshCursor ? await resetHostCursor(await hostRemote(context), context.host!.layout.checkout, fleet) : null;
   const profiles = fleet ? fleet.profiles : observeOnly ? observedProfiles() : await registerProfiles(session, url, noApp);
   const githubRecord = bound ? { appId: bound.facts.appId, installationId: bound.facts.installationId, slug: bound.facts.slug, ciAppIds: bound.ciApps.map(entry => entry.appId) } : null;
   record = installRecordSchema.parse({
@@ -1284,7 +1330,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
     nextSteps: observeOnly ? observeOnlySteps(session, url, plan) : [...nextSteps(session, url, mergeCheckExists, webhook, profiles), ...release.pending.map(action => `${action.human ?? 'Pending'} Command: ${action.command}`)],
     release,
     ...(observeOnly ? { held: plan.actions.filter(action => action.state === 'held').map(action => ({ id: action.id, title: action.title, held: action.held! })) } : {}),
-    ...(fleet ? { host: fleet } : {}),
+    ...(fleet ? { host: fleet } : {}), ...(freshCursor ? { freshCursor } : {}),
     ...(context.host?.claim ? { signIn: `${url}/#claim=${context.host.claim}` } : {}),
   };
   const serialized = JSON.stringify(summary);
@@ -1413,7 +1459,7 @@ export function resumeCommand(session: Pick<InstallSession, 'inputs'>) {
     createEnvironments: flag('create-environments', inputs.createEnvironments),
     herdr: inputs.herdr === 'rebind' ? ['--herdr-rebind'] : inputs.herdr === 'skip' ? ['--no-herdr'] : inputs.herdr === 'instance' ? ['--herdr-instance'] : [],
   };
-  return ['graphyard', 'install', ...Object.values(flags).flat(), ...values('reuse-app', inputs.reuseApps), ...flag('no-github-app', inputs.noGithubApp), ...flag('observe-only', inputs.observeOnly), '--apply'].join(' ');
+  return ['graphyard', 'install', ...Object.values(flags).flat(), ...values('reuse-app', inputs.reuseApps), ...flag('no-github-app', inputs.noGithubApp), ...flag('observe-only', inputs.observeOnly), ...flag('fresh-cursor', inputs.freshCursor), '--apply'].join(' ');
 }
 
 async function pausedSummary(session: InstallSession, plan: InstallPlan, url: string, health: boolean, profiles: ProfileRegistration | null, pending: AppStepPending): Promise<PausedInstall> {
