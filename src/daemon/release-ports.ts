@@ -25,6 +25,7 @@ import { revertCandidateItem, type CandidateItemDelta, type RevertContract, type
 import { checkoutRepositoryPolicy } from '../model/repository-policy.js';
 import type { CutCommit } from './candidate-cut.js';
 import type { LocalCandidate, LocalReleasePorts, LocalValidation } from './promotion-local.js';
+import type { CandidateValidation, ExactCandidate } from '../model/release.js';
 
 /**
  * The variables the loop's environment names UAT and production by in control-plane mode; the
@@ -62,6 +63,42 @@ export function lastJson(output: string): unknown {
 }
 
 /**
+ * GY-1904: the plane's `/api/candidates` routes as the loop reaches them. `cut` asks for the next
+ * scheduled cut and answers the plane's refusal (409: nothing due yet) as `{ refused }`; `list` reads
+ * the newest candidates with their validations; `validated` appends one candidate's UAT verdict.
+ */
+export interface ExactCandidatePorts {
+  cut(input: { trigger: 'schedule'; waitMinutes: number; since?: string }): Promise<ExactCandidate | { refused: string }>;
+  list(): Promise<ExactCandidate[]>;
+  validated(id: string, validation: Omit<CandidateValidation, 'at' | 'by'>): Promise<unknown>;
+}
+/**
+ * The ports over the plane's client: `mutate` posts as the coordinator under a request id (the
+ * Idempotency-Key), `read` gets. A cut's key names the newest candidate it follows and the minute, so
+ * a retried cycle replays its cut; a verdict's names the candidate and its `rc/ID`.
+ */
+export const exactCandidatePorts = (mutate: (path: string, data: unknown, requestId?: string) => Promise<any>, read: (path: string) => Promise<any>): ExactCandidatePorts => ({
+  list: async () => (await read('candidates')).candidates as ExactCandidate[],
+  cut: async input => {
+    const after = ((await read('candidates')).candidates as ExactCandidate[])[0]?.id ?? 'none';
+    try { return await mutate('candidates', input, `candidate-cut:${after}:${new Date().toISOString().slice(0, 16)}`) as ExactCandidate; }
+    catch (error) {
+      // The plane's answer to a cut that is not due (409), as the master's client throws it: a confirmed refusal carrying the body.
+      const refusal = error as Error & { confirmedRefusal?: boolean; status?: number };
+      if (!refusal.confirmedRefusal && !(refusal.status && refusal.status < 500)) throw error;
+      try { return { refused: String(JSON.parse(refusal.message).error ?? refusal.message) }; } catch { return { refused: refusal.message }; }
+    }
+  },
+  validated: (id, validation) => mutate(`candidates/${encodeURIComponent(id)}/validation`, validation, `candidate-validation:${id}:${validation.release}`),
+});
+/** Pure: the verdict an exact candidate records from the UAT record its `rc/ID` was judged by. */
+export const exactValidation = (record: Pick<ReleaseCandidate, 'id' | 'sha' | 'exact'> & { exact: NonNullable<ReleaseCandidate['exact']> }, uat: Pick<UatRecord, 'result' | 'suites' | 'e2e'>): Omit<CandidateValidation, 'at' | 'by'> => ({
+  release: record.id, sha: record.sha, identity: record.exact.identity, result: uat.result === 'passed' ? 'pass' : 'fail',
+  cases: (uat.e2e?.cases ?? []).map(entry => ({ id: entry.case, result: entry.verdict })),
+  failed: [...new Set([...uat.suites.filter(suite => !suite.passed).map(suite => suite.name), ...(uat.e2e?.blocking ?? [])])],
+});
+
+/**
  * The port set, or null when the loop's environment names no UAT (`GRAPHYARD_UAT_URL`, or a static
  * site's `GRAPHYARD_UAT_STATIC`): the
  * release functions run in the coordinator checkout `root` with `GIT_SSH_COMMAND` set to the
@@ -85,7 +122,9 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
       /** An authenticated `GET /api/PATH`, through which promotion reads the candidate's imported-run hold (GY-1860). */
       read?: (path: string) => Promise<any>;
       /** An authenticated `POST /api/PATH`, through which promotion seals a released hold before any deployer runs (GY-1874); admins and operator agents seal. */
-      seal?: (path: string, data: unknown) => Promise<any> };
+      seal?: (path: string, data: unknown) => Promise<any>;
+      /** GY-1904: the plane's exact candidates; with it every cut is one of them, tagged at its source, and its UAT verdict is recorded on it. */
+      candidates?: ExactCandidatePorts };
     /** UAT itself, for tests: run only for a candidate with no passing UAT verdict recorded. */
     validation?: Pick<LocalReleasePorts, 'uat' | 'validate'> }): LocalReleasePorts | null {
   const environment = options.environment ?? process.env;
@@ -196,6 +235,49 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
   };
   /** The passing UAT verdict already recorded for candidate `id`, which a resumed promotion retry reuses (GY-1860). */
   const passedUat = async (id: string) => { await syncLedgerAsync(git, base); return (await readLedgerAsync(git)).uat.find(record => record.id === id && record.result === 'passed') ?? null; };
+  const validateRelease = async (id: string): Promise<LocalValidation> => {
+    const passed = await passedUat(id);
+    if (passed) return { record: passed, followUp: passed.followUp ?? null };
+    if (options.validation) return options.validation.validate(id);
+    if (!uatUrl || !graphyardCheckout(root)) return validateManaged(id);
+    const scratch = mkdtempSync(join(options.base, 'candidate-validate-'));
+    try {
+      const output = await cli(localValidateArguments(id, uatUrl), { GRAPHYARD_E2E_REPORT: join(scratch, 'e2e-report.json'), GRAPHYARD_CANDIDATE_ID: id, GRAPHYARD_TOKEN_FILE: config.credentialFile });
+      const result = lastJson(output) as { record: UatRecord; followUp: string | null };
+      if (!result || typeof result !== 'object' || !result.record) throw new Error(`release validate printed no record: ${output.slice(-500)}`);
+      return { record: result.record, followUp: result.followUp ?? null } satisfies LocalValidation;
+    } finally { rmSync(scratch, { recursive: true, force: true }); }
+  };
+  /**
+   * GY-1904: the exact candidate the next cut takes. One the plane cut whose record was never tagged (a
+   * crash between the two) is taken first, so no member is cut past; any whose `rc/ID` was judged but
+   * whose verdict never reached the plane has it recorded first. Else the plane's scheduled cut, its
+   * refusal naming what it waits for. The first cut's boundary is the newest record's commit: every
+   * delivery merged after the last cut is backlog, every earlier one is history.
+   */
+  const nextExact = async (ports: ExactCandidatePorts, ledger: Awaited<ReturnType<typeof readLedgerAsync>>): Promise<ExactCandidate | { refused: string }> => {
+    const listed = await ports.list();
+    for (const candidate of listed.filter(entry => !entry.validation)) {
+      const record = ledger.candidates.find(entry => entry.exact?.id === candidate.id), judged = record && ledger.uat.find(entry => entry.id === record.id);
+      if (record?.exact && judged) await ports.validated(candidate.id, exactValidation({ ...record, exact: record.exact }, judged));
+    }
+    const untagged = listed.filter(entry => !entry.validation && !ledger.candidates.some(record => record.exact?.id === entry.id)).at(-1);
+    if (untagged) return untagged;
+    let since: string | undefined;
+    if (!listed.length && ledger.candidates[0]) since = new Date((await gitAsync('show', '-s', '--format=%cI', ledger.candidates[0].sha)).trim()).toISOString();
+    return ports.cut({ trigger: 'schedule', waitMinutes: settings.idleMinutes, ...(since ? { since } : {}) });
+  };
+  /** GY-1904: the verdict of an exact cut's `rc/ID`, recorded on the plane's candidate; a refused record is retried by the next cut. */
+  const recordExact = async (id: string, validation: LocalValidation): Promise<LocalValidation> => {
+    const ports = options.plane?.candidates;
+    if (!ports) return validation;
+    const record = (await readLedgerAsync(git)).candidates.find(entry => entry.id === id);
+    if (record?.exact) {
+      try { await ports.validated(record.exact.id, exactValidation({ ...record, exact: record.exact }, validation.record)); }
+      catch (error) { console.error(`Candidate ${id}'s verdict was not recorded on exact candidate ${record.exact.id}; the next cut records it: ${error instanceof Error ? error.message : String(error)}`); }
+    }
+    return validation;
+  };
   return {
     settings,
     release,
@@ -210,12 +292,17 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
       // rerun UAT. A due cut supersedes it, and the UAT window bounds the retries.
       if (newest && !due && ledger.uat.some(record => record.id === newest.id && record.result === 'passed') && !ledger.production.some(record => record.id >= newest.id)
         && now() - Date.parse(newest.cutAt) < uatValidationWindowMs) return { cut: false, resume: toCandidate(newest) };
-      // The cut rule (candidate-cut.ts) alone decides a cut: not due, nothing is tagged or pushed.
-      if (!due) return { cut: false, reason: `the cut rule is not due (${settings.everyMerges} merges or ${settings.idleMinutes} idle minutes)` };
       const plane = options.plane;
+      // GY-1904: with the plane's exact candidates, the plane's cut decides — five delivered changes, or
+      // the oldest waiting `idleMinutes` — and the record is tagged at exactly that candidate's source.
+      const exact = plane?.candidates ? await nextExact(plane.candidates, ledger) : null;
+      if (exact && 'refused' in exact) return { cut: false, reason: exact.refused };
+      // Otherwise the cut rule (candidate-cut.ts) alone decides a cut: not due, nothing is tagged or pushed.
+      if (!exact && !due) return { cut: false, reason: `the cut rule is not due (${settings.everyMerges} merges or ${settings.idleMinutes} idle minutes)` };
       const pendingOutcomes = plane ? (cutAt: { sha: string; undelivered: ReadonlySet<string> }) => pendingAtCut({ contract: async sha => { try { return await gitAsync('show', `${sha}:${contractFile}`); } catch { return null; } }, goals: plane.goals, stage: plane.stage }, cutAt) : undefined;
-      const result = await cutAsync(git, { base, trigger: 'manual', now: new Date(now()), push: true, maxPrs: settings.everyMerges, pendingOutcomes, build: digests.build });
-      return result.cut ? { cut: true, candidate: toCandidate(result.candidate) } : { cut: false, reason: result.reason };
+      const result = await cutAsync(git, { base, trigger: 'manual', now: new Date(now()), push: true, maxPrs: settings.everyMerges, pendingOutcomes, build: digests.build,
+        ...(exact ? { exact: { id: exact.id, identity: exact.identity, sourceSha: exact.sourceSha, members: exact.members.map(member => ({ key: member.key, mergeSha: member.mergeSha, pr: member.pr })) } } : {}) });
+      return result.cut ? { cut: true, candidate: toCandidate(result.candidate) } : { cut: false, reason: exact ? `exact candidate ${exact.id} waits to be tagged: ${result.reason}` : result.reason };
     },
     uat: async id => {
       const passed = await passedUat(id);
@@ -223,19 +310,7 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
       if (options.validation) return options.validation.uat(id);
       const deployed = await deployToUatAsync(git, id, base, new Date(now()), digests.deploy); return { sha: deployed.sha };
     },
-    validate: async id => {
-      const passed = await passedUat(id);
-      if (passed) return { record: passed, followUp: passed.followUp ?? null };
-      if (options.validation) return options.validation.validate(id);
-      if (!uatUrl || !graphyardCheckout(root)) return validateManaged(id);
-      const scratch = mkdtempSync(join(options.base, 'candidate-validate-'));
-      try {
-        const output = await cli(localValidateArguments(id, uatUrl), { GRAPHYARD_E2E_REPORT: join(scratch, 'e2e-report.json'), GRAPHYARD_CANDIDATE_ID: id, GRAPHYARD_TOKEN_FILE: config.credentialFile });
-        const result = lastJson(output) as { record: UatRecord; followUp: string | null };
-        if (!result || typeof result !== 'object' || !result.record) throw new Error(`release validate printed no record: ${output.slice(-500)}`);
-        return { record: result.record, followUp: result.followUp ?? null } satisfies LocalValidation;
-      } finally { rmSync(scratch, { recursive: true, force: true }); }
-    },
+    validate: async id => recordExact(id, await validateRelease(id)),
     promote: async id => {
       const read = options.plane?.read, seal = options.plane?.seal;
       // GY-1874: the hold the promote decision reads is sealed through the plane's write port before any

@@ -174,13 +174,70 @@
       "status": 200,
       "expect": [
         {
-          "path": "mergeSha",
+          "path": "delivery.mergeSha",
           "type": "string"
         }
       ],
       "save": {
-        "mergeSha": "mergeSha"
-      }
+        "mergeSha": "delivery.mergeSha"
+      },
+      "waitSeconds": 3600
+    },
+    {
+      "kind": "http",
+      "name": "change 2 is delivered",
+      "method": "GET",
+      "path": "/api/work/{{id2}}",
+      "status": 200,
+      "expect": [
+        {
+          "path": "delivery.mergeSha",
+          "type": "string"
+        }
+      ],
+      "waitSeconds": 3600
+    },
+    {
+      "kind": "http",
+      "name": "change 3 is delivered",
+      "method": "GET",
+      "path": "/api/work/{{id3}}",
+      "status": 200,
+      "expect": [
+        {
+          "path": "delivery.mergeSha",
+          "type": "string"
+        }
+      ],
+      "waitSeconds": 3600
+    },
+    {
+      "kind": "http",
+      "name": "change 4 is delivered",
+      "method": "GET",
+      "path": "/api/work/{{id4}}",
+      "status": 200,
+      "expect": [
+        {
+          "path": "delivery.mergeSha",
+          "type": "string"
+        }
+      ],
+      "waitSeconds": 3600
+    },
+    {
+      "kind": "http",
+      "name": "change 5 is delivered",
+      "method": "GET",
+      "path": "/api/work/{{id5}}",
+      "status": 200,
+      "expect": [
+        {
+          "path": "delivery.mergeSha",
+          "type": "string"
+        }
+      ],
+      "waitSeconds": 3600
     },
     {
       "kind": "http",
@@ -296,6 +353,20 @@
     },
     {
       "kind": "http",
+      "name": "change 6 is delivered",
+      "method": "GET",
+      "path": "/api/work/{{id6}}",
+      "status": 200,
+      "expect": [
+        {
+          "path": "delivery.mergeSha",
+          "type": "string"
+        }
+      ],
+      "waitSeconds": 3600
+    },
+    {
+      "kind": "http",
       "name": "cut the next candidate",
       "method": "POST",
       "path": "/api/candidates",
@@ -332,7 +403,8 @@
           "path": "validation.result",
           "equals": "pass"
         }
-      ]
+      ],
+      "waitSeconds": 3600
     }
   ]
 }

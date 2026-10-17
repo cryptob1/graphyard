@@ -803,6 +803,7 @@
     "tests/soak-host-supervision.test.ts": 59368,
     "tests/soak-intervention-pattern-escalation-build.test.ts": 1892,
     "tests/soak-known-good.test.ts": 12836,
+    "tests/soak-exact-candidates.test.ts": 20000,
     "tests/soak-local-promotion.test.ts": 6000,
     "tests/soak-loop-code-root.test.ts": 45000,
     "tests/soak-loop-wake.test.ts": 34070,

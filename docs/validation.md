@@ -7,7 +7,7 @@ An `e2e:` proof passes from pinned candidate/bundle/separate [collector](runner-
 
 `e2e/cases/ID.json`, code-reviewed: `id` (file name)/`title`, optional `description`/`tags`, `target` (`uat`/`any`), `required` (default `false`), ordered `steps`:
 
-- `http`: `method`, `path`, optional `body`, expected `status`; `expect` checks dotted JSON `path` (`equals`/`exists`/`type`/`includes`); `save` keeps values.
+- `http`: `method`, `path`, optional `body`, expected `status`; `expect` checks dotted JSON `path` (`equals`/`exists`/`type`/`includes`); `save` keeps values; a GET's `waitSeconds` (≤3600) re-asks until they hold.
 - `browser` (Playwright Chromium): `open` `path`, `fill` `label` with `value`, `click`/`expectText` `text`, optionally by `role`; `exact: false` matches substrings.
 - `command`: `run` in the checkout with `TARGET_URL`, exit 0 passes, last 50 lines kept: `{"kind":"command","run":"npx playwright test"}`.
 - `agent`: agent-browser pursues `goal` at `path` until `success` holds, ending `VERDICT: PASS|FAIL - reason`, screenshot kept: `{"kind":"agent","goal":"Win tic-tac-toe","success":["Board says You win"],"path":"/games"}`.
