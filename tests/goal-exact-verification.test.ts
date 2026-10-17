@@ -253,11 +253,13 @@ test('integration:goal-loop-verifies-onboarding-hold-clearance — the loop read
   // The release jobs' own writers: release validate's UAT record and its holds step, against the repository's contract.
   const validated = async (id: string, sha: string, verdict: 'passed' | 'failed', options: { deployedSha?: string; runId?: string } = {}) => {
     const runId = options.runId ?? `rc-${id}`;
-    const report = { runId, url: 'https://uat.example.test', environment: 'uat', sha, startedAt: '2026-10-17T15:00:00.000Z', finishedAt: '2026-10-17T15:05:00.000Z', passed: verdict === 'passed' ? 1 : 0, failed: verdict === 'failed' ? 1 : 0,
+    // The run's instants are the candidate id's own: the reader binds SHAs and candidates, never times.
+    const at = `${id.slice(0, 4)}-${id.slice(4, 6)}-${id.slice(6, 8)}T${id.slice(9, 11)}:${id.slice(11, 13)}:00.000Z`;
+    const report = { runId, url: 'https://uat.example.test', environment: 'uat', sha, startedAt: at, finishedAt: at, passed: verdict === 'passed' ? 1 : 0, failed: verdict === 'failed' ? 1 : 0,
       cases: [{ id: 'onboarding-delivery-defaults', title: 'onboarding', file: 'e2e/cases/onboarding-delivery-defaults.json', outcome: verdict === 'passed' ? 'pass' as const : 'fail' as const, verdict, required: true, durationMs: 1, attempts: verdict === 'passed' ? 1 : 2,
         attemptResults: [], executed: 3, failingStep: verdict === 'passed' ? null : { index: 1, name: 'read the merger mode', reason: 'mode is "github", expected "control-plane"' } }] };
-    const candidate = { id, sha, cutAt: '2026-10-17T15:00:00.000Z', trigger: 'manual' as const, since: null, items: [] };
-    const record = { id, sha, result: verdict, deployedSha: options.deployedSha ?? sha, at: `${id.slice(0, 4)}-${id.slice(4, 6)}-${id.slice(6, 8)}T${id.slice(9, 11)}:${id.slice(11, 13)}:00.000Z`, suites: [], followUp: null };
+    const candidate = { id, sha, cutAt: at, trigger: 'manual' as const, since: null, items: [] };
+    const record = { id, sha, result: verdict, deployedSha: options.deployedSha ?? sha, at, suites: [], followUp: null };
     const holds = await releaseHolds(sync, { contract, report: async () => report, push: false, now: () => new Date(record.at), file: async (_item, requestId) => requestId === 'release-hold:onboarding-default-path:20261017T132854Z' ? 'GY-1909' : 'GY-1950' })(candidate as never, record as never);
     writeRecord(sync, `rc-uat/${id}`, sha, { ...record, e2e: holds.e2e, holds: holds.holds }, false);
     holds.write();
