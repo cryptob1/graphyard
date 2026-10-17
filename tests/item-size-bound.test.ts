@@ -137,6 +137,19 @@ test('unit:time-to-merge-by-size-reported — master status reports, for deliver
   assert.deepEqual(band('3-5'), { band: '3-5', items: 2, measured: 2, medianMinutesToMerge: 30, medianAttempts: 1 });
   assert.deepEqual(band('6-10'), { band: '6-10', items: 1, measured: 1, medianMinutesToMerge: 200, medianAttempts: 3 });
   assert.deepEqual(band('over 10'), { band: 'over 10', items: 0, measured: 0, medianMinutesToMerge: null, medianAttempts: null }, 'a delivery eight days old is outside the window');
+  assert.deepEqual(report.directoryScoped, { items: 0, measured: 0, medianMinutesToMerge: null, medianAttempts: null });
+
+  // A delivery planning a source directory scope has no known file count: it is reported apart,
+  // never in the band its count of paths would give (one path, `src/`, is not a 1-2 file item).
+  const scoped = [
+    { ...mergedItem('GY-19', { sources: 0, mergedAt: NOW - day, claimedMinutes: 300, attempts: 4 }), plannedFiles: ['src/', 'tests/'] },
+    { ...mergedItem('GY-20', { sources: 1, mergedAt: NOW - day, claimedMinutes: 100, attempts: 2 }), plannedFiles: ['src/runner/', 'src/model.ts'] },
+    { ...mergedItem('GY-21', { sources: 0, mergedAt: NOW - day, claimedMinutes: 10 }), plannedFiles: ['src/a.ts', 'tests/helpers/'] },
+  ] as Work[];
+  const withScopes = timeToMergeBySize([...work, ...scoped], NOW);
+  assert.deepEqual(withScopes.directoryScoped, { items: 2, measured: 2, medianMinutesToMerge: 200, medianAttempts: 3 }, 'directory-scoped deliveries are reported in their own group');
+  assert.deepEqual(withScopes.bands.find(entry => entry.band === '1-2'), { band: '1-2', items: 4, measured: 3, medianMinutesToMerge: 20, medianAttempts: 1 },
+    'the 1-2 band gains only the file-scoped delivery; a tests/ directory is a companion and does not make an item directory-scoped');
 
   // The bands' contents once more, as the master status report computes them: the report builder is
   // called on the same snapshot, and its `itemSize` is the report above.
@@ -180,6 +193,11 @@ test('unit:child-source-file-bound — a split child planning more than the run�
   assert.doesNotThrow(() => validateChildSizes([{ title: 'Within', criteria: ['AC-1'], plannedFiles: ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts', 'src/e.ts', 'tests/within.test.ts', 'docs/page.md'], after: [] }], 5));
   assert.throws(() => validateChildSizes([{ title: 'Over', criteria: ['AC-1'], plannedFiles: ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts', 'src/e.ts', 'src/f.ts'], after: [] }], 5),
     /Child 1 plans 6 source files, over 5/, 'a child over the bound is refused by name');
+  // A source directory scope could cover any number of files: it is refused, not counted as one.
+  for (const scope of ['src/runner/', 'src/runner/**'])
+    assert.throws(() => validateChildSizes([{ title: 'Directory', criteria: ['AC-1'], plannedFiles: [scope, 'src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts'], after: [] }], 5),
+      /Child 1 plans the source directory scope src\/runner\/\*{0,2}, which covers an unknown number of files/, `a child planning ${scope} is refused though it names five paths`);
+  assert.doesNotThrow(() => validateChildSizes([{ title: 'Companion directory', criteria: ['AC-1'], plannedFiles: ['src/a.ts', 'tests/helpers/', 'docs/'], after: [] }], 5), 'companion directories stay allowed');
 
   const starts: string[] = [];
   const children = [
@@ -191,6 +209,7 @@ test('unit:child-source-file-bound — a split child planning more than the run�
   await decompositionSettled();
   assert.match(starts[0]!, /at most 5 planned source files/, 'the prompt states the per-child source-file bound');
   assert.match(starts[0]!, /the control plane refuses a child planning more/, 'the prompt says the refusal is the control plane’s');
+  assert.match(starts[0]!, /never a source directory/, 'the prompt asks for source files, not directories');
   assert.equal(parent.decomposition?.state, 'failed', 'the proposed split is recorded as failed');
   assert.equal(parent.decomposition?.failure?.reason, 'refused', 'the control plane, not the session, refused it');
   assert.match(parent.decomposition?.failure?.detail ?? '', /Child 1 plans 6 source files, over 5/, 'the refusal names the child and the bound');

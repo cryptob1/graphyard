@@ -72,6 +72,9 @@ export const companionScope = (path: string) => /^(tests|docs)(\/|$)/.test(pathS
 /** The planned paths that are the source change: every planned path but its companions. */
 export const plannedSourceFiles = (work: Pick<Work, 'plannedFiles'>) => (work.plannedFiles ?? []).filter(path => !companionScope(path));
 
+/** The planned source paths that name a directory (`src/`, `src/runner/`, `src/runner/**`) rather than a file: their file count is unknown, so no count of planned source files measures them. */
+export const sourceDirectoryScopes = (plannedFiles: readonly string[]) => plannedFiles.filter(path => !companionScope(path) && pathScope(path).prefix);
+
 /** A rough size of the change an item asks for, in lines: per criterion, per root-level source directory, per narrower source path. Companions add nothing. */
 export function estimatedLines(work: Pick<Work, 'criteria' | 'plannedFiles'>) {
   const planned = plannedSourceFiles(work);
@@ -154,11 +157,14 @@ export function validateChildOrder(children: DecompositionPayload['children']) {
 }
 
 /**
- * Each child plans at most the run's bound of source files: the parent was split for planning
- * more, so a child that wide would be put to decomposition itself on arrival (GY-1858).
+ * Each child plans at most the run's bound of source files, each named as a file: the parent was
+ * split for planning more, and a child is never put to decomposition itself. A source directory
+ * scope covers an unknown number of files, so it could hide any count and is refused (GY-1858).
  */
 export function validateChildSizes(children: DecompositionPayload['children'], maxPlannedFiles: number) {
   children.forEach((child, index) => {
+    const directories = sourceDirectoryScopes(child.plannedFiles);
+    demand(!directories.length, `Child ${index + 1} plans the source directory scope ${directories.join(', ')}, which covers an unknown number of files; each child names its source files, at most ${maxPlannedFiles}`, 422);
     const sources = child.plannedFiles.filter(path => !companionScope(path));
     demand(sources.length <= maxPlannedFiles, `Child ${index + 1} plans ${sources.length} source files, over ${maxPlannedFiles}; each child plans at most ${maxPlannedFiles}`, 422);
   });
@@ -388,9 +394,8 @@ export type SourceFileBand = (typeof sourceFileBands)[number];
 export const sourceFileBand = (count: number): SourceFileBand | null =>
   count <= 0 ? null : count <= 2 ? '1-2' : count <= 5 ? '3-5' : count <= 10 ? '6-10' : 'over 10';
 
-export interface SizeBandSpeed {
-  band: SourceFileBand;
-  /** Deliveries in the window whose planned source files fall in the band. */
+export interface SizeSpeed {
+  /** Deliveries in the window in this group. */
   items: number;
   /** Those whose timeline records a first claim: the population both medians are over. */
   measured: number;
@@ -399,7 +404,9 @@ export interface SizeBandSpeed {
   /** Median attempts per merged item, over the same population. */
   medianAttempts: number | null;
 }
-export interface ItemSizeReport { windowDays: number; bands: SizeBandSpeed[] }
+export interface SizeBandSpeed extends SizeSpeed { band: SourceFileBand }
+/** `directoryScoped`: deliveries whose planned source scope names a directory, reported apart — their file count is unknown, so no band holds them. */
+export interface ItemSizeReport { windowDays: number; bands: SizeBandSpeed[]; directoryScoped: SizeSpeed }
 
 /** The middle value, rounded to a whole reading; null over an empty set. */
 const median = (values: number[]) => {
@@ -414,27 +421,29 @@ const median = (values: number[]) => {
  * observed, grouped by planned-source-file band, with the median minutes from an item's first
  * claim to its merge and the median attempts per band. Deliveries in the window are read on the
  * repository clock (`mergedAtRepository`, as every speed reading is); an item without a recorded
- * first claim (its timeline not reconstructed yet) is counted but not measured. This is the data
+ * first claim (its timeline not reconstructed yet) is counted but not measured. An item planning a
+ * source directory scope has no known file count, so it is reported apart in `directoryScoped`
+ * rather than banded by its count of paths, which would put the widest items in the smallest
+ * band. This is the data
  * `run.decomposition.maxPlannedFiles` is tuned from: where the merged minutes or attempts climb,
  * the bound sits.
  */
 export function timeToMergeBySize(work: readonly Work[], now: number, windowDays = 7): ItemSizeReport {
   const from = now - windowDays * 24 * 3_600_000;
-  const buckets = new Map<SourceFileBand, { items: number; minutes: number[]; attempts: number[] }>(
-    sourceFileBands.map(band => [band, { items: 0, minutes: [], attempts: [] }]));
+  type Bucket = { items: number; minutes: number[]; attempts: number[] };
+  const empty = (): Bucket => ({ items: 0, minutes: [], attempts: [] }), directoryScoped = empty();
+  const buckets = new Map<SourceFileBand, Bucket>(sourceFileBands.map(band => [band, empty()]));
   for (const item of work) {
     const merged = acceptedMergeAt(item), at = merged ? Date.parse(merged) : NaN;
-    const band = sourceFileBand(plannedSourceFiles(item).length);
+    const directory = sourceDirectoryScopes(item.plannedFiles ?? []).length > 0, band = sourceFileBand(plannedSourceFiles(item).length);
     if (!band || !Number.isFinite(at) || at < from || at > now) continue;
-    const bucket = buckets.get(band)!, claims = (item.pipeline?.attempts ?? []).map(claim => Date.parse(claim.claimedAt)).filter(Number.isFinite);
+    const bucket = directory ? directoryScoped : buckets.get(band)!, claims = (item.pipeline?.attempts ?? []).map(claim => Date.parse(claim.claimedAt)).filter(Number.isFinite);
     bucket.items += 1;
     if (claims.length) {
       bucket.minutes.push(Math.max(0, Math.round((at - Math.min(...claims)) / 60_000)));
       bucket.attempts.push(Math.max(1, item.pipeline?.attempts.length ?? claims.length));
     }
   }
-  return { windowDays, bands: sourceFileBands.map(band => {
-    const bucket = buckets.get(band)!;
-    return { band, items: bucket.items, measured: bucket.minutes.length, medianMinutesToMerge: median(bucket.minutes), medianAttempts: median(bucket.attempts) };
-  }) };
+  const speed = (bucket: Bucket): SizeSpeed => ({ items: bucket.items, measured: bucket.minutes.length, medianMinutesToMerge: median(bucket.minutes), medianAttempts: median(bucket.attempts) });
+  return { windowDays, bands: sourceFileBands.map(band => ({ band, ...speed(buckets.get(band)!) })), directoryScoped: speed(directoryScoped) };
 }

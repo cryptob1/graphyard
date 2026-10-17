@@ -15,7 +15,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 ## Item size
 
-`run.decomposition` judges every never-dispatched item, whoever created it: `maxPlannedFiles` counts planned source files only (`tests/`/`docs/` are companions), default 5, the estimated-lines bound scaled to it (600), raisable there; over it, a read-only session proposes at-most-five-source-file children, the control plane refusing a wider child. `master status` `itemSize`: last 7 days' deliveries by source-file band (1-2, 3-5, 6-10, over 10), median first-claim-to-merge minutes and attempts per band.
+`run.decomposition` judges each never-dispatched item, whoever made it: `maxPlannedFiles` (default 5) counts planned source files, not `tests/`/`docs/` companions; the lines bound scales to it (600). Over it, a read-only session proposes children within it: wider children or source directories are refused. `master status` `itemSize`: 7-day deliveries per source-file band (1-2, 3-5, 6-10, over 10; source-directory items: `directoryScoped`), median first-claim-to-merge minutes and attempts.
 
 ## GitHub administration through the browser
 
