@@ -1,5 +1,4 @@
 // Concern: cycle step 4c — request and supervise the routine decisions and their approver sessions.
-import { observationWaker } from '../master/base-break-refresh.js';
 import { decisionSituation, uncitedRefusals } from '../model/approval.js';
 import type { Work } from '../model.js';
 import { canonicalJson } from '../onboarding.js';
@@ -9,10 +8,7 @@ import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonAct
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
 import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
-import {
-  bindHeldSupervisedAsk, clearCoveringAdoptIfGone, coveringAdoptLeftAskOpen, coveringScopeAdoptWatch, heldAdoptWatch, heldDecisionRefusal, heldDecisionNamedIn, heldWaitDetail, heldWaitMarker, heldWaitScope,
-  approvedResumePendingDetail, markHeldScopeAsk, clearHeldScopeAsk, syncHeldScopeAskMarks, staleRevisionDecideRefusal, staleRevisionDecideNote, staleRevisionDecideDetail,
-} from './metrics.js';
+import { bindHeldSupervisedAsk, clearCoveringAdoptIfGone, coveringAdoptLeftAskOpen, coveringScopeAdoptWatch, heldAdoptWatch, heldDecisionRefusal, heldDecisionNamedIn, heldWaitDetail, heldWaitMarker, heldWaitScope, approvedResumePendingDetail, markHeldScopeAsk, clearHeldScopeAsk, syncHeldScopeAskMarks, staleRevisionDecideRefusal, staleRevisionDecideNote, staleRevisionDecideDetail, } from './metrics.js';
 import { candidateMovedMeanwhile, decisionFailureKind, decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication, selfHealingDecisionFailure } from './decision-reads.js';
 import { refusedAttestationWatch, type RefusedAttestation } from '../model/rework-ground.js';
 import { type DaemonEffects, record } from './effects.js'; import { planReportSink, reportMechanicalPlans } from './mechanical-plan-report.js';
@@ -20,8 +16,8 @@ import { adoptedWatch, refusedOnOtherGrounds } from './rework-grounds.js';
 import type { FaultKind } from '../model/fault-classes.js';
 import type { Cycle } from './cycle.js';
 import { baseRefreshConflict } from '../merge-queue.js'; import { docsSyncRoute } from './docs-sync-route.js';
-import { throughputDecisionAdopts, throughputRoutineDecision, wakeObservationJob } from './cycle-delivery.js';
-import { createApproverSupervisor } from './cycle-approvers.js';
+import { throughputDecisionAdopts, throughputRoutineDecision } from './cycle-delivery.js';
+import { createApproverSupervisor } from './cycle-approvers.js'; import { boundWakes, observationWakes, retireDepartedWakes } from './cycle-wakes.js';
 import { boundedDecisions, decisionBudget, decisionCallCarried, deferredFirst, settleDeferred } from './decision-budget.js'; import { boundedCalls, recordCarried, stepCallCarried } from './step-budget.js';
 import { staleReleaseStep } from './stale-releases.js';
 import { closeStanding, closingItems, recordingWrites, staleCloseStep } from './stale-closes.js';
@@ -34,7 +30,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const { config, state, now, snapshot, clock, clockOffset, performed, isolate, agents, open } = cycle;
   // The items this step writes, which the stale-close step leaves to the next cycle's read (GY-1439).
   const written = new Set<string>(); let budgetLeft = (): number => Number.POSITIVE_INFINITY; // the step budget every call below is capped by, bound where the budget is made; no decide call runs before it
-  const effects = recordingWrites(boundedDecisions(boundedCalls(await decisionReads(cycle.effects, cycle.heldDecisions, snapshot.work, Object.values(state.approvals), clock, cycle.effects.decisionReadDeadlineMs), cycle.heldDecisions, now, () => budgetLeft(), { step: 'approvers', calls: approverCalls }), cycle.heldDecisions, now, () => budgetLeft()), written);
+  const effects = recordingWrites(boundedDecisions(boundedCalls(await decisionReads(boundWakes(cycle, cycle.effects, () => budgetLeft()), cycle.heldDecisions, snapshot.work, Object.values(state.approvals), clock, cycle.effects.decisionReadDeadlineMs), cycle.heldDecisions, now, () => budgetLeft(), { step: 'approvers', calls: approverCalls }), cycle.heldDecisions, now, () => budgetLeft()), written);
   // 4c. Routine decisions: request with the master's operator-agent identity, launch an independent approver, supervise every cycle (see `approvalStep`).
   const stamp = new Date(clock).toISOString(), bounds = holdBounds.get(state) ?? new Map<string, number>(); holdBounds.set(state, bounds); for (const id of bounds.keys()) if (!snapshot.work.some(work => work.id === id)) bounds.delete(id);
   const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now(), faultKind?: FaultKind | null) =>
@@ -407,6 +403,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   }
   const waitingRank = (item: Work) => capacityRank.get(item.key) ?? Number.POSITIVE_INFINITY;
   const ordered = deferredFirst(snapshot.work, state.decisionsDeferred), workToProcess = capacityRank.size ? [...ordered].sort((a, b) => waitingRank(a) - waitingRank(b)) : ordered;
+  await retireDepartedWakes(cycle); // GY-1865 review: a carried wake of an item that left the loop's items is retired here, its row's last reader; one still open is retired where its decision is read
   // A producer request whose attempts are used up calls for rework once its escalation stood a cycle (GY-496).
   const exhausted = (await cycle.exhaustedProofs()).filter(entry => { const raised = state.actions[exhaustedProofKey(entry)]; return !!raised && raised.cycle < state.cycle; });
   // A needed decision with no watch is requested once ready to retry, or escalated.
@@ -418,7 +415,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const detail = `${item.key} needs a${decision.action === 'attest' ? 'n' : ''} ${decision.action} decision: ${decision.reason} This loop runs without the decision effects, so it cannot request one: graphyard master decide ${item.key} ${decision.action}${input} REASON, then graphyard master approver ${item.key} DECISION`;
     if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   };
-  const wake = effects.observe && observationWaker(effects.observe);
+  const { wake, wakeJob, wakeCarried, retireMootWake } = observationWakes(cycle, effects, pause); // GY-1865: the step's wakes, carried past the bound and retired once moot (cycle-wakes.ts)
   const noteWait = async (item: Work, detail: string) => { const waitKey = `wait:rework:${item.id}`; if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
   // GY-1436: one stable wait per held item, naming the docs-sync session, head, base and the end of its bound; that bound, reached or still ahead, ends the loop's idle wait (GY-1622), kept at the latest local time the control plane can reach it (the read's upper clock offset): the cycle it wakes finds the hold ended, at most one round trip late.
   const noteHold = async (item: Work, { wait: detail, deadline }: { wait: string; deadline: string }) => { const bound = Date.parse(deadline); const waitKey = `wait:docs-sync:${item.id}`; if (bound >= clock) bounds.set(item.id, bound + clockOffset.max); if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
@@ -451,6 +448,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // Still called for, only not attestable this cycle: its request is not one the item moved past.
       const called = neededDecision(item, config, cycle.baseFailed.get(item.id), exhausted, mechanical, refused);
       if (called) unattestable.add(decisionKey(item, called));
+      else await retireMootWake(item, 'the item no longer needs the decision the wake was to feed'); // GY-1865 review: no decision is needed any more, so the item's carried wake, if any, is moot
       // The item needs the decision and the loop will not attest what it could not verify. Step 3b
       // has already escalated an open item whose fence this host assessed and could not settle.
       const withheld = withheldDecision(item, config, clock, assessment);
@@ -468,7 +466,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // A docs-sync stopped at the loop-owned rework's cutoff (GY-1434) gives the conflict up on a reading taken since: woken here at
     // once, or by the observation job for the next cycle. That reading is the one the rework is then decided from.
     const synced: { work: Work | null } = { work: null };
-    const observe = async (work: Work) => { synced.work = wake ? await wake(work, clock) : null; if (!synced.work) await wakeObservationJob(cycle, work, 'docs-sync give-up'); return synced.work; };
+    const observe = async (work: Work) => { synced.work = wake ? await wake(work, clock) : null; if (!synced.work) await wakeJob(work, 'docs-sync give-up'); return synced.work; };
     const docsConflict = (subject: Work, routine: RoutineDecision) => routine.action === 'rework' && !state.approvals[decisionKey(subject, routine)] && !!baseRefreshConflict(subject) && routine.binding === `${subject.candidate!.sha}:conflict`;
     const hold = docsConflict(item, decision) ? await docsSync.hold(item, observe) : null;
     if (hold?.held) return noteHold(item, hold); released.at = true;
@@ -480,9 +478,9 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const endedWait = (subject: Work, at: string) => `${subject.key}: its docs-sync hold ended at ${at}; rework waits for an observation since then showing the head unmoved`;
     let wait = conflictReworkOverdue(item, decision, clock) ? null : hold?.awaiting ? endedWait(item, hold.awaiting)
       : decision.action === 'rework' ? reworkObservationWait(item, clock, pause, woken?.state === 'done' ? woken.at : null) : null;
-    const fresh = wait && !pause && wake && !state.approvals[key] ? await wake(item, clock) : null;
+    const fresh = wait && !pause && wake && !state.approvals[key] && !wakeCarried(item) /* GY-1865 review: a carried wakeObservation is the item's one resync in flight; wakeJob joins or consumes it */ ? await wake(item, clock) : null;
     const again = fresh && routineDecision(fresh, config, now(), assessment, fresh.candidate?.sha === item.candidate?.sha ? cycle.baseFailed.get(item.id) : undefined, [], [], refused);
-    if (fresh && again?.action !== 'rework') return noteWait(item, `${item.key}: woke its observation for a rework decision; the reading at ${fresh.observation?.at ?? 'unknown'} no longer calls for one`);
+    if (fresh && again?.action !== 'rework') { await retireMootWake(item, `the reading its wake fetched (at ${fresh.observation?.at ?? 'unknown'}) no longer calls for one`); return noteWait(item, `${item.key}: woke its observation for a rework decision; the reading at ${fresh.observation?.at ?? 'unknown'} no longer calls for one`); }
     if (fresh && again) {
       item = fresh; decision = again; key = decisionKey(item, decision); needed.add(key);
       // The fresh reading settles an ended docs-sync hold in the cycle it ended (GY-1436).
@@ -493,10 +491,10 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const watch = state.approvals[key];
     if (wait) {
       await noteWait(item, wait);
-      // The refusal wakes the item's observation job at once (GY-710); rework is decided once it lands.
-      // Its one-per-item wake:observation entry stays for guarded merge; pruneDaemonState bounds it.
-      return wakeObservationJob(cycle, item, 'rework');
+      // The refusal wakes the item's observation job at once (GY-710); rework is decided once it lands. GY-1865: the wake runs on this step's bound (cycle-wakes.ts), and its row is retired the cycle it is moot.
+      return wakeJob(item, 'rework');
     }
+    await retireMootWake(item, 'the item no longer waits for the observation it was to fetch'); // GY-1865 review: no rework wait stands, so a carried wake is moot
     // Settled watches are done; GY-1701 re-requests when a covering adopt's revision later vanishes.
     if (watch) {
       if (!watch.settledAt) await supervise(item, decision, key, watch);
