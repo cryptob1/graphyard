@@ -40,7 +40,8 @@ import { configuredDocumentation, documentationObligation, recordDocumentationSu
 import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { submittedBranchMoved } from './model/assignment.js';
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
-import { nextAction, nextActionKinds, sameAction } from './model/next-action.js';
+import { actionAccount, nextActionKinds, sameAction } from './model/next-action.js';
+import type { ActionAccount } from './model/action-account.js';
 import { recordScenarioRun } from './test-runs.js';
 import { resolveScenario } from './scenarios.js';
 import { sameObservationInputs } from './model/observation-save.js';
@@ -49,7 +50,7 @@ import type { ObservationJobState } from './model/action-kinds.js';
 import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
 import { recordStallRemedy, remedyFlows, remedyOutcomes, stallRemedyKinds } from './stall-remedies.js';
 import { claimAction, openActions, reconcileActions, renewClaim, settleAction, settleDelivered, type ActionRow } from './model/actions.js';
-import { livenessFallback, livenessOf, livenessRepairEntry } from './model/liveness.js';
+import { livenessFallback, livenessOf, livenessRepairEntry, rowDueAt, stalledActionLifts, waitDueAt } from './model/liveness.js';
 import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
 import { recordSession, sessionHandleSchema, sessionObservationFields } from './model/sessions.js';
 import { noSubmissionRenewalRefused, observeHead, workerNoSubmissionRefusalMs } from './model/attempt-bound.js';
@@ -62,7 +63,8 @@ import { loopOwnedRefusal } from './model/loop-owned.js';
 import { loopObservationProofs } from './model/loop-observation.js';
 import { assertDecisionAuthority, foldDecisions, liveLeaseRevisionRefusal, quarantinedRevisionRefusal, requiredDecisionCapabilities, type Decision, type HeldApplication } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
-import { deliverSplitParent, splitChildRevisionRefusal } from './decomposition.js';
+import { mechanicalHoldUntil } from './mechanical-findings.js';
+import { decompositionHoldGraceMs, deliverSplitParent, splitChildRevisionRefusal } from './decomposition.js';
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
 import { isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type Queryable, type SavedVersion } from './store/locked-read.js';
 
@@ -704,9 +706,10 @@ class ReconcileContended extends Error {}
  * line for the coordination lock before writing them: the one place a tick waits on other writers.
  * `full` says why the tick evaluated every live item, or is null when it evaluated only the items
  * whose inputs moved, and `lagMs` is the event-loop lag sampled over the tick's window (GY-1777),
- * null when the window held no sample.
+ * null when the window held no sample. `due` counts the items a non-full tick evaluated because
+ * their recorded due instant had passed (GY-1873), not because an input moved.
  */
-export interface ReconcileTick { at: string; candidates: number; evaluated: number; deferred: number; maxAttempts: number; ms: number; writes: number; lockWaitMs: number; full: ReconcileFull | null; lagMs: { p50: number; max: number } | null }
+export interface ReconcileTick { at: string; candidates: number; evaluated: number; deferred: number; maxAttempts: number; ms: number; writes: number; lockWaitMs: number; due: number; full: ReconcileFull | null; lagMs: { p50: number; max: number } | null }
 /** How long the reconciliation loop may go between passes before the gap is recorded as a plane stall (GY-1791): the loop is driven every couple of seconds, so a minute is dozens of missed passes. */
 export const planeStallMs = 60_000;
 /**
@@ -730,10 +733,16 @@ export interface FaceMove { id: string; key: string; fields: string[] }
  */
 export interface ReconcileFull { cause: 'view' | 'configuration' | 'interval' | 'faces'; moved: FaceMove[] }
 
-/** One item in the reconciliation view kept between passes (GY-1124). */
-interface ReconcileEntry { number: number; work: Work; version: string; settled: boolean; face: string }
-/** A write a reconciliation batch planned (GY-1290): its evaluation of the item, on a copy, at the row version and the clock it read. */
-interface ReconcilePlan { id: string; work: Work; version: string; now: Date }
+/**
+ * One item in the reconciliation view kept between passes (GY-1124). `due` is what the item's last
+ * evaluation read as the earliest instant at which its outcome could change with no write
+ * (GY-1873): null until an evaluation of the document as it stands has run, and stale the moment
+ * the document moves — every reread and every write re-records it from the evaluation of what
+ * stands then.
+ */
+interface ReconcileEntry { number: number; work: Work; version: string; settled: boolean; face: string; due: number | null }
+/** A write a reconciliation batch planned (GY-1290): its evaluation of the item, on a copy, at the row version and the clock it read, with the due instant that evaluation read (GY-1873). */
+interface ReconcilePlan { id: string; work: Work; version: string; now: Date; due: number | null }
 /** One planned write, committed: whether it wrote, whether later planned items must be evaluated again, and what to keep of it once committed. */
 interface ReconcileWritten { wrote: boolean; stale: boolean; faceMoved: OwnFaceMove | null; saved: SavedVersion[]; apply: () => void }
 /** The running pass's kept view and its readers, as one planned write needs them. */
@@ -784,6 +793,36 @@ function mergeFaceMoves(moves: Iterable<FaceMove>): FaceMove[] {
     merged.set(move.id, known ? { ...known, fields: [...new Set([...known.fields, ...move.fields])].sort() } : move);
   }
   return [...merged.values()];
+}
+/**
+ * The earliest instant at which this evaluated document's outcome could change with no write
+ * (GY-1873): the minimum over the time-bounded inputs its evaluation read — the lease's expiry,
+ * every open row's due (its claim, its retry, its settle window, the idle bound), the bound the
+ * named wait runs to, the observation window's opening, every evidence record's expiry, the review
+ * gate's mechanical hold and a running split's dispatch hold, and the
+ * widest backoff a stalled action's escalation lifts at. Instants already past are ignored: what they guarded has flipped already
+ * (or needs a write, or the full evaluation), and a past due would wake the item every pass. Null
+ * when the document holds none — then only a write or the full evaluation can change the outcome,
+ * and the item is never evaluated as due. A wait on another item is deliberately absent: nothing
+ * on this document flips when that instant passes — the other item's own due and the face its
+ * evaluation writes reach the waiter through `readsFace`.
+ */
+function reconcileDueAt(work: Work, all: Work[], now: Date, account: ActionAccount): number | null {
+  const nowMs = now.getTime();
+  let due: number | null = null;
+  const consider = (at: number | null | undefined) => { if (at != null && Number.isFinite(at) && at > nowMs && (due === null || at < due)) due = at; };
+  const considerIso = (value: string | null | undefined) => { if (value) consider(Date.parse(value)); };
+  considerIso(work.lease?.expiresAt);
+  for (const row of work.actionQueue?.actions ?? []) considerIso(rowDueAt(row, now));
+  if (!account.action && account.wait && account.wait.kind !== 'dependency') considerIso(waitDueAt(work, account.wait, all, now));
+  considerIso(work.observationWindow?.notBefore);
+  // Accepted evidence stops counting once its expiry passes (currentEvidence), so a gate can fail by the clock alone.
+  for (const evidence of work.evidence ?? []) considerIso(evidence.expiresAt);
+  // The review gate's mechanical hold lapses at its round window, and dispatch's wait on a running split at its limit and grace.
+  consider(mechanicalHoldUntil(work, nowMs));
+  if (work.decomposition?.state === 'running') consider(Date.parse(work.decomposition.startedAt) + work.decomposition.timeoutMs + decompositionHoldGraceMs);
+  for (const lift of stalledActionLifts(work)) consider(lift);
+  return due;
 }
 /** A fleet face the pass's own planned write moved (GY-1777): the move, and the item's document before and after it. */
 interface OwnFaceMove { move: FaceMove; before: Work; after: Work }
@@ -879,8 +918,13 @@ export class EventLoopLag {
   /** Close the window and forget its samples. */
   stop() { if (this.timer) clearInterval(this.timer); this.timer = null; this.samples = []; }
 }
-/** The floor on how long reconciliation goes between full evaluations (GY-1867 stretches it past a longer full pass): `GRAPHYARD_RECONCILE_FULL_MS`, 2000..300000 ms, default 10000 (GY-1124). */
-export function configuredReconcileFullMs(value = process.env.GRAPHYARD_RECONCILE_FULL_MS, fallback = 10_000): number {
+/**
+ * The floor on how long reconciliation goes between full evaluations (GY-1867 stretches it past a
+ * longer full pass): `GRAPHYARD_RECONCILE_FULL_MS`, 2000..300000 ms, default 300000 (GY-1873 — it
+ * was 10000 under GY-1124, when nothing recorded when each item was next due; the per-item due
+ * instants wake the clock-driven changes now, and the full evaluation is the rare safety net).
+ */
+export function configuredReconcileFullMs(value = process.env.GRAPHYARD_RECONCILE_FULL_MS, fallback = 300_000): number {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= 2_000 && parsed <= 300_000 ? parsed : fallback;
 }
@@ -2874,7 +2918,14 @@ export class Engine {
       return work;
     });
   }
-  evaluate(work: Work, all: Work[], now: Date) {
+  /**
+   * Evaluate one item and return the earliest instant at which its outcome could change with no
+   * write (GY-1873): the minimum over the time-bounded inputs the evaluation read, which the
+   * reconciliation keeps in its view so a pass wakes the item when that instant passes. The
+   * derivation runs once and answers both — the account it computes names the action and the wait,
+   * and the due reads the bounds beside them.
+   */
+  evaluate(work: Work, all: Work[], now: Date): number | null {
     // One request, one verdict (GY-124): two verdicts from one identity on one head for one request
     // are recorded as a conflict and withheld from the observation before any gate reads it.
     this.conflictTransitions.set(work, [...(this.conflictTransitions.get(work) ?? []), ...reconcileReviewConflict(work, now)]);
@@ -2895,14 +2946,18 @@ export class Engine {
     // with the document every save appends, so they need no second event of their own; the
     // executor's claim and settlement write their own named events.
     // One computation answers both: the queue reconciles against it and the item carries it, so
-    // two readers of the same evaluation cannot disagree about what this item needs.
-    const computed = nextAction(work, all, now);
+    // two readers of the same evaluation cannot disagree about what this item needs — and the
+    // same account names the wait, whose bound is part of the due instant (GY-1873).
+    const account = actionAccount(work, all, now);
+    const computed = account.action;
     // An open item the derivation names nothing for and nothing moves is owned by an escalation (GY-201).
-    reconcileActions(work, all, now, { next: computed ?? livenessFallback(work, all, now) });
+    reconcileActions(work, all, now, { next: computed ?? livenessFallback(work, all, now, account) });
     // Only a different decision is written: an identical action rebuilt in source order would
     // differ from the stored one by key order alone, and the reconciliation tick would rewrite
     // every item on every pass.
     if (work.nextAction === undefined || !sameAction(work.nextAction, computed)) work.nextAction = computed;
+    // After the queue reconciled: the rows it leaves are the ones whose dues are read (GY-1873).
+    return reconcileDueAt(work, all, now, account);
   }
   /** Append the auto-dispatch transitions of the last evaluation to the ledger, once, beside the document save. */
   private async recordDispatch(db: { query: (text: string, values: unknown[]) => Promise<unknown> }, work: Work, now: Date) {
@@ -3159,7 +3214,7 @@ export class Engine {
     if (!this.lockedReadsWarm) { await warmLockedReads(this.store.pool); this.lockedReadsWarm = true; }
     const fleet = this.reconcileView;
     let all: Work[] = [], candidates: string[] = [], next = 0, documentsRead = 0, full = false;
-    const tick: ReconcileTick = { at: new Date().toISOString(), candidates: 0, evaluated: 0, deferred: 0, maxAttempts: 0, ms: 0, writes: 0, lockWaitMs: 0, full: null, lagMs: null };
+    const tick: ReconcileTick = { at: new Date().toISOString(), candidates: 0, evaluated: 0, deferred: 0, maxAttempts: 0, ms: 0, writes: 0, lockWaitMs: 0, due: 0, full: null, lagMs: null };
     const view = () => { all = [...fleet.values()].sort((a, b) => a.number - b.number).map(entry => entry.work); };
     // Only the pass's candidates and the rows not settled now are versioned: a settled delivery that stays settled is never visited.
     const versionsOf = async (db: PoolClient) => new Map<string, string>((await db.query(reconcileVersionsSql, [candidates])).rows.map(row => [row.id, row.version]));
@@ -3175,12 +3230,17 @@ export class Engine {
       for (const row of rows) {
         const face = fleetFace(row.document), before = fleet.get(row.id)?.face ?? '';
         if (before !== face) { const move = { id: row.id, key: row.document.key, fields: faceFields(before, face) }; moves.push(move); if (owe) this.noteFaceMove(move); }
-        fleet.set(row.id, { number: Number(row.number), work: row.document, version: row.version, settled: false, face });
+        // The document moved, so whatever due its last evaluation read is stale; the item is a candidate
+        // this pass (a moved row is changed), and its next evaluation records the fresh instant (GY-1873).
+        fleet.set(row.id, { number: Number(row.number), work: row.document, version: row.version, settled: false, face, due: null });
       }
       view();
       return moves;
     };
     let opened = false, decided = false, changed: string[] = [], config = '', fullCause: ReconcileFull['cause'] | null = null, openedAt = 0;
+    // The live items whose recorded due instant has passed (GY-1873), kept beside the pass's other
+    // candidate sets so the batches can say what an evaluation was woken by.
+    let clockDue = new Set<string>();
     const pass: ReconcilePass = { fleet, all: () => all, view, versionsOf, moved, reread, lockWait: ms => { tick.lockWaitMs = Math.max(tick.lockWaitMs, Math.round(ms)); } };
     try {
       for (;;) {
@@ -3209,10 +3269,10 @@ export class Engine {
               const row = versions.get(document.id), entry = fleet.get(document.id);
               if (!row || entry && entry.version === row.version && entry.settled === row.settled) continue;
               const settled = isSettledSummary(document);
-              if (!settled) { fleet.set(document.id, { number, work: document, version: row.version, settled, face: entry?.face ?? '' }); continue; }
+              if (!settled) { fleet.set(document.id, { number, work: document, version: row.version, settled, face: entry?.face ?? '', due: null }); continue; }
               const face = fleetFace(document);
               if (entry?.face !== face) this.noteFaceMove({ id: document.id, key: document.key, fields: faceFields(entry?.face ?? '', face) });
-              fleet.set(document.id, { number, work: document, version: row.version, settled, face });
+              fleet.set(document.id, { number, work: document, version: row.version, settled, face, due: null });
             }
             view();
             // Items held for a merge inside a direct-merge window are delivered before anything else reads them.
@@ -3224,7 +3284,7 @@ export class Engine {
                 if (!entry) continue;
                 const face = fleetFace(work), fields = faceFields(entry.face, face);
                 this.noteFaceMove({ id: work.id, key: work.key, fields: fields.length ? fields : ['swept'] });
-                Object.assign(entry, { work, version: after.get(work.id) ?? '', face });
+                Object.assign(entry, { work, version: after.get(work.id) ?? '', face, due: null });
               }
               view();
             }
@@ -3245,9 +3305,15 @@ export class Engine {
             if (full || moved.length) tick.full = { cause: fullCause ?? 'faces', moved: moved.sort((a, b) => (fleet.get(a.id)?.number ?? Infinity) - (fleet.get(b.id)?.number ?? Infinity) || a.key.localeCompare(b.key)) };
             // A pass a moved face made full evaluates every live item too, so it restarts the clock from when it opened (GY-1867).
             if (tick.full && !full) this.reconcileFullAt = openedAt;
+            // What only the clock can change (GY-1873): every evaluated item left the earliest instant
+            // its outcome could change with no write in the view, and the pass wakes the ones whose
+            // instant has passed, beside the items whose inputs moved as before. The full evaluation
+            // stays as the safety net over both.
+            clockDue = tick.full ? new Set<string>() : new Set(live.filter(id => { const entry = fleet.get(id)!; return entry.due !== null && entry.due <= now.getTime(); }));
             const due = tick.full ? new Set(live) : new Set([
               ...changed, ...this.reconcileOwed,
               ...live.filter(id => { const work = fleet.get(id)!.work; return !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime() || standingEscalations(work).length > 0 || reaches.some(reach => readsFace(fleet.get(id)!, reach)); }),
+              ...clockDue,
             ]);
             if (full) this.reconcileConfig = config;
             // GY-1824: a full pass also takes in a few settled deliveries still owing their deployment
@@ -3275,8 +3341,12 @@ export class Engine {
             if (!fleet.has(id)) { gone++; continue; } else if (isStandIn(fleet.get(id)!.work)) await reread(db, [id]);
             evaluating.push(id);
             const entry = fleet.get(id)!, copy = structuredClone(entry.work);
-            if (await this.reconcileItem(db, copy, planned.size ? all.map(work => planned.get(work.id) ?? work) : all, now, { dryRun: true })) {
-              planned.set(id, copy); plans.push({ id, work: copy, version: entry.version, now });
+            const outcome = await this.reconcileItem(db, copy, planned.size ? all.map(work => planned.get(work.id) ?? work) : all, now, { dryRun: true });
+            // The evaluation read the document as it stands: its due instant stands whatever it wrote (GY-1873).
+            entry.due = outcome.due;
+            if (!tick.full && clockDue.has(id)) tick.due++;
+            if (outcome.wrote) {
+              planned.set(id, copy); plans.push({ id, work: copy, version: entry.version, now, due: outcome.due });
             }
           }
           return true;
@@ -3326,7 +3396,8 @@ export class Engine {
     if (this.reconcileTicks.length > 20) this.reconcileTicks.shift();
     if (elapsedMs >= this.reconcileSlowWarnMs) {
       // GY-1777: the warning says what made the pass full and the loop's lag, so a starved process is told from a held lock.
-      const why = tick.full ? `every live item evaluated because ${describeFull(tick.full)}` : `${tick.candidates} candidate(s) whose inputs moved`;
+      const why = tick.full ? `every live item evaluated because ${describeFull(tick.full)}`
+        : `${tick.candidates} candidate(s) whose inputs moved${tick.due ? `, ${tick.due} of them due by the clock` : ''}`;
       const lag = tick.lagMs ? `event-loop lag p50 ${tick.lagMs.p50} ms, max ${tick.lagMs.max} ms over the tick` : 'no event-loop lag sample over the tick';
       console.warn(`reconciliation tick took ${Math.round(elapsedMs)} ms for ${this.lastReconcile.live} item(s) (${tick.evaluated} evaluated, ${tick.writes} written, longest wait for the coordination lock ${tick.lockWaitMs} ms; ${why}; ${lag}), over the ${this.reconcileSlowWarnMs} ms bound; a high lag is this process starved of CPU, otherwise find what held the coordination lock in the server logs`);
     }
@@ -3354,7 +3425,7 @@ export class Engine {
       if (!row || !pass.fleet.has(plan.id)) return { wrote: false, stale, faceMoved: null, saved: [], apply: () => {} };
       if (row.version !== pass.fleet.get(plan.id)!.version) await pass.reread(db, [plan.id]);
       const entry = pass.fleet.get(plan.id)!;
-      let work = plan.work, before = entry.work;
+      let work = plan.work, before = entry.work, due = plan.due;
       if (!stale && entry.version === plan.version) await this.writeReconciled(db, work, pass.all(), plan.now);
       else {
         // In place: a failure from here on clears the kept view, as every rolled-back write does. The
@@ -3362,15 +3433,18 @@ export class Engine {
         // removes (a path, a resource, a parent) is reached through it rather than left to the full pass.
         before = structuredClone(entry.work);
         work = entry.work;
-        const wrote = await this.reconcileItem(db, work, pass.all(), now);
+        const outcome = await this.reconcileItem(db, work, pass.all(), now);
+        // The re-evaluation read the document as it now stands: its due instant replaces the planned one (GY-1873),
+        // here and in what the committed write keeps.
+        entry.due = due = outcome.due;
         // Items the batch evaluated after this one read it as evaluated: if it came out otherwise, they are evaluated again too.
         if (fleetFace(work) !== fleetFace(plan.work)) stale = true;
-        if (!wrote) return { wrote: false, stale, faceMoved: null, saved: [], apply: () => {} };
+        if (!outcome.wrote) return { wrote: false, stale, faceMoved: null, saved: [], apply: () => {} };
       }
       const version = ((await db.query('SELECT xmin::text AS version FROM work_items WHERE id = $1', [plan.id])).rows[0] as { version: string }).version, face = fleetFace(work);
       const saved = await savedVersions(db, [work]);
       const faceMoved = face !== entry.face ? { move: { id: plan.id, key: work.key, fields: faceFields(entry.face, face) }, before, after: work } : null;
-      return { wrote: true, stale, faceMoved, saved, apply: () => { Object.assign(entry, { work, version, face }); pass.view(); } };
+      return { wrote: true, stale, faceMoved, saved, apply: () => { Object.assign(entry, { work, version, face, due }); pass.view(); } };
     }, { lane: 'background', coordinationLock: false, retryStaleWrites: false });
   }
   /**
@@ -3391,11 +3465,14 @@ export class Engine {
     return true;
   }
   /**
-   * One item's reconciliation inside a batch, holding the item's row lock; true when it wrote the
-   * item. A `dryRun` (GY-1290) evaluates `work` — a copy — with no lock and writes nothing: true
-   * when the evaluation would write, which is all the batch's lock-free phase asks.
+   * One item's reconciliation inside a batch, holding the item's row lock; `wrote` says whether it
+   * wrote the item, and `due` is the earliest instant at which the evaluated document's outcome
+   * could change with no write (GY-1873), read whether or not anything was written — that instant
+   * is what wakes the item later. A `dryRun` (GY-1290) evaluates `work` — a copy — with no lock and
+   * writes nothing: `wrote` says the evaluation would write, which is all the batch's lock-free
+   * phase asks.
    */
-  private async reconcileItem(db: PoolClient, work: Work, all: Work[], now: Date, { dryRun = false }: { dryRun?: boolean } = {}): Promise<boolean> {
+  private async reconcileItem(db: PoolClient, work: Work, all: Work[], now: Date, { dryRun = false }: { dryRun?: boolean } = {}): Promise<{ wrote: boolean; due: number | null }> {
     // A delivered item is not re-evaluated, but one still holding rows, a merge-queue entry (stored
     // before GY-1236) or an action from before its delivery — every item delivered before GY-185 —
     // is settled here once, and the check that finds nothing to settle costs no evaluation.
@@ -3405,10 +3482,10 @@ export class Engine {
     // the delivery transaction raises a fresh delivery's.
     if (work.stage === 'done') {
       const leftover = !!(work as Work & { queue?: unknown }).queue || (work.actionQueue?.actions ?? []).some(row => row.kind !== 'verify-deployment') || (!!work.nextAction && work.nextAction.kind !== 'verify-deployment');
-      if ((!leftover && !deploymentUnrecorded(work)) || !settleDelivered(work, all, now)) return false;
+      if ((!leftover && !deploymentUnrecorded(work)) || !settleDelivered(work, all, now)) return { wrote: false, due: null };
       this.reconcileWrites.set(work, { delivered: true });
       if (!dryRun) await this.writeReconciled(db, work, all, now);
-      return true;
+      return { wrote: true, due: null };
     }
     const before = JSON.stringify(work);
     // The liveness invariant (GY-201) is judged on the record as it stood, before this tick
@@ -3463,14 +3540,14 @@ export class Engine {
     // GY-1687: the lapse that ended the attempt applies the requirements decision held for it, before the
     // evaluation derives a dispatch from the ended attempt; its ledger writes wait for the write phase.
     const pending = lost ? await this.applyHeldDecisions(db, work, all, { lease: lost, containmentQuarantine: work.containmentQuarantine, plannedFiles: work.plannedFiles }, now, { command: null, submitted: false }) : [];
-    this.evaluate(work, all, now);
+    const due = this.evaluate(work, all, now);
     // Every violation found at the start of the tick is repaired by the evaluation above — the
     // derivation names its successor and the queue opens its row — and the ledger says so.
     if (stranded) ledger.push(livenessRepairEntry(stranded, work, all, now));
-    if (!jsonChanged(before, work)) return false;
+    if (!jsonChanged(before, work)) return { wrote: false, due };
     this.reconcileWrites.set(work, { ledger, pending });
     if (!dryRun) await this.writeReconciled(db, work, all, now);
-    return true;
+    return { wrote: true, due };
   }
   /** What `reconcileItem`'s evaluation of a document decided to write, kept until it is written (GY-1290). */
   private readonly reconcileWrites = new WeakMap<Work, { delivered: true } | { ledger: { kind: string; details: Record<string, unknown> }[]; pending: ((db: PoolClient) => Promise<void>)[] }>();
