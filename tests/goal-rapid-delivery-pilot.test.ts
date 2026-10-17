@@ -7,7 +7,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { loadCases, loadContract } from '../src/e2e/case.js';
 import type { E2eLauncher, E2eLocator, E2ePage } from '../src/e2e/runner.js';
 import { checkoutRepositoryPolicy } from '../src/model/repository-policy.js';
-import { composeLeftovers } from '../src/compose-preview.js';
+import { composeOwnerLabel } from '../src/compose-preview.js';
 import { DeliveryDefaults } from '../web/components/delivery-slices.js';
 import Sidebar from '../web/components/sidebar.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -155,8 +155,11 @@ test('integration:goal-rapid-delivery-pilot — the complete protected seven-cas
   assert.ok(snapshot.notes.some((note: string) => /Ended .*'s preview of .* \(delivered\)/.test(note)), 'a delivered change\'s preview was ended');
   assert.equal(existsSync(snapshot.scratch), false, 'the fixture removed its scratch directory');
   await assert.rejects(fetch(`${made.url}/healthz`), 'the fixture plane is stopped');
-  const leftovers = spawnSync('docker', ['ps', '-a', '--filter', 'label=com.docker.compose.project', '--format', '{{.Label "com.docker.compose.project"}}'], { encoding: 'utf8' }).stdout.split('\n').filter(name => /^graphyard-preview-(rc-|gy-)/.test(name));
-  for (const project of new Set(leftovers)) { const left = await composeLeftovers(project); assert.equal(left.containers.length + left.volumes.length + left.networks.length, 0, `${project} was removed`); }
+  // Every Compose project this process started — the previews and each candidate's combined run, labelled with this process as owner — is gone: no container, volume or network of it is left.
+  const owned = (kind: string[], format: string) => spawnSync('docker', [...kind, '--filter', `label=${composeOwnerLabel}`, '--format', format], { encoding: 'utf8' }).stdout.split('\n').filter(line => {
+    try { return JSON.parse(line.split('\t')[1] ?? '').pid === process.pid; } catch { return false; } });
+  const left = [...owned(['ps', '-a'], `{{.Names}}\t{{.Label "${composeOwnerLabel}"}}`), ...owned(['volume', 'ls'], `{{.Name}}\t{{.Label "${composeOwnerLabel}"}}`), ...owned(['network', 'ls'], `{{.Name}}\t{{.Label "${composeOwnerLabel}"}}`)];
+  assert.deepEqual(left, [], 'every Compose project the run started was removed');
   // No worker credential: the fixture's plane knows its operator and the loop's coordinator, and grants nothing else.
   assert.deepEqual((snapshot.principals.principals ?? snapshot.principals).map((principal: any) => principal.role).sort(), ['admin', 'coordinator']);
 });
