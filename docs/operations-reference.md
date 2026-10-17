@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Wakes dismiss autocompact suggestions (`esc`, "Not now"), re-reading; unanswerable dialogs hold (`wake:master:held`).
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Wakes dismiss autocompact suggestions (`esc`, "Not now"), re-read; unconfirmed, unanswerable dialogs hold (`wake:master:held`).
 
 ### Perpetual master loop
 

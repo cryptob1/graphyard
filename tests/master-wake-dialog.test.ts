@@ -231,6 +231,23 @@ test('unit:master-wake-holds-dialog-still-showing — a settings dialog that sta
   assert.equal(state.actions[masterWakeHeldKey]?.state, 'done', 'the standing hold is retired with the wake that ends it');
 });
 
+test('unit:master-wake-holds-unconfirmed-dismissal — a re-read that fails after the esc holds the wake: no read confirmed the dialog cleared, so the wake text is never typed', async () => {
+  const pane = new MasterPane(compactDialog);
+  const read = pane.read;
+  // The read straight after the esc fails once, as a Herdr timeout would.
+  let failed = false;
+  pane.read = () => { if (!failed && pane.log.at(-1) === 'keys:esc') { failed = true; pane.log.push('read'); throw new Error('herdr pane read timed out'); } return read(); };
+  const { state, step } = stepOver(pane);
+  await step(clock);
+  assert.deepEqual(pane.keys, [['esc']], 'the not-now key is sent');
+  assert.deepEqual(pane.prompts, [], 'the wake is not sent on a pane no read confirmed clear');
+  assert.equal(state.master.lastWake, null);
+  assert.match(state.actions[masterWakeHeldKey]?.detail ?? '', /could not read the pane again/);
+  await step(clock + minute);
+  assert.equal(pane.prompts.length, 1, 'the next wake goes through once a read shows the pane clear');
+  assert.equal(state.actions[masterWakeHeldKey]?.state, 'done');
+});
+
 test('unit:master-wake-clear-pane — a master pane showing no dialog is woken as before, with no keys sent', async () => {
   const pane = new MasterPane(cleanScreen);
   const { state, step } = stepOver(pane);

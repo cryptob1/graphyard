@@ -275,11 +275,11 @@ function unanswerableDialog(name: string, screen: string | null | undefined): st
  * read again under the same test. Any other dialog — a credential, a payment, Claude Code's
  * Settings Warning, a menu no rule answers — holds the wake, named for the record: the wake's
  * keystrokes would land in it exactly as in the dialog this item exists to clear. A pane that
- * cannot be read holds nothing: the wake goes out as it always did, into whatever the pane shows.
+ * cannot be read first holds nothing, but a dismissal no later read confirms holds the wake.
  */
 async function masterWakeDialog(cycle: Cycle, name: string, agent: HerdrAgent): Promise<MasterWakeDialog> {
   const { effects } = cycle;
-  const read = async () => effects.sessionOutput ? await carriedCall(cycle, 'master', 'session', 'sessionOutput', () => Promise.resolve(effects.sessionOutput!(agent)).catch(error => { if (stepCallCarried(error)) throw error; return null; }), () => null) : null;
+  const read = async () => effects.sessionOutput ? await carriedCall(cycle, 'master', 'session', 'sessionOutput', () => Promise.resolve().then(() => effects.sessionOutput!(agent)).catch(error => { if (stepCallCarried(error)) throw error; return null; }), () => null) : null;
   const screen = await read(), prompt = detectConsentPrompt(screen);
   if (!prompt) {
     // A dialog no rule classifies — Claude Code's Settings Warning, or any other trailing menu the
@@ -296,6 +296,8 @@ async function masterWakeDialog(cycle: Cycle, name: string, agent: HerdrAgent): 
   await boundedCalls(unboundedEffects(effects), cycle.state, cycle.now, () => stepCallBoundMs, { step: 'master', calls: ['answerSession'] }).answerSession!(agent, prompt.keys);
   const answer: ConsentAnswer = { rule: prompt.rule.id, kind: prompt.kind, prompt: prompt.text, answer: prompt.rule.answer, keys: prompt.keys, at: new Date(cycle.clock).toISOString() };
   const again = await read(), still = detectConsentPrompt(again);
+  // Only a read that shows the pane clear sends the wake: one that failed cannot tell whether the dialog went.
+  if (again === null) return { hold: true, detail: `Held the master wake: ${showing}; the loop sent ${prompt.keys.join(' ')} ("${prompt.rule.answer}") but could not read the pane again to confirm the dialog cleared` };
   if (still) return { hold: true, detail: `Held the master wake: ${showing}; the loop sent ${prompt.keys.join(' ')} ("${prompt.rule.answer}") but the pane still shows a dialog: "${still.text}"` };
   const lingering = unanswerableDialog(name, again);
   if (lingering) return { hold: true, detail: `Held the master wake: ${showing}; the loop sent ${prompt.keys.join(' ')} ("${prompt.rule.answer}") but the pane then showed: ${lingering}` };
