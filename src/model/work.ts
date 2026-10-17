@@ -117,13 +117,6 @@ export interface Principal {
   scope?: { repositories: string[]; workItems: string[] };
   [operatorCredentialHash]?: string;
 }
-/**
- * A lane-only producer (GY-1879): role producer whose only authority is the `external-runs:import`
- * grant, with no proof allowlist and no deployment scope. It reviews nothing and produces no proof
- * evidence, so it holds no reviewer slot (delegation.ts) and the server holds it to its lane's routes (server/auth.ts).
- */
-export const laneOnlyProducer = (p: Pick<Principal, 'role' | 'grants' | 'proofs' | 'deploymentProviders'>) =>
-  p.role === 'producer' && !!p.grants?.length && p.grants.every(grant => grant === 'external-runs:import') && !p.proofs?.length && !p.deploymentProviders?.length;
 export interface AssignmentIdentity { owner: string; epoch: number; displayName?: string; runtime?: string; claimedAt?: string }
 export interface Lease { owner: string; epoch: number; expiresAt: string }
 export interface ContainmentScope { unit: string; pid: number }

@@ -16,7 +16,7 @@ import { buildIdentity } from '../protocol-version.js';
 import type { ProductionWatch } from '../production-watch.js';
 import { responderFromEnv, type Responder } from '../closed-question.js';
 import { Next, Sent, matchRoute, registerApiRoutes, requestFailure, type RouteContext, type RouteModule, type Services } from './routes.js';
-import { authenticate, laneProducerRouteGuard, operatorAgentRouteGuard, operatorVisible } from './auth.js';
+import { authenticate, laneProducerScope, operatorAgentRouteGuard, operatorVisible } from './auth.js';
 import type { Credential } from './principals.js';
 import { healthRoutes } from './routes/health.js';
 import { signinClaimFromEnv, signinRoutes } from './routes/signin.js';
@@ -46,15 +46,11 @@ export const publicRoutes: readonly RouteModule[] = [healthRoutes, githubRoutes,
  * routes.ts (`registerApiRoutes`); modules ahead of the operator-agent guard authorize their
  * callers themselves.
  */
-export const apiRoutes: readonly RouteModule[] = [
-  // A lane-only producer's boundary (GY-1879) comes first, ahead of every module that authorizes its callers itself.
-  { name: 'lane-producer-scope', routes: [laneProducerRouteGuard] },
-  ...registerApiRoutes([
-    operatorAgentRoutes, proofGrantRoutes, goalRoutes,
-    { name: 'operator-agent-scope', routes: [operatorAgentRouteGuard] },
-    agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, shippingPulseRoutes, flowAnalyticsRoutes, attributionRoutes, scenarioRoutes, interventionRoutes, actionRoutes, statusRoutes, workRoutes,
-  ]),
-];
+export const apiRoutes: readonly RouteModule[] = registerApiRoutes([
+  operatorAgentRoutes, proofGrantRoutes, goalRoutes,
+  { name: 'operator-agent-scope', routes: [operatorAgentRouteGuard] },
+  agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, shippingPulseRoutes, flowAnalyticsRoutes, attributionRoutes, scenarioRoutes, interventionRoutes, actionRoutes, statusRoutes, workRoutes,
+]);
 
 async function body(req: IncomingMessage, limit = 1_000_000) {
   const chunks: Buffer[] = []; let size = 0;
@@ -106,7 +102,7 @@ export function assembleServices(engine: Engine, credentials: Credential[], gith
 export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null, artifacts: ArtifactOptions = { backend: null, capacityBytes: artifactCapacityFromEnv() }, options: ServerOptions = {}) {
   const services = assembleServices(engine, credentials, github, artifacts, options);
   const unauthenticated: Principal = { id: '', role: 'reader' };
-  // The services ride on the server so the entry announces their decisions (limit drift, build) without reassembling.
+  // The services ride on the server so the entry announces decisions without reassembling.
   return Object.assign(createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -135,7 +131,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
       if (await dispatch(publicRoutes)) return;
       if (url.pathname.startsWith('/api/')) {
         context.actor = await authenticate(services, req.headers.authorization, services.repository, req.method, url.pathname);
-        if (await dispatch(apiRoutes)) return;
+        if (await dispatch([laneProducerScope, ...apiRoutes])) return;
         return send(404, { error: 'Route not found' });
       }
       await dispatch([staticRoutes]);

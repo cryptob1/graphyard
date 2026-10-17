@@ -1,7 +1,8 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { demand, laneOnlyProducer, operatorScopeIncludes, type Principal } from '../model.js';
+import { demand, operatorScopeIncludes, type Principal } from '../model.js';
+import { laneOnlyProducer } from './principals.js';
 import { readImports } from '../validation-import.js';
-import { Next, type Route, type Services } from './routes.js';
+import { Next, type Route, type RouteModule, type Services } from './routes.js';
 import { leaseCommandRequest } from './routes/work.js';
 
 /**
@@ -54,7 +55,7 @@ export const operatorAgentRouteGuard: Route = {
 /**
  * A lane-only producer (GY-1879: role producer, whose only grant is `external-runs:import`) is held
  * to the routes that grant names, derived from the grant alone. This guard is the first
- * authenticated route, so nothing else runs first: it passes POST /api/validation/import on to the
+ * authenticated route (src/server/index.ts dispatches it ahead of the table), so nothing else runs first: it passes POST /api/validation/import on to the
  * import, answers GET /api/validation/import/{sha} with the runs this principal imported itself and
  * GET /api/principals with its own entry, and refuses every other route before any effect.
  */
@@ -71,6 +72,7 @@ export const laneProducerRouteGuard: Route = {
     return Next;
   },
 };
+export const laneProducerScope: RouteModule = { name: 'lane-producer-scope', routes: [laneProducerRouteGuard] };
 
 /**
  * The human operator signs into the dashboard without handling a token (GY-738). `graphyard login`,

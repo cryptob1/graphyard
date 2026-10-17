@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { readFile, rm, stat } from 'node:fs/promises';
+import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -286,4 +286,75 @@ test('unit:principal-upsert-remove-single-entry-readback — a re-add that chang
     assert.equal(reads, 4, 'the stale entry was read three times and refused as the change');
     assert.deepEqual(changed.readback.principal, { ...huck, sessionKind: 'human' }, 'the readback is the served entry with the requested fields');
   } finally { await fixture.cleanup(); }
+});
+
+test('unit:principal-upsert-remove-single-entry-readback — principal add reaches the deployment where install --apply reached it: a Hetzner bundle over SSH at the server\'s address, a Docker host at its recorded host and user, a Compose bundle on its own port; principal remove on a self-contained host deletes the removed credential there', async () => {
+  const lines = (transport: Harness['transport']) => transport.commands.map(command => [command.program, ...command.args].join(' '));
+  // Each remote answers `cat` from the files written to it, as a real machine would.
+  const remoteCat = (files: () => Harness['hostFiles']) => ({ match: 'cat /opt/graphyard/', result: (line: string) => files().get(line.slice(4))?.content ?? { stdout: '', stderr: 'No such file', code: 1 } });
+
+  // Hetzner server-only: the bundle is read and rewritten on the server, never on this machine.
+  let hetzner: Harness | undefined;
+  hetzner = await harness({ provider: 'hetzner', extraResponses: [remoteCat(() => hetzner!.hostFiles)] });
+  try {
+    const session = await prepareInstall(hetzner.root, { repository: REPOSITORY, provider: 'hetzner', sshKey: 'graphyard-key', maxMonthly: 50, domain: 'graphyard.example.test' }, hetzner.deps);
+    await applyInstall(session, await buildPlan(session));
+    const added = await principal(hetzner, ['add', 'huck-engineer', '--role', 'producer', '--grant', GRANT]);
+    assert.deepEqual(added.readback.principal, huck);
+    const env = `${session.context.workdir}/server.env`;
+    assert.ok(lines(hetzner.remotes.get('203.0.113.10')!).includes(`cat ${env}`), 'the server\'s bundle is read over SSH at its address');
+    assert.ok(!lines(hetzner.transport).includes(`cat ${env}`), 'no local file is taken for the server\'s bundle');
+    assert.equal(deployedRoster(hetzner.transport, hetzner.remotes).at(-1)!.id, 'huck-engineer');
+  } finally { await hetzner.cleanup(); }
+
+  // A Docker host: the recorded host and SSH user are reached again; a record that predates them is refused before anything is written.
+  let docker: Harness | undefined;
+  docker = await harness({ provider: 'docker-host', extraResponses: [remoteCat(() => docker!.hostFiles)] });
+  try {
+    const session = await prepareInstall(docker.root, { repository: REPOSITORY, provider: 'docker-host', sshHost: '203.0.113.30', sshUser: 'deploy', domain: 'graphyard.example.test' }, docker.deps);
+    await applyInstall(session, await buildPlan(session));
+    assert.deepEqual((await recordOf(session.directory)).deployment, { sshHost: '203.0.113.30', sshUser: 'deploy', local: false, port: null, image: null });
+    const reached: string[] = [];
+    const ssh = (host: string, user?: string) => { reached.push(`${user}@${host}`); return docker!.deps.ssh!(host, user); };
+    const added = await principalCommand(['add', 'huck-engineer', '--role', 'producer', '--grant', GRANT], { ...docker.deps, ssh, cwd: docker.root });
+    assert.deepEqual(added.readback.principal, huck);
+    assert.ok(reached.length > 0 && reached.every(entry => entry === 'deploy@203.0.113.30'), `every SSH session reaches the recorded host as its user: ${reached.join(', ')}`);
+    const record = await recordOf(session.directory);
+    await writeFile(join(session.directory, 'install.json'), JSON.stringify({ ...record, deployment: null }));
+    await assert.rejects(principal(docker, ['remove', 'huck-engineer']), /does not record the host this installation runs on; rerun graphyard install --apply/);
+  } finally { await docker.cleanup(); }
+
+  // Compose on a port of its own: the rewritten bundle keeps publishing it, from the record or, for an older record, from the bundle itself.
+  let compose: Harness | undefined;
+  const cat = { match: 'cat /', result: (line: string) => compose!.transport.files.get(line.slice(4))?.content ?? { stdout: '', stderr: 'No such file', code: 1 } };
+  compose = await harness({ provider: 'compose', extraResponses: [cat] });
+  try {
+    const session = await prepareInstall(compose.root, { repository: REPOSITORY, provider: 'compose', port: 4317 }, compose.deps);
+    await applyInstall(session, await buildPlan(session));
+    const bundle = () => compose!.transport.files.get(`${session.context.workdir}/compose.yaml`)!.content;
+    assert.match(bundle(), /127\.0\.0\.1:4317:/);
+    assert.equal((await recordOf(session.directory)).deployment.port, 4317);
+    await principal(compose, ['add', 'huck-engineer', '--role', 'producer', '--grant', GRANT]);
+    assert.match(bundle(), /127\.0\.0\.1:4317:/, 'the recorded port is kept');
+    const record = await recordOf(session.directory);
+    await writeFile(join(session.directory, 'install.json'), JSON.stringify({ ...record, deployment: null }));
+    await principal(compose, ['remove', 'huck-engineer']);
+    assert.match(bundle(), /127\.0\.0\.1:4317:/, 'an older record keeps the port the bundle publishes');
+    assert.doesNotMatch(bundle(), /127\.0\.0\.1:4310:/);
+  } finally { await compose.cleanup(); }
+
+  // A self-contained host keeps credentials on the host: removing a principal deletes its token file there and no other.
+  let host: Harness | undefined;
+  host = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test', extraResponses: [remoteCat(() => host!.hostFiles)] });
+  try {
+    const session = await prepareInstall(host.root, { repository: REPOSITORY, provider: 'host', selfContained: true, sshHost: '203.0.113.20', sshUser: 'root', domain: 'graphyard.example.test' }, host.deps);
+    await applyInstall(session, await buildPlan(session));
+    const tokens = '/home/graphyard/.config/graphyard/owner-project/tokens';
+    await principal(host, ['add', 'huck-engineer', '--role', 'producer', '--grant', GRANT]);
+    assert.ok(host.hostFiles.has(`${tokens}/huck-engineer.token`), 'the added credential is written on the host');
+    await principal(host, ['remove', 'huck-engineer']);
+    const removals = lines(host.remotes.get('203.0.113.20')!).filter(line => line.startsWith('rm -f '));
+    assert.deepEqual(removals, [`rm -f ${tokens}/huck-engineer.token`], 'only the removed principal\'s token is deleted');
+    assert.ok(!deployedRoster(host.transport, host.remotes).some(entry => entry.id === 'huck-engineer'));
+  } finally { await host.cleanup(); }
 });

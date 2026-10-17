@@ -10,7 +10,7 @@ import { collectScanInput, detectDeploy, detectStack, discover, proposeDelivery 
 import { parseRepositoryConfig, repositoryConfigFile } from '../model/documentation.js';
 import { requiredPullRequestChecks, type DeliveryPolicy } from '../model/delivery-policy.js';
 import { applyWiring, deploymentAdapters, observeReleaseWiring, wiringActions, type DeploymentAdapter, type DeploymentContext } from './deploy-target.js';
-import { adapterFor, carriesCredential, readRemote, isProviderReference, quotedPrice, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
+import { adapterFor, carriesCredential, hetznerAddress, publishedPort, readRemote, isProviderReference, quotedPrice, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
 import { asUser, existingMachineAdapter, generateHostSecrets, SIGNIN_CLAIM_VARIABLE, hostHerdrOnly, hostLayout, hostProfilesOnly, hostPlan, hostRemote, hostTokenFile, installHostFleet, readHostSecrets, selfContainedAdapter, MIGRATE_SOURCE_VARIABLE, type HostFleetResult } from './host.js';
 import { applyProtection, applyRestore, observeRestore, protectionRecordFile, readProtectionRecord, recordProtectionOnce, restoreChanges, type ProtectionRecord, type RestoreChange, appClient, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, installationClient, installationToken, protectionSatisfied, readProtection, GRAPHYARD_CHECKS, readWebhookConfig, repositoryInstallation, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
 import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
@@ -1515,6 +1515,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
     // Persist the no-App choice so master setup / derivedVariables never reintroduce App vars
     // from a leftover github-app.json on this host (GY-1550); bound is null exactly when noApp.
     noGithubApp: noApp,
+    deployment: { sshHost: context.sshHost, sshUser: context.sshUser, local: !!context.host?.local, port: context.provider === 'compose' ? context.port : null, image: session.inputs.image ?? null },
     reviewers: session.reviewers,
     profiles: [
       ...(profiles.master.configured ? [{ name: 'master', principal: principalOfRole(session.principals, 'coordinator').id, kind: profiles.master.kind ?? 'unknown', role: 'master' as const }] : []),
@@ -1719,11 +1720,14 @@ export async function applyRosterChange(session: InstallSession, record: Install
   let deployment: { provider: Provider; service: string; variables: string[]; rewritten: boolean } | null = null;
   if (change.changed) {
     const principals = coreEnv(session).filter(value => value.name === 'GRAPHYARD_PRINCIPALS');
+    // A Compose bundle keeps the port its server publishes; an older record does not name it.
+    if (context.provider === 'compose') context.port = publishedPort(await readRemote(context.transport, `${context.workdir}/compose.yaml`)) ?? context.port;
     if (merges) await adapter.applyVariables!(context, principals);
     else { await adapter.setEnv(context, [...(await deployedBundle(session)).filter(value => value.name !== 'GRAPHYARD_PRINCIPALS'), ...principals]); await adapter.deploy(context); }
     deployment = { provider: context.provider, service: context.service, variables: ['GRAPHYARD_PRINCIPALS'], rewritten: !merges };
     await writeInstallRecord(session.directory, { ...record, principals: principalRecords(roster, session.tokens), updatedAt: new Date(deps.now()).toISOString() }, vault);
-    if (!change.entry && !context.host) await rm(tokenFile(session.directory, change.id), { force: true });
+    if (!change.entry && context.host) await (await hostRemote(context)).exec('rm', ['-f', hostTokenFile(context.host.layout, change.id)]);
+    else if (!change.entry) await rm(tokenFile(session.directory, change.id), { force: true });
   }
   const admin = principalOfRole(roster, 'admin');
   const target = `${record.url.replace(/\/$/, '')}/api/principals`;
@@ -1751,7 +1755,8 @@ const servedAs = (listed: { role?: string; sessionKind?: string | null; grants?:
  */
 async function deployedBundle(session: InstallSession): Promise<EnvValue[]> {
   const { context } = session;
-  const transport = context.host ? await hostRemote(context) : context.provider === 'docker-host' ? context.ssh(context.sshHost!, context.sshUser) : context.transport;
+  const transport = context.host ? await hostRemote(context) : context.provider === 'docker-host' ? context.ssh(context.sshHost!, context.sshUser)
+    : context.provider === 'hetzner' ? context.ssh(await hetznerAddress(context), context.sshUser) : context.transport;
   const text = await readRemote(transport, `${context.workdir}/server.env`);
   if (text === null) throw new Error(`${context.workdir}/server.env could not be read; the roster is not edited blind. Rerun graphyard install --apply`);
   const keys: Record<string, string> = { GITHUB_PRIVATE_KEY_FILE: 'GITHUB_PRIVATE_KEY', GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY_FILE: 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY' };

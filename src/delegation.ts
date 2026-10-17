@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
-import { blockingRulingActions, demand, escalationTriggers, holdDelivery, implementerIdentities, laneOnlyProducer, releaseLeadHold, operatorScopeIncludes, raiseEscalation, leadHoldRefusal, sliceIds, standingEscalations, type BlockingRulingAction, type Principal, type SliceId, type Work } from './model.js';
+import { blockingRulingActions, demand, escalationTriggers, holdDelivery, implementerIdentities, releaseLeadHold, operatorScopeIncludes, raiseEscalation, leadHoldRefusal, sliceIds, standingEscalations, type BlockingRulingAction, type Principal, type SliceId, type Work } from './model.js';
 import { save, wakeJob, type Store } from './store.js';
 import { fileConflicts, resourceConflicts } from './coordination.js';
 import { workIdByRef } from './store/locked-read.js';
+import { laneOnlyProducer } from './server/principals.js';
 
 export interface DelegationLimits { maxLeads: number; maxEngineersPerLead: number; minReviewers: number; maxReviewers: number }
 export const defaultDelegationLimits: DelegationLimits = { maxLeads: 3, maxEngineersPerLead: 2, minReviewers: 1, maxReviewers: 2 };

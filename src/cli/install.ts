@@ -68,7 +68,11 @@ export async function principalCommand(args: string[], dependencies: InstallDepe
   const record = await readInstallRecord(directory);
   if (!record) throw new Error(`No installation of ${repository} is recorded under ${directory}; run graphyard install --apply first`);
   const { roster, changed } = entry ? upsertRosterEntry(recordedRoster(record), entry) : removeRosterEntry(recordedRoster(record), id);
-  const session = await prepareInstall(root, { repository: record.repository, provider: record.provider, baseBranch: record.baseBranch, reviewPolicy: record.reviewPolicy, ...(record.domain ? { domain: record.domain } : {}), ...(record.service ? { serverName: record.service } : {}), ...(record.selfContained ? { selfContained: true } : {}), ...(record.noGithubApp ? { noGithubApp: true } : {}) }, dependencies, 'apply');
+  // The deployment is reached where install --apply reached it: its SSH host and user, local mode, port and image.
+  const at = record.deployment;
+  if (!at?.sshHost && !at?.local && (record.provider === 'docker-host' || record.provider === 'host')) throw new Error(`${directory}/install.json does not record the host this installation runs on; rerun graphyard install --apply once to record it, then edit the roster`);
+  const session = await prepareInstall(root, { repository: record.repository, provider: record.provider, baseBranch: record.baseBranch, reviewPolicy: record.reviewPolicy, ...(record.domain ? { domain: record.domain } : {}), ...(record.service ? { serverName: record.service } : {}), ...(record.selfContained ? { selfContained: true } : {}), ...(record.noGithubApp ? { noGithubApp: true } : {}),
+    ...(at ? { sshUser: at.sshUser, ...(at.sshHost ? { sshHost: at.sshHost } : {}), ...(at.local ? { local: true } : {}), ...(at.port ? { port: at.port } : {}), ...(at.image ? { image: at.image } : {}) } : {}) }, dependencies, 'apply');
   return applyRosterChange(session, record, roster, { id, changed, entry });
 }
 /** Repository onboarding: install a control plane, propose and apply the delivery workflow, register Apps, inspect readiness. */
