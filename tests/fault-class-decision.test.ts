@@ -21,6 +21,8 @@ import { readDecisions } from '../src/server/decision-ledger.js';
 import { humanNeeded, type NextAction } from '../src/model/next-action.js';
 import { approverSessionName } from '../src/master.js';
 import { RefusedResponse } from '../src/model.js';
+import type { InvariantCheck } from '../src/model/invariants.js';
+import { randomUUID } from 'node:crypto';
 
 // GY-1251 names this file for its proof: manual:fault-class-decision. The master loop filed 5
 // decision faults in 24 hours on 5 October 2026, all recorded at 05:12:49.809Z. Each was an
@@ -1218,8 +1220,8 @@ test('manual:fault-class-decision — action:decision|GY-1884: a recovery relaun
     const watch = Object.values(state.approvals).find(entry => entry.decision === decisionId)!;
     assert.match(watch.capacity ?? '', wait, `${form}: the watch keeps the capacity wait, so it stays in the oldest-first relaunch queue`);
     assert.equal(watch.launches, 0, `${form}: a launch no slot or account took is not counted against the bound`);
-    assert.equal(Object.values(state.actions).filter(action => action.state === 'failed').length, 0, `${form}: no failed decision action: ${JSON.stringify(state.actions)}`);
-    assert.ok(Object.values(state.actions).some(action => action.state === 'done' && /closed leftover approver pane w1V:pQGR/.test(action.detail)), `${form}: the recovery is named beside the wait`);
+    assert.equal(Object.values(state.actions).filter(action => action.kind === 'decision' && action.state === 'failed').length, 0, `${form}: no failed decision action: ${JSON.stringify(Object.fromEntries(Object.entries(state.actions).filter(([, action]) => action.kind === 'decision')))}`);
+    assert.ok(Object.values(state.actions).some(action => action.kind === 'decision' && action.state === 'done' && /closed leftover approver pane w1V:pQGR/.test(action.detail) && /approver (slot|capacity)/.test(action.detail)), `${form}: the recovery is named beside the wait`);
     assert.deepEqual(decisionInstances(state), [], `${form}: a capacity wait judged nothing`);
   }
 });
@@ -1276,4 +1278,168 @@ test('manual:fault-class-decision — owed-decision|GY-1834|2026-10-16T22:35:33.
   assert.match(standingLine[0]?.text ?? '', /a new head for GY-1834 has been owed for 52m/, JSON.stringify(standingLine));
   const counted = cycleFaults(emptyDaemonState(loopConfig()), [unlanded], late, { config: loopConfig(), reported: standingLine }).filter(fault => fault.faultClass === 'decision');
   assert.deepEqual(counted.map(fault => fault.kind), ['owed-decision'], 'the instance, reproduced as the base held it');
+});
+
+/**
+ * GY-1888 review of 6653b93a — required soak coverage. Simulated day through the real loop: repeated
+ * held-rework adoption across items and heads, own-name recovery with capacity contention on the
+ * relaunch, eventual session cleanup, bounded puts/launches, and every system invariant after every
+ * cycle. Lives in this proof file because a new soak-* file is outside plannedFiles (scope refused).
+ */
+test('unit:soak-invariants-hold — over a simulated day, held-rework adoption and held-name recovery across six items stay bounded, capacity waits on a recovery relaunch never fail the decision, leftover sessions are cleaned up, and every invariant holds', { timeout: 300_000 }, async () => {
+  const minute = 60_000, hour = 60 * minute, day = 24 * hour, cycleMs = 2 * minute;
+  const start = instanceClock, iso = (at: number) => new Date(at).toISOString();
+  const sha = (n: number, head: number) => `${n}${head}`.padEnd(40, 'a');
+  type Kind = 'hold' | 'recover' | 'capacity';
+  type Item = {
+    key: string; n: number; head: number; kind: Kind; heldId: string; decisionId: string | null;
+    leftover: string; registry: string; launches: number; puts: number; leftoverClosed: boolean;
+    capacityHits: number; recoveredAt: number | null; appliedAt: number | null;
+  };
+  const items: Item[] = [0, 1, 2, 3, 4, 5].map(n => ({
+    key: `GY-${1880 + n}`, n, head: 1, kind: n < 3 ? 'hold' : n < 5 ? 'recover' : 'capacity',
+    heldId: `067c0c4f-0000-4000-8000-${String(1880 + n).padStart(12, '0')}`,
+    decisionId: n < 3 ? null : `a17c5808-0000-4000-8000-${String(1880 + n).padStart(12, '0')}`,
+    leftover: `w1V:pHOLD${n}`, registry: `registry-hold-${n}`, launches: 0, puts: 0,
+    leftoverClosed: false, capacityHits: 0, recoveredAt: null, appliedAt: null,
+  }));
+  const appliedHold = (item: Item, at: number) => [{
+    id: item.heldId, action: 'rework', state: 'applied', input: { previousWorkerStopped: true }, requestedAt: iso(at - hour),
+    approvedAt: iso(at - hour + minute), approvedBy: 'graphyard-approver-graphyard',
+    situation: { sha: sha(item.n, item.head), baseSha: instanceBase }, reason: 'reviewer requested changes',
+  }];
+  const history = new Map<string, unknown[]>(items.map(item => [item.key, item.kind === 'hold' ? appliedHold(item, start) : []]));
+  const sessions: { name: string; pane: string; status: 'working' | 'done'; key: string; decision: string }[] = [];
+  const closed: string[] = [], ended: string[] = [], puts: string[] = [], launches: string[] = [];
+  const slotTaken = () => Object.assign(new Error('approver role is at its concurrency limit of 1'), { roleAtCapacity: 'approver role is at its concurrency limit of 1 (1 running)' });
+  const settle = (item: Item, at: number) => {
+    if (item.appliedAt || !item.decisionId) return;
+    const decision = history.get(item.key)!.find(entry => (entry as { id: string }).id === item.decisionId) as { state: string; approvedBy: string | null } | undefined;
+    if (!decision || decision.state !== 'requested') return;
+    Object.assign(decision, { state: 'applied', approvedBy: 'graphyard-approver-graphyard' });
+    item.appliedAt = at;
+    const session = sessions.find(entry => entry.key === item.key);
+    if (session) session.status = 'done';
+  };
+  const view = (item: Item, at: number): Work => {
+    const candidate = { sha: sha(item.n, item.head), baseSha: instanceBase, pr: 1800 + item.n, branch: `graphyard/${item.key.toLowerCase()}-${item.head}`, author: 'worker' };
+    const waiting = item.kind === 'hold' || !item.appliedAt;
+    return {
+      id: `00000000-0000-4000-8000-${String(1880 + item.n).padStart(12, '0')}`, key: item.key, title: item.key, description: '', type: 'bug', priority: 1,
+      dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:loop'] }], policy: { checks: ['test'], review: true },
+      plannedFiles: ['src/loop.ts'], stage: 'review', revision: 5 + item.head, policyRevision: 1, createdAt: iso(start - 3 * hour), updatedAt: iso(at),
+      stageEnteredAt: iso(start - hour), ready: true, epoch: item.head, lease: null, workspaces: [], submission: { epoch: item.head, pr: 1800 + item.n },
+      candidate, reworkRequested: !!item.appliedAt, scenarioRequirements: [], evidence: [],
+      observation: {
+        clockOffset: { min: 0, max: 0 }, candidate,
+        checks: [{ name: 'test', result: 'success', appId: 15368 }],
+        reviews: [{ reviewer: 'graphyard-reviewer[bot]', sha: candidate.sha, state: waiting ? 'CHANGES_REQUESTED' : 'APPROVED', submittedAt: iso(at - 10 * minute) }],
+        protected: true, mergeable: true, merged: false, mergeSha: null, files: ['src/loop.ts'], scopeFiles: [], at: iso(at - minute),
+      },
+      blocker: null, violations: [],
+      gates: [{ name: 'build', passed: true, reasons: [] }, { name: 'review', passed: !waiting, reasons: waiting ? ['Outstanding change requests must be resolved through a new review'] : [] }],
+    } as unknown as Work;
+  };
+  const heldName = (item: Item) => {
+    const name = approverSessionName({ key: item.key } as Work, item.decisionId!);
+    return new Error(`No session can be launched as ${JSON.stringify(name)}: the runtime refused it: {"error":{"code":"agent_name_taken","message":"agent name ${name} is already used; candidates: terminal_id=term_1 pane_id=${item.leftover} workspace_id=w1V tab_id=w1V:tQGM"}}`);
+  };
+  let now = start;
+  const effects: DaemonEffects = {
+    agents: () => [], herdr: () => ({ agents: sessions.map(session => ({ name: session.name, pane_id: session.pane, agent: 'claude', agent_status: session.status })), available: true }),
+    credentials: async () => ({}),
+    snapshot: async () => ({ work: items.map(item => view(item, now)), now: iso(now), jobs: [] }),
+    closeSession: pane => {
+      closed.push(pane);
+      const index = sessions.findIndex(session => session.pane === pane);
+      if (index >= 0) sessions.splice(index, 1);
+      const item = items.find(entry => entry.leftover === pane);
+      if (item) item.leftoverClosed = true;
+    },
+    dispatch: async () => {}, requestProof: () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {},
+    decisions: async work => ({ decisions: structuredClone(history.get(work.key) ?? []) }),
+    decide: async work => {
+      const item = items.find(entry => entry.key === work.key)!;
+      item.puts += 1; puts.push(work.key);
+      if (item.kind === 'hold') {
+        throw new RefusedResponse(`Graphyard refused work/${work.id}/decide (409): ${item.key} already holds rework: decision ${item.heldId} was applied for head ${sha(item.n, item.head).slice(0, 12)} and no worker has submitted since, so the item waits for a worker on it and a second rework authorizes nothing`, 409, { heldRework: { decision: item.heldId } });
+      }
+      const id = item.decisionId ?? randomUUID();
+      item.decisionId = id;
+      if (!history.get(item.key)!.some(entry => (entry as { id: string }).id === id)) {
+        history.get(item.key)!.push({ id, action: 'rework', state: 'requested', input: {}, approvedBy: null, requestedAt: iso(now) });
+      }
+      return { id };
+    },
+    approver: async (work, decision) => {
+      const item = items.find(entry => entry.key === work.key)!;
+      item.launches += 1; launches.push(`${work.key}:${decision}`);
+      if (!item.leftoverClosed) throw heldName(item);
+      // After the leftover is gone, the capacity item loses the slot twice, then launches.
+      if (item.kind === 'capacity' && item.capacityHits < 2) { item.capacityHits += 1; throw slotTaken(); }
+      const name = approverSessionName(work, decision), pane = `w1V:pNEW${item.n}`;
+      item.recoveredAt = now;
+      sessions.push({ name, pane, status: 'working', key: item.key, decision });
+      return { agentName: name, pane };
+    },
+    approverLaunch: async name => {
+      const item = items.find(entry => entry.decisionId && approverSessionName({ key: entry.key } as Work, entry.decisionId) === name);
+      return item && !item.leftoverClosed ? { account: null, runtime: 'claude', session: item.registry, pane: item.leftover } : null;
+    },
+    endRegistrySession: async session => { ended.push(session); },
+    persist: async () => {},
+  };
+  const state = emptyDaemonState(loopConfig());
+  const violations: string[] = [];
+  const failedDecisions: string[] = [];
+  let secondHeadAt: number | null = null;
+  for (let cycle = 0; now < start + day; cycle++, now += cycleMs) {
+    // Second head for each hold item once, so adoption repeats across heads.
+    if (secondHeadAt === null && now >= start + 4 * hour) {
+      secondHeadAt = now;
+      for (const item of items.filter(entry => entry.kind === 'hold')) {
+        item.head = 2;
+        history.set(item.key, appliedHold(item, now));
+        for (const [key, watch] of Object.entries(state.approvals)) if (watch.work === item.key) delete state.approvals[key];
+      }
+    }
+    // Approvers judge within one cycle of a successful recovery launch, well inside the unanswered bound.
+    for (const item of items) if (item.recoveredAt !== null && now >= item.recoveredAt + cycleMs) settle(item, now);
+    await runCycle(loopConfig(), state, effects, () => now);
+    for (const check of state.invariants.report as InvariantCheck[]) if (!check.holds) violations.push(`cycle ${cycle}: ${check.line}`);
+    for (const action of Object.values(state.actions)) {
+      if (action.kind === 'decision' && action.state === 'failed' && /agent_name_taken|concurrency limit|capacity/.test(action.detail)) {
+        failedDecisions.push(`${iso(now)} ${action.work}: ${action.detail.slice(0, 120)}`);
+      }
+    }
+  }
+
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  assert.deepEqual(failedDecisions, [], 'a capacity wait on a recovery relaunch never becomes a failed decision action');
+  for (const item of items.filter(entry => entry.kind === 'hold')) {
+    assert.ok(item.puts >= 1 && item.puts <= 3, `${item.key}: held rework was put at most a few times before adoption across both heads (${item.puts})`);
+    assert.equal(item.launches, 0, `${item.key}: an adopted hold launches no approver`);
+    assert.ok(Object.values(state.actions).some(action => action.work === item.key && /already holds rework decision/.test(action.detail)), `${item.key}: the hold was adopted`);
+  }
+  for (const item of items.filter(entry => entry.kind !== 'hold')) {
+    assert.equal(item.leftoverClosed, true, `${item.key}: the leftover pane was closed`);
+    assert.ok(ended.includes(item.registry), `${item.key}: its registry session was ended`);
+    assert.ok(item.launches >= 2 && item.launches <= 6, `${item.key}: recovery relaunches stay bounded (${item.launches})`);
+    assert.ok(item.puts <= 2, `${item.key}: the decision is requested once (${item.puts})`);
+    assert.ok(item.appliedAt !== null, `${item.key}: the recovered decision was applied`);
+  }
+  const capacity = items.find(entry => entry.kind === 'capacity')!;
+  assert.equal(capacity.capacityHits, 2, 'the capacity item waited through two contended recovery relaunches');
+  assert.ok(capacity.recoveredAt !== null, 'and then launched once a slot freed');
+  assert.ok(Object.values(state.approvals).every(watch => !watch.capacity), 'no capacity wait lingers at the end of the day');
+  assert.deepEqual(decisionInstances(state), [], 'no decision fault is filed across the day');
+  for (const item of items.filter(entry => entry.appliedAt)) {
+    const name = approverSessionName({ key: item.key } as Work, item.decisionId!);
+    assert.ok(!sessions.some(session => session.name === name), `${item.key}: no approver session lingers`);
+  }
+  assert.ok(puts.length <= 20, `puts across the day stay bounded: ${puts.length}`);
+  assert.ok(launches.length <= 30, `launches across the day stay bounded: ${launches.length}`);
+  assert.ok(secondHeadAt !== null, 'the hold items moved to a second head during the day');
 });
