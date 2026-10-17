@@ -46,7 +46,7 @@ export interface GateRecord { name: string; passed: boolean; reasons: readonly s
 type CheckRun = { name: string; result: string; appId: number; id?: number };
 export interface FailedCheckSource {
   candidate?: { sha: string; baseSha: string } | null;
-  observation?: { candidate: { sha: string; baseSha: string }; checks: readonly CheckRun[]; requiredChecks?: readonly { name: string; appId: number | null }[] } | null;
+  observation?: { candidate?: { sha: string; baseSha: string }; checks?: readonly CheckRun[]; requiredChecks?: readonly { name: string; appId: number | null }[] } | null;
   gates?: readonly GateRecord[]; policy?: { checks: readonly string[]; review: boolean } | null;
 }
 /** Same set as merge-queue `failedConclusions` (kept here: importing merge-queue cycles through work.ts → this file). */
@@ -159,7 +159,7 @@ export function failedCheckTestGround(path: string, item: FailedCheckSource, rea
   if (!reason || !testFile(path) || !item.candidate || !namedPaths(reason).includes(path)) return null;
   if (!reasonQuotesFailureSite(reason, path)) return null;
   const observation = item.observation, candidate = item.candidate;
-  if (!observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return null;
+  if (!observation?.candidate || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return null;
   const policy = item.policy?.checks ?? [];
   // Membership matches merge-queue requiredChecksOf (policy names plus protection-bound extras).
   const required = [...policy, ...(observation.requiredChecks ?? []).filter(check => check.name !== 'Graphyard / merge' && check.name !== 'graphyard/landable' && !policy.includes(check.name)).map(check => check.name)];
