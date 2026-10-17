@@ -72,10 +72,10 @@ Every 30 s the guard reruns, then reverts merges failing checks parents passed; 
 {"registration":{"id":"production-observer","revision":1},"epoch":4,"environment":{"id":"production","revision":1},"expectedGeneration":4,"snapshotId":"railway:snapshot:01J8Q4Z0Y3","observedAt":"2026-09-18T20:15:07Z","validFrom":"2026-09-18T20:12:31Z","validTo":"2026-09-18T20:15:07Z","services":[{"service":"api","complete":true,"deployment":{"id":"dep-a1","status":"success","deployedAt":"2026-09-18T20:12:31Z"},"instances":[{"instance":"api-1","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","measurement":"host-attestation","healthy":true}]},{"service":"web","complete":true,"deployment":{"id":"dep-w7","status":"success","deployedAt":"2026-09-18T20:12:40Z"},"instances":[{"instance":"web-1","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","measurement":"host-attestation","healthy":true}]}]}
 ```
 
-`POST /api/delivery/observe-sha` (producers; idempotent) marks contained items deployed:
+`POST /api/delivery/observe-sha` (an observer registration's lease; idempotent) marks every contained item deployed, for production (`GRAPHYARD_PRODUCTION_ENVIRONMENT`) and all its services only:
 
 ```json
-{"environment":"production","sha":"0123456789abcdef0123456789abcdef01234567","services":["web"],"observedAt":"2026-09-18T20:15:07Z"}
+{"registration":{"id":"production-observer","revision":1},"epoch":4,"environment":{"id":"production","revision":1},"sha":"0123456789abcdef0123456789abcdef01234567","services":["api","web"],"observedAt":"2026-09-18T20:15:07Z"}
 ```
 
 Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery sweep` per `freshnessSeconds`; `graphyard delivery` shows state.

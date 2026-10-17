@@ -15,9 +15,10 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 /**
- * GY-1861: a producer records a deployment observation by the commit an environment serves, and
+ * GY-1861: an observer records a deployment observation by the commit production serves, and
  * every delivered item whose merge that commit contains moves from awaiting deployment to deployed.
- * The digest-based observe path is unchanged.
+ * It needs an observer registration and lease, production, and every service; the digest-based
+ * observe path is unchanged.
  */
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
@@ -31,6 +32,9 @@ const digestOf = (label: string) => `sha256:${label.repeat(64).slice(0, 64)}`;
 let pg: EmbeddedPostgres, store: Store, engine: Engine, validation: Validation, delivery: Delivery;
 let http: ReturnType<typeof server>, url: string;
 let serial = 0;
+const production = { id: 'production', revision: 1 }, uat = { id: 'uat', revision: 1 };
+const shaRegistration = { id: 'production-sha-observer', revision: 1 }, uatRegistration = { id: 'uat-sha-observer', revision: 1 }, webRegistration = { id: 'production-web-observer', revision: 1 };
+const leases: Record<string, number> = {};
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1861;
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('delivery-observe-sha'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
@@ -40,13 +44,19 @@ before(async () => {
   http = server(engine, principals.map(p => ({ ...p, token: token(p) })));
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
+  for (const [env, services] of [[production, ['api', 'web']], [uat, ['api', 'web']]] as const)
+    await validation.define(operator, { kind: 'environment', id: env.id, expectedRevision: 0, repository: 'test/repository', url: `https://${env.id}.example.test`, instance: `instance-${env.id}`, immutable: true, services: [...services], resources: [`account-${env.id}`] }, id());
+  for (const [registration, environment, services] of [[shaRegistration, production, ['api', 'web']], [uatRegistration, uat, ['api', 'web']], [webRegistration, production, ['web']]] as const) {
+    await validation.define(operator, { kind: 'registration', id: registration.id, expectedRevision: 0, principalId: observer.id, role: 'observer', environment, adapterVersion: 'test-v1', proofs: [], enabled: true, services: [...services] }, id());
+    leases[registration.id] = (await delivery.lease(observer, { registration })).epoch;
+  }
 });
 after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pg) await pg.stop(); });
 const id = () => randomUUID();
 const reload = async (w: Work) => (await engine.store.workItem(w.id))!;
 const sha = (label: string) => label.repeat(40).slice(0, 40);
 const post = (actor: Principal, path: string, body: unknown, key = id()) => fetch(`${url}${path}`, { method: 'POST', headers: { authorization: `Bearer ${token(actor)}`, 'content-type': 'application/json', 'idempotency-key': key }, body: JSON.stringify(body) });
-const observation = (observed: string, overrides: Record<string, unknown> = {}) => ({ environment: 'production', sha: observed, services: ['web'], observedAt: new Date().toISOString(), ...overrides });
+const observation = (observed: string, overrides: Record<string, unknown> = {}) => ({ registration: shaRegistration, epoch: leases[shaRegistration.id], environment: production, sha: observed, services: ['api', 'web'], observedAt: new Date().toISOString(), ...overrides });
 /** Smoke-required policy, so the label names how far production has carried the merge. */
 const smoked = (w: Work): Work => ({ ...w, policy: { ...w.policy, deploySmoke: true } });
 
@@ -68,16 +78,33 @@ async function delivered(mergeSha: string) {
   return w;
 }
 
+/** Copies of a delivered item, written straight to the store, so a scan can be tested beyond one page. */
+async function copies(template: Work, count: number, mergeSha: string, mergedAt: (n: number) => string) {
+  const documents = Array.from({ length: count }, (_, n) => ({ ...structuredClone(template), id: randomUUID(), key: `COPY-${++serial}`, delivery: { ...structuredClone(template.delivery!), mergeSha, mergedAt: mergedAt(n) } }));
+  await store.pool.query('INSERT INTO work_items(id,document) SELECT * FROM unnest($1::uuid[],$2::jsonb[])', [documents.map(d => d.id), documents.map(d => JSON.stringify(d))]);
+  return documents.map(d => d.key);
+}
+
 test('unit:sha-observation-marks-deployed — a producer sha observation is idempotent and marks deployed exactly the delivered items it contains', async () => {
   const exact = await delivered(sha('1')), ancestor = await delivered(sha('2')), elsewhere = await delivered(sha('3'));
   const served = sha('4');
 
   // Every non-producer credential is refused, and nothing is recorded or marked.
   for (const actor of [reader, worker, operator]) {
-    const refused = await post(actor, '/api/delivery/observe-sha', observation(served));
+    const refused = await post(actor, '/api/delivery/observe-sha', observation(exact.delivery!.mergeSha));
     assert.equal(refused.status, 403, `${actor.role} is refused`);
     assert.match(await refused.text(), /A producer credential is required to record a deployment observation by commit/);
   }
+  // A producer without deployment-observer authority — an ordinary proof collector — is refused too, even naming the observer's registration.
+  const collector = await post(ci, '/api/delivery/observe-sha', observation(exact.delivery!.mergeSha));
+  assert.equal(collector.status, 403); assert.match(await collector.text(), /Wrong observer principal/);
+  await assert.rejects(delivery.observeSha(observer, observation(exact.delivery!.mergeSha, { epoch: leases[shaRegistration.id] + 1 }), id()), /Observer lease epoch is expired or superseded/);
+  // A non-production environment never moves the production deployment record.
+  await assert.rejects(delivery.observeSha(observer, observation(exact.delivery!.mergeSha, { registration: uatRegistration, epoch: leases[uatRegistration.id], environment: uat }), id()), /Only the production environment \('production'\) records a deployment by commit; 'uat' is not it/);
+  // A reading of some services only leaves the item's other services unobserved, so it is refused.
+  await assert.rejects(delivery.observeSha(observer, observation(exact.delivery!.mergeSha, { services: ['web'] }), id()), /must cover every service of 'production'; missing: api/);
+  await assert.rejects(delivery.observeSha(observer, observation(exact.delivery!.mergeSha, { registration: webRegistration, epoch: leases[webRegistration.id], services: ['api', 'web'] }), id()), /Services outside this observer's scope: api/);
+  assert.equal((await reload(exact)).delivery!.deployment, undefined);
   assert.equal((await store.pool.query(`SELECT count(*)::int AS n FROM events WHERE kind='delivery.sha-observed'`)).rows[0].n, 0);
 
   // Over HTTP with no GitHub configured, containment is equality alone: only the exact merge is marked.
@@ -103,12 +130,20 @@ test('unit:sha-observation-marks-deployed — a producer sha observation is idem
 
   // Idempotent: the same key replays its result, another key for the same environment and sha returns the one recorded observation.
   assert.deepEqual(await delivery.observeSha(observer, input, key, contains), result);
-  await assert.rejects(delivery.observeSha(observer, observation(served, { services: ['api'] }), key, contains), /Idempotency key reused with different input/);
+  await assert.rejects(delivery.observeSha(observer, observation(served, { services: ['web', 'api'] }), key, contains), /Idempotency key reused with different input/);
   const repeat = await delivery.observeSha(observer, observation(served, { observedAt: new Date(Date.now() - 1000).toISOString() }), id(), contains);
   assert.equal(repeat.duplicate, true); assert.equal(repeat.id, result.id); assert.equal(repeat.observedAt, result.observedAt);
   assert.deepEqual(repeat.deployed, []);
   assert.equal((await store.pool.query(`SELECT count(*)::int AS n FROM events WHERE kind='delivery.sha-observed' AND payload->>'sha'=$1`, [served])).rows[0].n, 1);
   assert.equal((await reload(ancestor)).delivery!.deployment!.at, marked.at, 'a repeat does not refresh the record');
+
+  // Beyond one page: more contained items than a page holds, behind more newer items the sha does not contain, are all reached.
+  const older = sha('7'), newer = sha('8'), release = sha('9'), mergedAt = Date.parse(elsewhere.delivery!.mergedAt);
+  const reached = await copies(elsewhere, 201, older, n => new Date(mergedAt - 3_600_000 - n * 1000).toISOString());
+  const ahead = await copies(elsewhere, 201, newer, n => new Date(mergedAt + 1000 + n).toISOString());
+  const drained = await delivery.observeSha(observer, observation(release), id(), async merge => merge === older);
+  assert.deepEqual([...drained.deployed].sort(), [...reached].sort());
+  assert.deepEqual(new Set(drained.awaiting.map(row => row.key)), new Set([...ahead, elsewhere.key]));
 
   // The documented request is one the schema accepts.
   const guide = await readFile(new URL('../docs/delivery.md', import.meta.url), 'utf8');
