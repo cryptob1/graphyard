@@ -20,7 +20,7 @@ import { lockedWork } from './store/locked-read.js';
 import { save } from './store/store.js';
 export { CHECK_NAME, LANDABLE_CHECK };
 import { baseBreakRefreshNeeded, parseFailedTests, readBaseBreak, type BaseBreak } from './master/base-break-refresh.js';
-import { alreadyMergeableRefusal, baseRefreshNeeded, requestedBaseRefresh, dismissedVerdict, enqueueRequestCurrent, mergeableNow, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, proofFailureRefusal, hasCriterionProofs, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, cancelledRerunLimit, mergeCheckBranch, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
+import { alreadyMergeableRefusal, baseRefreshNeeded, requestedBaseRefresh, dismissedVerdict, enqueueRequestCurrent, mergeableNow, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, proofFailureRefusal, hasCriterionProofs, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, cancelledRerunLimit, mergeCheckBranch, mergeVerdictRun, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import type { IntegrationJob } from './coordination.js';
 import { docsSyncAdoption, isDocsPage, overlappingPaths, type DocsSync } from './model/docs-sync.js';
@@ -1822,6 +1822,8 @@ export class GitHub {
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained: contained, baseTipAncestor: contained, scopeFiles,
       ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}),
       ...(baseBreak ? { baseBreak } : {}),
+      // The verdict a merged head stands under (GY-1917): master status names a delivery it contradicts.
+      ...(pr.merged ? { mergeVerdict: mergeVerdictRun(checks, this.config.appId, pr.head.sha) } : {}),
     };
   }
   /** The latest run of one check on one commit, other than this App's own, or null when it has none. */
@@ -2588,6 +2590,9 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const body = { name: CHECK_NAME, head_sha: work.candidate.sha, status: 'completed', conclusion: reasons.length ? 'failure' : 'success', external_id: work.id,
       output: { title: reasons.length ? 'REFUSED' : 'All required gates passed', summary: (reasons.length ? reasons.map(r => `- ${r}`).join('\n') : `Candidate ${work.candidate.sha}; base ${work.candidate.baseSha}; policy ${work.policyRevision}`).slice(0, 60000) } };
     const pr = await this.request(`/pulls/${work.candidate.pr}`);
+    // A head GitHub merged keeps the verdict it was merged under (GY-1917): no later write, the
+    // reconciliation error path's forced REFUSED included, contradicts the delivery it authorized.
+    if (pr.merged) return existing ? { id: existing.id ?? null, conclusion: existing.conclusion ?? null } : undefined;
     if (!reasons.length || !forcedReason) requireCurrent(pr.head.sha === work.candidate.sha && this.boundBase(work, pr, await this.baseBranch()) === work.candidate.baseSha, 'PR changed before check publication; retry');
     if (!reasons.length) requireCurrent(pr.state === 'open' && !pr.draft && pr.base.ref === this.config.base, 'PR is closed, draft, or retargeted; refusing success');
     await beforeWrite();

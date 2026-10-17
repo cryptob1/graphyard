@@ -2,7 +2,7 @@ import { agentOwner, humanOwner, installationOwner, type AttentionItem } from '.
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import { docsHeadroomStatus } from '../daemon/faults.js';
 import type { Work } from '../model.js';
-import { mergeStalls, requiredCheckDisagreements } from '../merge-queue.js';
+import { mergeStalls, requiredCheckDisagreements, verdictContradictions } from '../merge-queue.js';
 import { stallBoundMs, stalledItems, type ActionlessItem } from '../model/action-account.js';
 import { elapsed } from '../model/sessions.js';
 import { baseBreakHold, describeBaseBreak } from '../master/base-break-refresh.js';
@@ -120,11 +120,13 @@ export function generatedFilesAttention(root: string, coordinator: any): Attenti
   return generatedFiles;
 }
 
-/** A merge pending past five minutes on a head GitHub reports mergeable, with no refusal (GY-344), and a required-checks record GitHub's protection disagrees with (GY-1884). */
+/** A merge pending past five minutes on a head GitHub reports mergeable, with no refusal (GY-344), a required-checks record GitHub's protection disagrees with (GY-1884), and a delivery its public verdict contradicts (GY-1917). */
 export const mergeStallAttention = (snapshot: { work: Work[]; now: string }): AttentionItem[] =>
   [...mergeStalls(snapshot.work, Date.parse(snapshot.now)).map(stall => ({ subject: stall.key, text: stall.text, ...agentOwner('master', stall.next) })),
     // The recorded required checks against the protection GitHub returns (GY-1884): one item per disagreement.
-    ...requiredCheckDisagreements(snapshot.work).map(entry => ({ subject: entry.keys[0]!, text: entry.text, ...agentOwner('master', entry.next) }))];
+    ...requiredCheckDisagreements(snapshot.work).map(entry => ({ subject: entry.keys[0]!, text: entry.text, ...agentOwner('master', entry.next) })),
+    // A delivered head whose public verdict reads other than success (GY-1917).
+    ...verdictContradictions(snapshot.work).map(entry => ({ subject: entry.key, text: entry.text, ...agentOwner('master', entry.next) }))];
 
 /** The unqualified line a failed required check gives a row, or the rework it was once named as. */
 const failedCheckLine = (text: string | null | undefined) => !!text && (/^Required CI check .+ has not passed on the current candidate$/.test(text) || /needs a new head/.test(text));

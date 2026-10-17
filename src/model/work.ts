@@ -160,6 +160,8 @@ export interface Observation {
   landing?: LandingCheck;
   /** Set for a merged pull request whose content the base branch does not hold; see merge-queue.ts RevertedDelivery. */
   revertedDelivery?: RevertedDelivery;
+  /** Set on a merged pull request's observation: the App's latest `Graphyard / merge` run at the merged head, or null when it has none (GY-1917). */
+  mergeVerdict?: { id: number; conclusion: string | null } | null;
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
 /** `decision`: the approved two-party decision whose application raised it, when the item's ledger records it approved (GY-1347). */

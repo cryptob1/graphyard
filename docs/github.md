@@ -38,7 +38,7 @@ Refused workflow syncs: `sync GY-N --push-via-control-plane COMMIT` (`POST /api/
 
 ## Require the check
 
-Require `Graphyard / merge`, `graphyard/landable` ([landability](coordination.md)) from control-plane App: `strict` **off**, admin-enforced, no force push/deletion (`master protection --apply`, `master browser protection`); merges mergeable non-draft approved heads ([one delivery path](delivery.md#one-delivery-path)) whose latest `Graphyard / merge` and App-bound required runs read success, else held (one `merge.enqueue.refused`, ≤3 runs/head); record drift: `required-checks-disagree`.
+Require `Graphyard / merge`, `graphyard/landable` ([landability](coordination.md)) from control-plane App: `strict` **off**, admin-enforced, no force-push/deletion (`master protection --apply`, `master browser protection`); merges mergeable non-draft approved heads ([one delivery path](delivery.md#one-delivery-path)) whose latest `Graphyard / merge`, App-bound required runs pass, else held (one `merge.enqueue.refused`, ≤3 runs/head); merged runs frozen; drift: `required-checks-disagree`, `public-verdict-contradicts-delivery`.
 
 ## Failed checks
 
