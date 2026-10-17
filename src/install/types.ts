@@ -22,12 +22,15 @@ export interface PreflightItem { name: string; ok: boolean; detail: string; fix?
 /**
  * `satisfied` is how a re-plan reports an existing installation: the action stays in the
  * ordered plan so the sequence is auditable, but apply performs no duplicate provisioning.
+ * `held` (GY-1846) is an action a full install would perform that `--observe-only` never does;
+ * `held` on the action names why, so a reviewer sees what a later full install would change.
  */
 export interface PlanAction {
   id: string;
   target: 'local' | 'provider' | 'github' | 'graphyard' | 'host';
   title: string;
-  state: 'create' | 'update' | 'satisfied';
+  state: 'create' | 'update' | 'satisfied' | 'held';
+  held?: string;
   command?: string;
   values?: PlanValue[];
   drift?: PlanDrift[];
@@ -67,6 +70,8 @@ export interface InstallPlan {
    * nor reused with --reuse-app. `graphyard up --agent` without a browser profile stops when any remain.
    */
   browserApps?: ('control-plane' | 'reviewer')[];
+  /** `--observe-only` (GY-1846): only the control plane is deployed; every `held` action is left to a later full install. */
+  observeOnly?: boolean;
 }
 
 export interface InstallInputs {
