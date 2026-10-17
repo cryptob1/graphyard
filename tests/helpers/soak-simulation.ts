@@ -189,6 +189,13 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    */
   codeRoot?: string;
   /**
+   * GY-1958: with `codeRoot`, the managed repository is another project — its origin is not the CLI
+   * checkout's — and the cursor starts with what a pre-GY-1958 loop left after moving this install:
+   * a restart owed, a held snapshot pinned under the CLI checkout and a stall. Every pass must retire
+   * that once, then refuse with one standing row, never fetching in or moving the CLI checkout.
+   */
+  external?: boolean;
+  /**
    * GY-1315: releases requested outside any diagnosis go stale in backlog. Item `item`'s hand release
    * races once, item `racing`'s every release races, and `backlog` items never released sit beside
    * them, each history read taking `readMs` of real time.
@@ -2573,7 +2580,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     unit: { watchdogSec: plan.driftedWatchdogSec, rewrites: 0, launcher: 'checkout', launcherRewrites: 0, refusals: 0 }, executorEntry: 'checkout', executorRewrites: 0,
     starts: 0, watchdog: [] as { failed: number; attempts: number; windowSec: number }[],
     /** GY-1773: every pin the launcher received or lost, and each cycle's view of the checkout, the pin and the checkout the cursor names left behind. */
-    pins: [] as { at: number; commit: string | null }[], samples: [] as { elapsed: number; head: string; dirty: boolean; pin: string | null; snapshot: { at: string; commit: string; checkout: string | null; dirty: string[] } | null; outcome: SelfUpgradeOutcome['outcome'] | null; last: { to: string; code: boolean; self: boolean } | null; unit: string; executorEntry: string; pending: string | null; stall: string | null; unitRow: { state: string; attempts: number } | null; self: number }[],
+    pins: [] as { at: number; commit: string | null }[], samples: [] as { elapsed: number; head: string; dirty: boolean; pin: string | null; snapshot: { at: string; commit: string; checkout: string | null; dirty: string[] } | null; outcome: SelfUpgradeOutcome['outcome'] | null; last: { to: string; code: boolean; self: boolean } | null; unit: string; executorEntry: string; pending: string | null; stall: string | null; unitRow: { state: string; attempts: number } | null; self: number; refused?: { at: string; reason: string; commit: string | null } | null; refusedRow?: { state: string; attempts: number } | null }[],
     /** GY-1773: the docs-only commit `docsOnlyCommit` landed, once it has. */
     docsOnly: null as string | null };
   /** The paths the base branch changed between two commits: every merged pull request's files, and what any other commit added or removed. */
@@ -2598,7 +2605,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const managedRoot = '/soak/coordinator', codeRoot = loopCodeRoot(config.cliPath, managedRoot);
   if (options.codeRoot) assert.equal(codeRoot, options.codeRoot, 'the day\'s CLI checkout is the loop\'s code root');
   const codeRootDay = { gitRoots: new Set<string>(), loopUnits: [] as { elapsed: number; pin: string | null; launcher: string | null; handed: string | null; working: string | null }[],
-    executorUnits: [] as { elapsed: number; pin: string | null; entry: string | null; handed: string | null; working: string | null }[], executorUnit: '' };
+    executorUnits: [] as { elapsed: number; pin: string | null; entry: string | null; handed: string | null; working: string | null }[], executorUnit: '', persists: [] as number[] };
   const unitLine = (text: string, pattern: RegExp) => text.match(pattern)?.[1] ?? null;
   const loopUnitBinding = (text: string) => ({ launcher: unitLine(text, /^ExecStart=\S+ (\S+) master run$/m), handed: unitLine(text, /^Environment="?GRAPHYARD_CHECKOUT_ROOT=([^"\n]+)"?$/m), working: unitLine(text, /^WorkingDirectory=(.+)$/m) });
   const executorUnitBinding = (text: string) => ({ entry: unitLine(text, /^ExecStart=\S+ (\S+) --slot %i$/m), handed: unitLine(text, /^Environment="?GRAPHYARD_CHECKOUT_ROOT=([^"\n]+)"?$/m), working: unitLine(text, /^WorkingDirectory=(.+)$/m) });
@@ -2615,10 +2622,22 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const coordinatorGit = async (command: string, args: string[]): Promise<string> => {
     assert.equal(command, 'git');
     // GY-1899: every git command the self-upgrade runs reads or moves the CLI checkout, never the managed repository.
-    codeRootDay.gitRoots.add(args[1]);
-    if (args[0] !== '-C' || args[1] !== codeRoot) violations.push(`${new Date(clock.now()).toISOString()} (+${Math.round((clock.now() - dayStart) / minute)} min) git ${args.slice(2).join(' ')} ran in ${args[1]}, not the CLI checkout ${codeRoot}`);
+    // GY-1958: the two reads that identify which project the checkout tracks may name the managed
+    // repository — the common directory and the origin — and write, fetch and move nothing there.
+    const identification = args[0] === '-C' && args[1] === managedRoot
+      && ((args[2] === 'rev-parse' && args[3] === '--path-format=absolute' && args[4] === '--git-common-dir') || (args[2] === 'remote' && args[3] === 'get-url' && args[4] === 'origin'));
+    // GY-1958: the identification reads are the one git the self-upgrade may run beside the CLI
+    // checkout, in the managed repository; the set records every other command's root, and the
+    // violations above police the identification reads to their two exact shapes.
+    if (!identification) codeRootDay.gitRoots.add(args[1]);
+    if (args[0] !== '-C' || (args[1] !== codeRoot && !identification)) violations.push(`${new Date(clock.now()).toISOString()} (+${Math.round((clock.now() - dayStart) / minute)} min) git ${args.slice(2).join(' ')} ran in ${args[1]}, not the CLI checkout ${codeRoot}`);
     const [op, ...operands] = args.slice(2);
     if (op === 'fetch') { upgrades.fetches++; checkout.origin = github.tip; return ''; }
+    // GY-1958: the identification reads answer as two clones of one origin do — separate common
+    // directories, one shared origin — so the checkout's project is recognized and the day aligns.
+    if (op === 'rev-parse' && operands[0] === '--path-format=absolute') return `${args[1]}/.git\n`;
+    // GY-1958: with `external`, the managed repository answers another project's origin.
+    if (op === 'remote' && operands[0] === 'get-url' && operands[1] === 'origin') return options.external && args[1] === managedRoot ? 'git@github.com:acme/app.git\n' : 'https://github.com/cryptob1/graphyard.git\n';
     if (op === 'rev-parse') return `${operands[0] === 'HEAD' ? checkout.head : checkout.origin}\n`;
     if (op === 'symbolic-ref') throw Object.assign(new Error('fatal: ref HEAD is not a symbolic ref'), { status: 1 });
     if (op === 'status') return checkout.dirty ? ' M src/master.ts\n' : '';
@@ -2634,7 +2653,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const wantedLauncher = () => releaseLagDay.pin ? `snapshot:${releaseLagDay.pin}` : 'checkout';
   const wantedExecutorEntry = () => releaseLagDay.pin ? heldExecutorEntryOf(codeRoot, releaseLagDay.pin)! : 'checkout';
   const selfUpgrade = (state: DaemonState) => performSelfUpgrade(config, state, {
-    root: managedRoot, run: coordinatorGit, now: clock.now, persist: async () => {},
+    root: managedRoot, run: coordinatorGit, now: clock.now, persist: async () => { codeRootDay.persists.push(clock.now() - dayStart); },
     holdCli: async commit => {
       if (commit === null && releaseLagDay.pin && clock.now() - dayStart >= (options.releaseLag?.fleet?.stalePinAt ?? Infinity)) throw new Error('EACCES: the pin could not be removed');
       upgrades.pins.push({ at: clock.now(), commit });
@@ -2717,6 +2736,17 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
 
   // ---- The day. ----
   let state = emptyDaemonState(config);
+  if (options.external) {
+    // GY-1958: what the pre-GY-1958 loop left after aligning this install: a restart owed, a held snapshot pinned under the CLI checkout, a stall.
+    const at = new Date(dayStart).toISOString();
+    state.upgrade.pending = { from: null, to: checkout.head, code: true };
+    state.upgrade.snapshot = { at, commit: checkout.head, checkout: checkout.head, dirty: ['src/master.ts'] };
+    state.upgrade.stalled = { cause: 'executors-refused', reason: 'a claim was in flight', since: at, at };
+    releaseLagDay.pin = checkout.head;
+    upgrades.unit.launcher = `snapshot:${checkout.head}`; upgrades.executorEntry = heldExecutorEntryOf(codeRoot, checkout.head)!;
+    await mkdir(join(heldCliSnapshotAt(codeRoot, checkout.head), 'src'), { recursive: true });
+    await writeFile(heldCliPointer(codeRoot), `${JSON.stringify({ commit: checkout.head, root: heldCliSnapshotAt(codeRoot, checkout.head), loop: true })}\n`);
+  }
   for (let index = 0; index < (options.stuckWatches ?? 0); index++) {
     const decision = `aged-out-${index}`, session = `aged-out-session-${index}`;
     stuck.sessions.add(session);
@@ -3407,7 +3437,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       upgrades.samples.push({ elapsed, head: checkout.head, dirty: checkout.dirty, pin: releaseLagDay.pin, snapshot: state.upgrade.snapshot ? { ...state.upgrade.snapshot } : null, outcome: upgraded?.outcome ?? null,
         last: state.upgrade.last ? { to: state.upgrade.last.to, code: state.upgrade.last.code, self: state.upgrade.last.self } : null,
         unit: upgrades.unit.launcher, executorEntry: upgrades.executorEntry, pending: state.upgrade.pending?.to ?? null, stall: state.upgrade.stalled?.cause ?? null,
-        unitRow: state.actions['upgrade:unit'] ? { state: state.actions['upgrade:unit'].state, attempts: state.actions['upgrade:unit'].attempts } : null, self: upgrades.self });
+        unitRow: state.actions['upgrade:unit'] ? { state: state.actions['upgrade:unit'].state, attempts: state.actions['upgrade:unit'].attempts } : null, self: upgrades.self,
+        refused: state.upgrade.refused ? { ...state.upgrade.refused } : null, refusedRow: state.actions['upgrade:refused'] ? { state: state.actions['upgrade:refused'].state, attempts: state.actions['upgrade:refused'].attempts } : null });
       if (options.releaseLag) {
         const rows = Object.entries(state.actions).filter(([key]) => key.startsWith('upgrade:')), held = state.actions['upgrade:held'];
         releaseLagDay.passes.push({ elapsed, outcome: upgraded?.outcome ?? null, pending: state.upgrade.pending?.to ?? null, stall: state.upgrade.stalled?.cause ?? null, held: held ? { state: held.state, attempts: held.attempts } : null,
