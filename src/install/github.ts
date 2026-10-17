@@ -1,5 +1,5 @@
 import { createSign, randomBytes } from 'node:crypto';
-import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
+import { chmod, link, readFile, unlink, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
 import type { Transport } from './transport.js';
@@ -389,13 +389,12 @@ export async function readQueueRuleset(gh: GitHubCli, repository: string): Promi
  * recorded: a failed or malformed read refuses before anything is written. An existing record is
  * kept as it is, whatever the branch holds now; one taken for another repository or branch refuses,
  * since this branch's protection would otherwise change unrecorded. Written 0600 through a
- * temporary file and a rename, and refused when it would carry a credential the vault holds.
- * Answers the record that stands.
+ * temporary file published with link(), which fails rather than replace a record another apply
+ * wrote meanwhile (that one is re-read and kept), and refused when it would carry a credential the
+ * vault holds. Answers the record that stands.
  */
 export async function recordProtectionOnce(gh: GitHubCli, input: { directory: string; repository: string; branch: string; now: number; assertClean: (text: string, where: string) => string }): Promise<ProtectionRecord> {
-  const existing = await readProtectionRecord(input.directory);
-  if (existing && (existing.repository.toLowerCase() !== input.repository.toLowerCase() || existing.branch !== input.branch))
-    throw new Error(`The protection record ${protectionRecordFile(input.directory)} holds ${existing.repository}@${existing.branch}, so ${input.repository}@${input.branch} would change with no record of its protection; restore ${existing.branch} with install --restore-protection first`);
+  const existing = await standingRecord(input);
   if (existing) return existing;
   const observed = await observeRestore(gh, input.repository, input.branch);
   const record: ProtectionRecord = {
@@ -407,9 +406,27 @@ export async function recordProtectionOnce(gh: GitHubCli, input: { directory: st
   const file = protectionRecordFile(input.directory);
   const temporary = `${file}.${randomBytes(8).toString('hex')}.tmp`;
   await writeFile(temporary, serialized, { mode: 0o600, flag: 'wx' });
-  await rename(temporary, file);
-  await chmod(file, 0o600);
+  try {
+    await chmod(temporary, 0o600);
+    // Published with link(), which never replaces: a record another apply wrote after the check
+    // above is the true baseline, so it is kept byte-for-byte and read back (GY-1876).
+    try { await link(temporary, file); }
+    catch (error: any) {
+      if (error?.code !== 'EEXIST') throw error;
+      const standing = await standingRecord(input);
+      if (!standing) throw new Error(`The protection record ${file} existed when it was published and was gone when read back; rerun`);
+      return standing;
+    }
+  } finally { await unlink(temporary).catch(() => {}); }
   return record;
+}
+
+/** The record that stands for this branch, or null; one taken for another repository or branch refuses. */
+async function standingRecord(input: { directory: string; repository: string; branch: string }) {
+  const existing = await readProtectionRecord(input.directory);
+  if (existing && (existing.repository.toLowerCase() !== input.repository.toLowerCase() || existing.branch !== input.branch))
+    throw new Error(`The protection record ${protectionRecordFile(input.directory)} holds ${existing.repository}@${existing.branch}, so ${input.repository}@${input.branch} would change with no record of its protection; restore ${existing.branch} with install --restore-protection first`);
+  return existing;
 }
 
 const actors = (list: any, key: 'login' | 'slug') => (Array.isArray(list) ? list : []).map((entry: any) => String(entry?.[key] ?? entry)).sort();

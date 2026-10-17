@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
-import { chmod, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { randomBytes } from 'node:crypto';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { chmod, link, readdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { createHash, randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1145,8 +1145,11 @@ export async function installHerdrOnly(session: InstallSession) {
   if (!session.context.host) throw new Error('--herdr-only sets Herdr up on a self-contained host (--target host or hetzner); for any other install, graphyard up sets Herdr up on this machine');
   const url = session.record?.url;
   if (!url) throw new Error(`--herdr-only needs an installed host, and no install of ${session.inputs.repository} is recorded here; run install --apply first`);
+  // It writes the host's Herdr state, so it holds the apply lock like every apply (GY-1876).
+  const release = await acquireApplyLock(session.directory, session.deps.now());
   try { return { herdr: await hostHerdrOnly(session.context, url), herdrFailure: null }; }
   catch (error) { if (!(error instanceof HerdrSetupFailure)) throw error; return { herdr: null, herdrFailure: { step: error.step, message: session.vault.scrub(error.message) } }; }
+  finally { await release(); }
 }
 /**
  * `install --target host --profiles-only` (GY-1850): the reviewer and worker profiles written on an
@@ -1158,8 +1161,9 @@ export async function installProfilesOnly(session: InstallSession) {
   if (session.mode !== 'apply') throw new Error('--profiles-only writes the profiles on the host; pass --apply (--plan sessions change nothing)');
   if (!session.context.host) throw new Error('--profiles-only writes the profiles on a self-contained host (--target host or hetzner); for any other install, run graphyard master environments --apply in the configured checkout');
   if (!session.record?.url) throw new Error(`--profiles-only needs an installed host, and no install of ${session.inputs.repository} is recorded here; run install --apply first`);
-  const { host, report } = await hostProfilesOnly(session.context);
-  return { host, profiles: report };
+  const release = await acquireApplyLock(session.directory, session.deps.now());
+  try { const { host, report } = await hostProfilesOnly(session.context); return { host, profiles: report }; }
+  finally { await release(); }
 }
 /** Herdr on this machine and the server its graphyard plugin is bound to, when it is. */
 async function observeHerdr(session: InstallSession) {
@@ -1255,11 +1259,18 @@ export async function applyInstall(session: InstallSession, plan: InstallPlan): 
   if (session.restore) {
     // Exactly the reviewed plan's writes, then a re-read that must match the record.
     const restore = plan as unknown as ProtectionRestorePlan;
-    const { verified } = await applyRestore(githubCli(session.context.transport), session.restore, restore.changes);
-    return { ...restore, restored: true, verified } as unknown as InstallSummary;
+    const release = await acquireApplyLock(session.directory, session.deps.now());
+    try {
+      const { verified } = await applyRestore(githubCli(session.context.transport), session.restore, restore.changes);
+      return { ...restore, restored: true, verified } as unknown as InstallSummary;
+    } finally { await release(); }
   }
-  try { return await performInstall(session, plan); }
-  catch (error: any) {
+  try {
+    refuseUnready(session, plan);
+    await prepareInstallDirectory(session.directory, session.root);
+    const release = await acquireApplyLock(session.directory, session.deps.now());
+    try { return await performInstall(session, plan); } finally { await release(); }
+  } catch (error: any) {
     if (error instanceof InstallPaused) throw error;
     const message = session.vault.scrub(String(error?.message ?? error));
     throw message === error?.message ? error : new Error(message);
@@ -1285,14 +1296,107 @@ async function observeOnlyCreated(session: InstallSession) {
   } catch { return false; }
 }
 
-async function performInstall(session: InstallSession, plan: InstallPlan): Promise<InstallSummary> {
-  const { adapter, context, deps, vault } = session;
+/**
+ * The gate comes before anything is written, so "changed nothing" is literally true: at this point
+ * not even the install directory, its lock or a credential file exists yet for a first install.
+ */
+function refuseUnready(session: InstallSession, plan: InstallPlan) {
   if (session.mode !== 'apply') throw new Error('Apply requires a session prepared in apply mode; --plan sessions create nothing');
-  const log = (line: string) => deps.log(vault.scrub(line));
-  // The gate comes before anything is written, so "changed nothing" is literally true: at this
-  // point not even a credential file exists yet for a first install.
   const blocked = plan.preflight.filter(item => !item.ok);
   if (blocked.length) throw new Error(`Preflight is incomplete; the installer changed nothing.\n${blocked.map(item => `- ${item.name}: ${item.detail}${item.fix ? `\n  ${item.fix.startsWith('HUMAN:') ? '' : 'Run: '}${item.fix}` : ''}`).join('\n')}`);
+}
+
+/** The exclusive lock an `install --apply` holds on its installation directory for the whole apply (GY-1876). */
+export const applyLockFile = (directory: string) => resolve(directory, 'apply.lock');
+const processAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error: any) { return error?.code === 'EPERM'; } };
+/**
+ * Which process runs under `pid` now, so a pid the system has since reused names a different one:
+ * the boot and the kernel's start tick on Linux, the start time `ps` reports elsewhere; null when
+ * neither can be read.
+ */
+export function processStart(pid: number): string | null {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const ticks = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19];
+    if (ticks) return `${readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()}:${ticks}`;
+  } catch {}
+  if (process.platform === 'linux') return null;
+  try { return execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000 }).trim() || null; } catch { return null; }
+}
+/**
+ * A holder on another machine cannot be probed, so only one on this machine whose process is gone
+ * is stale: its pid runs nothing, or runs a process started after the one that took the lock.
+ */
+function liveHolder(text: string): { pid: number; host: string; startedAt: string } | null {
+  let holder: any;
+  try { holder = JSON.parse(text); } catch { return null; }
+  if (!Number.isSafeInteger(holder?.pid) || holder.pid <= 0 || typeof holder.host !== 'string') return null;
+  if (holder.host !== hostname()) return holder;
+  if (!processAlive(holder.pid)) return null;
+  if (typeof holder.process !== 'string') return holder;
+  const running = processStart(holder.pid);
+  return running === null || running === holder.process ? holder : null;
+}
+
+/** Pauses for tests between the steps that race: after the standing lock is read, and after the reclaim token is taken. */
+export type ApplyLockPauses = { readStale?: () => Promise<void>; tookToken?: () => Promise<void> };
+
+/**
+ * Takes the apply lock, or refuses naming the pid that holds it, before this apply writes anything
+ * under the directory or to GitHub, the vault or the provider. The lock is published whole with
+ * link(), which never replaces. A lock left by a process that is gone is reclaimed under a token
+ * named by that lock's own bytes and taken with link(), so exactly one apply reclaims each stale
+ * lock; the token's holder re-reads the lock and only then renames its own over it, so the lock
+ * path is never absent and no live holder's lock is ever moved (a token whose holder is gone is
+ * superseded by one named for both). Answers the release, which removes only this apply's own lock.
+ */
+export async function acquireApplyLock(directory: string, now: number, pauses: ApplyLockPauses = {}): Promise<() => Promise<void>> {
+  const file = applyLockFile(directory);
+  const content = `${JSON.stringify({ pid: process.pid, host: hostname(), startedAt: new Date(now).toISOString(), process: processStart(process.pid) ?? undefined, nonce: randomBytes(8).toString('hex') })}\n`;
+  const temporary = `${file}.${randomBytes(8).toString('hex')}.tmp`;
+  const release = async () => { if (await readFile(file, 'utf8').catch(() => null) === content) await unlink(file).catch(() => {}); };
+  const refuse = (holder: { pid: number; host: string; startedAt: string }, what: string) =>
+    new Error(`Another install --apply (pid ${holder.pid} on ${holder.host}, since ${holder.startedAt}) ${what} the lock ${file}, so this apply wrote nothing; let it finish, then apply again`);
+  await writeFile(temporary, content, { mode: 0o600, flag: 'wx' });
+  try {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try { await link(temporary, file); return release; } catch (error: any) { if (error?.code !== 'EEXIST') throw error; }
+      const standing = await readFile(file, 'utf8').catch(() => null);
+      if (standing === null) continue;
+      const holder = liveHolder(standing);
+      if (holder) throw refuse(holder, 'holds');
+      await pauses.readStale?.();
+      // The reclaim token for exactly this stale lock; a token whose holder is gone is superseded.
+      const chain = [standing], superseded: string[] = [];
+      let token: string | null = null;
+      for (let generation = 0; generation < 5 && !token; generation++) {
+        const name = `${file}.${createHash('sha256').update(chain.join('\0')).digest('hex').slice(0, 16)}.reclaim`;
+        try { await link(temporary, name); token = name; break; } catch (error: any) { if (error?.code !== 'EEXIST') throw error; }
+        const claimed = await readFile(name, 'utf8').catch(() => null);
+        if (claimed === null) continue;
+        const reclaimer = liveHolder(claimed);
+        if (reclaimer) throw refuse(reclaimer, 'is reclaiming');
+        chain.push(claimed);
+        superseded.push(name);
+      }
+      if (!token) continue;
+      try {
+        await pauses.tookToken?.();
+        // Only this token's holder may replace the stale lock, and its dead owner cannot, so it is
+        // still exactly what was read unless another apply already reclaimed it.
+        if (await readFile(file, 'utf8').catch(() => null) !== standing) continue;
+        await rename(temporary, file);
+        for (const name of superseded) await unlink(name).catch(() => {});
+        return release;
+      } finally { await unlink(token).catch(() => {}); }
+    }
+  } finally { await unlink(temporary).catch(() => {}); }
+  throw new Error(`Could not take the lock ${file}: other applies kept taking it; apply again`);
+}
+
+async function performInstall(session: InstallSession, plan: InstallPlan): Promise<InstallSummary> {
+  const { adapter, context, deps, vault } = session;
+  const log = (line: string) => deps.log(vault.scrub(line));
   await materializeInstall(session);
 
   const observation = await adapter.observe(context);

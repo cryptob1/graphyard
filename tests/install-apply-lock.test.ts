@@ -1,0 +1,207 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { readdir, readFile, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { hostname } from 'node:os';
+import { applyInstall, buildPlan, prepareInstall } from '../src/install/index.js';
+import { installDirectory } from '../src/install/secrets.js';
+import { fakeTransport, type Transport } from '../src/install/transport.js';
+import { githubResponses, harness, REPOSITORY } from './install-harness.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
+
+const PROTECTION_READ = `gh api repos/${REPOSITORY}/branches/main/protection`;
+
+test('unit:install-apply-exclusive-lock — a second install --apply on one installation directory refuses on the first one\'s lock, naming its pid, and writes nothing while it is held; a lock left by a process that is gone is reclaimed', async () => {
+  // Loaded when the test runs, so a checkout without the lock fails here as a test case.
+  const { applyLockFile } = await import('../src/install/index.js') as any;
+  assert.equal(typeof applyLockFile, 'function', 'src/install/index.ts exports no apply lock');
+  const fixture = await harness({ provider: 'railway' });
+  try {
+    // The recording transport, held at the first apply's protection read until released.
+    let gated = false, entered!: () => void, release!: () => void;
+    const reached = new Promise<void>(accept => { entered = accept; });
+    const held = new Promise<void>(accept => { release = accept; });
+    const recording = fixture.transport;
+    const transport: Transport = { ...recording, async exec(program, args, options) {
+      if (gated && [program, ...args].join(' ') === PROTECTION_READ) { gated = false; entered(); await held; }
+      return recording.exec(program, args, options);
+    } };
+    const deps = { ...fixture.deps, transport };
+    const directory = installDirectory('owner-project', fixture.configHome);
+    const lock = applyLockFile(directory);
+
+    const first = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, deps);
+    const second = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, deps);
+    const [firstPlan, secondPlan] = [await buildPlan(first), await buildPlan(second)];
+
+    gated = true;
+    const running = applyInstall(first, firstPlan);
+    await reached;
+    assert.ok(existsSync(lock), 'the first apply holds no lock while it writes');
+    const holder = JSON.parse(await readFile(lock, 'utf8'));
+    assert.equal(holder.pid, process.pid);
+    const commandsBefore = recording.commands.length, requestsBefore = fixture.requests.length;
+    const filesBefore = JSON.stringify(await snapshot(directory));
+
+    await assert.rejects(applyInstall(second, secondPlan), (error: Error) => error.message.includes(`pid ${process.pid}`) && error.message.includes(lock) && /wrote nothing/.test(error.message));
+    assert.equal(recording.commands.length, commandsBefore, 'the second apply ran a command while the first held the lock');
+    assert.equal(fixture.requests.length, requestsBefore, 'the second apply sent a request while the first held the lock');
+    assert.equal(JSON.stringify(await snapshot(directory)), filesBefore, 'the second apply wrote under the installation directory');
+
+    release();
+    await running;
+    assert.ok(!existsSync(lock), 'the first apply left its lock behind');
+
+    // A lock whose process is gone is reclaimed, and released again after the apply.
+    const gone = spawnSync(process.execPath, ['-e', '']).pid!;
+    await writeFile(lock, `${JSON.stringify({ pid: gone, host: hostname(), startedAt: new Date(0).toISOString() })}\n`, { mode: 0o600 });
+    const third = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, fixture.deps);
+    await applyInstall(third, await buildPlan(third));
+    assert.ok(!existsSync(lock), 'the reclaimed lock was not released');
+    assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('apply.lock')), [], 'reclaiming left a file behind');
+
+    // A live holder on this machine refuses, and its lock is left as it was.
+    const live = `${JSON.stringify({ pid: process.ppid, host: hostname(), startedAt: new Date(0).toISOString() })}\n`;
+    await writeFile(lock, live, { mode: 0o600 });
+    const fourth = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, fixture.deps);
+    await assert.rejects(applyInstall(fourth, await buildPlan(fourth)), (error: Error) => error.message.includes(`pid ${process.ppid}`));
+    assert.equal(await readFile(lock, 'utf8'), live);
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:install-apply-lock-competing-reclaimers — two applies reclaiming one stale lock and a third arriving never run together: the lock path is never absent while its owner runs and no live lock is moved', async () => {
+  const { acquireApplyLock, applyLockFile } = await import('../src/install/index.js') as any;
+  const directory = await temporaryDirectory('apply-lock');
+  const lock = applyLockFile(directory);
+  const gate = () => { let open!: () => void, reached!: () => void; const at = new Promise<void>(r => { reached = r; }), opened = new Promise<void>(r => { open = r; }); return { at, open, pause: async () => { reached(); await opened; } }; };
+  const gone = spawnSync(process.execPath, ['-e', '']).pid!;
+  const stale = `${JSON.stringify({ pid: gone, host: hostname(), startedAt: new Date(0).toISOString() })}\n`;
+  const holderOf = async () => JSON.parse(await readFile(lock, 'utf8'));
+
+  // The reviewed interleaving: A and B both read the same dead holder; A reclaims first.
+  await writeFile(lock, stale, { mode: 0o600 });
+  const [a, b] = [gate(), gate()];
+  const first = acquireApplyLock(directory, 1_000, { readStale: a.pause });
+  const second = acquireApplyLock(directory, 2_000, { readStale: b.pause });
+  await Promise.all([a.at, b.at]);
+  a.open();
+  const releaseFirst = await first;
+  const owned = await readFile(lock, 'utf8');
+  assert.equal((await holderOf()).startedAt, new Date(1_000).toISOString(), 'A did not take the lock');
+  // C arrives while B still holds its stale reading: A's lock stands, so C is refused.
+  await assert.rejects(acquireApplyLock(directory, 3_000), (error: Error) => /holds the lock/.test(error.message) && error.message.includes(`pid ${process.pid}`));
+  b.open();
+  await assert.rejects(second, (error: Error) => /holds the lock/.test(error.message));
+  assert.equal(await readFile(lock, 'utf8'), owned, 'a competing reclaimer moved or replaced the live lock');
+  await releaseFirst();
+  assert.ok(!existsSync(lock));
+
+  // A holds the reclaim token for the stale lock: B (same stale reading) and C (arriving) both refuse.
+  await writeFile(lock, stale, { mode: 0o600 });
+  const [ta, rb] = [gate(), gate()];
+  const reclaiming = acquireApplyLock(directory, 4_000, { tookToken: ta.pause });
+  const late = acquireApplyLock(directory, 5_000, { readStale: rb.pause });
+  await Promise.all([ta.at, rb.at]);
+  assert.equal(await readFile(lock, 'utf8'), stale, 'the stale lock was removed before its reclaimer replaced it');
+  await assert.rejects(acquireApplyLock(directory, 6_000), (error: Error) => /is reclaiming the lock/.test(error.message));
+  rb.open();
+  await assert.rejects(late, (error: Error) => /is reclaiming the lock/.test(error.message));
+  ta.open();
+  const releaseReclaimed = await reclaiming;
+  assert.equal((await holderOf()).startedAt, new Date(4_000).toISOString());
+  await releaseReclaimed();
+
+  // A reclaim token whose holder is gone is superseded, and every token is cleaned up.
+  await writeFile(lock, stale, { mode: 0o600 });
+  await writeFile(`${lock}.${createHash('sha256').update(stale).digest('hex').slice(0, 16)}.reclaim`, stale, { mode: 0o600 });
+  const releaseSuperseding = await acquireApplyLock(directory, 7_000);
+  assert.equal((await holderOf()).startedAt, new Date(7_000).toISOString());
+  await releaseSuperseding();
+  assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('apply.lock')), [], 'reclaiming left a file behind');
+});
+
+test('unit:install-apply-lock-reused-pid — a lock whose pid now runs a process started after the holder\'s is reclaimed; the holder\'s own process still refuses', async () => {
+  const { acquireApplyLock, applyLockFile, processStart } = await import('../src/install/index.js') as any;
+  const directory = await temporaryDirectory('apply-lock-reused');
+  const lock = applyLockFile(directory);
+  const parent = processStart(process.ppid);
+  assert.ok(parent, 'this machine reports no process start time');
+  // The lock's own record names this process's start time.
+  const releaseOwn = await acquireApplyLock(directory, 1_000);
+  assert.equal(JSON.parse(await readFile(lock, 'utf8')).process, processStart(process.pid));
+  await releaseOwn();
+  // The crashed apply's pid is now a live, unrelated process: its recorded start differs.
+  await writeFile(lock, `${JSON.stringify({ pid: process.ppid, host: hostname(), startedAt: new Date(0).toISOString(), process: `${parent}-earlier` })}\n`, { mode: 0o600 });
+  const releaseReclaimed = await acquireApplyLock(directory, 2_000);
+  assert.equal(JSON.parse(await readFile(lock, 'utf8')).startedAt, new Date(2_000).toISOString(), 'a reused pid kept the abandoned lock alive');
+  await releaseReclaimed();
+  // The same pid with the start it really has is the holder, and refuses.
+  const live = `${JSON.stringify({ pid: process.ppid, host: hostname(), startedAt: new Date(0).toISOString(), process: parent })}\n`;
+  await writeFile(lock, live, { mode: 0o600 });
+  await assert.rejects(acquireApplyLock(directory, 3_000), (error: Error) => /holds the lock/.test(error.message) && error.message.includes(`pid ${process.ppid}`));
+  assert.equal(await readFile(lock, 'utf8'), live);
+  // A reclaim token is judged the same way: one whose pid was reused is superseded.
+  const stale = `${JSON.stringify({ pid: spawnSync(process.execPath, ['-e', '']).pid!, host: hostname(), startedAt: new Date(0).toISOString() })}\n`;
+  await writeFile(lock, stale, { mode: 0o600 });
+  await writeFile(`${lock}.${createHash('sha256').update(stale).digest('hex').slice(0, 16)}.reclaim`, `${JSON.stringify({ pid: process.ppid, host: hostname(), startedAt: new Date(0).toISOString(), process: `${parent}-earlier` })}\n`, { mode: 0o600 });
+  const releaseSuperseding = await acquireApplyLock(directory, 4_000);
+  assert.equal(JSON.parse(await readFile(lock, 'utf8')).startedAt, new Date(4_000).toISOString());
+  await releaseSuperseding();
+  assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('apply.lock')), [], 'reclaiming left a file behind');
+});
+
+test('unit:install-partial-apply-lock — install --herdr-only and --profiles-only refuse while another apply holds the lock, and reach no host transport', async () => {
+  const { installHerdrOnly, installProfilesOnly, applyLockFile, processStart } = await import('../src/install/index.js') as any;
+  const directory = await temporaryDirectory('apply-lock-partial');
+  const live = `${JSON.stringify({ pid: process.ppid, host: hostname(), startedAt: new Date(0).toISOString(), process: processStart(process.ppid) })}\n`;
+  await writeFile(applyLockFile(directory), live, { mode: 0o600 });
+  const touched: string[] = [];
+  const transport = { exec: async (command: string, args: string[]) => { touched.push([command, ...args].join(' ')); throw new Error('transport exec reached'); } };
+  const session = { mode: 'apply', directory, deps: { now: () => 1_000 }, inputs: { repository: REPOSITORY, provider: 'host' }, record: { url: 'https://graphyard.example' },
+    context: { provider: 'host', host: { local: true, layout: {} }, transport }, vault: { scrub: (text: string) => text } };
+  for (const partial of [installHerdrOnly, installProfilesOnly]) {
+    await assert.rejects(partial(session), (error: Error) => /holds the lock/.test(error.message) && error.message.includes(`pid ${process.ppid}`), partial.name);
+  }
+  assert.deepEqual(touched, [], 'a partial apply wrote on the host while another apply held the lock');
+  assert.equal(await readFile(applyLockFile(directory), 'utf8'), live);
+});
+
+test('unit:protection-record-no-replace — a protection record that appears between the existence check and the publish is kept byte-for-byte and read back, never replaced', async () => {
+  const { recordProtectionOnce, protectionRecordFile } = await import('../src/install/github.js') as any;
+  const fixture = await harness({ provider: 'railway' });
+  try {
+    const directory = installDirectory('owner-project', fixture.configHome);
+    const file = protectionRecordFile(directory);
+    const { prepareInstallDirectory } = await import('../src/install/secrets.js');
+    await prepareInstallDirectory(directory, fixture.root);
+    // The faster apply's record: the branch's true protection before Graphyard wrote any.
+    const baseline = { format: 'graphyard-protection-record-v1', repository: REPOSITORY, branch: 'main', recordedAt: new Date(0).toISOString(),
+      protection: { url: `https://api.github.com/repos/${REPOSITORY}/branches/main/protection`, enforce_admins: { enabled: false } }, allowAutoMerge: false, mergeQueueRuleset: null };
+    const text = `${JSON.stringify(baseline, null, 2)}\n`;
+    // GitHub as the slower apply reads it, after the faster one's protection write: the record
+    // appears during that read, after recordProtectionOnce found none.
+    const recording = fakeTransport({ responses: githubResponses({ installed: false, protection: { enforce_admins: { enabled: true } }, deliveries: [], hookConfig: null }) });
+    let wrote = false;
+    const gh = async (args: string[], options: { allowFailure?: boolean } = {}) => {
+      if (!wrote && ['gh', ...args].join(' ') === PROTECTION_READ) { wrote = true; await writeFile(file, text, { mode: 0o600, flag: 'wx' }); }
+      return recording.exec('gh', args, { allowFailure: options.allowFailure });
+    };
+    const answered = await recordProtectionOnce(gh, { directory, repository: REPOSITORY, branch: 'main', now: 1_000, assertClean: (value: string) => value });
+    assert.ok(wrote, 'the record was not created between the check and the publish');
+    assert.equal(await readFile(file, 'utf8'), text, 'the standing record was replaced');
+    assert.deepEqual(answered, baseline, 'the standing record was not read back');
+    assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('protection-record.json.')), [], 'the unpublished record was left behind');
+  } finally { await fixture.cleanup(); }
+});
+
+async function snapshot(directory: string): Promise<Record<string, string>> {
+  const entries: Record<string, string> = {};
+  for (const entry of await readdir(directory, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const path = `${entry.parentPath}/${entry.name}`;
+    entries[path] = await readFile(path, 'utf8');
+  }
+  return entries;
+}
