@@ -2,9 +2,11 @@
 
 Graphyard is a control plane that runs a team of AI coding agents on a repository. Its goal is software that ships itself: agents build, verify, review and release, while the human keeps three decisions: goals and priorities, spending money or opening accounts, and issuing credentials to people.
 
+[![How Graphyard works: a two-minute walkthrough](docs/diagrams/how-graphyard-works.gif)](docs/diagrams/how-graphyard-works.mp4)
+
 ## Start here: setup and docs
 
-One command, then [setup checklist](docs/setup-from-zero.md):
+[Setup checklist](docs/setup-from-zero.md):
 
 ```sh
 graphyard up --agent --goal GOAL.md
@@ -25,7 +27,7 @@ graphyard up --agent --goal GOAL.md
 7. A passing candidate is promoted to production and checked there: production verified.
 8. A failure anywhere is reverted or fixed by a new work item.
 
-graphyard.json sets sensitive paths (`risk.sensitive`) and normal-change review timing (`review.normalChanges`): [delivery](docs/delivery.md). Only Graphyard writes to main, merging PRs passing every check.
+graphyard.json sets sensitive paths (`risk.sensitive`) and normal-change review timing (`review.normalChanges`): [delivery](docs/delivery.md). Only Graphyard writes to main.
 
 ```mermaid
 flowchart LR
