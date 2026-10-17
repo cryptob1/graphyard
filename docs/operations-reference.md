@@ -3,11 +3,11 @@
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Wakes dismiss autocompact suggestions, re-read; unconfirmed/unanswerable dialogs hold (`wake:master:held`). `daemon.stepStalls`: 3-cycle signatures: one verified remedy (unknown-profile/401/merge-key-reuse), else master wake.
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Wakes dismiss autocompact suggestions (`esc`/"Not now"), re-read; unconfirmed/unanswerable dialogs hold (`wake:master:held`). `daemon.stepStalls`: 3-cycle signatures: one verified remedy (unknown-profile/401/merge-key-reuse), else master wake; 5min retries.
 
 ### Dispatch order
 
-Within a priority: a submitted attempt (returned rework) precedes unsubmitted items, ahead of starvation/cold/scope; `master status` schedule follows.
+Within a priority: a submitted attempt (returned rework) precedes unsubmitted items, ahead of starvation/cold/scope; `master status`'s schedule follows.
 
 ### Perpetual master loop
 
@@ -35,7 +35,7 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 
 ## Flaky CI check
 
-[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); main merges wait for reruns. Cancelled/timed-out jobs rerun ≤3 times, then one `escalation:main-guard:SHA` infrastructure fault names run+step, reverting nothing. A real failure reruns once: a pass joins `mainGuardFlakes` (last 20); a second failure reverts.
+[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); main merges wait for reruns. Cancelled/timed-out jobs rerun ≤3 times, then one `escalation:main-guard:SHA` infrastructure fault names run+step, reverting nothing. A real failure reruns once: a pass joins `mainGuardFlakes` (last 20); a second failure/refusal/unconcluded hour reverts.
 
 ## Accepted evidence turns out to be wrong
 
@@ -72,11 +72,11 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ### Reading the budget
 
-`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also `master status`): REST-only `perHour` across replicas (`instances`), `limit`/`share`/`target` 0.6/`byEndpoint`. Immutable per-cycle webhook-driven reads [aren't repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
+`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also `master status`): REST-only `perHour` across replicas (`instances`), `limit`/`share`/`target` 0.6/`byEndpoint`; `lastHour`: hourly requests by kind. Immutable, per-cycle, webhook-driven reads [aren't repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
 
 ### Reading under control-plane
 
-`master merger control-plane`: candidates observed from its checkout, polling GitHub for none of their pull request/reviews/checks; person-opened ones still are. Diagnostician/doctor read `graphyard status GY-N`, not `gh pr view`.
+`master merger control-plane`: its candidates are observed from its checkout, polling GitHub for none of their pull request/reviews/checks; person-opened ones still are. Diagnostician/doctor read `graphyard status GY-N`, not `gh pr view`.
 
 ### Webhook liveness
 
@@ -84,9 +84,9 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ## Control-plane resources
 
-`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume+`GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes[:ROOT]` per `TMPDIR`/`/tmp` (unheld/unregistered checkout/worktree 24h; <25% free escalates naming consumers; foreign-namespace markers judge ownerless, 6h unheld, preview too, GY-1896); `loaded-revision`: code moves. No fault: owed restart in bound, pane unowned <10min, `/tmp` >10% free <30min past ≥25% pass.
+`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume+`GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes[:ROOT]`, per `TMPDIR`/`/tmp` (any checkout/worktree unheld/unregistered 24h; <25% free: escalates, naming consumers; foreign-namespace markers judge ownerless, 6h unheld, preview checkouts too, GY-1896); `loaded-revision`: code moves. No fault: owed restart within bound, pane unowned <10min, `/tmp` >10% free <30min past a ≥25% pass.
 
-Session-started `npm test`/`test:browser`/typecheck/`tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`). Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`) until 1GB above.
+Session-started `npm test`/`test:browser`/typecheck/`tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`). Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; one fault/dip) until 1GB above.
 
 ## Storage retention
 
@@ -94,7 +94,7 @@ Compaction deletes past `GRAPHYARD_LEDGER_RETENTION_DAYS` (14), appending `ledge
 
 ## Bootstrap mode for a self-proving change
 
-`policy:bootstrap` holders add `"bootstrap":{"reason":"…","contractPaths":["src/herdr/recovery.ts"]}` to criterion; `e2e:` proofs never defer; next item touching those paths owes it (`graphyard obligations`).
+`policy:bootstrap` holders add `"bootstrap":{"reason":"…","contractPaths":["src/herdr/recovery.ts"]}` to criterion; `e2e:` proofs never defer, next item touching those paths owes it (`graphyard obligations`).
 
 ## Delivered with a failed smoke proof
 
@@ -131,4 +131,4 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ### Concurrent reconciliation
 
-Reconcile evaluates moved rows and due-past items (clock-only); full evaluation ≥ max(`GRAPHYARD_RECONCILE_FULL_MS` (300000), 3× its length) is the safety net; ticks >5s log due count, lag. Batches evaluate lock-free, write under coordination+row locks; heartbeats lock their item.
+Reconcile evaluates moved rows, due-past items, and each moved fleet face's item plus readers; empty views, configuration changes, ≥ max(`GRAPHYARD_RECONCILE_FULL_MS` (300000), 3× length) run full. Batches evaluate lock-free, write under coordination+row locks; heartbeats lock their item.

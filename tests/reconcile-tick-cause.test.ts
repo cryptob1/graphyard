@@ -7,10 +7,11 @@ import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-// GY-1777: a slow reconciliation tick says why it evaluated every live item (the keys whose fleet
-// face moved and the face fields that moved, or the full-evaluation interval) and the event-loop lag
-// it ran under; and a face the tick's own planned writes moved does not make the next pass full,
-// while a face a request outside the tick moved still does.
+// GY-1777: a slow reconciliation tick says why it evaluated every live item (the kept view, the
+// merge configuration or the full-evaluation interval) and the event-loop lag it ran under. A fleet
+// face any writer moved — the tick's own planned writes (GY-1777) or a request outside it
+// (GY-1898) — makes the next pass evaluate the moved item and the items that read it, the tick
+// naming the faces and how many items they made evaluated.
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'worker-1', role: 'worker' };
@@ -87,7 +88,7 @@ function recordEvaluations() {
   return { evaluated, blockOnce: (ms: number) => { block = ms; }, duringOnce: (run: () => Promise<void>) => { during = run; }, writingOnce: (change: (work: Work) => void) => { writing = change; }, restore: () => { internals.reconcileItem = original; } };
 }
 
-test('unit:slow-tick-names-cause — a tick past the bound names the keys and face fields that made it full, or the interval, and the event-loop lag it ran under', { timeout: 120_000 }, async () => {
+test('unit:slow-tick-names-cause — a tick past the bound names the keys and face fields that made it full, or the faces a writer outside it moved and the items they made evaluated, and the event-loop lag it ran under', { timeout: 120_000 }, async () => {
   const items: Work[] = [];
   for (let n = 0; n < 8; n++) items.push(await create());
   engine.resetReconcileView();
@@ -96,25 +97,30 @@ test('unit:slow-tick-names-cause — a tick past the bound names the keys and fa
   assert.match(first.line, /every live item evaluated because the kept view was empty/);
   await settle();
 
-  // One request outside the tick moves one face: the warning names that item and the fields that moved.
+  // One request outside the tick moves one face: the pass is not full (GY-1898) — it evaluates the
+  // moved item alone, and the warning names the face, the fields that moved and the item they made evaluated.
   await engine.execute(operator, 'ready', items[0].id, {}, randomUUID());
   const one = await slowPass();
-  assert.equal(one.evaluated, one.live, 'a face moved by a request makes the pass full');
-  assert.equal(one.tick.full?.cause, 'faces');
-  assert.deepEqual(one.tick.full?.moved.map(move => move.key), [items[0].key]);
-  assert.ok(one.tick.full?.moved[0].fields.includes('ready'), `the moved fields include the one the request changed: ${one.tick.full?.moved[0].fields.join(', ')}`);
-  assert.match(one.line, new RegExp(`every live item evaluated because the fleet face of ${items[0].key} \\([^)]*\\bready\\b[^)]*\\) moved`), one.line);
+  assert.ok(!one.tick.full, 'a face moved by a request no longer makes the pass full');
+  assert.equal(one.evaluated, 1, `the moved item alone is evaluated: ${JSON.stringify(one.tick.faces)}`);
+  assert.deepEqual(one.tick.faces.map(move => move.key), [items[0].key]);
+  assert.ok(one.tick.faces[0].fields.includes('ready'), `the moved fields include the one the request changed: ${one.tick.faces[0].fields.join(', ')}`);
+  assert.equal(one.tick.readers, 1, 'the tick counts the moved item among the ones the face made evaluated');
+  assert.match(one.line, new RegExp(`the fleet face of ${items[0].key} \\([^)]*\\bready\\b[^)]*\\) moved and made 1 evaluated`), one.line);
   // A tick shorter than the sampler's 10 ms resolution holds no sample; one that holds samples carries their p50 and max.
   assert.match(one.line, /; (event-loop lag p50 \d+ ms, max \d+ ms over the tick|no event-loop lag sample over the tick)\)/, one.line);
   assert.ok(one.tick.lagMs ? one.tick.lagMs.max >= one.tick.lagMs.p50 && one.line.includes(`p50 ${one.tick.lagMs.p50} ms, max ${one.tick.lagMs.max} ms`) : one.line.includes('no event-loop lag sample'), 'the warning carries the lag the tick recorded');
   await settle();
 
-  // Seven faces moved: every key is named, each with the fields that changed on it.
+  // Seven faces moved: every key is named, each with the fields that changed on it, and the count
+  // names every item they made evaluated — the seven moved ones; none of them reads another.
   for (const item of items.slice(1, 8)) await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   const many = await slowPass();
-  assert.equal(many.tick.full?.moved.length, 7);
+  assert.ok(!many.tick.full, 'seven moved faces still decide one incremental pass, not a full one');
+  assert.equal(many.tick.faces.length, 7);
+  assert.equal(many.tick.readers, 7);
   const named = items.slice(1, 8).map(item => `${item.key} \\([^)]*\\)`).join(', ');
-  assert.match(many.line, new RegExp(`the fleet face of ${named} moved`), many.line);
+  assert.match(many.line, new RegExp(`the fleet face of ${named} moved and made 7 evaluated`), many.line);
   for (const item of items.slice(1, 8)) assert.match(many.line, new RegExp(`${item.key} \\([^)]*\\bready\\b[^)]*\\)`), many.line);
   assert.doesNotMatch(many.line, /and \d+ more/, many.line);
   await settle();
@@ -160,15 +166,15 @@ test('unit:slow-tick-names-cause — a tick past the bound names the keys and fa
   } finally { mover.restore(); }
   await retitle('description', 'Moved again before the next pass opened');
   const once = await slowPass();
-  assert.equal(once.tick.full?.cause, 'faces', JSON.stringify(once.tick.full));
-  const entries = once.tick.full!.moved.filter(move => move.id === twice.id);
-  assert.equal(entries.length, 1, `the item moved twice is named once: ${JSON.stringify(once.tick.full!.moved)}`);
+  assert.ok(!once.tick.full, 'the twice-moved face is decided incrementally too');
+  const entries = once.tick.faces.filter(move => move.id === twice.id);
+  assert.equal(entries.length, 1, `the item moved twice is named once: ${JSON.stringify(once.tick.faces)}`);
   assert.ok(entries[0].fields.includes('title') && entries[0].fields.includes('description'), `its fields are the union of both moves: ${entries[0].fields.join(', ')}`);
   assert.equal(once.line.split(`${twice.key} (`).length - 1, 1, once.line);
   assert.match(once.line, new RegExp(`${twice.key} \\([^)]*\\bdescription\\b[^)]*\\btitle\\b[^)]*\\)`), once.line);
 });
 
-test('unit:own-write-no-full-pass — a face the tick\'s own write moved makes the next pass evaluate only its readers; a face a request moved still makes it full', { timeout: 120_000 }, async () => {
+test('unit:own-write-no-full-pass — a face the tick\'s own write moved and a face a request moved both make the next pass evaluate only the moved item and its readers', { timeout: 120_000 }, async () => {
   const leased = await create({ exclusiveResources: ['printer'] });
   const dependent = await create({ dependencies: [leased.id] });
   // Readers the engine defines without a reference: one waits on the exclusive resource the leased
@@ -204,12 +210,15 @@ test('unit:own-write-no-full-pass — a face the tick\'s own write moved makes t
     recorder.evaluated.length = 0;
     await settle();
 
-    // A request outside the tick moves a face: the next pass is full, as before.
+    // A request outside the tick moves a face: the next pass decides it just as incrementally as an
+    // own write's (GY-1898) — the moved item alone, for nothing reads others[0].
     await engine.execute(operator, 'ready', others[0].id, {}, randomUUID());
-    const full = await slowPass();
-    assert.equal(full.evaluated, full.live, 'every live item is evaluated against the face a request moved');
-    assert.deepEqual(full.tick.full?.moved.map(move => move.key), [others[0].key]);
-    for (const other of others) assert.ok(new Set(recorder.evaluated).has(other.id));
+    const outside = await slowPass();
+    assert.ok(!outside.tick.full, 'a face a request moved no longer makes the pass full');
+    assert.deepEqual(outside.tick.faces.map(move => move.key), [others[0].key]);
+    const saw = new Set(recorder.evaluated);
+    assert.ok(saw.has(others[0].id), 'the moved item is evaluated against its moved face');
+    assert.ok(!saw.has(dependent.id) && !saw.has(sharer.id) && !saw.has(neighbour.id), `nothing reads others[0] and no reader is evaluated: ${recorder.evaluated.join(', ')}`);
     recorder.evaluated.length = 0;
     await settle();
 
