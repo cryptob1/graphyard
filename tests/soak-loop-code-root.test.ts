@@ -10,6 +10,9 @@ import { alignRunningLoopUnit, heldCliSnapshotAt, heldCliPointer, loadedHeldSnap
 import { daemonEffects } from '../src/daemon/effects-production.js';
 import { alignLoopUnit, loopUnitOf } from '../src/supervisor.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { minute } from './helpers/soak-world.js';
+import { soakControlPlanes } from './helpers/soak-plane.js';
+import { simulateDay } from './helpers/soak-simulation.js';
 
 /**
  * GY-1899 under the real upgrade step for a simulated day: a managed repository and the Graphyard
@@ -26,6 +29,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * false reading of the shared managed commit would owe the same restart every pass), the pin is
  * written and lifted at most once per head, and no pin outlives its head.
  */
+
+soakControlPlanes('soak-loop-code-root', 446);
 
 // The one instant in the file, the day's start: the code under test takes now: () => clock, and
 // `new Date(clock)` derives every observation stamp from it; nothing reads the wall clock.
@@ -227,4 +232,64 @@ test('manual:loop-code-root-holds-day — the same world through a release-lagge
   assert.equal(idle.outcome, 'skipped', JSON.stringify(idle));
   assert.equal(w.state.upgrade.snapshot, undefined, 'the lift cleared the record of the checkout left behind');
   assertPinBounds(w, 2, 'holds day');
+});
+
+/**
+ * The same concern under the real loop (tests/helpers/soak-simulation.ts, `codeRoot`): the managed
+ * repository stays /soak/coordinator while the loop's launcher comes from a separate Graphyard
+ * checkout, and every cycle runs the real loop with its system invariants. The day's own invariants
+ * add, after every cycle: every git command the self-upgrade issues targets the CLI checkout; at each
+ * loop restart the unit the production alignment renders starts the launcher the pin requires and
+ * hands it the CLI checkout while a pin stands; at each fleet restart the executor unit the real
+ * renderer wrote starts the snapshot's entry handed the CLI checkout, or the CLI checkout's own
+ * entry once the pin lifts — both always working in the managed repository.
+ */
+async function codeRoot(label: string) {
+  const root = await temporaryDirectory(`soak-code-root-${label}-day`);
+  await mkdir(join(root, 'scripts'), { recursive: true });
+  await writeFile(join(root, 'scripts', 'graphyard-executor.mjs'), '// entry\n');
+  return root;
+}
+const hours = (count: number) => count * 6 * cycle;
+type Day = Awaited<ReturnType<typeof simulateDay>>;
+/** What every distinct-roots day must show, whichever holds it ran through. */
+function assertDistinctRoots(day: Day, root: string, label: string, snapshots: boolean) {
+  const c = day.codeRootDay!;
+  assert.deepEqual(day.violations, [], `${label}: every system invariant and every checkout binding holds after every cycle`);
+  assert.deepEqual(day.lost, [], `${label}: no lease was lost`);
+  assert.deepEqual([...c.gitRoots], [root], `${label}: the self-upgrade ran git only in the CLI checkout, never in the managed repository`);
+  const held = c.loopUnits.filter(unit => unit.pin), free = c.loopUnits.filter(unit => !unit.pin);
+  // A snapshot restart points the loop unit while its pin stands; a release-lag hold only pins, and its lift restarts onto the checkout.
+  assert.ok((snapshots ? held.length > 0 : held.length === 0) && free.length > 0, `${label}: the loop unit was aligned while a pin stood (${held.length}) and after it lifted (${free.length})`);
+  assert.ok(held.every(unit => unit.handed === root && unit.launcher === join(root, '.graphyard', 'held-cli', unit.pin!.slice(0, 12), 'bin', 'graphyard.mjs')), `${label}: a held loop unit starts the snapshot under the CLI checkout and hands that checkout: ${JSON.stringify(held.find(unit => unit.handed !== root))}`);
+  assert.ok(free.every(unit => unit.handed === null && unit.launcher === join(root, 'bin', 'graphyard.mjs')), `${label}: an unpinned loop unit starts the CLI checkout's launcher, handed nothing`);
+  assert.ok(c.loopUnits.every(unit => unit.working === '/soak/coordinator'), `${label}: the loop always works in the managed repository`);
+  assert.ok(c.executorUnits.some(unit => unit.pin) === snapshots && c.executorUnits.every(unit => unit.working === '/soak/coordinator' && (unit.entry === join(root, 'scripts', 'graphyard-executor.mjs') ? unit.handed === null : unit.handed === root)), `${label}: executor units start the CLI checkout's entry, or a snapshot's handed the CLI checkout: ${JSON.stringify(c.executorUnits)}`);
+  assert.ok(day.upgrades.self >= 2, `${label}: the loop restarted onto more than one head (${day.upgrades.self})`);
+  assert.equal(day.state.release?.commit, day.checkout.head, `${label}: the day ends with the loop reporting the CLI checkout's commit`);
+  assert.ok(day.upgrades.pins.some(pin => pin.commit), `${label}: the day pinned a release under the CLI checkout`);
+  assert.equal(day.upgrades.samples.at(-1)?.pin, null, `${label}: no pin outlives the day`);
+  assert.equal(readHeldCli(root), null, `${label}: the pin's pointer under the CLI checkout is lifted`);
+}
+
+test('manual:loop-code-root-real-loop-snapshot-day — the real loop over a simulated day with the CLI checkout apart from the managed repository: two deploys restart it onto held snapshots of a dirty checkout and the lift returns it, with every git command on the CLI checkout and every loop and executor unit binding the CLI checkout\u2019s launcher or its snapshot', { timeout: 600_000 }, async () => {
+  const root = await codeRoot('snapshot');
+  const day = await simulateDay({ hours: 8, dirtyLift: true, codeRoot: root,
+    plan: { deploys: [hours(2), hours(4)], dirtyCheckout: { from: hours(1), to: hours(6) }, headMove: { from: hours(99), to: hours(100) }, heldClaimRestarts: 0, deaths: new Set() } });
+  assert.deepEqual(day.failures, [], 'no cycle or self-upgrade failed');
+  assert.ok(day.upgrades.samples.some(sample => sample.snapshot && sample.pin), 'the loop ran a held snapshot of the dirty checkout');
+  assertDistinctRoots(day, root, 'snapshot day', true);
+});
+
+test('manual:loop-code-root-real-loop-release-lag-day — the real loop over a simulated day whose deploys lag the base tip, with the CLI checkout apart from the managed repository: each hold pins the served release under the CLI checkout, the units start its snapshot handed that checkout, and each lift restarts the loop and the fleet onto the CLI checkout\u2019s commit', { timeout: 600_000 }, async () => {
+  const root = await codeRoot('lag');
+  const plan = { items: 16, heldClaimRestarts: 0, leftovers: 0, slowRecompute: 0, unstable: 0, attested: 0, workMs: 15 * minute, rework: new Set<number>(), deaths: new Set<number>(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set<number>(), misread: new Set<number>(), exits: new Set<number>(), spentProducer: 0, lostRuns: 0,
+    outOfQueue: { item: 16, afterMs: hours(99) }, blind: { from: hours(99), to: hours(100) }, split: { at: hours(99), item: 16 }, loopRestarts: [] as number[], dirtyCheckout: { from: hours(99), to: hours(100) }, headMove: { from: hours(99), to: hours(100) },
+    deploys: [90 * minute, hours(3), hours(4) + 30 * minute, hours(6)] };
+  const day = await simulateDay({ hours: 7, plan, releaseLag: { cutAgoMs: 30 * minute }, codeRoot: root });
+  assert.deepEqual(day.failures, [], 'no cycle or self-upgrade failed');
+  const r = day.releaseLagDay!;
+  assert.ok(r.passes.some(pass => pass.stall === 'release-lagged' && pass.pin), 'the day held a restart with the served release pinned');
+  assert.deepEqual(r.restarts.filter(restart => !restart.contained), [], 'every restart landed on a commit the served release contains');
+  assertDistinctRoots(day, root, 'release-lag day', false);
 });

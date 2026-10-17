@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { type FileHandle, mkdir, open, utimes, writeFile } from 'node:fs/promises';
+import { type FileHandle, mkdir, open, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { existsSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
@@ -70,15 +70,16 @@ import { type DocsSyncPlan, docsSyncHarness, docsSyncSessionName, releaseDocsSyn
 import { type TmpReclaimReport, heldOpenPaths, reclaimTmpDirectories, tmpReclaimLimitPerCycle, tmpReclaimMinAgeMs, writeTempOwner } from '../../src/tmp-reclaim.js';
 import { temporaryDirectory } from './temp-dirs.js';
 import { lostRunReason, sessionRetry } from '../../src/producer.js';
-import { type SelfUpgradeOutcome, heldExecutorEntryOf, performSelfUpgrade } from '../../src/daemon/upgrade.js';
+import { type SelfUpgradeOutcome, alignRunningLoopUnit, heldCliPointer, heldCliSnapshotAt, heldExecutorEntryOf, heldLauncherOf, performSelfUpgrade } from '../../src/daemon/upgrade.js';
+import { loopCodeRoot } from '../../src/daemon/checkout-state.js';
 import { type ExecutorRegistration, executorFleetReport } from '../../src/executor-fleet.js';
 import { cycleDelay, watchdogPlan } from '../../src/daemon/liveness.js';
 import { LoopWake, loopWakeSubjects } from '../../src/daemon/loop-wake.js';
 import { loopSelfProvision, masterSetup } from '../../src/cli/master-setup.js';
 import { deploymentTarget } from '../../src/install/index.js';
 import { type Transport } from '../../src/install/transport.js';
-import { loopUnitName, loopWatchdogSeconds } from '../../src/supervisor.js';
-import { executorUnit, writeExecutorDeclaration } from '../../src/repository-setup.js';
+import { loopUnitName, loopUnitOf, loopUnitText, loopWatchdogSeconds } from '../../src/supervisor.js';
+import { executorEntryBinding, executorUnit, renderExecutorUnit, writeExecutorDeclaration } from '../../src/repository-setup.js';
 import { healUserSupervision } from '../../src/user-manager.js';
 import { hostSupervisionKey } from '../../src/daemon/cycle-host.js';
 import { ChildProcessError } from '../../src/child-runner.js';
@@ -193,6 +194,14 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-1294: the loop's own write moves a diagnosed item's revision before its approver reads the diagnosis decision, so the decision settles stale. */
   staleDiagnosis?: boolean;
+  /**
+   * GY-1899: the Graphyard checkout the loop runs from stands apart from the managed repository
+   * (/soak/coordinator) — a temporary directory, so the production `loopCodeRoot` reads it. The
+   * configured launcher is this checkout's, every git command the self-upgrade runs must target it,
+   * the pin is written under it, and the loop and executor units the day renders through the real
+   * renderers must start and hand it, never the managed root.
+   */
+  codeRoot?: string;
   /**
    * GY-1315: releases requested outside any diagnosis go stale in backlog. Item `item`'s hand release
    * races once, item `racing`'s every release races, and `backlog` items never released sit beside
@@ -356,7 +365,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // below arms from, while each test's own assertions still read the shared base plan.
   const plan = { ...basePlan, ...options.plan };
   const failover = options.failover;
-  const config: MasterConfig = failover ? failover.master
+  const chosen: MasterConfig = failover ? failover.master
     // GY-1286: the slow-server day staffs every item at once, so their decisions fall due together.
     : options.slowDecisions || options.slowCalls ? masterConfigSchema.parse({ ...soakConfig, workers: [...workers, ...extraWorkers] })
     : options.master ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, masterSessionMinutes: options.master.sessionMinutes, masterHeartbeatMinutes: options.master.heartbeatMinutes } })
@@ -367,6 +376,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     : options.loopWake ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, intervalSeconds: options.loopWake.intervalSeconds } })
     : options.supervised ? withSupervision(masterConfigSchema.parse({ ...soakConfig, supervision: 'supervised', operatorLogin: options.supervised.operator }))
     : soakConfig;
+  const config: MasterConfig = options.codeRoot ? masterConfigSchema.parse({ ...chosen, cliPath: join(options.codeRoot, 'bin', 'graphyard.mjs') }) : chosen;
   // The spent producer request (GY-496) is a main-day fault, like the blind window and the split:
   // the hand-approver, documentation and regression days exercise their own faults and would only
   // inherit this one's rework round.
@@ -2656,8 +2666,29 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     }
     return [...paths];
   };
+  // GY-1899: the checkout the loop's code comes from, as the production wiring derives it from the configured launcher.
+  const managedRoot = '/soak/coordinator', codeRoot = loopCodeRoot(config.cliPath, managedRoot);
+  if (options.codeRoot) assert.equal(codeRoot, options.codeRoot, 'the day\'s CLI checkout is the loop\'s code root');
+  const codeRootDay = { gitRoots: new Set<string>(), loopUnits: [] as { elapsed: number; pin: string | null; launcher: string | null; handed: string | null; working: string | null }[],
+    executorUnits: [] as { elapsed: number; pin: string | null; entry: string | null; handed: string | null; working: string | null }[], executorUnit: '' };
+  const unitLine = (text: string, pattern: RegExp) => text.match(pattern)?.[1] ?? null;
+  const loopUnitBinding = (text: string) => ({ launcher: unitLine(text, /^ExecStart=\S+ (\S+) master run$/m), handed: unitLine(text, /^Environment="?GRAPHYARD_CHECKOUT_ROOT=([^"\n]+)"?$/m), working: unitLine(text, /^WorkingDirectory=(.+)$/m) });
+  const executorUnitBinding = (text: string) => ({ entry: unitLine(text, /^ExecStart=\S+ (\S+) --slot %i$/m), handed: unitLine(text, /^Environment="?GRAPHYARD_CHECKOUT_ROOT=([^"\n]+)"?$/m), working: unitLine(text, /^WorkingDirectory=(.+)$/m) });
+  if (options.codeRoot) {
+    // The executor template as init installs it for the managed repository from this CLI (setupRepository hands it the CLI checkout).
+    codeRootDay.executorUnit = renderExecutorUnit(await readFile(new URL('../../examples/master/graphyard-executor@.service', import.meta.url), 'utf8'), { root: managedRoot, node: process.execPath, ...executorEntryBinding(managedRoot, codeRoot, null) });
+  }
+  /** GY-1899: a violation unless a unit binds what the pin requires — the snapshot's launcher or entry handed the CLI checkout while it stands, the CLI checkout's own, handed nothing, once it lifts — always working in the managed repository. */
+  const bindingViolation = (what: string, binding: { started: string | null; handed: string | null; working: string | null }, held: string | null, own: string) => {
+    const wanted = { started: held ?? own, handed: held ? codeRoot : null, working: managedRoot };
+    if (binding.started !== wanted.started || binding.handed !== wanted.handed || binding.working !== wanted.working)
+      violations.push(`${new Date(clock.now()).toISOString()} (+${Math.round((clock.now() - dayStart) / minute)} min) the ${what} unit binds ${JSON.stringify(binding)}, not ${JSON.stringify(wanted)}`);
+  };
   const coordinatorGit = async (command: string, args: string[]): Promise<string> => {
     assert.equal(command, 'git');
+    // GY-1899: every git command the self-upgrade runs reads or moves the CLI checkout, never the managed repository.
+    codeRootDay.gitRoots.add(args[1]);
+    if (args[0] !== '-C' || args[1] !== codeRoot) violations.push(`${new Date(clock.now()).toISOString()} (+${Math.round((clock.now() - dayStart) / minute)} min) git ${args.slice(2).join(' ')} ran in ${args[1]}, not the CLI checkout ${codeRoot}`);
     const [op, ...operands] = args.slice(2);
     if (op === 'fetch') { upgrades.fetches++; checkout.origin = github.tip; return ''; }
     if (op === 'rev-parse') return `${operands[0] === 'HEAD' ? checkout.head : checkout.origin}\n`;
@@ -2673,16 +2704,26 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   };
   /** GY-1790: the launcher the loop unit must start, and the entry the executor units must, given the pin as it stands: the snapshot's while one stands, the checkout's otherwise. */
   const wantedLauncher = () => releaseLagDay.pin ? `snapshot:${releaseLagDay.pin}` : 'checkout';
-  const wantedExecutorEntry = () => releaseLagDay.pin ? heldExecutorEntryOf('/soak/coordinator', releaseLagDay.pin)! : 'checkout';
+  const wantedExecutorEntry = () => releaseLagDay.pin ? heldExecutorEntryOf(codeRoot, releaseLagDay.pin)! : 'checkout';
   const selfUpgrade = (state: DaemonState) => performSelfUpgrade(config, state, {
-    root: '/soak/coordinator', run: coordinatorGit, now: clock.now, persist: async () => {},
+    root: managedRoot, run: coordinatorGit, now: clock.now, persist: async () => {},
     holdCli: async commit => {
       if (commit === null && releaseLagDay.pin && clock.now() - dayStart >= (options.releaseLag?.fleet?.stalePinAt ?? Infinity)) throw new Error('EACCES: the pin could not be removed');
       upgrades.pins.push({ at: clock.now(), commit });
       releaseLagDay.pin = commit;
+      // GY-1899: the pin is real under the CLI checkout, so the production unit alignment reads it from there.
+      if (options.codeRoot) {
+        if (!commit) await rm(heldCliPointer(codeRoot), { force: true });
+        else {
+          await mkdir(join(heldCliSnapshotAt(codeRoot, commit), 'src'), { recursive: true });
+          await writeFile(join(heldCliSnapshotAt(codeRoot, commit), 'src', 'cli.ts'), 'export {};\n');
+          await writeFile(heldCliPointer(codeRoot), `${JSON.stringify({ commit, root: heldCliSnapshotAt(codeRoot, commit), loop: true })}\n`);
+        }
+      }
     },
     restartExecutors: async to => {
       // GY-1790: a slot the fleet restart starts runs the entry its unit names, which must be the one the pin requires now.
+      if (options.codeRoot) bindingViolation('executor', { ...executorUnitBinding(codeRootDay.executorUnit), started: executorUnitBinding(codeRootDay.executorUnit).entry }, releaseLagDay.pin ? heldExecutorEntryOf(codeRoot, releaseLagDay.pin) : null, join(codeRoot, 'scripts', 'graphyard-executor.mjs'));
       if (upgrades.executorEntry !== wantedExecutorEntry()) violations.push(`${new Date(clock.now()).toISOString()} (+${Math.round((clock.now() - dayStart) / minute)} min) the executors restarted onto ${to.slice(0, 12)} through units starting ${upgrades.executorEntry}, not ${wantedExecutorEntry()}`);
       // A busy fleet: a claim outlives restartExecutors' bounded wait for the first passes, and the restart is refused.
       if (upgrades.held.length < plan.heldClaimRestarts) { upgrades.held.push(to); return { result: 'refused', reason: `Restart refused while an executor on ${config.hostId} holds a claimed action`, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; }
@@ -2696,6 +2737,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     // and (GY-1790) its ExecStart follows the pin — the snapshot's launcher while one stands, the checkout's otherwise.
     // Inside a `unitRefusal` window the file cannot be written: the refusal says whether the launcher it names is stale.
     alignUnit: async () => {
+      // GY-1899: the production alignment (alignRunningLoopUnit) renders the unit it would write, read back for its binding.
+      if (options.codeRoot) await alignRunningLoopUnit(managedRoot, config, loopUnitOf(managedRoot), async input => {
+        codeRootDay.loopUnits.push({ elapsed: clock.now() - dayStart, pin: releaseLagDay.pin, ...loopUnitBinding(loopUnitText(input)) });
+        return { wrote: 'unchanged', reason: null, unitPath: '' };
+      });
       const wanted = wantedLauncher(), elapsed = clock.now() - dayStart;
       if (options.unitRefusal?.some(window => elapsed >= window.from && elapsed < window.to)) {
         upgrades.unit.refusals++;
@@ -2709,6 +2755,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     },
     // GY-1790: the executor units' entry follows the pin the same way — the snapshot's script while it stands, the checkout's when it lifts.
     alignExecutorUnits: async script => {
+      // GY-1899: the production rewrite (alignExecutorUnitScript with the CLI checkout as its code root), rendered for real.
+      if (options.codeRoot) {
+        codeRootDay.executorUnit = renderExecutorUnit(codeRootDay.executorUnit, { root: managedRoot, node: process.execPath, ...executorEntryBinding(managedRoot, loopCodeRoot(config.cliPath, managedRoot), script) });
+        codeRootDay.executorUnits.push({ elapsed: clock.now() - dayStart, pin: releaseLagDay.pin, ...executorUnitBinding(codeRootDay.executorUnit) });
+      }
       const wanted = script ?? 'checkout';
       if (upgrades.executorEntry === wanted) return { wrote: 'unchanged', reason: null };
       upgrades.executorEntry = wanted; upgrades.executorRewrites++;
@@ -2720,6 +2771,10 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     // checkout guard reads it as the snapshot the loop runs from.
     restartSelf: async () => {
       // GY-1790: the loop re-executes through its unit, so the launcher the unit names must be the one the pin requires now.
+      if (options.codeRoot) {
+        const last = codeRootDay.loopUnits.at(-1);
+        bindingViolation('loop', { started: last?.launcher ?? null, handed: last?.handed ?? null, working: last?.working ?? null }, releaseLagDay.pin ? heldLauncherOf(codeRoot, releaseLagDay.pin) : null, config.cliPath);
+      }
       if (upgrades.unit.launcher !== wantedLauncher()) violations.push(`${new Date(clock.now()).toISOString()} (+${Math.round((clock.now() - dayStart) / minute)} min) the loop re-executed through a unit starting ${upgrades.unit.launcher}, not ${wantedLauncher()}`);
       const snapshotLoad = checkout.dirty && releaseLagDay.pin ? releaseLagDay.pin : null;
       loadedSnapshot = snapshotLoad;
@@ -3618,7 +3673,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, limitMenuDay, menuReset, menuNotice, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, githubStatusReads, credentialReads, blockerRecords, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
     wakes, lateReading, staleMerges, restartLog, hostDay, guardDay, mainWatchDay, budgetDay, slowPlaneDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, planReportDay, loopWakeDay: loopWakeDay || null,
-    holdThrowDay, restartDay: options.checkoutRestart ? restartDay : null, releaseLagDay: options.releaseLag ? releaseLagDay : null, fleetDay: options.releaseLag?.fleet ? fleetDay : null, dirtyLift: options.dirtyLift ? dirtyLift : null, failedLaunches };
+    holdThrowDay, restartDay: options.checkoutRestart ? restartDay : null, releaseLagDay: options.releaseLag ? releaseLagDay : null, fleetDay: options.releaseLag?.fleet ? fleetDay : null, dirtyLift: options.dirtyLift ? dirtyLift : null, failedLaunches, codeRootDay: options.codeRoot ? codeRootDay : null };
 }
 
 /**
