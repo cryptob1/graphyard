@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { assessCut, cutDue, type CutCommit } from '../src/daemon/candidate-cut.js';
+import { assessCut, assessExactCut, cutDue, type CutCommit } from '../src/daemon/candidate-cut.js';
 import { candidateSettings, candidateSettingsSchema, defaultCandidateEveryMerges, defaultCandidateIdleMinutes } from '../src/master/merge-writer-settings.js';
 import { masterRunSchema } from '../src/master/profiles.js';
 import { noLocalPortsReason, promotionCycle, promotionFrozenReason, promotionMode, promotionReads, promotionWorkflow, type PromotionLedger, type PromotionReads } from '../src/daemon/deployment.js';
@@ -23,18 +23,20 @@ const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
 const history = (...ages: number[]): CutCommit[] => ages.map((age, index) => ({ sha: sha(`merge-${index}-${age}`), at: iso(start - age * minute) }));
 const defaults = candidateSettings({});
 
-test('unit:candidate-cut-due — cutDue is true at 10 or more first-parent merges after the newest cut, or at one merge 15 or more minutes old with no cut since, and false otherwise; run.candidates.everyMerges and run.candidates.idleMinutes override both', () => {
-  assert.deepEqual(defaults, { everyMerges: 10, idleMinutes: 15 });
-  assert.equal(defaultCandidateEveryMerges, 10); assert.equal(defaultCandidateIdleMinutes, 15);
+test('unit:candidate-cut-due — cutDue is true at 5 or more first-parent merges after the newest cut, or at one merge 15 or more minutes old with no cut since, and false otherwise; run.candidates.everyMerges (never above five) and run.candidates.idleMinutes override both', () => {
+  assert.deepEqual(defaults, { everyMerges: 5, idleMinutes: 15 });
+  assert.equal(defaultCandidateEveryMerges, 5); assert.equal(defaultCandidateIdleMinutes, 15);
   const cut = { candidates: [{ id: '20300501T100000Z', sha: sha('cut'), cutAt: iso(start - 120 * minute) }] };
-  // Nine fresh merges after the cut: neither threshold is met.
-  const nine = [...history(1, 2, 3, 4, 5, 6, 7, 8, 9), { sha: sha('cut'), at: iso(start - 120 * minute) }, ...history(200)];
-  assert.equal(cutDue(cut, nine, start, defaults), false, 'nine merges, the oldest nine minutes old, are not due');
-  assert.match(assessCut(cut, nine, start, defaults).reason, /9 merge\(s\) landed on main after candidate 20300501T100000Z; the next candidate is cut at 10 merges or once one has waited 15 minutes/);
-  // The tenth merge makes the count.
-  const ten = [{ sha: sha('tenth'), at: iso(start) }, ...nine];
-  assert.equal(cutDue(cut, ten, start, defaults), true, 'ten merges after the cut are due');
-  assert.match(assessCut(cut, ten, start, defaults).reason, /10 merge\(s\) landed on main after candidate 20300501T100000Z, at or past the 10-merge cut/);
+  // Four fresh merges after the cut: neither threshold is met.
+  const four = [...history(1, 2, 3, 4), { sha: sha('cut'), at: iso(start - 120 * minute) }, ...history(200)];
+  assert.equal(cutDue(cut, four, start, defaults), false, 'four merges, the oldest four minutes old, are not due');
+  assert.match(assessCut(cut, four, start, defaults).reason, /4 merge\(s\) landed on main after candidate 20300501T100000Z; the next candidate is cut at 5 merges or once one has waited 15 minutes/);
+  // The fifth merge makes the count.
+  const five = [{ sha: sha('fifth'), at: iso(start) }, ...four];
+  assert.equal(cutDue(cut, five, start, defaults), true, 'five merges after the cut are due');
+  assert.match(assessCut(cut, five, start, defaults).reason, /5 merge\(s\) landed on main after candidate 20300501T100000Z, at or past the 5-merge cut/);
+  // A wider everyMerges an older master.json carries still parses, and takes effect as five.
+  assert.deepEqual(candidateSettings(masterRunSchema.parse({ intervalSeconds: 20, candidates: { everyMerges: 10 } })), { everyMerges: 5, idleMinutes: 15 });
   // One merge that has waited 15 minutes is due on its own; at 14 it is not. The age is the commit time, never the loop's reads.
   const lone = (age: number) => [{ sha: sha('lone'), at: iso(start - age * minute) }, { sha: sha('cut'), at: iso(start - 120 * minute) }];
   assert.equal(cutDue(cut, lone(14), start, defaults), false);
@@ -62,6 +64,19 @@ test('unit:candidate-cut-due — cutDue is true at 10 or more first-parent merge
   assert.throws(() => candidateSettingsSchema.parse({ idleMinutes: 15, cadence: 'x' }));
   assert.throws(() => masterRunSchema.parse({ intervalSeconds: 20, candidates: { everyMerges: 1000 } }));
   assert.deepEqual(candidateSettings(masterRunSchema.parse({ intervalSeconds: 20 })), defaults);
+});
+
+test('unit:exact-cut-takes-five — an exact cut takes the oldest five waiting changes at most, whatever the cap or backlog, leaves the rest waiting, and a scheduled partial batch waits its bounded wait', () => {
+  const backlog = (count: number, age = 1) => Array.from({ length: count }, (_, index) => ({ workId: `w-${index + 1}`, key: `GY-${index + 1}`, mergeSha: sha(`m-${index}`), mergedAt: iso(start - (age + count - index) * minute), pr: null }));
+  const six = assessExactCut(backlog(6), { trigger: 'manual', now: start, cap: 5, waitMinutes: 15 });
+  assert.equal(six.due, true); assert.deepEqual(six.members.map(member => member.key), ['GY-1', 'GY-2', 'GY-3', 'GY-4', 'GY-5']); assert.equal(six.waiting, 1);
+  assert.equal(assessExactCut(backlog(9), { trigger: 'manual', now: start, cap: 50, waitMinutes: 15 }).members.length, 5, 'a cap above five still cuts five');
+  assert.equal(assessExactCut(backlog(5).slice(0, 2), { trigger: 'manual', now: start, cap: 2, waitMinutes: 15, total: 8 }).waiting, 6, 'total counts the backlog the caller did not read whole');
+  assert.equal(assessExactCut([], { trigger: 'manual', now: start, cap: 5, waitMinutes: 15 }).due, false);
+  const partial = assessExactCut(backlog(2), { trigger: 'schedule', now: start, cap: 5, waitMinutes: 15 });
+  assert.equal(partial.due, false); assert.deepEqual(partial.members, []); assert.match(partial.reason, /a candidate is cut at 5 changes or once GY-1 has waited 15 minutes/);
+  assert.equal(assessExactCut(backlog(2, 14), { trigger: 'schedule', now: start, cap: 5, waitMinutes: 15 }).due, true, 'the oldest change has waited 16 minutes');
+  assert.equal(assessExactCut(backlog(5), { trigger: 'schedule', now: start, cap: 5, waitMinutes: 60 }).due, true, 'a full batch is due at once');
 });
 
 // ---- The local ports ---------------------------------------------------------------------------------
@@ -126,7 +141,7 @@ test('unit:promotion-local-ports — under a control-plane merger promotionCycle
   result = await cycle(result.state, { ...reads, local: idle.local }, start + 11 * minute);
   assert.deepEqual(idle.calls, ['history', 'cut']); assert.deepEqual(idle.due, [false], 'the port is told the cut is not due'); assert.equal(result.dispatched, false);
   assert.deepEqual(green.due, [true], 'the passing run above asked for a due cut');
-  assert.match(result.state.reason!, /2 merge\(s\) landed on main after candidate 20300501T100000Z; the next candidate is cut at 10 merges or once one has waited 15 minutes/);
+  assert.match(result.state.reason!, /2 merge\(s\) landed on main after candidate 20300501T100000Z; the next candidate is cut at 5 merges or once one has waited 15 minutes/);
   assert.equal(result.state.nextDueAt, iso(start + 11 * minute), 'with merges waiting the cut is due later');
   // The cut rule is read once a run-read window: the next cycle inside it neither reads nor cuts.
   const quiet = fakeLocal();

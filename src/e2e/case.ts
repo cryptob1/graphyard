@@ -42,7 +42,9 @@ const httpStep = z.object({
   expect: z.array(assertion).max(50).default([]),
   /** Values to keep for later steps: variable name → dotted path into the answer. */
   save: z.record(variable, z.string().max(200)).optional(),
-}).strict();
+  /** A GET retried every few seconds until its status and expectations hold, for at most this long: what a later actor (the loop) settles. */
+  waitSeconds: z.number().int().min(1).max(3600).optional(),
+}).strict().refine(step => step.waitSeconds === undefined || step.method === 'GET', 'only a GET step waits: a POST is never repeated');
 const browserStep = z.object({
   kind: z.literal('browser'), name: text.optional(),
   action: z.enum(['open', 'click', 'fill', 'expectText']),

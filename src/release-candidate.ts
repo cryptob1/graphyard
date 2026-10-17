@@ -118,7 +118,15 @@ export interface ReleaseCandidate {
    * deployer cannot deploy by digest: those keep sha promotion.
    */
   build?: CandidateBuild;
+  /**
+   * GY-1904: the plane's exact candidate this record was cut at (`/api/candidates`): its id and
+   * identity, and its members, which are this record's `items`. Its `sha` is that candidate's source.
+   * Absent on records cut without one.
+   */
+  exact?: ExactCut;
 }
+/** GY-1904: the exact candidate a cut is tagged at: the plane's record, whose `sourceSha` holds every member. */
+export interface ExactCut { id: string; identity: string; sourceSha: string; members: CandidateItem[] }
 export interface SuiteResult { name: string; passed: boolean; detail: string }
 /**
  * GY-1844. One build registration, the shape of src/delivery.ts's `buildSchema`: the exact artifact
@@ -280,10 +288,11 @@ export const contractPendingCases = (contract: Pick<ReleaseContract, 'outcomes'>
  * promoting this one brings a failed predecessor's deliveries too. The first candidate ever has
  * nothing to start after, so it takes main's tip. A tip that is already a candidate is not cut twice.
  */
-export function cutCandidate(input: { tip: string; now: Date; trigger: CutTrigger; latest: ReleaseCandidate | null; promoted: ReleaseCandidate | null; commits: readonly CommitSummary[]; maxPrs?: number; pendingOutcomes?: readonly string[] }):
+export function cutCandidate(input: { tip: string; now: Date; trigger: CutTrigger; latest: ReleaseCandidate | null; promoted: ReleaseCandidate | null; commits: readonly CommitSummary[]; maxPrs?: number; pendingOutcomes?: readonly string[]; exact?: ExactCut }):
   { cut: true; candidate: ReleaseCandidate } | { cut: false; reason: string } {
   assertSha(input.tip, 'main tip');
   const { latest } = input;
+  if (input.exact) return cutExact(input, input.exact);
   if (latest?.sha === input.tip) return { cut: false, reason: `main tip ${input.tip} is already candidate ${latest.id}` };
   const maxPrs = maxPrsFrom(input.maxPrs);
   const start = latest ? input.commits.findIndex(commit => commit.sha === latest.sha) : -1;
@@ -298,6 +307,32 @@ export function cutCandidate(input: { tip: string; now: Date; trigger: CutTrigge
     prs: capped ? maxPrs : merges.length, queued: capped ? merges.length - maxPrs : 0,
     items: itemsFromCommits(input.commits.slice(Math.max(0, input.commits.findIndex(commit => commit.sha === sha)))),
     ...(input.pendingOutcomes?.length ? { pendingOutcomes: [...new Set(input.pendingOutcomes)].sort() } : {}),
+  } };
+}
+
+/**
+ * Pure (GY-1904): the record of an exact cut — tagged at the exact candidate's source, which must be
+ * a first-parent commit of main after the newest cut, and carrying exactly its members as items, so
+ * UAT validates the commit that holds them and nothing a later merge brought. `exact.members` keeps
+ * membership/identity order (oldest-first); `items` is newest-first so `revertTarget` selects the
+ * newest matching or fallback culprit, matching every other cut path.
+ */
+function cutExact(input: Parameters<typeof cutCandidate>[0], exact: ExactCut): { cut: true; candidate: ReleaseCandidate } | { cut: false; reason: string } {
+  assertSha(exact.sourceSha, `exact candidate ${exact.id} source`);
+  const { latest } = input;
+  const start = latest ? input.commits.findIndex(commit => commit.sha === latest.sha) : -1;
+  const after = start >= 0 ? input.commits.slice(0, start) : input.commits;
+  const at = after.findIndex(commit => commit.sha === exact.sourceSha);
+  if (at < 0) return { cut: false, reason: `exact candidate ${exact.id}'s source ${exact.sourceSha} is not a first-parent commit of main${latest ? ` after candidate ${latest.id} (${latest.sha})` : ''}` };
+  const asItem = (member: ExactCut['members'][number]) => ({ key: member.key, mergeSha: member.mergeSha, pr: member.pr });
+  return { cut: true, candidate: {
+    id: candidateId(input.now), sha: exact.sourceSha, cutAt: input.now.toISOString(), trigger: input.trigger,
+    since: input.promoted ? { id: input.promoted.id, sha: input.promoted.sha } : null,
+    from: latest ? { id: latest.id, sha: latest.sha } : null,
+    prs: after.length - at, queued: at,
+    items: exact.members.map(asItem).reverse(),
+    ...(input.pendingOutcomes?.length ? { pendingOutcomes: [...new Set(input.pendingOutcomes)].sort() } : {}),
+    exact: { id: exact.id, identity: exact.identity, sourceSha: exact.sourceSha, members: exact.members.map(asItem) },
   } };
 }
 
@@ -549,7 +584,7 @@ export function cut(git: Git, options: { base: string; trigger: CutTrigger; now:
   return result;
 }
 /** Async cut for the loop's local ports (GY-1526): same ledger rules as `cut`, through AsyncGit. */
-export async function cutAsync(git: AsyncGit, options: { base: string; trigger: CutTrigger; now: Date; push: boolean; maxPrs?: number; pendingOutcomes?: PendingResolver | AsyncPendingResolver; build?: AsyncBuildResolver }) {
+export async function cutAsync(git: AsyncGit, options: { base: string; trigger: CutTrigger; now: Date; push: boolean; maxPrs?: number; pendingOutcomes?: PendingResolver | AsyncPendingResolver; build?: AsyncBuildResolver; exact?: ExactCut }) {
   await syncLedgerAsync(git, options.base);
   const tip = (await git(['rev-parse', `refs/remotes/origin/${options.base}`])).trim();
   const ledger = await readLedgerAsync(git);
@@ -557,7 +592,12 @@ export async function cutAsync(git: AsyncGit, options: { base: string; trigger: 
   const maxPrs = options.maxPrs ?? maxPrsFrom(process.env.GRAPHYARD_RC_MAX_PRS);
   let commits = await firstParentCommitsAsync(git, tip, promoted?.sha ?? null);
   if (!promoted && latest && !commits.some(commit => commit.sha === latest.sha)) commits = [...await firstParentCommitsAsync(git, tip, latest.sha), ...await firstParentCommitsAsync(git, latest.sha, null)];
-  const result = cutCandidate({ tip, now: options.now, trigger: options.trigger, latest, promoted, maxPrs, commits });
+  // GY-1904: an exact cut's source must hold every member's merge, or it is not their combined source.
+  if (options.exact) for (const member of options.exact.members) {
+    try { await git(['merge-base', '--is-ancestor', member.mergeSha, options.exact.sourceSha]); }
+    catch { return { cut: false as const, reason: `exact candidate ${options.exact.id}'s source ${options.exact.sourceSha} does not hold ${member.key}'s merge ${member.mergeSha}` }; }
+  }
+  const result = cutCandidate({ tip, now: options.now, trigger: options.trigger, latest, promoted, maxPrs, commits, exact: options.exact });
   if (result.cut && options.pendingOutcomes) markPending(result.candidate, await options.pendingOutcomes(pendingCut(result.candidate, commits)));
   if (result.cut && options.build) {
     const built = await options.build({ id: result.candidate.id, sha: result.candidate.sha, items: result.candidate.items });

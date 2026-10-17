@@ -50,7 +50,7 @@ import { mainWatchFreezeFromEnv, mainWatchReads, type MainWatchReads } from './m
 import { shadowReads, shadowVerdictBody, shadowVerdictKey, type ShadowReads } from './cycle-shadow.js';
 import { mergeRecordKey, mergeWriterReads, type MergeWriterReads } from './cycle-merge-writer.js';
 import type { SlowLoopItemInput } from './slow-loop-item.js';
-import { localReleasePorts } from './release-ports.js';
+import { exactCandidatePorts, localReleasePorts } from './release-ports.js';
 import { revertRecordKey } from '../release-revert.js';
 import { readMergeWriter } from '../master/dispatch.js';
 import { worktreeRoot } from '../install/worktree-root.js';
@@ -344,7 +344,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         // GY-1874: sealing a released hold is a write the coordinator credential cannot make: the loop
         // seals through its operator-agent identity (an admin or an operator agent seals), when one is
         // provisioned; without it the promotion keeps its read alone.
-        ...(config.operatorAgent ? { seal: (path: string, data: unknown) => asOperatorAgent('POST', path, data) } : {}) } }) }); },
+        ...(config.operatorAgent ? { seal: (path: string, data: unknown) => asOperatorAgent('POST', path, data) } : {}),
+        // GY-1904: the loop cuts the plane's exact candidates and records their verdicts as the coordinator.
+        candidates: exactCandidatePorts(mutate, path => asCoordinator(path)) } }) }); },
     // GY-1519: the watch reads history from this checkout and its policy from the control plane; the freeze is the environment's ask.
     get mainWatch() { return mainWatchReads(current(), root, run, { policy: () => asCoordinator('main-watch'), freeze: mainWatchFreezeFromEnv() }); },
     // GY-1522 / GY-1560: the gate trial-merges in this checkout's object store under the managed worktree root, records each verdict as the coordinator (one idempotency key per (head, tip)), and reads disagreement explanations so explaining clears the cursor's standing action.
