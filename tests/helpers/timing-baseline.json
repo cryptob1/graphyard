@@ -389,6 +389,7 @@
     "tests/exhaustion-launch-account.test.ts": 4000,
     "tests/exhaustion-notice.test.ts": 2891,
     "tests/exited-worker-pane.test.ts": 813,
+    "tests/external-results.test.ts": 2000,
     "tests/failed-launch-pane.test.ts": 1909,
     "tests/failed-manual-proof-rework.test.ts": 1026,
     "tests/fault-class-capacity.test.ts": 751,
