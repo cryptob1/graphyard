@@ -130,7 +130,7 @@ test('unit:railway-app-bind-plan-matches-redeploy — the supported app-bind pla
   assert.ok(docs.split('\n').some(line =>
     line.includes('app bind SLUG')
     && line.includes('GITHUB_APP_ID') && line.includes('GITHUB_INSTALLATION_ID') && line.includes('GITHUB_PRIVATE_KEY') && line.includes('GITHUB_WEBHOOK_SECRET') && line.includes('GITHUB_CI_APP_IDS')
-    && /Railway serving-SUCCESS redeploy \(refuse latest≠SUCCESS\)\/await\/no-source-upload\/no-`GRAPHYARD_BUILD_SHA`/.test(line)
+    && /Railway serving-SUCCESS redeploy\/refuse-latest≠SUCCESS\/await\/no-source-upload\/no-`GRAPHYARD_BUILD_SHA`/.test(line)
     && /else deploy/.test(line)), 'docs/install.md does not state Railway app bind changes only the five App variables, redeploys the serving SUCCESS deployment (refusing a newer failed latest), awaits that redeploy, and never uploads or stamps GRAPHYARD_BUILD_SHA');
   const { fixture, bindPlan, bindApply, importApp } = await observeOnlyInstallation();
   try {
