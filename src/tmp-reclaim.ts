@@ -14,6 +14,13 @@
 // A directory created through the tests' shared helper (tests/helpers/temp-dirs.ts) carries an
 // owner marker naming the process that made it, which is what makes "whose owning process is
 // gone" checkable rather than guessed from a modification time.
+//
+// One refusal the pass cannot cure is settled instead of reported (GY-1967): a writer it does not
+// control — a sandboxed trial child's test run — can plant a directory of another account inside
+// an entry that is otherwise this user's own, and no pass may empty what it may not write. Such
+// an entry is kept as residue, marked beside with the directory that holds it, and skipped by
+// later passes with one stat until that obstruction is gone: no error, no carried retry, and no
+// fault every pass repeats.
 
 import { existsSync, readFileSync, readlinkSync, type Dirent, type Stats } from 'node:fs';
 import { chmod, lstat, opendir, readdir, readFile, readlink, realpath, rm, stat, statfs, writeFile } from 'node:fs/promises';
@@ -128,6 +135,82 @@ export const tmpReclaimRetryMs = 2_000;
 const retryable = new Set(['ENOTEMPTY', 'EBUSY', 'EPERM', 'EMFILE', 'ENFILE']), unfinishedRemovals = new Set<string>(), unfinishedRegistrations = new Map<string, string>();
 /** The marker naming a directory's owner is a sibling file, `<directory>.owner`, not a file inside it: the dominant use of these directories is an embedded Postgres data dir, and `initdb` refuses any directory that holds so much as a dot file. */
 export const tempOwnerMarker = (directory: string) => `${directory}.owner`;
+
+// ---- Settled residue (GY-1967) -----------------------------------------------------------------
+//
+// A writer the pass does not control can plant a directory of another account inside an entry that
+// is otherwise this user's own: a trial exports its temporary directory to the checkout's test run
+// (src/merge-writer/trial.ts), and a run inside a sandbox writes there as the sandbox's own account
+// — on the host of GY-1967's instances, nobody:nobody inside a `gy-t` trial temp. The entry's
+// removal then fails EACCES for good: rm cannot empty what it cannot write, and makeOwnerWritable
+// deliberately skips directories another user owns. Before GY-1967 the pass carried the entry in
+// its unfinished removals and reported the same error on every pass, so one stuck entry became a
+// failed `action:reclaim` fault forever. The pass now settles the refusal as kept residue: the
+// entry stays, a sibling marker names the directory that holds it, and later passes honour the
+// marker with one stat instead of meeting the refusal again — no error, no carried retry, no
+// repeating fault — until the obstruction is gone, when the marker goes and the entry is due like
+// any other.
+
+/** The suffix of the residue marker a pass writes beside an entry it settled, as a sibling file like the owner marker. */
+export const tempResidueSuffix = '.foreign';
+export const tempResidueMarker = (directory: string) => `${directory}${tempResidueSuffix}`;
+/** What a settled entry's marker records: the directory inside it another account owns whose modes the pass may not change, or null when no single one was found, and that directory's owner. */
+export interface TempResidue { obstruction: string | null; uid: number | null; at: string }
+export const readTempResidue = async (directory: string): Promise<TempResidue | null> => {
+  const marker = tempResidueMarker(directory);
+  // Most candidates carry no marker at all: a stat beats the read's exception on a scan of thousands.
+  if (!existsSync(marker)) return null;
+  try {
+    const parsed = JSON.parse(await readFile(marker, 'utf8')) as Partial<TempResidue>;
+    return typeof parsed?.obstruction === 'string' || parsed?.obstruction === null ? { obstruction: parsed.obstruction, uid: typeof parsed.uid === 'number' ? parsed.uid : null, at: typeof parsed.at === 'string' ? parsed.at : '' } : null;
+  } catch { return null; }
+};
+/** Settle `directory` as kept residue: write its marker naming `obstruction`, best-effort, for later passes to honour. */
+export const writeTempResidue = async (directory: string, obstruction: string | null, now = Date.now()): Promise<TempResidue> => {
+  const uid = obstruction === null ? null : (await lstat(obstruction).catch(() => null))?.uid ?? null;
+  const residue: TempResidue = { obstruction, uid, at: new Date(now).toISOString() };
+  await writeFile(tempResidueMarker(directory), `${JSON.stringify(residue)}\n`);
+  return residue;
+};
+/**
+ * Whether this process may remove entries inside a directory with these modes: it owns the
+ * directory, or other or this process's group holds both search and write on it. A directory
+ * another user owns without that is one makeOwnerWritable rightly never touches, and the one
+ * refusal a pass cannot cure by making its own directories writable.
+ */
+const removableWithin = (info: Stats, uid = process.getuid?.()) => uid === undefined || info.uid === uid ||
+  (info.mode & 0o0003) === 0o0003 || (info.gid === process.getgid?.() && (info.mode & 0o0030) === 0o0030);
+/**
+ * The shallowest directory under `path` another user owns whose modes keep this process from
+ * removing entries inside it, or null when the tree holds none. A directory the process may write
+ * through is descended for a deeper one, since a removal must empty what is beneath it too; this
+ * is the name a settled removal's marker records, so later passes re-check the obstruction with
+ * one stat instead of walking the tree.
+ */
+export async function foreignObstruction(path: string, uid: number | undefined): Promise<string | null> {
+  if (uid === undefined) return null;
+  const queue = [path];
+  for (let at = 0; at < queue.length; at++) {
+    let info: Stats | null = null;
+    try { info = await lstat(queue[at]!); } catch { continue; }
+    if (!info.isDirectory()) continue;
+    if (info.uid !== uid && !removableWithin(info)) return queue[at]!;
+    for (const entry of await readdir(queue[at]!, { withFileTypes: true }).catch(() => [] as Dirent[])) queue.push(join(queue[at]!, entry.name));
+  }
+  return null;
+}
+/**
+ * Whether a settled entry's recorded obstruction still keeps this process out: the directory it
+ * names still exists, another user owns it, and its modes still refuse this process. One lstat a
+ * pass; an obstruction of no named directory never stands, so a settled entry whose cause named
+ * nothing is re-attempted — and settled again — instead of kept for good on a cause that may have
+ * cleared.
+ */
+export async function tempResidueStands(residue: TempResidue, uid: number | undefined): Promise<boolean> {
+  if (residue.obstruction === null || uid === undefined) return false;
+  const info = await lstat(residue.obstruction).catch(() => null);
+  return info !== null && info.isDirectory() && info.uid !== uid && !removableWithin(info);
+}
 
 /**
  * The start a live kernel reports for `pid`, in clock ticks since boot, or null when /proc cannot
@@ -423,6 +506,15 @@ export interface TmpReclaimReport {
   kept: number;
   errors: string[];
   /**
+   * Entries the pass settled as kept residue (GY-1967) instead of reporting an error: a removal
+   * EACCES or EPERM refused for directories the pass may not change — another account's, planted
+   * inside a tree that is otherwise this user's own. Each is kept (counted in `kept` where the
+   * root's accounting holds them), marked beside, and skipped by later passes with one stat until
+   * its obstruction is gone; no pass reports it again, so none faults on it. Absent while no pass
+   * of this report settled one.
+   */
+  residue?: number;
+  /**
    * The escalation steps the pass ran past its base bounds because a root's volume stayed below its
    * inode headroom (GY-1597), each with what it removed; absent when the bound never stood. With
    * steps run, `scanned` and `kept` are the last step's.
@@ -683,18 +775,54 @@ async function makeOwnerWritable(path: string, uid: number | undefined): Promise
   return changed;
 }
 /**
+ * The removal of an entry the pass owns was refused by what it may not change: a directory another
+ * user owns inside the tree (`obstruction` naming the shallowest one, GY-1967), or an `EACCES` or
+ * `EPERM` no writable bit of this user's would cure (`obstruction` null). The calling sweep settles
+ * the entry as kept residue instead of reporting the error, so one stuck entry never becomes a
+ * fault every pass repeats.
+ */
+export class ForeignSubtreeError extends Error {
+  constructor(readonly obstruction: string | null) { super(obstruction === null ? 'the entry holds directories this pass may not change' : `the entry holds a directory another user owns: ${obstruction}`); this.name = 'ForeignSubtreeError'; }
+}
+/**
+ * Settle a removal the pass may not finish: the entry stays, counted in `report.residue`, a marker
+ * beside it naming `obstruction` where one was found. True when `error` was such a refusal, so the
+ * caller carries no unfinished removal and reports no error the action record would fail on.
+ */
+export async function settleForeignResidue(path: string, error: unknown, report: { residue?: number }): Promise<boolean> {
+  if (!(error instanceof ForeignSubtreeError)) return false;
+  if (error.obstruction !== null) await writeTempResidue(path, error.obstruction).catch(() => { /* the next pass meets the refusal again and settles it there */ });
+  report.residue = (report.residue ?? 0) + 1;
+  return true;
+}
+/**
  * Remove `path` recursively, retrying while its tree refills or is still being released, for at
  * most `retryMs`. A refusal its owner's own read-only directories cause (`EACCES`, or the `EPERM`
  * some filesystems report) makes those directories writable first and retries inside the window,
  * so an entry the pass owns is freed this pass instead of reported for every pass to come
- * (GY-1828); one whose read-only directories are another user's changes nothing and fails as before.
+ * (GY-1828). A refusal nothing this pass may change answers at once as `ForeignSubtreeError` — a
+ * directory another user owns inside the tree (GY-1967), named by the error for the caller to
+ * settle as kept residue — instead of spending the window on retries no retry can satisfy, and a
+ * residue marker a previous pass wrote short-circuits the attempt while its obstruction stands, so
+ * a settled entry costs one stat a pass, never a tree walk. The marker goes the moment its
+ * obstruction no longer stands, and the entry is due again this same pass.
  */
 async function removeTree(path: string, retryMs: number, uid: number | undefined) {
+  const residue = await readTempResidue(path);
+  if (residue) {
+    if (await tempResidueStands(residue, uid)) throw new ForeignSubtreeError(residue.obstruction);
+    await rm(tempResidueMarker(path), { force: true }).catch(() => { /* gone already, or the next pass takes it */ });
+  }
   const until = Date.now() + retryMs;
   for (;;) {
     try { return await rm(path, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 }); } catch (error) {
       const code = (error as NodeJS.ErrnoException).code ?? '';
-      const writable = code === 'EACCES' || code === 'EPERM' ? await makeOwnerWritable(path, uid) : false;
+      const refusing = code === 'EACCES' || code === 'EPERM';
+      if (refusing && uid !== undefined) {
+        const foreign = await foreignObstruction(path, uid);
+        if (foreign !== null) throw new ForeignSubtreeError(foreign);
+      }
+      const writable = refusing ? await makeOwnerWritable(path, uid) : false;
       if ((!retryable.has(code) && !writable) || Date.now() >= until) throw error;
       await new Promise(done => setTimeout(done, 10));
     }
@@ -706,7 +834,7 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
   const dirents = await readdir(root, { withFileTypes: true }).catch(() => [] as Dirent[]);
   // A marker goes with its directory, never as an entry of its own; a symlink is never followed or taken.
   // A tsx cache is never a whole-tree candidate, whatever a caller's prefixes: its sockets and per-cycle bound are the cache sweep's.
-  const candidate = (entry: Dirent) => (entry.isDirectory() || entry.isFile()) && !entry.name.endsWith('.owner') && !tsxCachePattern.test(entry.name) && minAge(entry.name) !== null;
+  const candidate = (entry: Dirent) => (entry.isDirectory() || entry.isFile()) && !entry.name.endsWith('.owner') && !entry.name.endsWith(tempResidueSuffix) && !tsxCachePattern.test(entry.name) && minAge(entry.name) !== null;
   const removable: { path: string; mtime: number; kind: TmpReclaimClass }[] = [];
   let held: Set<string> | null = null;
   for (const entry of dirents) {
@@ -715,6 +843,12 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
     const path = join(root, entry.name);
     // A marker whose directory is already gone is clutter: take it back, whatever the bound.
     if (entry.name.startsWith('graphyard-') && entry.name.endsWith('.owner') && !existsSync(path.slice(0, -'.owner'.length))) {
+      try { await rm(path, { force: true }); } catch { /* the next pass tries again */ }
+      continue;
+    }
+    // A residue marker whose entry is gone is clutter the same way: its obstruction took the entry
+    // with it, or a keeper elsewhere freed it, and the marker names nothing now (GY-1967).
+    if (entry.name.endsWith(tempResidueSuffix) && !existsSync(path.slice(0, -tempResidueSuffix.length))) {
       try { await rm(path, { force: true }); } catch { /* the next pass tries again */ }
       continue;
     }
@@ -796,9 +930,16 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
       await removeTree(path, pass.retryMs, pass.uid);
       for (const [pending, checkout] of pass.registrations) if (checkout === path) { await rm(pending, { recursive: true, force: true }); pass.registrations.delete(pending); }
       await rm(tempOwnerMarker(path), { force: true });
+      await rm(tempResidueMarker(path), { force: true }).catch(() => { });
       pass.unfinished.delete(path);
       took(report, kind, path, bytes);
-    } catch (error) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
+    } catch (error) {
+      // A refusal the pass may not change — another account's directory planted inside the entry
+      // (GY-1967) — is settled as kept residue: the entry stays, a marker beside it names what
+      // holds it, later passes honour the marker instead of meeting the refusal again, and no
+      // error the action record would fail on is reported. Any other failure is carried and named.
+      if (!await settleForeignResidue(path, error, report)) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
+    }
   }
   report.kept += Math.max(0, removable.length - (report.removed.length - removedBefore));
 }
@@ -954,7 +1095,9 @@ async function reclaimCompileCaches(root: string, real: string, pass: PassState,
       await removeTree(path, pass.retryMs, pass.uid);
       pass.unfinished.delete(path);
       took(report, 'compileCache', path, bytes);
-    } catch (error) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
+    } catch (error) {
+      if (!await settleForeignResidue(path, error, report)) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
+    }
   }
 }
 
@@ -1032,7 +1175,9 @@ async function reclaimRuntimeScratch(root: string, real: string, pass: PassState
         await removeTree(path, pass.retryMs, pass.uid);
         pass.unfinished.delete(path); pass.written.delete(path);
         took(report, 'runtimeScratch', path, bytes);
-      } catch (error) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
+      } catch (error) {
+        if (!await settleForeignResidue(path, error, report)) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
+      }
     }
   }
 }

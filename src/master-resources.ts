@@ -114,7 +114,7 @@ export interface ResourceInputs {
  * still stood at its end, the top consumers it named (GY-1597); and how many entries each class
  * took (GY-1655) — the base classes always, a retention class (pnpm store, compile cache) once it took one (GY-1683).
  */
-export interface TmpPassRecord { removed: number; at: string; roots?: string[]; classes?: Partial<Record<TmpReclaimClass, number>>; escalated?: TmpReclaimReport['escalated']; consumers?: TmpConsumer[]; pressure?: TmpRootPressure[] }
+export interface TmpPassRecord { removed: number; at: string; roots?: string[]; classes?: Partial<Record<TmpReclaimClass, number>>; escalated?: TmpReclaimReport['escalated']; consumers?: TmpConsumer[]; pressure?: TmpRootPressure[]; residue?: number }
 export interface TmpInodes {
   path: string; totalInodes: number; freeInodes: number;
   /** What the last /tmp pass to remove anything removed, and when it was recorded. */
@@ -530,6 +530,8 @@ function describeTmpInodes(tmp: TmpInodes) {
   const parts = [`measured ${tmp.path}: ${tmp.freeInodes} of ${tmp.totalInodes} inodes free`];
   if (tmp.own) parts.push(`${tmp.own.capped ? 'at least ' : ''}${entries(tmp.own.entries)} are this user's (${tmp.own.testTemp} top-level with test temp names${tmp.own.agentScratch ? `, ${tmp.own.agentScratch} with agent scratch names` : ''}${tmp.own.tsxCache ? `, ${entries(tmp.own.tsxCache.entries)} under its tsx compile cache ${tmp.own.tsxCache.name}` : ''}); the per-user quota itself is not readable`);
   if (tmp.latest) parts.push(`the loop's latest /tmp pass removed ${entries(tmp.latest.removed)} at ${tmp.latest.at}${tmp.latest.classes ? ` (${describeTmpClasses(tmp.latest.classes)})` : ''}${tmp.latest.roots ? `, scanning ${tmp.latest.roots.join(' and ')}` : ''}`);
+  // Entries the pass settled as kept residue (GY-1967): another account's subtree inside an entry that is otherwise this user's own. The pass reports no error for them, so this is where they show.
+  if (tmp.latest?.residue) parts.push(`${entries(tmp.latest.residue)} held as another account's residue, marked beside it until its obstruction is gone`);
   // Below the headroom the pass escalated in the same run (GY-1597): say how far, and what it could not reach.
   const top = tmp.latest?.escalated?.at(-1);
   if (top) parts.push(`below the inode headroom it escalated to ${top.limit} per cycle and tsx cache files older than ${minutes(top.cacheAgeMs)} (${tmp.latest!.escalated!.map(step => step.removed).join(' + ')} removed by the escalated steps)`);
@@ -877,7 +879,7 @@ export interface ResourceReclaimReport {
    * candidates it examined and kept, whether the inode bound still stood, its escalation steps and
    * the consumers it named. Absent when no pass finished this cycle.
    */
-  tmpPass?: Pick<TmpReclaimReport, 'roots' | 'scanned' | 'kept' | 'boundStands' | 'escalated' | 'consumers'>;
+  tmpPass?: Pick<TmpReclaimReport, 'roots' | 'scanned' | 'kept' | 'boundStands' | 'escalated' | 'consumers' | 'residue'>;
   errors: string[];
 }
 /** How a /tmp pass's own errors are marked among a reclaim report's errors (GY-1600). */
@@ -1180,12 +1182,12 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
   const tmp = namesOnly ? null : takeTmpReclaim(() => (options.tmpPass ?? reclaimTmpDirectories)(loopTmpReclaimOptions(options.tmpRoots ?? (options.tmpRoot === undefined ? undefined : [options.tmpRoot]))));
   if (tmp) {
     report.tmp = { removed: tmp.removed.length, bytes: tmp.bytes };
-    report.tmpPass = { roots: tmp.roots, scanned: tmp.scanned, kept: tmp.kept, boundStands: tmp.boundStands, escalated: tmp.escalated, consumers: tmp.consumers };
+    report.tmpPass = { roots: tmp.roots, scanned: tmp.scanned, kept: tmp.kept, boundStands: tmp.boundStands, escalated: tmp.escalated, consumers: tmp.consumers, ...(tmp.residue ? { residue: tmp.residue } : {}) };
     report.errors.push(...tmp.errors.map(error => `${tmpErrorPrefix}${error}`));
   }
   const took = !!(report.reaped.review || report.reaped.producer || report.closed.length || report.released.length || report.tmp.removed || report.errors.length);
   // A finished pass is recorded as the latest even when it removed nothing, so status never shows an old count as current.
-  const tmpLatest = tmp ? { removed: tmp.removed.length, at: report.at, ...(tmp.roots ? { roots: tmp.roots } : {}), ...(tmp.classes ? { classes: tmp.classes } : {}), ...(tmp.escalated ? { escalated: tmp.escalated } : {}), ...(tmp.consumers ? { consumers: tmp.consumers } : {}), ...(tmp.pressure ? { pressure: tmp.pressure } : {}) } : file.tmpLatest ?? null;
+  const tmpLatest = tmp ? { removed: tmp.removed.length, at: report.at, ...(tmp.roots ? { roots: tmp.roots } : {}), ...(tmp.classes ? { classes: tmp.classes } : {}), ...(tmp.escalated ? { escalated: tmp.escalated } : {}), ...(tmp.consumers ? { consumers: tmp.consumers } : {}), ...(tmp.pressure ? { pressure: tmp.pressure } : {}), ...(tmp.residue ? { residue: tmp.residue } : {}) } : file.tmpLatest ?? null;
   if (took || tmp || JSON.stringify(seen) !== JSON.stringify(file.seen)) {
     try {
       await withReclaimLock(root, async () => {
@@ -1206,6 +1208,11 @@ export function describeReclaim(report: ResourceReclaimReport) {
     report.closed.length ? `closed ${report.closed.length} finished session(s) and released their names (${report.closed.map(entry => entry.name).join(', ')})` : '',
     report.released.length ? `released ${report.released.length} stuck session slot(s) (${report.released.map(entry => entry.name).join(', ')})` : '',
     describeTmpReclaim(report.tmp.removed, report.tmp.bytes),
+    // Residue is named only on a line that exists anyway (GY-1967): a pass whose only outcome is
+    // the settled residue records no action row at all — the state is steady, not an event, and
+    // shows in the resources reading and the pass record instead.
+    report.tmpPass?.residue && (report.tmp.removed || report.errors.length)
+      ? `${report.tmpPass.residue} tmp entr${report.tmpPass.residue === 1 ? 'y' : 'ies'} held as another account's residue` : '',
     report.errors.length ? `${report.errors.length} could not be reclaimed: ${report.errors[0]}` : '',
   ].filter(Boolean);
   return parts.length ? `Resource reclaim: ${parts.join('; ')}` : null;
