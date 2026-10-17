@@ -790,14 +790,15 @@ function variableDrift(session: InstallSession, action: string, values: EnvValue
 /**
  * The `gh` login a provider needs (GY-1412): `repo` for branch protection and CI discovery
  * everywhere, plus `admin:repo_hook` for a hosted provider. Compose observes GitHub by polling,
- * never through a webhook, so it needs no `admin:repo_hook`. A login whose scopes `gh` does not
+ * never through a webhook, so it needs no `admin:repo_hook`; nor does `--observe-only` (GY-1862),
+ * which holds every App, webhook and protection action. A login whose scopes `gh` does not
  * list (a fine-grained token) is not refused for scopes it may hold.
  */
-export function githubCliScopes(provider: Provider) { return pollsGitHub(provider) ? ['repo'] : ['repo', 'admin:repo_hook']; }
-export function githubCliPreflight(provider: Provider, status: { code: number; stdout: string; stderr?: string }, repository: string): PreflightItem {
-  const needed = githubCliScopes(provider);
+export function githubCliScopes(provider: Provider, choice: ObserveOnlyChoice = {}) { return pollsGitHub(provider) || choice.observeOnly ? ['repo'] : ['repo', 'admin:repo_hook']; }
+export function githubCliPreflight(provider: Provider, status: { code: number; stdout: string; stderr?: string }, repository: string, choice: ObserveOnlyChoice = {}): PreflightItem {
+  const needed = githubCliScopes(provider, choice);
   const login = `gh auth login --scopes ${needed.join(',')}`;
-  const note = pollsGitHub(provider) ? `; ${provider} polls GitHub, so it needs no admin:repo_hook` : '';
+  const note = pollsGitHub(provider) ? `; ${provider} polls GitHub, so it needs no admin:repo_hook` : choice.observeOnly ? '; --observe-only registers no webhook, so it needs no admin:repo_hook' : '';
   if (status.code !== 0) return { name: 'GitHub CLI', ok: false, detail: 'gh is missing or not authenticated', fix: `Install GitHub CLI and run: ${login} (the account must administer ${repository})${note}` };
   const listed = /Token scopes:\s*(.*)/.exec(`${status.stdout}\n${status.stderr ?? ''}`)?.[1];
   const held = listed === undefined ? null : [...listed.matchAll(/[\w:-]+/g)].map(match => match[0]);
@@ -828,7 +829,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   // for the release wiring a candidate model still creates there.
   const ghNeeded = !noApp || candidateModel;
   const ghStatus = ghNeeded ? await gh(['auth', 'status'], { allowFailure: true }) : { code: 1, stdout: '', stderr: '' };
-  if (ghNeeded) preflight.push(githubCliPreflight(context.provider, ghStatus, session.inputs.repository));
+  if (ghNeeded) preflight.push(githubCliPreflight(context.provider, ghStatus, session.inputs.repository, { observeOnly }));
   const polling = noApp ? null : webhookPreflight(context.provider);
   if (polling) preflight.push(polling);
   // The master loop runs from this checkout and its unit refuses a temporary directory: say so

@@ -1,0 +1,102 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { applyInstall, buildPlan, prepareInstall, type InstallDependencies } from '../src/install/index.js';
+import { deliveryPolicySchema } from '../src/model/delivery-policy.js';
+import { harness, REPOSITORY } from './install-harness.js';
+
+const SERVICE = 'graphyard-owner-project';
+const REPO_ONLY = { match: 'gh auth status', result: "github.com\n  ✓ Logged in to github.com account installer\n  - Token scopes: 'gist', 'read:org', 'repo'" };
+const SIGNED_OUT = { match: 'gh auth status', result: { stdout: '', stderr: 'You are not logged into any GitHub hosts.', code: 1 } };
+
+// A release-candidate repository, so the observe-only install still calls `gh` for its release wiring.
+const releaseCandidate = deliveryPolicySchema.parse({
+  mode: 'release-candidate', candidateSchedule: '0 */6 * * *',
+  mergeGate: { preMerge: [{ check: 'test', command: 'npm run test', source: 'script', reason: 'fast' }], perCandidate: [{ check: 'test:e2e', command: 'npm run test:e2e', source: 'script', reason: 'long' }] },
+  deploy: { adapter: 'railway', project: null, uat: null, production: null },
+});
+
+/** A Railway account that remembers what the installer created. */
+function railway(login: typeof REPO_ONLY | typeof SIGNED_OUT) {
+  const state = { project: false, database: false, service: false };
+  return [login,
+    { match: 'railway status --json', result: () => state.project
+      ? JSON.stringify({ name: SERVICE, services: { edges: [...(state.database ? [{ node: { name: 'Postgres' } }] : []), ...(state.service ? [{ node: { name: SERVICE } }] : [])] } })
+      : { stdout: '', stderr: 'no linked project', code: 1 } },
+    { match: 'railway init', result: () => { state.project = true; return ''; } },
+    { match: 'railway add --database', result: () => { state.database = true; return ''; } },
+    { match: 'railway add --service', result: () => { state.service = true; return ''; } },
+    { match: 'git/ref/heads/release', result: { stdout: '', stderr: 'gh: Not Found (HTTP 404)', code: 1 } },
+    { match: `repos/${REPOSITORY}/environments`, result: JSON.stringify({ environments: [] }) },
+  ];
+}
+
+async function observeOnly(login: typeof REPO_ONLY | typeof SIGNED_OUT) {
+  const fixture = await harness({ provider: 'railway', extraResponses: railway(login),
+    statusBody: { actor: { id: 'owner-project-operator', role: 'admin' }, repository: REPOSITORY, github: false, githubAppId: null, githubInstallationId: null } });
+  await writeFile(join(fixture.root, 'graphyard.json'), JSON.stringify({ documentation: { paths: ['README.md'], changelog: null }, delivery: releaseCandidate }));
+  const calls = { githubApp: 0, registerProfiles: 0, runHerdr: 0, provision: 0 };
+  const deps: InstallDependencies = { ...fixture.deps, log: () => {},
+    githubApp: async () => { calls.githubApp++; throw new Error('observation-only must not bind an App'); },
+    registerProfiles: async () => { calls.registerProfiles++; throw new Error('observation-only must not register profiles'); },
+    runHerdr: () => { calls.runHerdr++; return ''; } };
+  const prepare = async (mode: 'plan' | 'apply') => {
+    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway', observeOnly: true }, deps, mode);
+    const adapter = session.delivery.adapter;
+    session.delivery.adapter = { ...adapter, provision: async (...args) => { calls.provision++; return adapter.provision(...args); } };
+    return session;
+  };
+  return { fixture, calls, prepare };
+}
+
+const githubCli = (plan: { preflight: { name: string; ok: boolean; detail: string; fix?: string }[] }) => plan.preflight.find(item => item.name === 'GitHub CLI')!;
+
+test('unit:observe-only-repo-scope-suffices — a repo-only gh login passes the GitHub CLI preflight of install --observe-only --provider railway, which plans and applies holding every App, webhook, protection, ref and product action; no gh login is still refused', async () => {
+  const { fixture, calls, prepare } = await observeOnly(REPO_ONLY);
+  try {
+    const plan = await buildPlan(await prepare('plan'));
+    const gh = githubCli(plan);
+    assert.equal(gh.ok, true, gh.detail);
+    assert.match(gh.detail, /scopes repo; --observe-only registers no webhook, so it needs no admin:repo_hook/);
+    assert.ok(plan.preflight.every(item => item.ok), JSON.stringify(plan.preflight.filter(item => !item.ok)));
+    const held = plan.actions.filter(action => action.state === 'held').map(action => action.id);
+    for (const id of ['github.app', 'github.protection', 'release.branches', 'release.railway.uat', 'release.railway.production']) assert.ok(held.includes(id), `${id} is not held`);
+
+    const session = await prepare('apply');
+    const summary = await applyInstall(session, await buildPlan(session));
+    assert.equal(summary.health, true);
+    assert.equal(summary.github, null);
+    assert.deepEqual(summary.release.created, []);
+    assert.deepEqual(calls, { githubApp: 0, registerProfiles: 0, runHerdr: 0, provision: 0 });
+    const lines = fixture.allCommandLines();
+    for (const pattern of [/git\/refs/, /--method (POST|PUT|PATCH|DELETE)/, /\/protection/, /\/hooks/, /rulesets/, /^railway environment/])
+      assert.ok(!lines.some(line => pattern.test(line)), `observation-only ran ${lines.find(line => pattern.test(line))}`);
+    assert.ok(!fixture.transport.commands.some(command => command.cwd?.endsWith('/release-railway')), 'the product deployment adapter ran railway');
+    assert.ok(!fixture.requests.some(request => request.url.includes('api.github.com')), 'observation-only called the GitHub API');
+  } finally { await fixture.cleanup(); }
+
+  const signedOut = await observeOnly(SIGNED_OUT);
+  try {
+    const session = await signedOut.prepare('apply');
+    const plan = await buildPlan(session);
+    const gh = githubCli(plan);
+    assert.equal(gh.ok, false);
+    assert.match(gh.detail, /gh is missing or not authenticated/);
+    assert.match(gh.fix!, /gh auth login --scopes repo /);
+    await assert.rejects(applyInstall(session, plan), /Preflight is incomplete; the installer changed nothing/);
+  } finally { await signedOut.fixture.cleanup(); }
+});
+
+test('unit:full-install-still-needs-hook-scope — a full Railway install whose gh login lacks admin:repo_hook still fails the GitHub CLI preflight naming the missing scope', async () => {
+  const fixture = await harness({ provider: 'railway', extraResponses: [REPO_ONLY] });
+  try {
+    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, fixture.deps, 'apply');
+    const plan = await buildPlan(session);
+    const gh = githubCli(plan);
+    assert.equal(gh.ok, false);
+    assert.match(gh.detail, /the gh login lacks scope admin:repo_hook \(railway needs repo, admin:repo_hook\)/);
+    assert.equal(gh.fix, 'Run: gh auth refresh --scopes repo,admin:repo_hook');
+    await assert.rejects(applyInstall(session, plan), /Preflight is incomplete; the installer changed nothing/);
+  } finally { await fixture.cleanup(); }
+});
