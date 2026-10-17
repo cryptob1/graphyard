@@ -49,3 +49,37 @@ export function servedFor(work: Work, release: ReleaseView = noRelease): string 
 export function leftFlowAt(work: Work, release: ReleaseView = noRelease): string | null {
   return flowExitAt(work, release.environment, release);
 }
+
+/**
+ * GY-1904: one member of an exact candidate — a change Graphyard delivered, bound to its work item
+ * and the merge commit that delivered it.
+ */
+export interface CandidateMember { workId: string; key: string; mergeSha: string; mergedAt: string; pr: number | null }
+/**
+ * GY-1904: an exact candidate on the plane's ledger (`release.candidate` events, append-only). It
+ * names at most `maxCandidateChanges` members, the source commit that holds them all (the newest
+ * member's merge commit) and `identity`, the content address of that source and the membership, so
+ * validation and promotion bind to exactly what was cut. A record is written once and never changed.
+ */
+export interface ExactCandidate {
+  id: string; sequence: number; cutAt: string; cutBy: string; trigger: 'manual' | 'schedule';
+  members: CandidateMember[];
+  sourceSha: string;
+  identity: string;
+  /** The candidate this one follows, or null for the first. */
+  previous: { id: string; sourceSha: string } | null;
+  /** Deliveries merged at or after this instant are the ledger's backlog: 24 hours before the first cut, carried by every later one, so an install's history is never cut. */
+  floor: string;
+  /** Delivered changes still waiting after this cut; the next candidate starts with them. */
+  waiting: number;
+  /** The validation run against exactly these members; null until one is recorded. */
+  validation: null;
+}
+export const exactCandidateKind = 'release.candidate';
+/** How far before the first cut the backlog reaches. */
+export const candidateFloorMs = 24 * 3_600_000;
+/** Pure: the content identity's input — the source commit, then every member as `workId mergeSha`, in membership order. */
+export const candidateIdentityText = (sourceSha: string, members: readonly Pick<CandidateMember, 'workId' | 'mergeSha'>[]) =>
+  [sourceSha, ...members.map(member => `${member.workId} ${member.mergeSha}`)].join('\n');
+/** Pure: the combined source of members in merge order — the newest member's merge commit, which holds every earlier one. */
+export const candidateSource = (members: readonly Pick<CandidateMember, 'mergeSha'>[]) => members.at(-1)!.mergeSha;

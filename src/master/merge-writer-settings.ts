@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { configHome } from '../install/secrets.js';
+import { maxCandidateChanges } from '../project-applications.js';
 
 /** How long one trial (build plus the affected tests) may run before it is killed; a timeout is no verdict and is retried later (cycle-shadow.ts). */
 export const defaultShadowTimeoutMinutes = 20;
@@ -56,8 +57,8 @@ export const mergeWriterSettings = (run: { mergeWriter?: MergeWriterSettings }, 
 
 // ---- The loop-driven candidate cut (GY-1526) ------------------------------------------------------
 
-/** A candidate is cut once this many first-parent merges have landed after the newest cut (the workflow's own cap, GY-1491). */
-export const defaultCandidateEveryMerges = 10;
+/** A candidate is cut once this many first-parent merges have landed after the newest cut: GY-1904's five, the most one candidate holds. */
+export const defaultCandidateEveryMerges = maxCandidateChanges;
 /** A candidate is cut once any merge after the newest cut has waited this long, main quiet or not: a lone merge never waits for nine more. */
 export const defaultCandidateIdleMinutes = 15;
 /** The widest cut an install may ask for: past this a failed candidate implicates too many changes to revert by area. */
@@ -68,7 +69,8 @@ export const maxCandidateIdleMinutes = 4 * 60;
 /**
  * `run.candidates` in .graphyard/master.json: when the loop cuts a release candidate itself
  * (control-plane mode, daemon/candidate-cut.ts). Unset, it cuts at `defaultCandidateEveryMerges`
- * merges or `defaultCandidateIdleMinutes` idle minutes.
+ * merges or `defaultCandidateIdleMinutes` idle minutes. A wider `everyMerges` still parses, so an
+ * older master.json keeps the loop running, but takes effect as `maxCandidateChanges` (GY-1904).
  */
 export const candidateSettingsSchema = z.object({
   everyMerges: z.number().int().min(1).max(maxCandidateEveryMerges).optional(),
@@ -78,6 +80,6 @@ export type CandidateSettings = z.infer<typeof candidateSettingsSchema>;
 
 /** The settings with their defaults applied. */
 export const candidateSettings = (run: { candidates?: CandidateSettings }) => ({
-  everyMerges: run.candidates?.everyMerges ?? defaultCandidateEveryMerges,
+  everyMerges: Math.min(run.candidates?.everyMerges ?? defaultCandidateEveryMerges, maxCandidateChanges),
   idleMinutes: run.candidates?.idleMinutes ?? defaultCandidateIdleMinutes,
 });

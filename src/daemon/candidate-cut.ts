@@ -1,5 +1,7 @@
-// Concern: when the loop cuts the next release candidate itself (GY-1526) — at a count of merges since the newest cut, or at one merge left waiting.
+// Concern: when the loop cuts the next release candidate itself (GY-1526) — at a count of merges since the newest cut, or at one merge left waiting — and which waiting deliveries an exact candidate takes (GY-1904).
 import { candidateSettings } from '../master/merge-writer-settings.js';
+import { maxCandidateChanges } from '../project-applications.js';
+import type { CandidateMember } from '../model/release.js';
 
 /**
  * The cut rule for control-plane mode, where no workflow cron cuts candidates (GY-1526). A
@@ -56,3 +58,27 @@ export function assessCut(ledger: CutLedger, mainHistory: readonly CutCommit[], 
  * at least one merge whose commit is `idleMinutes` or more old with no cut since (AC-1).
  */
 export const cutDue = (ledger: CutLedger, mainHistory: readonly CutCommit[], now: number, settings: CutSettings) => assessCut(ledger, mainHistory, now, settings).due;
+
+/** GY-1904: what one exact cut takes from the plane's backlog, and whether it may run now. */
+export interface ExactCutAssessment { due: boolean; members: CandidateMember[]; waiting: number; reason: string }
+
+/**
+ * Pure (GY-1904): the exact cut of `backlog` — the delivered changes no candidate holds yet, oldest
+ * merge first (or its oldest entries, with `total` its size) — at `now`. It takes the oldest `cap` of them (never more than `maxCandidateChanges`,
+ * however long the backlog) and leaves the rest waiting for the next candidate. A manual cut runs
+ * whenever anything waits; a scheduled cut runs once a full batch waits or the oldest change has
+ * waited `waitMinutes` since its merge, so a partial batch is cut after that bounded wait.
+ */
+export function assessExactCut(backlog: readonly CandidateMember[], input: { trigger: 'manual' | 'schedule'; now: number; cap: number; waitMinutes: number; total?: number }): ExactCutAssessment {
+  const cap = Math.max(1, Math.min(maxCandidateChanges, Math.floor(input.cap)));
+  // `total` is the whole backlog's size when the caller read only its oldest entries.
+  const total = Math.max(input.total ?? 0, backlog.length);
+  const members = backlog.slice(0, cap), waiting = total - members.length;
+  if (!members.length) return { due: false, members, waiting: 0, reason: 'No delivered change waits for a candidate; nothing to cut' };
+  const counted = `${total} delivered change(s) wait`;
+  if (input.trigger === 'manual') return { due: true, members, waiting, reason: `${counted}; a manual cut takes the oldest ${members.length}` };
+  if (total >= cap) return { due: true, members, waiting, reason: `${counted}, a full batch of ${cap}` };
+  const waited = age({ sha: members[0].mergeSha, at: members[0].mergedAt }, input.now);
+  if (waited >= input.waitMinutes * 60_000) return { due: true, members, waiting, reason: `${counted}; ${members[0].key} has waited ${minutes(waited)} minute(s), at or past the ${input.waitMinutes}-minute wait, so the partial batch is cut` };
+  return { due: false, members: [], waiting: total, reason: `${counted}; a candidate is cut at ${cap} changes or once ${members[0].key} has waited ${input.waitMinutes} minutes (it has waited ${minutes(waited)})` };
+}
