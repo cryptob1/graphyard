@@ -39,7 +39,7 @@ node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --apply
 ```
 
-Writes credentials, [variables](deployment.md#variables); deploys; [protects](github.md#require-the-check) branch (not with `--no-github-app`/`--observe-only`), recording prior protection once (`protection-record.json`); `--restore-protection --plan|--apply` restores, re-read-verified; unrecorded refuses. **Verify** `/healthz`.
+Writes credentials, [variables](deployment.md#variables); deploys; [protects](github.md#require-the-check) branch (not with `--no-github-app`/`--observe-only`), recording prior protection once (`protection-record.json`); `--restore-protection --plan|--apply` restores, re-read-verified; unrecorded/unreadable/other-branch refuses. **Verify** `/healthz`.
 
 ## Step 3: App confirmation
 
@@ -55,7 +55,7 @@ Skip with `--no-github-app` until App binds; else dispatch [small item](onboardi
 
 ## Self-contained host
 
-`--target host --ssh-host HOST` (or `--target hetzner`): server/Postgres/loop/executors/Herdr/runtimes on one systemd machine; credentials in `~graphyard/.config/graphyard/<install>/`. Public IPv4 serves `<ip>.sslip.io`; else `--domain`. Unpullable images build there at installer's commit. Workers push/open PRs as App (one-hour tokens).
+`--target host --ssh-host HOST` (or `--target hetzner`): server/Postgres/loop/executors/Herdr/runtimes on one systemd machine; credentials in `~graphyard/.config/graphyard/<install>/`. Public IPv4 serves `<ip>.sslip.io`; else `--domain`. Unpullable images build at installer's commit. Workers push/open PRs as App (one-hour tokens).
 
 Price: `--confirm-price`/`--max-monthly`. Saved Apps (`--github-app FILE`/this install's/`.graphyard/github-app.json`) reused if minting a token; `--reuse-app SLUG` (or App page) reuses host-saved Apps. `--migrate` stops loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`), restores; logins move.
 

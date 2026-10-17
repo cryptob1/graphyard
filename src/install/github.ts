@@ -329,7 +329,7 @@ export const protectionRecordFormat = 'graphyard-protection-record-v1';
 export const PROTECTION_RECORD_FILE = 'protection-record.json';
 const protectionRecordSchema = z.object({
   format: z.literal(protectionRecordFormat), repository: z.string().min(1), branch: z.string().min(1), recordedAt: z.string().min(1),
-  protection: z.record(z.string(), z.unknown()).nullable(), allowAutoMerge: z.boolean().nullable(), mergeQueueRuleset: z.record(z.string(), z.unknown()).nullable(),
+  protection: z.record(z.string(), z.unknown()).nullable(), allowAutoMerge: z.boolean(), mergeQueueRuleset: z.record(z.string(), z.unknown()).nullable(),
 }).strict();
 export type ProtectionRecord = z.infer<typeof protectionRecordSchema>;
 export const protectionRecordFile = (directory: string) => resolve(directory, PROTECTION_RECORD_FILE);
@@ -347,31 +347,49 @@ export async function readProtectionRecord(directory: string): Promise<Protectio
   return result.data;
 }
 
-/** Graphyard's own merge-queue ruleset on the repository, by name; an operator's other rulesets are never read here. */
+/**
+ * A GET the baseline and the restore rest on: its JSON document, null only when GitHub confirms
+ * there is none (`absent`), and a refusal naming what was read otherwise. Unlike ghJson it never
+ * turns a failed or malformed answer into a fallback, which would read as a confirmed absence.
+ */
+async function readConfirmed(gh: GitHubCli, args: string[], what: string, absent?: RegExp): Promise<any> {
+  const result = await gh(args, { allowFailure: true });
+  if (result.code !== 0 && absent?.test(`${result.stderr}\n${result.stdout}`)) return null;
+  if (result.code !== 0) throw new Error(`GitHub did not answer ${what} (gh ${args.join(' ')} exited ${result.code}); run "gh auth status" and confirm the account administers the repository, then rerun`);
+  let parsed: unknown;
+  try { parsed = JSON.parse(result.stdout); } catch { parsed = null; }
+  if (!parsed || typeof parsed !== 'object') throw new Error(`GitHub answered ${what} (gh ${args.join(' ')}) with no JSON document, so it cannot be compared; rerun`);
+  return parsed;
+}
+
+/** Graphyard's own merge-queue ruleset on the repository, by name, or null when the listing confirms none; an operator's other rulesets are never read here. */
 export async function readQueueRuleset(gh: GitHubCli, repository: string): Promise<Record<string, unknown> | null> {
-  const rulesets = await ghJson(gh, ['api', `repos/${repository}/rulesets?includes_parents=false`], []) as any[];
-  const found = Array.isArray(rulesets) ? rulesets.find(ruleset => ruleset?.name === mergeQueueRulesetName) : undefined;
+  const rulesets = await readConfirmed(gh, ['api', `repos/${repository}/rulesets?includes_parents=false`], `the rulesets of ${repository}`);
+  if (!Array.isArray(rulesets)) throw new Error(`GitHub answered the rulesets of ${repository} with no list, so whether ${mergeQueueRulesetName} stands is unknown; rerun`);
+  const found = rulesets.find(ruleset => ruleset?.name === mergeQueueRulesetName);
   if (!found) return null;
-  const document = await ghJson(gh, ['api', `repos/${repository}/rulesets/${found.id}`], null);
-  return document && typeof document === 'object' ? document : { id: found.id, name: found.name };
+  const document = await readConfirmed(gh, ['api', `repos/${repository}/rulesets/${found.id}`], `ruleset ${found.id} of ${repository}`);
+  if (document.id !== found.id || document.name !== mergeQueueRulesetName) throw new Error(`GitHub answered ruleset ${found.id} of ${repository} with another document, so ${mergeQueueRulesetName} cannot be recorded or compared; rerun`);
+  return document;
 }
 
 /**
- * Records `current` (readProtection's answer) once: an existing record is kept as it is, whatever
- * the branch holds now. Written 0600 through a temporary file and a rename, and refused when it
- * would carry a credential the vault holds. Answers the record that stands.
+ * Records the branch once, read afresh through observeRestore so that only a confirmed answer is
+ * recorded: a failed or malformed read refuses before anything is written. An existing record is
+ * kept as it is, whatever the branch holds now; one taken for another repository or branch refuses,
+ * since this branch's protection would otherwise change unrecorded. Written 0600 through a
+ * temporary file and a rename, and refused when it would carry a credential the vault holds.
+ * Answers the record that stands.
  */
-export async function recordProtectionOnce(gh: GitHubCli, input: { directory: string; repository: string; branch: string; current: any | null; now: number; assertClean: (text: string, where: string) => string }): Promise<ProtectionRecord> {
+export async function recordProtectionOnce(gh: GitHubCli, input: { directory: string; repository: string; branch: string; now: number; assertClean: (text: string, where: string) => string }): Promise<ProtectionRecord> {
   const existing = await readProtectionRecord(input.directory);
+  if (existing && (existing.repository.toLowerCase() !== input.repository.toLowerCase() || existing.branch !== input.branch))
+    throw new Error(`The protection record ${protectionRecordFile(input.directory)} holds ${existing.repository}@${existing.branch}, so ${input.repository}@${input.branch} would change with no record of its protection; restore ${existing.branch} with install --restore-protection first`);
   if (existing) return existing;
-  const merge = input.current ?? await readMergeFacts(gh, input.repository, input.branch);
-  const settings: RepositoryMergeSettings | null = (merge as any)?.[installRepositoryMerge] ?? null;
+  const observed = await observeRestore(gh, input.repository, input.branch);
   const record: ProtectionRecord = {
     format: protectionRecordFormat, repository: input.repository, branch: input.branch, recordedAt: new Date(input.now).toISOString(),
-    // JSON keeps the document exactly as GitHub answered it; the merge facts readProtection attached are symbol keys it drops.
-    protection: input.current ? JSON.parse(JSON.stringify(input.current)) : null,
-    allowAutoMerge: settings ? settings.allowAutoMerge : null,
-    mergeQueueRuleset: await readQueueRuleset(gh, input.repository),
+    protection: observed.protection, allowAutoMerge: observed.allowAutoMerge, mergeQueueRuleset: observed.mergeQueueRuleset,
   };
   const serialized = `${JSON.stringify(record, null, 2)}\n`;
   input.assertClean(serialized, PROTECTION_RECORD_FILE);
@@ -419,20 +437,25 @@ function rulesetPayload(ruleset: any) {
   return { name: ruleset?.name, target: ruleset?.target, enforcement: ruleset?.enforcement, bypass_actors: ruleset?.bypass_actors ?? [], conditions: ruleset?.conditions ?? null, rules: ruleset?.rules ?? [] };
 }
 
-export interface RestoreObservation { protection: any | null; allowAutoMerge: boolean | null; mergeQueueRuleset: any | null }
+export interface RestoreObservation { protection: any | null; allowAutoMerge: boolean; mergeQueueRuleset: any | null }
 export interface RestoreChange { write: string; field: string; recorded: string; observed: string }
 
-/** Protection, auto-merge and Graphyard's queue ruleset as GitHub answers them now. */
+/**
+ * Protection, auto-merge and Graphyard's queue ruleset as GitHub answers them now. Absence counts
+ * only when GitHub confirms it (protection: its "Branch not protected" 404); every other failed,
+ * malformed or incomplete read refuses, so an unknown state never compares equal to a recorded one.
+ */
 export async function observeRestore(gh: GitHubCli, repository: string, branch: string): Promise<RestoreObservation> {
-  const protection = await ghJson(gh, ['api', `repos/${repository}/branches/${branch}/protection`], null);
-  const settings = repositoryMergeSettings(await ghJson(gh, ['api', `repos/${repository}`], null));
-  return { protection: protection && typeof protection === 'object' ? protection : null, allowAutoMerge: settings ? settings.allowAutoMerge : null, mergeQueueRuleset: await readQueueRuleset(gh, repository) };
+  const protection = await readConfirmed(gh, ['api', `repos/${repository}/branches/${branch}/protection`], `the protection of ${repository}@${branch}`, /Branch not protected/i);
+  const settings = await readConfirmed(gh, ['api', `repos/${repository}`], `the repository ${repository}`);
+  if (typeof settings.allow_auto_merge !== 'boolean') throw new Error(`GitHub answered the repository ${repository} without allow_auto_merge, so its auto-merge setting is unknown; confirm the account administers ${repository}`);
+  return { protection, allowAutoMerge: settings.allow_auto_merge, mergeQueueRuleset: await readQueueRuleset(gh, repository) };
 }
 
 /**
  * The writes that return the branch to the record, diffed against what GitHub answers now; empty
- * when it already matches. Auto-merge is written only when the record read it; an operator's own
- * rulesets are never touched, only the one named Graphyard's merge queue.
+ * when it already matches. An operator's own rulesets are never touched, only the one named
+ * Graphyard's merge queue.
  */
 export function restoreChanges(record: ProtectionRecord, current: RestoreObservation): RestoreChange[] {
   const { repository, branch } = record;
@@ -445,7 +468,7 @@ export function restoreChanges(record: ProtectionRecord, current: RestoreObserva
     const recorded = restorePayload(record.protection), observed = current.protection === null ? null : restorePayload(current.protection);
     if (JSON.stringify(recorded) !== JSON.stringify(observed)) changes.push({ write: `PUT ${protection}`, field: 'branch protection', recorded: show(recorded), observed: show(observed) });
   }
-  if (record.allowAutoMerge !== null && current.allowAutoMerge !== null && record.allowAutoMerge !== current.allowAutoMerge)
+  if (record.allowAutoMerge !== current.allowAutoMerge)
     changes.push({ write: `PATCH repos/${repository} allow_auto_merge=${record.allowAutoMerge}`, field: 'auto-merge', recorded: String(record.allowAutoMerge), observed: String(current.allowAutoMerge) });
   const recordedQueue = record.mergeQueueRuleset ? rulesetPayload(record.mergeQueueRuleset) : null, observedQueue = current.mergeQueueRuleset ? rulesetPayload(current.mergeQueueRuleset) : null;
   if (!recordedQueue && observedQueue) changes.push({ write: `DELETE repos/${repository}/rulesets/${current.mergeQueueRuleset.id}`, field: mergeQueueRulesetName, recorded: 'none', observed: show(observedQueue) });
@@ -469,7 +492,11 @@ export async function applyRestore(gh: GitHubCli, record: ProtectionRecord, chan
     const gone = method === 'DELETE' && /\b404\b|Not Found|not protected/i.test(`${result.stderr}\n${result.stdout}`);
     if (result.code !== 0 && !gone) throw new Error(`Restoring ${change.field} on ${record.repository}@${record.branch} failed at ${change.write}; run "gh auth status" and confirm the account administers ${record.repository}`);
   }
-  const remaining = restoreChanges(record, await observeRestore(gh, record.repository, record.branch));
+  // The re-read refuses rather than verifies when any part of it cannot be read.
+  let reread: RestoreObservation;
+  try { reread = await observeRestore(gh, record.repository, record.branch); }
+  catch (error: any) { throw new Error(`The restore wrote its changes but could not verify ${record.repository}@${record.branch}: ${error.message}`); }
+  const remaining = restoreChanges(record, reread);
   if (remaining.length) throw new Error(`The restore wrote its changes but ${record.repository}@${record.branch} still differs from the record in ${remaining.map(change => change.field).join(', ')}`);
   return { verified: true as const };
 }

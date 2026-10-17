@@ -1346,7 +1346,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
     const satisfied = protectionSatisfied(protectionInputs, current);
     // Before the first write, the protection, auto-merge and queue ruleset found are recorded once,
     // for `install --restore-protection` (GY-1870); a later apply keeps that record.
-    if (!satisfied) await recordProtectionOnce(gh, { directory: session.directory, repository: session.inputs.repository, branch: session.inputs.baseBranch, current, now: deps.now(), assertClean: (text, where) => vault.assertClean(text, where) });
+    if (!satisfied) await recordProtectionOnce(gh, { directory: session.directory, repository: session.inputs.repository, branch: session.inputs.baseBranch, now: deps.now(), assertClean: (text, where) => vault.assertClean(text, where) });
     const applied = satisfied ? null : await applyProtection(gh, { ...protectionInputs, graphyardAppId: mergeCheckExists ? facts.appId : null });
     protectionDetail = applied
       ? `required checks ${applied.required_status_checks.checks.map(check => check.context).join(', ')} ("up to date" off: a candidate merges on the base it was built on); ${applied.required_pull_request_reviews.required_approving_review_count} approving review(s); admin enforcement`

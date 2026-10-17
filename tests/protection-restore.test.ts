@@ -15,12 +15,14 @@ const recordFile = (configHome: string) => join(installDirectory('owner-project'
 /**
  * GitHub as the restore sees it: protection that a PUT replaces (answered back in GET form) and a
  * DELETE removes, the repository's auto-merge setting, and its rulesets. Every write records whether
- * the protection record already existed when it was sent.
+ * the protection record already existed when it was sent; `override` answers a line first, the way
+ * a failing or malformed GitHub would.
  */
 function fakeGitHub(initial: { protection?: any; allowAutoMerge?: boolean } = {}) {
   const github = {
     protection: initial.protection ?? null as any, allowAutoMerge: initial.allowAutoMerge ?? false, rulesets: [] as any[],
     recordFile: '', writes: [] as { line: string; recorded: boolean }[],
+    override: null as null | ((line: string) => string | { stdout: string; stderr: string; code: number } | undefined),
   };
   const wrap = (value: boolean) => ({ enabled: value });
   const people = (list: string[] = [], key: string) => list.map(name => ({ [key]: name }));
@@ -37,6 +39,8 @@ function fakeGitHub(initial: { protection?: any; allowAutoMerge?: boolean } = {}
   const answer = (line: string, input?: string): string | { stdout: string; stderr: string; code: number } => {
     const notFound = { stdout: '', stderr: 'gh: Not Found (HTTP 404)', code: 1 };
     if (line.includes('--method')) github.writes.push({ line, recorded: existsSync(github.recordFile) });
+    const overridden = github.override?.(line);
+    if (overridden !== undefined) return overridden;
     if (line === `gh api ${PROTECTION}`) return github.protection ? JSON.stringify(github.protection) : { stdout: '', stderr: 'gh: Branch not protected (HTTP 404)', code: 1 };
     if (line.startsWith(`gh api --method PUT ${PROTECTION}`)) { github.protection = asGet(JSON.parse(input!)); return '{}'; }
     if (line === `gh api --method DELETE ${PROTECTION}`) { if (!github.protection) return notFound; github.protection = null; return ''; }
@@ -58,6 +62,11 @@ function fakeGitHub(initial: { protection?: any; allowAutoMerge?: boolean } = {}
   };
   return { github, responses: [{ match: 'gh api', result: answer }] };
 }
+
+/** GitHub failing one GET (HTTP 500), or answering it with a document the reads must not trust. */
+const serverError = { stdout: '', stderr: 'gh: Server Error (HTTP 500)', code: 1 };
+const failing = (exact: string, answer: string | typeof serverError = serverError) => (line: string) => line === `gh api ${exact}` ? answer : undefined;
+const RULESETS = `repos/${REPOSITORY}/rulesets?includes_parents=false`;
 
 async function install(github: ReturnType<typeof fakeGitHub>, reuse?: Harness) {
   const fixture = await harness({ provider: 'railway', extraResponses: github.responses, ...(reuse ? { root: reuse.root, configHome: reuse.configHome } : {}) });
@@ -112,6 +121,41 @@ test('unit:protection-prior-state-recorded-before-first-apply — the first gith
     assert.deepEqual(record.protection, served);
     assert.equal(record.allowAutoMerge, false);
   } finally { await fixture.cleanup(); }
+
+  // A read that fails or answers no usable document refuses the apply before any record or protection write:
+  // a failed GET is never recorded as an absence, nor a ruleset as its bare listing entry.
+  const queue = { id: 7, name: mergeQueueRulesetName, target: 'branch', enforcement: 'active', bypass_actors: [], conditions: null, rules: [{ type: 'merge_queue' }] };
+  for (const [what, override, rulesets] of [
+    ['protection', failing(PROTECTION), []],
+    ['repository', failing(`repos/${REPOSITORY}`), []],
+    ['repository without auto-merge', failing(`repos/${REPOSITORY}`, JSON.stringify({ full_name: REPOSITORY, owner: { type: 'User' } })), []],
+    ['ruleset listing', failing(RULESETS), []],
+    ['ruleset document', failing(`repos/${REPOSITORY}/rulesets/7`), [queue]],
+  ] as const) {
+    const broken = fakeGitHub();
+    broken.github.rulesets.push(...rulesets);
+    broken.github.override = override;
+    const fixture = await harness({ provider: 'railway', extraResponses: broken.responses });
+    try {
+      broken.github.recordFile = recordFile(fixture.configHome);
+      const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, fixture.deps);
+      await assert.rejects(applyInstall(session, await buildPlan(session)), /GitHub (did not answer|answered)/, `a failed ${what} read did not refuse`);
+      assert.ok(!existsSync(broken.github.recordFile), `a failed ${what} read left a record`);
+      assert.ok(!broken.github.writes.some(write => write.line.includes(PROTECTION) || write.line.includes('/rulesets') || write.line.includes(`repos/${REPOSITORY} `)), `a failed ${what} read still wrote`);
+    } finally { await fixture.cleanup(); }
+  }
+
+  // A record taken for another branch refuses, so this branch never changes unrecorded.
+  const { recordProtectionOnce } = await import('../src/install/github.js') as any;
+  const other = fakeGitHub();
+  const recorded = await install(other);
+  try {
+    const before = await readFile(other.github.recordFile, 'utf8');
+    const gh = async (args: string[]) => recorded.transport.exec('gh', args, { allowFailure: true });
+    await assert.rejects(recordProtectionOnce(gh, { directory: installDirectory('owner-project', recorded.configHome), repository: REPOSITORY, branch: 'develop', now: 0, assertClean: (text: string) => text }),
+      /holds owner\/project@main, so owner\/project@develop would change with no record/);
+    assert.equal(await readFile(other.github.recordFile, 'utf8'), before);
+  } finally { await recorded.cleanup(); }
 });
 
 test('unit:protection-restore-matches-recorded-state — the restore plan lists its writes and writes nothing, the apply writes exactly the recorded payload (or deletes protection for none) and its re-read matches, and no record refuses naming it', async () => {
@@ -167,6 +211,14 @@ test('unit:protection-restore-matches-recorded-state — the restore plan lists 
   try {
     assert.ok(bare.github.protection);
     const writes = bare.github.writes.length;
+    // An unknown state never compares equal to the record: each failed or incomplete read refuses the plan.
+    for (const override of [failing(PROTECTION), failing(`repos/${REPOSITORY}`), failing(`repos/${REPOSITORY}`, JSON.stringify({ full_name: REPOSITORY, owner: { type: 'User' } })), failing(RULESETS), failing(RULESETS, 'not json')]) {
+      bare.github.override = override;
+      await assert.rejects(restore(unprotected, 'plan'), /GitHub (did not answer|answered)/);
+      await assert.rejects(restore(unprotected, 'apply'), /GitHub (did not answer|answered)/);
+    }
+    bare.github.override = null;
+    assert.equal(bare.github.writes.length, writes, 'a refused restore wrote');
     const plan = await restore(unprotected, 'plan');
     assert.deepEqual(plan.changes.map((change: any) => change.write), [`DELETE ${PROTECTION}`, `PATCH repos/${REPOSITORY} allow_auto_merge=false`]);
     assert.equal(bare.github.writes.length, writes);
@@ -181,4 +233,12 @@ test('unit:protection-restore-matches-recorded-state — the restore plan lists 
     await writeFile(bare.github.recordFile, JSON.stringify({ ...record, format: 'graphyard-protection-record-v9' }));
     await assert.rejects(restore(unprotected, 'plan'), /format graphyard-protection-record-v9, which this release does not read/);
   } finally { await unprotected.cleanup(); }
+
+  // A re-read that fails after the writes refuses instead of verifying.
+  const lost = fakeGitHub();
+  const rereadFails = await install(lost);
+  try {
+    lost.github.override = line => lost.github.writes.some(write => write.line === `gh api --method DELETE ${PROTECTION}`) && line === `gh api ${PROTECTION}` ? serverError : undefined;
+    await assert.rejects(restore(rereadFails, 'apply'), /The restore wrote its changes but could not verify owner\/project@main: GitHub did not answer the protection/);
+  } finally { await rereadFails.cleanup(); }
 });
