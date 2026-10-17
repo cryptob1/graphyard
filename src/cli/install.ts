@@ -178,7 +178,7 @@ export const installCommands = defineCommands([
     name: 'init',
     help: [
       '  init [--scan] [--apply] [--url URL] [--herdr [--herdr-rebind]] [--token-stdin]',
-      '       [--delivery release-candidate|per-pr] [--candidate-cron CRON|off]',
+      '       [--delivery local|release-candidate|per-pr] [--candidate-cron CRON|off]',
       '                                Scan and propose the delivery workflow (--scan), or apply the reviewed proposal (--apply);',
       '                                the scan shows the merge-gate split (pre-merge vs per-candidate checks) before anything is applied;',
       '                                after graphyard install, --apply reuses the install\'s identities and App and writes no principals file',
@@ -198,7 +198,9 @@ export const installCommands = defineCommands([
         // Applying rescans with the choices the operator reviewed, so a confirmed opt-out or cadence
         // is compared with the checkout rather than read back as a difference.
         const reviewed = stored?.proposal.delivery ? { mode: stored.proposal.delivery.mode, candidateSchedule: stored.proposal.delivery.candidateSchedule } : undefined;
-        const fresh = await scanProposal(root, { url: values.url ?? null, runtimes: availableRuntimes(), delivery: values.apply ? { ...reviewed, ...choices } : choices });
+        // GY-1901: the recorded merger chooses the default model; an explicit github merger keeps the GitHub pipeline.
+        const recordedMerger = await mergerFromStatus(() => context.api('status'));
+        const fresh = await scanProposal(root, { url: values.url ?? null, runtimes: availableRuntimes(), delivery: { ...(values.apply ? { ...reviewed, ...choices } : choices), merger: recordedMerger } });
         if (values.apply) {
           if (!stored) throw new Error('No stored setup proposal to apply. Run init --scan, review .graphyard/setup-proposal.json, then rerun with --apply');
           // An install that owns this repository supplies the identities and the App (GY-1413);
@@ -210,7 +212,7 @@ export const installCommands = defineCommands([
           if (differences.length) throw new Error(`${differences.join('; ')}. Rerun init --scan, review the refreshed proposal, then apply it again. The stored proposal was left unchanged.`);
           const url = selected ?? installed?.url;
           if (!url) throw new Error('Applying requires the Graphyard server URL; pass --url');
-          const merger = await mergerFromStatus(() => context.api('status'));
+          const merger = recordedMerger;
           if (installed) {
             const result = await applyProposal(root, stored.proposal, { url, installed, github: protectionRun, merger });
             return print({ proposal: stored.file, ...result, installed: installed.directory });

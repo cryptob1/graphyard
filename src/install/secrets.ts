@@ -63,6 +63,12 @@ export const installRecordSchema = z.object({
    * `derivedVariables` must not push a saved App registration onto the deployment.
    */
   noGithubApp: z.boolean().default(false),
+  /**
+   * GY-1901: the merger this installation chose, `control-plane` for one a non-observe install
+   * created, so a retry before graphyard.json is committed still proposes the local mode. Null on a
+   * record that predates it: that installation keeps the delivery model it had.
+   */
+  merger: z.enum(['control-plane', 'github']).nullable().default(null),
   reviewers: z.array(z.object({ name: z.string().min(1), appId: z.number().int().positive(), botUserId: z.number().int().positive() })).default([]),
   profiles: z.array(z.object({ name: z.string().min(1), principal: z.string().min(1), kind: z.string().min(1), role: z.enum(['worker', 'reviewer', 'master']) })).default([]),
   /** The release pipeline's deployment adapter and the plan actions --apply created for it (GY-1102). */

@@ -436,6 +436,7 @@
     "tests/github-setup-manifest.test.ts": 494,
     "tests/github.test.ts": 968,
     "tests/goal-acceptance.test.ts": 2600,
+    "tests/goal-delivery-onboarding.test.ts": 6500,
     "tests/goal-pipeline-outright-refusals.test.ts": 1238,
     "tests/goal-planner.test.ts": 2900,
     "tests/graphyard-up.test.ts": 4200,
@@ -951,6 +952,7 @@
     "tests/file-durations-status.test.ts": 257,
     "tests/event-loop-lag-pending.test.ts": 729,
     "tests/install-worker-credentials.test.ts": 900,
-    "tests/fault-class-loop.test.ts": 630
+    "tests/fault-class-loop.test.ts": 630,
+    "tests/slow-tick-repeat-receipt.test.ts": 600
   }
 }
