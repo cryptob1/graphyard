@@ -1,0 +1,70 @@
+TAP version 13
+# Subtest: unit:slow-tick-names-cause — a tick past the bound names the keys and face fields that made it full, or the interval, and the event-loop lag it ran under
+not ok 1 - unit:slow-tick-names-cause — a tick past the bound names the keys and face fields that made it full, or the interval, and the event-loop lag it ran under
+  ---
+  duration_ms: 559.594477
+  type: 'test'
+  location: '/tmp/graphyard-slow-tick-receipt-7xQOSI/tree/tests/reconcile-tick-cause.test.ts:1:3514'
+  failureType: 'hookFailed'
+  error: |-
+    Postgres init script failed (code: 1, signal: null). ERROR OUTPUT: shell-init: error retrieving current directory: getcwd: cannot access parent directories: No such file or directory
+    shell-init: error retrieving current directory: getcwd: cannot access parent directories: No such file or directory
+    2026-10-17 04:53:13.723 PDT [760] FATAL:  could not open file "base/1/3767": No such file or directory
+    2026-10-17 04:53:13.723 PDT [760] STATEMENT:  CREATE TEXT SEARCH TEMPLATE snowball
+    		(INIT = dsnowball_init,
+    		LEXIZE = dsnowball_lexize);
+    	
+    2026-10-17 04:53:13.723 PDT [760] PANIC:  could not open file "/tmp/graphyard-reconcile-tick-cause-TjwKc9/global/pg_control": No such file or directory
+    child process exited with exit code 134
+    initdb: removing contents of data directory "/tmp/graphyard-reconcile-tick-cause-TjwKc9"
+    initdb: warning: could not open directory "/tmp/graphyard-reconcile-tick-cause-TjwKc9": No such file or directory
+    initdb: error: failed to remove contents of data directory
+    
+  code: 'ERR_TEST_FAILURE'
+  stack: |-
+    ChildProcess.<anonymous> (file:///home/vish/code/graphyard/node_modules/embedded-postgres/dist/index.js:176:36)
+    ChildProcess.emit (node:events:507:28)
+    maybeClose (node:internal/child_process:1101:16)
+    Socket.<anonymous> (node:internal/child_process:457:11)
+    Socket.emit (node:events:507:28)
+    Pipe.<anonymous> (node:net:346:12)
+  ...
+# Subtest: unit:own-write-no-full-pass — a face the tick's own write moved makes the next pass evaluate only its readers; a face a request moved still makes it full
+not ok 2 - unit:own-write-no-full-pass — a face the tick's own write moved makes the next pass evaluate only its readers; a face a request moved still makes it full
+  ---
+  duration_ms: 0.673161
+  type: 'test'
+  location: '/tmp/graphyard-slow-tick-receipt-7xQOSI/tree/tests/reconcile-tick-cause.test.ts:1:8241'
+  failureType: 'hookFailed'
+  error: |-
+    Postgres init script failed (code: 1, signal: null). ERROR OUTPUT: shell-init: error retrieving current directory: getcwd: cannot access parent directories: No such file or directory
+    shell-init: error retrieving current directory: getcwd: cannot access parent directories: No such file or directory
+    2026-10-17 04:53:13.723 PDT [760] FATAL:  could not open file "base/1/3767": No such file or directory
+    2026-10-17 04:53:13.723 PDT [760] STATEMENT:  CREATE TEXT SEARCH TEMPLATE snowball
+    		(INIT = dsnowball_init,
+    		LEXIZE = dsnowball_lexize);
+    	
+    2026-10-17 04:53:13.723 PDT [760] PANIC:  could not open file "/tmp/graphyard-reconcile-tick-cause-TjwKc9/global/pg_control": No such file or directory
+    child process exited with exit code 134
+    initdb: removing contents of data directory "/tmp/graphyard-reconcile-tick-cause-TjwKc9"
+    initdb: warning: could not open directory "/tmp/graphyard-reconcile-tick-cause-TjwKc9": No such file or directory
+    initdb: error: failed to remove contents of data directory
+    
+  code: 'ERR_TEST_FAILURE'
+  stack: |-
+    ChildProcess.<anonymous> (file:///home/vish/code/graphyard/node_modules/embedded-postgres/dist/index.js:176:36)
+    ChildProcess.emit (node:events:507:28)
+    maybeClose (node:internal/child_process:1101:16)
+    Socket.<anonymous> (node:internal/child_process:457:11)
+    Socket.emit (node:events:507:28)
+    Pipe.<anonymous> (node:net:346:12)
+  ...
+1..2
+# tests 2
+# suites 0
+# pass 0
+# fail 2
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1178.527239

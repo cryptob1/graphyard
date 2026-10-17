@@ -64,7 +64,7 @@ export interface InstallPlan {
    * `committed` is false while graphyard.json holds no reviewed policy yet: protection then keeps
    * the discovered checks until `graphyard init --scan --apply` records the split.
    */
-  delivery: { mode: 'release-candidate' | 'per-pr'; committed: boolean; preMerge: string[]; perCandidate: string[]; adapter: 'railway' | 'command' };
+  delivery: { mode: 'local' | 'release-candidate' | 'per-pr'; committed: boolean; preMerge: string[]; perCandidate: string[]; adapter: 'railway' | 'command' };
   /**
    * The Apps --apply would create in a browser (GY-1442): neither bound, saved for this repository,
    * nor reused with --reuse-app. `graphyard up --agent` without a browser profile stops when any remain.
