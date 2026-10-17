@@ -695,6 +695,26 @@ export function requiredCheckDisagreements(work: Work[]): { keys: string[]; reco
     text: `required-checks-disagree: Graphyard recorded the required checks as ${entry.recorded}, but the protection GitHub returns requires ${entry.protection} (observed on ${entry.keys.join(', ')})`,
     next: 'graphyard master create files the control-plane defect in the required-checks read; gh api repos/OWNER/REPO/branches/BRANCH/protection shows what GitHub enforces' }));
 }
+/** GY-1917. The App's latest `Graphyard / merge` run among a head's check runs, as the merged observation records it, or null when it has none. */
+export function mergeVerdictRun(runs: readonly any[], appId: number, head: string): { id: number; conclusion: string | null } | null {
+  const latest = runs.filter(run => run?.name === CHECK_NAME && run?.app?.id === appId && (run.head_sha ?? head) === head && Number.isSafeInteger(run.id)).sort((a, b) => b.id - a.id)[0];
+  return latest ? { id: latest.id, conclusion: latest.status === 'completed' ? latest.conclusion ?? null : latest.status ?? null } : null;
+}
+/**
+ * GY-1917. Every delivered item whose merged head's latest `Graphyard / merge` run, as its merged
+ * observation read it, reads other than success while every recorded gate passed: the public
+ * verdict contradicts the delivery Graphyard authorized, seen without a manual check-runs read.
+ */
+export function verdictContradictions(work: Work[]): { key: string; head: string; run: number; conclusion: string | null; text: string; next: string }[] {
+  return work.flatMap(item => {
+    const observation = item.observation, verdict = observation?.mergeVerdict;
+    if (item.stage !== 'done' || item.closure || !observation?.merged || !verdict || verdict.conclusion === 'success' || !item.gates.every(gate => gate.passed)) return [];
+    const head = observation.candidate.sha;
+    return [{ key: item.key, head, run: verdict.id, conclusion: verdict.conclusion,
+      text: `public-verdict-contradicts-delivery: ${item.key} merged head ${head.slice(0, 12)} with every recorded gate passed, but its latest ${CHECK_NAME} run ${verdict.id} reads ${verdict.conclusion ?? 'no conclusion'}`,
+      next: `graphyard master create files the control-plane defect that rewrote run ${verdict.id} after the merge; the delivery itself stands` }];
+  });
+}
 /** How long an authorized head may stay BLOCKED with every gate passing before master status raises it (GY-1112). */
 export const blockedAuthorizedStallMs = 30 * 60_000;
 /**
