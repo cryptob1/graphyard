@@ -44,7 +44,7 @@ import { nextAction, nextActionKinds, sameAction } from './model/next-action.js'
 import { recordScenarioRun } from './test-runs.js';
 import { resolveScenario } from './scenarios.js';
 import { sameObservationInputs } from './model/observation-save.js';
-import { adoptSchema, adoptionHolderRefusal, attemptLiveRefusal, closedPullRefusal, draftPullRefusal, movedHeadRefusal, prAdoptionOf, sameAdoption, type AdoptedPull } from './model/pr-adoption.js';
+import { adoptSchema, adoptionHolderRefusal, attemptLiveRefusal, closedPullRefusal, draftPullRefusal, foreignBaseRefusal, forkedPullRefusal, movedHeadRefusal, prAdoptionOf, sameAdoption, type AdoptedPull } from './model/pr-adoption.js';
 import type { ObservationJobState } from './model/action-kinds.js';
 import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
 import { recordStallRemedy, remedyFlows, remedyOutcomes, stallRemedyKinds } from './stall-remedies.js';
@@ -916,7 +916,10 @@ export class Engine {
     const github = await githubFromEnv();
     this.adoptionObserver = github ? async pr => {
       const pull = await github.request(`/pulls/${pr}`);
-      return { head: String(pull.head.sha), branch: String(pull.head.ref), state: pull.state === 'open' ? 'open' as const : 'closed' as const, draft: pull.draft === true };
+      return { head: String(pull.head.sha), branch: String(pull.head.ref), state: pull.state === 'open' ? 'open' as const : 'closed' as const, draft: pull.draft === true,
+        headRepository: typeof pull.head.repo?.full_name === 'string' ? pull.head.repo.full_name : null,
+        baseRepository: typeof pull.base?.repo?.full_name === 'string' ? pull.base.repo.full_name : null,
+        baseRef: typeof pull.base?.ref === 'string' ? pull.base.ref : null };
     } : null;
     return this.adoptionObserver;
   }
@@ -1485,6 +1488,12 @@ export class Engine {
         demand(adoption!.state === 'open', closedPullRefusal(data.pr), 409);
         // A draft's author is still reshaping it: the adoption waits for it to be marked ready.
         demand(adoption!.draft === false, draftPullRefusal(data.pr), 409);
+        // A fork's head is outside the managed origin and a foreign base never lands on the managed
+        // branch: either could never be worked or completed, so both are refused at adoption, the
+        // same-repository and managed-base invariants the observation path holds.
+        demand((adoption!.headRepository ?? '').toLowerCase() === this.repository!.toLowerCase() && (adoption!.baseRepository ?? '').toLowerCase() === this.repository!.toLowerCase(),
+          forkedPullRefusal(data.pr, adoption!.headRepository, adoption!.baseRepository, this.repository!), 409);
+        demand(adoption!.baseRef === this.baseBranch, foreignBaseRefusal(data.pr, adoption!.baseRef, this.baseBranch), 409);
         // The moved-head refusal names the head the provider reports now.
         demand(adoption!.head === data.head, movedHeadRefusal(data.pr, adoption!, data.head), 409);
         // A second owner is refused naming the holder: another item's binding or submission, or its hold on the branch.

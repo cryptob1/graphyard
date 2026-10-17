@@ -41,10 +41,7 @@ before(async () => {
   engine.submissionObserver = null;
   github = new FakeGitHub(repository, { autoApprove: true });
   // The live read an adoption is judged against: the fake, as the deployment's GitHub App reads a pull request.
-  engine.adoptionObserver = async pr => {
-    const view = github.view(pr);
-    return { head: view.head.sha, branch: view.head.ref, state: view.state as 'open' | 'closed', draft: false };
-  };
+  engine.adoptionObserver = async pr => livePull(pr);
 });
 after(async () => { await store.close(); await database.stop(); });
 
@@ -67,6 +64,11 @@ const externalPull = (branch: string) => {
   const head = github.push(branch, { 'src/basket.ts': 'export const basket = [];\n' }, 'Add the basket', 'person:huck');
   const pull = github.openPull({ head: branch, title: 'Add the basket', body: 'Huck-123' }, 'person:huck');
   return { head, pull };
+};
+/** The live read an adoption is judged against: the fake, as the deployment's GitHub App reads a pull request. */
+const livePull = (pr: number) => {
+  const view = github.view(pr);
+  return { head: view.head.sha, branch: view.head.ref, state: view.state as 'open' | 'closed', draft: false, headRepository: repository, baseRepository: repository, baseRef: 'main' };
 };
 /** The master's adoption intent, each call under its own idempotency key like a real client. */
 const adopt = (item: Work, pr: number, head: string) =>
@@ -116,6 +118,22 @@ test('unit:pr-adoption-binds-once — adopting a pull request at its live head b
   await engine.execute(worker, 'release', reserving.id, { epoch: claim.epoch, cause: 'stood down' }, randomUUID());
   const afterEnd = await adopt(await released(), thirdPull.number, thirdHead);
   assert.equal(afterEnd.prAdoption!.branch, 'graphyard/huck-notes');
+  // A fork's head lives outside the managed origin, and a pull request against another base never
+  // lands on the managed one: either could never be worked or completed, so both are refused.
+  const { head: sixthHead, pull: sixthPull } = externalPull('feature/huck-fork');
+  engine.adoptionObserver = async () => ({ head: sixthHead, branch: 'feature/huck-fork', state: 'open', draft: false, headRepository: 'person/huck-fork', baseRepository: repository, baseRef: 'main' });
+  try {
+    await refused(adopt(rival, sixthPull.number, sixthHead), new RegExp(`Pull request #${sixthPull.number} lives on person/huck-fork against ${repository}, not ${repository}`));
+  } finally {
+    engine.adoptionObserver = async pr => livePull(pr);
+  }
+  const { head: seventhHead, pull: seventhPull } = externalPull('feature/huck-elsewhere');
+  engine.adoptionObserver = async () => ({ head: seventhHead, branch: 'feature/huck-elsewhere', state: 'open', draft: false, headRepository: repository, baseRepository: repository, baseRef: 'release/2.0' });
+  try {
+    await refused(adopt(rival, seventhPull.number, seventhHead), `Pull request #${seventhPull.number} targets base release/2.0, not main`);
+  } finally {
+    engine.adoptionObserver = async pr => livePull(pr);
+  }
   // And an item already past adoption takes no second pull request: one binding stands per item.
   await refused(adopt(item, thirdPull.number, thirdHead), `${item.key} already adopted pull request #${pull.number}; one binding stands per item`);
 });
@@ -124,14 +142,11 @@ test('unit:pr-adoption-refuses-unadoptable — a draft, a control-plane merge wr
   const { head, pull } = externalPull('feature/huck-draft');
   const item = await released();
   // A draft: the binding waits for the pull request to be marked ready for review.
-  engine.adoptionObserver = async () => ({ head, branch: 'feature/huck-draft', state: 'open', draft: true });
+  engine.adoptionObserver = async () => ({ head, branch: 'feature/huck-draft', state: 'open', draft: true, headRepository: repository, baseRepository: repository, baseRef: 'main' });
   try {
     await refused(adopt(item, pull.number, head), `Pull request #${pull.number} is a draft`);
   } finally {
-    engine.adoptionObserver = async pr => {
-      const view = github.view(pr);
-      return { head: view.head.sha, branch: view.head.ref, state: view.state as 'open' | 'closed', draft: false };
-    };
+    engine.adoptionObserver = async pr => livePull(pr);
   }
   // The control plane as merge writer: no GitHub pull request could ever complete, so none is adopted.
   const setMerger = (merger: string, reason: string) => store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['test-fixture', mergerEventKind, JSON.stringify({ merger, reason, previous: merger === 'github' ? 'control-plane' : 'github' })]);

@@ -33,7 +33,7 @@ export const adoptSchema = z.object({
 export type Adopt = z.infer<typeof adoptSchema>;
 
 /** The pull request as the provider reports it live, read outside any coordination transaction. */
-export interface AdoptedPull { head: string; branch: string; state: 'open' | 'closed'; draft: boolean }
+export interface AdoptedPull { head: string; branch: string; state: 'open' | 'closed'; draft: boolean; headRepository: string | null; baseRepository: string | null; baseRef: string | null }
 
 /** The binding an accepted adoption records on the item, once. */
 export interface PrAdoption {
@@ -65,6 +65,19 @@ export function closedPullRefusal(pr: number): string {
 /** A draft's author is still reshaping it, so its adoption waits until it is marked ready for review. */
 export function draftPullRefusal(pr: number): string {
   return `Pull request #${pr} is a draft; adoption binds a pull request marked ready for review`;
+}
+
+/**
+ * A fork's head cannot be fetched or pushed through the managed repository's origin, so an attempt
+ * on it could never work or complete: the same-repository invariant the observation path holds.
+ */
+export function forkedPullRefusal(pr: number, headRepository: string | null, baseRepository: string | null, repository: string): string {
+  return `Pull request #${pr} lives on ${headRepository ?? 'an unknown head repository'} against ${baseRepository ?? 'an unknown base repository'}, not ${repository}; adoption binds a same-repository pull request the managed origin can fetch and push`;
+}
+
+/** A pull request against another branch never lands on the managed base, so its adoption could never complete. */
+export function foreignBaseRefusal(pr: number, base: string | null, managed: string): string {
+  return `Pull request #${pr} targets base ${base ?? 'an unknown branch'}, not ${managed}; adoption binds a pull request against the managed base branch`;
 }
 
 /**
