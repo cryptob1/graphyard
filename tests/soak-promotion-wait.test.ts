@@ -19,26 +19,30 @@ import { controlPlaneEffects } from '../scripts/graphyard-executor.mjs';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
- * GY-1831: the promotion wait over simulated days. Each delivered item's verify-deployment row is
- * retried, attempt after attempt, while the release that serves its merge is still being made; the
- * wait is per item and per attempt, so this suite runs it at scale. Every minute the loop's real
- * promotion step (promotionCycle) reads a simulated GitHub — main moving with each merge, release
- * candidates dispatched, validating, promoting or failing and re-cut behind the moving main — and
- * records its state on the real cursor (writeDaemonState). The executor, built as the shipped one
- * is (controlPlaneEffects over the cursor, controlPlaneHandlers' verify-deployment), claims and
- * settles each row through the real action queue (claimAction, settleAction), and the loop's
- * stalled-action attention path (stalledActionAttention, classifyAttention, trackFaults) files
- * what it would file. Production deploys each promotion minutes after the workflow records it, and
- * every candidate runs an advisory soak that outlives its validation, failed candidates' included.
- * Two quiet stretches end on a failing candidate, so the merges it carried have nothing in flight. The same days run without the promotion read, as the base ran them.
+ * GY-1831, GY-1966: the promotion wait over simulated days. Each delivered item's verify-deployment
+ * row is retried, attempt after attempt, while the release that serves its merge is still being
+ * made; the wait is per item and per attempt, so this suite runs it at scale. Every minute the
+ * loop's real promotion step (promotionCycle) reads a simulated GitHub — main moving with each
+ * merge, release candidates dispatched, validating, promoting or failing and re-cut behind the
+ * moving main — and records its state on the real cursor (writeDaemonState). The executor, built
+ * as the shipped one is (controlPlaneEffects over the cursor, controlPlaneHandlers'
+ * verify-deployment), claims and settles each row through the real action queue (claimAction,
+ * settleAction), and the loop's attention path (stalledActionAttention, classifyAttention,
+ * trackFaults) files what it would file. Production deploys each promotion minutes after the
+ * workflow records it, and every candidate runs an advisory soak that outlives its validation,
+ * failed candidates' included. Two quiet stretches end on a failing candidate, so the merges it
+ * carried have nothing in flight. The same days run without the promotion read, as the base ran
+ * them.
  *
- * Invariants: every row ends delivered or stalled within the promotion wait bound (plus the stall
- * threshold's retries at the backoff ceiling) of its merge or of the last release production started serving, and
- * never later than two bounds after its merge; a row whose release was served within the bound files no stalled-action
- * instance; a row left on a quiet pipeline stalls and files as before; each row's attempts are
- * bounded; the cursor stays bounded; once merges resume every row is delivered; an attempt while
- * production is still deploying a recorded promotion names the wait, and one on a quiet pipeline —
- * its failed candidate's soak still running — never does. Instants are epoch
+ * Invariants: every row ends delivered or stalled within the promotion wait bound of the pipeline's
+ * last demonstrated movement (a candidate cut or a release production started serving — the
+ * movement restarts the row's unchanged run, GY-1966) and never later than two bounds after its
+ * merge; a row whose release was served within the bound files no instance; a row left on a
+ * pipeline whose validation window has closed stands plain, stalls, and files as the release
+ * machinery's production instance, never a per-item stalled-action (GY-1966); while a failed
+ * candidate's window stands the row names the wait, and past it never does; each row's attempts
+ * are bounded; the cursor stays bounded; once merges resume every row is delivered; an attempt
+ * while production is still deploying a recorded promotion names the wait. Instants are epoch
  * milliseconds, never a wall-clock reading.
  */
 
@@ -53,8 +57,11 @@ const quiet = [[9 * hour, 13 * hour], [30 * hour, 35 * hour]] as const;
 const inQuiet = (into: number) => quiet.some(([from, to]) => into >= from && into < to);
 const quietFails = (into: number) => quiet.some(([from, to]) => into >= from - hour && into < to);
 /**
- * A row is delivered or stalled at most this long after its merge or the last release change: the wait's bound, then — the
- * wait over without a delivery — a plain run of the stall threshold's failures at the backoff ceiling (plus the claims' minutes).
+ * A row is delivered or stalled at most this long after the pipeline's last demonstrated movement
+ * (its newest candidate cut, or the last release production started serving — the movement
+ * restarts the row's unchanged run, GY-1966), or after its merge when no movement bears on it: the
+ * wait's bound, then — the wait over without a delivery — a plain run of the stall threshold's
+ * failures at the backoff ceiling (plus the claims' minutes).
  */
 const settleBoundMs = promotionWaitBoundMs + actionStallThreshold * actionRetryMaxMs + 2 * minute;
 
@@ -107,7 +114,7 @@ async function simulate(waits: boolean) {
     mutate: async (path: string) => { const key = works.find(work => path === `work/${work.id}/deployment`)?.key; if (key) rows.get(key)!.deliveredAt = now; return {}; },
   });
   const handler = controlPlaneHandlers(() => config, {
-    ...effects, ...(waits ? {} : { promotionCarryingMerge: undefined }),
+    ...effects, ...(waits ? {} : { promotionWaitSuffix: undefined }),
     observeDeployment: async (delivered: Work[]) => {
       const serving = delivered.filter(work => contains(work.delivery!.mergeSha, production.sha));
       return { source: 'endpoint', sha: production.sha, at: iso(now), deployed: serving.map(work => work.key), pending: delivered.filter(work => !serving.includes(work)).map(work => work.key) } as never;
@@ -117,7 +124,7 @@ async function simulate(waits: boolean) {
 
   let promotion: PromotionState | null = null, merges = 0, attempts = 0, handoffs = 0, strandedSoaking = 0;
   const record = { instances: [] as never[], open: {} as Record<string, string>, failing: {} as Record<string, string> };
-  const filed: { subject: string; at: number; text: string }[] = [];
+  const filed: { subject: string; at: number; kind: string; text: string }[] = [];
   for (; now <= t0 + endsAt; now += intervalMs) {
     const into = now - t0;
     // Main moves with each merge; the merged item's verify-deployment row is requested at once, as next-action requests it.
@@ -156,9 +163,13 @@ async function simulate(waits: boolean) {
       // Quiet: the newest candidate cut main's tip and failed, nothing carries the merge, and its soak may still run.
       const last = dispatches.at(-1);
       const stranded = !!last && last.concluded && last.fails && last.cut === mainline.at(-1) && !handoff && contains(row.merge, production.sha) !== true;
-      if (stranded && outcome.reason.includes(promotionWaitClause)) violations.push(`${row.key}: named the promotion wait on a quiet pipeline${now < last!.at + soakMs ? ' while its failed candidate soaks' : ''}`);
+      // GY-1966: while the failed candidate's validation window stands the machinery is mid-cycle and
+      // the failure names the wait; past it the pipeline has stopped moving and the failure stands plain.
+      const inCycle = !!last && now < last.at + promotionWaitBoundMs;
+      if (waits && stranded && inCycle && !outcome.reason.includes(promotionWaitClause)) violations.push(`${row.key}: stood plain while its failed candidate's validation window stood`);
+      if (waits && stranded && !inCycle && outcome.reason.includes(promotionWaitClause)) violations.push(`${row.key}: named the promotion wait after the pipeline had stopped moving`);
       if (handoff && contains(row.merge, production.sha) !== true) handoffs++;
-      if (stranded && now < last!.at + soakMs) strandedSoaking++;
+      if (stranded && inCycle) strandedSoaking++;
       settleAction(claim.work, claim.row.id, { executor: executor.id, principal: executor.principal }, outcome.result, outcome.reason, new Date(now));
       if (outcome.result === 'done') {
         row.attemptsAtEnd ??= claim.row.attempts;
@@ -169,14 +180,14 @@ async function simulate(waits: boolean) {
     const attention = stalledActionAttention({ work: open(), now: iso(now) });
     for (const entry of attention) { const row = rows.get(entry.subject)!; if (row.stalledAt === null) { row.stalledAt = now; row.attemptsAtEnd ??= works.find(work => work.key === entry.subject)!.actionQueue!.actions[0].attempts; } }
     for (const instance of trackFaults(record, classifyAttention(attention), iso(now))) {
-      filed.push({ subject: instance.subject, at: now, text: instance.text });
-      if (instance.kind === 'stalled-action' && rows.has(instance.subject)) rows.get(instance.subject)!.filed++;
+      filed.push({ subject: instance.subject, at: now, kind: instance.kind, text: instance.text });
+      if (rows.has(instance.subject)) rows.get(instance.subject)!.filed++;
     }
   }
   return { rows: [...rows.values()], filed, violations, logs, attempts, dispatches, changes: production.changes, handoffs, strandedSoaking };
 }
 
-test('unit:soak-invariants-hold — GY-1831: two simulated days of merges riding release candidates that promote, fail and are re-cut behind a moving main, and two quiet stretches: every verify-deployment row ends delivered or stalled within the promotion wait bound, a row its release served within the bound files no stalled-action instance, a row left on a quiet pipeline stalls and files as before, attempts stay bounded and every row is delivered once merges resume', { timeout: 600_000 }, async () => {
+test('unit:soak-invariants-hold — GY-1831 and GY-1966: two simulated days of merges riding release candidates that promote, fail and are re-cut behind a moving main, and two quiet stretches: every verify-deployment row ends delivered or stalled within the promotion wait bound of the pipeline\'s last movement, a row its release served within the bound files no instance, a row left on a stopped pipeline files as the release machinery\'s, attempts stay bounded and every row is delivered once merges resume', { timeout: 600_000 }, async () => {
   const day = await simulate(true);
   const { rows, filed, violations, logs, dispatches } = day;
   const at = (ms: number) => `+${Math.round((ms - t0) / minute)} min`;
@@ -184,16 +195,18 @@ test('unit:soak-invariants-hold — GY-1831: two simulated days of merges riding
   assert.deepEqual(violations, [], 'no row fails once production serves its merge, no dispatch while a candidate validates, and the cursor stays bounded');
   assert.deepEqual(logs, [], 'the cursor was readable all day');
   assert.ok(day.handoffs >= 10, `attempts fell inside a deployment handoff and named the wait: ${day.handoffs}`);
-  assert.ok(day.strandedSoaking >= 1, `attempts fell on a quiet pipeline while its failed candidate soaked and stood plain: ${day.strandedSoaking}`);
+  assert.ok(day.strandedSoaking >= 1, `attempts fell on a failed candidate whose validation window stood and named the wait: ${day.strandedSoaking}`);
   assert.ok(rows.length >= 120, `merges landed all day: ${rows.length}`);
   assert.ok(dispatches.filter(run => run.fails).length >= 10 && dispatches.filter(run => !run.fails).length >= 30, `candidates promoted and failed and were re-cut: ${dispatches.length}`);
 
-  // Delivered or stalled within the bound, whatever the pipeline did. A release production starts serving is progress
-  // (the failure names it, so its run starts again): the bound runs from the merge or the last such change, whichever is later.
+  // Delivered or stalled within the bound, whatever the pipeline did. The pipeline's demonstrated
+  // movements — a candidate cut, a release production started serving — restart the row's unchanged
+  // run (GY-1966), so the bound runs from the merge or the last such movement, whichever is later.
   for (const row of rows) {
     const end = Math.min(row.deliveredAt ?? Infinity, row.stalledAt ?? Infinity);
-    const from = Math.max(row.mergedAt, ...day.changes.filter(change => change < end));
-    assert.ok(end - from <= settleBoundMs, `${row.key} merged ${at(row.mergedAt)}, last release change ${at(from)}, ended ${Number.isFinite(end) ? at(end) : 'never'}: within ${settleBoundMs / minute} min`);
+    const cuts = day.dispatches.map(run => run.at).filter(at => at < end);
+    const from = Math.max(row.mergedAt, ...day.changes.filter(change => change < end), ...(cuts.length ? [cuts[cuts.length - 1]] : []));
+    assert.ok(end - from <= settleBoundMs, `${row.key} merged ${at(row.mergedAt)}, last pipeline movement ${at(from)}, ended ${Number.isFinite(end) ? at(end) : 'never'}: within ${settleBoundMs / minute} min`);
     assert.ok(end - row.mergedAt <= settleBoundMs + promotionWaitBoundMs, `${row.key} merged ${at(row.mergedAt)} ended ${at(end)}: never more than two bounds after its merge`);
   }
   // A release served within the bound is the pipeline's ordinary pace: no stall, no filing, delivered at its next attempt.
@@ -203,11 +216,15 @@ test('unit:soak-invariants-hold — GY-1831: two simulated days of merges riding
   for (const row of paced) assert.ok(row.deliveredAt! - row.servedAt! <= actionRetryMaxMs + minute, `${row.key} is delivered within one retry of being served`);
   assert.ok(rows.some(row => row.servedAt !== null && row.servedAt - row.mergedAt > validationMs * 2 && row.stalledAt === null), 'a merge carried past a failed candidate by the re-cut behind it waited without stalling');
 
-  // The quiet stretches: the failed candidate left nothing in flight, so the merges it carried stall and file, then deliver once merges resume.
+  // The quiet stretches: the failed candidate's window closed on a pipeline nothing moves, so the merges it
+  // carried stall and file as the release machinery's, then deliver once merges resume.
   const stranded = rows.filter(row => quiet.some(([from, to]) => row.mergedAt - t0 < from && (row.servedAt ?? Infinity) - t0 >= to));
   assert.ok(stranded.length >= 2, `merges were stranded on each quiet pipeline: ${stranded.map(row => row.key)}`);
   for (const row of stranded) {
-    assert.ok(row.stalledAt !== null && row.filed >= 1, `${row.key}, stranded on a quiet pipeline, stalls and files its stalled-action instance as before`);
+    const kinds = filed.filter(entry => entry.subject === row.key).map(entry => entry.kind);
+    assert.ok(row.stalledAt !== null && row.filed >= 1, `${row.key}, stranded on a stopped pipeline, stalls and files`);
+    assert.ok(kinds.includes('production'), `${row.key} files as the release machinery's (GY-1966): ${[...new Set(kinds)].join(', ') || 'nothing'}`);
+    assert.ok(!kinds.includes('stalled-action'), `${row.key} is not filed as a per-item stalled-action over a pipeline-held wait`);
     assert.ok(row.deliveredAt !== null, `${row.key} is delivered once merges resume and a candidate carries it`);
   }
   assert.deepEqual(filed.filter(entry => entry.text.includes(promotionWaitClause) && entry.at - rows.find(row => row.key === entry.subject)!.mergedAt < promotionWaitBoundMs).map(entry => entry.subject), [], 'no instance names the wait inside its bound');

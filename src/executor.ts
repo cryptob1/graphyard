@@ -6,7 +6,7 @@ import type { Work } from './model.js';
 import type { ActionRow } from './model/actions.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { actionJudgment, type NextActionKind } from './model/next-action.js';
-import { describeObservationJob, promotionWaitClause, resyncUnobservedPrefix, staleContainmentReasonPrefix } from './model/action-kinds.js';
+import { describeObservationJob, resyncUnobservedPrefix, staleContainmentReasonPrefix } from './model/action-kinds.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { registeredLaunch } from './model/session-state.js';
 import { answeredByPendingSession, independentProducerProfiles } from './producer.js';
@@ -69,14 +69,14 @@ export interface ControlPlaneEffects {
   launchProducer: (work: Work, request: DispatchRequest, profile: ProducerProfile, agents: HerdrAgent[], observedAt: string) => Promise<any>;
   observeDeployment: (delivered: Work[]) => Promise<DeploymentObservation>;
   /**
-   * GY-1831: whether the promotion pipeline has `mergeSha` in flight — a release candidate carrying
-   * it is being built or promoted, or the dispatch that will carry it is due — answered from the
-   * promotion state the loop already records on its cursor, read at the failed attempt. Absent,
-   * false, or reading false, a `verify-deployment` failure that the running release does not carry
-   * the merge keeps its plain reason and stalls as before; the wiring fails it closed the same way
-   * when the state cannot be read.
+   * GY-1831, GY-1966: the wait a `verify-deployment` failure names while the promotion pipeline is
+   * moving `mergeSha` toward the release that serves it, with the pipeline's newest demonstrated
+   * movement, answered from the promotion state the loop already records on its cursor, read at
+   * the failed attempt. Null, absent, or failing to read, a `verify-deployment` failure that the
+   * running release does not carry the merge keeps its plain reason and stalls as before; the
+   * wiring fails closed the same way when the state cannot be read.
    */
-  promotionCarryingMerge?: (mergeSha: string) => Promise<boolean>;
+  promotionWaitSuffix?: (mergeSha: string) => Promise<string | null>;
   /** Where the handler's own diagnostics go; absent, a failed promotion read is logged nowhere. */
   log?: (line: string) => void;
   /** Records a launched session's durable handle on the item (AC-8). */
@@ -451,17 +451,19 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       if (!observation.deployed.includes(work.key)) {
         const plain = observation.reason ?? `the running release ${observation.sha.slice(0, 12)} does not carry ${work.key}'s merge ${action.inputs.mergeSha.slice(0, 12)} yet`;
         // GY-1831: a release the promotion pipeline is about to serve is the pipeline's ordinary
-        // pace, not a fault. Naming the wait bounds the row by the promotion wait bound instead of
-        // the stall threshold, so the retries land within minutes of the promotion. Containment
-        // derived without a fresh base branch is not this shape, since its pending list is not
-        // reliable; an informational reason (an inactive release production still serves) is. A
-        // state that cannot be read stands as not carrying — logged, so an unreadable pipeline is
-        // diagnosable — and the plain reason and the stall are what they were.
-        const waiting = !observation.reason?.includes(staleContainmentReasonPrefix) && await Promise.resolve(effects.promotionCarryingMerge?.(action.inputs.mergeSha)).catch(error => {
+        // pace, not a fault. GY-1966: the wait names the pipeline's newest demonstrated movement,
+        // so the row's unchanged run measures the stretch since the pipeline last moved and the
+        // promotion wait bound holds it — a re-cut cycle longer than an hour no longer files.
+        // Containment derived without a fresh base branch is not this shape, since its pending
+        // list is not reliable; an informational reason (an inactive release production still
+        // serves) is. A state that cannot be read stands as not carrying — logged, so an
+        // unreadable pipeline is diagnosable — and the plain reason and the stall are what they
+        // were.
+        const waiting = !observation.reason?.includes(staleContainmentReasonPrefix) && await Promise.resolve(effects.promotionWaitSuffix?.(action.inputs.mergeSha)).catch(error => {
           effects.log?.(`[graphyard-executor] the promotion state could not be read for ${work.key}, so the failure stands as it was: ${error instanceof Error ? error.message : String(error)}`);
-          return false;
+          return null;
         });
-        throw new Error(waiting ? `${plain}; ${promotionWaitClause}` : plain);
+        throw new Error(waiting ? `${plain}; ${waiting}` : plain);
       }
       // An unobserved post-deploy criterion is named in the result, never filed as a work item (2026-10-17).
       const owed = reportPostDeployChecks(work, observation.sha, new Date(effects.now?.() ?? Date.now())).filter(check => check.result === 'owed');
