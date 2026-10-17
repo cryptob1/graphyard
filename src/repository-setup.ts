@@ -865,8 +865,9 @@ export interface LoopCodeFacts {
  * checkout (or the repository's, a unit naming no launcher) and its cursor records loading exactly
  * this CLI's commit from a clean tree. A cursor naming no commit is not proof, and neither is a
  * known-good pin or held snapshot on another commit: those are this install's machinery, but the
- * command asked for this CLI's code. A slot runs this code when its own registration records this
- * CLI's commit, or the repository checkout's when the slot starts the repository's own executor.
+ * command asked for this CLI's code. A slot runs this code when its own registration records the
+ * commit of the checkout its template launches: the repository checkout's HEAD when the template
+ * starts the repository's own executor, else this CLI's; never whichever of the two it matches.
  */
 export function judgeLoopCode(facts: LoopCodeFacts): LoopCodeReading {
   const canonical = facts.canonical ?? canonicalPath;
@@ -887,12 +888,18 @@ export function judgeLoopCode(facts: LoopCodeFacts): LoopCodeReading {
   }
   // An executor slot started from this checkout before it moved to a new commit runs code no unit
   // file names, so each running or standing-down slot's own registration is judged too; a stopped
-  // slot runs nothing. A slot starts this CLI's executor, or the repository's own when the
-  // repository carries one, so either checkout's current commit is that slot's right code.
-  const slotStale = facts.fleet.flatMap(entry => {
-    if (entry.state !== 'running' && entry.state !== 'standing-down') return [];
+  // slot runs nothing. The commit a slot must run is its launcher's: the repository checkout's HEAD
+  // when the template starts the repository's own executor, else this CLI's. Accepting either HEAD
+  // for every slot would pass a slot that still runs the older commit the repository checkout
+  // happens to sit on while its template starts this CLI (the two share history), so each slot is
+  // held to the one commit its template launches.
+  const judged = facts.fleet.filter(entry => entry.state === 'running' || entry.state === 'standing-down');
+  const repositoryBacked = !!executor?.checkout && canonical(executor.checkout) === canonical(facts.primary) && canonical(facts.primary) !== canonical(cli.root);
+  if (repositoryBacked && judged.length && !facts.primaryCommit) return { ...base, error: `the commit of the repository checkout (${facts.primary}), whose own executor ${executor!.path} starts, could not be read, so no slot is judged against it` };
+  const expected = repositoryBacked ? { commit: facts.primaryCommit, owner: 'the repository checkout\'s' } : { commit: cli.commit, owner: 'this checkout\'s' };
+  const slotStale = judged.flatMap(entry => {
     const commit = entry.release?.commit ?? null, name = entry.supervisor?.unit ?? entry.root ?? 'an executor';
-    if (!same(commit, cli.commit) && !same(commit, facts.primaryCommit)) return [`${name} runs ${commit ? shortSha(commit) : 'a release with no recorded commit'}, not this checkout's ${shortSha(cli.commit)}`];
+    if (!same(commit, expected.commit)) return [`${name} runs ${commit ? shortSha(commit) : 'a release with no recorded commit'}, not ${expected.owner} ${shortSha(expected.commit)}`];
     return entry.release?.dirty === true ? [`${name} runs ${shortSha(commit)} with uncommitted changes it loaded`] : [];
   });
   const executorStale = [

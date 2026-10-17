@@ -504,11 +504,12 @@ test('unit:doctor-flags-loop-on-other-code — the reading judges the units agai
     const headless = await readLoopCode(root, { cliPath: join(cliCheckout, 'bin', 'graphyard.mjs'), run: () => { throw new Error('git is gone'); }, units, unitDirectory, home, cursor: JSON.stringify({ release: { commit: COMMIT, dirty: false } }) });
     assert.match(headless.error ?? '', /could not be read, so no unit is judged/, 'without this CLI\'s commit nothing is judged ready');
 
-    // A slot's own registration is judged the same way: a running slot whose recorded release is
-    // neither this CLI's commit nor the repository checkout's (a slot may start the repository's own
-    // executor) is other code, a stopped slot runs nothing, and the pin's older commit is other code
-    // for a slot too. The registrations are read beside the master credential, exactly where the
-    // fleet records them (executor-fleet's executor registration).
+    // A slot's own registration is judged the same way, against the commit of the checkout its
+    // template launches: this CLI's while the template starts this CLI's executor, the repository
+    // checkout's when it starts the repository's own. A running slot on any other commit is other
+    // code, a stopped slot runs nothing, and the pin's older commit is other code for a slot too.
+    // The registrations are read beside the master credential, exactly where the fleet records
+    // them (executor-fleet's executor registration).
     const slotCommit = 'c'.repeat(40), repositoryCommit = 'd'.repeat(40);
     const withRepository = (_command: string, args: string[]) => args[2] === 'rev-parse' ? `${args[1] === cliCheckout ? COMMIT : repositoryCommit}\n` : '';
     const slot1Unit = units.executorTemplate.replace('@.service', '@1.service');
@@ -530,10 +531,25 @@ test('unit:doctor-flags-loop-on-other-code — the reading judges the units agai
     assert.equal((await slotReading()).executorStale, null, 'a stopped slot runs nothing and is never flagged');
     await writeFile(join(executorsDirectory, 'slot-1.json'), JSON.stringify(fleetRecord({ release: { commit: OLD_COMMIT, dirty: false } })));
     assert.match((await slotReading()).executorStale ?? '', new RegExp(`runs ${OLD_COMMIT.slice(0, 12)}`), 'a slot on the pin\'s older commit is other code');
-    await writeFile(join(executorsDirectory, 'slot-1.json'), JSON.stringify(fleetRecord({ release: { commit: repositoryCommit, dirty: false } })));
-    assert.equal((await slotReading()).executorStale, null, 'a slot started from the repository\'s own executor, on the repository checkout\'s commit, runs the right code');
     await writeFile(join(executorsDirectory, 'slot-1.json'), JSON.stringify(fleetRecord({ release: { commit: COMMIT, dirty: false } })));
     assert.equal((await slotReading()).executorStale, null, 'a slot on this CLI\'s commit runs this code');
+    // Shared history: the CLI checkout at A, the repository checkout at the older B this CLI's
+    // launcher once sat on, the template starting this CLI, a clean slot still reporting B. The
+    // repository checkout's HEAD is not this slot's code, so the slot is other code and replaced.
+    await writeFile(join(executorsDirectory, 'slot-1.json'), JSON.stringify(fleetRecord({ release: { commit: repositoryCommit, dirty: false } })));
+    assert.match((await slotReading()).executorStale ?? '', new RegExp(`${quote(slot1Unit)} runs ${repositoryCommit.slice(0, 12)}, not this checkout's ${COMMIT.slice(0, 12)}`), 'a slot started by this CLI\'s template but still on the repository checkout\'s commit is other code');
+    // The repository's own executor: the template launches the repository checkout, so its HEAD is
+    // the slot's right code and this CLI's commit is not; an unreadable repository HEAD judges no slot.
+    await writeFile(join(unitDirectory, units.executorTemplate), `[Unit]\nDescription=Graphyard executor\n\n[Service]\nWorkingDirectory=${root}\nExecStart=/usr/bin/node ${join(root, 'scripts', 'graphyard-executor.mjs')} --slot %i\n`);
+    assert.equal((await slotReading()).executorStale, null, 'a slot started from the repository\'s own executor, on the repository checkout\'s commit, runs the right code');
+    await writeFile(join(executorsDirectory, 'slot-1.json'), JSON.stringify(fleetRecord({ release: { commit: COMMIT, dirty: false } })));
+    assert.match((await slotReading()).executorStale ?? '', new RegExp(`${quote(slot1Unit)} runs ${COMMIT.slice(0, 12)}, not the repository checkout's ${repositoryCommit.slice(0, 12)}`), 'a slot started from the repository\'s own executor but on this CLI\'s commit is other code');
+    const headlessRepository = await readLoopCode(root, { cliPath: join(cliCheckout, 'bin', 'graphyard.mjs'), run: (_command, args) => args[2] === 'rev-parse' && args[1] === cliCheckout ? `${COMMIT}\n` : (() => { throw new Error('no HEAD'); })(), units, unitDirectory, home, cursor: JSON.stringify({ release: { commit: COMMIT, dirty: false } }) });
+    assert.match(headlessRepository.error ?? '', new RegExp(`the commit of the repository checkout \\(${quote(root)}\\), whose own executor .* starts, could not be read, so no slot is judged`), 'a repository-backed slot is never judged against a commit that could not be read');
+    await writeFile(join(executorsDirectory, 'slot-1.json'), JSON.stringify(fleetRecord({ state: 'stopped', stoppedAt: 't2' })));
+    assert.equal((await readLoopCode(root, { cliPath: join(cliCheckout, 'bin', 'graphyard.mjs'), run: (_command, args) => args[2] === 'rev-parse' && args[1] === cliCheckout ? `${COMMIT}\n` : (() => { throw new Error('no HEAD'); })(), units, unitDirectory, home, cursor: JSON.stringify({ release: { commit: COMMIT, dirty: false } }) })).error, null, 'with no running slot the repository HEAD is not needed');
+    await writeFile(join(unitDirectory, units.executorTemplate), `[Unit]\nDescription=Graphyard executor\n\n[Service]\nWorkingDirectory=${root}\nExecStart=/usr/bin/node ${join(cliCheckout, 'scripts', 'graphyard-executor.mjs')} --slot %i\n`);
+    await writeFile(join(executorsDirectory, 'slot-1.json'), JSON.stringify(fleetRecord({ release: { commit: COMMIT, dirty: false } })));
 
     // Registrations that exist but cannot be read judge nothing: the reading's error, never an empty fleet.
     const unreadableHome = join(base, 'home-unreadable');
