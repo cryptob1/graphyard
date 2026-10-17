@@ -380,3 +380,35 @@ test('manual:loop-code-root-real-loop-external-install-day — the real loop ove
   const secondPass = refusing[1]!.elapsed;
   assert.ok(c.persists.length > 0 && c.persists.every(elapsed => elapsed < secondPass), `the cursor is written on the first pass, for the retirement and the refusal, and never again: ${JSON.stringify(c.persists)} (second pass at ${secondPass})`);
 });
+
+test('manual:loop-code-root-real-loop-external-install-dirty-day — the real loop on an install whose managed repository is another project, starting with a dirty CLI checkout and the held snapshot, owed restart and stall a pre-GY-1958 loop left: while the checkout stays dirty across cycles and deploys the pin and the unit bindings keep naming the snapshot, and once it is clean the snapshot is retired exactly once, with bounded writes, no fetch, no move and no restart', { timeout: 600_000 }, async () => {
+  const root = await codeRoot('external-dirty');
+  const clean = hours(4);
+  const day = await simulateDay({ hours: 8, codeRoot: root, external: true,
+    plan: { deploys: [hours(1), hours(3), hours(5), hours(7)], dirtyCheckout: { from: 0, to: clean }, headMove: { from: hours(99), to: hours(100) }, heldClaimRestarts: 0, deaths: new Set() } });
+  const c = day.codeRootDay!, samples = day.upgrades.samples, pinned = samples[0]!.head;
+  assert.deepEqual(day.violations, [], 'every system invariant holds after every cycle');
+  assert.deepEqual(day.lost, [], 'no lease was lost');
+  assert.deepEqual(day.failures, [], 'no cycle or self-upgrade failed');
+  assert.ok(day.final.filter(item => item.stage === 'done').length > 0, 'items still flow to done beside the standing refusal');
+  assert.equal(day.upgrades.fetches, 0, 'nothing is ever fetched in the CLI checkout');
+  assert.deepEqual(day.upgrades.checkouts, [], 'the CLI checkout is never moved');
+  assert.deepEqual([...c.gitRoots], [root], 'git ran only in the CLI checkout, beside the identification reads');
+  assert.equal(day.upgrades.self, 0, 'the loop never restarts itself onto Graphyard code');
+  assert.deepEqual(day.upgrades.executors, [], 'the fleet is never restarted');
+  const dirty = samples.filter(sample => sample.dirty && sample.outcome), cleaned = samples.filter(sample => !sample.dirty && sample.outcome);
+  assert.ok(dirty.length >= 10 && cleaned.length >= 10, `the upgrade ran on many dirty (${dirty.length}) and clean (${cleaned.length}) cycles`);
+  assert.ok(samples.every(sample => sample.outcome === null || sample.outcome === 'refused'), `every pass refuses: ${[...new Set(samples.map(sample => sample.outcome))]}`);
+  // While dirty: the owed restart and the stall are retired, the snapshot, its pin and the unit bindings stand.
+  assert.ok(dirty.every(sample => sample.pending === null && sample.stall === null), 'the owed restart and the stall are retired on the first pass');
+  assert.ok(dirty.every(sample => sample.snapshot?.commit === pinned && sample.pin === pinned), 'the held snapshot and its pin stand across every dirty cycle and deploy');
+  assert.ok(dirty.every(sample => sample.unit === `snapshot:${pinned}` && sample.executorEntry !== 'checkout'), 'the loop and executor units keep naming the snapshot while the checkout is dirty');
+  // Once clean: retired once, never to return.
+  assert.ok(cleaned.every(sample => sample.snapshot === null && sample.pin === null && sample.unit === 'checkout' && sample.executorEntry === 'checkout'), 'once clean the snapshot, its pin and the unit bindings are retired');
+  assert.deepEqual(day.upgrades.pins.map(pin => pin.commit), [null], 'the pin is lifted once, after the checkout is clean, and no pin is placed');
+  assert.equal(readHeldCli(root), null, 'the pointer under the CLI checkout is gone');
+  assert.equal(day.state.actions['upgrade:align']?.attempts, 2, 'two retirements recorded: the owed restart and stall, then the snapshot once clean');
+  assert.ok(cleaned.every(sample => sample.refusedRow?.state === 'failed' && sample.refusedRow.attempts === 1), 'one deduplicated upgrade:refused row whose attempts never climb');
+  const firstClean = cleaned[0]!.elapsed, secondPass = dirty[1]!.elapsed;
+  assert.ok(c.persists.every(elapsed => elapsed < secondPass || (elapsed >= firstClean && elapsed < firstClean + cycle)), `the cursor is written on the first pass and on the clean pass that retires the snapshot, and never again: ${JSON.stringify(c.persists)} (first clean pass at ${firstClean})`);
+});

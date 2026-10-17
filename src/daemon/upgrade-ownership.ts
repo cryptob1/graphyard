@@ -51,13 +51,13 @@ export const isExternalUpgradeRefusal = (reason: string) => reason.startsWith(ex
  * whatever scheme or scp spelling names it. A managed root that is no repository, holds another
  * origin than the checkout's, or holds none is a different project here: its verified deployments
  * say nothing about this checkout's code, so its base branch is never fetched. A read that fails
- * any other way is taken for the checkout's own, so one failed child never stops an own install's
- * upgrades — the next pass reads it again.
+ * any other way leaves the answer unknown (null): that pass neither aligns nor retires anything,
+ * since aligning an external install is the corruption this guards, and the next pass reads again.
  */
-export async function managesOwnCheckout(codeRoot: string, managedRoot: string, run: ChildRun): Promise<boolean> {
+export async function managesOwnCheckout(codeRoot: string, managedRoot: string, run: ChildRun): Promise<boolean | null> {
   if (codeRoot === managedRoot) return true;
   // A definitive "absent" — git exits 128 for no repository, 2 for no such remote — reads as '',
-  // judged on its own terms; any other failed read reads as null, the checkout's own by default.
+  // judged on its own terms; any other failed read reads as null, unknown.
   const read = async (root: string, args: string[], absent: readonly number[]): Promise<string | null> => {
     try { return (await run('git', ['-C', root, ...args])).trim() || null; }
     catch (error: any) { return absent.includes(error?.status) ? '' : null; }
@@ -73,7 +73,7 @@ export async function managesOwnCheckout(codeRoot: string, managedRoot: string, 
     read(codeRoot, ['remote', 'get-url', 'origin'], [2, 128]),
   ]);
   if (managedOrigin === '' || codeOrigin === '') return false;
-  if (managedOrigin === null || codeOrigin === null) return true;
+  if (managedOrigin === null || codeOrigin === null) return null;
   return originIdentity(resolvedOrigin(codeRoot, codeOrigin)) === originIdentity(resolvedOrigin(managedRoot, managedOrigin));
 }
 

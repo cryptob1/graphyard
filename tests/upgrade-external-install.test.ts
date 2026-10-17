@@ -366,3 +366,46 @@ test('unit:upgrade-external-install — a held snapshot of a still-dirty checkou
     await rm(managed, { recursive: true, force: true });
   }
 });
+
+test('unit:upgrade-external-install — an origin probe that fails indeterminately leaves the identity unknown: the pass neither aligns nor refuses, and the next pass judges it again', async () => {
+  const checkout = await temporaryDirectory('upgrade-external-probe-checkout');
+  const managed = await temporaryDirectory('upgrade-external-probe-managed');
+  try {
+    const loaded = await repository(checkout, 'README.md', 'graphyard\n');
+    await repository(managed, 'app.txt', 'app\n');
+    git(checkout, 'remote', 'add', 'origin', 'https://github.com/cryptob1/graphyard.git');
+    git(managed, 'remote', 'add', 'origin', 'https://github.com/owner/app.git');
+    // A probe that times out: no definitive "absent" status, so whose project it is cannot be told.
+    for (const timedOut of [{ status: null, signal: 'SIGTERM' }, { status: 1 }]) {
+      const judged = await managesOwnCheckout(checkout, managed, async (command, args) => {
+        if (args.includes('get-url')) throw Object.assign(new Error('timed out'), timedOut);
+        return runPlain(command, args);
+      });
+      assert.equal(judged, null, `an indeterminate origin read is unknown, never the checkout's own (${JSON.stringify(timedOut)})`);
+    }
+    const master = await config(join(checkout, 'bin/graphyard.mjs'), 'owner/app');
+    const state = emptyDaemonState(master);
+    state.release = { commit: loaded, dirty: false };
+    state.deployment = verified(git(managed, 'rev-parse', 'HEAD'));
+    const operations: string[] = [];
+    let failing = true;
+    const run: ChildRun = async (command, args) => {
+      operations.push(args.slice(2).join(' '));
+      if (failing && args.includes('get-url')) throw Object.assign(new Error('timed out'), { status: null, signal: 'SIGTERM' });
+      return runPlain(command, args);
+    };
+    const outcome = await performSelfUpgrade(master, state, deps(managed, run));
+    assert.equal(outcome.outcome, 'skipped', JSON.stringify(outcome));
+    assert.deepEqual(operations.filter(entry => /^(fetch|checkout)\b/.test(entry)), [], `nothing is fetched or checked out on an unknown identity: ${operations.join(' | ')}`);
+    assert.equal(git(checkout, 'rev-parse', 'HEAD'), loaded, 'the CLI checkout stays where it stands');
+    assert.equal(state.upgrade.refused ?? null, null, 'no refusal is recorded on an unknown identity');
+    // The probe answers next pass: the install is judged external and refuses as usual.
+    failing = false;
+    const next = await performSelfUpgrade(master, state, deps(managed, run));
+    assert.equal(next.outcome, 'refused', JSON.stringify(next));
+    assert.equal(state.upgrade.refused?.reason, externalUpgradeRefusal);
+  } finally {
+    await rm(checkout, { recursive: true, force: true });
+    await rm(managed, { recursive: true, force: true });
+  }
+});

@@ -234,7 +234,9 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   const alignUnit = async (): Promise<boolean> => (await alignUnitRecorded()).wrote !== 'refused';
   // GY-1958: an install managing another project runs no alignment — the checkout is never fetched
   // in or moved, what an earlier alignment left owed is retired, and the install upgrades by command.
-  if (!(await managesOwnCheckout(codeRoot, deps.root, deps.run))) return externalInstallPass(state, codeRoot, deps.run, {
+  const own = await managesOwnCheckout(codeRoot, deps.root, deps.run);
+  if (own === null) return { outcome: 'skipped', reason: 'whether the managed repository is the coordinator checkout\'s own project could not be read, so this pass neither aligns nor refuses; retried next cycle' };
+  if (!own) return externalInstallPass(state, codeRoot, deps.run, {
     at, persist, unstall, refused, note: (detail, failure) => note(detail, failure, alignKey),
     settle: async () => (await holdCli(null).then(() => null, error => `the held snapshot pin could not be lifted: ${message(error)}`))
       ?? (await alignExecutorUnits(null).then(why => why && `the executor units could not be returned to the checkout's launcher: ${why}`))
