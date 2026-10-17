@@ -26,7 +26,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // the seal stands no import can bind before the deploy. A held candidate is never sealed, so a
 // passing import can still release it and promotion retries.
 
-const producer: Principal = { id: 'huck-producer', role: 'producer' };
+// Importing needs the external-runs:import grant (GY-1879) beside the producer role.
+const producer: Principal = { id: 'huck-producer', role: 'producer', grants: ['external-runs:import'] };
 const reader: Principal = { id: 'coordinator-reader', role: 'reader' };
 // The identity GRAPHYARD_RELEASE_TOKEN is provisioned as (src/master/release-filing.ts): the credential a direct `release promote` holds in the uat environment.
 const releaseFiler: Principal = { id: releaseFilingIdentity.id, role: 'operator-agent', capabilities: [...releaseFilingIdentity.capabilities], scope: { repositories: ['owner/project'], workItems: [] } };

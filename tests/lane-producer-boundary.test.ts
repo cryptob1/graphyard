@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { freePort } from '../src/cli/test-isolation.js';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -41,7 +42,8 @@ const github = {
 let database: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string, scratch: string;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1881;
+  // A free port: verify runs each proof of this file at once, and a fixed port collides between them.
+  const port = await freePort();
   scratch = await temporaryDirectory('lane-producer');
   database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('lane_producer_test');

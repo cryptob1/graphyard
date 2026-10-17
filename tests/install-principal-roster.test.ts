@@ -13,6 +13,7 @@ import { principalCommand } from '../src/cli/install.js';
 import { applyInstall, buildPlan, prepareInstall } from '../src/install/index.js';
 import { fingerprint, plannedPrincipals, reconcileRoster, rosterEntry, tokenFile } from '../src/install/secrets.js';
 import { externalRunsImportGrant } from '../src/server/principals.js';
+import { freePort } from '../src/cli/test-isolation.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { deployedRoster, harness, REPOSITORY, type Harness } from './install-harness.js';
 
@@ -189,7 +190,8 @@ const github = {
 let database: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string, scratch: string;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1879;
+  // A free port: verify runs each proof of this file at once, and a fixed port collides between them.
+  const port = await freePort();
   scratch = await temporaryDirectory('principal-roster');
   database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('principal_roster_test');
@@ -357,7 +359,7 @@ test('unit:principal-upsert-remove-single-entry-readback — principal add reach
     const added = await principal(host, ['add', 'huck-engineer', '--role', 'producer', '--grant', GRANT]);
     assert.ok(host.hostFiles.has(`${tokens}/huck-engineer.token`), 'the added credential is written on the host');
     assert.deepEqual(claim(), installed, 'principal add keeps the deployed sign-in claim');
-    assert.equal(added.signIn, undefined, 'no new sign-in link is minted');
+    assert.ok(!('signIn' in added), 'no new sign-in link is minted');
     await principal(host, ['remove', 'huck-engineer']);
     assert.deepEqual(claim(), installed, 'principal remove keeps the deployed sign-in claim');
     const removals = lines(host.remotes.get('203.0.113.20')!).filter(line => line.startsWith('rm -f '));

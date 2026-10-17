@@ -3,7 +3,7 @@
 
 > install Graphyard for OWNER/REPO on PROVIDER following docs/install.md
 
-Ask only: **Which provider**; **Provider login**; **GitHub App confirmation click**, once (none with `--no-github-app`/`--observe-only`); **Approval of the printed plan**. Never invent a fifth.
+Ask only: **Which provider**; **Provider login**; **GitHub App confirmation click**, once (none with `--no-github-app`/`--observe-only`); **Plan approval**. Never invent a fifth.
 
 ## Hard rules
 
@@ -55,7 +55,7 @@ Skip with `--no-github-app` until App binds; else dispatch [small item](onboardi
 
 ## Principal roster
 
-`--apply` keeps `install.json`'s roster (`--observe-only`: recorded workers/producers). `principal add ID --role ROLE [--session-kind ai|human] [--grant external-runs:import]...`/`principal remove ID`: one non-installer entry; only `GRAPHYARD_PRINCIPALS`; `/api/principals` readback; idempotent. Producers need `--grant`; `external-runs:import`-only: [import lane](validation.md#release-verdicts), no reviewer slot.
+`--apply` keeps `install.json`'s roster (`--observe-only`: recorded workers/producers). `principal add ID --role ROLE [--session-kind ai|human] [--grant external-runs:import]...`/`principal remove ID`: one non-installer entry; only `GRAPHYARD_PRINCIPALS`; `/api/principals` readback; idempotent. Producers need `--grant`; import-only: [lane](validation.md#release-verdicts), no reviewer slot.
 
 ## Self-contained host
 
