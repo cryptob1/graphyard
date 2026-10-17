@@ -14,9 +14,9 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions, each sta
 
 ## From goal to work items
 
-Goal passes intake, acceptance, approval, planning, approval and delivery. `graphyard goal FILE` records it; acceptance role writes outcomes and required `uat` cases ([validation](validation.md)), non-author-approved. Merged, `planner` role writes architecture note (at most 400 words) and items, each naming outcomes, cases, `plannedFiles` and predecessors; a serving-release criterion carries `manual:post-deploy/NAME` beside a buildable one. A plan leaving outcome uncovered, parallel items sharing file, naming a criterion twice or touching a required case is refused with the reason; three refused rounds hand goal to master. Another identity approves the plan (`goal plan-approve`); loop creates and releases items (`planned`, then `delivering`), dispatching none before its dependencies are delivered. Goal is `delivered` once every item is done and production serves it: merge deployed, smoke proof where policy asks.
+Goal passes intake, acceptance, approval, planning, approval and delivery. `graphyard goal FILE` records it; acceptance role writes outcomes and required `uat` cases ([validation](validation.md)), non-author-approved. Merged, `planner` role writes architecture note (at most 400 words) and items, each naming outcomes, cases, `plannedFiles` and predecessors; a serving-release criterion carries `manual:post-deploy/NAME` beside a buildable one. A plan leaving outcome uncovered, parallel items sharing file, naming a criterion twice or touching a required case is refused with the reason; three refused rounds hand goal to master. Another identity approves the plan (`goal plan-approve`); loop creates and releases items (`planned`, then `delivering`), dispatching none before its dependencies are delivered. Goal is `delivered` once every item is done and production serves it (deployed; smoke proof where policy asks).
 
-A 401/403/409/422 refusal redrafts acceptance or re-releases a plan an hour later (noted); a 422 plan post is a refused round; so is a validation-failed payload: reason fed back as `lastRefusal`, retried in ten minutes; others re-post then. `POST /goals/GY-N/land` fetches base first (≤20s), else `503` unrecorded.
+A 401/403/409/422 refusal redrafts acceptance or re-releases plan an hour later (noted); a 422 plan post is a refused round; so is a validation-failed payload: reason fed back as `lastRefusal`, retried in ten minutes; others re-post then. `POST /goals/GY-N/land` fetches base first (≤20s), else `503` unrecorded.
 
 ## Risk lanes
 
@@ -26,15 +26,15 @@ A 401/403/409/422 refusal redrafts acceptance or re-releases a plan an hour late
 - **Medium** (60min): remainder; adds producer-run `unit:`/`integration:`.
 - **Low** (30min): test-only, docs-only, single-module. Required CI, one approval.
 
-**Risk class** (`sensitive`/`normal`; unknown: sensitive), from the merge delta per `graphyard.json` (`risk.sensitive`, `review.normalChanges`; generic defaults), shows in `graphyard status`; lanes still gate github mode.
+**Risk class** (`sensitive`/`normal`; unknown: sensitive): delta paths vs `graphyard.json` `risk.sensitive` (generic default), in `graphyard status`. **Review timing**: sensitive before merge, normal after unless `review.normalChanges: pre-merge` ([delivery](delivery.md)); lanes gate github mode.
 
-All lanes require `e2e:` proofs; low/medium reworks need no approver (`graphyard-risk-lane`), nor any lane's rework grounded on the exact head: trusted proof failed on it, approver refused its `manual:` attestation (loop-requested), or control plane's own test merge onto moved base conflicted (not GitHub's reading alone; `src/model/rework-ground.ts`). A returned head has spent its ground (later retry-cap reworks wait). Grounded reworks are no [intervention](dashboard.md).
+All lanes require `e2e:` proofs; low/medium reworks need no approver (`graphyard-risk-lane`), nor any lane's rework grounded on the exact head: trusted proof failed on it, approver refused its `manual:` attestation (loop-requested), or control plane's test merge onto moved base conflicted (not GitHub's reading alone; `src/model/rework-ground.ts`). A returned head spent its ground (later retry-cap reworks wait). Grounded reworks are no [intervention](dashboard.md).
 
 ## Who holds which authority
 
 ![Bootstrap: one supervised worker; normal operation: a fleet.](diagrams/bootstrap-vs-normal.svg)
 
-Text equivalent: in bootstrap the human operator supervises one worker; later master runs a credentialed fleet.
+Text equivalent: operator supervises one bootstrap worker; later master runs credentialed fleet.
 
 ![Authority of operator, Graphyard, Herdr sessions, reviewer, producer.](diagrams/roles-and-authority.svg)
 
@@ -46,4 +46,4 @@ Text equivalent: operator makes human-only decisions; Herdr hosts master (`coord
 
 Text equivalent: mutations, events commit in locked Postgres transactions; reconciliation syncs GitHub, merging passing heads; webhooks wake jobs.
 
-Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`; claims bump epoch; latest trusted proof wins; merge is not [delivery](delivery.md).
+Gates deterministically check one candidate, `(PR, head SHA, base SHA)`; claims bump epoch; latest trusted proof wins; merge is not [delivery](delivery.md).
