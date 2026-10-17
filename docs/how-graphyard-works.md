@@ -26,7 +26,7 @@ An outright 401/403/409/422 refusal redrafts acceptance or re-releases a plan an
 - **Medium** (60min): remainder; adds producer-run `unit:`/`integration:`.
 - **Low** (30min): test-only, docs-only, single-module. Required CI, one approval.
 
-**Risk class** (`sensitive`/`normal`; unknown: sensitive), judged from the merge delta, shows in `graphyard status`; lanes still gate github mode.
+**Risk class** (`sensitive`/`normal`; unknown: sensitive), judged from the merge delta per the repository's `graphyard.json` (`risk.sensitive`, `review.normalChanges`; generic defaults; [delivery](delivery.md)), shows in `graphyard status`; lanes still gate github mode.
 
 All lanes require `e2e:` proofs; low/medium reworks need no approver (`graphyard-risk-lane`), nor any lane's rework grounded on the exact head: trusted proof failed on it, approver refused its `manual:` attestation (loop-requested), or control plane's own test merge onto moved base conflicted (not GitHub's reading alone; `src/model/rework-ground.ts`). A returned head has spent its ground (a later retry-cap rework waits). Grounded reworks are no [intervention](dashboard.md).
 
@@ -34,7 +34,7 @@ All lanes require `e2e:` proofs; low/medium reworks need no approver (`graphyard
 
 ![Bootstrap: one supervised worker; normal operation: a fleet.](diagrams/bootstrap-vs-normal.svg)
 
-Text equivalent: in bootstrap the human operator supervises one worker; later master runs a credentialed fleet.
+Text equivalent: in bootstrap the operator supervises one worker; later master runs a credentialed fleet.
 
 ![Authority of operator, Graphyard, Herdr sessions, reviewer, producer.](diagrams/roles-and-authority.svg)
 
