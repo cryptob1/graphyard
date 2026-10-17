@@ -129,7 +129,7 @@ export function githubResponses(state: FakeState, repository = REPOSITORY, branc
     { match: `gh api repos/${repository}/commits/${branch}`, result: JSON.stringify({ sha: HEAD_SHA }) },
     { match: '--method PUT', result: '{}' },
     { match: `gh api repos/${repository}/branches/${branch}/protection`, result: state.protection ? JSON.stringify(state.protection) : { stdout: '', stderr: 'Branch not protected', code: 1 } },
-    // The repository itself, as --reuse-app and --bind-app read it with the host's gh login (GY-1877) and the
+    // The repository itself, as --reuse-app and app bind read it with the host's gh login (GY-1877) and the
     // protection record reads it with its rulesets (GY-1870); any other line under them answers empty, as an unmatched one does.
     { match: `gh api repos/${repository}`, result: (line: string) => line === `gh api repos/${repository}` ? JSON.stringify({ id: REPOSITORY_ID, full_name: repository, owner: { login: repository.split('/')[0], type: 'User' }, allow_auto_merge: false })
       : line.startsWith(`gh api repos/${repository}/rulesets?includes_parents=false`) ? '[]' : '' },
@@ -178,6 +178,7 @@ export interface HarnessOptions {
   envFile?: string;
   service?: string;
   workdir?: string;
+  /** GET /api/status's body, or a function answering it per request (GY-1877: a server that reports the App once it is written). */
   statusBody?: unknown;
   healthy?: boolean;
   /** The commit /healthz reports; the pinned Graphyard source's by default, so a Railway upload is served. */
@@ -230,7 +231,7 @@ export async function harness(options: HarnessOptions): Promise<Harness> {
     if (url.endsWith('/healthz')) return options.healthy === false ? json(503, { ok: false }) : json(200, { ok: true, commit: options.servedCommit === undefined ? GRAPHYARD_SOURCE_SHA : options.servedCommit });
     if (url.endsWith('/api/agent-registry/document')) return json(200, registry);
     if (url.endsWith('/api/agent-registry/apply') && method === 'POST') return json(200, { applied: true });
-    if (url.endsWith('/api/status')) return json(200, options.statusBody ?? { actor: { id: `${installId}-operator`, role: 'admin' }, repository, github: true, githubAppId: GRAPHYARD_APP_ID, githubInstallationId: 500 });
+    if (url.endsWith('/api/status')) return json(200, typeof options.statusBody === 'function' ? options.statusBody() : options.statusBody ?? { actor: { id: `${installId}-operator`, role: 'admin' }, repository, github: true, githubAppId: GRAPHYARD_APP_ID, githubInstallationId: 500 });
     if (url.includes('/app/installations/') && url.endsWith('/access_tokens')) return json(201, { token: 'installation-token-for-tests', expires_at: new Date(Date.now() + 3_600_000).toISOString() });
     const app = appOfJwt(options.apps ?? [], String((init.headers ?? {}).Authorization ?? ''));
     if (app && url.endsWith('/app')) return json(200, { id: app.appId, slug: app.slug, owner: { login: app.account ?? repository.split('/')[0] }, permissions: app.permissions ?? requiredPermissions(controlPlanePermissions) });
