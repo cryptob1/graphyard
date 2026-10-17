@@ -32,6 +32,7 @@ export function renderVersion(report: VersionReport) {
   if (!server) lines.push('server  not connected (set GRAPHYARD_URL or run onboard)');
   else if (server.error) lines.push(`server  ${server.url} unreachable: ${server.error}`);
   else lines.push(`server  ${server.version ?? 'unknown'} (commit ${server.commit ?? 'unknown'}) at ${server.url}`);
+  if (server && !server.error && server.version !== report.cli.version) lines.push('note    the CLI and the server run different releases');
   return lines.join('\n');
 }
 

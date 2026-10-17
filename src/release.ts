@@ -57,24 +57,39 @@ export function checkoutRelease(cwd: string, fallbackRevision = 'unknown'): Rele
   return version ? { version, revision, released: true } : { version: `unreleased ${revision.slice(0, 12)}`, revision, released: false };
 }
 
+/**
+ * The release a build stamped through `GRAPHYARD_VERSION` (with the revision `GRAPHYARD_BUILD_REVISION`
+ * names), or null when it stamped none it recognises. An image has no `.git`, so its stamp is its
+ * release: a promoted image's date version, a candidate image's `unreleased <sha>`, or the X.Y.Z a
+ * `vX.Y.Z` tag published through release.yml. The Dockerfile's `0.0.0-dev` default is no release.
+ */
+export function stampedRelease(env: NodeJS.ProcessEnv, revisionOf: () => string): Release | null {
+  const version = env.GRAPHYARD_VERSION?.trim();
+  if (!version) return null;
+  const released = datedVersionPattern.test(version) || /^\d+\.\d+\.\d+$/.test(version);
+  if (!released && !/^unreleased [0-9a-f]{7,40}$/.test(version)) return null;
+  const stamped = env.GRAPHYARD_BUILD_REVISION;
+  return { version, revision: stamped && stamped !== 'unknown' ? stamped : revisionOf(), released };
+}
+
 /** The Graphyard installation this code runs from. */
 export const installationRoot = fileURLToPath(new URL('..', import.meta.url));
-let ownRelease: Release | undefined;
-/** This code's own release, read once per process. */
-export const cliRelease = () => ownRelease ??= checkoutRelease(installationRoot, process.env.GRAPHYARD_BUILD_REVISION || 'unknown');
+let ownCheckout: Release | undefined;
+const checkout = () => ownCheckout ??= checkoutRelease(installationRoot, process.env.GRAPHYARD_BUILD_REVISION || 'unknown');
+/**
+ * This process's release, which `graphyard version`, `/healthz` and the install defaults all report:
+ * the build's stamp when it has one, else the checkout's dated tag or `unreleased <sha>` (read once).
+ */
+export const cliRelease = (): Release => stampedRelease(process.env, () => checkout().revision) ?? checkout();
 
 /**
- * The version this process is running. An image the promotion published is stamped with its date
- * version through `GRAPHYARD_VERSION` (a candidate image under test with `unreleased <sha>`), with the
- * Git revision it was built from; any other stamp, such as package.json's, is ignored. A checkout reports its
- * own dated tag, or `unreleased <sha>`, exactly as `graphyard version` does, so `/healthz` and the CLI
- * name a release the same way.
+ * The version and revision this process is running, as `/healthz` and `/api/status` report it: the
+ * release `graphyard version` names, with only a build-stamped revision, since a checkout's HEAD may
+ * not be the code it serves (its served commit is `/healthz` `commit`).
  */
 export const releaseInfo = () => {
-  const stamped = process.env.GRAPHYARD_VERSION;
-  if (stamped && (datedVersionPattern.test(stamped) || /^unreleased [0-9a-f]{7,40}$/.test(stamped))) return { version: stamped, revision: process.env.GRAPHYARD_BUILD_REVISION || cliRelease().revision };
-  const own = cliRelease();
-  return { version: own.version, revision: own.revision };
+  const stamped = stampedRelease(process.env, () => 'unknown');
+  return { version: (stamped ?? cliRelease()).version, revision: stamped?.revision ?? (process.env.GRAPHYARD_BUILD_REVISION || 'unknown') };
 };
 
 /** The image an install defaults to: the CLI's own release, else the stable channel. */
