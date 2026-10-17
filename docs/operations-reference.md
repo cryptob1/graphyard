@@ -19,7 +19,7 @@ Leases expire 120s after last heartbeat (recorded renewal fault, plane stall: 30
 
 ## Supervisor died leaving a containment quarantine
 
-[`master settle-containment`](operations.md#recovery-recipes) verifies nothing survives; refused: confirm stop, rework, or `recover-containment` once delivered ([autosettle](protocol/leases.md#watch)).
+[`master settle-containment`](operations.md#recovery-recipes) verifies nothing survives; refused: confirm stop, then rework, or `recover-containment` once delivered ([autosettle](protocol/leases.md#watch)).
 
 ## Submitted implementation needs rework
 

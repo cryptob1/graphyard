@@ -140,12 +140,15 @@ const starving = (item: Work, now: number | undefined) => now !== undefined && s
 /**
  * True when the item already carries a submitted attempt: a standing submission (a returned
  * rework) or one its pipeline timeline still records (`recordSubmission` stamps `submittedAt`, and
- * it stands after the submission object itself is cleared). An attempt that ended without
+ * it stands after the submission object itself is cleared). The loop's coordination view strips
+ * `pipeline` but projects `reworkRounds`, which `recordRework` counts only for a submitted item and
+ * which every reopen that clears `submission` (main-guard and candidate reverts) raises first, so a
+ * reverted, reopened item still ranks as submitted there. An attempt that ended without
  * submitting — a lapsed lease, a rework before anything was offered — is not one: the repository
  * itself calls that only an ended attempt (`recordRework`), not a rework round, and the item starts
  * again in the existing order. `dispatchSort` reads it once per sort, like starvation.
  */
-const attempted = (work: Work) => !!work.submission || !!work.pipeline?.submittedAt;
+const attempted = (work: Work & { reworkRounds?: number }) => !!work.submission || !!work.pipeline?.submittedAt || (work.pipeline?.reworkRounds ?? work.reworkRounds ?? 0) > 0;
 function dispatchRank(a: Work, b: Work, hot: ReadonlySet<string>, starvingA: boolean, starvingB: boolean) {
   const left = scopeBreadth(a.plannedFiles), right = scopeBreadth(b.plannedFiles);
   const hotA = touchesHot(a, hot), hotB = touchesHot(b, hot);

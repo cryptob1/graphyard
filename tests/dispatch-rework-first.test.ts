@@ -2,6 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dispatchSort, dispatchStarvationMs } from '../src/coordination.js';
 import { dispatchSchedule } from '../src/master/status.js';
+import { reopenReverted } from '../src/main-guard.js';
+import { recordSubmission } from '../src/pipeline-speed.js';
+import { coordinationWork } from '../src/server/work-view.js';
 import type { Work } from '../src/model.js';
 
 // GY-1891: dispatch finishes before it starts — an item returning for rework is offered before a
@@ -57,6 +60,15 @@ test('unit:dispatch-reworks-before-fresh-items — dispatchSort offers every sam
   assert.ok(dispatchSort([broadHotRework, starvingFresh], heat, clock)[0] === broadHotRework, 'a broad, hot, just-returned rework is still offered before a starving fresh item: the submitted-attempt key outranks wait');
   assert.ok(dispatchSort([starvingFresh, expiredRetry], new Set(), clock)[0] === starvingFresh, 'an attempt that ended without submitting is not a rework: the expired retry keeps its existing-order place behind a starving fresh item');
   assert.ok(dispatchSort([newFresh, narrowSubmittedOnce], new Set())[0] === narrowSubmittedOnce, 'the key holds without a clock or heat, as the empty defaults give the cold order');
+  // The loop sorts the coordination view, which strips `pipeline`: a delivery the main guard
+  // reverted and reopened has no standing submission there, yet still ranks as submitted.
+  const reverted = work('GY-reverted', { plannedFiles: ['src/', 'tests/', hotFile], createdAt: iso(-60_000), stageEnteredAt: iso(-60_000), stage: 'done', submission: { epoch: 1, pr: 9 }, delivery: { mergeSha: 'abc123' } as Work['delivery'] });
+  recordSubmission(reverted, 1, new Date(clock - 120_000));
+  assert.ok(reopenReverted(reverted, { mergeSha: 'abc123', pr: 9, failing: ['test'], revert: null } as any, new Date(clock - 60_000)), 'the guard reopens the reverted delivery');
+  const view = [reverted, starvingFresh, expiredRetry].map(item => coordinationWork(structuredClone(item), { evidence: 0, dispatchHistory: 0, queueHistory: 0, actionHistory: 0, sessions: 0 }));
+  assert.ok(view.every(item => item.pipeline === undefined) && view[0].submission === null, 'the coordination view carries neither the timeline nor a standing submission');
+  assert.deepEqual(dispatchSort(view, heat, clock).map(item => item.key), ['GY-reverted', 'GY-starvingFresh', 'GY-retryExpired'],
+    'over the coordination view the loop reads, a reverted, reopened item still precedes never-submitted work, and those keep the existing order');
   // master status's schedule offers this same order: two live attempts heat the file, the
   // dispatchable six are offered in the loop's order.
   const all = [claimed('GY-hotA', [hotFile]), claimed('GY-hotB', [hotFile]), ...mixed];
