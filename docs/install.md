@@ -11,7 +11,7 @@ Ask only: **Which provider**; **Provider login**; **GitHub App confirmation clic
 - **One principal per role** (`--workers N`); never share worker credentials.
 - **Workers never receive an admin, coordinator, or producer credential.**
 - **Proof producers get explicit grants only** (`--producer-proof NAME`).
-- Credentials only under `$GRAPHYARD_CONFIG_HOME` (default `~/.config/graphyard`): the plan's `installDirectory`, `workers/` from `init --apply` (directories `0700`, files `0600`).
+- Credentials only under `$GRAPHYARD_CONFIG_HOME` (default `~/.config/graphyard`): the plan's `installDirectory` (`tokens/`, up-issued `workers/`; directories `0700`, files `0600`).
 
 ## Preconditions
 

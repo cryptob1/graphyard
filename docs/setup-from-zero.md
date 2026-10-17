@@ -14,13 +14,11 @@ cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --agent --repo OWNER/R
 
 Only legacy `--merger github` needs a human (GitHub Mobile).
 
-A Hetzner server waits (exit 3) for price approval: rerun with `--confirm-price`, `--max-monthly` or `--ssh-key`.
-
-`up` runs, in order: preflight, control plane, host supervisor, Herdr, deploy key, merger setting (legacy: `github` only) and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` reviews and merges, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to merge (a host install: a person); goals wait. Reruns skip recorded `.graphyard/up.json` steps but redo `master-loop` until loop and executors run this CLI's exact clean commit (`doctor`: `loop-code`).
+`up` runs, in order: preflight, control plane, host supervisor, Herdr, deploy key, merger setting (legacy: `github` only) and master identities (`master autonomy --apply`; `--local` reviews and merges, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to merge (a host install: a person); goals wait. Reruns skip recorded `.graphyard/up.json` steps, redoing `master-loop` until loop and executors run this CLI's exact clean commit (`doctor`: `loop-code`).
 
 ## The Setup page
 
-A step needing a person prints one Setup-page link (`SERVER/#sign-in=CODE&setup`, signed in 10 minutes), waits until green, then a fresh link; [phone access](dashboard.md#from-your-phone). Items:
+A step needing a person prints one Setup-page link (`SERVER/#sign-in=CODE&setup`), waits until green, then a fresh link; [phone access](dashboard.md#from-your-phone). Items:
 
 | Item | Button
 | --- | ---
@@ -33,7 +31,7 @@ Once green, **Describe what you want built** records a goal.
 
 ## Agent setup: up --agent
 
-`up --agent` takes `[--goal FILE] [--browser-profile PROFILE] [--url URL]` (server: from `master.json` or install): stderr JSON (`step-failed`: argv, stderr); exit `0`/`1`/`2`/`3` (green/failed/prerequisite/waiting). Default: no Apps, browser profile or `--reviewer`; missing repo: `gh repo create --source . --push`; no `--local`. Apps in signed-in Chrome profile (passed, master's, same-login install's; none without `--reuse-app`/saved Apps: exit `2`) in `.graphyard/master-actions/`. Handoffs: subscription login approval, *Confirm access* Mobile number. Beside Mobile: App page (http://127.0.0.1:4311) in your browser; sudo code (Setup field/`up --sudo-code`); import both Apps, `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` → `3`). `--wait MINUTES` (20). Preflight refuses `/tmp`, `/var/tmp`.
+`up --agent` takes `[--goal FILE] [--browser-profile PROFILE] [--url URL]` (server: from `master.json` or install): stderr JSON (`step-failed`: argv, stderr); exit `0`/`1`/`2`/`3` (green/failed/prerequisite/waiting). Default: no Apps, browser profile or `--reviewer`; missing repo: `gh repo create --source . --push`; no `--local`. Apps in signed-in Chrome profile (passed, master's, same-login install's; none without `--reuse-app`/saved Apps: exit `2`). Handoffs: subscription login approval, *Confirm access* Mobile number. Beside Mobile: App page (http://127.0.0.1:4311) in your browser; sudo code (Setup field/`up --sudo-code`); import both Apps, `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` → `3`). `--wait MINUTES` (20). Preflight refuses `/tmp`, `/var/tmp`.
 
 ## Troubleshooting: manual steps
 
@@ -65,7 +63,7 @@ The repository needs a GitHub `origin` and an Actions `pull_request` test workfl
 
 ## 4. Register the GitHub App
 
-Legacy merger only. `--apply` serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`. Branch protection: `--apply` protects the base; rerun once `Graphyard / merge` requires it; **Verify:** `branch-protection`.
+Legacy merger only. `--apply` serves `http://127.0.0.1:4311` and prints it ([App confirmation](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, [update them](install.md#upgrading-an-existing-installation) ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`. Branch protection: `--apply` protects the base; rerun once `Graphyard / merge` requires it; **Verify:** `branch-protection`.
 
 ## 6. Onboard the checkout
 
@@ -73,7 +71,7 @@ Legacy merger only. `--apply` serves `http://127.0.0.1:4311` and prints it; it o
 
 ## 8. Agent environments
 
-Connect each account in Settings → Agents ([dashboard](dashboard.md#settings-agents)); host-logged-in accounts register with `gy master registry propose --apply`, profiles with `gy master environments --apply`; up's accounts step runs both where the loop runs (host: `install --profiles-only`); account lines wait for both. Unknown-reviewer-profile refusals: one `gy master status` attention, uncounted five-minute retries. **Verify:** one `agent-environment:NAME` line passes per environment; then [roles](onboarding.md#configure-the-fleet).
+Connect each account in Settings → Agents ([dashboard](dashboard.md#settings-agents)); host-logged-in accounts register with `gy master registry propose --apply`, profiles with `gy master environments --apply`; up's accounts step runs both where the loop runs (host: `install --profiles-only`); account lines wait for both. Worker and producer credentials are per install (the install directory's `workers/`, never a host-wide folder another install fills); up issues a logged-in install's own worker identities there (0600), and names refused credentials and the server instead of asking for a sign-in. Unknown-reviewer-profile refusals: one `gy master status` attention, uncounted five-minute retries. **Verify:** one `agent-environment:NAME` line passes per environment; then [roles](onboarding.md#configure-the-fleet).
 
 ## 9. Worker sandbox and harness rules
 
@@ -89,7 +87,7 @@ gy master init --browser-profile Default \
 gy master restart
 ```
 
-**HUMAN:** `--browser-profile` names a GitHub-signed-in Chrome profile. **Verify:** `gy master status` shows `setup.supervisor` active.
+**Verify:** `gy master status` shows `setup.supervisor` active.
 
 ## 11. Hosted variables (Railway only)
 

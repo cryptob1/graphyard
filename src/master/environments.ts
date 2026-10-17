@@ -11,6 +11,8 @@ import { type CapacityRole, type CapacityAccount, capacityRetryAt, quotaRoles } 
 import { type FleetClient, type FleetLaunchAccount, type FleetProbe, selectFleetSession, fleetRoleHealth, httpFleetClient, fleetRequestTimeoutMs } from '../fleet.js';
 import { type AgentEnvironment, agentEnvironmentSchema, type EnvironmentKind, environmentKinds, environmentVariable, type MasterConfig, masterConfigSchema, producerProfileSchema, reviewerProfileSchema, workerProfileSchema } from './profiles.js';
 import { atomicPrivateText, atomicPrivateWrite, externalCredential, loadStoredMasterConfig, readCredentialFile } from './config.js';
+import { installDirectory, readInstallRecord } from '../install/secrets.js';
+import { installIdFor } from '../install/types.js';
 import { failureText } from './worktrees.js';
 import { shellQuote } from './dispatch.js';
 import { timedCall } from './timings.js';
@@ -596,7 +598,13 @@ export async function setupAgentEnvironments(root: string, input: { directory?: 
     next.workers.filter(profile => profile.mode === 'launch').forEach((profile, index) => migrate('worker', profile, index));
     next.producers.forEach((profile, index) => migrate('producer', profile, index));
     next.reviewers.forEach((profile, index) => migrate('reviewer', profile, index));
-    const credentialHome = dirname(dirname(config.credentialFile));
+    // Worker and producer credentials are per install (GY-1885): they are read only from the
+    // directory `graphyard install` manages for this repository, so a second install on one host
+    // never scans — and never refuses — another install's token folder. A master configured with
+    // no install of its own keeps reading beside its coordinator credential, as it always has.
+    const own = (() => { try { return installDirectory(installIdFor(config.repository)); } catch { return null; } })();
+    const installed = own ? await readInstallRecord(own).catch(() => null) : null;
+    const credentialHome = installed ? own! : dirname(dirname(config.credentialFile));
     const issued = async (role: 'worker' | 'producer') => {
       const folder = resolve(credentialHome, `${role}s`);
       const files = (await readdir(folder).catch(() => [] as string[])).filter(name => name.endsWith('.token')).sort().map(name => resolve(folder, name));

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { dirname, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -1068,32 +1068,77 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     // report, not a file, is what the account checklist lines judge. A failed write stops the run,
     // resumed or fresh; a pass with no configured checkout yet writes nothing and judges as before.
     const remoteProfiles = remoteLoop || !!state.identitiesHost;
-    const writeProfiles = async () => {
+    /** GY-1885: the report the write answered, so a still-missing profile names its cause. */
+    const writeProfiles = async (): Promise<any> => {
       let report: any;
       if (remoteProfiles) report = parseJson(await run('accounts', [...installArgs('--apply'), '--profiles-only'].filter(arg => arg !== '--no-herdr' && arg !== '--herdr-instance' && arg !== '--fresh-cursor')))?.profiles;
       else if (existsSync(resolve(deps.root, '.graphyard/master.json'))) report = parseJson(await run('accounts', ['master', 'environments', '--apply']));
       const counts = report?.counts;
       if (counts) writtenProfiles = { workers: counts.workers ?? 0, reviewers: counts.reviewers ?? 0 };
+      return report ?? null;
     };
-    const accountIds: SetupItemId[] = supervised ? ['account:worker'] : ['account:worker', 'account:reviewer'];
-    // The registry's first fold may lag the apply by a poll; only a role still empty after it is asked for:
-    // handed off in agent mode, on the Setup page interactively. A profile still missing is written
-    // again on each wait, and a wait that polled at all is followed by one more write: an account
-    // signed in during it (say B, while A's profiles already made both counts nonzero) gets its own
-    // profile before the lines are taken as green, and a write that still leaves one missing waits again.
+    /** Files the write refused (a credential the plane would not take); a duplicate of a principal already profiled is not a refusal. */
+    const refusedCredentials = (report: any) => (Array.isArray(report?.skipped) ? report.skipped as unknown[] : [])
+      .filter((entry): entry is { file: string; reason?: string } => !!entry && typeof entry === 'object' && typeof (entry as any).file === 'string' && !/a profile already uses/.test(String((entry as any).reason)));
+    /**
+     * GY-1885: a second install on this host gets its own worker credentials instead of waiting on
+     * an account sign-in. The install record names the worker principals its plane was deployed
+     * with, and their tokens already sit 0600 in the install directory's tokens folder — the only
+     * tokens that plane accepts. Copies are written 0600 into the install directory's workers
+     * folder, the one folder `master environments` reads for this install, so the profiles write
+     * turns them into worker profiles. Nothing is generated: a token the plane does not know would
+     * only be refused.
+     */
+    const issueWorkerCredentials = async (): Promise<string[]> => {
+      const directory = deps.installDirectory?.() ?? installDirectory(installIdFor(request.repository));
+      const record = await readInstallRecord(directory).catch(() => null);
+      const workers = (record?.principals ?? []).filter(principal => principal.role === 'worker');
+      if (!workers.length) throw new UpStop(`accounts: ${directory} records no worker principal to issue, and the profiles write found no worker credential; rerun graphyard install --repo ${request.repository} --apply to record this install, then ${rerun()}`, upExitCodes.failed);
+      const issued: string[] = [], missing: string[] = [];
+      for (const principal of workers) {
+        const file = resolve(directory, 'workers', `${principal.id}.token`);
+        if (existsSync(file)) continue;
+        const token = await readFile(resolve(directory, 'tokens', `${principal.id}.token`), 'utf8').catch(() => null);
+        if (token === null || !token.trim()) { missing.push(resolve(directory, 'tokens', `${principal.id}.token`)); continue; }
+        await mkdir(resolve(directory, 'workers'), { recursive: true, mode: 0o700 });
+        await writeFile(file, token, { mode: 0o600 });
+        await chmod(file, 0o600);
+        issued.push(file);
+      }
+      if (!issued.length && missing.length) throw new UpStop(`accounts: this install's worker credentials are missing (${missing.join(', ')}), and none can be regenerated here: the plane accepts only the tokens it was deployed with. Rerun graphyard install --repo ${request.repository} --apply to reissue them, then ${rerun()}`, upExitCodes.failed);
+      return issued;
+    };
+    /**
+     * GY-1885: the accounts wait settles a role the checklist still holds open. While a profile is
+     * missing the line stays open (withWrittenProfiles), so the settle runs inside the wait: a write
+     * whose report names refused credentials stops the run naming them and the plane — a sign-in
+     * cannot fix a refused credential. Otherwise the write is handed this install's own worker
+     * identities once, and the next write makes a worker profile from each. The handoff asks for a
+     * sign-in only while no account is logged in at all.
+     */
     const awaitAccounts = async () => {
+      let issuedOnce = false;
       for (;;) {
         let waited = false;
         await waitGreen(accountIds, true, async (pending, polls) => {
           waited = true;
-          if (profileMissing()) await writeProfiles();
-          if (request.agent && polls > 0) handoff('accounts')(`Sign in to an AI coding account for ${pending.map(id => id.slice('account:'.length)).join(' and ')}: approve its browser login on your device`, { url: setupUrl });
+          let report: any = null;
+          if (profileMissing()) report = await writeProfiles();
+          if (request.agent && polls > 0 && !(report?.counts?.loggedIn > 0)) handoff('accounts')(`Sign in to an AI coding account for ${pending.map(id => id.slice('account:'.length)).join(' and ')}: approve its browser login on your device`, { url: setupUrl });
+          if (!profileMissing()) return;
+          const refused = refusedCredentials(report);
+          if (refused.length) throw new UpStop(`accounts: the control plane at ${await deps.serverUrl().catch(() => null) ?? 'its recorded address'} refuses ${refused.map(entry => entry.file).join(', ')} (${refused.map(entry => String(entry.reason ?? 'refused').split('\n')[0]).join('; ')}), so no worker profile can be written; a sign-in cannot fix this. Reissue this install's worker credentials, then rerun ${rerun()}`, upExitCodes.failed);
+          if (issuedOnce || remoteProfiles) throw new UpStop(`accounts: the profiles write ${remoteProfiles ? `on ${state.identitiesHost ?? 'the host'} found no worker credential to write a worker profile from, and this machine cannot issue the install's worker identities there` : `still wrote no worker profile after this install's worker credentials were issued in ${deps.installDirectory?.() ?? installDirectory(installIdFor(request.repository))}`}; rerun ${rerun()} once that is fixed`, upExitCodes.failed);
+          const files = await issueWorkerCredentials();
+          issuedOnce = true;
+          if (files.length) deps.emit({ kind: 'note', text: `accounts: issued this install's worker credentials (${files.join(', ')}), so the profiles write makes a worker profile from each.` });
         }, 1);
         if (!waited) return;
         await writeProfiles();
         if (!profileMissing()) return;
       }
     };
+    const accountIds: SetupItemId[] = supervised ? ['account:worker'] : ['account:worker', 'account:reviewer'];
     // A run resuming over an earlier pass's completed accounts step still writes the profiles it may
     // lack, and waits for them here with the same rewrite, never in a later wait that writes nothing.
     if (state.completed.includes('accounts')) { await writeProfiles(); await awaitAccounts(); }
