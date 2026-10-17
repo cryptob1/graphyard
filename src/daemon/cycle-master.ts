@@ -5,14 +5,16 @@ import { launchAppearanceMs, promptDigest, record, stoppedStates, type DaemonEff
 import { actionableSubjects } from './metrics.js';
 import { detailChanged } from './decisions.js';
 import { message } from './state.js';
-import { emptyMasterSession, type MasterSessionState } from './state.js';
+import { emptyMasterSession, type DaemonAction, type DaemonState, type MasterSessionState } from './state.js';
+import type { MasterConfig } from '../master.js';
 import { sessionCapMs } from '../model/registry-sessions.js';
 import { masterHandover, masterSessionBudgetMs, masterHeartbeatIntervalMs, masterWakeText, masterProfile } from '../master/master-session.js';
 import { stallWakeSubjects } from './step-stalls.js';
 import { PromptNotAcceptedError } from '../master/launch.js';
 import { outputReadDue } from './cycle-sessions.js';
 import type { Cycle } from './cycle.js';
-import { carriedCall, owedWrite, stepCallCarried, withinStepBudget } from './step-budget.js';
+import type { HerdrAgent } from '../master/herdr.js';
+import { boundedCalls, carriedCall, owedWrite, stepBudget, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
 
 /** The launcher key the master launch records its started entry under: one in flight at a time. */
 export const masterLaunchKey = 'master:launch';
@@ -115,22 +117,7 @@ async function masterSessionStepWithin(cycle: Cycle) {
   // Everything below reads `state.master` afresh: a rotation above replaced the record, and the
   // relaunch it owes belongs to the new one.
   const live = state.master;
-  if (!live.agentName && !launching && listed(config.masterAgentName)) {
-    const found = herdr.agents.find(candidate => candidate.name === config.masterAgentName)!;
-    // The launch record (if this host has one) says which account and registry session the adopted
-    // session runs on, so its exhaustion holds the right account and its slot ends with it.
-    const known = launcher.adopt ? await Promise.resolve(launcher.adopt(config.masterAgentName)).catch(() => null) : null;
-    live.agentName = config.masterAgentName;
-    live.pane = found.pane_id ?? null;
-    live.runtime = found.agent ?? null;
-    live.account = known?.account ?? null;
-    live.session = known?.session ?? null;
-    live.startedAt = new Date(clock).toISOString();
-    live.adopted = true;
-    live.misses = 0;
-    performed.push(await record(state, `master:adopt:${live.startedAt}`, { kind: 'session', work: null, principal: null, state: 'done',
-      detail: `Adopted master session ${live.agentName} in pane ${live.pane ?? 'unknown'}${known?.account ? ` on ${known.account}` : ''}: it was started outside the loop (master start), so the loop supervises, wakes and rotates it instead of launching a second`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
-  }
+  if (!live.agentName && !launching && listed(config.masterAgentName)) performed.push(await adoptMasterSession(config, state, effects, herdr.agents, clock, now()));
 
   // Launch: nothing live holds the role, so the handover is composed from control-plane truth and one launch handed over.
   if (!live.agentName && !live.launching && !listed(config.masterAgentName)) {
@@ -237,6 +224,72 @@ async function masterSessionStepWithin(cycle: Cycle) {
         attempts: 1, cycle: state.cycle }, now(), effects.persist));
     });
   }
+}
+
+/**
+ * Adopts the listed session named `config.masterAgentName` that the loop did not launch (a human
+ * `master start`): supervised, woken and rotated from here, never a second one launched beside it.
+ */
+async function adoptMasterSession(config: MasterConfig, state: DaemonState, effects: DaemonEffects, agents: readonly HerdrAgent[], clock: number, now: number): Promise<DaemonAction> {
+  const live = state.master;
+  const found = agents.find(candidate => candidate.name === config.masterAgentName)!;
+  // The launch record (if this host has one) says which account and registry session the adopted
+  // session runs on, so its exhaustion holds the right account and its slot ends with it.
+  const known = effects.masterSession?.adopt ? await Promise.resolve(effects.masterSession.adopt(config.masterAgentName)).catch(() => null) : null;
+  live.agentName = config.masterAgentName;
+  live.pane = found.pane_id ?? null;
+  live.runtime = found.agent ?? null;
+  live.account = known?.account ?? null;
+  live.session = known?.session ?? null;
+  live.startedAt = new Date(clock).toISOString();
+  live.adopted = true;
+  live.misses = 0;
+  return record(state, `master:adopt:${live.startedAt}`, { kind: 'session', work: null, principal: null, state: 'done',
+    detail: `Adopted master session ${live.agentName} in pane ${live.pane ?? 'unknown'}${known?.account ? ` on ${known.account}` : ''}: it was started outside the loop (master start), so the loop supervises, wakes and rotates it instead of launching a second`, attempts: 1, cycle: state.cycle }, now, effects.persist);
+}
+
+/**
+ * The stall wake a failed cycle owes (GY-1854): the master-session step above runs after the
+ * cycle's own reads (the snapshot, the agents, the credentials), so a stall of one of those reads
+ * fails every cycle before the step that would deliver its wake, and the master would never
+ * receive the signature as its task. Run beside a failed cycle, this delivers exactly that wake
+ * through what a failed cycle still has: the live master session on the cursor (or the listed
+ * session named for the role, adopted here as the step adopts it), the pane inventory, and the
+ * prompt port. The same digest bookkeeping as the step's wake applies — a subject is woken once per
+ * changed task, so a standing stall is never woken again per failed cycle, and a stall the
+ * handover or an earlier wake already named is skipped. A working pane is left for the next
+ * delivery, as the step leaves it. Answers the subject keys it woke the session for.
+ */
+export async function wakeMasterForStalls(config: MasterConfig, state: DaemonState, raw: DaemonEffects, now: () => number): Promise<string[]> {
+  if (!raw.promptSession || !raw.masterSession) return [];
+  const clock = now(), live = state.master;
+  const subjects = stallWakeSubjects(state, config.cliPath).filter(subject => live.subjects[subject.key] !== promptDigest(subject.detail));
+  if (!subjects.length || live.launching) return [];
+  // The inventory read and the prompt wait under the master step's own per-call bound (GY-1774): a
+  // runtime that does not answer carries the wake to the next failed cycle, never holds the loop.
+  const budget = stepBudget(now, (config.run?.intervalSeconds ?? 20) * 1000);
+  const effects = boundedCalls(unboundedEffects(raw), state, now, budget.left, { step: 'master', calls: ['herdr', 'agents', 'promptSession'] });
+  let herdr: { agents: HerdrAgent[]; available: boolean }, agent: HerdrAgent | undefined, keys: string[], quietMs: number;
+  try {
+    herdr = effects.herdr ? await effects.herdr() : { agents: await effects.agents(), available: true };
+    if (herdr.available === false) return [];
+    if (!live.agentName && herdr.agents.some(candidate => candidate.name === config.masterAgentName)) await adoptMasterSession(config, state, effects, herdr.agents, clock, clock);
+    agent = live.agentName ? herdr.agents.find(candidate => candidate.name === live.agentName && candidate.pane_id === live.pane) : undefined;
+    if (!agent || (!agent.agent && agent.agent_status === 'unknown') || agent.agent_status === 'working') return [];
+    keys = subjects.map(subject => subject.key).slice(0, 20);
+    const reference = live.lastWake?.at ?? live.startedAt;
+    quietMs = reference ? Math.max(0, clock - Date.parse(reference)) : 0;
+    await effects.promptSession!(agent, masterWakeText(config.cliPath, keys, false, Math.round(quietMs / 60_000)));
+  } catch (error) {
+    if (stepCallCarried(error)) return [];
+    throw error;
+  } finally { budget.end(); }
+  const at = new Date(clock).toISOString();
+  live.lastWake = { at, causes: keys, heartbeat: false };
+  for (const subject of subjects) live.subjects[subject.key] = promptDigest(subject.detail);
+  await record(state, `wake:master:${state.cycle}`, { kind: 'wake', work: null, principal: null, state: 'done',
+    detail: `Woke master session ${live.agentName} for changed subjects: ${keys.join(', ')} — delivered beside the failed cycle, which ended before its master-session step`, attempts: 1, cycle: state.cycle }, clock, effects.persist);
+  return keys;
 }
 
 /**

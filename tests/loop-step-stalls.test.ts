@@ -7,9 +7,9 @@ import type { MergerMode } from '../src/merger-mode.js';
 import { cycleFailureCeilingMs } from '../src/daemon/liveness.js';
 import type { StepStallRemedyOutcome } from '../src/stall-remedies.js';
 import type { DaemonEffects } from '../src/daemon/effects.js';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // The modules under test are imported inside each test, so a run against code without them fails
 // its cases rather than the file (graphyard verify's exercise).
@@ -259,11 +259,22 @@ test('unit:held-effects-gate-the-call — while a step\u2019s stall stands insid
   const now = () => clock;
 
   let dispatches = 0, mergers = 0;
+  // Every cursor write is kept, and the launch reads the newest at the instant it is made: the
+  // admission that arms the window must already be on it.
+  const cursors: string[] = [];
+  const persist = async (state: DaemonState) => { cursors.push(JSON.stringify(state.stepStalls)); };
   const effects = {
-    dispatch: async () => { dispatches += 1; return {}; },
+    dispatch: async () => {
+      dispatches += 1;
+      const persisted = JSON.parse(cursors.at(-1) ?? '{}') as Record<string, { attemptAt: string | null; nextAttemptAt: string | null }>;
+      const live = Object.values(loop.stepStalls).find(entry => entry.step === 'dispatch')!;
+      assert.equal(persisted[live.signature]?.attemptAt, live.attemptAt, 'the admission is on the cursor before the launch is made');
+      assert.equal(persisted[live.signature]?.nextAttemptAt, live.nextAttemptAt, 'and so is the window it armed');
+      return {};
+    },
     mergeWriter: { merger: async (): Promise<MergerMode> => { mergers += 1; return 'control-plane'; } },
   } as unknown as DaemonEffects;
-  const held = S.stallHeldEffects(effects, () => loop, now);
+  const held = S.stallHeldEffects(effects, () => loop, now, persist);
   assert.notEqual(held.dispatch, (effects as { dispatch?: unknown }).dispatch, 'the dispatch port is wrapped');
 
   // Inside the window: the launch is refused cleanly, as a dispatch another dispatcher holds is —
@@ -294,6 +305,16 @@ test('unit:held-effects-gate-the-call — while a step\u2019s stall stands insid
   assert.equal(held.mergeWriter!.admit!(), false, 'a second merge inside the new window is held');
   const run = Object.values(loop.stepStalls).find(entry => entry.step === 'dispatch')!;
   assert.ok(run.attemptAt, 'the admission is on the run until the attempt reports');
+  // Restart from the boundary: a process that dies right after the admission, before any later
+  // cursor write, reloads the cursor the admission wrote — and the window stands armed on it, so the
+  // launch is held, never made a second time at once.
+  assert.equal(cursors.length, 1, 'one cursor write for the one admission (the held calls wrote nothing)');
+  const reloaded: DaemonState = { ...state(), stepStalls: JSON.parse(cursors[0]) };
+  const restarted = S.stallHeldEffects(effects, () => reloaded, now, persist);
+  const afterRestart = await restarted.dispatch!(work, {} as never, [] as never, {} as never).then(() => null, error => error as DispatchReservedError);
+  assert.ok(afterRestart instanceof DispatchReservedError, 'the restarted loop reads the armed window and holds the launch');
+  assert.equal(dispatches, 1, 'no second launch inside the persisted window');
+  assert.equal(cursors.length, 1, 'a held launch writes no cursor');
   // The admitted attempt's failure, recorded a cycle later, counts as that window's one failure and
   // keeps the window its admission armed.
   const window = run.nextAttemptAt;
@@ -394,8 +415,8 @@ test('unit:stall-record-bounded — the cursor keeps the newest runs and drops w
 
 test('unit:stall-credential-renewal — the 401 remedy renews a refused profile credential from the one the install issued for its principal and reads it back, renews the deploy key for a merge stall, and never renews the coordinator credential', async () => {
   const { S } = await load();
-  const home = await mkdtemp(join(tmpdir(), 'gy-1854-credentials-'));
-  try {
+  const home = await temporaryDirectory('gy-1854-credentials');
+  {
     const coordinator = 'c'.repeat(40), issued = 'w'.repeat(40), stale = 's'.repeat(40);
     for (const folder of ['master', 'workers', 'profile']) await mkdir(join(home, folder), { recursive: true });
     const write = (file: string, token: string) => writeFile(file, `${token}\n`, { mode: 0o600 });
@@ -451,15 +472,22 @@ test('unit:stall-credential-renewal — the 401 remedy renews a refused profile 
     const unreached = await S.renewHostCredentials(mergeStall, keyPorts);
     assert.deepEqual([unreached.outcome, unreached.verified], ['applied', false]);
     assert.match(unreached.detail, /does not reach the repository: Permission denied/);
-  } finally { await rm(home, { recursive: true, force: true }); }
+  }
 });
 
 test('unit:held-effects-hold-any-stalled-call — a stalled step whose failing call is any loop effect (the host reclaim) is held at that call: inside the window it is not made, past it once, and an answer lets it go', async () => {
   const { S } = await load();
   const loop = state();
   let calls = 0, failing = true;
-  const effects = { reclaim: async () => { calls += 1; if (failing) throw new Error('EACCES: permission denied, rmdir /var/tmp/held'); return { at: 'now' }; } } as unknown as DaemonEffects;
-  const held = S.stallHeldEffects(effects, () => loop, () => clock);
+  const cursors: string[] = [];
+  const effects = { reclaim: async () => {
+    calls += 1;
+    // An admitted call reads its own admission on the cursor: the window it armed is written before it is made.
+    const standing = Object.values(loop.stepStalls).find(run => run.step === 'reclaim' && run.stalledAt);
+    if (standing) assert.equal((JSON.parse(cursors.at(-1) ?? '{}') as Record<string, { attemptAt: string | null }>)[standing.signature]?.attemptAt, standing.attemptAt, 'the admission is persisted before the admitted call');
+    if (failing) throw new Error('EACCES: permission denied, rmdir /var/tmp/held'); return { at: 'now' };
+  } } as unknown as DaemonEffects;
+  const held = S.stallHeldEffects(effects, () => loop, () => clock, async state => { cursors.push(JSON.stringify(state.stepStalls)); });
   // One cycle of the reclaim step: the call, and the failed row it records from the thrown error.
   const cycle = async (index: number) => {
     const actions: { kind: 'reclaim'; state: 'failed' | 'done'; detail: string }[] = [];
@@ -479,6 +507,7 @@ test('unit:held-effects-hold-any-stalled-call — a stalled step whose failing c
   // Past the window the call is made once, and its failure is that window's one failure.
   tick(60_000); await cycle(8);
   assert.equal(calls, 4, 'past the window the call is attempted once');
+  assert.equal(cursors.length, 1, 'the one admission wrote the cursor once; held calls wrote nothing');
   assert.equal(Object.values(loop.stepStalls)[0].count, 4);
   tick(60_000); await cycle(9);
   assert.equal(calls, 4, 'the admission arms the next window');
@@ -487,11 +516,20 @@ test('unit:held-effects-hold-any-stalled-call — a stalled step whose failing c
   tick(S.stallBackoffMs); await cycle(10);
   assert.equal(calls, 5);
   assert.deepEqual(loop.stepStalls, {}, 'the answered call ends the run, never re-forming it');
-  // A short or hold text is never matched to a call, and a sync failure is held as a throw.
-  const sync = S.stallHeldEffects({ agents: () => { throw new Error('herdr listing failed: socket closed'); } } as unknown as DaemonEffects, () => loop, () => clock);
+  // A failure is matched to its call however short its text — `EACCES` alone is carried by the
+  // row that quotes it, as a whole, never as the inside of a longer word — and a sync failure is
+  // held as a throw. Only a hold's own answer, or a failure with no text, names nothing.
+  assert.equal(S.detailCarries('Worktree reclamation failed: EACCES', 'EACCES'), true);
+  assert.equal(S.detailCarries('Session listing failed: EACCESS denied', 'EACCES'), false, 'the inside of a longer word is not the failure');
+  assert.equal(S.detailCarries('Dispatch failed: Graphyard refused /api/work (502): upstream unavailable; retried', 'Graphyard refused /api/work (502): upstream unavailable'), true);
+  const sync = S.stallHeldEffects({ agents: () => { throw new Error('EACCES'); } } as unknown as DaemonEffects, () => loop, () => clock);
   const failed = (detail: string) => [{ kind: 'session' as const, state: 'failed' as const, detail }];
   for (const index of [11, 12, 13]) { tick(60_000); try { sync.agents!(); } catch (error) { S.noteCycleStalls(loop, failed(`Session listing failed: ${(error as Error).message}`), index, clock); } }
   const syncRun = Object.values(loop.stepStalls)[0];
-  assert.deepEqual(syncRun.calls, [{ call: 'agents', async: false }]);
+  assert.deepEqual(syncRun.calls, [{ call: 'agents', async: false }], 'a six-character failure names its call');
   assert.throws(() => sync.agents!(), new RegExp(S.stallHoldMarker), 'a call that failed synchronously is held as a throw');
+  S.noteCallFailure(loop, 'agents', new Error(''), false);
+  S.noteCallFailure(loop, 'agents', `${S.stallHoldMarker}: held`, false);
+  const empty = S.noteCycleStalls(loop, failed('Session listing failed: '), 14, tick(S.stallBackoffMs + 60_000));
+  assert.deepEqual(empty.notes[0].run.calls, [], 'a failure with no text, or a hold, names no call');
 });

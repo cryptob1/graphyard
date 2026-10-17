@@ -29,6 +29,7 @@ import { mainWatchSummary } from './main-watch.js';
 import { shadowGateSummary } from './cycle-shadow.js';
 import { adoptLoopRelease, fileSlowLoopItem } from './slow-loop-item.js';
 import { mergeWriterSummary } from './cycle-merge-writer.js';
+import { wakeMasterForStalls } from './cycle-master.js';
 import { noteCycleStalls, noteStepFailure, noteStepsSucceeded, remedyStalledSteps, stallHeldEffects, stallHold, stallNeedsMaster, stallRemedyRunner, stallSubjectKey, type StepStallRemedyRunner } from './step-stalls.js';
 import { detachRuns } from '../runner/registry.js';
 import type { LoopWake } from './loop-wake.js';
@@ -277,7 +278,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
       if (property === 'diagnostician') { const diagnostician = target.diagnostician; return diagnostician && scratchDirectory ? { ...diagnostician, cwd: scratchDirectory } : undefined; }
       return Reflect.get(target, property, receiver);
     } });
-    const effects = boundedPersist(namedEffects(stallHeldEffects(scoped, () => state, now)));
+    const effects = boundedPersist(namedEffects(stallHeldEffects(scoped, () => state, now, bound => effects.persist(bound))));
     acquireDaemonLock(state, options.identity, now(), interval());
     // GY-437: the release is this process's, never the cursor's: a loop re-executed onto a moved
     // checkout must not report the release the process before it loaded.
@@ -409,6 +410,10 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           for (const { record } of stallApplied)
             log(`[graphyard-master] the ${record.kind} stall remedy ${record.outcome}${record.verified ? ', verified' : ', unverified'}: ${record.detail}`);
           if (stall.counted || cleared || stallApplied.length) await effects.persist(state);
+          // A stall that needs the master is woken from here: this cycle failed before its
+          // master-session step, and every cycle the same read fails would too (cycle-master.ts).
+          const woken = await wakeMasterForStalls(config, state, effects, now).catch(error => { log(`[graphyard-master] the stall wake was not delivered beside cycle ${failure.cycle}: ${message(error)}`); return [] as string[]; });
+          if (woken.length) log(`[graphyard-master] woke master session ${state.master.agentName} beside failed cycle ${failure.cycle} for ${woken.join(', ')}`);
           wait = failure.delayMs;
           // GY-1854: the stalled call's five-minute window holds the failed cycle's next run of it
           // too: the later of the failed-cycle backoff and the window ends the wait, so neither
