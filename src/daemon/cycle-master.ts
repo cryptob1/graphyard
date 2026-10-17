@@ -1,5 +1,5 @@
 // Concern: the master-session step (GY-898) — launch, adopt, supervise, rotate and wake the loop's own master session.
-import { detectConsentPrompt, type ConsentAnswer } from '../consent-prompt.js';
+import { detectConsentPrompt, screenDialog, settingsWarning, type ConsentAnswer } from '../consent-prompt.js';
 import { detectExhaustion, detectRetryingExhaustion } from '../model/capacity.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { launchAppearanceMs, promptDigest, record, stoppedStates, type DaemonEffects } from './effects.js';
@@ -211,18 +211,38 @@ async function masterSessionStepWithin(cycle: Cycle) {
 type MasterWakeDialog = { hold: false; answered: ConsentAnswer | null } | { hold: true; detail: string };
 
 /**
+ * The dialog no rule answers on a master pane, named for a held wake, or null when none shows
+ * (GY-1872): Claude Code's Settings Warning reports as the launcher's own sentence for it, and any
+ * other trailing menu the consent classifier passes over by its text. Either would take the wake's
+ * keystrokes exactly as the settings-suggestion dialog would, so it holds the wake whatever it asks.
+ */
+function unanswerableDialog(name: string, screen: string | null | undefined): string | null {
+  const warning = settingsWarning(screen);
+  if (warning) return warning;
+  const dialog = screenDialog(screen);
+  return dialog ? `master session ${name} is stopped on a dialog no rule answers: "${dialog}" (the wake would type into it)` : null;
+}
+
+/**
  * GY-1872: the dialog on the master's pane before its wake, and what the wake does about it. A
  * settings-suggestion dialog is answered with the not-now key its own footer offers — the send is
  * bounded by the per-call bound alone, like a triage record made after its step — and the pane is
- * read again: the wake is delivered only once no dialog shows. Any other dialog — a credential, a
- * payment, a menu no rule answers — holds the wake, named for the record. A pane that cannot be
- * read holds nothing: the wake goes out as it always did, into whatever the pane shows.
+ * read again under the same test. Any other dialog — a credential, a payment, Claude Code's
+ * Settings Warning, a menu no rule answers — holds the wake, named for the record: the wake's
+ * keystrokes would land in it exactly as in the dialog this item exists to clear. A pane that
+ * cannot be read holds nothing: the wake goes out as it always did, into whatever the pane shows.
  */
 async function masterWakeDialog(cycle: Cycle, name: string, agent: HerdrAgent): Promise<MasterWakeDialog> {
   const { effects } = cycle;
   const read = async () => effects.sessionOutput ? await carriedCall(cycle, 'master', 'session', 'sessionOutput', () => Promise.resolve(effects.sessionOutput!(agent)).catch(error => { if (stepCallCarried(error)) throw error; return null; }), () => null) : null;
-  const prompt = detectConsentPrompt(await read());
-  if (!prompt) return { hold: false, answered: null };
+  const screen = await read(), prompt = detectConsentPrompt(screen);
+  if (!prompt) {
+    // A dialog no rule classifies — Claude Code's Settings Warning, or any other trailing menu the
+    // classifier passes over — would take the wake's text just the same: the wake holds, naming it.
+    const held = unanswerableDialog(name, screen);
+    if (held) return { hold: true, detail: `Held the master wake: ${held}` };
+    return { hold: false, answered: null };
+  }
   const showing = `master session ${name} is stopped on a ${prompt.kind} dialog: "${prompt.text}"`;
   if (prompt.kind !== 'settings' || !prompt.rule || !prompt.keys || !effects.answerSession) {
     const why = prompt.kind === 'settings' ? 'this loop cannot send it keys' : 'no rule answers it, and the wake would type into it';
@@ -230,8 +250,10 @@ async function masterWakeDialog(cycle: Cycle, name: string, agent: HerdrAgent): 
   }
   await boundedCalls(unboundedEffects(effects), cycle.state, cycle.now, () => stepCallBoundMs, { step: 'master', calls: ['answerSession'] }).answerSession!(agent, prompt.keys);
   const answer: ConsentAnswer = { rule: prompt.rule.id, kind: prompt.kind, prompt: prompt.text, answer: prompt.rule.answer, keys: prompt.keys, at: new Date(cycle.clock).toISOString() };
-  const still = detectConsentPrompt(await read());
+  const again = await read(), still = detectConsentPrompt(again);
   if (still) return { hold: true, detail: `Held the master wake: ${showing}; the loop sent ${prompt.keys.join(' ')} ("${prompt.rule.answer}") but the pane still shows a dialog: "${still.text}"` };
+  const lingering = unanswerableDialog(name, again);
+  if (lingering) return { hold: true, detail: `Held the master wake: ${showing}; the loop sent ${prompt.keys.join(' ')} ("${prompt.rule.answer}") but the pane then showed: ${lingering}` };
   return { hold: false, answered: answer };
 }
 

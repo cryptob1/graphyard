@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Log: `journalctl --user -u graphyard-master`. The wake answers a settings-suggestion dialog first (Claude Code's autocompact suggestion): `esc`, "Not now (settings unchanged)", re-read, then wakes; a dialog no rule answers holds the wake at `wake:master:held`.
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Log: `journalctl --user -u graphyard-master`. The wake answers a settings-suggestion dialog (Claude Code's autocompact suggestion): `esc`, "Not now (settings unchanged)", re-reads, wakes; a dialog no rule answers (Settings Warning included) holds the wake (`wake:master:held`).
 
 ### Perpetual master loop
 

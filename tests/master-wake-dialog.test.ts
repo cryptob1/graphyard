@@ -12,9 +12,13 @@ import { emptyMasterSession } from '../src/daemon/state.js';
 // instead of the prompt, so the master stopped acting until a human pressed esc by hand. The wake
 // now reads the pane first, answers a settings-suggestion dialog with the not-now key its own
 // footer offers, reads again to confirm it closed, and only then delivers the wake; a dialog it
-// cannot answer holds the wake and is recorded. One case per proof:
-// unit:settings-suggestion-dialog-dismissed, unit:master-wake-answers-dialog-first,
-// unit:master-wake-holds-unanswerable-dialog, unit:master-wake-holds-dialog-still-showing.
+// cannot answer holds the wake and is recorded — a credential or payment, Claude Code's Settings
+// Warning, or a menu no rule answers (GY-1872 rework: the classifier names no prompt for those, so
+// the hold is read off the pane, on the first read and on the re-read after esc alike). Proofs and
+// their company: unit:settings-suggestion-dialog-dismissed, unit:master-wake-answers-dialog-first,
+// unit:master-wake-holds-unanswerable-dialog, unit:master-wake-holds-dialog-still-showing,
+// unit:master-wake-holds-settings-warning, unit:master-wake-holds-unclassified-menu,
+// unit:master-wake-holds-dialog-after-esc.
 
 // Fixed clock for every step run; the loop's own stamps derive from it, and this file reads the
 // wall clock never.
@@ -65,6 +69,29 @@ const paymentDialog = [
 ].join('\n');
 /** The pane once the dialog is answered: the session's own prompt, no menu. */
 const cleanScreen = '❯ the session is awake and reading its instruction\n';
+/** Claude Code's "Settings Warning" dialog, as `herdr pane read` returned it for GY-159: a numbered menu the classifier names no prompt for. */
+const settingsWarningScreen = [
+  '  Settings Warning',
+  '',
+  '  /home/vish/code/graphyard/.graphyard/worktrees/GY-159-4/.claude/settings.local.json',
+  '  ├ permissions.deny: Invalid permission rule "Bash(git push * :**)" was skipped: The :* pattern must be at the end. Move :* to the end for prefix matching, or use * for wildcard matching',
+  '',
+  '  ❯ 1. Continue',
+  '    2. Fix with Claude',
+  '    3. Exit and fix manually',
+  '',
+  '  Enter to confirm · Esc to cancel',
+].join('\n');
+/** A numbered dialog that names no kind the allow-list knows — a context picker — which the pane still ends on. */
+const contextDialog = [
+  'Context left until auto-compact: 11%',
+  '',
+  'What would you like to do?',
+  '❯ 1. Continue the conversation',
+  '  2. Compact the conversation now',
+  '',
+  'Enter to confirm · Esc to cancel',
+].join('\n');
 
 /** A master pane on the fixed clock: records every read, key send and prompt the loop makes. */
 class MasterPane {
@@ -72,9 +99,9 @@ class MasterPane {
   prompts: string[] = [];
   keys: string[][] = [];
   reads = 0;
-  constructor(public screen: string, private sticky = false) {}
+  constructor(public screen: string, private sticky = false, private afterEsc?: string) {}
   read = () => { this.reads += 1; this.log.push('read'); return this.screen; };
-  answer = (sent: string[]) => { this.keys.push(sent); this.log.push(`keys:${sent.join(' ')}`); if (!this.sticky) this.screen = cleanScreen; };
+  answer = (sent: string[]) => { this.keys.push(sent); this.log.push(`keys:${sent.join(' ')}`); if (this.afterEsc) this.screen = this.afterEsc; else if (!this.sticky) this.screen = cleanScreen; };
   prompt = (text: string) => { this.prompts.push(text); this.log.push('prompt'); };
 }
 
@@ -181,4 +208,48 @@ test('unit:master-wake-clear-pane — a master pane showing no dialog is woken a
   assert.deepEqual(pane.keys, []);
   assert.equal(pane.prompts.length, 1);
   assert.equal(state.actions[masterWakeHeldKey], undefined, 'no hold is recorded where no dialog stood');
+});
+
+test('unit:master-wake-holds-settings-warning — Claude Code\'s Settings Warning holds the wake: no key is typed into it, and the hold names the rules it skipped', async () => {
+  assert.equal(detectConsentPrompt(settingsWarningScreen), null, 'the classifier names no prompt for a settings warning — the hold is read off the pane');
+  const pane = new MasterPane(settingsWarningScreen);
+  const { state, step } = stepOver(pane);
+  await step(clock);
+  assert.deepEqual(pane.keys, [], 'no key is typed into the warning, "Continue" least of all');
+  assert.deepEqual(pane.prompts, [], 'the wake text is never typed into the dialog');
+  assert.equal(pane.reads, 2, 'the pane is read for the supervision check and the wake, and not read again');
+  const held = state.actions[masterWakeHeldKey];
+  assert.equal(held?.state, 'waiting', 'the wake is held, not spent');
+  assert.match(held?.detail ?? '', /Held the master wake/);
+  assert.match(held?.detail ?? '', /settings warning/);
+  assert.match(held?.detail ?? '', /skipped 1 invalid permission rule \(Bash\(git push \* :\*\*\)\)/);
+  assert.equal(state.master.lastWake, null, 'the held wake is made again next cycle');
+});
+
+test('unit:master-wake-holds-unclassified-menu — a numbered dialog naming no kind the allow-list knows holds the wake too, named by its text', async () => {
+  assert.equal(detectConsentPrompt(contextDialog), null, 'the classifier names no prompt for it');
+  const pane = new MasterPane(contextDialog);
+  const { state, step } = stepOver(pane);
+  await step(clock);
+  assert.deepEqual(pane.keys, []);
+  assert.deepEqual(pane.prompts, [], 'the wake text is never typed into the dialog');
+  const held = state.actions[masterWakeHeldKey];
+  assert.equal(held?.state, 'waiting');
+  assert.match(held?.detail ?? '', /no rule answers/);
+  assert.match(held?.detail ?? '', /What would you like to do\?/);
+  assert.equal(state.master.lastWake, null);
+});
+
+test('unit:master-wake-holds-dialog-after-esc — a settings dialog answered with esc that is followed by a dialog no rule answers holds the wake: the re-read runs the same test as the first read', async () => {
+  const pane = new MasterPane(compactDialog, false, settingsWarningScreen);
+  const { state, step } = stepOver(pane);
+  await step(clock);
+  assert.deepEqual(pane.keys, [['esc']], 'the not-now key is sent for the settings dialog');
+  assert.deepEqual(pane.prompts, [], 'the wake is not delivered into the dialog that follows');
+  assert.equal(state.master.lastWake, null);
+  const held = state.actions[masterWakeHeldKey];
+  assert.equal(held?.state, 'waiting');
+  assert.match(held?.detail ?? '', /Not now \(settings unchanged\)/);
+  assert.match(held?.detail ?? '', /then showed/);
+  assert.match(held?.detail ?? '', /settings warning/);
 });
