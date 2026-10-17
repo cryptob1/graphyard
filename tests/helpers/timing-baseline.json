@@ -811,7 +811,7 @@
     "tests/soak-intervention-pattern-escalation-build.test.ts": 1892,
     "tests/soak-known-good.test.ts": 12836,
     "tests/soak-local-promotion.test.ts": 6000,
-    "tests/soak-loop-code-root.test.ts": 60000,
+    "tests/soak-loop-code-root.test.ts": 80000,
     "tests/soak-loop-wake.test.ts": 34070,
     "tests/soak-loop-wakes-at-hold-bound.test.ts": 3000,
     "tests/soak-main-guard.test.ts": 31000,

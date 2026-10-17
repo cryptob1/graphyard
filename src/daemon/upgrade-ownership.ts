@@ -2,6 +2,7 @@
 // touches anything, and the pass an install managing another project runs instead: the managed
 // repository's base branch may be fetched and checked out only where the checkout belongs to it.
 import { realpathSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
 import { shortCommit } from '../executor-fleet.js';
 import type { DaemonState } from './state.js';
@@ -22,6 +23,14 @@ const originIdentity = (url: string) => {
   const slash = bare.indexOf('/');
   return slash < 0 ? bare.toLowerCase() : `${bare.slice(0, slash).toLowerCase()}${bare.slice(slash)}`;
 };
+/** Resolves a directory through its symlinks, or keeps it as spelled when it cannot be read. */
+const real = (directory: string) => { try { return realpathSync(directory); } catch { return directory; } };
+/**
+ * A filesystem origin resolved as git resolves it, from the checkout it is configured in: a relative
+ * `../origin` names a different repository from each checkout, so it is compared by where it lands.
+ * A URL or an scp-style `host:path` is left as spelled.
+ */
+const resolvedOrigin = (root: string, url: string) => /^[a-z][a-z0-9+.-]*:\/\//i.test(url) || /^[^/]*:/.test(url) ? url : real(resolve(root, url));
 
 /** The words every external install's refusal starts with: master status renders it as its own attention. */
 const externalRefusalLead = 'the managed repository is another project than the coordinator checkout';
@@ -53,7 +62,6 @@ export async function managesOwnCheckout(codeRoot: string, managedRoot: string, 
     try { return (await run('git', ['-C', root, ...args])).trim() || null; }
     catch (error: any) { return absent.includes(error?.status) ? '' : null; }
   };
-  const real = (directory: string) => { try { return realpathSync(directory); } catch { return directory; } };
   const [managedCommon, codeCommon] = await Promise.all([
     read(managedRoot, ['rev-parse', '--path-format=absolute', '--git-common-dir'], [128]),
     read(codeRoot, ['rev-parse', '--path-format=absolute', '--git-common-dir'], [128]),
@@ -66,7 +74,7 @@ export async function managesOwnCheckout(codeRoot: string, managedRoot: string, 
   ]);
   if (managedOrigin === '' || codeOrigin === '') return false;
   if (managedOrigin === null || codeOrigin === null) return true;
-  return originIdentity(codeOrigin) === originIdentity(managedOrigin);
+  return originIdentity(resolvedOrigin(codeRoot, codeOrigin)) === originIdentity(resolvedOrigin(managedRoot, managedOrigin));
 }
 
 /** The upgrade pass's own steps an external install's pass runs through. */
@@ -88,7 +96,7 @@ export interface ExternalInstallSteps {
  * ref name in the checkout's own origin — Graphyard's unreleased main — and move the checkout onto
  * it, so no alignment runs: the checkout stays where it stands and the pass records that the
  * install upgrades by command. What an earlier loop left owed while it still aligned this install —
- * a restart owed onto a moved checkout, a held snapshot's pin, a stall — is retired first, since
+ * a restart owed onto a moved checkout, a held snapshot's pin once the checkout is clean, a stall — is retired first, since
  * the alignment that would meet it never runs here again: the pin is lifted, the units returned to
  * the checkout's launcher and the cursor forgets it; the loop and the executors keep their loaded
  * code until `up` restarts them. A step that fails keeps the record, says why once and is retried
@@ -96,22 +104,26 @@ export interface ExternalInstallSteps {
  * touches its action row, so the cursor, the row and master status's attention stay as they are.
  */
 export async function externalInstallPass(state: DaemonState, codeRoot: string, run: ChildRun, steps: ExternalInstallSteps): Promise<SelfUpgradeOutcome> {
-  const owed = state.upgrade.pending, left = state.upgrade.snapshot, stalled = state.upgrade.stalled;
+  const owed = state.upgrade.pending, stalled = state.upgrade.stalled, standing = await checkoutState(codeRoot, run);
+  // A held snapshot stands because the checkout was dirty: while it still is (or cannot be read),
+  // the pin and the units keep naming the snapshot, so no restart ever boots the dirty checkout.
+  const kept = state.upgrade.snapshot && standing.dirty !== false ? state.upgrade.snapshot : undefined, left = kept ? undefined : state.upgrade.snapshot;
   if (owed || left || stalled) {
-    const unsettled = await steps.settle();
+    const unsettled = kept ? null : await steps.settle();
     if (unsettled) {
       const detail = `This install's managed repository is another project, so the loop no longer aligns its checkout, but what an earlier alignment left owed could not be retired: ${unsettled}; retried next cycle`;
       if (detailChanged(state.actions['upgrade:align'], detail)) await steps.note(detail, true);
     } else {
       const retired = [owed ? `the restart owed onto ${shortCommit(owed.to)}` : '', left ? `the held snapshot of ${shortCommit(left.commit)} and its pin` : '', stalled ? `the ${stalled.cause} stall` : ''].filter(Boolean).join(', ');
       state.upgrade.pending = null;
-      delete state.upgrade.snapshot;
+      if (left) delete state.upgrade.snapshot;
       steps.unstall();
       await steps.persist();
-      await steps.note(`Retired ${retired}: this install's managed repository is another project, so the loop no longer aligns its checkout; the loop and the executors keep their loaded code until graphyard up restarts them onto the checkout`, false);
+      const held = kept ? `; the held snapshot of ${shortCommit(kept.commit)} stays pinned until the checkout is clean` : '';
+      await steps.note(`Retired ${retired}: this install's managed repository is another project, so the loop no longer aligns its checkout; the loop and the executors keep their loaded code until graphyard up restarts them onto the checkout${held}`, false);
     }
   }
-  const standing = await checkoutState(codeRoot, run), prior = state.upgrade.refused;
+  const prior = state.upgrade.refused;
   if (prior?.reason !== externalUpgradeRefusal || prior.commit !== standing.commit) return steps.refused(externalUpgradeRefusal, standing.commit);
   touchStanding(state, 'upgrade:refused', steps.at());
   return { outcome: 'refused', reason: prior.reason, commit: prior.commit };

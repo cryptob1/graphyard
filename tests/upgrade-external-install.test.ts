@@ -272,6 +272,9 @@ test('unit:upgrade-external-install — origins are compared case-sensitively in
   assert.equal(await judged('/srv/Owner/App', '/srv/owner/app'), false, 'filesystem origins differing in path case are two projects');
   assert.equal(await judged('https://GitHub.com/cryptob1/graphyard.git', 'git@github.com:cryptob1/graphyard'), true, 'one upstream spelled two ways, its host in another case, is one project');
   assert.equal(await judged('https://github.com/Owner/App', 'https://github.com/owner/other'), false);
+  // A relative filesystem origin is resolved from the checkout it is configured in, as git resolves it.
+  assert.equal(await judged('./origin', './origin'), false, 'one relative spelling names a different repository from each checkout');
+  assert.equal(await judged('../origin', '/origin'), true, 'a relative origin landing on the other’s absolute one is one project');
 });
 
 test('unit:upgrade-external-install — an external install an earlier loop already moved has its owed restart and held snapshot retired, never left standing', async () => {
@@ -319,6 +322,45 @@ test('unit:upgrade-external-install — an external install an earlier loop alre
     // Settled, later passes have nothing to retire.
     await performSelfUpgrade(master, state, legacyDeps);
     assert.deepEqual(pins, [null, null]);
+  } finally {
+    await rm(checkout, { recursive: true, force: true });
+    await rm(managed, { recursive: true, force: true });
+  }
+});
+
+test('unit:upgrade-external-install — a held snapshot of a still-dirty checkout keeps its pin and units until the checkout is clean, while the owed restart is retired', async () => {
+  const checkout = await temporaryDirectory('upgrade-external-dirty-checkout');
+  const managed = await temporaryDirectory('upgrade-external-dirty-managed');
+  try {
+    const loaded = await repository(checkout, 'README.md', 'graphyard\n');
+    await repository(managed, 'app.txt', 'app\n');
+    const master = await config(join(checkout, 'bin/graphyard.mjs'), 'owner/app');
+    const state = emptyDaemonState(master);
+    state.release = { commit: loaded, dirty: false };
+    state.deployment = verified(git(managed, 'rev-parse', 'HEAD'));
+    state.upgrade.pending = { from: 'a'.repeat(40), to: loaded, code: true };
+    state.upgrade.snapshot = { at: iso(0), commit: loaded, checkout: loaded, dirty: ['README.md'] };
+    await writeFile(join(checkout, 'README.md'), 'work in progress\n');
+    const pins: (string | null)[] = [], executorEntries: (string | null)[] = [];
+    const { run } = recordingRun();
+    const dirtyDeps = { ...deps(managed, run),
+      holdCli: async (commit: string | null) => { pins.push(commit); },
+      alignExecutorUnits: async (script: string | null) => { executorEntries.push(script); return { wrote: 'updated', reason: null }; },
+      alignUnit: async () => ({ wrote: 'updated', reason: null }) };
+
+    assert.equal((await performSelfUpgrade(master, state, dirtyDeps)).outcome, 'refused');
+    assert.deepEqual([pins, executorEntries], [[], []], 'the pin and the units keep naming the snapshot while the checkout is dirty');
+    assert.equal(state.upgrade.snapshot?.commit, loaded, 'the snapshot record stands');
+    assert.equal(state.upgrade.pending, null, 'the owed restart is retired');
+    assert.match(state.actions['upgrade:align']!.detail, /stays pinned until the checkout is clean/);
+    await performSelfUpgrade(master, state, dirtyDeps);
+    assert.deepEqual(pins, [], 'a dirty checkout never has the pin lifted under it');
+
+    git(checkout, 'checkout', '-q', '--', 'README.md');
+    assert.equal((await performSelfUpgrade(master, state, dirtyDeps)).outcome, 'refused');
+    assert.deepEqual([pins, executorEntries], [[null], [null]], 'once clean, the pin lifts and the units return to the checkout\u2019s launcher');
+    assert.equal(state.upgrade.snapshot, undefined);
+    assert.match(state.actions['upgrade:align']!.detail, /^Retired the held snapshot of /);
   } finally {
     await rm(checkout, { recursive: true, force: true });
     await rm(managed, { recursive: true, force: true });

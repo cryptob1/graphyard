@@ -345,3 +345,38 @@ test('manual:loop-code-root-external-install-day — an install managing another
   assert.match([...attentions][0], /graphyard up\b/);
   assert.doesNotMatch([...attentions][0], /checkout --detach/);
 });
+
+test('manual:loop-code-root-real-loop-external-install-day — the real loop over a simulated day of items and deploys on an install whose managed repository is another project, starting from the owed restart, held snapshot pin and stall a pre-GY-1958 loop left: the first pass retires them, every later pass refuses with one standing row and one unchanging attention, the cursor is written a bounded number of times, nothing restarts, and the CLI checkout is never fetched in or moved', { timeout: 600_000 }, async () => {
+  const root = await codeRoot('external');
+  const day = await simulateDay({ hours: 8, codeRoot: root, external: true,
+    plan: { deploys: [hours(1), hours(3), hours(5), hours(7)], dirtyCheckout: { from: hours(99), to: hours(100) }, headMove: { from: hours(99), to: hours(100) }, heldClaimRestarts: 0, deaths: new Set() } });
+  const c = day.codeRootDay!, samples = day.upgrades.samples;
+  assert.deepEqual(day.violations, [], 'every system invariant holds after every cycle');
+  assert.deepEqual(day.lost, [], 'no lease was lost');
+  assert.deepEqual(day.failures, [], 'no cycle or self-upgrade failed');
+  assert.ok(day.final.filter(item => item.stage === 'done').length > 0, 'items still flow to done beside the standing refusal');
+  assert.equal(day.upgrades.fetches, 0, 'nothing is ever fetched in the CLI checkout');
+  assert.deepEqual(day.upgrades.checkouts, [], 'the CLI checkout is never moved');
+  assert.ok(samples.every(sample => sample.head === samples[0]!.head), 'the CLI checkout’s HEAD never changes');
+  assert.deepEqual([...c.gitRoots], [root], 'git ran only in the CLI checkout, beside the identification reads');
+  assert.equal(day.upgrades.self, 0, 'the loop never restarts itself onto Graphyard code');
+  assert.deepEqual(day.upgrades.executors, [], 'the fleet is never restarted');
+  // The legacy obligations are retired on the first pass and never return.
+  const refusing = samples.filter(sample => sample.outcome === 'refused');
+  assert.ok(refusing.length >= 10, `the upgrade ran on many cycles (${refusing.length})`);
+  assert.ok(samples.every(sample => sample.outcome === null || sample.outcome === 'refused'), `every pass refuses: ${[...new Set(samples.map(sample => sample.outcome))]}`);
+  assert.ok(refusing.every(sample => sample.pin === null && sample.pending === null && sample.snapshot === null && sample.stall === null), 'the pin, the owed restart, the snapshot and the stall are retired on the first pass');
+  assert.deepEqual(day.upgrades.pins.map(pin => pin.commit), [null], 'the legacy pin is lifted once and no pin is placed');
+  assert.equal(readHeldCli(root), null, 'the pointer under the CLI checkout is gone');
+  assert.equal(day.upgrades.unit.launcher, 'checkout', 'the loop unit is returned to the checkout’s launcher');
+  assert.equal(day.upgrades.executorEntry, 'checkout', 'the executor units are returned to the checkout’s entry');
+  assert.equal(day.state.actions['upgrade:align']?.state, 'done', 'the retirement is recorded once');
+  // One standing refusal: one row, one attention, written once.
+  assert.equal(new Set(refusing.map(sample => `${sample.refused?.reason}@${sample.refused?.commit}`)).size, 1, 'one standing refusal');
+  assert.ok(refusing.every(sample => sample.refusedRow?.state === 'failed' && sample.refusedRow.attempts === 1), 'one deduplicated upgrade:refused row whose attempts never climb');
+  const attentions = new Set(refusing.flatMap(sample => upgradeRefusalAttention(sample.refused, '/soak/coordinator', 'main').map(item => `${item.text}\n${item.next}`)));
+  assert.equal(attentions.size, 1, `one unchanging attention across the day: ${[...attentions].join(' | ')}`);
+  assert.doesNotMatch([...attentions][0]!, /checkout --detach/);
+  const secondPass = refusing[1]!.elapsed;
+  assert.ok(c.persists.length > 0 && c.persists.every(elapsed => elapsed < secondPass), `the cursor is written on the first pass, for the retirement and the refusal, and never again: ${JSON.stringify(c.persists)} (second pass at ${secondPass})`);
+});
