@@ -49,7 +49,9 @@ export class MergerSettings {
 
   async status(actor: Principal) {
     demand(['admin', 'coordinator', 'reader', 'operator-agent'].includes(actor.role), 'The merger setting is readable by admin, coordinator, reader and operator-agent identities', 403);
-    return { ...await mergeWriterStatus(this.store.pool), history: await mergerHistory(this.store.pool) };
+    // `mode` names the writer as the delivery defaults read it (GY-1901): `control-plane`, GitHub only a mirror, or `github`.
+    const setting = await mergeWriterStatus(this.store.pool);
+    return { ...setting, mode: setting.merger, history: await mergerHistory(this.store.pool) };
   }
 
   async change(actor: Principal, input: unknown, key: string) {
@@ -68,7 +70,8 @@ export class MergerSettings {
         demand(!unexplained.length, `Control-plane merger refused while unexplained shadow disagreements stand: ${[...new Set(unexplained.map(entry => entry.key))].join(', ')}`, 409);
       }
       await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, mergerEventKind, JSON.stringify({ merger: data.merger, reason: data.reason, previous: current.merger })]);
-      const result = { ...await mergeWriterStatus(db), history: await mergerHistory(db) };
+      const setting = await mergeWriterStatus(db);
+      const result = { ...setting, mode: setting.merger, history: await mergerHistory(db) };
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
       return result;
     });
