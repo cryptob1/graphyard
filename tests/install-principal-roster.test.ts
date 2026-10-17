@@ -290,6 +290,43 @@ test('unit:principal-upsert-remove-single-entry-readback — a re-add that chang
   } finally { await fixture.cleanup(); }
 });
 
+test('unit:principal-upsert-remove-single-entry-readback — overlapping roster edits never drop each other\'s entry: an edit holds the installation\'s apply lock from reading install.json until it is persisted and read back, so a second add of another id, or an install --apply planned before it, is refused and writes nothing, and once the first finishes both entries stand', async () => {
+  const fixture = await harness({ provider: 'railway' });
+  try {
+    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, fixture.deps);
+    await applyInstall(session, await buildPlan(session));
+    const before = deployedRoster(fixture.transport);
+    // A full apply planned now, against the roster before either edit.
+    const stalePlan = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, fixture.deps);
+    const plan = await buildPlan(stalePlan);
+    // The first edit is held at its readback, after it deployed and before it returns.
+    let hold!: () => void, reached!: () => void;
+    const held = new Promise<void>(resolve => { hold = resolve; }), atReadback = new Promise<void>(resolve => { reached = resolve; });
+    const paused = (async (input: any, init?: any) => {
+      if (String(input).endsWith('/api/principals')) { reached(); await held; }
+      return fixture.deps.fetch!(input, init);
+    }) as typeof fetch;
+    const first = principalCommand(['add', 'huck-engineer', '--role', 'producer', '--grant', GRANT], { ...fixture.deps, fetch: paused, cwd: fixture.root });
+    await atReadback;
+    const writes = variableWrites(fixture).length;
+    await assert.rejects(principal(fixture, ['add', 'huck-reader', '--role', 'reader']), /Another install --apply .* holds the lock/);
+    await assert.rejects(principal(fixture, ['remove', 'huck-engineer']), /holds the lock/);
+    await assert.rejects(applyInstall(stalePlan, plan), /holds the lock/);
+    assert.equal(variableWrites(fixture).length, writes, 'a refused edit or apply writes nothing while the first edit holds the lock');
+    hold();
+    assert.equal((await first).changed, true);
+    // The apply planned before the edit no longer deploys a roster without it.
+    await assert.rejects(applyInstall(stalePlan, plan), /roster in .*install\.json changed after this apply was planned/);
+    assert.equal(variableWrites(fixture).length, writes);
+    const second = await principal(fixture, ['add', 'huck-reader', '--role', 'reader']);
+    assert.equal(second.changed, true);
+    const roster = deployedRoster(fixture.transport);
+    assert.deepEqual(roster.map(entry => entry.id), [...before.map(entry => entry.id), 'huck-engineer', 'huck-reader']);
+    assert.deepEqual(roster.slice(0, before.length), before);
+    assert.deepEqual((await recordOf(session.directory)).principals.map((entry: { id: string }) => entry.id), roster.map(entry => entry.id));
+  } finally { await fixture.cleanup(); }
+});
+
 test('unit:principal-upsert-remove-single-entry-readback — principal add reaches the deployment where install --apply reached it: a Hetzner bundle over SSH at the server\'s address, a Docker host at its recorded host and user, a Compose bundle on its own port; principal remove on a self-contained host deletes the removed credential there', async () => {
   const lines = (transport: Harness['transport']) => transport.commands.map(command => [command.program, ...command.args].join(' '));
   // Each remote answers `cat` from the files written to it, as a real machine would.

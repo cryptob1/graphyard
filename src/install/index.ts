@@ -1251,6 +1251,17 @@ export async function resetHostCursor(remote: Transport, checkout: string, fleet
 }
 
 /**
+ * The roster this apply reconciled was read before it took the lock. A `graphyard principal` edit that
+ * held the lock in between changed install.json, so this apply refuses rather than deploy a roster
+ * missing that edit's entry (GY-1879); planning again reconciles with it.
+ */
+async function refuseMovedRoster(session: InstallSession) {
+  const roster = (record: InstallRecord | null) => JSON.stringify(record?.principals ?? []);
+  const current = await readInstallRecord(session.directory).catch(() => null);
+  if (roster(current) !== roster(session.record ?? null)) throw new Error(`The principal roster in ${session.directory}/install.json changed after this apply was planned (a graphyard principal add or remove ran); this apply wrote nothing. Run install --apply again to reconcile with it`);
+}
+
+/**
  * A provider command that fails now carries the provider's own diagnostic, which may quote a
  * value the installer piped into it, so the failure is scrubbed on the way out like every log
  * line and the summary.
@@ -1269,7 +1280,7 @@ export async function applyInstall(session: InstallSession, plan: InstallPlan): 
     refuseUnready(session, plan);
     await prepareInstallDirectory(session.directory, session.root);
     const release = await acquireApplyLock(session.directory, session.deps.now());
-    try { return await performInstall(session, plan); } finally { await release(); }
+    try { await refuseMovedRoster(session); return await performInstall(session, plan); } finally { await release(); }
   } catch (error: any) {
     if (error instanceof InstallPaused) throw error;
     const message = session.vault.scrub(String(error?.message ?? error));

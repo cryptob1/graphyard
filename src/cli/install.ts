@@ -6,7 +6,7 @@ import { deliveryModes, type DeliveryMode } from '../model/delivery-policy.js';
 import { appPageBusy, appPagePortFree, startGithubSetup, updateAppPermissions } from '../github-setup.js';
 import { applyProposal, loadAppliedSetup, loadProposal, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
 import { protectionRun } from '../protection.js';
-import { appCommand, applyInstall, applyRosterChange, appStepWait, buildPlan, InstallPaused, installHerdrOnly, installIdFor, installProfilesOnly, installRequestFromArgs, prepareInstall, repositoryRoot, type InstallDependencies } from '../install/index.js';
+import { acquireApplyLock, appCommand, applyInstall, applyRosterChange, appStepWait, buildPlan, InstallPaused, installHerdrOnly, installIdFor, installProfilesOnly, installRequestFromArgs, prepareInstall, repositoryRoot, type InstallDependencies } from '../install/index.js';
 import { installDirectory, readInstallRecord, recordedRoster, removeRosterEntry, rosterEntry, upsertRosterEntry } from '../install/secrets.js';
 import { runManifestFlow } from '../install/manifest.js';
 import { delegationLimitAssignments } from '../install/limits.js';
@@ -65,8 +65,15 @@ export async function principalCommand(args: string[], dependencies: InstallDepe
   const repository = values.repo ?? (await discover(root)).repository;
   if (!repository) throw new Error('Use --repo OWNER/NAME, or run from a checkout whose origin is the managed repository');
   const directory = installDirectory(installIdFor(repository), dependencies.configHome);
+  if (!await readInstallRecord(directory)) throw new Error(`No installation of ${repository} is recorded under ${directory}; run graphyard install --apply first`);
+  // The edit holds the installation's apply lock from reading the roster until it is persisted and read back,
+  // so two edits, or an edit and an install --apply, never each deploy a roster missing the other's entry.
+  const release = await acquireApplyLock(directory, (dependencies.now ?? Date.now)());
+  try { return await editRoster(root, directory, id, entry, dependencies); } finally { await release(); }
+}
+async function editRoster(root: string, directory: string, id: string, entry: ReturnType<typeof rosterEntry> | null, dependencies: InstallDependencies & { cwd: string }) {
   const record = await readInstallRecord(directory);
-  if (!record) throw new Error(`No installation of ${repository} is recorded under ${directory}; run graphyard install --apply first`);
+  if (!record) throw new Error(`No installation is recorded under ${directory}; run graphyard install --apply first`);
   const { roster, changed } = entry ? upsertRosterEntry(recordedRoster(record), entry) : removeRosterEntry(recordedRoster(record), id);
   // The deployment is reached where install --apply reached it: its SSH host and user, local mode, port and image.
   const at = record.deployment;
