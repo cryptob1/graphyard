@@ -3,7 +3,7 @@
 
 > install Graphyard for OWNER/REPO on PROVIDER following docs/install.md
 
-Ask only: **Which provider**; **Provider login**; **GitHub App confirmation click** (none with `--no-github-app`/`--observe-only`); **Plan approval**. Never invent a fifth.
+Ask only: **Which provider**; **Provider login**; **GitHub App confirmation click** (none with `--no-github-app`/`--observe-only`); **Approval of the printed plan**. Never invent a fifth.
 
 ## Hard rules
 
