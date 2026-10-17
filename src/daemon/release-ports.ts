@@ -14,10 +14,10 @@ import { deployKeySshCommand, firstParentHolds, pushArgs, pushEnvironment, runMe
 import { trialAuthor } from '../merge-writer/trial.js';
 import {
   awaitServing, cutAsync, deployToUatAsync, promoteAsync, readLedgerAsync, syncLedgerAsync, uatValidationWindowMs,
-  findCandidate, type AsyncGit, type ReleaseCandidate, type UatRecord,
+  findCandidate, uatServedDigests, validateAndRecord, type AsyncGit, type ReleaseCandidate, type UatRecord,
 } from '../release-candidate.js';
 import { validateProjectCandidate } from '../release-project.js';
-import { commandDigestAdapter, digestCommandTimeoutMs, verifyProductionDigests } from '../release-digests.js';
+import { commandDigestAdapter, digestCommandTimeoutMs, uatDigestSuite, verifyProductionDigests } from '../release-digests.js';
 import { revertCandidateItem, type CandidateItemDelta, type RevertContract, type RevertPorts, type RevertRecordEvent } from '../release-revert.js';
 import type { CutCommit } from './candidate-cut.js';
 import type { LocalCandidate, LocalReleasePorts, LocalValidation } from './promotion-local.js';
@@ -128,7 +128,17 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
   // GY-1535: a managed repository's candidate, validated in-process from a checkout of its exact SHA.
   const validateManaged = async (id: string): Promise<LocalValidation> => {
     await syncLedgerAsync(git, base);
-    const candidate = findCandidate(await readLedgerAsync(git), id);
+    const ledger = await readLedgerAsync(git), candidate = findCandidate(ledger, id);
+    // GY-1844: a candidate UAT serves by digest is attested first, like the CLI's validate: an instance on any other digest records
+    // the candidate's UAT verdict failed on that suite, so its cases never pass digests they did not test.
+    const served = uatServedDigests(ledger, candidate);
+    if (served && digests.instances && uatUrl) {
+      const suite = uatDigestSuite(served, digests.instances);
+      if (!(await suite.run(uatUrl, candidate)).passed) {
+        const result = await validateAndRecord(git, id, uatUrl, [suite], { base, push: true, timeoutMs: localServeWaitSeconds * 1000, file: options.file });
+        return { record: result.record, followUp: result.followUp ?? null };
+      }
+    }
     const checkout = mkdtempSync(join(options.base, 'candidate-cases-'));
     try {
       await git(['worktree', 'add', '--detach', checkout, candidate.sha]);

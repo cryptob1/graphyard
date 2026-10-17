@@ -92,6 +92,8 @@ test('unit:candidate-promotes-recorded-digests — a candidate records one build
   assert.throws(() => recordCandidateBuild(candidate, { ...built, sourceSha: 'a'.repeat(40) }), /is .+, not the built/);
   assert.throws(() => recordCandidateBuild(candidate, { ...built, artifacts: [{ service: 'api', digest: sha256('a') }, { service: 'api', digest: sha256('f') }] }), /name api twice/);
   assert.throws(() => recordCandidateBuild(candidate, { ...built, artifacts: [{ service: 'api', digest: 'deadbeef' }] }), /digest must be sha256:<64 hex digits>/);
+  assert.throws(() => recordCandidateBuild(candidate, { ...built, artifacts: Array.from({ length: 31 }, (_, index) => ({ service: `svc${index}`, digest: sha256('a') })) }), /not one the delivery model accepts: artifacts/);
+  assert.throws(() => recordCandidateBuild(candidate, { ...built, artifacts: [{ service: 'a'.repeat(151), digest: sha256('a') }] }), /not one the delivery model accepts: artifacts\.0\.service/);
 
   // The UAT result is recorded against the digests it tested.
   assert.deepEqual(assessUat(candidate, { deployedSha: tip, suites: [{ name: 'endpoints', passed: true, detail: 'ok' }], now, digests: built.artifacts }).digests, built.artifacts);
@@ -417,5 +419,33 @@ test('unit:release-callers-use-digest-adapter — the command adapter builds onc
     assert.deepEqual(await ports.verify(tip), { served: tip, verified: true }, 'every instance runs the promoted digest');
     running = [...running, { service: 'web', instance: 'web-2', digest: sha256('f') }];
     assert.deepEqual(await ports.verify(tip), { served: tip, verified: false }, 'one instance on another digest fails production verification at the same SHA');
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test('unit:managed-uat-attests-digests — the loop\'s managed-repository UAT validation attests that UAT\'s instances run the digests it was deployed with, recording a failed verdict on the digests suite when one runs another', async () => {
+  const { localReleasePorts, masterConfigSchema } = await load();
+  const repo = ledgerGit({ candidates: [candidate], ...digestServed(candidate, 1) }, { 'ls-remote': () => '' });
+  const asked: string[] = [];
+  const run = async (command: string, args: string[], options?: { env?: NodeJS.ProcessEnv }) => {
+    if (command === 'git') return repo.git(args);
+    asked.push(`${args[1]} ${options?.env?.GRAPHYARD_DEPLOY_ENVIRONMENT}`);
+    return JSON.stringify([{ service: 'api', instance: 'api-1', digest: sha256('a') }, { service: 'web', instance: 'web-1', digest: sha256('f') }]);
+  };
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy', retrials: 2 } } });
+  // '/checkout' is no Graphyard checkout, so the port validates the candidate as a managed repository's.
+  const ports = localReleasePorts(config, '/checkout', run, { base: '/managed', record: async () => ({}), now: () => 0,
+    environment: { GRAPHYARD_UAT_URL: 'https://uat.example.test', GRAPHYARD_INSTANCE_DIGESTS: 'instances' } })!;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ ok: true, commit: tip }))) as typeof fetch;
+  try {
+    const { record } = await ports.validate(candidate.id);
+    assert.equal(record.result, 'failed');
+    const digests = record.suites.find(suite => suite.name === 'digests');
+    assert.equal(digests?.passed, false, 'the digests suite judged the managed candidate');
+    assert.match(digests!.detail, /web/, 'naming the service whose instance runs another digest');
+    assert.deepEqual(repo.tags().find(tag => tag.id === candidate.id && 'suites' in tag)?.digests, built.artifacts, 'the recorded verdict names the digests UAT was deployed with');
+    assert.ok(asked.length > 0 && asked.every(entry => entry === 'instances uat'), 'it asked the adapter for UAT\'s instances');
+    assert.ok(repo.tagNames().includes(`rc-uat/${candidate.id}`), 'and recorded the verdict');
   } finally { globalThis.fetch = realFetch; }
 });

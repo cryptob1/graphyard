@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, join, resolve, sep } from 'node:path';
-import type { Manifest } from './delivery.js';
+import { buildSchema, type Manifest } from './delivery.js';
 import {
   currentDeployment, deploymentOutcomeTagPrefix, deploymentsIn, deploymentTagPrefix, fencedDeploy, fencedDeployAsync, outcomeOf,
   type DeploymentOutcome, type DeploymentRecord, type DeployFence,
@@ -156,6 +156,9 @@ export function recordCandidateBuild(candidate: ReleaseCandidate, build: Candida
     seen.add(artifact.service);
     if (!artifactDigestPattern.test(artifact.digest)) throw new Error(`Artifact ${artifact.service}'s digest must be sha256:<64 hex digits>, got ${JSON.stringify(artifact.digest)}`);
   }
+  // Whatever the specific checks above let through still has to be a build the delivery model would register (service-name length, artifact count, strict keys).
+  const canonical = buildSchema.safeParse(build);
+  if (!canonical.success) throw new Error(`The build registration is not one the delivery model accepts: ${canonical.error.issues.map(issue => `${issue.path.join('.') || 'build'}: ${issue.message}`).join('; ')}`);
   let provenance: URL;
   try { provenance = new URL(build.provenanceUrl); } catch { throw new Error(`The build registration's provenance is not a URL: ${JSON.stringify(build.provenanceUrl)}`); }
   if (provenance.protocol !== 'https:' && provenance.protocol !== 'http:') throw new Error(`The build registration's provenance is not an http(s) URL: ${JSON.stringify(build.provenanceUrl)}`);
