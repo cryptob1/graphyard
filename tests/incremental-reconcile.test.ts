@@ -87,14 +87,14 @@ test('unit:incremental-reconcile a pass after one heartbeat rereads that one doc
   assert.equal(renewed.evaluated, 1, 'a renewal moves no other item\'s inputs, so only the renewed item is evaluated');
 });
 
-test('unit:incremental-reconcile a change other items read re-evaluates the fleet but still rereads one document', { timeout: 120_000 }, async () => {
+test('unit:incremental-reconcile a change other items read re-evaluates the moved item and its readers but still rereads one document', { timeout: 120_000 }, async () => {
   const blocker = await create();
-  await create({ dependencies: [blocker.id] });
+  const dependent = await create({ dependencies: [blocker.id] });
   for (let n = 0; n < 5 && (await pass()).evaluated; n++);
   await engine.execute(operator, 'ready', blocker.id, {}, randomUUID());
   const moved = await pass();
   assert.equal(moved.documentsRead, 1, 'only the changed item is read again');
-  assert.equal(moved.evaluated, moved.live, 'its dependents and the rest of the fleet are evaluated against it');
+  assert.equal(moved.evaluated, 2, 'the moved item and the dependent that reads its face are evaluated against it (GY-1898)');
   assert.ok(moved.live > 2);
 });
 
