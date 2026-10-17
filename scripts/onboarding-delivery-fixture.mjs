@@ -29,7 +29,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { loadCases } from '../src/e2e/case.ts';
-import { candidatePendingOutcomes, checkoutContract, defaultStepTimeoutMs, deliverySuspendedCases, failureDetail, installServesDeliveries, releaseMaxWaitSeconds, releaseRetries, releaseVerdict, runCases, summarize } from '../src/e2e/runner.ts';
+import { candidatePendingOutcomes, checkoutContract, defaultStepTimeoutMs, deliverySuspendedCases, failureDetail, installServesDeliveries, releaseRetries, releaseWaitUntil, releaseVerdict, runCases, summarize } from '../src/e2e/runner.ts';
 import { contractPendingCases } from '../src/release-candidate.ts';
 import { checkoutRepositoryPolicy } from '../src/model/repository-policy.ts';
 import { repositoryDelivery } from '../src/install/index.ts';
@@ -259,7 +259,7 @@ export const settlingFetcher = (fetcher, target) => async (input, init) => {
  * a fixture that served another source than UAT is never attributed to the candidate. `targets`
  * names each executed case's own target URL and served SHA, so its recorded runs say where it ran.
  */
-export async function runOnboardingE2e(cases, { url, token, fixture, candidate = null, contract = null, policy, root = candidateRoot, launcher, fetcher, stepTimeoutMs, now = Date.now }) {
+export async function runOnboardingE2e(cases, { url, token, fixture, candidate = null, contract = null, policy, root = candidateRoot, launcher, fetcher, stepTimeoutMs, now = Date.now, sleep }) {
   const selected = cases.filter(entry => entry.definition.target === 'uat');
   const runId = candidate ? `rc-${candidate.id}` : `onboarding-${randomBytes(6).toString('hex')}`;
   const pending = contractPendingCases(contract, candidate?.pendingOutcomes);
@@ -269,6 +269,8 @@ export async function runOnboardingE2e(cases, { url, token, fixture, candidate =
   const pendingCases = policy.e2e.pendingOutcomes === 'blocking' ? [] : [...pending, ...suspended];
   const startedAt = new Date(now()).toISOString();
   const outcomes = [], served = new Set(), targets = [];
+  // GY-1938: every case's waits share the run's one deadline, so the run reports inside its command timeout.
+  const waitUntil = releaseWaitUntil(now());
   let stoppedBy = null, open = null;
   try {
     for (const entry of selected) {
@@ -286,8 +288,8 @@ export async function runOnboardingE2e(cases, { url, token, fixture, candidate =
         }
       }
       // The step that creates an item on the fixture waits for its preview to settle, so each step there has the settling budget besides its own.
-      const report = await runCases([entry], { url: target.url, token: target.token, environment: 'uat', runId, retries: releaseRetries, maxWaitSeconds: releaseMaxWaitSeconds, root, pendingCases: pendingCases, policy, launcher,
-        fetcher: target.settle ? settlingFetcher(fetcher ?? fetch, target) : fetcher, stepTimeoutMs: target.settle ? (stepTimeoutMs ?? defaultStepTimeoutMs) + previewSettleMs : stepTimeoutMs, now });
+      const report = await runCases([entry], { url: target.url, token: target.token, environment: 'uat', runId, retries: releaseRetries, waitUntil, root, pendingCases: pendingCases, policy, launcher,
+        fetcher: target.settle ? settlingFetcher(fetcher ?? fetch, target) : fetcher, stepTimeoutMs: target.settle ? (stepTimeoutMs ?? defaultStepTimeoutMs) + previewSettleMs : stepTimeoutMs, now, sleep });
       served.add(report.sha);
       const known = targets.find(entry => entry.url === target.url && entry.sha === report.sha);
       if (known) known.cases.push(id); else targets.push({ url: target.url, sha: report.sha, cases: [id] });
