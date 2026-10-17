@@ -1,0 +1,523 @@
+<title>How Graphyard Works</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column; a pipeline diagram, then short sections; rail-yard signal colours on a cool steel neutral */
+:root {
+  --bg: #f5f6f7;
+  --surface: #ffffff;
+  --fg: #1b2129;
+  --muted: #5b6672;
+  --rule: #d9dee3;
+  --accent: #b5480f;      /* signal orange */
+  --accent-soft: #fbe9df;
+  --steel: #2f4a63;        /* rail steel blue */
+  --ok: #2c7a4b;
+  --font-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12161b; --surface: #1a2027; --fg: #e6eaee; --muted: #9aa6b2; --rule: #2c343d;
+    --accent: #f08a4b; --accent-soft: #3a2418; --steel: #8fb3d6; --ok: #6fcf97; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12161b; --surface: #1a2027; --fg: #e6eaee; --muted: #9aa6b2; --rule: #2c343d;
+  --accent: #f08a4b; --accent-soft: #3a2418; --steel: #8fb3d6; --ok: #6fcf97; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg);
+  font-family: var(--font-body); font-size: 16px; line-height: 1.6;
+  padding-inline: 20px; padding-block: 40px 64px;
+}
+main { max-width: 760px; margin: 0 auto; display: grid; gap: 48px; }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; letter-spacing: -0.01em; }
+h1 { font-size: clamp(2rem, 6vw, 2.9rem); font-weight: 800; line-height: 1.05; }
+h2 { font-size: 1.45rem; font-weight: 700; margin-bottom: 12px; }
+h3 { font-size: 1.02rem; font-weight: 700; }
+p { margin: 0; max-width: 65ch; }
+.eyebrow { font-family: var(--font-mono); font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+header { display: grid; gap: 14px; }
+.lede { font-size: 1.12rem; color: var(--muted); }
+code, .key { font-family: var(--font-mono); font-size: 0.88em; }
+.key { background: var(--accent-soft); color: var(--accent); padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
+
+.diagram { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 16px; overflow-x: auto; }
+.diagram pre.mermaid { margin: 0; min-width: 560px; display: flex; justify-content: center; }
+
+ol.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; counter-reset: step; }
+ol.steps li { counter-increment: step; display: grid; grid-template-columns: 2.4rem 1fr; gap: 12px; padding: 12px 0; border-top: 1px solid var(--rule); }
+ol.steps li:first-child { border-top: none; }
+ol.steps li::before { content: counter(step); font-family: var(--font-display); font-weight: 800; font-size: 1.25rem; color: var(--steel); font-variant-numeric: tabular-nums; }
+ol.steps li > div { min-width: 0; display: grid; gap: 2px; }
+ol.steps p { color: var(--muted); }
+
+.roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.role { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 14px 16px; display: grid; gap: 4px; align-content: start; }
+.role p { color: var(--muted); font-size: 0.95rem; }
+
+.human { border-left: 4px solid var(--accent); padding: 4px 0 4px 16px; display: grid; gap: 8px; }
+.human ul { margin: 0; padding-left: 1.1rem; display: grid; gap: 4px; }
+
+.table-wrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); }
+table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+tr:last-child td { border-bottom: none; }
+th { font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+td:first-child { font-weight: 600; white-space: nowrap; }
+
+.states { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.state { font-family: var(--font-mono); font-size: 0.82rem; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--rule); background: var(--surface); }
+.state.final { border-color: var(--ok); color: var(--ok); }
+.arrow { color: var(--muted); }
+
+section { display: grid; gap: 14px; }
+footer { color: var(--muted); font-size: 0.88rem; border-top: 1px solid var(--rule); padding-top: 16px; }
+
+/* Walkthrough player */
+.player { background: var(--surface); border: 1px solid var(--rule); border-radius: 12px; overflow: hidden; display: grid; }
+.screen { position: relative; aspect-ratio: 16 / 9; max-width: 100%; background: var(--bg); }
+.screen svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.poster { position: absolute; inset: 0; display: grid; place-items: center; align-content: center; gap: 10px; background: color-mix(in srgb, var(--bg) 82%, transparent); border: 0; cursor: pointer; color: var(--fg); font: inherit; width: 100%; }
+.poster[hidden] { display: none !important; }
+.poster .big { width: 64px; height: 64px; border-radius: 50%; background: var(--accent); display: grid; place-items: center; }
+.poster .big::after { content: ""; border-left: 20px solid var(--surface); border-top: 12px solid transparent; border-bottom: 12px solid transparent; margin-left: 6px; }
+.poster strong { font-family: var(--font-display); font-size: 1.2rem; }
+.poster span { color: var(--muted); font-size: 0.9rem; }
+.caption { min-height: 3.4em; padding: 10px 16px; border-top: 1px solid var(--rule); font-size: 0.98rem; display: flex; align-items: center; }
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 16px 14px; }
+.controls button { font: inherit; font-size: 0.85rem; border: 1px solid var(--rule); background: var(--bg); color: var(--fg); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+.controls button:focus-visible, .chapters button:focus-visible, .poster:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#play { min-width: 76px; font-weight: 600; }
+#scrub { flex: 1 1 200px; min-width: 0; accent-color: var(--accent); }
+#clock { font-family: var(--font-mono); font-size: 0.8rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.chapters { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 16px; }
+.chapters button { font: inherit; font-size: 0.78rem; font-family: var(--font-mono); border: 1px solid var(--rule); background: transparent; color: var(--muted); border-radius: 999px; padding: 3px 10px; cursor: pointer; }
+.chapters button.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+
+/* Shapes inside the animation */
+.v-card rect { fill: var(--surface); stroke: var(--rule); stroke-width: 1.5; }
+.v-card.hl rect { stroke: var(--accent); stroke-width: 2; }
+.v-card.ok rect { stroke: var(--ok); stroke-width: 2; }
+.v-card.bad rect { stroke: #c0392b; stroke-width: 2; }
+.v-card.steel rect { fill: var(--steel); stroke: var(--steel); }
+.v-card.steel text { fill: var(--surface); }
+.t-title { font-family: var(--font-display); font-weight: 700; font-size: 16px; fill: var(--fg); }
+.t-sub { font-family: var(--font-body); font-size: 12.5px; fill: var(--muted); }
+.t-key { font-family: var(--font-mono); font-size: 13px; fill: var(--accent); font-weight: 500; }
+.t-label { font-family: var(--font-mono); font-size: 12px; fill: var(--muted); letter-spacing: 0.06em; }
+.t-scene { font-family: var(--font-mono); font-size: 13px; fill: var(--accent); letter-spacing: 0.08em; }
+.v-line { stroke: var(--muted); stroke-width: 2; fill: none; }
+.v-line.ok { stroke: var(--ok); }
+.v-line.bad { stroke: #c0392b; }
+.v-ring { fill: none; stroke: var(--steel); stroke-width: 3; }
+.v-dot { fill: var(--accent); }
+.v-bar-bg { fill: var(--rule); }
+.v-bar { fill: var(--ok); }
+.v-main { stroke: var(--steel); stroke-width: 4; }
+.v-commit { fill: var(--steel); }
+.v-commit.new { fill: var(--accent); }
+.ok-text { fill: var(--ok); }
+.bad-text { fill: #c0392b; }
+</style>
+
+<main>
+  <header>
+    <span class="eyebrow">Graphyard · how it works</span>
+    <h1>From a goal to production, run by agents</h1>
+    <p class="lede">You state what you want. Graphyard breaks it into small work items, has AI agents build, test and review each one, merges what passes, and verifies it on the live release. People decide the goals; agents do the rest and check each other.</p>
+  </header>
+
+  <section aria-labelledby="watch">
+    <h2 id="watch">Watch: the two-minute walkthrough</h2>
+    <div class="player">
+      <div class="screen">
+        <svg id="stage" viewBox="0 0 960 540" role="img" aria-label="Animated walkthrough of how Graphyard takes a goal to production"></svg>
+        <button class="poster" id="poster" type="button" aria-label="Play the walkthrough">
+          <div class="big" aria-hidden="true"></div>
+          <strong>How Graphyard works</strong>
+          <span>11 short scenes · about 2 minutes</span>
+        </button>
+      </div>
+      <div class="caption" id="caption" aria-live="polite">Press play to follow one goal from a sentence to a verified release.</div>
+      <div class="controls">
+        <button type="button" id="play">Play</button>
+        <input type="range" id="scrub" min="0" max="134" step="0.1" value="0" aria-label="Position in the walkthrough">
+        <span id="clock">0:00 / 2:14</span>
+      </div>
+      <div class="chapters" id="chapters"></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="flow">
+    <h2 id="flow">The path of one goal</h2>
+    <div class="diagram">
+<pre class="mermaid">
+flowchart LR
+  A[Goal] --> B[Planner splits it into work items]
+  B --> C[Worker builds an item]
+  C --> D[Graphyard tests the merged result]
+  D --> E{Risky change?}
+  E -- yes --> R1[Review first] --> F[Graphyard merges to main]
+  E -- no --> F
+  F --> R2[Review after merge]
+  F --> G[Release candidate: UAT + end-to-end tests]
+  G --> H[Promoted to production]
+  H --> I[Verified on the live release]
+  G -. failure .-> J[Revert or new fix item]
+  J --> C
+</pre>
+    </div>
+    <ol class="steps">
+      <li><div><h3>State a goal</h3><p>A short plain-language file: what to build, for whom, any constraints, and where it ships.</p></div></li>
+      <li><div><h3>Plan it into work items</h3><p>A planner agent turns the goal into small items like <span class="key">GY-1772</span>, each with acceptance criteria and the tests that prove them.</p></div></li>
+      <li><div><h3>Build</h3><p>The master loop hands each ready item to a worker agent in its own workspace. Low-risk changes go to cheap fast runtimes (Pi) first; risky or repeatedly reworked ones go to stronger models.</p></div></li>
+      <li><div><h3>Test the merged result</h3><p>Graphyard tests the change as it would land on the latest main, not the branch alone, using the build, unit tests and each criterion's proof tests.</p></div></li>
+      <li><div><h3>Review</h3><p>An independent agent reviews it. Sensitive changes (auth, data, deploy, CI) are reviewed before merge; normal ones after. A reviewer never reviews its own work.</p></div></li>
+      <li><div><h3>Merge</h3><p>Graphyard itself writes main. Nothing merges with a failed check, an open blocking finding or an unapproved decision.</p></div></li>
+      <li><div><h3>Release and verify</h3><p>Merged changes ride a release candidate through UAT and the end-to-end suite, are promoted to production, and are checked on the exact release that serves them.</p></div></li>
+      <li><div><h3>Recover</h3><p>A failure anywhere is reverted or fixed forward by a new work item. The loop keeps cycling until every item is verified live or has a real external blocker recorded.</p></div></li>
+    </ol>
+  </section>
+
+  <section aria-labelledby="who">
+    <h2 id="who">Who does what</h2>
+    <div class="roles">
+      <div class="role"><h3>Master loop</h3><p>Runs every ~20 seconds: dispatch, review, merge, deploy checks, cleanup. Upgrades itself when a new release is live.</p></div>
+      <div class="role"><h3>Master agent</h3><p>Reads the loop's state, files and releases work, and handles what the loop can't settle by rule.</p></div>
+      <div class="role"><h3>Workers</h3><p>Build one item each, under a lease they renew; losing the lease means they stop.</p></div>
+      <div class="role"><h3>Reviewers</h3><p>Judge each change against its criteria. Always independent of whoever built it.</p></div>
+      <div class="role"><h3>Approvers</h3><p>Sign off on decisions the master requests: requirement changes, scope widenings, risky reworks.</p></div>
+      <div class="role"><h3>Control plane</h3><p>The server that holds every item, lease, decision and piece of evidence, with full history.</p></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="human">
+    <h2 id="human">What people decide</h2>
+    <div class="human">
+      <p>Everything else is decided by one agent and approved by a different one. People keep exactly three decisions:</p>
+      <ul>
+        <li>Goals and priorities</li>
+        <li>Spending money or opening third-party accounts</li>
+        <li>Issuing credentials to people</li>
+      </ul>
+    </div>
+  </section>
+
+  <section aria-labelledby="gates">
+    <h2 id="gates">What every item must pass</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Gate</th><th>Passes when</th></tr></thead>
+        <tbody>
+          <tr><td>Ready</td><td>Released, dependencies done, no open blocker.</td></tr>
+          <tr><td>Build</td><td>A worker submitted a head inside the item's planned files.</td></tr>
+          <tr><td>Review</td><td>An independent reviewer approved this exact head (before or after merge, by risk).</td></tr>
+          <tr><td>Test</td><td>Required checks and every criterion's proof passed on the merged result.</td></tr>
+          <tr><td>Merge</td><td>Graphyard landed it on main and confirmed main holds it.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Requirements are never weakened to let an implementation pass, and agents never get the credentials that produce trusted evidence.</p>
+  </section>
+
+  <section aria-labelledby="done">
+    <h2 id="done">When is it actually done?</h2>
+    <div class="states">
+      <span class="state">Merged</span><span class="arrow">→</span>
+      <span class="state">Awaiting deployment</span><span class="arrow">→</span>
+      <span class="state">Deployed</span><span class="arrow">→</span>
+      <span class="state final">Production verified</span>
+    </div>
+    <p>Merged code is not shipped code. An item counts as delivered only when the release serving production contains it and it has been checked there.</p>
+  </section>
+
+  <section aria-labelledby="heal">
+    <h2 id="heal">When something gets stuck</h2>
+    <p>The loop notices its own problems: slow cycles, failing steps, flaky tests, false reverts. Known failures have a built-in fix the loop applies itself; anything else goes to the master agent, and anything that is a defect in Graphyard becomes a work item that agents fix. The aim is that nobody has to step in by hand.</p>
+  </section>
+
+  <footer>Graphyard · summary of <code>README.md</code> and <code>docs/how-graphyard-works.md</code>, October 2026.</footer>
+</main>
+
+<script>
+(() => {
+  const NS = 'http://www.w3.org/2000/svg';
+  const stage = document.getElementById('stage');
+  const DURATION = 134;
+  const objs = [], updaters = [];
+
+  // ---- drawing helpers -------------------------------------------------------
+  function el(tag, attrs, parent) {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    (parent || stage).appendChild(e);
+    return e;
+  }
+  function text(parent, x, y, cls, str, anchor = 'middle') {
+    const t = el('text', { x, y, class: cls, 'text-anchor': anchor }, parent);
+    t.textContent = str;
+    return t;
+  }
+  function card(w, h, title, sub, cls, key) {
+    const g = el('g', { class: 'v-card ' + (cls || '') });
+    el('rect', { x: -w / 2, y: -h / 2, width: w, height: h, rx: 10 }, g);
+    let y = sub ? -4 : 6;
+    if (key) { text(g, 0, -h / 2 + 22, 't-key', key); y = sub ? 6 : 12; }
+    text(g, 0, y, 't-title', title);
+    if (sub) text(g, 0, y + 20, 't-sub', sub);
+    return g;
+  }
+  function label(str, cls) { const g = el('g', {}); text(g, 0, 0, cls || 't-label', str); return g; }
+  function line(points, cls) {
+    const g = el('g', {});
+    el('path', { d: 'M' + points.map(p => p.join(' ')).join(' L'), class: 'v-line ' + (cls || ''), 'marker-end': 'url(#arrow)' }, g);
+    return g;
+  }
+  const defs = el('defs', {});
+  const marker = el('marker', { id: 'arrow', viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, defs);
+  el('path', { d: 'M0 0 L10 5 L0 10 z', class: 'v-dot' }, marker);
+
+  // ---- timeline: keyframes [t, x, y, opacity, scale] ---------------------------
+  function A(g) {
+    const k = [];
+    const o = {
+      at(t, x, y, s = 1) { k.push([t, x, y, 0, s * 0.94], [t + 0.5, x, y, 1, s]); return o; },
+      to(t, x, y, s, d = 0.9) { const p = k[k.length - 1]; k.push([t, p[1], p[2], p[3], p[4]], [t + d, x, y, p[3], s == null ? p[4] : s]); return o; },
+      out(t) { const p = k[k.length - 1]; k.push([t, p[1], p[2], p[3], p[4]], [t + 0.45, p[1], p[2], 0, p[4]]); return o; },
+    };
+    objs.push({ g, k });
+    return o;
+  }
+  const ease = u => u <= 0 ? 0 : u >= 1 ? 1 : u * u * (3 - 2 * u);
+  function pose(k, t) {
+    if (t < k[0][0]) return [k[0][1], k[0][2], 0, k[0][4]];
+    for (let i = k.length - 1; i >= 0; i--) {
+      if (t >= k[i][0]) {
+        const a = k[i], b = k[i + 1];
+        if (!b) return [a[1], a[2], a[3], a[4]];
+        const e = ease((t - a[0]) / ((b[0] - a[0]) || 1));
+        return [a[1] + (b[1] - a[1]) * e, a[2] + (b[2] - a[2]) * e, a[3] + (b[3] - a[3]) * e, a[4] + (b[4] - a[4]) * e];
+      }
+    }
+    return [0, 0, 0, 1];
+  }
+
+  // ---- scene header ----------------------------------------------------------
+  const chapters = [
+    [0, 'Goal'], [10, 'Plan'], [22, 'Dispatch'], [36, 'Build'], [48, 'Test'], [60, 'Review'],
+    [74, 'Merge'], [84, 'Release'], [100, 'Failure'], [112, 'Self-repair'], [124, 'People'],
+  ];
+  const sceneLabel = text(stage, 32, 40, 't-scene', '', 'start');
+  updaters.push(t => {
+    let i = 0; chapters.forEach(([s], j) => { if (t >= s) i = j; });
+    sceneLabel.textContent = String(i + 1).padStart(2, '0') + ' · ' + chapters[i][1].toUpperCase();
+  });
+
+  // 1 · Goal (0–10)
+  A(card(120, 54, 'You', 'the operator', 'steel')).at(0.3, 150, 270).out(9.4);
+  A(line([[220, 270], [300, 270]])).at(1.6, 0, 0).out(9.4);
+  A(card(470, 110, 'Build a browser Snake game', 'playable on phone and laptop, live on GitHub Pages', 'hl', 'GOAL')).at(2, 560, 270).out(9.6);
+  A(label('one plain-language goal file is all you write')).at(4.5, 560, 370).out(9.4);
+
+  // 2 · Plan (10–22)
+  A(card(220, 60, 'Planner agent', 'splits the goal', 'steel')).at(10.3, 480, 110).out(21.4);
+  const items = [
+    ['GY-1', 'Board & movement'], ['GY-2', 'Food & growth'], ['GY-3', 'Collisions'],
+    ['GY-4', 'High score'], ['GY-5', 'Publish to Pages'],
+  ];
+  const itemAnims = items.map(([key, name], i) => {
+    const g = card(160, 92, name, 'criteria + tests', '', key);
+    return A(g).at(11.5 + i * 0.9, 120 + i * 180, 300);
+  });
+  A(label('each item: acceptance criteria, the tests that prove them, the files it may touch')).at(16.5, 480, 410).out(21.4);
+  itemAnims.forEach((a, i) => a.to(21, 90, 140 + i * 66, 0.62));
+  A(label('READY QUEUE')).at(21.4, 90, 100).out(35.4);
+
+  // 3 · Dispatch (22–36)
+  const ring = el('g', {});
+  el('circle', { cx: 0, cy: 0, r: 82, class: 'v-ring' }, ring);
+  const tick = el('circle', { cx: 0, cy: -82, r: 9, class: 'v-dot' }, ring);
+  text(ring, 0, -4, 't-title', 'Master loop');
+  text(ring, 0, 16, 't-sub', 'cycles every ~20 s');
+  A(ring).at(22.4, 420, 270).out(35.5);
+  updaters.push(t => {
+    const a = t * Math.PI / 2;
+    tick.setAttribute('cx', (Math.sin(a) * 82).toFixed(1));
+    tick.setAttribute('cy', (-Math.cos(a) * 82).toFixed(1));
+  });
+  A(card(170, 62, 'Pi', 'fast, cheap · normal risk')).at(24, 800, 150).out(35.5);
+  A(card(170, 62, 'Claude', 'strong · risky changes')).at(24.4, 800, 270).out(35.5);
+  A(card(170, 62, 'Codex', 'strong · reworked items')).at(24.8, 800, 390).out(35.5);
+  itemAnims[0].to(26, 655, 150, 0.5);
+  itemAnims[3].to(27.6, 655, 150, 0.5).to(28.6, 655, 205, 0.5);
+  itemAnims[2].to(29.6, 655, 270, 0.5);
+  itemAnims[1].to(31.2, 655, 390, 0.5);
+  A(label('GY-5 waits: it depends on the others')).at(32.5, 200, 470).out(35.5);
+  [1, 2, 3, 4].forEach(i => itemAnims[i].out(35.5));
+
+  // 4 · Build (36–48)
+  const ws = el('g', {});
+  el('rect', { x: -300, y: -150, width: 600, height: 300, rx: 14, class: 'v-bar-bg', opacity: 0.35 }, ws);
+  text(ws, -280, -122, 't-label', 'ISOLATED WORKSPACE · OWN BRANCH', 'start');
+  A(ws).at(36.4, 480, 270).out(47.6);
+  itemAnims[0].to(36.8, 330, 230, 0.9);
+  A(card(170, 60, 'Pi worker', 'writing code', 'steel')).at(37.4, 600, 230).out(47.6);
+  const lease = el('g', {});
+  el('rect', { x: 0, y: 0, width: 320, height: 12, rx: 6, class: 'v-bar-bg' }, lease);
+  const leaseFill = el('rect', { x: 0, y: 0, width: 0, height: 12, rx: 6, class: 'v-bar' }, lease);
+  text(lease, 0, -10, 't-label', 'LEASE · renewed every 30 s, or the work stops', 'start');
+  A(lease).at(38.5, 320, 330).out(47.6);
+  updaters.push(t => { leaseFill.setAttribute('width', (((t - 38.5) % 3 + 3) % 3 / 3 * 320).toFixed(1)); });
+  ['commit', 'commit', 'tests pass locally'].forEach((s, i) => A(label('● ' + s, 't-sub')).at(40.5 + i * 1.6, 380 + i * 110, 385).out(47.6));
+  A(card(220, 48, 'Submitted for checking', '', 'ok')).at(45.2, 480, 455).out(47.6);
+  itemAnims[0].out(47.6);
+
+  // 5 · Test the merged result (48–60)
+  A(card(150, 54, 'main', 'latest', 'steel')).at(48.4, 170, 180).out(59.5);
+  A(card(150, 54, 'GY-1 change', 'the branch', 'hl')).at(48.8, 170, 360).out(59.5);
+  A(line([[250, 180], [400, 255]])).at(50.2, 0, 0).out(59.5);
+  A(line([[250, 360], [400, 290]])).at(50.4, 0, 0).out(59.5);
+  A(card(200, 70, 'Merged result', 'what main would become')).at(51, 500, 270).out(59.5);
+  A(line([[605, 270], [660, 270]])).at(52.2, 0, 0).out(59.5);
+  ['Build', 'Unit tests', 'Criterion proofs'].forEach((s, i) => {
+    const g = el('g', {}); text(g, 0, 0, 't-title ok-text', '✓ ' + s, 'start');
+    A(g).at(53 + i * 1.4, 680, 225 + i * 40).out(59.5);
+  });
+  A(label('run in parallel on Graphyard’s own machine, ~4–5 min')).at(57, 480, 440).out(59.5);
+
+  // 6 · Review (60–74)
+  A(card(250, 64, 'Independent reviewer', 'never the agent that built it', 'steel')).at(60.4, 480, 120).out(73.5);
+  A(line([[420, 155], [300, 270]])).at(63.4, 0, 0).out(73.5);
+  A(line([[540, 155], [660, 270]])).at(63.6, 0, 0).out(73.5);
+  A(card(320, 78, 'Sensitive change', 'auth, data, deploy, CI → review before merge', 'hl')).at(64, 250, 310).out(73.5);
+  A(card(320, 78, 'Normal change', 'merge after tests, review right after')).at(65.6, 710, 310).out(73.5);
+  A(card(360, 62, 'Approver agent', 'signs off scope changes and other decisions', 'ok')).at(68.6, 480, 450).out(73.5);
+
+  // 7 · Merge (74–84)
+  const main = el('g', {});
+  el('line', { x1: 0, y1: 0, x2: 720, y2: 0, class: 'v-main' }, main);
+  [40, 160, 280, 400, 520].forEach(x => el('circle', { cx: x, cy: 0, r: 10, class: 'v-commit' }, main));
+  text(main, 0, -26, 't-label', 'MAIN', 'start');
+  A(main).at(74.4, 120, 280).out(83.5);
+  const nc = el('g', {}); el('circle', { cx: 0, cy: 0, r: 14, class: 'v-commit new' }, nc); text(nc, 0, 40, 't-key', 'GY-1');
+  A(nc).at(77.4, 760, 280).out(83.5);
+  A(card(380, 58, 'Only Graphyard writes main', 'nothing lands with a failed check or open finding', 'steel')).at(79, 480, 420).out(83.5);
+
+  // 8 · Release & verify (84–100)
+  const stops = [['Merged', ''], ['Release candidate', 'batched'], ['UAT + end-to-end', 'real user flows'], ['Production', 'promoted'], ['Verified live', 'on the exact release']];
+  stops.forEach(([t1, t2], i) => {
+    A(card(160, 66, t1, t2, i === 4 ? 'ok' : '')).at(85 + i * 2.6, 110 + i * 185, 270).out(99.5);
+    if (i < 4) A(line([[192 + i * 185, 270], [212 + i * 185, 270]])).at(86.2 + i * 2.6, 0, 0).out(99.5);
+  });
+  A(label('merged is not shipped: an item counts only once production serves it and it is checked there')).at(96.5, 480, 400).out(99.5);
+
+  // 9 · Failure (100–112)
+  A(card(300, 62, 'A check fails on main', 'or in UAT', 'bad')).at(100.4, 480, 130).out(111.5);
+  A(line([[420, 165], [310, 270]], 'bad')).at(102.4, 0, 0).out(111.5);
+  A(line([[540, 165], [650, 270]], 'bad')).at(102.6, 0, 0).out(111.5);
+  A(card(240, 64, 'Revert', 'the change that broke it')).at(103, 290, 310).out(111.5);
+  A(card(240, 64, 'Fix forward', 'a new work item', 'hl', 'GY-6')).at(104.6, 670, 310).out(111.5);
+  A(line([[670, 345], [670, 420], [520, 450]])).at(106.6, 0, 0).out(111.5);
+  A(label('back into the ready queue, built and checked like any other item')).at(107.2, 380, 470).out(111.5);
+
+  // 10 · Self-repair (112–124)
+  A(card(250, 62, 'A step fails 3× in a row', 'the loop notices', 'bad')).at(112.4, 220, 140).out(123.5);
+  const ladder = ['Known failure → the loop applies its fix', 'Unknown → handed to the master agent', 'Graphyard defect → filed as a work item'];
+  ladder.forEach((s, i) => {
+    A(card(470, 54, (i + 1) + '. ' + s, '', i === 0 ? 'ok' : '')).at(114.6 + i * 2.4, 600, 140 + i * 90).out(123.5);
+  });
+  A(label('the aim: nobody fixes things by hand')).at(121, 480, 450).out(123.5);
+
+  // 11 · People decide (124–134)
+  A(label('PEOPLE KEEP THREE DECISIONS', 't-scene')).at(124.3, 480, 100);
+  ['Goals and priorities', 'Spending money, new accounts', 'Credentials for people'].forEach((s, i) => {
+    A(card(270, 72, s, '', 'hl')).at(125.2 + i * 1.3, 190 + i * 290, 230);
+  });
+  A(card(560, 62, 'Everything else: one agent decides, another approves', '', 'steel')).at(130, 480, 380);
+
+  // ---- captions --------------------------------------------------------------
+  const captions = [
+    [0, 10, 'You write one goal in plain language: what to build, for whom, and where it ships.'],
+    [10, 16, 'A planner agent splits the goal into small work items.'],
+    [16, 22, 'Each item has acceptance criteria, the tests that prove them, and the files it may touch.'],
+    [22, 29, 'The master loop runs every ~20 seconds and hands ready items to worker agents.'],
+    [29, 36, 'Normal-risk items go to fast, cheap Pi first; risky or reworked ones go to stronger models.'],
+    [36, 42, 'Each worker builds in its own isolated workspace and branch.'],
+    [42, 48, 'It holds a lease it must keep renewing; if it stops, Graphyard takes the item back.'],
+    [48, 54, 'Graphyard tests the change as it would land on the latest main, not the branch alone.'],
+    [54, 60, 'Build, unit tests and every criterion’s proof must pass.'],
+    [60, 66, 'A separate agent reviews the change. It never reviews its own work.'],
+    [66, 74, 'Sensitive changes are reviewed before merge, normal ones right after. Decisions need an approver agent.'],
+    [74, 84, 'Graphyard itself writes main. Nothing merges with a failed check or an open finding.'],
+    [84, 92, 'Merged changes ride a release candidate through UAT and the end-to-end suite.'],
+    [92, 100, 'Then they are promoted to production and checked on the exact release serving them.'],
+    [100, 106, 'If something fails, Graphyard reverts the change or files a fix as a new item.'],
+    [106, 112, 'The fix goes through the same path: build, test, review, merge, verify.'],
+    [112, 118, 'The loop watches itself. A step that fails three times in a row is stuck.'],
+    [118, 124, 'It applies a known fix, hands it to the master agent, or files the defect as a work item.'],
+    [124, 134, 'People keep three decisions. Everything else is decided by one agent and approved by another.'],
+  ];
+  const capEl = document.getElementById('caption');
+
+  // ---- player ----------------------------------------------------------------
+  const playBtn = document.getElementById('play'), scrub = document.getElementById('scrub');
+  const clock = document.getElementById('clock'), poster = document.getElementById('poster');
+  const chapWrap = document.getElementById('chapters');
+  const chapBtns = chapters.map(([s, name], i) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.textContent = (i + 1) + ' ' + name;
+    b.addEventListener('click', () => { seek(s + 0.01); if (!playing) render(); });
+    chapWrap.appendChild(b);
+    return b;
+  });
+  const fmt = s => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
+  let t = 0, playing = false, last = 0, lastCap = '';
+
+  function render() {
+    for (const o of objs) {
+      const p = pose(o.k, t);
+      if (p[2] < 0.01) { o.g.style.display = 'none'; continue; }
+      o.g.style.display = '';
+      o.g.setAttribute('transform', 'translate(' + p[0].toFixed(1) + ' ' + p[1].toFixed(1) + ') scale(' + p[3].toFixed(3) + ')');
+      o.g.style.opacity = p[2].toFixed(3);
+    }
+    for (const u of updaters) u(t);
+    const cap = captions.find(([a, b]) => t >= a && t < b) || captions[captions.length - 1];
+    if (cap[2] !== lastCap) { capEl.textContent = cap[2]; lastCap = cap[2]; }
+    scrub.value = t.toFixed(1);
+    clock.textContent = fmt(t) + ' / ' + fmt(DURATION);
+    let ci = 0; chapters.forEach(([s], j) => { if (t >= s) ci = j; });
+    chapBtns.forEach((b, j) => b.classList.toggle('on', j === ci));
+  }
+  function frame(now) {
+    if (!playing) return;
+    t = Math.min(DURATION, t + (now - last) / 1000);
+    last = now;
+    render();
+    if (t >= DURATION) { pause(); return; }
+    requestAnimationFrame(frame);
+  }
+  function play() {
+    if (t >= DURATION) t = 0;
+    playing = true; poster.hidden = true; playBtn.textContent = 'Pause';
+    last = performance.now(); requestAnimationFrame(frame);
+  }
+  function pause() { playing = false; playBtn.textContent = t >= DURATION ? 'Replay' : 'Play'; }
+  function seek(s) { t = Math.max(0, Math.min(DURATION, s)); poster.hidden = true; if (playing) last = performance.now(); render(); }
+
+  playBtn.addEventListener('click', () => (playing ? pause() : play()));
+  poster.addEventListener('click', play);
+  scrub.addEventListener('input', () => seek(parseFloat(scrub.value)));
+  document.addEventListener('keydown', e => {
+    if (e.target === scrub || e.target.closest('.chapters')) return;
+    if (e.code === 'Space' && e.target.closest && e.target.closest('.player')) { e.preventDefault(); playing ? pause() : play(); }
+  });
+
+  t = 6; render(); t = 0; scrub.value = 0; clock.textContent = '0:00 / ' + fmt(DURATION);
+})();
+</script>

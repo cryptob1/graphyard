@@ -2,6 +2,8 @@
 
 Graphyard is a control plane that runs a team of AI coding agents on a repository. Its goal is software that ships itself: agents build, verify, review and release, while the human keeps three decisions: goals and priorities, spending money or opening accounts, and issuing credentials to people.
 
+[![How Graphyard works: a two-minute walkthrough](docs/diagrams/how-graphyard-works.gif)](docs/diagrams/how-graphyard-works.mp4)
+
 ## Start here: setup and docs
 
 One command, then [setup checklist](docs/setup-from-zero.md):
@@ -19,9 +21,9 @@ graphyard up --agent --goal GOAL.md
 1. You give Graphyard a goal in a plain-language file.
 2. A planner agent turns the goal into small work items with acceptance criteria.
 3. A worker agent takes over: the worker builds each work item on its own branch.
-4. Graphyard checks the merged tree: build, tests and the change's E2E cases against its preview, before the merge to main itself.
-5. An independent agent reviews, before the merge for sensitive changes and after the merge for everything else, by default.
-6. About every ten merges a release candidate goes to a test environment for UAT + E2E (user acceptance, end-to-end suite).
+4. Graphyard checks the merged tree: build, tests and the change's E2E cases against its preview, before the merge to main.
+5. An independent agent reviews before the merge for sensitive changes, after it for everything else.
+6. About every ten merges a release candidate goes to a test environment for UAT + E2E.
 7. A passing candidate is promoted to production and checked there: production verified.
 8. A failure anywhere is reverted or fixed by a new work item.
 
