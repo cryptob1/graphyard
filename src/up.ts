@@ -19,6 +19,7 @@ import { installIdFor } from './install/types.js';
 import { installDirectory, readInstallRecord } from './install/secrets.js';
 import { ensureDeployKey, ensureMainWriteProtection } from './install/deploy-key.js';
 import type { GitHubCli } from './install/github.js';
+import type { Transport } from './install/transport.js';
 import { herdrAttachCommand, installHerdrInstance, type HerdrInstance } from './master/herdr.js';
 import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, HerdrSetupFailure, herdrSync, hostHerdrDeps, prepareHerdrInstance, withLocalBin, type HerdrHostDeps } from './herdr-host.js';
 import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin } from './repository-setup.js';
@@ -226,6 +227,22 @@ export interface UpDependencies {
    * Defaults to `master merger MERGER` with the admin credential.
    */
   setMerger?(adminToken: string, requestId: string, merger: MergerMode): Promise<void>;
+  /**
+   * GY-1851: the HTTP status the control plane gave each credential this install recorded (the
+   * coordinator, operator-agent and approver) at a status read; one that drew no answer is left out.
+   * HOST_INSTALL is the `install --plan` argv of a self-contained host install, whose identities live
+   * on the host (null otherwise). Absent, nothing is judged stale; the real dependencies read
+   * recordedCredentialAnswers here, or hostCredentialAnswers through the install's host transport.
+   */
+  credentialAnswers?(adminToken: string | null, hostInstall?: string[] | null): Promise<{ identity: string; status: number; listed?: boolean | null }[]>;
+  /**
+   * GY-1851: stop the master loop and wait until its process has exited, so nothing holds the old
+   * cursor in memory to write it again; answers the systemd unit it stopped, or null for a loop run
+   * outside one (or none running). Defaults to stopRecordedLoop.
+   */
+  stopLoop?(): Promise<{ unit: string | null }>;
+  /** GY-1851: start the stopped unit again; defaults to `systemctl --user start UNIT`. */
+  startUnit?(unit: string): Promise<void>;
   pollMs?: number;
   /** How long a step waits on a person before the run stops (resumable); Infinity interactively. */
   humanWaitMs?: number;
@@ -313,6 +330,13 @@ interface UpState {
   herdrInstance?: boolean;
   /** GY-1511: why Herdr is left out (noHerdr): the named failure of the step that could not set it up. */
   herdrFailure?: string | null;
+  /**
+   * GY-1851: the credentials the control plane refused (401), so it serves a fresh database: until the
+   * master loop runs again, the install re-issues every credential and the loop starts a fresh cursor.
+   */
+  reissue?: string[] | null;
+  /** GY-1851: the host install that restarted the loop on a fresh cursor (`install --fresh-cursor`), and the old cursor's archive. */
+  hostCursor?: { host: string; archived: { file: string; cycle: number } | null } | null;
 }
 export const upStateFile = (root: string) => resolve(root, '.graphyard/up.json');
 /** GY-1833: `up --merger control-plane` over a recorded github run migrates the install; the reverse starts over. */
@@ -367,6 +391,11 @@ function installSignIn(stdout: string) {
  */
 async function rememberSignIn(root: string, state: UpState, stdout: string) {
   const { claim, operatorTokenFile, identitiesHost } = installSignIn(stdout);
+  const fresh = parseJson(stdout)?.freshCursor;
+  if (state.reissue?.length && typeof fresh?.host === 'string') {
+    state.hostCursor = { host: fresh.host, archived: typeof fresh.archived?.file === 'string' ? { file: fresh.archived.file, cycle: Number(fresh.archived.cycle) || 0 } : null };
+    await writeState(root, state);
+  }
   if ((operatorTokenFile && operatorTokenFile !== state.operatorTokenFile) || (identitiesHost && identitiesHost !== state.identitiesHost)) {
     if (operatorTokenFile) state.operatorTokenFile = operatorTokenFile;
     if (identitiesHost) state.identitiesHost = identitiesHost;
@@ -423,6 +452,91 @@ const childStop = (step: string, args: string[], result: { code: number; stdout:
   new ChildStop(childFailure(step, args, result, more), exitCode, args.map(redactLine), childFirstStderr(result));
 
 export const signInAt = (link: string, base: string) => { const at = link.indexOf('#'); return at < 0 ? link : `${base.replace(/\/+$/, '')}/${link.slice(at)}`; };
+/** The steps a reinstall onto a fresh database runs again (GY-1851): the install, master init, the merger, the agent identities, the onboarding item, the accounts, the loop and the goal. */
+const reissueSteps: readonly UpStep[] = ['control-plane', 'host-supervisor', 'merger-setting', 'master-autonomy', 'onboarding', 'accounts', 'master-loop', 'goal'];
+const masterJson = (root: string) => readFile(resolve(root, '.graphyard/master.json'), 'utf8').then(parseJson, () => null);
+/**
+ * GY-1851: GET /api/status at SERVER with each credential master.json records (the coordinator's,
+ * the operator-agent's and the approver's), answering the HTTP status of each. A credential with no
+ * readable file, or a request that drew no answer, is left out: only the plane's answer judges it.
+ * A refused agent identity carries `listed`: true when the plane's operator-agent listing (read with
+ * ADMIN) still holds it (revoked, say: its database row stands, so the database is not fresh), false
+ * when the listing confirms it absent, and null when no listing was read (no ADMIN, or the request
+ * failed): its absence is then unknown. CONFIG is master.json and READ reads a file it names.
+ */
+async function credentialAnswersFrom(config: any, read: (file: string) => Promise<string>, server: string, fetcher: typeof fetch, admin: string | null) {
+  const recorded = [['coordinator', null, config?.credentialFile], ['operator-agent', config?.operatorAgent?.id, config?.operatorAgent?.credentialFile], ['approver', config?.approver?.id, config?.approver?.credentialFile]] as const;
+  const call = (path: string, token: string) => fetcher(`${server.replace(/\/+$/, '')}/api/${path}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000) });
+  const answers: { identity: string; status: number; listed?: boolean | null }[] = [];
+  let listing: unknown[] | null | undefined;
+  for (const [identity, id, file] of recorded) {
+    if (typeof file !== 'string') continue;
+    const token = (await read(file).catch(() => '')).trim();
+    if (token.length < 32) continue;
+    const status = await call('status', token).then(response => response.status, () => null);
+    if (status === null) continue;
+    if (status === 401 && typeof id === 'string') {
+      if (admin) listing ??= await call('operator-agents', admin).then(async response => response.ok ? await response.json().catch(() => null) as unknown[] | null : null, () => null);
+      answers.push({ identity, status, listed: Array.isArray(listing) ? listing.some((entry: any) => entry?.id === id) : null });
+      continue;
+    }
+    answers.push({ identity, status });
+  }
+  return answers;
+}
+/** GY-1851: credentialAnswersFrom over this checkout's master.json and the credential files it names here. */
+export async function recordedCredentialAnswers(root: string, server: string, fetcher: typeof fetch = fetch, admin: string | null = null) {
+  return credentialAnswersFrom(await masterJson(root), file => readFile(resolve(file), 'utf8'), server, fetcher, admin);
+}
+/**
+ * GY-1851: a self-contained host's identities, judged where they were provisioned: install runs
+ * master init and master autonomy in the host's checkout (CHECKOUT), so its master.json and the
+ * credential files it names are read there through the install's transport, and ADMIN is the admin
+ * credential the host keeps, for the confirming operator-agent listing. A master.json the host
+ * does not answer with fails, so up says it could not judge the host rather than judging nothing.
+ */
+export async function hostCredentialAnswers(remote: Transport, checkout: string, server: string, fetcher: typeof fetch = fetch, admin: string | null = null) {
+  const cat = async (file: string) => { const result = await remote.exec('cat', [file], { allowFailure: true, timeout: 60_000 }); return result.code === 0 ? result.stdout : ''; };
+  const config = parseJson(await cat(`${checkout}/.graphyard/master.json`));
+  if (!config || typeof config !== 'object') throw new Error(`${checkout}/.graphyard/master.json on ${remote.description} could not be read`);
+  return credentialAnswersFrom(config, cat, server, fetcher, admin);
+}
+/** GY-1851: the master loop's cursor file, found from the coordinator credential master.json records. */
+const recordedCursor = async (root: string) => { const file = (await masterJson(root))?.credentialFile; return typeof file === 'string' ? { credentialFile: resolve(file) } : null; };
+export async function archiveRecordedCursor(root: string) {
+  const config = await recordedCursor(root);
+  return config ? (await import('./daemon/state.js')).archiveDaemonCursor(config) : null;
+}
+const recordedCursorExists = async (root: string) => { const config = await recordedCursor(root); return !!config && existsSync((await import('./daemon/state.js')).daemonStatePath(config as any)); };
+const processAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error: any) { return error?.code === 'EPERM'; } };
+/**
+ * GY-1851: stop this install's master loop and wait for its process to exit: its systemd unit is
+ * stopped (systemd waits out the loop's shutdown write), and a loop the cursor's lock names on this
+ * host outside the unit is sent SIGTERM and waited on (SIGKILL past the unit's stop bound). Answers
+ * the unit stopped, to start again once the cursor is archived.
+ */
+export async function stopRecordedLoop(root: string): Promise<{ unit: string | null }> {
+  const { loadStoredMasterConfig } = await import('./master.js');
+  const { supervisingUnit } = await import('./master/loop-restart.js');
+  const { loopStopTimeoutSeconds } = await import('./supervisor.js');
+  const { defaultChildRun } = await import('./child-runner.js');
+  const config = await loadStoredMasterConfig(root);
+  const unit = (await supervisingUnit(root, config))?.unit ?? null;
+  if (unit) await defaultChildRun('systemctl', ['--user', 'stop', unit], { timeoutMs: (loopStopTimeoutSeconds + 60) * 1000 });
+  const cursor = await recordedCursor(root);
+  const lock = cursor ? parseJson(await readFile((await import('./daemon/state.js')).daemonStatePath(cursor as any), 'utf8').catch(() => ''))?.lock : null;
+  if (lock && lock.host !== config.hostId && Date.now() - Date.parse(lock.heartbeatAt) < 3 * config.run.intervalSeconds * 1000) throw new Error(`the master loop runs on ${lock.host} (pid ${lock.pid}); stop it there before its cursor is archived`);
+  if (lock && lock.host === config.hostId && Number.isInteger(lock.pid) && lock.pid !== process.pid && processAlive(lock.pid)) {
+    process.kill(lock.pid, 'SIGTERM');
+    const deadline = Date.now() + loopStopTimeoutSeconds * 1000;
+    while (processAlive(lock.pid)) {
+      if (Date.now() > deadline) { try { process.kill(lock.pid, 'SIGKILL'); } catch { /* gone */ } }
+      await new Promise(done => setTimeout(done, 200));
+    }
+  }
+  return { unit };
+}
+
 /** Both of the master's agent identities are recorded in master.json and their credential files are readable. */
 async function provisioned(root: string) {
   const config = await readFile(resolve(root, '.graphyard/master.json'), 'utf8').then(parseJson, () => null);
@@ -546,6 +660,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   // Supervised installs register no reviewer App (GY-1501): the operator is the reviewer.
   // Control-plane merger (GY-1552) registers no App at all: install --no-github-app, no --reviewer.
   const installArgs = (mode: '--plan' | '--apply') => ['install', '--provider', request.provider, '--repo', request.repository, ...(controlPlaneMerger ? ['--no-github-app'] : supervised ? [] : ['--reviewer', request.reviewer]), mode, ...(state.noHerdr ? ['--no-herdr'] : state.herdrInstance ? ['--herdr-instance'] : []),
+    // GY-1851: a re-issue restarts a host install's loop on a fresh cursor where it runs; other installs ignore it.
+    ...(mode === '--apply' && state.reissue?.length ? ['--fresh-cursor'] : []),
     ...([['--confirm-price', passed.confirmPrice], ['--max-monthly', passed.maxMonthly], ['--ssh-key', passed.sshKey], ['--ssh-host', passed.sshHost], ['--ssh-user', passed.sshUser]] as const).flatMap(([flag, value]) => value ? [flag, value] : []),
     ...(controlPlaneMerger ? [] : (request.reuseApps ?? []).flatMap(slug => ['--reuse-app', slug]))];
   const rerun = () => `graphyard up --repo ${request.repository} --provider ${request.provider}${controlPlaneMerger ? ' --merger control-plane' : supervised ? '' : ' --merger github'}${request.agent ? ' --agent' : ''}`;
@@ -718,6 +834,33 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         deps.emit({ kind: 'note', text: 'The App page is still waiting for a person; serving it again' });
       }
     });
+    // GY-1851: an install whose recorded credentials the control plane refuses (401) is a fresh
+    // database behind a kept install directory: a new installation. Its credentials are re-issued
+    // through the install, master init and master autonomy, and the loop starts a fresh cursor.
+    // An identity the plane still lists (revoked, say) is no fresh database, and is left to master autonomy's own refusal;
+    // a refused identity whose absence no listing confirmed leaves the state untouched, so a later run judges it again.
+    if (state.completed.includes('control-plane') && !state.reissue?.length && deps.credentialAnswers) {
+      // A self-contained host's identities live on the host, with the admin credential: they are judged there (hostCredentialAnswers).
+      const host = state.identitiesHost ?? null;
+      const admin = host ? null : await deps.operatorToken?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
+      const answers = await deps.credentialAnswers(admin, host ? installArgs('--plan') : null).catch((error: any) => {
+        deps.emit({ kind: 'note', text: `The recorded credentials could not be checked against the control plane (${String(error?.message ?? error).split('\n')[0].slice(0, 300)}), so nothing is judged stale on this run.` });
+        return [];
+      });
+      const refused = answers.filter(answer => answer.status === 401).map(answer => answer.identity);
+      const listed = answers.filter(answer => answer.status === 401 && answer.listed === true).map(answer => answer.identity);
+      const unknown = answers.filter(answer => answer.status === 401 && answer.listed === null).map(answer => answer.identity);
+      if (listed.length) deps.emit({ kind: 'note', text: `The control plane refused the recorded ${listed.join(', ')} credential${listed.length > 1 ? 's' : ''} (401) but still lists the identit${listed.length > 1 ? 'ies' : 'y'}: its database is not fresh (a revoked or rotated identity), so nothing is re-issued; restore it through the operator-agent API or choose another identity in .graphyard/master.json.` });
+      else if (unknown.length) deps.emit({ kind: 'note', text: `The control plane refused the recorded ${unknown.join(', ')} credential${unknown.length > 1 ? 's' : ''} (401), but its operator-agent listing could not be read (${host ? `the admin credential on ${host} could not be read, or GET /api/operator-agents failed` : admin ? 'GET /api/operator-agents failed' : "the operator's admin credential is not on this machine"}), so nothing confirms a fresh database and nothing is re-issued; rerun graphyard up once the listing answers.` });
+      else if (refused.length) {
+        state.reissue = refused;
+        state.completed = state.completed.filter(name => !reissueSteps.includes(name));
+        // The onboarding item and the goal lived in the old database: they are filed again on the fresh one.
+        state.onboardingWork = null; state.onboardingRequest = null; state.goal = null; state.goalRequest = null; state.hostCursor = null;
+        await writeState(deps.root, state);
+        deps.emit({ kind: 'note', text: `The control plane refused the recorded ${refused.join(', ')} credential${refused.length > 1 ? 's' : ''} (401): it serves a fresh database, so this run re-issues the coordinator, operator-agent and approver credentials and starts the master loop on a fresh cursor, archiving the old one beside itself.` });
+      }
+    }
     const installedBefore = state.completed.includes('control-plane');
     await controlPlane();
     await resolveSetupUrl();
@@ -760,7 +903,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     // A self-contained host's loop and Herdr run there: its install's control-plane step, once done,
     // never runs again, so `install --herdr-only` sets Herdr up there on every run, its own instance too.
     if (remoteLoop) {
-      const args = [...installArgs('--apply'), '--herdr-only'].filter(arg => arg !== '--no-herdr' && arg !== '--herdr-instance');
+      const args = [...installArgs('--apply'), '--herdr-only'].filter(arg => arg !== '--no-herdr' && arg !== '--herdr-instance' && arg !== '--fresh-cursor');
       const result = await deps.cli(args);
       const output = parseJson(result.stdout);
       if (typeof output?.herdr?.attach === 'string') {
@@ -857,7 +1000,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       if (state.identitiesHost) return `the master's agent identities were provisioned on ${state.identitiesHost}, where its loop runs`;
       const admin = await deps.operatorToken?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
       // An install whose operator already ran the command keeps those identities; the admin credential only refreshes them.
-      if (!admin && await provisioned(deps.root)) return 'the master\'s operator-agent and approver identities were already provisioned';
+      // A re-issue (GY-1851) never keeps the files the fresh database refused.
+      if (!admin && !state.reissue?.length && await provisioned(deps.root)) return 'the master\'s operator-agent and approver identities were already provisioned';
       if (!admin) throw new UpStop(`master-autonomy: the operator's admin credential is not on this machine${state.operatorTokenFile ? ` (${state.operatorTokenFile} is unreadable)` : ''}, so the master's agent identities cannot be provisioned; pipe it to graphyard master autonomy --admin-token-stdin --apply here, then rerun ${rerun()}`, upExitCodes.prerequisite);
       await run('master-autonomy', ['master', 'autonomy', '--admin-token-stdin', '--apply', '--harness', request.master], { stdin: admin });
       return 'the master creates, releases and unblocks work with its own operator-agent identity';
@@ -901,7 +1045,25 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
 
     await step('master-loop', async () => {
       await cleanCli('master-loop');
-      if (!(await checklist()).find(item => item.id === 'master-loop')?.done) await run('master-loop', ['master', 'restart']);
+      let fresh: string | undefined;
+      if (state.reissue?.length && state.identitiesHost) {
+        // GY-1851: a host install's loop runs on the host, never here: `install --fresh-cursor` stopped it
+        // there, archived its cursor and started it again, so nothing is stopped or started on this machine.
+        if (!state.hostCursor) throw new UpStop(`master-loop: the install on ${state.identitiesHost} reported no fresh cursor for its master loop, so the loop there may still run on the old database's cursor; rerun ${rerun()}`, upExitCodes.failed);
+        fresh = `the loop on ${state.hostCursor.host} started a fresh cursor${state.hostCursor.archived ? `; the old one (cycle ${state.hostCursor.archived.cycle}) is archived at ${state.hostCursor.archived.file}` : ''}`;
+        deps.emit({ kind: 'note', text: `Re-issued the coordinator, operator-agent and approver credentials for the fresh database; ${fresh}.` });
+      } else if (state.reissue?.length) {
+        // GY-1851: stop, archive, start, in that order: a running loop holds the old cursor in memory
+        // and writes it again as it stops, so the cursor is set aside (never deleted) only once the
+        // loop has exited, and the loop starts again reading no cursor at all.
+        const stopped = await (deps.stopLoop ?? (() => stopRecordedLoop(deps.root)))().catch((error: any) => { throw new UpStop(`master-loop: stopping the master loop before archiving its cursor failed: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun ${rerun()}`, upExitCodes.failed); });
+        const archived = await archiveRecordedCursor(deps.root);
+        if (await recordedCursorExists(deps.root)) throw new UpStop(`master-loop: the master loop's cursor was written again after the loop stopped, so a loop still runs on the old database's cursor; stop it, then rerun ${rerun()}`, upExitCodes.failed);
+        if (stopped.unit) await (deps.startUnit ?? (async (unit: string) => { await (await import('./child-runner.js')).defaultChildRun('systemctl', ['--user', 'start', unit], { timeoutMs: 120_000 }); }))(stopped.unit);
+        else await run('master-loop', ['master', 'restart']);
+        fresh = archived ? `the loop started a fresh cursor; the old one (cycle ${archived.cycle}) is archived at ${archived.file}` : 'the loop started a fresh cursor';
+        deps.emit({ kind: 'note', text: `Re-issued the coordinator, operator-agent and approver credentials for the fresh database; ${fresh}.` });
+      } else if (!(await checklist()).find(item => item.id === 'master-loop')?.done) await run('master-loop', ['master', 'restart']);
       // A loop that refuses to run is a failed setup step naming its cause, never a wait that stalls.
       const refused = async () => {
         const reason = await deps.loopRefusal?.();
@@ -909,6 +1071,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       };
       await waitGreen(['master-loop'], false, refused);
       await refused();
+      if (state.reissue?.length) { state.reissue = null; state.hostCursor = null; return fresh; }
     });
 
     await waitGreen(last.map(item => item.id), true);
@@ -1580,6 +1743,16 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
       });
       child.stdin.end(options.stdin ?? '');
     }),
+    credentialAnswers: async (admin, hostInstall) => {
+      const url = await serverUrl();
+      if (!url) return [];
+      if (!hostInstall) return recordedCredentialAnswers(root, url, fetch, admin);
+      // GY-1851: the host install's own session reaches the host and reads back the admin credential it keeps there.
+      const [{ installRequestFromArgs, prepareInstall }, { hostRemote }] = await Promise.all([import('./install/index.js'), import('./install/host.js')]);
+      const session = await prepareInstall(root, installRequestFromArgs(hostInstall.slice(1)).request, { cliPath, log: () => {} }, 'plan');
+      const adminId = session.principals.find(principal => principal.role === 'admin')?.id;
+      return hostCredentialAnswers(await hostRemote(session.context), session.context.host!.layout.checkout, url, fetch, adminId ? session.tokens.get(adminId) ?? null : null);
+    },
     status: async () => {
       const url = await serverUrl(), token = await masterToken();
       return url && token ? planeRequest(url, token)('status') : null;
