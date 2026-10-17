@@ -11,6 +11,7 @@ import { sessionName } from './session-name.js';
 import { smokeRegistryAccount } from './runner/roles.js';
 import type { SmokeResult } from './runner/pi.js';
 import { accountIneligibility, deriveAccountPlan, exhaustedTwin, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, smokeFailureDue, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
+import { exhaustionNoticeMaxLength, exhaustionTailLines, type ExhaustionSignal } from './model/capacity.js';
 
 /**
  * The executor's side of the agent registry (GY-91).
@@ -69,6 +70,36 @@ export const unknownRegistrySession = (error: unknown) => error instanceof Fleet
 export const roleAtCapacity = (reason: string) => /^role \S+ is at its concurrency limit\b/.test(reason);
 /** The refusal's reason when `error` is a launch refused for its role's capacity, else null. (A tag, not a subclass: fleet.ts and master.ts import each other.) */
 export const capacityRefusal = (error: unknown): string | null => { const tag = error instanceof Error ? (error as Error & { roleAtCapacity?: unknown }).roleAtCapacity : null; return typeof tag === 'string' ? tag : null; };
+
+/** The notice of Claude Code's out-of-usage-credits screen, wherever it stands on its line (GY-1889). */
+const outOfCreditsNotice = /\bout of usage credits\b/i;
+/** The runtime's own hint beneath that notice (`Run /usage-credits … /model to switch models`): the pair is the screen, so its first line alone — in a transcript, a summary or a report about the screen — is not one. */
+const outOfCreditsHint = /\brun\s+\/usage-credits\b/i;
+/**
+ * Claude Code's out-of-usage-credits screen (GY-1889). With the account's credits spent, Claude
+ * Code stops on its own two lines — `You're out of usage credits. Run /usage-credits to keep
+ * using Fable 5.1 or /model to switch models.` — and waits for a person nobody will send, so the
+ * session never acknowledges its request: the loop read it as never started, counted the attempt
+ * against the request, and relaunched onto the same spent account. The screen is matched as the
+ * pair the runtime draws — the notice, and its own slash-command hint beneath it (the lines are
+ * joined, as a narrow pane wraps the sentence across them) — on the tail the limit notices scan
+ * (`exhaustionTailLines`): what the session scrolled away is worked past, not stopped on. The
+ * screen names no reset, so the account it spends is held for the bounded unknown-reset window
+ * (`recordObservedExhaustion`). A declared function on purpose: runtime-prompt.ts's
+ * `detectRuntimeExhaustion` reads it through this module, and fleet.ts and master.ts import each
+ * other, so only a hoisted declaration is safe at load in either order.
+ */
+export function outOfCreditsScreen(output: string): ExhaustionSignal | null {
+  const lines = output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n')
+    .map(line => line.replace(/[│┃|]\s*$/, '').trim().replace(/\s{2,}/g, ' ')).filter(Boolean).slice(-exhaustionTailLines);
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const line = lines[index].replace(/^[^A-Za-z0-9]+/, '');
+    if (line.length > exhaustionNoticeMaxLength || !outOfCreditsNotice.test(line)) continue;
+    if (!outOfCreditsHint.test(`${line} ${lines.slice(index + 1, index + 4).join(' ')}`)) continue;
+    return { reason: line.slice(0, 300), resetsAt: null };
+  }
+  return null;
+}
 
 /**
  * How long a registry session is left alone after its selection before its runtime session is

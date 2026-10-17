@@ -1,5 +1,6 @@
 // Concern: what a blocked or stopped session's runtime shows — its prompts and its provider limit notices — and the loop's answer.
 import { exhaustionNoticeLabelWords, exhaustionNoticeMaxLength, exhaustionTailLines, parseResetTime, type ExhaustionSignal } from '../model/capacity.js';
+import { outOfCreditsScreen } from '../fleet.js';
 /**
  * A runtime's own safety prompt, read off a blocked session's screen (GY-197).
  *
@@ -221,6 +222,10 @@ export function detectRuntimeExhaustion(output: string, runtime: string | null |
   // A session blocked on Claude's usage-limit menu is spent, whatever stands around the notice (GY-1566).
   const menu = classifyRuntimePrompt(output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n').slice(-exhaustionTailLines).join('\n'), now);
   if (menu?.kind === 'usage-limit' && menu.exhaustion) return menu.exhaustion;
+  // So is one stopped on Claude Code's out-of-usage-credits screen (GY-1889): the runtime's own pair,
+  // held for the bounded unknown-reset window, since the screen names no reset to wait for.
+  const credits = outOfCreditsScreen(output);
+  if (credits) return credits;
   const notices = runtimeLimitNotices(runtime);
   const lines = output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n').map(line => line.replace(/[│┃|]\s*$/, '').trim().replace(/\s{2,}/g, ' ')).filter(Boolean).slice(-exhaustionTailLines);
   for (let index = lines.length - 1; index >= 0; index--) {

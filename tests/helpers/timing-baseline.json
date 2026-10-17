@@ -735,6 +735,7 @@
     "tests/session-liveness-launch-window.test.ts": 3365,
     "tests/session-liveness-model.test.ts": 3250,
     "tests/session-liveness.test.ts": 2811,
+    "tests/session-out-of-credits.test.ts": 1500,
     "tests/session-reconcile.test.ts": 1396,
     "tests/setup-checks-consistent.test.ts": 1400,
     "tests/setup-guide-no-operator-token.test.ts": 300,
