@@ -865,7 +865,7 @@ class EventLoopLag {
   /** Close the window and forget its samples. */
   stop() { if (this.timer) clearInterval(this.timer); this.timer = null; this.samples = []; }
 }
-/** The longest reconciliation goes between full evaluations: `GRAPHYARD_RECONCILE_FULL_MS`, 2000..300000 ms, default 10000 (GY-1124). */
+/** The floor on how long reconciliation goes between full evaluations (GY-1867 stretches it past a longer full pass): `GRAPHYARD_RECONCILE_FULL_MS`, 2000..300000 ms, default 10000 (GY-1124). */
 export function configuredReconcileFullMs(value = process.env.GRAPHYARD_RECONCILE_FULL_MS, fallback = 10_000): number {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= 2_000 && parsed <= 300_000 ? parsed : fallback;
@@ -1172,12 +1172,15 @@ export class Engine {
    * Let a lease renewal run before reconciliation's next evaluation or write (GY-1290). Evaluation is
    * CPU work on the one event loop every request shares: a renewal's every query round trip would
    * otherwise resume only after the evaluation then running, so a renewal of a few round trips waited
-   * through as many evaluations. Reconciliation first lets pending I/O — an arriving request
-   * included — run, then waits until no renewal is in flight, so a renewal waits on at most the one
-   * evaluation it arrived during.
+   * through as many evaluations. Reconciliation first lets the event loop run — a due timer, an
+   * arriving request included — then waits until no renewal is in flight, so a renewal waits on at
+   * most the one evaluation it arrived during.
    */
   private async yieldToRenewals() {
-    await new Promise(resolve => setImmediate(resolve));
+    // A timer's yield (GY-1867), not `setImmediate`: a chain of immediate continuations keeps the
+    // loop in the check phase, so timers scheduled while a long evaluation runs — the event-loop
+    // sampler's included — fire only once it ends, and a tick reads as starved when it was itself.
+    await new Promise(resolve => setTimeout(resolve, 0));
     if (!this.renewing) return;
     let timer: NodeJS.Timeout | undefined;
     await new Promise<void>(resolve => { this.renewalsDone.push(resolve); timer = setTimeout(resolve, this.reconcileYieldMs); });
@@ -2832,9 +2835,23 @@ export class Engine {
   /**
    * How long reconciliation may go without evaluating every live item (GY-1124). Between full
    * passes a pass evaluates only the items whose inputs it can see moving; this bound catches up
-   * what only the clock moves — an observation going stale, a settle window closing.
+   * what only the clock moves — an observation going stale, a settle window closing. It is the
+   * floor: the next full pass is due no sooner than `fullEvaluationIntervalMs` (GY-1867).
    */
   reconcileFullEvaluationMs = configuredReconcileFullMs();
+  /** The measured duration (ms, rounded) of the last full pass, recorded when that pass ends (GY-1867). */
+  private reconcileFullMs = 0;
+  /**
+   * When the next full pass is due, measured from when the last one began (GY-1867): the configured
+   * interval stretched past a pass that ran longer than a third of it — `max(I, 3 × its duration)` —
+   * so a full pass is never due again the moment it ends and full passes take at most about a
+   * quarter of the server's time whatever the fleet grows to; the configured value stays the floor.
+   * An interval of 0 — unreachable through `GRAPHYARD_RECONCILE_FULL_MS`, which clamps to
+   * 2000..300000 — keeps the meaning the stress suites give it: the clock brings every pass.
+   */
+  private fullEvaluationIntervalMs() {
+    return this.reconcileFullEvaluationMs > 0 ? Math.max(this.reconcileFullEvaluationMs, 3 * this.reconcileFullMs) : 0;
+  }
   /**
    * The fleet as the last pass left it (GY-1124): every item's document — a settled delivery's
    * work-index summary — with the row version (`xmin`) it was read at, whether the index called
@@ -2926,9 +2943,11 @@ export class Engine {
    * did: every live item when another item's fleet face changed (anything beyond a lease
    * renewal: stage, queue, dependencies, resources, candidate…) or the engine's merge
    * configuration did; an item whose lease has lapsed or whose standing escalations read the
-   * ledger; and the items an earlier pass deferred. Every
-   * `reconcileFullEvaluationMs` the pass evaluates every live item, for the inputs only the
-   * clock moves. A pass after a heartbeat therefore reads one document and evaluates one item. A
+   * ledger; and the items an earlier pass deferred. No sooner than
+   * `max(reconcileFullEvaluationMs, 3 × the last full pass's duration)` (GY-1867) after the last full
+   * pass began, the pass evaluates every live item, for the inputs only the clock moves, so a full
+   * pass is never due again the moment it ends. A pass after a heartbeat therefore reads one document
+   * and evaluates one item. A
    * face the pass's own writes moved does not make the next pass full (GY-1777): the next pass
    * evaluates the items whose evaluation reads it (`readsFace`), and a tick over
    * `reconcileSlowWarnMs` names what made it full and the event-loop lag it ran under.
@@ -3061,7 +3080,9 @@ export class Engine {
             const listed = (await db.query(reconcileRowsSql)).rows as { id: string; number: string; version: string; settled: boolean }[];
             config = stableJson({ ciAppIds: this.ciAppIds });
             // Measured on the clock evaluation reads, so time the gates see pass is what brings the catch-up.
-            fullCause = !fleet.size ? 'view' : config !== this.reconcileConfig ? 'configuration' : !(now.getTime() - this.reconcileFullAt < this.reconcileFullEvaluationMs) ? 'interval' : null;
+            // GY-1867: the interval stretches past the last full pass, so the tick after a long full
+            // pass is not full again at once; a face a writer moved still makes it full (`faces`).
+            fullCause = !fleet.size ? 'view' : config !== this.reconcileConfig ? 'configuration' : !(now.getTime() - this.reconcileFullAt < this.fullEvaluationIntervalMs()) ? 'interval' : null;
             full = fullCause !== null;
             if (full) this.reconcileFullAt = now.getTime();
             const versions = new Map(listed.map(row => [row.id, row]));
@@ -3183,6 +3204,8 @@ export class Engine {
     this.lastReconcile = { documentsRead, evaluated: tick.evaluated, live: [...fleet.values()].filter(entry => !entry.settled).length, full };
     const elapsedMs = performance.now() - tickStarted;
     tick.ms = Math.round(elapsedMs);
+    // The next full pass is spaced past this one's own length (GY-1867).
+    if (full) this.reconcileFullMs = tick.ms;
     tick.lagMs = this.eventLoopLag.read();
     this.reconcileTicks.push(tick);
     if (this.reconcileTicks.length > 20) this.reconcileTicks.shift();
