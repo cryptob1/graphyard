@@ -9,10 +9,15 @@
  * itself (a digest per table, beside the generation), and the metadata-only write that records
  * it for a release whose whole migration is already recorded — so an upgrade deploy asks no
  * work table for a lock at all.
+ *
+ * GY-1961: the generation follows the table definitions (`schemaGenerations` in release.ts), so
+ * a release whose definitions are older than the ones that migrated the database refuses before
+ * any statement runs instead of re-applying its older DDL over the newer schema.
  */
+import { createHash } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { advisoryLocks } from './locks.js';
-import { migration, migrationDigestComment, migrationDigests, newerSchema, recordedMigrationDigests, tables, type MigrationDigests } from './schema.js';
+import { migration, migrationDigestComment, recordedMigrationDigests, tables, type MigrationDigests } from './schema.js';
 import { releaseInfo, schemaVersion } from '../release.js';
 import { reserve } from './pools.js';
 
@@ -30,15 +35,40 @@ export const migrationAttemptLockTimeoutMs = 3_000;
 /** The migration's statements ahead of the first table's DDL: the shared trigger function. */
 const migrationPrelude = migration.slice(0, migration.indexOf(tables[0].ddl));
 
+/** The schema a release's code carries: its generation, its release, and the DDL its migration runs. */
+export interface SchemaCode { generation: number; release: string; prelude: string; tables: readonly { name: string; ddl: string }[] }
+/** The schema this process's code carries. */
+export const currentSchemaCode = (): SchemaCode => ({ generation: schemaVersion, release: releaseInfo().version, prelude: migrationPrelude, tables });
+
+const sha256 = (text: string) => `sha256:${createHash('sha256').update(text).digest('hex')}`;
+/** The migration digests `code` records: for this process's code, exactly `migrationDigests()`. */
+export const schemaCodeDigests = (code: SchemaCode): MigrationDigests => ({
+  migration: `migration ${sha256(`${code.prelude}${code.tables.map(table => table.ddl).join('\n')}\n`)}`,
+  prelude: sha256(code.prelude),
+  tables: Object.fromEntries(code.tables.map(table => [table.name, sha256(table.ddl)])),
+});
+/** One digest over every table definition, in migration order: the entry `schemaGenerations` records for a generation. */
+export const schemaGenerationDigest = (code: SchemaCode = currentSchemaCode()) => {
+  const digests = schemaCodeDigests(code);
+  return sha256(JSON.stringify([digests.prelude, ...code.tables.map(table => [table.name, digests.tables[table.name]])]));
+};
+
+/** The refusal of a release under a database a newer generation migrated: it names both generations and both releases. */
+export const newerSchema = (recorded: { version: number; release?: string | null }, code: SchemaCode = currentSchemaCode()) => new Error(
+  `Database schema generation ${recorded.version} (migrated by Graphyard ${recorded.release ?? 'unknown'}) is newer than this release supports (generation ${code.generation}, Graphyard ${code.release}); `
+  + `startup refuses instead of re-applying its older table definitions — upgrade to Graphyard ${recorded.release ?? 'the release that migrated it'} or newer, or restore a backup taken at generation ${code.generation} or earlier`);
+
 /** What the recorded generation says about the migration that ran; `tables` null before per-table digests were recorded. */
-export interface RecordedMigration { version: number; migration: string | null; prelude: string | null; tables: Record<string, string> | null }
+export interface RecordedMigration { version: number; release?: string | null; migration: string | null; prelude: string | null; tables: Record<string, string> | null }
+
+const recordedSql = "SELECT COALESCE((SELECT MAX(version) FROM graphyard_schema),0) AS version, (SELECT graphyard_version FROM graphyard_schema ORDER BY version DESC LIMIT 1) AS release, obj_description(to_regclass('graphyard_schema'),'pg_class') AS digest";
+const recordedRow = (row: { version: unknown; release: string | null; digest: string | null }): RecordedMigration => ({ version: Number(row.version), release: row.release, ...recordedMigrationDigests(row.digest) });
 
 /** The recorded generation and what it says about the migration that ran, read without any lock a replica holds; null before the first migration. */
 export async function recordedMigration(pool: Pool): Promise<RecordedMigration | null> {
   const table = (await pool.query("SELECT to_regclass('graphyard_schema') AS oid")).rows[0].oid;
   if (!table) return null;
-  const { rows } = await pool.query("SELECT COALESCE((SELECT MAX(version) FROM graphyard_schema),0) AS version, obj_description(to_regclass('graphyard_schema'),'pg_class') AS digest");
-  return { version: Number(rows[0].version), ...recordedMigrationDigests(rows[0].digest) };
+  return recordedRow((await pool.query(recordedSql)).rows[0]);
 }
 
 /**
@@ -49,25 +79,24 @@ export async function recordedMigration(pool: Pool): Promise<RecordedMigration |
  * another release recorded a different migration first, so the caller decides again from what is
  * now recorded.
  */
-export async function recordMigrationDigests(pool: Pool, digests: MigrationDigests, timeout: number): Promise<boolean> {
+export async function recordMigrationDigests(pool: Pool, digests: MigrationDigests, timeout: number, code: SchemaCode = currentSchemaCode()): Promise<boolean> {
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
     try {
       await db.query(`SET LOCAL lock_timeout = ${timeout}`);
       await db.query('SELECT pg_advisory_xact_lock($1)', [advisoryLocks.migration]);
-      const { rows } = await db.query("SELECT COALESCE((SELECT MAX(version) FROM graphyard_schema),0) AS version, obj_description(to_regclass('graphyard_schema'),'pg_class') AS digest");
-      const version = Number(rows[0].version);
-      if (version > schemaVersion) throw newerSchema(version);
-      const recorded = recordedMigrationDigests(rows[0].digest);
-      if (version !== schemaVersion || recorded.tables !== null || recorded.migration !== digests.migration) { await db.query('ROLLBACK'); return false; }
+      const recorded = recordedRow((await db.query(recordedSql)).rows[0]);
+      const version = recorded.version;
+      if (version > code.generation) throw newerSchema(recorded, code);
+      if (version !== code.generation || recorded.tables !== null || recorded.migration !== digests.migration) { await db.query('ROLLBACK'); return false; }
       await db.query(`COMMENT ON TABLE graphyard_schema IS ${migrationDigestComment(digests)}`);
       await db.query('COMMIT');
       return true;
     } catch (error) { await db.query('ROLLBACK').catch(() => {}); throw error; }
   } catch (error) {
-    const code = (error as { code?: string }).code;
-    if (code === '55P03') throw new Error(`Recording schema generation ${schemaVersion}'s migration digests gave up after ${timeout} ms waiting for the migration advisory lock pg_advisory_xact_lock(${advisoryLocks.migration}), held by another session; startup fails instead of outlasting the health check — retry the deploy when it is released`, { cause: error });
+    const failure = (error as { code?: string }).code;
+    if (failure === '55P03') throw new Error(`Recording schema generation ${code.generation}'s migration digests gave up after ${timeout} ms waiting for the migration advisory lock pg_advisory_xact_lock(${advisoryLocks.migration}), held by another session; startup fails instead of outlasting the health check — retry the deploy when it is released`, { cause: error });
     throw error;
   } finally { db.release(); }
 }
@@ -129,22 +158,24 @@ export async function retryLockFailures(
  * runs. A table whose recorded DDL digest matches this release's is left alone entirely (GY-773):
  * no statement of its DDL runs, so no lock — not even briefly — is asked for it.
  */
-export async function runStartupMigration(pool: Pool, options: { lockTimeoutMs?: number; attemptLockTimeoutMs?: number } = {}) {
-  const digests = migrationDigests();
+export async function runStartupMigration(pool: Pool, options: { lockTimeoutMs?: number; attemptLockTimeoutMs?: number; code?: SchemaCode } = {}) {
+  const code = options.code ?? currentSchemaCode();
+  const { generation, tables } = code;
+  const digests = schemaCodeDigests(code);
   const timeout = Math.max(1, Math.floor(options.lockTimeoutMs ?? migrationLockTimeoutMs));
   const attemptTimeout = Math.max(1, Math.floor(options.attemptLockTimeoutMs ?? migrationAttemptLockTimeoutMs));
   const upToDate = (recorded: RecordedMigration | null) => {
-    const perTable = recorded?.version === schemaVersion ? recorded.tables : null;
-    return recorded?.version === schemaVersion && recorded.prelude === digests.prelude && perTable !== null
+    const perTable = recorded?.version === generation ? recorded.tables : null;
+    return recorded?.version === generation && recorded.prelude === digests.prelude && perTable !== null
       && tables.every(table => perTable[table.name] === digests.tables[table.name]);
   };
   // Decide from what is recorded now, and decide again if another release records while we act.
   let recorded = await recordedMigration(pool);
   for (;;) {
-    if (recorded && recorded.version > schemaVersion) throw newerSchema(recorded.version);
+    if (recorded && recorded.version > generation) throw newerSchema(recorded, code);
     if (upToDate(recorded)) return;
-    if (recorded?.version === schemaVersion && recorded.tables === null && recorded.migration === digests.migration) {
-      if (await recordMigrationDigests(pool, digests, timeout)) return;
+    if (recorded?.version === generation && recorded.tables === null && recorded.migration === digests.migration) {
+      if (await recordMigrationDigests(pool, digests, timeout, code)) return;
       recorded = await recordedMigration(pool);
       continue;
     }
@@ -159,7 +190,7 @@ export async function runStartupMigration(pool: Pool, options: { lockTimeoutMs?:
   let guard: PoolClient;
   try { guard = await reserve(pool); } catch (error) {
     db.release();
-    throw new Error(`Schema migration to generation ${schemaVersion} could not reserve the connection its lock-wait watchdog needs (${(error as Error).message}); startup fails instead of migrating without a deadline — retry the deploy`, { cause: error });
+    throw new Error(`Schema migration to generation ${generation} could not reserve the connection its lock-wait watchdog needs (${(error as Error).message}); startup fails instead of migrating without a deadline — retry the deploy`, { cause: error });
   }
   let lost: Error | undefined;
   const lose = (error: Error) => { lost ??= error; };
@@ -195,7 +226,7 @@ export async function runStartupMigration(pool: Pool, options: { lockTimeoutMs?:
       const { rows } = await guard.query("SELECT pg_cancel_backend(pid) AS cancelled FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock'", [pid]);
       if (!rows[0]?.cancelled) { cancelledWaiting = false; if (watching && attempt === armed) poll = setTimeout(() => { polling = watch(pid, attempt); }, 100); }
     } catch (error) {
-      if (watching) abort(new Error(`Schema migration to generation ${schemaVersion} lost the connection its lock-wait watchdog needs (${(error as Error).message}) past its ${timeout} ms deadline, while waiting for ${waitingOn}; startup fails instead of outlasting the health check — retry the deploy`, { cause: error }));
+      if (watching) abort(new Error(`Schema migration to generation ${generation} lost the connection its lock-wait watchdog needs (${(error as Error).message}) past its ${timeout} ms deadline, while waiting for ${waitingOn}; startup fails instead of outlasting the health check — retry the deploy`, { cause: error }));
     }
   };
   try {
@@ -222,13 +253,12 @@ export async function runStartupMigration(pool: Pool, options: { lockTimeoutMs?:
       if (tableCheck[0].oid === null) {
         recordedInTxn = { version: 0, migration: null, prelude: null, tables: null };
       } else {
-        const { rows: schemaRows } = await step('a lock on table graphyard_schema', 'SELECT COALESCE((SELECT MAX(version) FROM graphyard_schema),0) AS version, obj_description(to_regclass(\'graphyard_schema\'),\'pg_class\') AS digest');
-        recordedInTxn = { version: Number(schemaRows[0].version), ...recordedMigrationDigests(schemaRows[0].digest) };
+        recordedInTxn = recordedRow((await step('a lock on table graphyard_schema', recordedSql)).rows[0]);
       }
       const unchangedPrelude = recordedInTxn?.prelude === digests.prelude;
       const unchangedTable = (name: string) => recordedInTxn?.tables?.[name] === digests.tables[name];
-      if (recordedInTxn.version > schemaVersion) throw newerSchema(recordedInTxn.version);
-      if (!unchangedPrelude) await step('a lock on the migration\'s shared function graphyard_immutable', migrationPrelude);
+      if (recordedInTxn.version > generation) throw newerSchema(recordedInTxn, code);
+      if (!unchangedPrelude) await step('a lock on the migration\'s shared function graphyard_immutable', code.prelude);
       for (const { name, ddl } of tables) {
         if (unchangedTable(name)) continue;
         const waiting = `a lock on table ${name} (or an object its migration touches)`;
@@ -237,9 +267,9 @@ export async function runStartupMigration(pool: Pool, options: { lockTimeoutMs?:
       // GY-824: the budget bounds lock waits, never this migration's own work: DDL that ran without
       // waiting may outlast one attempt's budget, so the steps that remain wait on a fresh one.
       attemptDeadline = Math.min(deadline, Date.now() + attemptTimeout);
-      const current = Number((await step('a lock on table graphyard_schema', 'SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
-      if (current > schemaVersion) throw newerSchema(current);
-      if (current < schemaVersion) await step(waitingOn, 'INSERT INTO graphyard_schema(version, graphyard_version) VALUES($1,$2)', [schemaVersion, releaseInfo().version]);
+      const current = recordedRow((await step('a lock on table graphyard_schema', recordedSql)).rows[0]);
+      if (current.version > generation) throw newerSchema(current, code);
+      if (current.version < generation) await step(waitingOn, 'INSERT INTO graphyard_schema(version, graphyard_version) VALUES($1,$2)', [generation, code.release]);
       await step(waitingOn, `COMMENT ON TABLE graphyard_schema IS ${migrationDigestComment(digests)}`);
       await Promise.race([db.query('COMMIT'), abandoned]);
     }; await retryLockFailures(migrate, () => !aborted && Date.now() < deadline, async () => { await disarm(); await db.query('ROLLBACK').catch(() => {}); }, undefined, error => transientLockError(error, cancelledWaiting));
@@ -251,7 +281,7 @@ export async function runStartupMigration(pool: Pool, options: { lockTimeoutMs?:
     await db.query('ROLLBACK').catch(() => {});
     // 55P03: a lock wait hit the time left; 57014 after the watchdog fired: it cancelled a lock wait past the deadline.
     const code = (error as { code?: string }).code;
-    if (code === '55P03' || (code === '57014' && cancelledWaiting)) throw new Error(`Schema migration to generation ${schemaVersion} gave up after ${timeout} ms waiting for ${waitingOn}, held by another session; startup fails instead of outlasting the health check — retry the deploy when it is released`, { cause: error });
+    if (code === '55P03' || (code === '57014' && cancelledWaiting)) throw new Error(`Schema migration to generation ${generation} gave up after ${timeout} ms waiting for ${waitingOn}, held by another session; startup fails instead of outlasting the health check — retry the deploy when it is released`, { cause: error });
     throw error;
   } finally {
     // A cancel still in flight must not reach whatever this connection runs next.

@@ -3,7 +3,7 @@
 
 ## The one command
 
-One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --apply` ([install](install.md)). Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`; `/healthz?strict` alerts (503 unhealthy). CI and release-candidate runners pull Docker Hub images through the `mirror.gcr.io` mirror.
+One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --apply` ([install](install.md)). Promotions publish `ghcr.io/cryptob1/graphyard:YYYY.M.D` ([releases](delivery.md#release-candidates)); `/healthz?strict` alerts (503 unhealthy). CI and release-candidate runners pull Docker Hub images through the `mirror.gcr.io` mirror.
 
 ## Variables
 
@@ -33,7 +33,7 @@ A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deplo
 
 Release lag and `loaded-revision` [resource](operations-reference.md#control-plane-resources) skip deliveries awaiting [promotion](delivery.md). Self-upgrades await production serving them (`release-lagged`, `upgrade:held`); `.graphyard/held-cli.json` pins `bin/graphyard.mjs`, executors, loops to it; held executors' owed restarts aren't faults.
 
-Observing a release releases its post-deploy follow-ups (lacking operator-agent identity, deployment unrecorded); one awaiting its window is Up next. The loop records throughput, judging the serving release over trailing 72h merges less operator-touched and grant-refused superseded idle charged from window start; ≥20 all excluded, or ≥10 missing 48h+, escalates once/release on an owner item, requesting its unchanged-budget decision.
+Observing a release reports post-deploy checks it does not yet see; nothing is filed. The loop records throughput, judging the serving release over trailing 72h merges less operator-touched and grant-refused superseded idle charged from window start; ≥20 all excluded, or ≥10 missing 48h+, escalates once/release on an owner item, requesting its unchanged-budget decision.
 
 ### Deployment incident
 
@@ -49,7 +49,7 @@ Hosted: `failing` ([liveness](operations-reference.md#webhook-liveness)) codes 0
 
 ## Backup, upgrade, rollback
 
-**Backup:** `graphyard db backup ./graphyard.json` (`DATABASE_URL`), `graphyard db verify FILE`; `graphyard db fence` before move (`--release` undoes). **Upgrade:** back up, deploy, check `/healthz` `commit`, run [App-permission migrations](install.md#upgrading-an-existing-installation); **rollback** only to same-schema images; state (`master.json`, connection file, daemon cursor) keeps fields a newer version wrote. **Restore:** `graphyard db migrate` empty database, `graphyard db restore FILE`.
+**Backup:** `graphyard db backup ./graphyard.json` (`DATABASE_URL`), `graphyard db verify FILE`; `graphyard db fence` before move (`--release` undoes). **Upgrade:** back up, deploy, check `graphyard version`, run [App-permission migrations](install.md#upgrading-an-existing-installation); **rollback**: older-schema images refuse to start; state (`master.json`, connection file, daemon cursor) keeps fields a newer version wrote. **Restore:** `graphyard db migrate` empty database, `graphyard db restore FILE`.
 
 ## Manual fallback
 

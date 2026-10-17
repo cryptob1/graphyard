@@ -154,13 +154,19 @@ export const staleContainmentReasonPrefix = 'Containment was derived without a f
 export const promotionWaitClause = 'a release candidate carrying the merge is in the promotion pipeline, so the deployment observation waits for the promotion to land';
 /**
  * How long a `verify-deployment` row may wait for the promotion pipeline to land the release that
- * serves its merge before it is stalled rather than waiting (GY-1831).
+ * serves its merge between two of the pipeline's demonstrated movements before it is stalled
+ * rather than waiting (GY-1831, GY-1966).
  *
- * The three stalled-gate filings this bound answers each saw a promotion land about 20 minutes
- * after its merge, and the pipeline's own cadence is a 10-minute dispatch gap; an hour covers both
- * with room and still raises the stall inside the hour a wedged pipeline deserves.
+ * The wait the executor names carries the pipeline's newest demonstrated movement (its cursor's
+ * newest candidate, dispatch or promotion), so the row's unchanged run measures the stretch since
+ * the pipeline last moved, not since the merge: a failed candidate is re-cut behind the moving
+ * main, and a candidate's validation may run this long before anything else moves. The bound is
+ * that window — `soakAwaitedMs`, the one the loop itself grants a candidate's soak — because a
+ * shorter one (the 60 minutes GY-1966 replaced) filed rows a re-cut cycle longer than an hour was
+ * still carrying. A stretch this long without a movement is a pipeline that has stopped moving,
+ * and the row stalls.
  */
-export const promotionWaitBoundMs = 60 * 60_000;
+export const promotionWaitBoundMs = 90 * 60_000;
 
 /**
  * Whether a dispatch refusal names a wait for a worker profile to free (GY-1108).
@@ -192,6 +198,16 @@ export function workerSlotWait(reason: string): boolean {
   }
   return busyLaunchProfiles > 0;
 }
+
+/**
+ * GY-1966: whether a stalled row's reason names the release machinery — a running release that
+ * does not carry the row's merge yet, with or without the promotion wait beside it. A row a
+ * pipeline that has stopped moving holds is the machinery's fault, not the item's: the attention
+ * it raises names the release machinery and counts under the deployment class, rather than filing
+ * a per-item stalled-action instance over a wait only the pipeline can end.
+ */
+export const namesReleaseMachinery = (reason: string): boolean =>
+  reason.includes(promotionWaitClause) || /the running release \S+ does not carry \S+'s merge \S+ yet/.test(reason);
 
 /**
  * The bound of a failure reason that names a handoff still in progress — the attempt did its part

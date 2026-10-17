@@ -49,7 +49,6 @@ import { observeDeployment, deploymentEnvironmentName, promotionReads, promotion
 import { mainWatchFreezeFromEnv, mainWatchReads, type MainWatchReads } from './main-watch.js';
 import { shadowReads, shadowVerdictBody, shadowVerdictKey, type ShadowReads } from './cycle-shadow.js';
 import { mergeRecordKey, mergeWriterReads, type MergeWriterReads } from './cycle-merge-writer.js';
-import type { SlowLoopItemInput } from './slow-loop-item.js';
 import { exactCandidatePorts, localReleasePorts } from './release-ports.js';
 import { revertRecordKey } from '../release-revert.js';
 import { readMergeWriter } from '../master/dispatch.js';
@@ -383,9 +382,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await mutate('merge-queue', config);
       publishedMergeQueue = published;
     },
-    ...throughputEffects(root, current, run, asCoordinator, asOperatorAgent), ...flakeLedgerEffects(root), ...readingEffects(current, mutate, asCoordinator), // GY-1779: the loop's own post-deploy readings
+    ...throughputEffects(root, current, run, asCoordinator, asOperatorAgent), ...flakeLedgerEffects(root), ...readingEffects(current, mutate, asCoordinator, { root, run }), // GY-1779: the loop's own post-deploy readings
     readThroughputOwner: async owner => await asCoordinator(`work/${encodeURIComponent(owner.id)}`) as Work,
-    get fileSlowLoopItem() { /* GY-1775: the slow-loop fix item, filed as the operator-agent (read on each call, as a reload may provision it) under the release-and-step key */ return current().operatorAgent ? (input: SlowLoopItemInput, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
       .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),

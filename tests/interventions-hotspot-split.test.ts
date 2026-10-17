@@ -34,7 +34,7 @@ test('unit:interventions-hotspot-split — the barrel only re-exports, and each 
   const code = (await read('src/interventions.ts')).split('\n').filter(line => line.trim() && !/^\s*(\/\/|\/\*\*|\*)/.test(line));
   for (const line of code) assert.match(line, /^export (type )?\{[^}]*\} from '\.[^']+';$/, `src/interventions.ts only re-exports: ${line.slice(0, 120)}`);
   for (const file of await modules()) assert.match((await read(file)).split('\n')[0], /^\/\/ Concern: \S.{10,}$/, `${file} opens with a "// Concern: …" header naming what it owns`);
-  for (const name of ['readInterventionLedger', 'foldInterventions', 'computeInterventionReport', 'detectPatterns', 'readInterventionReport', 'openPatternItems', 'startPatternScan', 'interventionScan', 'recordIntervention', 'recordJudgement', 'judgementToWork', 'loopSettledInBound', 'windowOutcomes'])
+  for (const name of ['readInterventionLedger', 'foldInterventions', 'computeInterventionReport', 'detectPatterns', 'readInterventionReport', 'startPatternScan', 'interventionScan', 'recordIntervention', 'recordJudgement', 'judgementToWork', 'loopSettledInBound', 'windowOutcomes'])
     assert.equal(typeof (interventions as Record<string, unknown>)[name], 'function', `src/interventions.ts still exports ${name}`);
   assert.ok(Array.isArray(interventions.interventionLedgerKinds) && interventions.controlPlaneActor.id === 'graphyard');
 });

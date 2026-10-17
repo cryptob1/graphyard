@@ -12,7 +12,7 @@ const modules = async () => ({ ...await import('../src/executor.js'), ...await i
 // and deploy deadlocked reviewer and worker (GY-1652 AC-3, GY-1657 AC-1..4). It is refused at
 // create and requirements revision unless declared with a manual:post-deploy/ proof; a declared
 // one is judged on the head's pre-merge evidence and checked by master verify-deployment on the
-// serving release, which files a follow-up naming the delivered item when it fails.
+// serving release, which reports it owed when it fails.
 // GY-1685 widens the wordings read as live (live host, on the installation, the release serving a merge,
 // a cycle after the fix) and refuses an item of nothing but declared verifications: the declaration rides
 // the item that ships the change.
@@ -120,21 +120,6 @@ test('manual:intervention-pattern-escalation-build — GY-1660: each linked buil
   }
 });
 
-test('unit:post-deploy-criteria — a recurring intervention pattern keeps its post-ship rate as a declared post-deploy verification beside the regression its head can show', async () => {
-  const source = await import('node:fs/promises').then(fs => fs.readFile(new URL('../src/interventions/patterns.ts', import.meta.url), 'utf8'));
-  const [rate, regression] = [...source.matchAll(/\{ id: '(AC-\d)', text: `([^`]+)`, proofs: \[`([^`]+)`\] \}/g)].map(([, id, text, proof]) => ({ id, text: text.replace(/\$\{[^}]+\}/g, 'X'), proofs: [proof.replace('${postDeployProofPrefix}', 'manual:post-deploy/').replace(/\$\{[^}]+\}/g, 'x')] }));
-  const { createSchema, liveObservationPhrase } = await modules();
-  // The measured outcome is unchanged: the rate below the threshold after the change ships…
-  assert.match(rate.text, /the intervention report shows the X rate at X below X per X days after the change ships, and the linked instances could not recur$/);
-  assert.equal(liveObservationPhrase(rate), 'after the change ships');
-  // …declared, so it is accepted and gates no merge; undeclared it would be refused.
-  assert.deepEqual(rate.proofs, ['manual:post-deploy/intervention-pattern-x-x']);
-  assert.equal(createSchema.safeParse(intent([rate, regression])).success, true);
-  assert.equal(createSchema.safeParse(intent([{ ...rate, proofs: ['manual:intervention-pattern-x-x'] }])).success, false);
-  assert.equal(liveObservationPhrase(regression), null, regression.text);
-  assert.deepEqual(regression.proofs, ['manual:intervention-pattern-x-x']);
-});
-
 test('unit:post-deploy-criteria — a declared post-deploy proof gates no merge in any lane', async () => {
   const { laneRequiresProof, requiredProofs, evaluateLandability } = await modules();
   for (const lane of ['low', 'medium', 'high'] as const) assert.equal(laneRequiresProof(lane, 'manual:post-deploy/harness-drift-cleared'), false, lane);
@@ -191,8 +176,8 @@ function delivered(overrides: Partial<Work> = {}): Work {
     reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], delivery: { mergedAt: at, mergeSha, authorizationRevision: 2 }, ...overrides } as Work;
 }
 
-test('unit:post-deploy-criteria — master verify-deployment checks a declared criterion on the serving release and files one follow-up naming the delivered item when it fails', async () => {
-  const { createSchema, filePostDeployFollowUps, postDeployChecks, verifyDeployment } = await modules();
+test('unit:post-deploy-criteria — master verify-deployment checks a declared criterion on the serving release and reports it owed when it fails', async () => {
+  const { createSchema, postDeployChecks, verifyDeployment } = await modules();
   const checks = postDeployChecks(delivered(), release);
   assert.equal(checks.length, 1);
   const [owed] = checks;
@@ -236,77 +221,27 @@ test('unit:post-deploy-criteria — master verify-deployment checks a declared c
   const twice = postDeployChecks(longWork, release);
   assert.equal(twice[0].followUp!.title, twice[1].followUp!.title, 'the titles are cut alike');
   assert.notEqual(twice[0].followUp!.requestId, twice[1].followUp!.requestId);
-  const longFiled: string[] = [];
-  const fileLong = async (input: any) => { longFiled.push(input.description); return { key: `GY-${60 + longFiled.length}` }; };
-  assert.deepEqual((await filePostDeployFollowUps(longWork, release, [longWork], fileLong)).map(check => check.followUp), ['GY-61', 'GY-62']);
-  // Checked again with both filed, each is matched by its own identity and neither is filed again.
-  const known = [longWork, ...longFiled.map((description, index) => ({ key: `GY-${61 + index}`, description }))];
-  assert.deepEqual((await filePostDeployFollowUps(longWork, release, known, fileLong)).map(check => check.followUp), ['GY-61', 'GY-62']);
-  assert.equal(longFiled.length, 2);
-
-  // Through verifyDeployment: the follow-up is filed once with an idempotency key, then the record is written.
+  // Through verifyDeployment: the record is written and the owed check is reported; nothing is filed.
   const now = Date.now();
   const work = [delivered()];
-  const records: unknown[] = [], filed: { input: any; requestId: string }[] = [];
+  const records: unknown[] = [];
   const effects = {
     snapshot: async () => ({ work, now: new Date(now).toISOString() }),
     observe: async () => ({ source: 'endpoint' as const, sha: release, at: new Date(now).toISOString(), reason: null, deployed: ['GY-42'], pending: [] }),
     // A launcher checkout of another repository emits nothing: the served merge is the whole check.
     release: () => ({ sha: 'f'.repeat(40), clean: true, repository: 'other/repo', reason: null }),
     emit: async () => assert.fail('nothing is emitted'), repository: 'owner/project', now: () => now,
-    record: async (_work: Work, data: unknown) => { assert.equal(filed.length, 1, 'filed before the record'); records.push(data); },
-    releaseWork: async () => {}, file: async (input: any, requestId: string) => { filed.push({ input, requestId }); return { key: 'GY-43' }; },
+    record: async (_work: Work, data: unknown) => { records.push(data); },
   };
-  // A filing that fails leaves the delivery unobserved, so the retry files it.
-  await assert.rejects(verifyDeployment(work[0], { ...effects, file: async () => { throw new Error('refused'); } }), /refused/);
-  assert.equal(records.length, 0);
   const verified = await verifyDeployment(work[0], effects);
   assert.equal(verified.result, 'verified', verified.refusals.join('; '));
   assert.equal(records.length, 1);
-  assert.deepEqual(verified.postDeploy, [{ criterion: 'AC-3', proof: 'manual:post-deploy/harness-drift-cleared', result: 'owed', followUp: 'GY-43' }]);
-  assert.equal(filed.length, 1);
-  assert.equal(filed[0].requestId, `post-deploy:${work[0].id}:AC-3:manual:post-deploy/harness-drift-cleared:${release}`);
-  // Verified again once the follow-up exists: it is named, never filed twice.
-  work.push({ ...delivered(), id: 'f0000000-0000-4000-8000-000000000043', key: 'GY-43', title: followUp.title, description: filed[0].input.description, stage: 'ready' } as Work);
-  work[0].delivery!.deployment = { sha: release, mergeSha, source: 'endpoint', observedAt: new Date(now).toISOString() } as never;
-  const again = await verifyDeployment(work[0], effects);
-  assert.equal(again.recorded, 'existing');
-  assert.deepEqual(again.postDeploy.map(check => check.followUp), ['GY-43']);
-  assert.equal(filed.length, 1);
-  // Filed one after another: two owed proofs of one criterion file two items, each once, with no title read across a stale snapshot.
-  const pair = [delivered({ criteria: [{ ...gy1652, proofs: ['manual:post-deploy/drift', 'manual:post-deploy/status'] }] })];
-  const paired: string[] = [];
-  const both = await filePostDeployFollowUps(pair[0], release, pair, async (input: any) => { paired.push(input.description); return { key: `GY-${50 + paired.length}` }; });
-  assert.deepEqual(both.map(check => check.followUp), ['GY-51', 'GY-52']);
-  assert.equal(new Set(paired).size, 2);
+  assert.deepEqual(verified.postDeploy, [{ criterion: 'AC-3', proof: 'manual:post-deploy/harness-drift-cleared', result: 'owed' }]);
   // A refused verification checks nothing and files nothing.
   const refused = await verifyDeployment(work[0], { ...effects, observe: async () => ({ source: 'unavailable' as const, sha: null, at: new Date(now).toISOString(), reason: 'no endpoint', deployed: [], pending: [] }) });
   assert.equal(refused.result, 'refused');
   assert.deepEqual(refused.postDeploy, []);
-  assert.equal(filed.length, 1);
-});
-
-test('unit:post-deploy-criteria — the loop\'s verify-deployment files an owed follow-up as the operator agent before recording the observation, and records nothing without one', async () => {
-  const { controlPlaneHandlers } = await modules();
-  const work = delivered(), calls: string[] = [];
-  const unusable = async (): Promise<never> => { throw new Error('not reached'); };
-  const handlers = (fileWork?: (input: unknown, requestId: string) => Promise<{ key?: string }>) => controlPlaneHandlers(() => ({}) as never, {
-    snapshot: async () => ({ work: [work], now: new Date().toISOString() }),
-    // The coordinator credential records the observation and never creates work.
-    mutate: async (path: string) => { assert.notEqual(path, 'work', 'the coordinator never creates work'); calls.push(path); return {}; },
-    agents: () => [], workerCredentials: async () => ({}), producerCredentials: async () => ({}),
-    dispatchWorker: unusable, launchReview: unusable, launchProducer: unusable,
-    observeDeployment: async () => ({ source: 'endpoint' as const, sha: release, at: new Date().toISOString(), reason: null, deployed: ['GY-42'], pending: [] }) as never,
-    releaseWork: async () => {},
-    ...(fileWork ? { fileWork } : {}),
-  });
-  const identity = { host: 'host-1', executor: 'executor-1' } as never;
-  const action = { id: 'row-1', work: work.id, key: 'GY-42', kind: 'verify-deployment', inputs: { kind: 'verify-deployment', mergeSha } } as never;
-  await assert.rejects(handlers()['verify-deployment']!(action, identity) as unknown as Promise<string>, /AC-3 \(manual:post-deploy\/harness-drift-cleared\) owes its post-deploy follow-up, and this executor has no operator-agent identity/);
-  assert.equal(calls.length, 0, 'nothing is recorded while the follow-up is unfiled');
-  const result = await handlers(async (input: any, requestId: string) => { calls.push(`file ${requestId}`); assert.ok(input.reason); return { key: 'GY-43' }; })['verify-deployment']!(action, identity) as unknown as Promise<string>;
-  assert.deepEqual(calls, [`file post-deploy:${work.id}:AC-3:manual:post-deploy/harness-drift-cleared:${release}`, `work/${work.id}/deployment`]);
-  assert.match(String(result), /AC-3 owes its post-deploy observation \(GY-43\)/);
+  assert.equal(records.length, 1);
 });
 
 // The linked instances of GY-1685's pattern, as their criteria were written when each item blocked, each run below

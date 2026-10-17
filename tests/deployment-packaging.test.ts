@@ -15,8 +15,8 @@ test('the packaged release names one version everywhere it is stamped', () => {
   const chart = read('deploy/helm/graphyard/Chart.yaml');
   assert.match(chart, new RegExp(`^appVersion: "${packageVersion.replace(/\./g, '\\.')}"$`, 'm'), 'chart appVersion follows package.json');
   const compose = read('compose.yaml');
-  assert.ok(compose.includes(`ghcr.io/cryptob1/graphyard:${packageVersion}`), 'compose defaults to the versioned release image');
-  assert.ok(compose.includes('GRAPHYARD_VERSION: ${GRAPHYARD_VERSION:-' + packageVersion + '}'), 'compose builds stamp the same version');
+  assert.ok(compose.includes('${GRAPHYARD_IMAGE:-ghcr.io/cryptob1/graphyard:stable}'), 'compose defaults to the stable channel (GY-1959)');
+  assert.ok(compose.includes('GRAPHYARD_VERSION: ${GRAPHYARD_VERSION:-}'), 'compose builds stamp no package version');
   const dockerfile = read('Dockerfile');
   for (const marker of ['ARG GRAPHYARD_VERSION', 'ARG GRAPHYARD_BUILD_REVISION', 'ENV GRAPHYARD_VERSION=${GRAPHYARD_VERSION}', 'org.opencontainers.image.version="${GRAPHYARD_VERSION}"', 'org.opencontainers.image.revision="${GRAPHYARD_BUILD_REVISION}"']) assert.ok(dockerfile.includes(marker), marker);
   const release = read('.github/workflows/release.yml');
@@ -25,8 +25,8 @@ test('the packaged release names one version everywhere it is stamped', () => {
   assert.ok(candidate.includes('scripts/verify-image-release.mjs'), 'every release-candidate image is held to the release contract');
   assert.ok(candidate.includes('deploy/helm/exercise.sh'), 'the chart exercise runs in release-candidate validation');
   accessSync(resolve('deploy/helm/exercise.sh'), constants.X_OK);
-  // The running process reports the package version unless the image stamped one.
-  assert.equal(releaseInfo().version, process.env.GRAPHYARD_VERSION || packageVersion);
+  // The running process reports its dated release, or `unreleased <sha>` (GY-1959).
+  assert.match(releaseInfo().version, /^(\d{4}\.\d{1,2}\.\d{1,2}(\.\d+)?|unreleased \S+)$/);
   assert.ok(Number.isInteger(schemaVersion) && schemaVersion >= 1);
 });
 

@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { contractFile, loadCases, loadContract, type CaseFile, type ReleaseContract } from './e2e/case.js';
-import { e2eSuite, type E2eLauncher, type E2eReport } from './e2e/runner.js';
+import { e2eSuite, installServesDeliveries, type E2eLauncher, type E2eReport } from './e2e/runner.js';
 import { holdTagPrefix, releaseHolds } from './release-holds.js';
 import { findCandidate, readLedgerAsync, recordsArguments, serveStaticSite, syncLedgerAsync, validateAndRecord, type AnyGit, type AsyncGit, type Git, type HoldOutcome, type ReleaseCandidate, type StaticUat, type Suite, type UatRecord } from './release-candidate.js';
 
@@ -122,7 +122,9 @@ export async function validateProjectCandidate(sourceGit: AnyGit, id: string, op
   const contract = existsSync(join(options.checkout, contractFile)) ? await loadContract(options.checkout).catch(() => null) : null;
   suites.push(projectCaseSuite(options.checkout, options.token, { fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs, report: value => { report = value; }, contract }));
   try {
-    const holds = asyncHolds(git, { contract, push: options.push, file: options.file, now: options.now, report: async () => report });
+    const holds = asyncHolds(git, { contract, push: options.push, file: options.file, now: options.now, report: async () => report,
+      // GY-1938: the holds honor the report's suspended delivery cases only when this own probe of the install confirms it cannot serve deliveries; a static site's UAT answers no merger, so nothing is suspended there.
+      servesDeliveries: 'url' in options.uat ? async () => (await installServesDeliveries(url, options.token, options.fetcher)).servesDeliveries : undefined });
     return await validateAndRecord(git, id, url, suites, { base: options.base, push: options.push, timeoutMs: options.timeoutMs, file: options.file, holds, now: options.now, fetcher: options.fetcher });
   } finally { await served?.close(); }
 }

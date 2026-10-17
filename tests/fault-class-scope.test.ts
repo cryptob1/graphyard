@@ -512,8 +512,9 @@ test('manual:fault-class-scope — action:scope|GY-1773|2026-10-14T05:03:05.438Z
 });
 
 test(`manual:fault-class-scope — action:scope|GY-1773|${gy1788WidenAt} replayed through the loop: the outage's cycles store the widen for retry and open no scope instance`, async () => {
+  // GY-1892: the rule now grants GY-1773's soak suites itself, so the outage is replayed on an ask only a finding grounds.
   const work = standing({ id: 'GY-1773', subject: 'GY-1773', observedAt: gy1788WidenAt, epoch: 2, requestedAt: '2026-10-14T04:59:06.260Z', refusedAt: '2026-10-14T04:59:28.010Z',
-    paths: ['tests/soak-day.test.ts', 'tests/helpers/soak-simulation.ts'], plannedFiles: ['src/daemon/upgrade.ts', 'src/daemon/state.ts', baseline],
+    paths: ['src/cli/master-status.ts'], plannedFiles: ['src/daemon/upgrade.ts', 'src/daemon/state.ts', baseline],
     settled: 'the ask was widened once the read answered' });
   const effects = {
     agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [work], now: gy1788WidenAt }), closeSession: () => {}, dispatch: async () => {},

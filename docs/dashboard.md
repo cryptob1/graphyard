@@ -31,4 +31,4 @@ Cards: ask, **Recommended** choice, one-line why, numbered steps, choices; agent
 
 ## Insights
 
-**Flow**; **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats filed `bug` unless `GRAPHYARD_INTERVENTION_PATTERNS=0`; pattern: owners, causes, rounds, [under-threshold days](protocol/read-endpoints.md)), **Validation**, **Releases**.
+**Flow**; **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats are attention, never items; pattern: owners, causes, rounds, [under-threshold days](protocol/read-endpoints.md)), **Validation**, **Releases**.

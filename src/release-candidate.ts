@@ -60,6 +60,12 @@ export const releaseFilingIdentity = { id: 'graphyard-release-follow-up', capabi
 /** The reason an operator-agent filing must carry; the create path refuses one without it. */
 export const filingReason = 'A failed release candidate files its follow-up';
 /**
+ * The follow-up's later-candidate UAT pass, declared a post-deploy verification (GY-1957): it can
+ * only exist on a candidate cut after the fix merges, so it must never gate the follow-up's own
+ * merge (GY-188) — `master verify-deployment` reads it on the serving release after delivery.
+ */
+export const followUpUatPassProof = 'manual:post-deploy/release-candidate-uat-pass';
+/**
  * Pure: why the control plane would refuse to create work as `actor`, the principal a release
  * environment's filing credential names (its `/api/status` actor), or null when it is admitted.
  */
@@ -182,7 +188,8 @@ export interface E2eCaseRecord {
 /** The e2e release run bound to the candidate: its run id, the SHA UAT served, every case's verdict and the blocking ones. */
 export interface E2eRecord { runId: string; sha: string; cases: E2eCaseRecord[]; blocking: string[] }
 export interface UatRecord {
-  id: string; sha: string; result: 'passed' | 'failed'; deployedSha: string | null; at: string; suites: SuiteResult[];
+  /** GY-1965: `cancelled` is the verdict of a uat job cancelled or failed before its suites recorded one; it concludes the validation and never promotes. */
+  id: string; sha: string; result: 'passed' | 'failed' | 'cancelled'; deployedSha: string | null; at: string; suites: SuiteResult[];
   /** The follow-up item a failed candidate filed, once filed. */
   followUp: string | null;
   e2e?: E2eRecord | null;
@@ -371,6 +378,7 @@ export function assessPromotion(candidate: ReleaseCandidate, uat: UatRecord | nu
       refusals.push(`Candidate ${candidate.id}'s UAT record was taken against ${uat.digests.map(digest => `${digest.service} ${digest.digest.slice(0, 18)}…`).join(', ')}, not its recorded build (${candidate.build.artifacts.map(digest => `${digest.service} ${digest.digest.slice(0, 18)}…`).join(', ')}); deploy the recorded digests to UAT and validate them again`);
     const flaky = unacceptedFlaky(candidate, uat, acceptances);
     if (flaky?.length) refusals.push(`Candidate ${candidate.id}'s required E2E case${flaky.length > 1 ? 's' : ''} ${flaky.join(', ')} ${flaky.length > 1 ? 'were' : 'was'} flaky at ${candidate.sha} in run ${uat.e2e!.runId}; an evidence decision must accept ${flaky.length > 1 ? 'each' : 'it'} at that exact SHA before promotion`);
+    else if (uat.result === 'cancelled') refusals.push(`Candidate ${candidate.id}'s UAT validation was cancelled before it recorded a verdict; cut a newer candidate`);
     else if (!flaky && uat.result !== 'passed') refusals.push(`Candidate ${candidate.id} failed UAT (${failingSuites(uat).map(suite => suite.name).join(', ')}); cut a newer candidate after the fix`);
   }
   if (imported && 'unread' in imported) refusals.push(`Candidate ${candidate.id}'s imported external runs could not be read (${imported.unread}); promotion waits until their hold is known`);
@@ -400,6 +408,14 @@ export const failingSuites = (uat: UatRecord) => uat.suites.filter(suite => !sui
  * The one follow-up item a failed candidate files. It names the failing suite and the candidate
  * SHA, and lists the deliveries the candidate carried for context only: they stay delivered, and
  * the fix arrives as new work merged to main and carried by a later candidate.
+ *
+ * Its later-candidate UAT pass is declared a post-deploy verification beside a pre-merge criterion
+ * the head can show (GY-1957): the fix carries a test reproducing the failing suite. Undeclared,
+ * the UAT-pass proof was demanded before merge (GY-188) while it can only exist on a candidate cut
+ * after the fix merges, so the follow-up was born unmergeable and only a two-party requirements
+ * rewrite could free it (GY-1938). Declared, the reviewer judges that criterion on the head's
+ * pre-merge evidence, the merge gate does not require it, and postDeployChecks owes it on the
+ * serving release until a trusted pass is recorded there after the merge.
  */
 export function followUpItem(candidate: ReleaseCandidate, uat: UatRecord, except: readonly string[] = []) {
   const failing = failingSuites(uat).filter(suite => !except.includes(suite.name));
@@ -411,7 +427,10 @@ export function followUpItem(candidate: ReleaseCandidate, uat: UatRecord, except
     description: `Release candidate ${candidate.id} at ${candidate.sha} failed UAT. Failing suite${failing.length > 1 ? 's' : ''}: ${failing.map(suite => `${suite.name} — ${suite.detail}`).join('; ')}. `
       + `It carried ${carried}; those deliveries stay delivered and are not reworked. Fix forward on main; the next candidate cut after the fix carries it to UAT.`,
     type: 'bug', priority: 1, reason: filingReason,
-    criteria: [{ id: 'AC-1', text: `The ${first.name} suite that failed on candidate ${candidate.id} (${candidate.sha}) passes against the UAT deployment of a later candidate`, proofs: ['manual:release-candidate-uat-pass'] }],
+    criteria: [
+      { id: 'AC-1', text: `The fix carries a test that reproduces the failing ${first.name} suite of candidate ${candidate.id} (${candidate.sha})`, proofs: ['unit:failing-suite-reproduced'] },
+      { id: 'AC-2', text: `The ${first.name} suite that failed on candidate ${candidate.id} (${candidate.sha}) passes against the UAT deployment of a later candidate`, proofs: [followUpUatPassProof] },
+    ],
     policy: { checks: ['test', 'typecheck'], review: true },
   };
 }
@@ -839,7 +858,7 @@ export function uatValidationCeilingMs(workflow: string, job = 'uat') {
  * Pure: whether UAT may take a candidate — by the branch move of a sha deploy, or by the
  * recorded-digests deployment of a digest-capable one (GY-1844) — given the commit the branch holds
  * now. UAT serving another candidate that has no verdict yet, cut within the validation window, is
- * a validation in progress: replacing it would fail that validation and file a spurious follow-up,
+ * a validation in progress (any verdict concludes it, a cancelled one too, GY-1965): replacing it would fail that validation and file a spurious follow-up,
  * so the deploy is refused. A digest deployment moves no branch, so when UAT's current deployment
  * generation (src/release-digests.ts) is a digest one, the candidate it names is judged the same
  * way. Otherwise the branch move is leased on the observed tip, so a concurrent deploy that moved

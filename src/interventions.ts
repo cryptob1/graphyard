@@ -11,7 +11,7 @@
  * the signal explicitly (`recordIntervention`) with the same fields.
  *
  * Nothing here decides a gate. The report is a reading of history; the one thing it writes is a
- * work item when a kind of intervention at a stage keeps recurring (`openPatternItems`).
+ * master-status attention when a kind of intervention at a stage keeps recurring (never a work item).
  *
  * This file only re-exports (GY-1447). Every intervention fix used to reword it, and concurrent
  * items conflicted on it, so each concern is a module under src/interventions/ that opens with the
@@ -24,5 +24,5 @@ export { interventionDecisionReachMs, interventionLedgerSince, loopSettledInBoun
 export { interventionLedgerKinds, interventionLedgerLimit, LedgerRowCache, readInterventionLedger, type InterventionLedgerRow } from './interventions/ledger.js';
 export { foldInterventions } from './interventions/fold.js';
 export { computeInterventionReport, detectPatterns, readInterventionReport } from './interventions/report.js';
-export { controlPlaneActor, interventionScan, interventionScanVariable, openPatternItems, patternScanIntervalMs, readScanWindow, startPatternScan, type ScanWindow } from './interventions/patterns.js';
+export { controlPlaneActor, interventionScan, interventionScanVariable, patternScanIntervalMs, readScanWindow, startPatternScan, type ScanWindow } from './interventions/patterns.js';
 export { judgementToWork, recordIntervention, recordJudgement } from './interventions/records.js';

@@ -6,13 +6,13 @@ import type { Work } from './model.js';
 import type { ActionRow } from './model/actions.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { actionJudgment, type NextActionKind } from './model/next-action.js';
-import { describeObservationJob, promotionWaitClause, resyncUnobservedPrefix, staleContainmentReasonPrefix } from './model/action-kinds.js';
+import { describeObservationJob, resyncUnobservedPrefix, staleContainmentReasonPrefix } from './model/action-kinds.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { registeredLaunch } from './model/session-state.js';
 import { answeredByPendingSession, independentProducerProfiles } from './producer.js';
 import { answeredByPendingReview } from './reviewer.js';
 import { daemonSummary, profileHealth, readDaemonState, type DaemonState, type DeploymentObservation } from './master-daemon.js';
-import { deferPostDeployFollowUps, filePostDeployFollowUps, patternReader, releasePostDeployFiler, type PatternReader } from './master-verification.js';
+import { patternReader, reportPostDeployChecks } from './master-verification.js';
 export { patternReader };
 import { withLaunchedRuntime } from './master/launch.js';
 import { launchedSessionHandle, selectReviewerProfile, type ExecutorEffects, type ExecutorHandler } from './auto-dispatch.js';
@@ -69,31 +69,16 @@ export interface ControlPlaneEffects {
   launchProducer: (work: Work, request: DispatchRequest, profile: ProducerProfile, agents: HerdrAgent[], observedAt: string) => Promise<any>;
   observeDeployment: (delivered: Work[]) => Promise<DeploymentObservation>;
   /**
-   * GY-1831: whether the promotion pipeline has `mergeSha` in flight — a release candidate carrying
-   * it is being built or promoted, or the dispatch that will carry it is due — answered from the
-   * promotion state the loop already records on its cursor, read at the failed attempt. Absent,
-   * false, or reading false, a `verify-deployment` failure that the running release does not carry
-   * the merge keeps its plain reason and stalls as before; the wiring fails it closed the same way
-   * when the state cannot be read.
+   * GY-1831, GY-1966: the wait a `verify-deployment` failure names while the promotion pipeline is
+   * moving `mergeSha` toward the release that serves it, with the pipeline's newest demonstrated
+   * movement, answered from the promotion state the loop already records on its cursor, read at
+   * the failed attempt. Null, absent, or failing to read, a `verify-deployment` failure that the
+   * running release does not carry the merge keeps its plain reason and stalls as before; the
+   * wiring fails closed the same way when the state cannot be read.
    */
-  promotionCarryingMerge?: (mergeSha: string) => Promise<boolean>;
+  promotionWaitSuffix?: (mergeSha: string) => Promise<string | null>;
   /** Where the handler's own diagnostics go; absent, a failed promotion read is logged nowhere. */
   log?: (line: string) => void;
-  /**
-   * `POST work` as the master's operator-agent identity, the one that may create work (GY-1660): files
-   * the follow-up a delivered item's unobserved post-deploy verification owes. The coordinator
-   * credential `mutate` carries cannot create work.
-   */
-  fileWork?: (input: unknown, requestId: string) => Promise<{ key?: string }>;
-  /**
-   * Releases a filed follow-up from backlog as the same operator-agent identity (GY-1747): the release serving its delivery
-   * has just been observed, so nothing remains for a person to decide. An item already released is left as it is.
-   */
-  releaseWork?: (key: string) => Promise<void>;
-  /** The intervention report's reading for a pattern (GY-1698): a windowed follow-up's observation instant is taken from it; absent or failing, the merge time plus the criterion's window stands. */
-  readPattern?: PatternReader;
-  /** The observed release's post-deploy filer, or why it cannot be had (GY-1732); `releasePostDeployFiler` over the executor's config by default. */
-  postDeployFiler?: (sha: string) => ReturnType<typeof releasePostDeployFiler>;
   /** Records a launched session's durable handle on the item (AC-8). */
   recordSession?: (work: Work, handle: SessionHandleInput) => Promise<unknown>;
   /** GY-1764: the base branch's tracked files the approve-scope handler judges a scope ask's paths against; built from the coordinator checkout when absent, injectable so a test supplies its own tree. */
@@ -464,44 +449,29 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       const observation = await effects.observeDeployment([work]);
       if (observation.source === 'unavailable' || !observation.sha) throw new Error(observation.reason ?? `no deployment could be read for ${work.key}`);
       if (!observation.deployed.includes(work.key)) {
-        const plain = observation.reason ?? `the running release ${observation.sha.slice(0, 12)} does not carry ${work.key}'s merge ${action.inputs.mergeSha.slice(0, 12)} yet`;
+        // An informational reason (an inactive release production still serves) follows the does-not-carry sentence, so a
+        // stall still names the release machinery; a stale containment reason stands alone, its pending list unreliable.
+        const notCarried = `the running release ${observation.sha.slice(0, 12)} does not carry ${work.key}'s merge ${action.inputs.mergeSha.slice(0, 12)} yet`;
+        const plain = !observation.reason ? notCarried : observation.reason.includes(staleContainmentReasonPrefix) ? observation.reason : `${notCarried}: ${observation.reason}`;
         // GY-1831: a release the promotion pipeline is about to serve is the pipeline's ordinary
-        // pace, not a fault. Naming the wait bounds the row by the promotion wait bound instead of
-        // the stall threshold, so the retries land within minutes of the promotion. Containment
-        // derived without a fresh base branch is not this shape, since its pending list is not
-        // reliable; an informational reason (an inactive release production still serves) is. A
-        // state that cannot be read stands as not carrying — logged, so an unreadable pipeline is
-        // diagnosable — and the plain reason and the stall are what they were.
-        const waiting = !observation.reason?.includes(staleContainmentReasonPrefix) && await Promise.resolve(effects.promotionCarryingMerge?.(action.inputs.mergeSha)).catch(error => {
+        // pace, not a fault. GY-1966: the wait names the pipeline's newest demonstrated movement,
+        // so the row's unchanged run measures the stretch since the pipeline last moved and the
+        // promotion wait bound holds it — a re-cut cycle longer than an hour no longer files.
+        // Containment derived without a fresh base branch is not this shape, since its pending
+        // list is not reliable; an informational reason (an inactive release production still
+        // serves) is. A state that cannot be read stands as not carrying — logged, so an
+        // unreadable pipeline is diagnosable — and the plain reason and the stall are what they
+        // were.
+        const waiting = !observation.reason?.includes(staleContainmentReasonPrefix) && await Promise.resolve(effects.promotionWaitSuffix?.(action.inputs.mergeSha)).catch(error => {
           effects.log?.(`[graphyard-executor] the promotion state could not be read for ${work.key}, so the failure stands as it was: ${error instanceof Error ? error.message : String(error)}`);
-          return false;
+          return null;
         });
-        throw new Error(waiting ? `${plain}; ${promotionWaitClause}` : plain);
+        throw new Error(waiting ? `${plain}; ${waiting}` : plain);
       }
-      // GY-1660: the release just observed checks the item's declared post-deploy verifications, and an
-      // owed one files its follow-up before the observation is recorded: a filing that fails fails the
-      // action, which retries it, where a recorded observation would refuse every retry.
-      // GY-1732: the follow-ups are filed by the observed release's own code, never by an executor checkout at another commit;
-      // where that code cannot be had or run, each is deferred under its request id and the observation waits for a retry.
-      // That code also decides whether anything is owed: this checkout may not recognise a proof the release does.
-      const sha = observation.sha, source = await (effects.postDeployFiler ?? (release => releasePostDeployFiler(config(), release)))(sha);
-      if ('reason' in source && !deferPostDeployFollowUps(work, sha, all, source.reason).some(check => check.deferred))
-        throw new Error(`${work.key}: whether the release ${sha.slice(0, 12)} owes post-deploy follow-ups is its own code's to decide, and ${source.reason}; the deployment observation waits for it`);
-      const checks = 'reason' in source ? deferPostDeployFollowUps(work, sha, all, source.reason)
-        : await filePostDeployFollowUps(work, sha, all, effects.fileWork, new Date(effects.now?.() ?? Date.now()), effects.readPattern, new Date(observation.at), source.filer).finally(source.dispose);
-      const deferred = checks.filter(check => check.deferred);
-      if (deferred.length) throw new Error(`${work.key}: ${deferred.map(check => `${check.criterion} (${check.proof}) owes its post-deploy follow-up ${check.requestId}, whose filing is deferred: ${check.deferred}`).join('; ')}; the deployment observation waits for it`);
-      const owed = checks.filter(check => check.result === 'owed');
-      const unfiled = owed.filter(check => !check.followUp);
-      if (unfiled.length) throw new Error(`${work.key}: ${unfiled.map(check => `${check.criterion} (${check.proof})`).join(', ')} owes its post-deploy follow-up, and ${effects.fileWork ? 'filing it returned no item' : 'this executor has no operator-agent identity to file it with; run graphyard master autonomy --admin-token-stdin --apply'}; the deployment observation waits for it`);
-      // GY-1747: the observation that the release serves the delivery is the follow-up's release from backlog; a failed release
-      // fails the action, which retries it, before the observation is recorded.
-      // Authority is owed only for a follow-up still unreleased: a retry after an earlier attempt released it has nothing left to release.
-      const filed = checks.filter(check => check.followUp && !all.some(item => item.key === check.followUp && item.ready));
-      if (filed.length && !effects.releaseWork) throw new Error(`${work.key}: ${filed.map(check => `${check.criterion} (${check.proof})`).join(', ')} has a filed post-deploy follow-up, and this executor has no operator-agent identity to release it from backlog with; run graphyard master autonomy --admin-token-stdin --apply; the deployment observation waits for it`);
-      for (const check of filed) await effects.releaseWork!(check.followUp!);
+      // An unobserved post-deploy criterion is named in the result, never filed as a work item (2026-10-17).
+      const owed = reportPostDeployChecks(work, observation.sha, new Date(effects.now?.() ?? Date.now())).filter(check => check.result === 'owed');
       await effects.mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: action.inputs.mergeSha, source: observation.source, observedAt: observation.at }, randomUUID());
-      return `observed the release serving ${observation.sha.slice(0, 12)} for ${work.key}${owed.length ? `; ${owed.map(check => `${check.criterion} owes its post-deploy observation${check.followUp ? ` (${check.followUp})` : ''}`).join(', ')}` : ''}`;
+      return `observed the release serving ${observation.sha.slice(0, 12)} for ${work.key}${owed.length ? `; ${owed.map(check => `${check.criterion} (${check.proof}) is not yet observed on this release`).join(', ')}` : ''}`;
     },
   };
   if (checkoutRefusal) for (const kind of Object.keys(handlers) as NextActionKind[]) {

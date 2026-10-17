@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { demand, stages } from '../../model.js';
 import { plannedFilesMax } from '../../model/scope.js';
 import { interventionKinds, interventionRecordSchema, interventionWindows, judgementSchema, type InterventionWindow } from '../../model/interventions.js';
-import { interventionScan, judgementToWork, openPatternItems, readInterventionReport, recordIntervention, recordJudgement } from '../../interventions.js';
+import { interventionScan, judgementToWork, readInterventionReport, recordIntervention, recordJudgement } from '../../interventions.js';
 import { classifyIntervention, retroJudgementSchema, retroStanding, type RetroClassification } from '../../model/retro-synthesis.js';
 import { judgeRetroArtefact, readRetroArtefacts, readRetroReport, synthesizeRetro } from '../../retro-synthesis.js';
 import { defineRoutes, parseJson } from '../routes.js';
@@ -54,16 +54,6 @@ export const interventionRoutes = defineRoutes('interventions', [
   {
     method: 'POST', path: '/api/interventions',
     handle: async context => recordIntervention(context.services.engine.store, context.actor, interventionRecordSchema.parse(await parseJson(context)), context.idempotencyKey()),
-  },
-  {
-    // The detection the server runs on its own every tick, exposed so a master can run it now
-    // and see what it opened. It never opens a second item for a pattern one already stands for.
-    method: 'POST', path: '/api/interventions/patterns',
-    async handle({ actor, services }) {
-      demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-      const { opened, truncated } = await openPatternItems(services.engine, services.interventionPolicy);
-      return { opened: opened.map(work => ({ id: work.id, key: work.key, title: work.title, origin: work.origin })), truncated, policy: services.interventionPolicy };
-    },
   },
   {
     method: 'POST', path: '/api/judgements',

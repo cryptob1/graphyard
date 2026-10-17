@@ -12,6 +12,7 @@
 import { agentOwner, type AttentionItem } from './attention.js';
 import { shortCommit } from '../executor-fleet.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
+import { isExternalUpgradeRefusal } from '../daemon/upgrade-ownership.js';
 
 /** How long a component may stay more than one delivery behind before it is named (GY-437). */
 export const releaseLagGraceMs = 10 * 60_000;
@@ -162,6 +163,10 @@ export async function releaseLag(baseTip: string | null, deliveries: readonly La
 /** The attention a refused upgrade raises, until the checkout clears: the loop stays on its loaded release and says why. */
 export function upgradeRefusalAttention(refused: { at: string; reason: string; commit: string | null } | null | undefined, root: string, baseBranch: string): AttentionItem[] {
   if (!refused) return [];
+  // GY-1958: an external install's refusal is no checkout to clear — the loop never aligns it, so
+  // the remedy is the command upgrade, and nothing in the managed repository at `root` is touched.
+  if (isExternalUpgradeRefusal(refused.reason)) return [{ subject: 'upgrade', text: `This install's managed repository is another project than the Graphyard checkout its loop runs from, so the loop runs no self-upgrade: it leaves that checkout at ${shortCommit(refused.commit)} untouched and never fetches in it, and the install upgrades by command.`,
+    ...agentOwner('master', 'Upgrade the install by command when a Graphyard release should run: move the Graphyard checkout the CLI runs from to that release, then run graphyard up, which restarts the loop and the executors onto it; the managed repository is never fetched in or checked out for this') }];
   return [{ subject: 'upgrade', text: `The loop left the coordinator checkout at ${shortCommit(refused.commit)} untouched: ${refused.reason} (seen ${refused.at}). It aligns the checkout with ${baseBranch} between cycles once it is a clean, detached checkout of ${baseBranch}.`,
     ...agentOwner('master', `Clear the coordinator checkout at ${root} — git -C ${root} status --porcelain names what is in it, and git -C ${root} checkout --detach "origin/${baseBranch}" returns it to what the loop upgrades onto`) }];
 }
