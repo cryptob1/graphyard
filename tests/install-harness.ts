@@ -166,6 +166,8 @@ export interface HarnessOptions {
   workdir?: string;
   statusBody?: unknown;
   healthy?: boolean;
+  /** The commit /healthz reports; the pinned Graphyard source's by default, so a Railway upload is served. */
+  servedCommit?: string | null;
   repository?: string;
   deliveries?: any[];
   /** Reuse a previous harness's checkout and credential home to exercise a re-run. */
@@ -209,7 +211,7 @@ export async function harness(options: HarnessOptions): Promise<Harness> {
     const url = String(input); const method = String(init.method ?? 'GET');
     requests.push({ method, url, ...(init.body ? { body: String(init.body) } : {}) });
     const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-    if (url.endsWith('/healthz')) return options.healthy === false ? json(503, { ok: false }) : json(200, { ok: true });
+    if (url.endsWith('/healthz')) return options.healthy === false ? json(503, { ok: false }) : json(200, { ok: true, commit: options.servedCommit === undefined ? GRAPHYARD_SOURCE_SHA : options.servedCommit });
     if (url.endsWith('/api/agent-registry/document')) return json(200, registry);
     if (url.endsWith('/api/agent-registry/apply') && method === 'POST') return json(200, { applied: true });
     if (url.endsWith('/api/status')) return json(200, options.statusBody ?? { actor: { id: `${installId}-operator`, role: 'admin' }, repository, github: true, githubAppId: GRAPHYARD_APP_ID, githubInstallationId: 500 });

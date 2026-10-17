@@ -137,4 +137,40 @@ test('unit:railway-upload-stamps-build-sha — the upload sets GRAPHYARD_BUILD_S
   assert.equal(unknown.transport.commands.length, 0, 'an upload of unknown commit ran a command');
   assert.deepEqual(railwayUploadReceipts(unknown.ctx), []);
   assert.deepEqual(app.values, [{ name: 'GRAPHYARD_BUILD_SHA', value: SHA, secret: false }]);
+
+  // `railway up --detach` returns once the build is queued, and on a rerun the previous
+  // deployment stays healthy: the health check waits for the stamped commit to be served.
+  const OLD = 'f'.repeat(40);
+  const serving = (commits: (string | null)[]) => {
+    const asked: string[] = [];
+    const fetch = (async (input: any) => {
+      asked.push(String(input));
+      const commit = commits.length > 1 ? commits.shift()! : commits[0];
+      return new Response(JSON.stringify({ ok: true, commit }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as unknown as typeof globalThis.fetch;
+    return { fetch, asked };
+  };
+  const SERVICE_URL = 'https://graphyard-owner-project.up.railway.app';
+  const rerun = serving([OLD, OLD, SHA]);
+  let waits = 0;
+  const pinned = context({ fetch: rerun.fetch, wait: async () => { waits++; } });
+  await railwayAdapter.deploy(pinned.ctx);
+  assert.equal(await railwayAdapter.health(pinned.ctx, SERVICE_URL), true);
+  assert.deepEqual(rerun.asked, [`${SERVICE_URL}/healthz`, `${SERVICE_URL}/healthz`, `${SERVICE_URL}/healthz`], 'the previous deployment satisfied the check');
+  assert.equal(waits, 2);
+
+  // The queued upload's build fails, so the old deployment keeps answering: the deploy step fails.
+  const stale = context({ fetch: serving([OLD]).fetch, wait: async () => {} });
+  await railwayAdapter.deploy(stale.ctx);
+  await assert.rejects(railwayAdapter.health(stale.ctx, SERVICE_URL), new RegExp(`^Error: provider\\.deploy failed: ${SERVICE_URL} still serves commit ${OLD}, not the uploaded commit ${SHA}`));
+  // Without an upload this context ran, health is the plain /healthz answer.
+  assert.equal(await railwayAdapter.health(context({ fetch: serving([OLD]).fetch }).ctx, SERVICE_URL), true);
+
+  // Through a full rerun apply, the old deployment answering healthy does not complete it.
+  const fixture = await harness({ provider: 'railway', servedCommit: OLD });
+  try {
+    const session = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'railway' }, fixture.deps);
+    await assert.rejects(applyInstall(session, await buildPlan(session)), /provider\.deploy failed: .* still serves commit f{40}, not the uploaded commit c{40}/);
+    assert.equal(fixture.transport.commands.filter(command => command.program === 'railway').at(-1)!.args[0], 'domain', 'the apply ran past the unserved upload');
+  } finally { await fixture.cleanup(); }
 });

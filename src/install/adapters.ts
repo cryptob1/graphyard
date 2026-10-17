@@ -708,6 +708,34 @@ export async function railwayUpload(ctx: AdapterContext): Promise<RailwayUploadR
   return receipt;
 }
 
+/** How long the health check waits for the uploaded build to be served: 200 × 3 s, ten minutes. */
+const RAILWAY_SERVE_ATTEMPTS = 200;
+
+/**
+ * Railway's health is the uploaded build's, not the service's: `railway up --detach` returns once
+ * the build is queued, and on a rerun the previous deployment keeps answering /healthz, so a
+ * healthy answer alone would complete the apply while the new upload is still building or has
+ * failed. After an upload, healthy means /healthz is ok and reports the commit that upload
+ * stamped in GRAPHYARD_BUILD_SHA; while it reports another, the check waits, and when the wait
+ * ends without it the deploy step fails, naming what is served instead.
+ */
+export async function railwayHealth(ctx: AdapterContext, url: string): Promise<boolean> {
+  const sha = railwayUploadReceipts(ctx).at(-1)?.buildSha;
+  if (!sha) return httpHealth(ctx, url);
+  let served = 'no answer';
+  for (let attempt = 0; attempt < RAILWAY_SERVE_ATTEMPTS; attempt++) {
+    try {
+      const response = await ctx.fetch(`${url.replace(/\/$/, '')}/healthz`, { signal: AbortSignal.timeout(15_000) });
+      const body = response.ok ? await response.json() as any : null;
+      const commit = typeof body?.commit === 'string' ? body.commit.toLowerCase() : null;
+      if (body?.ok === true && commit === sha.toLowerCase()) return true;
+      served = body?.ok === true ? `commit ${commit ?? 'null'}` : `HTTP ${response.status}`;
+    } catch { served = 'no answer'; }
+    await ctx.wait(3_000);
+  }
+  throw new Error(`provider.deploy failed: ${url} still serves ${served}, not the uploaded commit ${sha}; the upload's build failed or did not finish. Inspect: railway logs --service ${ctx.service}`);
+}
+
 export const railwayAdapter: ProviderAdapter = {
   provider: 'railway',
   async preflight(ctx) {
@@ -807,7 +835,7 @@ export const railwayAdapter: ProviderAdapter = {
     if (!found) throw new Error('Railway did not return an HTTPS domain for the service');
     return `https://${found[0]}`;
   },
-  health: httpHealth,
+  health: railwayHealth,
   async logs(ctx, lines = 100) {
     const result = await runRailway(ctx, ['logs', '--service', ctx.service, '--lines', String(lines)], { allowFailure: true, timeout: 180_000 });
     return ctx.vault.scrub(result.stdout || result.stderr);
