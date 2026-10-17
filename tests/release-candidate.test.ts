@@ -282,7 +282,7 @@ test('integration:failed-candidate-fix-forward — a failed candidate files one 
 test('unit:release-candidate-e2e-suite — UAT runs every case targeted at uat as the e2e suite of release validate; a failing case fails the candidate and its follow-up names the case and step', async () => {
   const workflow = await readFile(new URL('../.github/workflows/release-candidate.yml', import.meta.url), 'utf8');
   const validateStep = workflow.slice(workflow.indexOf('node bin/graphyard.mjs release validate'), workflow.indexOf('- name: Record the E2E case runs'));
-  assert.match(validateStep, /--suite 'e2e=node --import tsx --eval "import\(\\"\.\/src\/e2e\/runner\.ts\\"\)\.then\(m => m\.runE2eSuite\(\)\)"'/, 'the uat job runs the e2e suite inside release validate');
+  assert.match(validateStep, /--suite 'e2e=node --import tsx scripts\/onboarding-delivery-fixture\.mjs'/, 'the uat job runs the e2e suite inside release validate, the onboarding case on its isolated fixture (GY-1910)');
   assert.match(validateStep, /GRAPHYARD_UAT_TOKEN: \$\{\{ secrets\.GRAPHYARD_UAT_TOKEN \}\}/, 'the runner reads UAT\'s token from the uat environment secret');
   assert.match(validateStep, /UAT_URL: \$\{\{ vars\.UAT_URL \}\}/);
   const recordStep = workflow.slice(workflow.indexOf('- name: Record the E2E case runs'), workflow.indexOf('\n  imports:\n'));
