@@ -345,6 +345,7 @@
     "tests/diagnosis-hold.test.ts": 943,
     "tests/diagnostician.test.ts": 2224,
     "tests/diff-bound-carry.test.ts": 617,
+    "tests/digest-promotion.test.ts": 193,
     "tests/direct-merge-mode.test.ts": 2718,
     "tests/dismissed-review.test.ts": 1929,
     "tests/dispatch-collision.test.ts": 1679,
@@ -925,6 +926,7 @@
     "tests/worktree-preserved-aside.test.ts": 1442,
     "tests/worktree-reclaim.test.ts": 3054,
     "tests/zero-touch-control-plane.test.ts": 4000,
-    "tests/zero-touch-onboarding.test.ts": 5900
+    "tests/zero-touch-onboarding.test.ts": 5900,
+    "tests/evaluator-recovery.test.ts": 4000
   }
 }

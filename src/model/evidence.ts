@@ -41,6 +41,8 @@ export interface Evidence {
     artifact: { id: number; name: string; digest: string; url: string; createdAt: string };
   };
   validation?: { candidateId: string; requestId: string; attemptId: string };
+  /** GY-1841: the evaluation that judged this result under the recovery rule, every attempt kept with its time, outcome and cause. */
+  evaluation?: EvaluationRecord;
   /**
    * CI-produced evidence: the GitHub Actions job that executed the registered contract on this
    * commit, as the control plane read it back from GitHub before accepting the record. Only the
@@ -155,6 +157,78 @@ export function currentEvidence(work: Work, proof: string, now = new Date()): Ev
     && (!validation || !!validation.attemptId && e.validation?.candidateId === validation.candidateId && e.validation?.requestId === validation.requestId && e.validation?.attemptId === validation.attemptId)
     && (!scenario || e.scenarioRevision === scenario.revision && e.environment === scenario.environment)).at(-1);
   return latest && (!latest.expiresAt || Date.parse(latest.expiresAt) > now.getTime()) ? latest : undefined;
+}
+
+// -------------------------------------------------------------------------
+// Evaluator recovery (GY-1841): the explicit rule a failed evaluation is retried under.
+//
+// Judging a proof's retained evidence is an evaluation the pinned verifier performs, and it can
+// end for reasons that are not the change's: the artifacts were never retained (the producer
+// session timed out), the bytes cannot be read (the host ran out of resources), or the verifier
+// itself crashed. Such an evaluator-error is retried against the same retained evidence — the
+// artifacts pinned when the evaluation began — at most `evaluationRetries` more times, with a
+// widening backoff between attempts, never against new evidence. A fail the verifier reached is
+// a verdict on the change and is never retried; a pass on any attempt is the evaluation's
+// result. Every attempt is appended with its time, evaluator and outcome, and none is
+// overwritten. When the retries are exhausted the evaluation ends in its fault — the evaluator
+// errors — which is a fault of the evaluation, never a failed proof: nothing is judged to have
+// failed, and the errors are what the record shows.
+// -------------------------------------------------------------------------
+
+/** How one run of the evaluator over retained evidence ended. */
+export type EvaluationOutcome = 'pass' | 'fail' | 'evaluator-error';
+
+/** One evaluator run over an attempt's retained evidence, appended to the record it belongs to. */
+export interface EvaluationAttempt {
+  /** When the attempt ended. */
+  at: string;
+  /** The pinned evaluator that judged: the bundle's pinned report format. */
+  evaluator: string;
+  outcome: EvaluationOutcome;
+  /** Why the evaluator could not judge; null for a pass or a fail. */
+  cause: string | null;
+}
+
+/** One evaluation the recovery rule drove: every attempt kept in order, none overwritten, and the fault when none judged. */
+export interface EvaluationRecord {
+  attempts: EvaluationAttempt[];
+  /** The outcome of the attempt that decided the evaluation: a pass on any attempt is the result. */
+  outcome: EvaluationOutcome;
+  /** Set only after the retries are exhausted without a verdict: the evaluator errors, a fault of the evaluation, never a failed proof. */
+  fault: { kind: 'evaluator-error'; errors: string[] } | null;
+}
+
+/** An evaluator-error is retried against the same retained evidence at most this many more times. */
+export const evaluationRetries = 2;
+/** The backoff between retry attempts, in ms: each retry waits the previous wait doubled (250, then 500). */
+export const evaluationRetryBackoffMs = 250;
+
+/**
+ * Drive one evaluation under the recovery rule. `attempt` runs the evaluator once over the same
+ * retained evidence and resolves to `pass`, `fail`, or `{ error }` — why it could not judge; a
+ * throw is that attempt's evaluator-error too. `sleep` spaces the retries out and `now` stamps
+ * each attempt's time, so a test drives both without the wall clock.
+ */
+export async function evaluateWithRecovery(evaluator: string, attempt: () => Promise<'pass' | 'fail' | { error: string }>,
+  options: { retries?: number; backoffMs?: number; sleep?: (ms: number) => Promise<void>; now?: () => Date } = {}): Promise<EvaluationRecord> {
+  const retries = options.retries ?? evaluationRetries;
+  const backoffMs = options.backoffMs ?? evaluationRetryBackoffMs;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
+  const now = options.now ?? (() => new Date());
+  const attempts: EvaluationAttempt[] = [], errors: string[] = [];
+  for (;;) {
+    let verdict: 'pass' | 'fail' | { error: string };
+    try { verdict = await attempt(); }
+    catch (error) { verdict = { error: error instanceof Error ? error.message : String(error) }; }
+    if (verdict === 'pass' || verdict === 'fail') {
+      attempts.push({ at: now().toISOString(), evaluator, outcome: verdict, cause: null });
+      return { attempts, outcome: verdict, fault: null };
+    }
+    errors.push(verdict.error);
+    attempts.push({ at: now().toISOString(), evaluator, outcome: 'evaluator-error', cause: verdict.error });
+    if (attempts.length > retries) return { attempts, outcome: 'evaluator-error', fault: { kind: 'evaluator-error', errors } };
+    await sleep(backoffMs * 2 ** (attempts.length - 1));
+  }
 }
 
 /** What a producer submits as `exercise`. */

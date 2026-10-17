@@ -43,7 +43,9 @@ const gate = (item: Work, name: string) => item.gates.find(entry => entry.name =
 /**
  * The control-plane candidates owed a merge, oldest submission first: submitted (a candidate the
  * control plane observed itself, GY-1523), not done, not returned to a worker, with the `build`
- * gate passed and, for a sensitive delta (`riskOf`), the `review` gate too. A head the writer's own
+ * and `review` gates passed as the control plane served them: its review gate fails a delta reviewed before
+ * merge (a sensitive one, or any under a repository declaring `review.normalChanges: pre-merge`) until its
+ * approval, and passes a normal one reviewed after merge (GY-1525). A head the writer's own
  * trial already refused (`trial failed`, GY-1524 AC-3) waits for its rework rather than a second
  * trial; one refused `base moved N times` is queued again. An item whose ledger holds an open intent
  * or an unreconciled push blocks the whole queue: `reconcileIntents` settles it before any new merge,
@@ -55,7 +57,9 @@ export function mergeQueue(work: readonly Work[], ledger: Readonly<Record<string
     const candidate = item.candidate;
     if (item.stage === 'done' || !item.submission || !candidate || item.observation?.source !== 'control-plane' || item.reworkRequested || item.observation?.merged) return false;
     if (!gate(item, 'build')) return false;
-    if (riskOf(item).risk === 'sensitive' && !gate(item, 'review')) return false;
+    // The served review gate is the control plane's verdict under the deployment's policy, never this process's
+    // own reading of graphyard.json, which an unapplied edit or an older checkout makes diverge (GY-1843).
+    if (!gate(item, 'review')) return false;
     const state = ledger[item.key];
     if (state && state.head === candidate.sha.toLowerCase() && state.state === 'refused' && state.refusal?.kind === 'merge' && state.refusal.reason.startsWith(trialFailurePrefix)) return false;
     if (state && state.head === candidate.sha.toLowerCase() && state.state === 'reconciled') return false;

@@ -15,6 +15,7 @@ import { asUser, existingMachineAdapter, generateHostSecrets, hostHerdrOnly, hos
 import { applyProtection, appClient, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, installationClient, installationToken, protectionSatisfied, readProtection, GRAPHYARD_CHECKS, readWebhookConfig, repositoryInstallation, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
 import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
 import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
+import { repositoryPolicyAssignment } from '../model/repository-policy.js';
 import { delegationLimitAssignments, delegationLimitVariables } from './limits.js';
 import { assertOutsideRepository, configHome, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalsVariable, readInstallRecord, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord } from './secrets.js';
 import { AppStepPending, readAppFile, readSavedApp, readUninstalledApp, type SavedApp } from './manifest.js';
@@ -44,6 +45,8 @@ export interface InstallDependencies {
   fetch?: typeof fetch;
   configHome?: string;
   sourceRoot?: string;
+  /** The commit a Railway upload stamps as GRAPHYARD_BUILD_SHA; read from sourceRoot's checkout when absent. */
+  sourceCommit?: string | null;
   cliPath?: string;
   hostId?: string;
   now?: () => number;
@@ -216,6 +219,14 @@ export interface InstallSession {
    * none), or the refusal a declared manifest that failed or did not parse produced.
    */
   generatedFiles: { assignment: GeneratedFilesAssignment | null; error: string | null };
+  /**
+   * The managed repository's graphyard.json `risk`, `review` and `e2e` policy (GY-1843) as the
+   * GRAPHYARD_REPOSITORY_POLICY assignment the installer sets beside GRAPHYARD_PRINCIPALS: the
+   * runtime image carries no repository, so without it the deployed gates judge by the generic
+   * default. Or the refusal a declaration that does not parse produced. Absent on sessions built
+   * before it existed.
+   */
+  repositoryPolicy?: { assignment: ReturnType<typeof repositoryPolicyAssignment> | null; error: string | null };
   /** The App registration this install reuses instead of the browser step, or why the named one cannot be. */
   savedApp: { app: SavedApp | null; error: string | null };
   /** Every App registration saved on this host (GY-1442): what --reuse-app and the App page's reuse choose from. */
@@ -432,6 +443,11 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
   let generatedFiles: InstallSession['generatedFiles'];
   try { generatedFiles = { assignment: generatedFilesAssignment(root), error: null }; }
   catch (error: any) { generatedFiles = { assignment: null, error: error.message }; }
+  let repositoryPolicy: InstallSession['repositoryPolicy'];
+  try {
+    const text = await readFile(resolve(root, repositoryConfigFile), 'utf8').catch((error: any) => { if (error.code === 'ENOENT') return null; throw error; });
+    repositoryPolicy = { assignment: repositoryPolicyAssignment(text === null ? null : JSON.parse(text)), error: null };
+  } catch (error: any) { repositoryPolicy = { assignment: null, error: `${repositoryConfigFile}'s risk, review and e2e policy does not parse: ${error.message}` }; }
   const reviewPolicy = rawInputs.reviewPolicy ?? 'github';
   const delivery = await repositoryDelivery(root);
   let detectedBase = rawInputs.baseBranch;
@@ -478,6 +494,9 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
     local: provider === 'local' ? await localSettings(directory, installId, dependencies.localSupervisor) : null,
     spend: { maxMonthly: inputs.maxMonthly ?? null, confirmPrice: inputs.confirmPrice ?? null },
     observeOnly: !!inputs.observeOnly,
+    // The repository this install manages: the observe-only upload guard refuses it as the source.
+    managedRoot: root,
+    ...(dependencies.sourceCommit !== undefined ? { sourceCommit: dependencies.sourceCommit } : {}),
     wait: dependencies.wait ?? ((ms: number) => new Promise(accept => setTimeout(accept, ms))),
     transport, ssh, fetch: dependencies.fetch ?? fetch, vault,
   };
@@ -509,7 +528,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
     : delivery.committed ? requiredPullRequestChecks(delivery.policy) : detected.proposedChecks;
   return {
     root, inputs, installId, directory, adapter, context, principals, tokens, vault, record,
-    reviewers: record?.reviewers ?? [], mode, materialized, generatedFiles, savedApp, registrations,
+    reviewers: record?.reviewers ?? [], mode, materialized, generatedFiles, repositoryPolicy, savedApp, registrations,
     delivery: { ...delivery, adapter: deploymentAdapters[delivery.policy.deploy.adapter], context: deployment },
     reviewPolicy, requiredChecks,
     reviewCount: reviewPolicy === 'agent' ? 0 : Math.max(0, inputs.reviewCount ?? 1),
@@ -586,6 +605,9 @@ export function coreEnv(session: InstallSession): EnvValue[] {
     // a regenerated docs index instead of refusing it as an out-of-scope rewrite. A repository
     // that declares none leaves the variable unset, which is its correct deployment state.
     ...(session.generatedFiles.assignment ? [{ name: session.generatedFiles.assignment.variable, value: session.generatedFiles.assignment.value, secret: false }] : []),
+    // The repository's sensitive paths, review timing and pending-outcome rule (GY-1843): the image
+    // carries no graphyard.json, so the deployed gates read them from here.
+    ...(session.repositoryPolicy?.assignment ? [{ name: session.repositoryPolicy.assignment.variable, value: session.repositoryPolicy.assignment.value, secret: false }] : []),
     ...(context.repoCheckout ? [{ name: 'GRAPHYARD_REPOSITORY_ROOT', value: '/repo', secret: false }] : []),
   ];
 }
@@ -847,6 +869,8 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   preflight.push(session.generatedFiles.error
     ? { name: 'Generated-file manifest', ok: false, detail: session.generatedFiles.error, fix: `Fix ${generatedManifestScript} so \`node ${generatedManifestScript} --manifest\` prints the generated files as JSON, then rerun` }
     : { name: 'Generated-file manifest', ok: true, detail: session.generatedFiles.assignment ? `declares ${session.generatedFiles.assignment.value}` : 'the repository declares no generated files' });
+  // Deploying the generic default over a declaration that does not parse would silently weaken every gate.
+  if (session.repositoryPolicy?.error) preflight.push({ name: 'Repository policy', ok: false, detail: session.repositoryPolicy.error, fix: `Correct the risk, review and e2e sections of ${repositoryConfigFile} (docs/delivery.md), then rerun` });
   // --no-github-app never strips a live App: refuse before any write when the install record
   // already binds one (GY-1550). Orphaned deployment variables are judged after observe below.
   if (noApp && record?.github) preflight.push({ name: 'GitHub App', ok: false, detail: `this installation already binds GitHub App ${record.github.slug} (app ${record.github.appId}); --no-github-app does not strip a live App`, fix: `Rerun without --no-github-app to keep that App, or remove its binding and every ${APP_VARIABLES.join(', ')} variable from the ${context.provider} deployment before installing without one` });

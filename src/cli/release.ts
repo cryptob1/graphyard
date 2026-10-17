@@ -5,9 +5,11 @@ import { defineCommands } from './registry.js';
 import { resolveWork } from './context.js';
 import { releaseLeaseCommand } from './lease.js';
 import {
-  apiSuite, assessProductionServing, awaitServing, commandSuite, cut, deployToUat, endpointSuite, findCandidate, followUpItem, followUpRequestId, gitIn,
-  ledgerStatus, maxPrsFrom, promote, readLedger, readRecords, readServed, recordSoak, syncLedger, unacceptedFlaky, validateAndRecord, writeRecord, type CutTrigger, type FlakyAcceptance, type SoakRecord, type Suite,
+  apiSuite, assessProductionServing, awaitServing, commandSuite, cutAsync, deployToUatAsync, endpointSuite, findCandidate, followUpItem, followUpRequestId, gitIn,
+  ledgerStatus, maxPrsFrom, promoteAsync, readLedger, readRecords, readServed, recordSoak, syncLedger, uatServedDigests, unacceptedFlaky, validateAndRecord, writeRecord,
+  type AsyncGit, type CutTrigger, type FlakyAcceptance, type SoakRecord, type Suite,
 } from '../release-candidate.js';
+import { commandDigestAdapter, shellRun, uatDigestSuite, verifyProductionDigests } from '../release-digests.js';
 import { acceptancesFrom, foldHolds, foldRecord, holdItemsFor, holdTag, holdTagPrefix, releaseHolds, type HoldRecord } from '../release-holds.js';
 import { pendingFromPlane, readPlane, servingStage } from '../release-pending.js';
 import { checkRepositoryContract, contractFile, loadContract } from '../e2e/case.js';
@@ -50,8 +52,10 @@ export const releaseCommands = defineCommands([
       '                                deliveries it carries; merges to main never pause. It takes at',
       '                                most N merges after the last candidate (GRAPHYARD_RC_MAX_PRS,',
       '                                default 10) and leaves the rest queued for the next cut',
+      '                                GRAPHYARD_RELEASE_BUILD builds it once and records each digest',
       '  release status                Every candidate with its UAT verdict and production promotion',
-      '  release uat ID|latest         Deploy the candidate to UAT: release/uat moves to its exact SHA',
+      '  release uat ID|latest         Deploy the candidate to UAT: release/uat moves to its exact SHA,',
+      '                                or GRAPHYARD_DEPLOY_DIGESTS deploys its recorded build digests',
       '  release validate ID --url URL [--api] [--check PATH]... [--suite NAME=COMMAND]... [--wait SECONDS]',
       '                                Run the suites against UAT serving the candidate and record the',
       '                                verdict; --api drives the deployed API with GRAPHYARD_UAT_TOKEN;',
@@ -63,10 +67,12 @@ export const releaseCommands = defineCommands([
       '  release fold OUTCOME --decision ID',
       '                                Fold an outcome\'s open hold into another\'s, as the applied fold',
       '                                decision ID on its hold item (another agent approved) names',
-      '  release promote ID|latest     Deploy a UAT-passed candidate to production by its exact SHA;',
+      '  release promote ID|latest     Deploy a UAT-passed candidate to production by its exact SHA, or',
+      '                                by its recorded digests (never a rebuild) under GRAPHYARD_DEPLOY_DIGESTS;',
       '                                flaky required cases need applied evidence decisions at that SHA',
       '  release verify --url URL [--wait SECONDS]',
-      '                                Check production serves a promoted candidate and name it',
+      '                                Check production serves a promoted candidate and name it; a digest',
+      '                                promotion also needs every instance (GRAPHYARD_INSTANCE_DIGESTS) to run its digest',
       '  release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]',
       "                                Record the advisory soak's verdict for the candidate (tag",
       '                                rc-soak/ID on its exact SHA) with the soak run and its timing',
@@ -78,7 +84,9 @@ export const releaseCommands = defineCommands([
       if (id && !subcommands.has(id)) {
         return releaseLeaseCommand.run(context, await resolveWork(api, id));
       }
-      const root = repositoryRoot(), git = gitIn(root);
+      const root = repositoryRoot(), git = gitIn(root), asyncGit: AsyncGit = async args => git(args);
+      // GY-1844: the repository's digest adapter (GRAPHYARD_RELEASE_BUILD, GRAPHYARD_DEPLOY_DIGESTS, GRAPHYARD_INSTANCE_DIGESTS); unset ports keep sha promotion.
+      const digests = commandDigestAdapter(process.env, shellRun(root));
       const options = flags(args);
       const base = options.one('base') ?? 'main', push = options.one('no-push') === undefined;
       const target = options.positional[0] ?? 'latest';
@@ -111,10 +119,10 @@ export const releaseCommands = defineCommands([
           try { source = git(['show', `${at.sha}:${contractFile}`]); } catch { source = null; }
           return pendingFromPlane(plane, source, at);
         };
-        return print(cut(git, { base, trigger, now: new Date(), push, maxPrs, pendingOutcomes }));
+        return print(await cutAsync(asyncGit, { base, trigger, now: new Date(), push, maxPrs, pendingOutcomes, build: digests.build }));
       }
       if (id === 'status' || !id) { syncLedger(git, base); return print(ledgerStatus(readLedger(git))); }
-      if (id === 'uat') return print(deployToUat(git, target, base));
+      if (id === 'uat') return print(await deployToUatAsync(asyncGit, target, base, new Date(), digests.deploy));
       if (id === 'soak') {
         const sha = options.one('sha'), result = options.one('result');
         if (!sha || !result) throw new Error(usage);
@@ -127,7 +135,7 @@ export const releaseCommands = defineCommands([
         const ledger = readLedger(git), candidate = findCandidate(ledger, target), uat = ledger.uat.find(record => record.id === candidate.id);
         // Only a candidate held by flaky cases alone reads the control plane's evidence decisions; an unreachable one leaves it held.
         const acceptances = uat && unacceptedFlaky(candidate, uat)?.length ? await acceptancesOf(api, git, candidate.id).catch(error => { console.error(`Could not read evidence decisions: ${error.message}`); return []; }) : [];
-        const result = promote(git, target, { base, push, now: new Date(), acceptances });
+        const result = await promoteAsync(asyncGit, target, { base, push, now: new Date(), acceptances, deployDigests: digests.deploy });
         print(result); if (!result.promoted) process.exitCode = 1; return;
       }
       const url = options.one('url');
@@ -145,6 +153,10 @@ export const releaseCommands = defineCommands([
           if (!name || !command) throw new Error(`--suite takes NAME=COMMAND, got ${entry}`);
           suites.push(commandSuite(name, command));
         }
+        // GY-1844: UAT serving the candidate's recorded digests is checked instance by instance when the adapter reports instances.
+        syncLedger(git, base);
+        const ledger = readLedger(git), served = uatServedDigests(ledger, findCandidate(ledger, target));
+        if (served && digests.instances) suites.push(uatDigestSuite(served, digests.instances));
         const file = async (item: object, requestId: string) => workKey(await api('work', item, requestId));
         // GY-1378: the e2e suite's report, written by its command, decides the release holds against the candidate checkout's contract.
         const reportFile = options.one('e2e-report') ?? process.env.GRAPHYARD_E2E_REPORT;
@@ -166,8 +178,9 @@ export const releaseCommands = defineCommands([
         const ledger = readLedger(git);
         const promoted = ledger.production[0];
         const served = promoted ? await awaitServing(url, promoted.sha, { timeoutMs: waitMs }) : await readServed(url);
-        const result = assessProductionServing(served, ledger.production);
-        print(result); if (!result.verified || result.reason) process.exitCode = 1; return;
+        // GY-1844: a digest promotion verifies only when every promoted service's instances run the promoted digest.
+        const result = { ...assessProductionServing(served, ledger.production), digests: await verifyProductionDigests(ledger, digests.instances) };
+        print(result); if (!result.verified || result.reason || !result.digests.verified) process.exitCode = 1; return;
       }
       throw new Error(usage);
     },

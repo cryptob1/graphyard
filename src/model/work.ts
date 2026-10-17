@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { BaseRefresh, BaseRefreshRequest, LandingCheck, MergeRefusal, RevertedDelivery } from '../merge-queue.js';
 import { criteriaSchema, policySchema, resourcesSchema, type Criterion, type Lane } from './policy.js';
-import type { Evidence } from './evidence.js';
+import type { EvaluationAttempt, Evidence } from './evidence.js';
 import type { AgentReview, ReviewFailover, ReviewRequest } from './review.js';
 import type { Delivery, ReleaseDelivery } from './delivery.js';
 import type { BlockingRulingAction } from './delegation.js';
@@ -169,9 +169,12 @@ export interface Work extends Create {
   /**
    * The current validation selection per proof. `reanchor` is set when the selected request's
    * target moved and automatic re-anchoring could not create a fresh request yet; the
-   * authoritative history is the attribution ledger, this is the standing binding.
+   * authoritative history is the attribution ledger, this is the standing binding. `fault` (GY-1841)
+   * is set when the selected result's evaluation exhausted its evaluator-error retries: the
+   * evaluator errors and every attempt, a fault of the evaluation, never a failed proof.
    */
-  validation?: Record<string, { candidateId: string; requestId?: string; attemptId?: string; reanchor?: { state: 'blocked'; reasons: string[]; supersededRequestId: string; environmentId: string; at: string } }>;
+  validation?: Record<string, { candidateId: string; requestId?: string; attemptId?: string; reanchor?: { state: 'blocked'; reasons: string[]; supersededRequestId: string; environmentId: string; at: string };
+    fault?: { kind: 'evaluator-error'; errors: string[]; attempts: EvaluationAttempt[]; requestId: string; attemptId: string; at: string } }>;
   criteria: Criterion[];
   retiredCriterionIds?: string[];
   formalReviewResetRequired?: boolean;
