@@ -10,13 +10,13 @@ import { roleSessionMaximumMs } from '../model/sessions.js';
 import { credentialBlockedKey, credentialBlockedReason, credentialFailure } from '../worker-credential.js';
 import type { Cycle } from './cycle.js';
 import { settleEndedAttemptFence, supervisorStillRunning } from './cycle-reclaim.js';
-import { carriedRow, owedWrite, recordCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
+import { carriedRow, owedWrite, recordCarried, stepCallCarried, withinStepBudget, type OwedWriteOutcome } from './step-budget.js';
 
-/** A worker's implementation handle, written by the loop: the one record `master status` and the item's history show of it. */
-export function workerHandle(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string | null, outcome: string, finished: boolean) {
+/** A worker's implementation handle, written by the loop: the one record `master status` and the item's history show of it. What became of the write tells the caller whether the handle can be believed yet (`sent`), is still owed (`owed`), or was refused for its own sake (`refused`). */
+export function workerHandle(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string | null, outcome: string, finished: boolean): Promise<OwedWriteOutcome> {
   const { config, effects } = cycle;
-  if (!effects.recordSession) return Promise.resolve();
-  // GY-1774: a best-effort record, owed to the next cycle when carried past the step's bound, never re-sent with the action it follows; refused, it is let go as before.
+  if (!effects.recordSession) return Promise.resolve('refused');
+  // GY-1774: a best-effort record, owed to the next cycle when carried past the step's bound or refused by the plane's outage (GY-1895), never re-sent with the action it follows; refused otherwise, it is let go as before.
   return owedWrite(cycle, `handle:${item.id}:${profile.principal}:${epoch}`, { kind: 'session', work: item.key, principal: profile.principal, epoch }, `Recording ${profile.agentName}'s implementation handle on ${item.key} epoch ${epoch}`, 'recordSession',
     fx => fx.recordSession!(item, { id: `${profile.principal}:${epoch}`, kind: 'implementation', principal: profile.principal, runtime: profile.kind ?? profile.mode, host: config.hostId,
       ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
@@ -309,7 +309,20 @@ async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLi
       // delivered on a later cycle once the attempt's own pane verifies, instead of being consumed.
       const paneReason = checkPaneStillBelongs(item, handleId, pane);
       if (paneReason) {
-        performed.push(await entry(promptKey, 'failed', `${item.key} epoch ${epoch}: ${changed}; the recorded pane cannot be re-prompted: ${paneReason}`, (previous?.attempts ?? 0) + 1));
+        // GY-1895: a paste the fence refuses while this attempt's own coordinate write is still owed
+        // — carried past its bound, or carried by the plane's outage, the launch's own payload in
+        // flight — is that write's pending answer, not the session's fault (one outage is one
+        // condition, GY-1344): the entry counts no fault while the row above stands carried. The
+        // fence itself is never answered by re-writing the handle with the pane the name lookup
+        // resolved: the only pane that puts this attempt's coordinates back is the launch's own
+        // write, retried from the ledger. A refusal that is the record's own counts, as always.
+        // A write answered on this very cycle (its retry ran at this step's start) still counts as
+        // pending: the cycle's snapshot was read before it landed, so the handle shows no pane here
+        // although the plane now records it — the next cycle's snapshot carries it and delivers. Nor
+        // does a pending refusal grow the paste's backoff, so the delivery follows the landing.
+        const coordinate = state.actions[`owed:handle:${item.id}:${profile.principal}:${epoch}`];
+        const coordinatePending = carriedRow(coordinate) || coordinate?.cycle === state.cycle;
+        performed.push(await record(state, promptKey, { kind: 'session', work: item.key, principal: profile.principal, epoch, state: 'failed', detail: `${item.key} epoch ${epoch}: ${changed}; the recorded pane cannot be re-prompted: ${paneReason}`, attempts: coordinatePending ? previous?.attempts ?? 1 : (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist, coordinatePending ? null : undefined));
         // A handle that records no pane (its coordinate write failed or never completed) refuses
         // every resolution for ever: the name-based absence checks see the name's still-listed
         // holder, and the idle recovery below stays unreachable while the waits stand. So does a
@@ -324,6 +337,12 @@ async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLi
           if (!seen) { await entry(keys.idle, 'waiting', handle ? `${item.key} epoch ${epoch}: its handle ${handleId} records no pane yet (its coordinate write has not completed), so the cleared wait cannot be delivered and its agent name is no address; the reclaim bound starts here`
             : `${item.key} epoch ${epoch}: its handle ${handleId} is not on the record (its launch registered this session under another attempt's id), so the cleared wait cannot be delivered and its agent name is no address; the reclaim bound starts here`); return; }
           if (seen.cycle === state.cycle || now() - Date.parse(seen.at) < launchAppearanceMs) return;
+          // GY-1895: the bound ends an attempt whose coordinate write will never land. One the
+          // plane's outage kept from answering is still owed above and lands when the plane does,
+          // so the write's answer — not the bound — decides while it stands carried, and the
+          // reclaim waits: the attempt keeps its lease, which only its session can still renew. It
+          // waits too on the cycle the write landed, whose snapshot predates the landing.
+          if (coordinatePending) return;
           await reclaimIdle(handle ? `its handle ${handleId} has recorded no pane since ${seen.at} (its coordinate write has not completed), so the cleared wait cannot be verified deliverable to it, and its agent name is no address`
             : `its handle ${handleId} has not been on the record since ${seen.at} (its launch registered its session under another attempt's id), so the cleared wait cannot be verified deliverable to it, and its agent name is no address`, null);
         }

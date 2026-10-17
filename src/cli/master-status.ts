@@ -8,6 +8,7 @@ import { type Work } from '../model/work.js';
 import { pendingCaseChanges } from './master-status-case-changes.js';
 import { installationMerger } from '../executor.js';
 import { leftBehindCheckoutAttention, readHeldCli } from '../daemon/upgrade.js';
+import { loopCodeRoot } from '../daemon/checkout-state.js';
 import { baseFailureAttention, daemonSummary, loopAttention, readDaemonState } from '../master-daemon.js';
 import { timeToMergeBySize } from '../decomposition.js';
 import { stalledReviewCapAttention } from '../daemon/cycle-review-cap.js';
@@ -53,14 +54,9 @@ export { stalledActionAttention } from './stalled-actions.js';
 export { overlongSessionAttention } from './overlong-sessions.js';
 export { unansweredRequestAttention, unansweredRequestOwner, unobtainableReviewAttention } from './unanswered-requests.js';
 
-/**
- * The `master status` report: Graphyard work truth joined with Herdr session health, the local
- * review, producer, dispatch, daemon and administration ledgers, the dispatch schedule with its
- * overlap holds, and the conflict set of every open candidate probed over the fetched PR heads.
- */
+/** The `master status` report: work truth joined with Herdr session health, the ledgers, the dispatch schedule and the candidates' conflict sets. */
 export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string, credential?: string, timeoutMs?: number) => Promise<any>, coordinator: any, cli: { commit: string | null }, dependencies: { supervisorHost?: LoopSupervisorHost; now?: () => number; reportReadBoundMs?: number } = {}) {
-  // Every phase of the build is timed, and every server read of a second or more is named with its
-  // route and the phase it was made in: both are carried under `timings` (GY-377).
+  // Every phase is timed, server reads of a second or more named with route and phase, under `timings` (GY-377).
   const timings = new Timings(dependencies.now);
   const report = await withTimings(timings, () => buildStatusReport(root, master, timedApi(masterApi), coordinator, cli, dependencies));
   return { ...report, timings: timings.report() };
@@ -74,7 +70,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const { reviewRecords, reviewRuntime, producerRecords, reviews, producers, retries } = await reconcileLedgers(root, master, snapshot, runtime);
   // Setup that silently stops every launch, and the loop's supervision (GY-114), read from the host.
   const { setup, attention: setupItems } = await timedStep('setup', () => setupHealth(root, master, dependencies.supervisorHost, coordinator));
-  // Status reads the cursor as the loop would; the loop logs and persists any repair it makes.
+  // Status reads the cursor as the loop would; the loop logs and persists any repair.
   const dispatchCursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
   const stuck = stuckRequestReport({ reviews: reviewRecords, producers: producerRecords }, Date.now());
   const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : withStuckRequests(dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000, master.run.awaitReviewers ?? defaultAwaitReviewers.logins, snapshot.work, Date.parse(snapshot.now) || Date.now()), stuck.stuck);
@@ -124,7 +120,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, executors: releases.executors, promotion: 'error' in daemonState ? null : promotionWait(daemonState) }));
   const promotion = promotionSummaryWithLag(cursor?.promotion, lag.report, lag.attention, Date.parse(snapshot.now), intervalMs);
   // GY-1773: a held snapshot ahead of the dirty checkout left behind; a refused seal check.
-  lag.attention.push(...leftBehindCheckoutAttention(cycling?.upgrade?.snapshot, readHeldCli(root), root), ...sealRefusalAttention(cursor?.promotion, master.repository));
+  // GY-1899: the pin lives under the running CLI's checkout, where the upgrade's holdCliAt wrote it.
+  const codeRoot = loopCodeRoot(master.cliPath, root);
+  lag.attention.push(...leftBehindCheckoutAttention(cycling?.upgrade?.snapshot, readHeldCli(codeRoot), codeRoot), ...sealRefusalAttention(cursor?.promotion, master.repository));
   // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406),
   // queue-head lag (GY-492), slow renewals (GY-558) and conflict hotspots (GY-566).
   const { observation, health, stalledItems } = stallAttention(snapshot, coordinator, derivedStalls, hs.attention);

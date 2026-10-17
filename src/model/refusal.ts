@@ -44,8 +44,17 @@ export function admin(actor: Principal) { demand(actor.role === 'admin', 'Operat
  */
 const planeSilence = /Application failed to respond|ECONNREFUSED|ECONNRESET|socket hang up|(?<!git )fetch failed|operation was aborted due to timeout|\b50[234] (?:Bad Gateway|Service Unavailable|Gateway Time-?out)\b/i;
 export const planeUnavailableText = (text: string | null | undefined) => !!text && planeSilence.test(text);
+/**
+ * The structural read of a refusal's status and body, shared by every client that keeps both
+ * (GY-1895): a 502-504 whose body carries no `error` field of its own is the plane not answering —
+ * a proxy answered in the server's place, and Railway's 502 body names `message`, not `error` —
+ * while an answer the server judged itself (its own `error` string) is the item's.
+ */
+export function planeUnavailableStatus(status: unknown, body: unknown): boolean {
+  return typeof status === 'number' && status >= 502 && status <= 504 && !(body && typeof (body as { error?: unknown }).error === 'string');
+}
 export function planeUnavailable(error: unknown): boolean {
-  if (error instanceof RefusedResponse) return error.status >= 502 && error.status <= 504 && !(error.body && typeof (error.body as { error?: unknown }).error === 'string');
+  if (error instanceof RefusedResponse) return planeUnavailableStatus(error.status, error.body);
   if ((error as { name?: unknown } | null)?.name === 'TimeoutError') return true;
   return planeUnavailableText(error instanceof Error ? error.message : typeof error === 'string' ? error : null);
 }
