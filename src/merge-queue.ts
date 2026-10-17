@@ -661,6 +661,40 @@ export function mergeStalls(work: Work[], now: number): { key: string; pr: numbe
       next: `graphyard master create files the control-plane defect for merge state ${status} on ${item.key}; gh pr view ${candidate.pr} shows what GitHub is waiting on` }];
   });
 }
+declare module './model/work.js' { interface Observation { protectionChecks?: { name: string; appId: number | null }[] | null } }
+/** `name (app N)`, or `name (any app)` for a check bound to none: how the required-check lists are named. */
+const describeRequiredChecks = (checks: readonly { name: string; appId: number | null }[]) =>
+  checks.length ? [...checks].sort((a, b) => a.name.localeCompare(b.name) || (a.appId ?? -1) - (b.appId ?? -1)).map(check => `${check.name} (${check.appId === null ? 'any app' : `app ${check.appId}`})`).join(', ') : 'none';
+/**
+ * GY-1884. The required checks the observation recorded against the protection GitHub returned for
+ * the base branch (`protectionChecks`, every classic and ruleset entry as listed). They disagree when
+ * a check GitHub requires is missing from the record, the record names one GitHub does not require,
+ * or the record binds a check to another app than every entry GitHub lists for it (an unbound record
+ * agrees only where GitHub lists the check unbound too). Every open item observes the same branch, so
+ * one disagreement is one entry, naming both lists and the items whose latest observation shows it.
+ */
+export function requiredCheckDisagreements(work: Work[]): { keys: string[]; recorded: string; protection: string; text: string; next: string }[] {
+  const found = new Map<string, { keys: string[]; recorded: string; protection: string }>();
+  for (const item of work) {
+    const observation = item.observation;
+    if (item.stage === 'done' || !observation || !Array.isArray(observation.protectionChecks)) continue;
+    const recorded = observation.requiredChecks ?? [], listed = observation.protectionChecks;
+    const agrees = recorded.length === new Set(recorded.map(check => check.name)).size
+      && listed.every(entry => recorded.some(check => check.name === entry.name))
+      && recorded.every(check => {
+        const entries = listed.filter(entry => entry.name === check.name);
+        return entries.length > 0 && (check.appId === null ? entries.some(entry => entry.appId === null) || new Set(entries.map(entry => entry.appId)).size > 1 : entries.every(entry => entry.appId === check.appId));
+      });
+    if (agrees) continue;
+    const entry = { recorded: describeRequiredChecks(recorded), protection: describeRequiredChecks(listed) };
+    const key = JSON.stringify(entry);
+    const known = found.get(key);
+    if (known) known.keys.push(item.key); else found.set(key, { keys: [item.key], ...entry });
+  }
+  return [...found.values()].map(entry => ({ ...entry,
+    text: `required-checks-disagree: Graphyard recorded the required checks as ${entry.recorded}, but the protection GitHub returns requires ${entry.protection} (observed on ${entry.keys.join(', ')})`,
+    next: 'graphyard master create files the control-plane defect in the required-checks read; gh api repos/OWNER/REPO/branches/BRANCH/protection shows what GitHub enforces' }));
+}
 /** How long an authorized head may stay BLOCKED with every gate passing before master status raises it (GY-1112). */
 export const blockedAuthorizedStallMs = 30 * 60_000;
 /**
