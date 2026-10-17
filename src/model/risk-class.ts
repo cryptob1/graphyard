@@ -1,4 +1,5 @@
 import type { Work } from './work.js';
+import { compiledRules, repositoryPolicy, type CompiledRule, type RepositoryPolicy } from './repository-policy.js';
 
 // ---- Risk class from the merge delta (GY-1521) ---------------------------------------------------
 
@@ -10,34 +11,34 @@ import type { Work } from './work.js';
  * and names, per file, the rule that made it sensitive. Nothing gates on the class yet: it is
  * computed on read and shown beside the lane by `graphyard status` and the item page.
  *
- * `sensitive` is the surface whose change wants the full ceremony: persistence and schema
- * (`src/store/`, `migrations/`), authentication, principals, the public API and its assembler and
- * bootstrap (`src/server/`), the operator agent and proof grants, installation and deployment
- * (`src/install/`, `deploy/`, Dockerfile, compose), CI configuration (`.github/`), dependencies
- * (`package.json`, `package-lock.json`) and the merge path itself (`src/merge-queue.ts`,
- * `src/direct-merge.ts`, `src/merger-mode.ts`, `src/main-guard.ts`, `src/regression-guard.ts`,
- * `src/merge-writer/`). Everything else is `normal`. A delta nobody can see (no files at all) is
- * sensitive: until the class can see what a change touches, it is treated as the worst case.
+ * `sensitive` is whatever the repository's graphyard.json declares under `risk.sensitive`
+ * (model/repository-policy.ts, GY-1843): each entry a glob and the rule a reason cites. A repository
+ * that declares none gets the generic default — CI configuration, dependency manifests and
+ * lockfiles, migrations, container, compose, deploy and infrastructure files, auth and secrets,
+ * anywhere in the tree — never Graphyard's own layout, which Graphyard's graphyard.json declares for
+ * itself. Everything else is `normal`. A delta nobody can see (no files at all) is sensitive: until
+ * the class can see what a change touches, it is treated as the worst case.
  */
 export const riskClasses = ['sensitive', 'normal'] as const;
 export type RiskClass = typeof riskClasses[number];
 
-/** Every rule that makes a path sensitive, with the name a reason cites. */
-export const sensitiveRules: readonly { rule: string; pattern: RegExp }[] = [
-  { rule: 'persistence layer', pattern: /^src\/store\// },
-  { rule: 'server auth, principals, API assembler, bootstrap or routes', pattern: /^src\/server\/(auth|principals|index|main|routes)/ },
-  { rule: 'operator agent', pattern: /^src\/operator-agent\.ts$/ },
-  { rule: 'proof grants', pattern: /^src\/proof-grants\.ts$/ },
-  { rule: 'installation', pattern: /^src\/install\// },
-  { rule: 'deployment', pattern: /^deploy\// },
-  { rule: 'Dockerfile', pattern: /^Dockerfile/ },
-  { rule: 'compose file', pattern: /^compose\.ya?ml$/ },
-  { rule: 'CI configuration', pattern: /^\.github\// },
-  { rule: 'dependencies', pattern: /^package(-lock)?\.json$/ },
-  { rule: 'merge path', pattern: /^src\/(merge-queue|direct-merge|merger-mode|main-guard|regression-guard)\.ts$/ },
-  { rule: 'merge writer', pattern: /^src\/merge-writer\// },
-  { rule: 'migrations', pattern: /^migrations\// },
-];
+const compiled = new WeakMap<RepositoryPolicy, CompiledRule[]>();
+/** Every rule that makes a path sensitive under `policy` (the one in force by default), with the name a reason cites. */
+export function riskRules(policy: RepositoryPolicy = repositoryPolicy()): readonly CompiledRule[] {
+  let rules = compiled.get(policy);
+  if (!rules) compiled.set(policy, rules = compiledRules(policy, 'risk'));
+  return rules;
+}
+/** The rules in force when this module loaded; readers that must follow a replaced policy call `riskRules()`. */
+export const sensitiveRules: readonly CompiledRule[] = riskRules();
+
+/**
+ * Whether a change of this class is reviewed before it merges: a sensitive one always, a normal one
+ * only when the repository declares `review.normalChanges: pre-merge`; otherwise a normal change
+ * merges on its trial and owes one post-merge review (GY-1525).
+ */
+export const reviewedBeforeMerge = (risk: RiskClass, policy: RepositoryPolicy = repositoryPolicy()) =>
+  risk === 'sensitive' || policy.review.normalChanges === 'pre-merge';
 
 /** One file of a delta: its path and, for a rename, where it came from. */
 export interface DeltaFile { path: string; previousPath?: string }
@@ -54,14 +55,14 @@ export function deltaPaths(files: readonly DeltaFile[]): string[] {
 }
 
 /**
- * The class of a delta. Each sensitive path yields one reason per rule it matches, naming the
+ * The class of a delta under the repository's policy. Each sensitive path yields one reason per rule it matches, naming the
  * path and the rule; a normal delta has no reasons; an empty delta is sensitive with the one
  * reason `unknown change`.
  */
-export function classifyRisk(files: readonly DeltaFile[]): RiskVerdict {
+export function classifyRisk(files: readonly DeltaFile[], policy: RepositoryPolicy = repositoryPolicy()): RiskVerdict {
   const paths = deltaPaths(files);
   if (!paths.length) return { risk: 'sensitive', reasons: [unknownChangeReason] };
-  const reasons = paths.flatMap(path => sensitiveRules.filter(({ pattern }) => pattern.test(path)).map(({ rule }) => sensitiveReason(path, rule)));
+  const reasons = paths.flatMap(path => riskRules(policy).filter(({ pattern }) => pattern.test(path)).map(({ rule }) => sensitiveReason(path, rule)));
   return reasons.length ? { risk: 'sensitive', reasons } : { risk: 'normal', reasons: [] };
 }
 
@@ -91,9 +92,19 @@ export function riskDelta(work: Pick<Work, 'candidate' | 'observation'>): { file
 }
 
 /** The item's risk class and its reasons, from the delta `riskDelta` selects. */
-export function riskOf(work: Pick<Work, 'candidate' | 'observation'>): RiskVerdict & { source: DeltaSource } {
+export function riskOf(work: Pick<Work, 'candidate' | 'observation'>, policy: RepositoryPolicy = repositoryPolicy()): RiskVerdict & { source: DeltaSource } {
   const delta = riskDelta(work);
-  return { ...classifyRisk(delta.files), source: delta.source };
+  return { ...classifyRisk(delta.files, policy), source: delta.source };
+}
+
+/**
+ * The risk the item page shows (GY-1843): judged by the policy the control plane serves on
+ * /api/status (`repositoryPolicy`), the one its gates use; only a status that carries none — an older
+ * server — falls back to this process's own reading, marked `estimated` so the page labels it.
+ */
+export function shownRisk(work: Pick<Work, 'candidate' | 'observation'>, served?: RepositoryPolicy | null): RiskVerdict & { estimated: boolean } {
+  const { risk, reasons } = served ? riskOf(work, served) : riskOf(work);
+  return { risk, reasons, estimated: !served };
 }
 
 /**

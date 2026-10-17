@@ -18,7 +18,7 @@ Both: `timeoutSeconds` (600). Case `secrets: ["NAME"]` from `~/.config/graphyard
 
 ## Release verdicts
 
-One retry: **passed**; **failed** (both); **flaky** (retry passed at same SHA; `RUN:attempt-1`/`-2`); **unrun** (stopped by a failed required case; listed apart); **blocked** (imported, couldn't run: `reason`); **pending** (required case whose outcome no done item serves, `rc/ID` `pendingOutcomes`, plane-read in `uat`: never blocks unless a delivered outcome shares it; an unreadable plane warns, records none). Only failed or unaccepted flaky required cases block (imported: blocked/unrun/skipped too).
+One retry: **passed**; **failed** (both); **flaky** (retry passed at same SHA; `RUN:attempt-1`/`-2`); **unrun** (stopped by a failed required case; listed apart); **blocked** (imported, couldn't run: `reason`); **pending** (required case whose outcome no done item serves, `rc/ID` `pendingOutcomes`, plane-read in `uat`: blocks only if a delivered outcome shares it or under [`e2e.pendingOutcomes: blocking`](delivery.md#managed-repositories); unreadable plane: warning). Only failed or unaccepted flaky required cases block (imported: blocked/unrun/skipped too).
 
 Flaky required cases block promotion until an `evidence` decision (`{"case":ID,"runId":RUN,"sha":FULL_SHA}` on hold item, another agent approving) accepts, refused unless both attempts were recorded at that SHA; `release promote` reads only that run's and SHA's applied decisions and promotes only passing UATs.
 

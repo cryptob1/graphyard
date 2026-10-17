@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { fakeTransport, type BundleFileRecord, type Transport } from '../src/install/transport.js';
 import type { InstallDependencies } from '../src/install/index.js';
 import type { Provider } from '../src/install/types.js';
@@ -13,6 +14,9 @@ export const REPOSITORY = 'owner/project';
 export const GRAPHYARD_APP_ID = 200_001;
 export const CI_APP_ID = 15_368;
 export const HEAD_SHA = 'a'.repeat(40);
+/** The Graphyard source every harness install uploads: this checkout, never the managed repository, at a fixed commit (GY-1864). */
+export const GRAPHYARD_SOURCE = fileURLToPath(new URL('..', import.meta.url));
+export const GRAPHYARD_SOURCE_SHA = 'c'.repeat(40);
 
 export async function temporaryRepository(repository = REPOSITORY) {
   const root = await temporaryDirectory('install');
@@ -162,6 +166,8 @@ export interface HarnessOptions {
   workdir?: string;
   statusBody?: unknown;
   healthy?: boolean;
+  /** The commit /healthz reports; the pinned Graphyard source's by default, so a Railway upload is served. */
+  servedCommit?: string | null;
   repository?: string;
   deliveries?: any[];
   /** Reuse a previous harness's checkout and credential home to exercise a re-run. */
@@ -205,7 +211,7 @@ export async function harness(options: HarnessOptions): Promise<Harness> {
     const url = String(input); const method = String(init.method ?? 'GET');
     requests.push({ method, url, ...(init.body ? { body: String(init.body) } : {}) });
     const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-    if (url.endsWith('/healthz')) return options.healthy === false ? json(503, { ok: false }) : json(200, { ok: true });
+    if (url.endsWith('/healthz')) return options.healthy === false ? json(503, { ok: false }) : json(200, { ok: true, commit: options.servedCommit === undefined ? GRAPHYARD_SOURCE_SHA : options.servedCommit });
     if (url.endsWith('/api/agent-registry/document')) return json(200, registry);
     if (url.endsWith('/api/agent-registry/apply') && method === 'POST') return json(200, { applied: true });
     if (url.endsWith('/api/status')) return json(200, options.statusBody ?? { actor: { id: `${installId}-operator`, role: 'admin' }, repository, github: true, githubAppId: GRAPHYARD_APP_ID, githubInstallationId: 500 });
@@ -221,7 +227,7 @@ export async function harness(options: HarnessOptions): Promise<Harness> {
   }) as unknown as typeof fetch;
 
   const deps: InstallDependencies = {
-    transport: transport as Transport, ssh, fetch: fetchImpl, configHome, sourceRoot: root,
+    transport: transport as Transport, ssh, fetch: fetchImpl, configHome, sourceRoot: GRAPHYARD_SOURCE, sourceCommit: GRAPHYARD_SOURCE_SHA,
     cliPath: join(root, 'package.json'), hostId: 'install-test-host',
     wait: async () => {}, now: () => Date.now(), log: () => {},
     githubApp: async request => request.reviewer
