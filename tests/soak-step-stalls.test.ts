@@ -75,6 +75,8 @@ interface Day {
   launches: number[];
   landed: number[];
   reclaims: number[];
+  /** The merge writer's merger reads, each the call a persistent merger failure makes. */
+  mergerReads: number[];
   credentialReads: number[];
   records: number[];
   prompts: string[];
@@ -102,6 +104,8 @@ interface Day {
  * finished cycle is judged as it ends.
  */
 async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: string; withMergeWriter?: boolean; reclaimFailure?: string;
+  /** The merge writer's merger read, made before any merge is admitted, fails this way on every call. */
+  mergerFailure?: string;
   /** The day's credential read and launch answer by the worker's credential file: refused (401) until it holds the issued token. */
   credentials?: { coordinator: string; worker: string; good: string };
   /** The cycle's own credential read fails this way on every cycle from `after` milliseconds into the day: the cycle fails before its master-session step. */
@@ -113,7 +117,7 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
     return { coordinator: join(directory, 'coordinator.token'), worker: join(directory, 'worker-a.token') };
   })() : undefined);
   const dayConfig = () => config(files);
-  const result: Day = { cycles: 0, launches: [], landed: [], reclaims: [], credentialReads: [], records: [], prompts: [], remedies: [], remedyHistory: [], waits: [], cursorStalls: 'null', cursorMergeWriter: 'null', logs: [], reviewRefusals: [], reviewsLanded: [], profileWrites: [], state: emptyDaemonState(dayConfig()) };
+  const result: Day = { cycles: 0, launches: [], landed: [], reclaims: [], mergerReads: [], credentialReads: [], records: [], prompts: [], remedies: [], remedyHistory: [], waits: [], cursorStalls: 'null', cursorMergeWriter: 'null', logs: [], reviewRefusals: [], reviewsLanded: [], profileWrites: [], state: emptyDaemonState(dayConfig()) };
   // The reviewer profiles the day's configuration carries: the remedy's write adds the asked-for one when the day says it does.
   const reviewers: string[] = [];
   /**
@@ -166,7 +170,7 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
         push: async () => 'pushed' as const,
         holds: async () => false,
         record: async () => { result.records.push(now - start); throw new Error(options.mergeRecordFailure ?? 'Idempotency key reused with different input'); },
-        merger: async () => 'control-plane' as const,
+        merger: async () => { result.mergerReads.push(now - start); if (options.mergerFailure) throw new Error(options.mergerFailure); return 'control-plane' as const; },
       },
     } : {}),
     persist: async state => {
@@ -206,7 +210,8 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
     if (process.env.SOAK_TRACE) console.error('SOAK cycle', result.cycles, phase, 'waits', result.waits.at(-1));
     result.cycles += 1;
     for (const check of result.state.invariants.report) assert.ok(check.holds, `${phase}: ${check.invariant} — ${check.reading}`);
-    assert.deepEqual(Object.keys(result.state.actions).filter(key => key.startsWith('isolated:')), [], `${phase}: no step isolated a failure`);
+    // A failing merger read is isolated by the merge writer's own step, the day's scripted failure.
+    assert.deepEqual(Object.keys(result.state.actions).filter(key => key.startsWith('isolated:') && !(options.mergerFailure && key === 'isolated:merge:merge writer')), [], `${phase}: no step isolated a failure`);
     // The day's scripted failures are the only ones: the dispatch refusal, the merge record the
     // plane refuses as reused, and the one deployment line an unconfigured endpoint answers with.
     const scripted = (action: { kind: string; detail: string }) => action.kind === 'dispatch' || action.kind === 'merge' || (action.kind === 'reclaim' && !!options.reclaimFailure)
@@ -343,6 +348,28 @@ test('unit:soak-step-stalls-call-hold — a day whose host reclaim throws the sa
   assert.ok(result.cycles > 2 * result.reclaims.length, 'the loop kept cycling between the held calls');
   // The held cycles count nothing: the count is the reclaims the run saw fail.
   assert.ok(standing.count <= result.reclaims.length, 'the run counts reclaim attempts, never held cycles');
+  const subject = stallSubjectKey(standing.signature);
+  assert.equal(result.prompts.filter(prompt => prompt.includes(subject)).length, 1, 'one master wake for the run');
+  assert.deepEqual(JSON.parse(result.cursorStalls), JSON.parse(JSON.stringify(result.state.stepStalls)), 'the persisted stepStalls are the live ones');
+});
+
+test('unit:soak-step-stalls-merger-hold — a day whose merge writer\u2019s merger read fails the same way every cycle, before any merge is admitted: one stall, the merger read itself made at most once per five minutes while it stands, the master woken once, every invariant holding', { timeout: 600_000 }, async () => {
+  const result = await runDay({ withMergeWriter: true, mergerFailure: 'Graphyard refused /api/status (500): merger unreadable' });
+  const standing = Object.values(result.state.stepStalls).find(run => run.step === 'merge');
+  assert.ok(standing?.stalledAt, 'the day recorded the merge stall');
+  assert.equal(Object.values(result.state.stepStalls).filter(run => run.step === 'merge').length, 1, 'one signature, one run, one stall');
+  assert.ok(standing.calls.some(entry => entry.call === 'mergeWriter.merger'), `the stall holds the merger read its failed rows carry: ${JSON.stringify(standing.calls)}`);
+  // The read itself — made before admission on every cycle, and by the steps that read the merger
+  // after it — is made once per window from the cycle after the stall formed.
+  const stalledFrom = Date.parse(standing.stalledAt!) - start;
+  const after = result.mergerReads.filter(at => at > stalledFrom);
+  const gaps = after.slice(1).map((at, index) => at - after[index]);
+  assert.ok(gaps.length >= 3, `the day runs several windows past the stall (${after.length} merger read(s))`);
+  assert.ok(gaps.every(gap => gap >= stallBackoffMs), `every merger read past the stall waits a full window: ${gaps.map(gap => Math.round(gap / minute)).join(', ')} min`);
+  assert.ok(result.mergerReads.length <= 4 + dayMs / stallBackoffMs, `${result.mergerReads.length} merger reads over ${result.cycles} cycles is once per window, not once per cycle`);
+  assert.ok(result.cycles > 2 * result.mergerReads.length, 'the loop kept cycling between the held reads');
+  assert.ok(standing.count <= result.mergerReads.length, 'the run counts merger reads, never held cycles');
+  assert.deepEqual(result.records, [], 'no merge record is written while the merger is unread');
   const subject = stallSubjectKey(standing.signature);
   assert.equal(result.prompts.filter(prompt => prompt.includes(subject)).length, 1, 'one master wake for the run');
   assert.deepEqual(JSON.parse(result.cursorStalls), JSON.parse(JSON.stringify(result.state.stepStalls)), 'the persisted stepStalls are the live ones');

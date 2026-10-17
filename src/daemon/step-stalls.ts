@@ -569,7 +569,8 @@ export function stallRemedyRunner(config: () => MasterConfig, state: () => Daemo
  * dispatcher holds is — `DispatchReservedError` with the item as the held resource, which the
  * dispatch step answers by passing the item over and recording no failure — and the merge
  * writer's `admit` answers false, so it starts no new merge while the window stands (a settled
- * flight is still recorded, replays and owed reworks still run). Every other effect call is
+ * flight is still recorded, replays and owed reworks still run); its `merger` read, made before
+ * admission every cycle, is held as an effect call. Every other effect call is
  * watched: its failure is noted for the stall step to name (`noteCallFailure`), and once a stall
  * names it, a call inside the window answers the hold — thrown, or rejected when the call failed
  * as a promise — without being made (`admitStalledEffect`); the window's one admitted call that
@@ -615,7 +616,9 @@ export function stallHeldEffects<T extends DaemonEffects>(effects: T, state: () 
         const known = wrapped.get(property);
         if (known?.value === value) return known.held;
         const writer = value as unknown as NonNullable<DaemonEffects['mergeWriter']>;
-        const held = { ...writer, admit: () => (writer.admit?.() ?? true) && !admitStalledCall(state(), 'merge', now()).hold };
+        // The merger read runs before admission on every cycle, so it is held as the call itself.
+        const held = { ...writer, merger: hold('mergeWriter.merger', () => writer.merger()) as typeof writer.merger,
+          admit: () => (writer.admit?.() ?? true) && !admitStalledCall(state(), 'merge', now()).hold };
         wrapped.set(property, { value, held });
         return held;
       }
