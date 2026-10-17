@@ -36,12 +36,12 @@ human pushing to main is reported by the main watch, not blocked.
 | # | Gate (GitHub side) | Implements (files) | Protects against | Control-plane equivalent | What breaks if deleted | Verdict |
 | - | --- | --- | --- | --- | --- | --- |
 | 1 | Control-plane GitHub App + installation (`graphyard-cryptob1-graphyard`, App 4935393, installation 161493384) | `src/github-setup.ts`, `src/install/github.ts`, `src/github.ts`, `src/github-permissions.ts`, `.graphyard/github-app.json` | Nothing by itself — it is the single actor every automated GitHub act uses; its permission table bounds all automation | none — it *is* the control plane's GitHub side | Observation, check publication, auto-merge, review dispatch, worker push mints, base syncs, reruns all die; delivery stops in both merger modes | **keep** — it is the identity provider and observer for every other row |
-| 2 | Reviewer App + head-named verdict comments (`graphyard-verdict`) | `src/github-setup.ts` (`--reviewer`), `src/reviewer.ts`, `src/agent-review.ts`, `src/review-post.ts` (github mode) | Verdicts posted by an identity that cannot push code (no `contents: write`, `checks`, `administration`), naming the exact head, never an implementer | review gate in `src/engine.ts`; control-plane verdict tokens (`src/review-post.ts`, `POST /api/work/:id/review-verdict`, GY-1525) — already enforced by the control plane | In github mode, agent review has no poster: every review-gated item stalls. After the merger switch: nothing — the API path already exists | **delete** (GitHub-side role only, after D1; item D3) — the gate itself stays |
-| 3 | Revert-approver App (independent approver for main-guard reverts) | `src/github.ts` (`revertApproverFromEnv`), `src/install/github.ts` (`--role revert-approver`), `src/main-guard.ts` | The App that pushed a merge cannot approve its revert; only an exact-inverse diff is approved | none — the prevent-and-revert loop exists only in github mode; under the writer the trial refuses the push instead | Main-guard reverts can no longer merge (`require_last_push_approval` refuses); a red main stays red | **delete** (with row 17, item D4) |
-| 4 | Classic branch protection on `main` (required approvals, App-bound checks, `enforce_admins`, no force-push/deletion, `strict` off) | `src/protection.ts` (`protectionPlan`, `applyProtection`, `conversationPayload`), `src/cli/master.ts` (`master protection --apply`), `src/master-browser.ts` | Any actor merging to main what Graphyard did not authorize on that exact head; admins included; strict off because the writer/queue merge on the base they were built on | under the control-plane merger: the writer's trial (`src/merge-writer/trial.ts`) + engine gates; the main watch as detector | In github mode: auto-merge merges without waiting for `Graphyard / merge` — the merge gate's GitHub half vanishes; force pushes to main become possible | **delete** after D1 (item D2) — superseded by row 9, which is stronger (binds admins too) |
-| 5 | Auto-merge (`allow_auto_merge: true`, observed live; `enablePullRequestAutoMerge` with `expectedHeadOid`) | `src/protection.ts` (`mergeMode`, `enableAutoMergeArgs`, `ensureMergeMode`), `src/github.ts` (`autoMergeMutation`, `enqueuePullRequest`) | Merges happen only after every required check on the exact head is green (GitHub executes the merge) | the merge writer's trial-then-push (`src/merge-writer/executor.ts`) | With row 4 gone nothing merges automatically; in github mode delivery stops | **delete** after D1 (item D2) |
+| 2 | Reviewer App + head-named verdict comments (`graphyard-verdict`) | `src/github-setup.ts` (`--reviewer`), `src/reviewer.ts`, `src/agent-review.ts`, `src/review-post.ts` (github mode) | Verdicts posted by an identity that cannot push code (no `contents: write`, `checks`, `administration`), naming the exact head, never an implementer | review gate in `src/engine.ts`; control-plane verdict tokens (`src/review-post.ts`, `POST /api/work/:id/review-verdict`, GY-1525) — already enforced by the control plane | In github mode, agent review has no poster: every review-gated item stalls. After the merger switch: nothing — the API path already exists | **delete** (GitHub-side role only, after D1; item D3, filed as GY-1936) — the gate itself stays |
+| 3 | Revert-approver App (independent approver for main-guard reverts) | `src/github.ts` (`revertApproverFromEnv`), `src/install/github.ts` (`--role revert-approver`), `src/main-guard.ts` | The App that pushed a merge cannot approve its revert; only an exact-inverse diff is approved | none — the prevent-and-revert loop exists only in github mode; under the writer the trial refuses the push instead | Main-guard reverts can no longer merge (`require_last_push_approval` refuses); a red main stays red | **delete** (with row 17, item D4, filed as GY-1937) |
+| 4 | Classic branch protection on `main` (required approvals, App-bound checks, `enforce_admins`, no force-push/deletion, `strict` off) | `src/protection.ts` (`protectionPlan`, `applyProtection`, `conversationPayload`), `src/cli/master.ts` (`master protection --apply`), `src/master-browser.ts` | Any actor merging to main what Graphyard did not authorize on that exact head; admins included; strict off because the writer/queue merge on the base they were built on | under the control-plane merger: the writer's trial (`src/merge-writer/trial.ts`) + engine gates; the main watch as detector | In github mode: auto-merge merges without waiting for `Graphyard / merge` — the merge gate's GitHub half vanishes; force pushes to main become possible | **delete** after D1 (item D2, filed as GY-1935) — superseded by row 9, which is stronger (binds admins too) |
+| 5 | Auto-merge (`allow_auto_merge: true`, observed live; `enablePullRequestAutoMerge` with `expectedHeadOid`) | `src/protection.ts` (`mergeMode`, `enableAutoMergeArgs`, `ensureMergeMode`), `src/github.ts` (`autoMergeMutation`, `enqueuePullRequest`) | Merges happen only after every required check on the exact head is green (GitHub executes the merge) | the merge writer's trial-then-push (`src/merge-writer/executor.ts`) | With row 4 gone nothing merges automatically; in github mode delivery stops | **delete** after D1 (item D2, filed as GY-1935) |
 | 6 | Merge-queue ruleset "Graphyard merge queue" (+ repair-lane bypass, App-only, pull-request mode) | `src/protection.ts` (`mergeQueueRuleset`, `applyMergeQueue`, `repairBypassActor`) | Serialized merge groups, each one authorized head on the base it lands on; only the App may bypass, in PR mode | the writer's queue (`src/merge-writer/executor.ts` `mergeQueue`) — one head at a time, trial-tested | Absent here: user-owned repositories get HTTP 422 (`mergeMode` falls back to auto-merge; observed: no rulesets on `main`). Nothing to delete on this repository | **n/a here** (org installs only); the switch item D1 is where an org install would retire it |
-| 7 | App-bound required checks `Graphyard / merge` + `graphyard/landable` (bound to the App, observed live on PR #1315's head) | `src/protection.ts` (`GRAPHYARD_CHECKS`, `requiredStatusChecks`), `src/github.ts` (`publish`), `src/landable-check.ts` | GitHub refusing any merge the control plane did not authorize on that exact sha; a new push invalidates the verdict (republished only on the current head; merged heads frozen, GY-1917) | engine gates + the writer's trial proofs (`criterionProofs`) | In github mode the merge gate is gone: policy verdicts never reach GitHub | **delete** after D1 (item D2) |
+| 7 | App-bound required checks `Graphyard / merge` + `graphyard/landable` (bound to the App, observed live on PR #1315's head) | `src/protection.ts` (`GRAPHYARD_CHECKS`, `requiredStatusChecks`), `src/github.ts` (`publish`), `src/landable-check.ts` | GitHub refusing any merge the control plane did not authorize on that exact sha; a new push invalidates the verdict (republished only on the current head; merged heads frozen, GY-1917) | engine gates + the writer's trial proofs (`criterionProofs`) | In github mode the merge gate is gone: policy verdicts never reach GitHub | **delete** after D1 (item D2, filed as GY-1935) |
 | 8 | Merge-writer deploy key (`graphyard-merge-writer-<host>`, ed25519, read-write) | `src/install/deploy-key.ts` (`ensureDeployKey`), `src/daemon/cycle-merge-writer.ts` (`pushEnvironment`) | The writer's push credential: repository-scoped SSH key, registered and fingerprint-checked, held 0600 under the install directory | none — it is the writer's hand | The writer cannot push merges; the switch (D1) cannot complete | **keep** — registered at the switch; it is what makes the control plane the only writer |
 | 9 | Ruleset "Graphyard merge writer only" (creation/update/non-fast-forward/deletion refused for every actor; deploy keys bypass) | `src/protection.ts` (`mainWriteRuleset`, `mainWriteRulesetCurrent`), `src/install/deploy-key.ts` (`ensureMainWriteProtection`) | Any push to main by any actor — administrators included, which classic protection cannot promise — except the merge writer's deploy key | it **is** the control-plane-era write lock (GY-1715) | Any actor can push main again; only the main watch would notice (detect-not-prevent). Not yet applied here (github mode; `mainWriteRuleset` is applied only while the writer key is the repository's sole read-write deploy key) | **apply at D1, keep** thereafter |
 | 10 | GitHub environment `uat` + secret `GRAPHYARD_RELEASE_TOKEN` (+ `UAT_URL`) | `src/master/release-filing.ts` (`provisionReleaseFiling`), `src/install/release-pipeline.ts` (`environment: uat`), `src/install/deploy-target.ts` (`--create-environments`) | The release-filing token is readable only by workflows running in the `uat` environment (candidate pipelines), never by pull-request code; `master setup --apply` issues/rotates the `graphyard-release-follow-up` identity behind it (scoped `intent:create`) | the identity is a control-plane principal (`src/operator-agent.ts`); GitHub is store + scoping only | Failed candidates file no holds/follow-ups (the recorded GY-1691 outage); UAT verification loses its URL | **keep** |
@@ -51,7 +51,7 @@ human pushing to main is reported by the main watch, not blocked.
 | 14 | Reviewer session binding + one-time verdict token | `src/review-post.ts` (`reviewBindingSchema`, control-plane mode), `src/reviewer.ts` (launch binding) | Exactly one verdict per launch, bound to head, base and policy revision; the token is never the reviewer's App token widened | same mechanism (it is the control plane's) | Verdicts cannot be posted; review stalls | **keep** |
 | 15 | Operator `gh` login on the host + gh-pause | `src/install/github.ts` (`githubCli`), `src/gh-pause.ts`, `src/protection.ts` (`protectionRun`) | Nothing repo-side: it is the administrative hand (deploy-key registration, protection writes, secret stores); gh-pause pauses every ungoverned gh read on a rate-limit refusal | none | Setup and administration steps fail; the loop skips reads instead of burning the quota | **keep** |
 | 16 | App request budgets + pacing (hourly budget, observation pacer, cadence bands, one-page compares) | `src/github.ts` (`GitHubBudget`, `TokenBudgets`, `ObservationPacer`, `observationCadence`, `comparePath`), `src/gh-pause.ts` | Spending the App's hourly quota or the gh login's rate limit (the 5 October merge burst is the recorded lesson: twenty candidates spent the hour in forty minutes) | none | 403s mid-observation; the loop stalls until reset | **keep** |
-| 17 | Main guard (github-mode revert engine, job loop every 30 s) | `src/main-guard.ts`, `src/github.ts` (`guardGitHubMain`), row 3's revert-approver App | A merge that breaks main is reverted through a revert PR the independent App merges; flakes rerun once; cancelled runs escalate instead of reverting; the reverted item reopens for rework | the writer's trial runs build + proofs on the merge commit **before** push (prevention); candidate reverts on failed UAT (`src/release-revert.ts`); main watch (detection) | In github mode a red main stays red until an agent notices; joint merges keep breaking main. After D1 the path is dead code | **delete** after D1 (item D4) |
+| 17 | Main guard (github-mode revert engine, job loop every 30 s) | `src/main-guard.ts`, `src/github.ts` (`guardGitHubMain`), row 3's revert-approver App | A merge that breaks main is reverted through a revert PR the independent App merges; flakes rerun once; cancelled runs escalate instead of reverting; the reverted item reopens for rework | the writer's trial runs build + proofs on the merge commit **before** push (prevention); candidate reverts on failed UAT (`src/release-revert.ts`); main watch (detection) | In github mode a red main stays red until an agent notices; joint merges keep breaking main. After D1 the path is dead code | **delete** after D1 (item D4, filed as GY-1937) |
 | 18 | Main watch (report-only; promotion freeze with `GRAPHYARD_MAIN_WATCH_FREEZE`; admin acknowledgement) | `src/daemon/main-watch.ts`, `src/routes/main-watch.ts` (route: `src/server/routes/main-watch.ts`) | Unexplained main commits (a human's direct push, anything no delivery/ledger/revert/window explains) are reported once per sha; with the freeze on, promotion holds until an admin acknowledges | it **is** the control plane's detector — the model for this whole layer | Manual pushes to main go unnoticed; delivery provenance drifts silently | **keep** |
 | 19 | Required CI checks `test`/`typecheck` (`ci.yml`; `policy.checks` per item) | `.github/workflows/ci.yml`, `graphyard.json` policy, engine test gate (reads the check runs GitHub reports) | The control plane refuses a candidate whose CI did not pass on the exact head (the `test` gate reasons name the failing check) | the writer's trial runs the same proofs pre-push (`criterionProofs`) | In github mode the quality signal is gone; after D1 nothing — the trial covers it and the `pull_request` trigger is inert (no Graphyard PRs) | **keep** while github mode; trigger cleanup folds into D2 |
 | 20 | `acceptance.yml` protected harness (`pull_request_target` from main; `graphyard/*` candidate branches only; forks never planned; attempt-scoped artifacts) | `.github/workflows/acceptance.yml`, `scripts/enumerate-ci-proofs.mjs`, `scripts/prepare-acceptance.mjs`, `scripts/publish-acceptance.mjs` | Proof integrity: candidate code never meets producer secrets; evidence is ciRun-bound to the exact job GitHub reports | ciRun-bound evidence verification (`src/server/routes/work.ts`, `isCiProducer`) | No CI-produced evidence; proofs fall back to producer sessions | **keep** |
@@ -137,21 +137,25 @@ Rollback (documented so no deletion can become irreversible):
 5. No work is lost in either direction: candidates, submissions and their evidence are
    control-plane records and survive the flip.
 
-## Deletion items to file (left unreleased)
+## Deletion items (filed 2026-10-17, left unreleased)
 
 One item per delete row (rows 2+3/17 clustered where the same deletion serves both), each with
 plannedFiles and a criterion that proves no control-plane gate is loosened. **Ordered so the
 switch comes first**: rows 2, 3, 4, 5, 7 and 17 are safe to delete only once GitHub no longer
-executes merges. The exact create payloads follow in Appendix A; AC-2's filing step and its
-refusal for this attempt's identity are recorded at the end of this document.
+executes merges. The payloads below were filed from the coordinator checkout on 2026-10-17 as
+**GY-1934** (D1, the switch), **GY-1935** (D2), **GY-1936** (D3) and **GY-1937** (D4), every
+one left unreleased; the filing record is at the end of this document.
 
 ## Appendix A — `graphyard master create` payloads, in filing order
 
-File each from the coordinator checkout (the command needs `.graphyard/master.json`), in this
-order, with dependencies added as noted. Leave every one unreleased (backlog, `ready: false` —
-creation does not release; nothing below runs `ready`).
+Filed from the coordinator checkout (the command needs `.graphyard/master.json`) in this order;
+each payload is the record of what was filed, and `<D1 id>` resolved to GY-1934's id
+`6a2e38be-c883-438d-9d60-82be2f420aa8` at filing. The filing identity widened only plannedFiles,
+adding `tests/docs-budget.test.ts` to each item (docs edits move the word budget); every one is
+unreleased (backlog, `ready: false` — creation does not release; nothing below runs `ready`).
 
-**D1 — first. The switch itself (makes the control-plane merger the only mode in use):**
+**D1 — first. The switch itself (makes the control-plane merger the only mode in use).**
+Filed as **GY-1934** (2026-10-17T19:12:49Z, backlog):
 
 ```json
 {
@@ -171,7 +175,8 @@ creation does not release; nothing below runs `ready`).
 }
 ```
 
-**D2 — after D1 (rows 4, 5, 7, 19's inert trigger):**
+**D2 — after D1 (rows 4, 5, 7, 19's inert trigger).**
+Filed as **GY-1935** (depends on GY-1934, backlog):
 
 ```json
 {
@@ -192,7 +197,8 @@ creation does not release; nothing below runs `ready`).
 }
 ```
 
-**D3 — after D1 (row 2, GitHub-side role only):**
+**D3 — after D1 (row 2, GitHub-side role only).**
+Filed as **GY-1936** (depends on GY-1934, backlog):
 
 ```json
 {
@@ -212,7 +218,8 @@ creation does not release; nothing below runs `ready`).
 }
 ```
 
-**D4 — after D1 (rows 3 and 17):**
+**D4 — after D1 (rows 3 and 17).**
+Filed as **GY-1937** (depends on GY-1934, backlog):
 
 ```json
 {
@@ -233,12 +240,24 @@ creation does not release; nothing below runs `ready`).
 }
 ```
 
-## AC-2 filing status for this attempt (recorded 2026-10-17)
+## AC-2 filing status (recorded 2026-10-17; updated by attempt 2 after the filing)
 
-The four payloads above are complete and ordered. Filing them is a `graphyard master create`
-step, which this attempt's identity (worker `graphyard-claude-2`) is refused by design — the
-engine allows `create` only to an admin or an operator-agent holding `intent:create` with
-wildcard work scope (`src/engine.ts`, `authorizeOperatorCommand`; `src/model/refusal.ts`,
-`admin()`), and the CLI itself runs only from the coordinator checkout where
-`.graphyard/master.json` lives. Both refusals are recorded verbatim in this attempt's blocker;
-the master takes the step from the coordinator checkout and unblocks.
+The four payloads above were filed the same day from the coordinator checkout by the master
+coordinator, in order, each left unreleased:
+
+| Item | Key | Filed (UTC) | Id | Depends on | State |
+| - | --- | --- | --- | --- | --- |
+| D1 switch | GY-1934 | 2026-10-17T19:12:49Z | `6a2e38be-c883-438d-9d60-82be2f420aa8` | — | backlog, `ready: false` |
+| D2 merge gate | GY-1935 | 2026-10-17T19:13:15Z | `6c5c862e-9a03-4ad0-9730-088feff05c17` | GY-1934 | backlog, `ready: false` |
+| D3 reviewer App role | GY-1936 | 2026-10-17T19:13:18Z | `455c56f3-8cbe-4f25-953e-6b3f7f4daea3` | GY-1934 | backlog, `ready: false` |
+| D4 main guard | GY-1937 | 2026-10-17T19:13:21Z | `d0f36211-eecd-4056-ab1d-79730652e59d` | GY-1934 | backlog, `ready: false` |
+
+Each filed item keeps its payload's criteria and `manual:` proofs verbatim, with the no-loosening
+criterion last on every item (GY-1934 AC-4, GY-1935 AC-4, GY-1936 AC-3, GY-1937 AC-4). The
+filing identity widened only plannedFiles, adding `tests/docs-budget.test.ts` to each item.
+For the record: attempt 1's worker identity (`graphyard-claude-2`) was refused the filing
+itself — `graphyard create` answers "Operator permission required" (403; create needs admin or
+operator-agent `intent:create`, `src/engine.ts` `authorizeOperatorCommand`,
+`src/model/refusal.ts` `admin()`), and `graphyard master create` needs the coordinator
+checkout's `.graphyard/master.json`. The master took the step and GY-1933 re-entered the ready
+queue, which is how attempt 2 — this document's committer — closed AC-2.
