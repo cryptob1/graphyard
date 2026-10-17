@@ -6,7 +6,7 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, join, resolve, sep } from 'node:path';
 import { buildSchema, type Manifest } from './delivery.js';
 import {
-  currentDeployment, deploymentOutcomeTagPrefix, deploymentsIn, deploymentTagPrefix, digestVariables, fencedDeploy, fencedDeployAsync, outcomeOf,
+  currentDeployment, deploymentOutcomeTagPrefix, deploymentsIn, deploymentTagPrefix, digestVariables, fencedDeploy, fencedDeployAsync, isObservedDigestSuite, outcomeOf,
   type DeploymentOutcome, type DeploymentRecord, type DeployFence,
 } from './release-digests.js';
 export type { DeploymentOutcome, DeploymentRecord, DeployFence } from './release-digests.js';
@@ -720,7 +720,8 @@ export async function awaitServing(url: string, sha: string, options: { timeoutM
  * Validate a candidate on UAT: wait for UAT to serve its exact SHA, run every suite against it,
  * and confirm UAT still serves that SHA afterwards so no verdict is attributed across a redeploy.
  * A digest deployment's `digests` option — what an observation backed — is stamped on the verdict
- * (GY-1844); `validateAndRecord` names it only when an observation ran (GY-1868).
+ * (GY-1844); `validateAndRecord` stamps the served digests only when the observation suite ran and
+ * passed (GY-1868).
  */
 export async function validate(candidate: ReleaseCandidate, url: string, suites: readonly Suite[], options: { timeoutMs: number; now?: () => Date; fetcher?: typeof fetch; sleep?: (ms: number) => Promise<void>; digests?: Manifest }) {
   const clock = options.now ?? (() => new Date());
@@ -914,11 +915,20 @@ export async function validateAndRecord(sourceGit: AnyGit, id: string, url: stri
   const existing = ledger.uat.find(record => record.id === candidate.id);
   if (existing) throw new Error(`Candidate ${candidate.id} was already validated on UAT (${existing.result} at ${existing.at}); cut a new candidate to validate again`);
   // GY-1868: the verdict names the digests UAT serves only when an observation backed them — the
-  // suites include the `digests` suite the instance observer runs, or the caller names `digests`
-  // itself, attesting its own observation. Without the observer the verdict names none, so digest
-  // promotion refuses and names it (digestPromotionRefusal) instead of accepting unobserved digests.
-  const digests = options.digests ?? (suites.some(suite => suite.name === 'digests') ? uatServedDigests(ledger, candidate) : undefined);
-  const record = await validate(candidate, url, suites, { ...options, digests });
+  // caller attests its own observation with `digests`, or the suites include the observation suite
+  // only `uatDigestSuite` can build (isObservedDigestSuite's module-private WeakSet in
+  // src/release-digests.ts, so a caller-named `--suite digests=…` cannot pose as it) and that suite
+  // passed. Without either the verdict names no digests, so digest promotion refuses and names
+  // GRAPHYARD_INSTANCE_DIGESTS (digestPromotionRefusal) instead of accepting unobserved digests.
+  const record = await validate(candidate, url, suites, options);
+  if (!options.digests) {
+    const observation = suites.find(isObservedDigestSuite);
+    // `validate` runs the suites in order and returns their results in that order, so the
+    // observation's verdict sits at its own index; the name check fails safe if that ever changes.
+    const result = observation ? record.suites[suites.indexOf(observation)] : undefined;
+    const digests = observation && result?.name === observation.name && result.passed ? uatServedDigests(ledger, candidate) : undefined;
+    if (digests?.length) record.digests = digests;
+  }
   let filingError: string | null = null;
   const holds = options.holds ? await options.holds(candidate, record) : null;
   if (holds) { Object.assign(record, { e2e: holds.e2e, holds: holds.holds }); filingError = holds.filingError; }

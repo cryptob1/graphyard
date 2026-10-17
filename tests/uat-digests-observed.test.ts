@@ -17,7 +17,9 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * digest promotion refuses naming `GRAPHYARD_INSTANCE_DIGESTS` instead of accepting digests nothing
  * observed; with the observer and a matching report the verdict carries the digests and promotion is
  * allowed. The CLI's validate (`src/cli/release.ts`) and the loop's managed-repository validation
- * (`src/daemon/release-ports.ts`) give the same result.
+ * (`src/daemon/release-ports.ts`) give the same result. A caller-named suite — `--suite
+ * digests=<passing command>` — is not the observation: only a suite `uatDigestSuite` built (marked
+ * in a module-private WeakSet, `src/release-digests.ts`) and passed can back the verdict's digests.
  */
 
 const now = new Date(0);
@@ -218,6 +220,29 @@ test('unit:uat-digests-require-observation — a UAT verdict names the digests U
         process.exitCode = savedExit;
       });
     } finally { bareServer.close(); }
+
+    // A caller-named `--suite digests=<passing command>` is not the observation (GY-1868): the
+    // suite runs and passes, yet the verdict still names no digests and promotion refuses naming
+    // GRAPHYARD_INSTANCE_DIGESTS — the name the caller chose is not something only the observer
+    // can produce.
+    const forgedRepo = await repository();
+    const forgedSha = forgedRepo.sha;
+    const { candidate: third } = cut(forgedRepo.git, { base: 'main', trigger: 'manual', now, push: true, build: () => buildOf(forgedSha) }) as any;
+    const forgedServer = uatServer(forgedSha);
+    try {
+      await withReleaseEnvironment({ GRAPHYARD_DEPLOY_DIGESTS: shellDeployCommand, GRAPHYARD_INSTANCE_DIGESTS: undefined }, async () => {
+        await releaseCommand('uat', [third.id, '--base', 'main'], forgedRepo.work);
+        const [validated] = await releaseCommand('validate', [third.id, '--url', await forgedServer.url(), '--wait', '1', '--base', 'main', '--suite', 'digests=true'], forgedRepo.work);
+        assert.equal(validated.record.result, 'passed', 'the caller-named digests suite passed, like any other suite');
+        assert.ok(validated.record.suites.some((suite: { name: string; passed: boolean }) => suite.name === 'digests' && suite.passed), 'the caller-named digests suite ran and passed');
+        assert.equal(validated.record.digests, undefined, 'the caller chose the name, so it is not the observation: the verdict names no digests');
+        const [refused] = await releaseCommand('promote', [third.id, '--base', 'main'], forgedRepo.work);
+        assert.equal(refused.promoted, false);
+        assert.match(refused.refusals.join(' '), /GRAPHYARD_INSTANCE_DIGESTS/);
+        assert.equal(process.exitCode, 1, 'the refusal fails the command');
+        process.exitCode = savedExit;
+      });
+    } finally { forgedServer.close(); }
   } finally { server.close(); process.exitCode = savedExit; }
 
   // ——— The daemon path: the loop's managed-repository validation gives the same result. ———
