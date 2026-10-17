@@ -802,9 +802,12 @@ const canonicalPath = (path: string) => { const absolute = resolve(path); try { 
 const shortSha = (commit: string | null | undefined) => commit ? String(commit).slice(0, 12) : 'no commit';
 /** The checkout a unit runs its code from: the directory above the launcher its ExecStart names — `bin/graphyard.mjs`, a pin's `dist/cli.js`, or `scripts/graphyard-executor.mjs` — else its WorkingDirectory (GY-1859). A unit naming neither reads as its WorkingDirectory, so a unit this install wrote never reads as foreign. */
 function unitCodeCheckout(text: string, home: string): string | null {
-  const { workingDirectory, execStart } = unitCheckout(text, home);
-  const launcher = execStart?.split(/\s+/).map(part => part.replace(/^"|"$/g, '')).find(part => /(?:bin\/graphyard\.mjs|dist\/cli\.js|scripts\/graphyard-executor\.mjs)$/.test(part));
-  return launcher ? dirname(dirname(launcher)) : workingDirectory;
+  return unitLauncherCheckout(text, home) ?? unitCheckout(text, home).workingDirectory;
+}
+/** The checkout whose Graphyard launcher a unit's ExecStart starts, null when it names none: the executable alone, never the rest of the unit (GY-1859). */
+export function unitLauncherCheckout(text: string, home: string): string | null {
+  const launcher = unitCheckout(text, home).execStart?.split(/\s+/).map(part => part.replace(/^"|"$/g, '')).find(part => /(?:bin\/graphyard\.mjs|dist\/cli\.js|scripts\/graphyard-executor\.mjs)$/.test(part));
+  return launcher ? dirname(dirname(launcher)) : null;
 }
 /** What a running executor recorded about itself beside the master credential (executor-fleet's registration), as far as the commit check reads it (GY-1859). */
 export interface ExecutorCodeRecord { state?: string; root?: string | null; release?: { commit?: string | null; dirty?: boolean | null } | null; supervisor?: { unit?: string } | null }

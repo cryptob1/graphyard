@@ -23,7 +23,7 @@ import type { GitHubCli } from './install/github.js';
 import type { Transport } from './install/transport.js';
 import { herdrAttachCommand, installHerdrInstance, type HerdrInstance } from './master/herdr.js';
 import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, HerdrSetupFailure, herdrSync, hostHerdrDeps, prepareHerdrInstance, withLocalBin, type HerdrHostDeps } from './herdr-host.js';
-import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin, readLoopCode, readHostLoopCode, alignExecutorUnits, liftLoopPins, type LoopCodeReading } from './repository-setup.js';
+import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin, readLoopCode, readHostLoopCode, alignExecutorUnits, liftLoopPins, unitLauncherCheckout, type LoopCodeReading } from './repository-setup.js';
 import { recordHerdrInstance } from './master/config.js';
 import { mergerModes, type MergerMode } from './merger-mode.js';
 
@@ -1069,13 +1069,14 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     // still runs this CLI's code — the install this check exists for is one whose earlier run
     // recorded the step while its loop served an earlier checkout. So the recorded step is re-opened
     // whenever the units read as other code, and the step below runs again instead of printing the
-    // same false green; a reading that cannot be taken re-opens nothing, since it judges nothing.
+    // same false green. A reading that failed proves nothing either way, so it re-opens the step too,
+    // which then fails naming why rather than standing green on code it never read.
     // A host install's units are read on the host, through the install's transport, never this machine's.
     const hostLoop = remoteLoop ? installArgs('--plan') : null;
     if (hostLoop && JSON.stringify(state.hostInstall ?? null) !== JSON.stringify(hostLoop)) { state.hostInstall = hostLoop; await writeState(deps.root, state); }
     if (state.completed.includes('master-loop') && deps.loopCode) {
       const recorded = await deps.loopCode(hostLoop).catch(() => null);
-      if (recorded?.loopStale || recorded?.executorStale) {
+      if (recorded?.loopStale || recorded?.executorStale || recorded?.error) {
         state.completed = state.completed.filter(name => name !== 'master-loop');
         await writeState(deps.root, state);
       }
@@ -1088,6 +1089,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // invisible to it, and setup kept saying nothing was needed. Read the units against this CLI
       // first; a loop or executor on other code is rewritten to this CLI and restarted.
       const reading = deps.loopCode ? await deps.loopCode(hostLoop).catch(() => null) : null;
+      // A reading that failed judged nothing: the step is never green on code it could not read.
+      if (reading?.error) throw new UpStop(`master-loop: what the install's loop and executor units run could not be read: ${reading.error}; fix that, then rerun ${rerun()}`, upExitCodes.failed);
       const loopStale = reading?.loopStale ?? null, executorStale = deps.alignExecutors ? reading?.executorStale ?? null : null;
       // A unit that starts another checkout is rewritten; one on this checkout whose process loaded other code is restarted.
       const rewriteLoop = !!loopStale && reading?.loopReplace !== 'restart';
@@ -1775,6 +1778,18 @@ interface HostLoopSession {
 }
 
 /** GY-1859: a host install's transport and layout, prepared once per install arguments as credentialAnswers prepares them. */
+/**
+ * GY-1859: whether a host install's executor template starts code other than the host's Graphyard
+ * checkout or its repository checkout. Judged by the launcher ExecStart starts, never the whole text:
+ * a held snapshot under the repository checkout, or an old launcher beside WorkingDirectory=checkout,
+ * still names a permitted path, and an ExecStart naming no launcher is not known to start either.
+ */
+export function hostTemplateStartsOtherCode(text: string, layout: { home: string; graphyard: string; checkout: string }) {
+  const trim = (path: string) => path.replace(/\/+$/, '');
+  const launcher = unitLauncherCheckout(text, layout.home);
+  return !launcher || (trim(launcher) !== trim(layout.graphyard) && trim(launcher) !== trim(layout.checkout));
+}
+
 function hostLoopSessions(root: string, cliPath: string) {
   const hostSessions = new Map<string, Promise<HostLoopSession>>();
   return (hostInstall: string[]) => {
@@ -1883,7 +1898,7 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
       const instances = [...new Set([...listed.stdout.matchAll(executorInstancePattern({ executorTemplate: options.template }))].map(match => match[0]))].sort();
       // A template starting another checkout is written again by the executor installer, from the host checkout now at this commit.
       const template = await host.remote.exec('cat', [`${host.layout.userUnitDirectory}/${options.template}`], { allowFailure: true, timeout: 60_000 });
-      const rebind = template.code === 0 && !template.stdout.includes(`${host.layout.graphyard}/`) && !template.stdout.includes(`${host.layout.checkout}/`);
+      const rebind = template.code === 0 && hostTemplateStartsOtherCode(template.stdout, host.layout);
       if (rebind) {
         const installed = await host.asUser(host.layout.checkout, 'env', [...host.environment, 'node', `${host.layout.graphyard}/scripts/graphyard-executor.mjs`, '--install', '--count', String(Math.max(1, instances.length))]);
         if (installed.code !== 0) return { wrote: 'none', reason: `the executor installer on ${host.remote.description} failed: ${(installed.stderr || installed.stdout).trim().split('\n').pop()}`, restarted: [] };

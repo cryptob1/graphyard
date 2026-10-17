@@ -279,7 +279,7 @@ async function pinnedReplacement() {
   assert.ok(lifted.events.some(event => event.kind === 'note' && event.text.includes(`at ${COMMIT.slice(0, 12)}`)), 'and the commit the loop now reports');
 }
 
-test('unit:up-reopens-a-recorded-master-loop-step — a rerun whose up.json already records master-loop re-opens it when the units read as other code, and leaves it recorded when they read as this checkout or cannot be read', async () => {
+test('unit:up-reopens-a-recorded-master-loop-step — a rerun whose up.json already records master-loop re-opens it when the units read as other code or their reading failed, and leaves it recorded when they read as this checkout', async () => {
   const { runUp } = await up();
 
   // The install this item exists for: an earlier run recorded master-loop done while its loop kept
@@ -304,12 +304,36 @@ test('unit:up-reopens-a-recorded-master-loop-step — a rerun whose up.json alre
   assert.equal(settledRun.exitCode, 0, settledRun.next);
   assert.deepEqual(settled.calls, [], 'a recorded master-loop whose loop runs this checkout is left recorded and skipped');
 
-  // A reading that cannot be taken judges nothing, so the recorded step stands.
+  // A reading that failed proves nothing either way: the recorded step is re-opened and fails naming
+  // why, never left green on code nobody read, and nothing is rewritten or restarted on it.
+  const failedReading = () => reading({ loop: null, executor: null, loopCommit: null, loopStale: null, executorStale: null, error: 'units.json is corrupt' });
   const unreadableRoot = await recordedRoot('graphyard-up-loop-recorded-unreadable');
-  const unreadable = world([reading({ loop: null, executor: null, loopStale: null, executorStale: null, error: 'units.json is corrupt' })]);
+  const unreadable = world([failedReading()]);
   const unreadableRun = await runUp(request(), dependencies(unreadableRoot, [], unreadable));
-  assert.equal(unreadableRun.exitCode, 0, unreadableRun.next);
-  assert.deepEqual(unreadable.calls, [], 'a failed reading re-opens nothing');
+  assert.equal(unreadableRun.exitCode, 1, unreadableRun.next);
+  assert.match(unreadableRun.next, /^master-loop: .*could not be read: units\.json is corrupt/);
+  assert.deepEqual(unreadable.calls.filter(call => call.args[0] === 'master'), [], 'a failed reading rewrites and restarts nothing');
+  const reopened = JSON.parse(await readFile(join(unreadableRoot, '.graphyard', 'up.json'), 'utf8'));
+  assert.ok(!reopened.completed.includes('master-loop'), 'the step a failed reading re-opened is not recorded done');
+
+  // An unfinished step whose first reading failed fails the same way instead of restarting past it.
+  const freshRoot = await resumedRoot('graphyard-up-loop-fresh-unreadable');
+  const fresh = world([failedReading()], { loopRunning: false });
+  const freshRun = await runUp(request(), dependencies(freshRoot, [], fresh));
+  assert.equal(freshRun.exitCode, 1, freshRun.next);
+  assert.match(freshRun.next, /could not be read: units\.json is corrupt/);
+  assert.deepEqual(fresh.calls.filter(call => call.args[0] === 'master'), [], 'nothing restarts on a reading that judged nothing');
+});
+
+test('unit:up-host-template-judged-by-its-launcher — a host executor template is rebound unless the launcher ExecStart starts is the host Graphyard checkout or the repository checkout', async () => {
+  const { hostTemplateStartsOtherCode } = await up();
+  const layout = { home: '/home/graphyard', graphyard: '/srv/graphyard/graphyard', checkout: '/srv/graphyard/repo' };
+  const unit = (execStart: string) => `[Service]\nWorkingDirectory=${layout.checkout}\nExecStart=${execStart}\n`;
+  assert.equal(hostTemplateStartsOtherCode(unit(`/usr/bin/node ${layout.graphyard}/scripts/graphyard-executor.mjs --slot %i`), layout), false, 'the host Graphyard checkout\'s launcher stands');
+  assert.equal(hostTemplateStartsOtherCode(unit(`/usr/bin/node ${layout.checkout}/scripts/graphyard-executor.mjs --slot %i`), layout), false, 'the repository checkout\'s own launcher stands');
+  assert.equal(hostTemplateStartsOtherCode(unit(`/usr/bin/node ${layout.checkout}/.graphyard/held-cli/${OLD_COMMIT}/scripts/graphyard-executor.mjs --slot %i`), layout), true, 'a held snapshot under the repository checkout is other code');
+  assert.equal(hostTemplateStartsOtherCode(unit(`/usr/bin/node /srv/graphyard/graphyard-pilot/scripts/graphyard-executor.mjs --slot %i`), layout), true, 'an old launcher beside WorkingDirectory=checkout is other code');
+  assert.equal(hostTemplateStartsOtherCode(unit('/usr/bin/true'), layout), true, 'an ExecStart naming no launcher is not known to start this code');
 });
 
 test('unit:up-waits-for-the-loop-own-commit — the post-restart wait goes green only on a succeeded reading whose loop reported this CLI\'s commit; a failed or erroring reading, or a cursor with no commit, polls to a failure naming which', async () => {
