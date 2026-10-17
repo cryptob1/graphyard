@@ -36,9 +36,6 @@ async function setupProtection(github: { branchProtection?: (requireNativeReview
   return protection.protected ? 'complete' : protection.requiredChecks.length ? 'checks' : 'off';
 }
 
-/** `project` on /api/status: the delivery in force, or why its declaration is refused (the defaults are then not claimed). */
-const projectStatus = () => { const { delivery, error } = projectDelivery(); return { delivery, ...(error ? { error } : {}) }; };
-
 /** Control-plane status and the work reads every client polls. */
 export const statusRoutes = defineRoutes('status', [
   {
@@ -61,8 +58,7 @@ export const statusRoutes = defineRoutes('status', [
       const work = await engine.store.fleet();
       const visibleWork = operatorVisible(work);
       // What waits on the operator, derived from the human-only rule table (model/human-request.ts)
-      // and carried on the read every client already polls, so the dashboard's Needs you page is
-      // a renderer of that table rather than a second opinion about it (GY-102).
+      // on the read every client polls, so the Needs you page renders that table (GY-102).
       // The production environment the master verifies deployments under, as it last published it
       // (else this process's own setting), so the dashboard reads a release as live under the same
       // name `master verify-deployment` and the flow report's production phase use.
@@ -99,10 +95,9 @@ export const statusRoutes = defineRoutes('status', [
         documentation: engine.documentation,
         // What the timeline reconstruction has done in this process, and any failure it hit.
         pipelineBackfill: pipelineBackfillState(observedAt.getTime()),
-        // The fleet as the registry holds it: each account's runtime, model, role eligibility, live
-        // sessions, quota and reset time, and why it is ineligible when it is. `?host=` (or the executor-host header) judges
-        // placement for the executor asking. It names hosts and login homes, so identities that
-        // only implement or produce do not read it.
+        // The fleet as the registry holds it: each account's runtime, model, eligibility, sessions,
+        // quota and reset time. `?host=` (or the executor-host header) judges placement for that
+        // executor. It names hosts and login homes, so implementers and producers do not read it.
         fleet: ['admin', 'coordinator', 'reader', 'slice-lead'].includes(actor.role) ? await services.agentRegistry.snapshot(executorHost(url, req)) : null,
         // The pipeline doctor's last runs (GY-711): what each found, did and filed. The loop
         // posts one summary per run, so the dashboard's Doctor panel reads them from here.
@@ -111,9 +106,8 @@ export const statusRoutes = defineRoutes('status', [
         directMerge: await directMergeStatus(engine.store.pool, engine.directMergeEnvironment, observedAt),
         // The merger setting (merger-mode.ts): which writer lands heads, and one line while it is the control plane.
         mergeWriter: await mergeWriterStatus(engine.store.pool),
-        // The project's effective delivery defaults, applications and case bindings (GY-1901), from the
-        // committed policy the install deployed, else the checkout's graphyard.json, else the defaults.
-        project: projectStatus(),
+        // Delivery defaults, applications and case bindings (GY-1901).
+        project: projectDelivery(),
         // Heartbeat latency and the renewals refused or failed server-side, this process, last 10 minutes (GY-558).
         leaseHealth: engine.leaseHealth.report(),
         // The first-run facts the Setup page and `graphyard up` read beside the App and the fleet (GY-1419):

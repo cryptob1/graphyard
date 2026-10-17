@@ -186,9 +186,12 @@ export function loadProjectDelivery(env: Record<string, string | undefined> = pr
 }
 
 let inForce: ProjectDelivery | null = null;
-/** The project delivery this process serves, read once; a refusal is reported as `error` rather than failing every status read. */
-export function projectDelivery(): { delivery: ProjectDelivery | null; error: string | null } {
-  try { return { delivery: inForce ??= loadProjectDelivery(), error: null }; }
+/**
+ * `project` on /api/status: the delivery this process serves, read once; a refusal is reported as
+ * `error` (the defaults are then not claimed) rather than failing every status read.
+ */
+export function projectDelivery(): { delivery: ProjectDelivery | null; error?: string } {
+  try { return { delivery: inForce ??= loadProjectDelivery() }; }
   catch (error: any) { return { delivery: null, error: String(error?.message ?? error) }; }
 }
 /** Replaces the delivery in force (a test); null reads it again on next use. */
