@@ -11,7 +11,7 @@ import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, bou
 import { bindHeldSupervisedAsk, clearCoveringAdoptIfGone, coveringAdoptLeftAskOpen, coveringScopeAdoptWatch, heldAdoptWatch, heldDecisionRefusal, heldDecisionNamedIn, heldWaitDetail, heldWaitMarker, heldWaitScope, approvedResumePendingDetail, markHeldScopeAsk, clearHeldScopeAsk, syncHeldScopeAskMarks, staleRevisionDecideRefusal, staleRevisionDecideNote, staleRevisionDecideDetail, } from './metrics.js';
 import { candidateMovedMeanwhile, decisionFailureKind, decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication, selfHealingDecisionFailure } from './decision-reads.js';
 import { refusedAttestationWatch, type RefusedAttestation } from '../model/rework-ground.js';
-import { type DaemonEffects, record } from './effects.js'; import { planReportSink, reportMechanicalPlans } from './mechanical-plan-report.js';
+import { type DaemonEffects, record } from './effects.js'; import { type HeldReworkAnswer, heldReworkAnswer, heldReworkWatch, refusedHeldReworkAnswer } from './decision-holds.js'; import { planReportSink, reportMechanicalPlans } from './mechanical-plan-report.js';
 import { adoptedWatch, refusedOnOtherGrounds } from './rework-grounds.js';
 import type { FaultKind } from '../model/fault-classes.js';
 import type { Cycle } from './cycle.js';
@@ -42,9 +42,9 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const verdict = decision.action === 'rework' && !carried ? standingVerdict(item) : null;
     const previous = state.actions[key], attempts = (previous?.attempts ?? 0) + 1;
     await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'started', detail: `Requesting the ${decision.action} decision for ${item.key}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist);
+    const adoptHolding = async (held: HeldReworkAnswer) => { state.approvals[key] = heldReworkWatch(item, held, stamp); performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: held.detail, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist)); }; // GY-1888: an applied rework already holding the item answers the request (decision-holds.ts)
     try {
-      // An unreadable history is unknown, not empty (GY-1241): the request fails until a read answers,
-      // except rework/recover, whose refusal the server names and the loop cites (GY-229).
+      // An unreadable history is unknown, not empty (GY-1241): the request fails until a read answers, except rework/recover, whose refusal the server names and the loop cites (GY-229).
       const unread = decision.action === 'rework' || decision.action === 'recover';
       const history = effects.decisions ? (await effects.decisions(item).catch(error => { if (unread) return { decisions: [] }; throw error; })).decisions : [];
       const applied = decision.action === 'merge' ? approvedMerge(item, history) : null;
@@ -91,6 +91,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         }
         standing = undefined;
       }
+      const holding = heldReworkAnswer(item, history, decision, standing); if (holding) { await adoptHolding(holding); return; } // GY-1888: adopted, never re-put and refused
       // Earlier-head merge/attest: withdraw. Withdrawal that applied settles it (GY-1298).
       const overtaken = standing ? overtakenDecision(item, decision, standing, !!effects.withdraw, clock) : null;
       if (overtaken) {
@@ -222,6 +223,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s ${decision.action} decision ${heldId} is approved and held; the control plane applies it when the attempt ends, so nothing is requested`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
         return;
       }
+      const refusedHold = refusedHeldReworkAnswer(item, decision, error); if (refusedHold) { await adoptHolding(refusedHold); return; } // GY-1888: a hold the history read missed
       if (decisionCallCarried(message(error))) return void performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver in time: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, null));
       if (staleRevisionDecideRefusal(error)) {
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}; ${staleRevisionDecideNote}, so the request is re-computed next cycle against the applied revision`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, null));
