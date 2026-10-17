@@ -1738,10 +1738,11 @@ const bindAppRegistration = (session: Pick<InstallSession, 'inputs' | 'registrat
 
 /**
  * The plan of `graphyard app bind SLUG`: the App-only bind of an observation-only installation
- * (GY-1877). It runs the full install's App step and nothing more — the five App
- * variables, a deploy, its health, the App webhook repointed here — against the control plane an
- * earlier observation-only apply recorded, for an App `graphyard app import` saved on this host.
- * Everything else a full install performs stays held by observation-only, and the plan says so.
+ * (GY-1877). It runs the full install's App step and nothing more — the five App variables, a
+ * deployment-preserving redeploy on merge adapters (GY-1908; never a source upload), its health,
+ * the App webhook repointed here — against the control plane an earlier observation-only apply
+ * recorded, for an App `graphyard app import` saved on this host. Everything else a full install
+ * performs stays held by observation-only, and the plan says so.
  */
 async function buildBindAppPlan(session: InstallSession): Promise<InstallPlan> {
   const { adapter, context, record } = session;
@@ -1808,7 +1809,9 @@ async function buildBindAppPlan(session: InstallSession): Promise<InstallPlan> {
       { name: 'GITHUB_WEBHOOK_SECRET', value: REDACTED, secret: true, ...(saved?.app.webhookSecret ? { fingerprint: fingerprint(saved.app.webhookSecret) } : { note: 'held by the imported registration' }) },
       { name: 'GITHUB_CI_APP_IDS', value: alreadyBound && bound?.ciAppIds.length ? bound.ciAppIds.join(',') : `<the Apps publishing checks on ${session.inputs.baseBranch}>`, secret: false },
     ] },
-    { id: 'provider.deploy', target: 'provider', state: alreadyBound && !ciPending ? 'satisfied' : 'update', title: `Deploy the application with the App variables and wait for it to become healthy${ciPending ? ' (only if CI Apps are now observed)' : ''}` },
+    { id: 'provider.deploy', target: 'provider', state: alreadyBound && !ciPending ? 'satisfied' : 'update', title: merges
+      ? `Redeploy the serving SUCCESS deployment with the App variables (refuse when latest is a newer failed attempt; no source upload or GRAPHYARD_BUILD_SHA stamp) and wait for that redeploy and the bound App to serve${ciPending ? ' (only if CI Apps are now observed)' : ''}`
+      : `Deploy the application with the App variables and wait for it to become healthy${ciPending ? ' (only if CI Apps are now observed)' : ''}` },
     { id: 'provider.url', target: 'provider', state: url ? 'satisfied' : 'create', title: 'The public HTTPS URL of the service, as recorded', values: url ? [{ name: 'url', value: url, secret: false }] : [] },
     { id: 'verify.health', target: 'graphyard', state: 'update', title: 'Verify GET /healthz returns {"ok":true}' },
     polling
@@ -1918,21 +1921,30 @@ async function performBindApp(session: InstallSession, plan: InstallPlan): Promi
     ciAppIds = await detect();
   }
   if (write) {
-    // Exactly the five App variables. A merge adapter keeps every other variable; a rewrite adapter's
-    // environment is the whole file, so the control-plane variables ride along beside them, proven
-    // unchanged against the deployed file first.
+    // Exactly the five App variables. A merge adapter keeps every other variable and redeploys the
+    // current deployment (GY-1908): never `railway up` or a GRAPHYARD_BUILD_SHA stamp, which would
+    // replace the served source with the CLI checkout. A rewrite adapter's environment is the whole
+    // file, so the control-plane variables ride along beside them, proven unchanged first.
     const appEnv = githubEnv(facts, ciAppIds);
     // Read again just before the write: the deployment may have changed since the plan.
     const rewritten = await rewrittenCoreVariables(session);
     if (rewritten.length) throw new Error(`${context.provider} rewrites the whole environment, and binding the App would also change ${rewritten.join(', ')}; nothing was written. ${rewriteFix(session)}`);
-    await adapter.setEnv(context, typeof adapter.applyVariables === 'function' ? appEnv : [...coreEnv(session), ...appEnv]);
-    await adapter.deploy(context);
+    // Railway redeploy returns after the mutation; preserveServingDeployment makes applyVariables
+    // refuse a non-serving latest and wait for the specific redeploy to become SUCCESS (GY-1908).
+    if (typeof adapter.applyVariables === 'function') {
+      context.preserveServingDeployment = true;
+      await adapter.applyVariables(context, appEnv);
+    } else {
+      await adapter.setEnv(context, [...coreEnv(session), ...appEnv]);
+      await adapter.deploy(context);
+    }
   }
   const health = await waitForHealth(session, url);
   if (!health) throw new Error(`The service at ${url} did not return to health after the GitHub credentials were written. Inspect: graphyard install --provider ${context.provider} --repo ${repository} --logs`);
-  // The binding is recorded only once the running server reports this App: a deployment that did
-  // not load the credentials would otherwise be recorded bound, and every rerun would skip it.
-  const status = await authenticatedStatus(session, url);
+  // Poll until the serving instance reports this App: after a variable-only redeploy the previous
+  // healthy instance can still answer /healthz, and a same-id key rotation must not change the
+  // webhook or record the binding until the new credentials serve (GY-1908).
+  const status = await waitForBoundApp(session, url, facts.appId);
   if (status.githubAppId !== facts.appId) throw new Error(`The server at ${url} reports ${status.githubAppId === null ? 'no GitHub App' : `GitHub App ${status.githubAppId}`} after GitHub App ${facts.slug} (app ${facts.appId}) was written to it, so the binding is not recorded. Inspect: graphyard install --provider ${context.provider} --repo ${repository} --logs, then rerun graphyard app bind ${slug}`);
   const webhookUrl = webhookUrlFor(url);
   let webhookDetail: string;
@@ -2175,6 +2187,16 @@ async function authenticatedStatus(session: InstallSession, url: string) {
   if (body?.actor?.role !== 'admin') throw new Error('The generated admin credential did not authenticate as an admin actor');
   if (String(body?.repository ?? '').toLowerCase() !== session.inputs.repository.toLowerCase()) throw new Error('The server is bound to a different repository than the one being installed');
   return { actor: String(body.actor.id), role: String(body.actor.role), repository: String(body.repository), githubAppId: body.githubAppId ?? null };
+}
+
+/** Poll authenticated /api/status until it reports `appId`, so a redeploy that has not yet loaded the App is not recorded bound (GY-1908). */
+async function waitForBoundApp(session: InstallSession, url: string, appId: number, attempts = 40) {
+  let last = await authenticatedStatus(session, url);
+  for (let attempt = 0; attempt < attempts && last.githubAppId !== appId; attempt++) {
+    await session.deps.wait(3_000);
+    last = await authenticatedStatus(session, url);
+  }
+  return last;
 }
 
 async function resolveApp(session: InstallSession, url: string, record: InstallRecord): Promise<AppFacts & { slug: string; botUserId?: number; reused?: boolean }> {

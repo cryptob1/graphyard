@@ -8,6 +8,9 @@
 // (GY-945, GY-883). These rules ground them per path, so the loop grants them with no approver, and
 // `derivePlannedFiles` plans them at authoring time.
 import { documentationGlobMatches } from './documentation-glob.js';
+import type { FaultClass } from './fault-classes.js';
+import { ciCheckName } from './ci-refusal.js';
+import { requiredCheckFailurePattern } from './required-check-refusal.js';
 import type { WorkOrigin } from './interventions.js';
 import { namedPaths, pathScope, pathScopeContains, testFile } from './scope.js';
 
@@ -38,17 +41,45 @@ export const timingBaseline = (path: string) => !pathScope(path).prefix && /(?:^
 export const noWallClockGatePath = 'tests/no-wall-clock-time-bombs.test.ts';
 export const noWallClockGate = (path: string) => path === noWallClockGatePath;
 const testScope = (entry: string) => testFile(entry) || pathScope(entry).prefix && /(?:^|\/)(?:tests?|__tests__)\/$/.test(pathScope(entry).path);
-/** A test path's directory, stem and suffix, or null — used to match a shorter ask to a proof-named file. */
+
+/** Candidate, observation, policy and gates the failed-check ground reads, as the test gate reads them. */
+export interface GateRecord { name: string; passed: boolean; reasons: readonly string[]; ciAppIds?: number[] }
+type CheckRun = { name: string; result: string; appId: number; id?: number };
+export interface FailedCheckSource {
+  candidate?: { sha: string; baseSha: string } | null;
+  observation?: { candidate?: { sha: string; baseSha: string }; checks?: readonly CheckRun[]; requiredChecks?: readonly { name: string; appId: number | null }[] } | null;
+  gates?: readonly GateRecord[]; policy?: { checks: readonly string[]; review: boolean } | null;
+}
+/** Same set as merge-queue `failedConclusions` (kept here: importing merge-queue cycles through work.ts → this file). */
+const failedRequiredConclusions = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure', 'stale', 'neutral']);
+/** Newest decisive run: merge-queue `latestCheck` / `newestCheck` (id wins; non-cancelled preferred). */
+const newestDecisiveRun = (runs: readonly CheckRun[]) => {
+  const pool = runs.filter(run => run.result !== 'cancelled');
+  return (pool.length ? pool : runs).reduce<CheckRun | undefined>((a, b) => !a ? b : b.id !== undefined && (a.id === undefined || b.id > a.id) ? b : a.id !== undefined && b.id === undefined ? a : b, undefined);
+};
+/** Trusted counting failure for `name`: a protection-bound app, else test-gate CI apps; newest decisive run (merge-queue `requiredCheckRun`). */
+const trustedRequiredFailure = (name: string, item: FailedCheckSource, boundApp: number | null) => {
+  const apps = boundApp !== null ? [boundApp] : item.gates?.find(gate => gate.name === 'test')?.ciAppIds ?? [15368];
+  const run = newestDecisiveRun((item.observation?.checks ?? []).filter(entry => entry.name === name && apps.includes(entry.appId)));
+  return !!run && run.result !== 'cancelled' && failedRequiredConclusions.has(run.result);
+};
+/**
+ * GY-1893: modules each fault class's instances are produced and answered in. Filing plans only
+ * the proof test (GY-1706); `impliedScopes` / `plannedCompanions` grant the class's machinery so
+ * the item never waits out the bound. Decision and scope are tabled from their instances.
+ */
+export const faultClassMachinery: Partial<Record<FaultClass, readonly string[]>> = {
+  decision: ['src/daemon/decision-text.ts', 'src/daemon/cycle-decisions.ts', 'src/daemon/cycle-approvers.ts'],
+  scope: ['src/review-scope.ts', 'src/daemon/cycle-scope.ts', 'src/model/scope.ts', 'src/model/scope-companions.ts', 'src/model/scope-collapse.ts'],
+};
+/** Machinery of the fault class an item closes, or none. */
+export const machineryOf = (origin?: WorkOrigin | null): readonly string[] =>
+  origin?.faultClass ? faultClassMachinery[origin.faultClass.class] ?? [] : [];
 const testStemParts = (path: string) => {
   const match = /^((?:[^/]+\/)*)([^/]+?)(\.(?:test|spec)\.[cm]?[jt]sx?)$/.exec(pathScope(path).path);
   return match && testFile(path) ? { directory: match[1], stem: match[2], suffix: match[3] } : null;
 };
-/**
- * True when `path` is the proof-named test, or a same-suffix stem that lengthens or shortens it by
- * a hyphenated suffix (GY-1700's webhook-soft-accept beside unit:webhook-soft-accept-no-5xx). The
- * shorter stem must itself be hyphenated so a single token (fleet vs fleet-panel) is never a match
- * (GY-945's new-file path must still reach newProofTestGround).
- */
+/** Proof-named test, or same-suffix hyphenated stem lengthening/shortening it (GY-1700); single-token stems never match (GY-945). */
 const proofTestStemMatch = (path: string, named: string) => {
   if (path === named) return true;
   const asked = testStemParts(path), proof = testStemParts(named);
@@ -56,11 +87,10 @@ const proofTestStemMatch = (path: string, named: string) => {
   const [shorter, longer] = asked.stem.length <= proof.stem.length ? [asked.stem, proof.stem] : [proof.stem, asked.stem];
   return shorter.includes('-') && longer.startsWith(`${shorter}-`);
 };
-/** True when `path` is, or a scope that holds, documentation the item's repository configures. */
 export const documentationPath = (path: string, documentation: readonly string[]) =>
   documentation.some(scope => documentationGlobMatches(scope, path) || pathScope(path).prefix && pathScopeContains(path, pathScope(scope).path));
 
-/** Where a repository keeps its tests and how it names them, read from its tree: `tests/` and `.test.ts` by default. */
+/** Test directory and extension from the tree; `tests/` + `.test.ts` by default. */
 export function testLayout(tree: Iterable<string> = []) {
   const counts = new Map<string, number>();
   for (const file of tree) {
@@ -73,58 +103,38 @@ export function testLayout(tree: Iterable<string> = []) {
 }
 const proofWords = (proofs: readonly string[]) => proofs.map(proof => proof.replace(/^[a-z]+:/, '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)).filter(entry => entry.length);
 const sharedWords = (words: readonly string[][]) => words.slice(1).reduce((shared, entry) => { let index = 0; while (index < shared.length && shared[index] === entry[index]) index++; return shared.slice(0, index); }, words[0] ?? []);
-/**
- * The test file a criterion's proofs will live in when no file holds them yet: named for the words
- * the proof names share (`unit:fleet-panel-renders-registry` and `unit:fleet-panel-marks-stale-probe`
- * live in `tests/fleet-panel.test.ts`), or for the first proof when they share none.
- */
+/** Test file named for shared proof words, or the first proof when they share none. */
 export function proofTestFile(proofs: readonly string[], layout = testLayout()) {
   const words = proofWords(proofs);
   if (!words.length) return null;
   const shared = sharedWords(words);
   return `${layout.directory}${(shared.length ? shared : words[0]).join('-')}${layout.extension}`;
 }
-/**
- * The test files an item's proofs will live in: one named for what every criterion's test proofs
- * share when they share a word (GY-945's two criteria share `fleet-panel`), otherwise one per criterion.
- */
+/** One shared-word file for all criteria's test proofs, else one per criterion (GY-945). */
 export function proofTestFiles(criteria: readonly CompanionCriterion[], layout = testLayout()) {
   const entries = criterionTestProofs(criteria), all = entries.flatMap(entry => entry.proofs);
   if (entries.length > 1 && sharedWords(proofWords(all)).length) return [{ path: proofTestFile(all, layout)!, criterion: entries.map(entry => entry.criterion).join(', '), proofs: all }];
   return entries.map(entry => ({ path: proofTestFile(entry.proofs, layout)!, criterion: entry.criterion, proofs: entry.proofs }));
 }
-/** A criterion that describes a change in the web UI: what makes a single file under `web/` the feature it describes. */
 const webUi = /\b(?:web (?:UI|app|page|dashboard)|dashboard)\b/i;
-/** The fields of an item that make it a review follow-up and say what it names (GY-1116). */
 export type FollowUpSource = { origin?: WorkOrigin | null; description?: string | null };
 
-/**
- * The files a review follow-up names (GY-1116): each finding's own path, and the paths its text or the
- * item's description name unambiguously — a directory and a file extension. A dotted API name
- * (`store.init`) is prose, not a file, so it never lands in plannedFiles or implies scope.
- */
+/** Finding paths plus unambiguous path tokens in finding/description text; dotted API names are prose (GY-1116). */
 export function followUpPaths(findings: readonly { path?: string | null; text: string }[], description?: string | null): string[] {
   const named = (text: string) => namedPaths(text).filter(token => /\/[^/]+\.[A-Za-z0-9]{1,5}$/.test(token));
   return [...new Set([...findings.flatMap(finding => [...(finding.path ? [finding.path] : []), ...named(finding.text)]), ...(description ? named(description) : [])])];
 }
 
-/**
- * Structural ground for a peer module: an existing source module that a planned file directly
- * imports by relative specifier, or that directly imports a planned file.
- * `read` answers a module's text on the base branch, null when absent.
- */
+/** Peer module: planned file imports `path`, or `path` imports a planned file. `read` is base text. */
 export async function peerModuleGround(path: string, text: string | null, plannedFiles: readonly string[], read: (path: string) => Promise<string | null>): Promise<string | null> {
   if (pathScope(path).prefix || !codeExtension.test(path) || testFile(path)) return null;
   const planned = plannedFiles.filter(scope => !pathScope(scope).prefix && codeExtension.test(scope) && scope !== path && !testFile(scope));
   if (!planned.length) return null;
   const targetStem = moduleStem(path);
-
-  // 1. A planned file imports path (peer dependency / implementation delegate):
   for (const scope of planned) {
     const source = await read(scope);
     if (source && relativeImports(scope, source).includes(targetStem)) return `${path} is imported by ${scope}, a planned file whose behaviour the item changes`;
   }
-  // 2. path imports a planned file (peer consumer):
   if (text) {
     const stems = new Map(planned.map(scope => [moduleStem(scope), scope]));
     for (const stem of relativeImports(path, text)) if (stems.has(stem)) return `${path} imports ${stems.get(stem)}, a planned file whose behaviour the item changes`;
@@ -132,15 +142,39 @@ export async function peerModuleGround(path: string, text: string | null, planne
   return null;
 }
 
+/** Prose names the check (paths stripped so `.test.ts` never counts as the `test` check). */
+const reasonNamesCheck = (reason: string, name: string) => {
+  let prose = reason;
+  for (const path of namedPaths(reason)) if (path !== name) prose = prose.split(path).join(' ');
+  prose = prose.replace(/:\d+/g, ' ');
+  return new RegExp(`(?:^|[^\\w.-])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=[^\\w.-]|$)`, 'i').test(prose);
+};
+const reasonQuotesFailureSite = (reason: string, path: string) =>
+  new RegExp(`${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:\\d+`).test(reason);
 /**
- * The ground a requested path stands on as a companion the item's own record implies, or null. These
- * need no file read: the documentation-budget gate, when the ask or the plan holds documentation;
- * the test-duration baseline, when it holds a test file; the test file named for the criteria's proofs (`proofTestFiles`); and a single file under `web/`
- * when a criterion describes a change in the web UI (GY-945's page and stylesheet). The engine's rule grants
- * these; what needs the base branch — imports, and which proofs a file already holds — is the
- * loop's (`importingTestGround`, `newProofTestGround`, `peerModuleGround`).
+ * GY-1893 / GY-1881: grant the test file a trusted failed required-check run on this candidate
+ * names, when the ask names that held check and quotes `PATH:LINE`. Uses the test gate's selection
+ * (CI apps, newest decisive run, sha+base); superseded/untrusted failures and non-tests grant nothing.
  */
-export function companionGround(path: string, item: { plannedFiles?: readonly string[]; criteria: readonly CompanionCriterion[]; origin?: WorkOrigin | null; description?: string | null }, ask: readonly string[], documentation: readonly string[]): string | null {
+export function failedCheckTestGround(path: string, item: FailedCheckSource, reason?: string): string | null {
+  if (!reason || !testFile(path) || !item.candidate || !namedPaths(reason).includes(path)) return null;
+  if (!reasonQuotesFailureSite(reason, path)) return null;
+  const observation = item.observation, candidate = item.candidate;
+  if (!observation?.candidate || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return null;
+  const policy = item.policy?.checks ?? [];
+  // Membership matches merge-queue requiredChecksOf (policy names plus protection-bound extras).
+  const required = [...policy.map(name => ({ name, appId: null })), ...(observation.requiredChecks ?? []).filter(check => check.name !== 'Graphyard / merge' && check.name !== 'graphyard/landable' && !policy.includes(check.name))];
+  // The gate holds a policy check as not passed, a protection-only one as failed (GY-430).
+  const heldName = (held: string) => ciCheckName(held) ?? requiredCheckFailurePattern.exec(held)?.[1] ?? null;
+  const failed = [...new Set(required.filter(({ name, appId }) => (item.gates ?? []).some(gate => !gate.passed && gate.reasons.some(held => heldName(held) === name)) && reasonNamesCheck(reason, name) && trustedRequiredFailure(name, item, appId)).map(check => check.name))];
+  return failed.length ? `${path} is the test file the failed required check ${failed.join(' and ')} on this item's current candidate names, which the item answers within its attempt` : null;
+}
+/**
+ * Companion ground from the item's record alone (no base read): docs-budget / timing / wall-clock
+ * gates, proof-named test files, a single `web/` file a criterion describes, and GY-1893's failed
+ * required-check test file (reason names the check and `PATH:LINE`). Import/proof-held grounds are the loop's.
+ */
+export function companionGround(path: string, item: { plannedFiles?: readonly string[]; criteria: readonly CompanionCriterion[]; origin?: WorkOrigin | null; description?: string | null } & FailedCheckSource, ask: readonly string[], documentation: readonly string[], reason?: string): string | null {
   if (pathScope(path).prefix) return null;
   if (documentationBudgetGate(path)) {
     const documented = [...ask, ...(item.plannedFiles ?? [])].find(entry => entry !== path && documentationPath(entry, documentation));
@@ -160,17 +194,12 @@ export function companionGround(path: string, item: { plannedFiles?: readonly st
     if (extension) for (const entry of [...proofTestFiles(item.criteria, layout), ...criterionTestProofs(item.criteria).map(each => ({ ...each, path: proofTestFile(each.proofs, layout) }))])
       if (entry.path && proofTestStemMatch(path, entry.path)) return `${path} is the test file ${entry.criterion}'s proofs (${entry.proofs.join(', ')}) live in`;
   }
-  // The feature a criterion describes in the web UI is a page, component or stylesheet under web/: one file, never the tree.
   const described = path.startsWith('web/') && !testFile(path) ? item.criteria.find(criterion => webUi.test(criterion.text)) : undefined;
   if (described) return `${path} is the web UI ${described.id} describes`;
-  return null;
+  return failedCheckTestGround(path, item, reason);
 }
 
-/**
- * GY-955 AC-1(b): the ground a new test file is granted on — one the base does not hold — when some
- * criterion's test proofs are held by no file on the base, so the change must write them somewhere
- * new. `held` answers how many base files hold a proof name; a failed search reads as held.
- */
+/** GY-955 AC-1(b): new test file when some criterion's test proofs are held by no base file. */
 export async function newProofTestGround(path: string, criteria: readonly CompanionCriterion[], held: (proof: string) => Promise<number>): Promise<string | null> {
   if (!testFile(path)) return null;
   const directory = path.slice(0, path.lastIndexOf('/') + 1), extension = /\.(?:test|spec)\.[cm]?[jt]sx?$/.exec(path)?.[0];
@@ -178,8 +207,7 @@ export async function newProofTestGround(path: string, criteria: readonly Compan
     const unheld: string[] = [];
     for (const proof of entry.proofs) if (await held(proof) === 0) unheld.push(proof);
     if (!unheld.length) continue;
-    // Fault-class manual proofs live in the proof-named file (or its hyphenated stem); an unrelated
-    // test path is not "whatever it is called" the way unit proofs are (GY-1287 / GY-1701).
+    // Fault-class manual proofs must match the proof-named file or its hyphenated stem (GY-1287 / GY-1701).
     if (unheld.some(proof => /^manual:fault-class-/.test(proof))) {
       if (!extension) continue;
       const named = proofTestFile(entry.proofs, { directory, extension });
@@ -192,7 +220,6 @@ export async function newProofTestGround(path: string, criteria: readonly Compan
 
 const codeExtension = /\.(?:[cm]?[jt]sx?)$/;
 const moduleStem = (path: string) => path.replace(codeExtension, '').replace(/\/index$/, '');
-/** The repository modules a file imports or re-exports by relative specifier, as path stems. */
 export function relativeImports(path: string, text: string) {
   const stems = new Set<string>();
   for (const match of text.matchAll(/\bfrom\s*['"](\.{1,2}\/[^'"]+)['"]|\bimport\s*(?:\(\s*)?['"](\.{1,2}\/[^'"]+)['"]/g)) {
@@ -205,15 +232,9 @@ export function relativeImports(path: string, text: string) {
   }
   return [...stems];
 }
-/** The files a module stem may be on disk, most likely first. */
 export const moduleFiles = (stem: string) => ['.ts', '.tsx', '.mts', '.js', '.mjs', '.jsx', '/index.ts', '/index.js'].map(suffix => `${stem}${suffix}`);
 
-/**
- * GY-955 AC-1(a): the ground an existing test file is granted on because it imports a module a
- * planned file is, or a module that re-exports a planned file (a barrel such as src/model.ts over
- * src/model/gates.ts), or one a planned barrel re-exports. The test pins the behaviour the item
- * changes, so the change breaks it. `read` answers a module's text on the base, null when absent.
- */
+/** GY-955 AC-1(a): existing test that imports a planned file, or a barrel that re-exports one. */
 export async function importingTestGround(path: string, text: string | null, plannedFiles: readonly string[], read: (path: string) => Promise<string | null>, limit = 20): Promise<string | null> {
   if (!text || !testFile(path)) return null;
   const planned = plannedFiles.filter(scope => !pathScope(scope).prefix && codeExtension.test(scope) && scope !== path);
@@ -238,41 +259,25 @@ export async function importingTestGround(path: string, text: string | null, pla
   return null;
 }
 
-/** A per-area verification map (verification/AREA.md, GY-1495): a file, never the tree; the supported `./` spelling is the same file. */
 export const verificationMapFile = (path: string) => !pathScope(path).prefix && /^verification\/[^/]+\.md$/.test(pathScope(path).path);
-/**
- * A test-side gate the engine grants as the companion of a test in the raw ask or the plan (the
- * wall-clock gate, the timing baseline, the docs-budget gate): its ground is the ask's, so it is no
- * independent ground for anything else.
- */
+/** Wall-clock / timing / docs-budget gate: companion of a test in the ask, not an independent ground. */
 export const testCompanionGate = (path: string) => noWallClockGate(path) || timingBaseline(path) || documentationBudgetGate(path);
-/** The globs a map's opening `Paths:` line names, as parseVerificationMap reads them, or null when the text opens with no such line. */
 const verificationMapPaths = (text: string) => {
   const opening = text.replace(/\r\n/g, '\n').split('\n').find(line => line.trim())?.match(/^Paths:\s*(.*)$/);
   const paths = opening?.[1].split(/[\s,]+/).filter(Boolean) ?? [];
   return paths.length ? paths : null;
 };
 /**
- * GY-1783: the ground a verification map is granted on. A map opens with a `Paths:` line naming the
- * globs it covers and holds the `## Tests` list an area's test files are named in, so an item that
- * changes a file under those paths, or creates a test for one, must edit the map — granted the way
- * the test importing a planned file is (importingTestGround). The ground names the line and the
- * planned file it covers, or the test file under those paths a criterion names or this request has
- * already granted on a ground of its own: `granted` holds the paths the rules grounded before the
- * map, never the raw ask (a map covering only an unrelated test asked beside it is not granted on
- * that test) and never a gate (`testCompanionGate`) granted as the companion of a test in the raw
- * ask, so an ungrounded test cannot reach the map through the gate it drags in (review of d8e550a6).
- * `text` is the map on the base: a map the base does not hold, one opening with no Paths line, or
- * one covering none of those files stays refused and routed as before; the loop asks only for a map
- * parseVerificationMap reads whole, so a malformed file under verification/ is routed, never granted.
+ * GY-1783: grant a verification map whose `Paths:` covers a planned file, a criterion-named test,
+ * or a previously grounded test (never the raw ask alone, never a `testCompanionGate`). Base text
+ * required; a map with no Paths line or no covered file stays refused.
  */
 export function verificationMapGround(path: string, text: string | null, item: { plannedFiles?: readonly string[]; criteria: readonly CompanionCriterion[] }, granted: readonly string[] = []): string | null {
   if (!text || !verificationMapFile(path)) return null;
   const paths = verificationMapPaths(text);
   if (!paths) return null;
   const line = `Paths: ${paths.join(', ')}`;
-  // As verificationGlobCovers reads a glob (verification-maps.ts, not imported: it reaches scope.ts back through documentation.ts), a
-  // leading `./` is stripped, so `Paths: ./src/master/**` covers a planned `src/` as documentationGlobMatches covers a file under it (review of 8aac4bbf).
+  // Leading `./` stripped like verificationGlobCovers (not imported: reaches scope.ts via documentation.ts).
   const covered = (entry: string) => entry !== path && paths.some(glob => documentationGlobMatches(glob, entry) || pathScope(entry).prefix && glob.replace(/^\.\//, '').startsWith(pathScope(entry).path));
   const planned = (item.plannedFiles ?? []).find(covered);
   if (planned) return `${path} is the verification map whose ${line} covers ${planned}, a planned file whose behaviour the item changes`;
@@ -283,13 +288,7 @@ export function verificationMapGround(path: string, text: string | null, item: {
   return null;
 }
 
-/**
- * GY-955 AC-2: the companions plannedFiles carries at authoring time, beside what the criteria name.
- * The test file each criterion's proofs will live in, when the plan holds no test file for them —
- * the one already named for the proofs on the base, or the new one `proofTestFile` names — the
- * wall-clock gate and timing baseline the tree holds when the plan holds a test, and the
- * documentation-budget gate when the plan holds documentation.
- */
+/** GY-955 AC-2: authoring-time companions — proof test, wall-clock/timing/docs gates, follow-up paths, fault-class machinery. */
 export function plannedCompanions(item: { plannedFiles: readonly string[]; criteria: readonly CompanionCriterion[]; origin?: WorkOrigin | null; description?: string | null }, tree: ReadonlySet<string>, documentation: readonly string[]) {
   const added: { path: string; criterion: string | null; why: string }[] = [];
   const covered = (path: string) => item.plannedFiles.some(entry => pathScopeContains(entry, path)) || added.some(entry => entry.path === path);
@@ -307,5 +306,9 @@ export function plannedCompanions(item: { plannedFiles: readonly string[]; crite
   if (item.origin?.reviewFollowUps)
     for (const file of followUpPaths(item.origin.reviewFollowUps.findings ?? [], item.description))
       if (tree.has(file) && !covered(file)) added.push({ path: file, criterion: 'FOLLOWUP', why: 'the file a review follow-up names' });
+  const closed = item.origin?.faultClass;
+  if (closed)
+    for (const file of machineryOf(item.origin))
+      if (tree.has(file) && !covered(file)) added.push({ path: file, criterion: 'AC-1', why: `the ${closed.class} fault class's machinery, where the shared cause AC-1 removes lives` });
   return added;
 }

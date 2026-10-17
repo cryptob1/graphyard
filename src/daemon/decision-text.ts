@@ -116,6 +116,30 @@ export function refusalNamedIn(error: unknown, action: 'rework' | 'recover' = 'r
   return new RegExp(`Decision ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) \\(${action}\\) with this input\\b`).exec(text)?.[1] ?? null;
 }
 /**
+ * The applied rework a refused request names as already holding the item (GY-1579), or null. The
+ * server returns it as a field of the 409 body (`heldRework`), so the loop adopts the hold the
+ * record answers instead of repeating a request the control plane refuses on every retry — each
+ * refusal a counted decision fault (GY-1888, GY-1846's put). Only a server that predates the field
+ * is read from its message, and a rewording there fails closed, as refusalNamedIn's does.
+ */
+export function heldReworkNamedIn(error: unknown): string | null {
+  const field = error instanceof RefusedResponse ? (error.body as any)?.heldRework : undefined;
+  if (field && typeof field === 'object') return typeof field.decision === 'string' && decisionId.test(field.decision) ? field.decision : null;
+  const text = error instanceof Error ? error.message : String(error);
+  return /already holds rework: decision ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) was applied/.exec(text)?.[1] ?? null;
+}
+/**
+ * The pane a refused approver launch names as holding the session's own name (GY-1884), or null:
+ * the runtime refuses the rename with `agent_name_taken` and names the holder (`pane_id=…`), so
+ * the loop can recover the launch instead of repeating it every retry. The name is matched exactly,
+ * so a refusal of some other session's name is never read as this one's.
+ */
+export function heldApproverPaneIn(error: unknown, name: string): string | null {
+  const text = error instanceof Error ? error.message : String(error);
+  if (!text.includes('agent_name_taken') || !text.includes(`as ${JSON.stringify(name)}`)) return null;
+  return /pane_id=([A-Za-z0-9:_-]+)/.exec(text)?.[1] ?? null;
+}
+/**
  * The actions whose standing request the loop adopts on the server's word alone (GY-1374): they bind
  * nothing a standing one could disagree with, unlike a merge or attest (its candidate), a resolve (its
  * trigger) or a requirements decision (its scope request), each of which the history read must judge.
