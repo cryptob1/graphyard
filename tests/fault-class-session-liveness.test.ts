@@ -46,6 +46,7 @@ import * as approversModule from '../src/daemon/cycle-approvers.js';
 import { approvalWatchSchema, type DaemonAction } from '../src/daemon/state.js';
 // GY-1895: the launch's own coordinate write goes through the same ledger the loop's best-effort records do.
 import { launchWrite, retryOwedWrites } from '../src/daemon/step-budget.js';
+import { retireGuessedCoordinate } from '../src/daemon/cycle-dispatch.js';
 import { coordinateOwed } from '../src/model/launch-sentinel.js';
 import { registeredLaunch } from '../src/model/session-launch.js';
 // A namespace import, so the base run of this file, which has no rekeyLaunchedSession, fails only the GY-1788 case that reads it.
@@ -1591,6 +1592,49 @@ test(`unit:fault-class-session-liveness GY-1895 action:session GY-1885 10:25:23Z
   await gy1895CoordinateReplay('GY-1885', 6, 'graphyard-opencode-2', 5, 'w1V:pQKZ', 'paneless');
 });
 
+test(`unit:fault-class-session-liveness GY-1895 action:session GY-1885 — an outage that outlasts the reclaim bound: on the recovery cycle the owed coordinate lands after the cycle's snapshot was read, and the attempt is not reclaimed from that stale snapshot — the next cycle delivers once`, async () => {
+  const key = 'GY-1885', epoch = 6, principal = 'graphyard-opencode-2', pane = 'w1V:pQKZ';
+  const { item, profile, agents } = gy1895OutageAttempt(key, epoch, principal, 5, pane, 'paneless');
+  const world = await resumeWorld(item, profile, agents, { value: 0 }, GY1895_NOW);
+  const { state } = world;
+  const plane = { up: false }, writes: SessionHandleInput[] = [], refused: SessionHandleInput[] = [];
+  gy1895Engine(world, key, plane, writes, refused);
+  // Production's snapshot is read at the cycle's start and never patched by recordSession
+  // (effects-production.ts): the step reads the item as it stood then, not as the landing left it.
+  const snapshotCycle = (ms: number) => { const snapshot = structuredClone(world.item); return { ...world.cycle(ms), heldBy: () => snapshot } as unknown as Cycle; };
+  const reclaimed = () => Object.values(state.actions).some(action => /keeping the attempt's branch/.test(action.detail));
+  try {
+    await gy1895StashLaunchCoordinate(world, key, principal, epoch, pane, plane, writes, refused);
+    // Cycle 1, the outage standing: the reclaim bound starts.
+    await resumeStep(snapshotCycle(0), new Set(), true);
+    assert.ok(state.actions[`idle:${item.id}:${epoch}`], 'the reclaim bound starts at the first unverifiable observation');
+    // Cycle 2, still down and past launchAppearanceMs: the carried write holds the reclaim.
+    state.cycle += 1;
+    await resumeStep(snapshotCycle(150_000), new Set(), true);
+    assert.equal(reclaimed(), false, 'the owed write decides while it stands carried, not the bound');
+    // Cycle 3, the plane answers: the snapshot is read before the step's ledger retry lands the
+    // coordinate, so the fence still sees no pane. The base reclaimed the attempt right here.
+    plane.up = true;
+    state.cycle += 1;
+    await resumeStep(snapshotCycle(210_000), new Set(), true);
+    assert.ok(writes.some(write => write.id === `${principal}:${epoch}` && write.pane === pane), 'the retry landed the launch\u2019s own pane');
+    assert.equal(state.actions[`owed:handle:${item.id}:${principal}:${epoch}`]?.state, 'done', 'the owed row was retired on its answer');
+    assert.equal(reclaimed(), false, 'the attempt is not reclaimed from the snapshot that predates the landing');
+    assert.deepEqual(world.prompts, [], 'the stale snapshot still refuses the paste');
+    assert.deepEqual(GY1895_sessionLiveness(state), [], 'and that refusal counts no fault: its write answered this cycle');
+    // Cycle 4: the fresh snapshot carries the pane, and the applied scope decision is delivered once.
+    state.cycle += 1;
+    await resumeStep(snapshotCycle(240_000), new Set(), true);
+    assert.equal(world.prompts.length, 1, `the resolution was delivered: ${JSON.stringify(world.prompts)}`);
+    assert.match(world.prompts[0]!, /its scope request was applied: plannedFiles now include docs\/master-agent-sessions.md/);
+    state.cycle += 1;
+    await resumeStep(snapshotCycle(270_000), new Set(), true);
+    assert.equal(world.prompts.length, 1, 'the delivery is never repeated');
+    assert.equal(reclaimed(), false, 'no reclaim ever ran');
+    assert.deepEqual(GY1895_sessionLiveness(state), [], 'no session-liveness instance anywhere in the recovery');
+  } finally { world.cleanup(); }
+});
+
 test('unit:fault-class-session-liveness GY-1895 session isolation — a paneless handle and a reused agent name pointing at another session\'s pane bind nothing, paste nothing and close nothing, and a refusal whose coordinate write is not owed still counts', async () => {
   // The profile's agent name resolves to a pane this item's finished previous attempt holds: the
   // name was reassigned to whatever the listing still shows there, and no launch identity ties it
@@ -1646,12 +1690,19 @@ test('unit:fault-class-session-liveness GY-1895 launch coordinates — a launch 
     assert.equal(writes.length, 0, 'nothing landed while the plane was down');
     assert.deepEqual(refused.map(write => write.id), ['graphyard-opencode-2:5', 'graphyard-opencode-2:5', 'graphyard-opencode-2:5', 'graphyard-opencode-2:6'],
       'the registration, the superseded-registration close it always writes, and the coordinates were each sent once; the coordinate loop stopped at the first unanswered send instead of hammering the silent plane');
-    // The next cycle's bounded steps retry the ledger: both stashed writes land with the exact
-    // payloads the launcher held — the claimed id, the launch's own pane, the launch token.
+    // The dispatch retires the guessed id's owed write once its move is owed: the move's destination
+    // carries the launch's pane, and a guessed write retried after the move lands would reopen the
+    // record the move closed — so the ledger owes the move alone.
+    await retireGuessedCoordinate(world.cycle(0), item, handle.id, rekey);
+    assert.match(state.actions[`owed:handle:${item.id}:graphyard-opencode-2:5`]!.detail, /was superseded by the launch's record owed its move to graphyard-opencode-2:6 and is not sent/);
+    assert.equal(state.actions[`owed:handle:${item.id}:graphyard-opencode-2:5`]!.state, 'done');
+    // The next cycle's bounded steps retry the ledger: the move lands with the exact payload the
+    // launcher held — the claimed id, the launch's own pane — and the guessed write is never sent.
     plane.up = true;
     await retryOwedWrites(world.cycle(60_000), ['recordSession']);
-    assert.deepEqual(writes.map(write => [write.id, write.pane]), [['graphyard-opencode-2:5', 'w1V:pQKZ'], ['graphyard-opencode-2:6', 'w1V:pQKZ']],
-      'the coordinate and the move landed, each with the launcher\u2019s own pane');
+    await retryOwedWrites(world.cycle(120_000), ['recordSession']);
+    assert.deepEqual(writes.map(write => [write.id, write.pane]), [['graphyard-opencode-2:6', 'w1V:pQKZ']],
+      'only the move landed, with the launcher\u2019s own pane; no later retry of the guessed id ever lands after it');
     assert.equal((item.sessions ?? []).find(session => session.id === 'graphyard-opencode-2:6')?.pane, 'w1V:pQKZ', 'the attempt\u2019s own handle records the pane again');
     // A refusal that is the record's own is never hidden: a registration the engine refuses leaves
     // the launch unwritten, so the coordinated write still takes the record over (supersede), the

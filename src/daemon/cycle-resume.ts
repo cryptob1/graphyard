@@ -316,8 +316,13 @@ async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLi
         // fence itself is never answered by re-writing the handle with the pane the name lookup
         // resolved: the only pane that puts this attempt's coordinates back is the launch's own
         // write, retried from the ledger. A refusal that is the record's own counts, as always.
+        // A write answered on this very cycle (its retry ran at this step's start) still counts as
+        // pending: the cycle's snapshot was read before it landed, so the handle shows no pane here
+        // although the plane now records it — the next cycle's snapshot carries it and delivers. Nor
+        // does a pending refusal grow the paste's backoff, so the delivery follows the landing.
         const coordinate = state.actions[`owed:handle:${item.id}:${profile.principal}:${epoch}`];
-        performed.push(await record(state, promptKey, { kind: 'session', work: item.key, principal: profile.principal, epoch, state: 'failed', detail: `${item.key} epoch ${epoch}: ${changed}; the recorded pane cannot be re-prompted: ${paneReason}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist, carriedRow(coordinate) ? null : undefined));
+        const coordinatePending = carriedRow(coordinate) || coordinate?.cycle === state.cycle;
+        performed.push(await record(state, promptKey, { kind: 'session', work: item.key, principal: profile.principal, epoch, state: 'failed', detail: `${item.key} epoch ${epoch}: ${changed}; the recorded pane cannot be re-prompted: ${paneReason}`, attempts: coordinatePending ? previous?.attempts ?? 1 : (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist, coordinatePending ? null : undefined));
         // A handle that records no pane (its coordinate write failed or never completed) refuses
         // every resolution for ever: the name-based absence checks see the name's still-listed
         // holder, and the idle recovery below stays unreachable while the waits stand. So does a
@@ -335,8 +340,9 @@ async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLi
           // GY-1895: the bound ends an attempt whose coordinate write will never land. One the
           // plane's outage kept from answering is still owed above and lands when the plane does,
           // so the write's answer — not the bound — decides while it stands carried, and the
-          // reclaim waits: the attempt keeps its lease, which only its session can still renew.
-          if (carriedRow(coordinate)) return;
+          // reclaim waits: the attempt keeps its lease, which only its session can still renew. It
+          // waits too on the cycle the write landed, whose snapshot predates the landing.
+          if (coordinatePending) return;
           await reclaimIdle(handle ? `its handle ${handleId} has recorded no pane since ${seen.at} (its coordinate write has not completed), so the cleared wait cannot be verified deliverable to it, and its agent name is no address`
             : `its handle ${handleId} has not been on the record since ${seen.at} (its launch registered its session under another attempt's id), so the cleared wait cannot be verified deliverable to it, and its agent name is no address`, null);
         }

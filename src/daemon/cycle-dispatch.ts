@@ -32,6 +32,14 @@ import { guardCarried, settleCarriedWrites } from './carried-writes.js';
 import { carriedCall, launchWrite, owedWrite, recordCarried, stepCallCarried, supersedeOwed, unboundedEffects, withinStepBudget } from './step-budget.js';
 
 /**
+ * A move that landed — or one owed, whose destination carries everything the guessed write did —
+ * retires any coordinate the launch still owes under the guessed id: a late retry of it, landing
+ * after the move, would reopen the record the move closed (GY-1895).
+ */
+export async function retireGuessedCoordinate(cycle: Parameters<typeof supersedeOwed>[0], item: Pick<Work, 'id'>, guessedId: string, rekey: SessionRekey) {
+  if (rekey.outcome === 'moved' || rekey.outcome === 'owed') await supersedeOwed(cycle, `handle:${item.id}:${guessedId}`, `the launch's record ${rekey.outcome === 'moved' ? 'moved' : 'owed its move'} to ${rekey.to}`);
+}
+/**
  * Move a launched session's record onto the epoch its launch actually claimed (GY-1791).
  *
  * The registration is written before the claim, so its id guesses the epoch as the dispatch
@@ -450,9 +458,7 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
         // differ, and the record moves onto the claimed epoch's id (GY-1791) — the resume fence,
         // the watcher and the blocker probes all key this attempt by that id.
         const rekey = await rekeyLaunchedSession(launchRecord, guessed, item.epoch + 1, launched as { epoch?: number; pane?: string | null; agentName?: string | null }, pane => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`);
-        // A move that landed retires any coordinate the launch still owes under the guessed id: a
-        // late retry of it would reopen the record the move closed (GY-1895).
-        if (rekey.outcome === 'moved') await supersedeOwed(cycle, `handle:${item.id}:${guessed.id}`, `the launch's record moved to ${rekey.to}`);
+        await retireGuessedCoordinate(cycle, item, guessed.id, rekey);
         clearProfileFailure(state, current.profile);
         delete state.dispatchFailures[item.id];
         // The file comes before the claimant keys, so the 2000-character detail bound trims a long

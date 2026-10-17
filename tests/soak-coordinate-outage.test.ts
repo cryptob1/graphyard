@@ -68,6 +68,10 @@ test('unit:soak-invariants-hold — an outage that refuses every pane-carrying c
     assert.match(instance.text, /is not seen since/, `the outage window opened no instance of its own: ${JSON.stringify([instance.kind, instance.subject, instance.text.slice(0, 120)])}`);
   const actionSession = state.faults.instances.filter(instance => instance.kind === 'action:session');
   assert.deepEqual(actionSession.map(entry => [entry.subject, entry.at]), [], 'no failed paste of the day counts an action:session instance');
+  // Nor is any attempt the window covered reclaimed for its coordinates — while the write stands
+  // owed, or on the recovery cycle whose snapshot predates its landing.
+  const coordinateReclaims = Object.entries(state.actions).filter(([key, row]) => key.startsWith('resume:reclaim:') && /coordinate write has not completed|has not been on the record since/.test(row.detail));
+  assert.deepEqual(coordinateReclaims.map(([key]) => key), [], 'no attempt was reclaimed for a coordinate write the outage held');
 
   // Each cleared wait is delivered once: no key and epoch ever sees a second resume delivery.
   const deliveries = new Map<string, number>();
