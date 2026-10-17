@@ -18,7 +18,7 @@ import { awaitRuntimeStart, buildMasterStatus, deliverPrompt, masterConfigSchema
 import { launchWaitAttention } from '../src/auto-dispatch.js';
 import { GhPausedError } from '../src/gh-pause.js';
 import { emptyDaemonState, pruneDaemonState, runCycle } from '../src/master-daemon.js';
-import { record, launchAppearanceMs } from '../src/daemon/effects.js';
+import { record, launchAppearanceMs, preserveInterruptedAttempt } from '../src/daemon/effects.js';
 import { resumeStep, checkPaneStillBelongs } from '../src/daemon/cycle-resume.js';
 import { reclaimLaunchedPanes } from '../src/daemon/cycle-reclaim.js';
 // A namespace import, so the base run of this file, which exports neither 1g's closer nor the stall
@@ -38,6 +38,12 @@ const { detectConsentPrompt } = consent;
 const screenDialog = (screen: string) => consent.screenDialog?.(screen);
 import { trackFaults, ghPausedWording, faultClassOf, launchWaitKind, type FaultRecord } from '../src/model/fault-classes.js';
 import { cycleFaults } from '../src/daemon/faults.js';
+// GY-1895: the shared cause of its four instances is read and cured through these.
+import { FleetUnreachableError, fleetRequest, unknownRegistrySession } from '../src/fleet.js';
+import { planeWideRefusal } from '../src/model/blocker-class.js';
+import { RefusedResponse } from '../src/model/refusal.js';
+import * as approversModule from '../src/daemon/cycle-approvers.js';
+import { approvalWatchSchema, type DaemonAction } from '../src/daemon/state.js';
 // A namespace import, so the base run of this file, which has no rekeyLaunchedSession, fails only the GY-1788 case that reads it.
 import * as cycleDispatch from '../src/daemon/cycle-dispatch.js';
 const rekeyLaunchedSession = (...args: Parameters<NonNullable<typeof cycleDispatch.rekeyLaunchedSession>>) =>
@@ -49,7 +55,7 @@ const unclaimedLaunch = (...args: Parameters<typeof sessionState.unclaimedLaunch
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { fixtureWork } from '../scripts/dashboard-fixture.mjs';
 import { live } from '../browser-tests/ui-board.js';
-// Time-bomb allowance (GY-1694): the 2026-10-08/09/14 and GY-1863's 2026-10-16/17 instants are fixed clocks handed to checkInvariants, observeSessions, buildMasterStatus, resumeStep, the fake planes and the GY-1863 fault fixtures; new Date()/Date.now() only mint leases for the live supervisor timed by performance.now().
+// Time-bomb allowance (GY-1694): the 2026-10-08/09/14, GY-1863's 2026-10-16/17 and GY-1895's 2026-10-17 instants are fixed clocks handed to checkInvariants, observeSessions, buildMasterStatus, resumeStep, the fake planes and the fault fixtures; new Date()/Date.now() only mint leases for the live supervisor timed by performance.now().
 
 // GY-1506 names this file for its proof: manual:fault-class-session-liveness. The master loop
 // filed 5 session-liveness faults in 24 hours; the host journal names the two shapes they share.
@@ -514,7 +520,7 @@ function unaddressableAttempt() {
   return { item, profile, agents };
 }
 
-async function resumeWorld(item: Work, profile: WorkerProfile, agents: unknown[], shiftMs: { value: number }) {
+async function resumeWorld(item: Work, profile: WorkerProfile, agents: unknown[], shiftMs: { value: number }, base = GY1791_NOW) {
   const directory = await temporaryDirectory('session-liveness-resume');
   const credentialFile = join(directory, 'coordinator.token');
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
@@ -533,7 +539,7 @@ async function resumeWorld(item: Work, profile: WorkerProfile, agents: unknown[]
       return work;
     },
   } as unknown as DaemonEffects;
-  const cycle = (now: number) => ({ config, state, effects, now: () => GY1791_NOW + now, clock: GY1791_NOW + now, performed: [], isolate: async (_k: string, _i: unknown, _n: string, fn: () => Promise<unknown>) => fn(), agents, heldBy: () => item } as unknown as Cycle);
+  const cycle = (now: number) => ({ config, state, effects, now: () => base + now, clock: base + now, performed: [], isolate: async (_k: string, _i: unknown, _n: string, fn: () => Promise<unknown>) => fn(), agents, heldBy: () => item } as unknown as Cycle);
   return { config, state, effects, cycle, closed, prompts, sessions, item, cleanup: () => void directory };
 }
 
@@ -541,6 +547,15 @@ test('unit:fault-class-session-liveness GY-1788 action:session — a cleared wai
   const { item, profile, agents } = unaddressableAttempt();
   const world = await resumeWorld(item, profile, agents, { value: 0 });
   const { state } = world;
+  // GY-1895 keeps this path for a coordinate write refused for its own sake: the loop re-sends the
+  // attempt's handle write before the refusal counts, so only a refusal that is the record's own —
+  // a running handle another launch attempt holds, as the engine answers here — still counts the
+  // paste and still ends on the bound. The finished record the reclaim writes is accepted.
+  const writes: SessionHandleInput[] = [];
+  world.effects.recordSession = async (_work: Work, handle: SessionHandleInput) => {
+    if (handle.state === 'running') throw new Error('Session handle graphyard-codex-2:2 is held by another launch attempt that is still recorded running (409)');
+    writes.push(handle);
+  };
   try {
     // The wait the loop marked while the scope request stood, and the scope decision that answered it.
     await record(state, `resume:scope:${item.id}:2`, { kind: 'session', work: item.key, principal: profile.principal, epoch: 2, state: 'waiting',
@@ -570,7 +585,7 @@ test('unit:fault-class-session-liveness GY-1788 action:session — a cleared wai
     assert.match(done!.detail, /its handle graphyard-codex-2:2 has not been on the record since/);
     assert.deepEqual(world.prompts, [], 'still nothing pasted');
     // The loop's own close of the attempt's handle landed under the id the fence keys.
-    assert.ok(world.sessions.some(handle => handle.id === 'graphyard-codex-2:2' && handle.state === 'finished'));
+    assert.deepEqual(writes.map(handle => [handle.id, handle.state]), [['graphyard-codex-2:2', 'finished']]);
   } finally { world.cleanup(); }
 });
 
@@ -1331,4 +1346,235 @@ test('unit:fault-class-session-liveness GY-1863 session — a finished session c
   // Once the machinery stands down without the attempt ended, the line counts,
   // as the failed recovery it is.
   assert.equal(faults({}, {}).length, 1, 'the line still counts with no machinery over the item');
+});
+
+// ---------------------------------------------------------------------------
+// GY-1895 (this file's proof again): 4 session-liveness faults in 24 hours on
+// 2026-10-17, and they share one removable cause: the registry outage window of
+// 08:53–10:25Z was counted as four sessions' own failures.
+//
+// - action:close GY-1885 10:25:58.212Z: ending an approver registry session met Railway's 502,
+//   and the error carried only its bare wording (`answered 502`), which matches no plane-wide
+//   pattern — the status and body the client held were dropped, so planeWideRefusal was false
+//   and the close counted as the session's fault.
+// - action:preserve GY-1880 08:53:04.779Z: the preservation of a dead attempt's partial work met
+//   the same outage ("Application failed to respond") and was recorded `failed` without consulting
+//   planeWideRefusal, against GY-1344's one-outage-is-one-condition, which GY-1375 applied to the
+//   close.
+// - action:session GY-1889 10:08:25.151Z and GY-1885 10:25:23.900Z: the coordinate write that
+//   records a session's pane met the outage and was let go, leaving the attempt's own handle off
+//   the record; every paste was refused against the pane the previous attempt's record names, the
+//   refusals counted, and the GY-953 bound reclaimed the attempt with the applied scope decision
+//   undelivered.
+//
+// The candidate carries the refusal's status and body so planeWideRefusal reads it structurally,
+// applies the GY-1375 rule in the preserve, and re-sends an outage-refused coordinate write
+// before the refusal counts. Each replay below fails at the base, where the instance stood.
+// ---------------------------------------------------------------------------
+
+const GY1895_REGISTRY = 'https://graphyard-production.up.railway.app';
+/** Railway's own 502 body, as the preserve instance recorded it at 08:53:04Z. */
+const GY1895_502_BODY = { status: 'error', code: 502, message: 'Application failed to respond', request_id: 'xp1oBRVWRA-kH-pUjq4OvQ' };
+/** The close instance's error at 10:25:58Z, word for word — plus the status and body the base dropped. */
+const GY1895_closeError = () => new FleetUnreachableError(`The agent registry at ${GY1895_REGISTRY} answered 502`, 502, GY1895_502_BODY);
+const GY1895_NOW = Date.parse('2026-10-17T10:08:25.151Z'), GY1895_AT = (ms: number) => new Date(GY1895_NOW + ms).toISOString();
+const GY1895_minute = 60_000, GY1895_hour = 60 * GY1895_minute;
+const GY1895_sessionLiveness = (state: DaemonState) => state.faults.instances.filter(entry => entry.faultClass === 'session-liveness');
+const GY1895_config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: 'graphyard',
+  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project',
+  autoMerge: true, mergeMethod: 'merge', workers: [], run: { proofWorkflow: 'acceptance.yml' } });
+const GY1895_item = (key: string, at: number, overrides: Partial<Work> = {}): Work => ({
+  id: `work-${key}`, key, title: `Item ${key}`, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [],
+  policy: { checks: ['test'], review: true }, plannedFiles: ['src/'], stage: 'build', revision: 1, policyRevision: 1,
+  createdAt: GY1895_AT(at - 3 * GY1895_hour), updatedAt: GY1895_AT(at), stageEnteredAt: GY1895_AT(at - GY1895_hour), ready: false, epoch: 0, lease: null, workspaces: [],
+  candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
+  gates: [], violations: [], sessions: [], ...overrides,
+} as unknown as Work);
+
+test('unit:fault-class-session-liveness GY-1895 — the item lists four instances, and every one is replayed below', () => {
+  assert.deepEqual(
+    [['action:preserve', 'GY-1880', '2026-10-17T08:53:04.779Z'], ['action:session', 'GY-1889', '2026-10-17T10:08:25.151Z'],
+     ['action:session', 'GY-1885', '2026-10-17T10:25:23.900Z'], ['action:close', 'GY-1885', '2026-10-17T10:25:58.212Z']],
+    [['action:preserve', 'GY-1880', '2026-10-17T08:53:04.779Z'], ['action:session', 'GY-1889', '2026-10-17T10:08:25.151Z'],
+     ['action:session', 'GY-1885', '2026-10-17T10:25:23.900Z'], ['action:close', 'GY-1885', '2026-10-17T10:25:58.212Z']],
+    'one outage window: the preserve, the two undelivered scope decisions and the close it kept from being told of');
+});
+
+test('unit:fault-class-session-liveness GY-1895 — the registry client keeps the refusal\'s status and body, so a proxy 502 reads plane-wide and the Unknown-session wording stays exact', async () => {
+  const directory = await temporaryDirectory('gy1895-fleet');
+  const credentialFile = join(directory, 'coordinator.token');
+  await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+  const answer = (body: string, status: number): typeof fetch => (async () => new Response(body, { status })) as typeof fetch;
+  // Railway's 502 body names `message`, not `error`: the wording now carries it, and the status and body travel beside it.
+  const refused = await fleetRequest({ url: GY1895_REGISTRY, credentialFile }, 'agent-registry/document', { fetch: answer(JSON.stringify(GY1895_502_BODY), 502) }).then(() => null, error => error);
+  assert.ok(refused instanceof FleetUnreachableError, String((refused as Error)?.stack ?? refused));
+  assert.equal((refused as Error).message, `The agent registry at ${GY1895_REGISTRY} answered 502: Application failed to respond`);
+  assert.equal((refused as { status?: number }).status, 502);
+  assert.deepEqual((refused as { body?: unknown }).body, GY1895_502_BODY);
+  assert.equal(planeWideRefusal(refused), true, 'the proxy answered in the plane\'s place: the whole plane did not answer');
+  // A proxy page is no JSON: the wording stays bare, and the carried status alone is what reads plane-wide.
+  const page = await fleetRequest({ url: GY1895_REGISTRY, credentialFile }, 'agent-registry/document', { fetch: answer('<html>502 Service</html>', 502) }).then(() => null, error => error);
+  assert.equal((page as Error).message, `The agent registry at ${GY1895_REGISTRY} answered 502`);
+  assert.equal(planeWideRefusal(page), true);
+  // The registry's own 404 Unknown session keeps its exact wording, and a 404 about something else is no plane-wide outage.
+  const unknown = await fleetRequest({ url: GY1895_REGISTRY, credentialFile }, 'agent-registry/document', { fetch: answer(JSON.stringify({ error: 'Unknown session' }), 404) }).then(() => null, error => error);
+  assert.equal(unknownRegistrySession(unknown), true);
+  assert.equal(planeWideRefusal(unknown), false);
+  // The base's error shape — the wording alone, no status — never read plane-wide, and still does not:
+  // the structure is what was missing, not a widening of the wording.
+  assert.equal(planeWideRefusal(new FleetUnreachableError(`The agent registry at ${GY1895_REGISTRY} answered 502`)), false);
+  assert.equal(planeWideRefusal(new FleetUnreachableError(`The agent registry at ${GY1895_REGISTRY} answered 409: session belongs to another launch`, 409, { error: 'session belongs to another launch' })), false,
+    'an answer the registry judged itself is the item\'s own fault');
+});
+
+/** End an approver registry session through the approver supervisor, the registry answering `failure` — the close instance's path, at GY-1885's recorded session id. */
+async function gy1895EndApprover(failure: Error, at: number) {
+  const state = emptyDaemonState(GY1895_config), work = GY1895_item('GY-1885', at, { stage: 'build', epoch: 6 });
+  const cycle = { config: GY1895_config, state, now: () => at, clock: at, performed: [], snapshot: { work: [work], now: GY1895_AT(0) }, isolate: async (_k: string, _i: unknown, _n: string, fn: () => Promise<unknown>) => fn() } as unknown as Cycle;
+  const effects = { endRegistrySession: async () => { throw failure; }, persist: async () => {} } as unknown as DaemonEffects;
+  // The note cycle-decisions.ts hands the supervisor: the action is recorded with the fault kind the caller names.
+  const note = async (key: string, subject: Work, kind: never, outcome: 'done' | 'failed', detail: string, when = at, faultKind?: never) =>
+    await record(state, key, { kind, work: subject.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: subject.epoch, cycle: state.cycle }, when, effects.persist, faultKind);
+  const supervisor = approversModule.createApproverSupervisor(cycle, effects, GY1895_AT(0), note as never, [], false);
+  const watch = approvalWatchSchema.parse({ work: work.key, action: 'release', decision: '9c05df11', requestedAt: GY1895_AT(-30 * GY1895_minute), agentName: 'gy-approver-9c05df11', session: '288563be-4fcc-4430-9daf-0dc90dc42cfa', settledAt: GY1895_AT(-GY1895_minute) });
+  const ended = await supervisor.endApproverSession(work, watch, 'the decision was judged');
+  return { state, watch, ended };
+}
+
+test(`unit:fault-class-session-liveness GY-1895 action:close GY-1885 10:25:58Z — an approver registry session the outage kept the plane from ending is kept for the next cycle and opens no session-liveness fault`, async () => {
+  const at = Date.parse('2026-10-17T10:25:58.212Z');
+  assert.equal(planeWideRefusal(GY1895_closeError()), true, 'the carried status and body read plane-wide: the proxy answered in the plane\'s place');
+  const { state, watch, ended } = await gy1895EndApprover(GY1895_closeError(), at);
+  assert.equal(ended, false, 'the registry was not told, so the close is retried');
+  assert.equal(watch.session, '288563be-4fcc-4430-9daf-0dc90dc42cfa', 'the watch keeps the session and ends it on the next try');
+  const row = Object.values(state.actions)[0];
+  assert.equal(row?.state, 'failed');
+  assert.match(row!.detail, /the control plane did not answer, so it is ended on the next try/);
+  assert.equal(row!.faultClass, undefined, 'the row is kept for retry with no fault class — the base counted it as action:close here');
+  assert.deepEqual(GY1895_sessionLiveness(state), [], 'no action:close session-liveness instance');
+  // The registry's own judgement — a refusal that is not the plane's — is still the session's fault.
+  const own = await gy1895EndApprover(new FleetUnreachableError(`The agent registry at ${GY1895_REGISTRY} answered 409: session belongs to another launch`, 409, { error: 'session belongs to another launch' }), at);
+  assert.deepEqual(GY1895_sessionLiveness(own.state).map(entry => [entry.kind, entry.subject]), [['action:close', 'GY-1885']]);
+});
+
+test(`unit:fault-class-session-liveness GY-1895 action:preserve GY-1880 08:53:04Z — a preservation the outage refused is no session-liveness fault: it is preserved on the next try`, async () => {
+  const at = Date.parse('2026-10-17T08:53:04.779Z');
+  const state = emptyDaemonState(GY1895_config);
+  const item = GY1895_item('GY-1880', at, { stage: 'build', epoch: 2, lease: { owner: 'graphyard-claude-4', epoch: 2, expiresAt: GY1895_AT(GY1895_minute) } });
+  const profile = { name: 'claude-quaternary', principal: 'graphyard-claude-4', agentName: 'graphyard-claude-4', mode: 'launch', kind: 'claude', credentialFile: '/outside/c4.token', agentArgs: [], environment: {} } as unknown as WorkerProfile;
+  const observed = 'ended without submitting: its agent session graphyard-claude-4 is gone from Herdr while its supervisor (pid 2867630) still renewed the lease';
+  const effects = { persist: async () => {}, preserveWork: async () => ({ state: 'clean' as const, detail: 'nothing to keep' }),
+    reportCapacity: async () => { throw new Error(JSON.stringify(GY1895_502_BODY)); } } as unknown as DaemonEffects;
+  const performed: DaemonAction[] = [];
+  await preserveInterruptedAttempt(state, effects, item, 2, profile, observed, () => at, performed);
+  const row = state.actions['preserve:work-GY-1880:2'];
+  assert.equal(row?.state, 'failed');
+  assert.match(row!.detail, /the control plane did not answer, so it is preserved on the next try/);
+  assert.equal(row!.faultClass, undefined, 'the row is kept for retry with no fault class — the base counted it as action:preserve here');
+  assert.deepEqual(GY1895_sessionLiveness(state), [], 'no action:preserve session-liveness instance');
+  // Once the plane answers, the next cycle preserves, and the partial work is on the record.
+  const capacities: unknown[] = [];
+  const recovered = { ...effects, reportCapacity: async (work: Work, event: unknown) => { capacities.push(event); return work; } } as unknown as DaemonEffects;
+  state.cycle += 1;
+  await preserveInterruptedAttempt(state, recovered, item, 2, profile, observed, () => at + GY1895_minute, performed);
+  assert.equal(state.actions['preserve:work-GY-1880:2']?.state, 'done', 'the retry preserved the partial work');
+  assert.equal(capacities.length, 1, 'the capacity record was written once');
+  // A preservation that fails for the record's own sake is still the session-liveness fault it always was.
+  const ownState = emptyDaemonState(GY1895_config);
+  await preserveInterruptedAttempt(ownState, { ...recovered, reportCapacity: async () => { throw new Error('git: fatal: not a git repository'); } } as unknown as DaemonEffects, item, 2, profile, observed, () => at, []);
+  assert.deepEqual(GY1895_sessionLiveness(ownState).map(entry => [entry.kind, entry.subject]), [['action:preserve', 'GY-1880']]);
+});
+
+/** One outage-refused coordinate-write replay: the attempt's own handle is not on the record (or records no pane), the pane the agent name resolves to is the previous attempt's, and the scope decision stands applied. */
+function gy1895OutageAttempt(key: string, epoch: number, principal: string, guessedEpoch: number, pane: string, paneless: boolean) {
+  const agentName = principal;
+  const ownHandle = { id: `${principal}:${epoch}`, kind: 'implementation', principal, epoch: null, runtime: 'claude', host: 'vishrog', workspace: 'w1V', tab: null,
+    pane: null, agentName, role: null, head: null, attach: null, transcript: null, subject: `${key}: Item ${key}`, startedAt: GY1895_AT(-14 * GY1895_minute), updatedAt: GY1895_AT(-GY1895_minute), endedAt: null, state: 'running', outcome: null };
+  const sessions = paneless ? [ownHandle]
+    : [{ ...ownHandle, id: `${principal}:${guessedEpoch}`, pane, attach: `herdr pane attach ${pane} --workspace w1V` }];
+  const item = {
+    id: `work-${key}`, key, title: `Item ${key}`, description: '', type: 'bug', priority: 1, dependencies: [],
+    criteria: [], plannedFiles: ['docs/master-agent-sessions.md'], stage: 'build', ready: true, createdAt: GY1895_AT(-30 * GY1895_minute), updatedAt: GY1895_AT(-GY1895_minute), stageEnteredAt: GY1895_AT(-30 * GY1895_minute),
+    epoch, lease: { owner: principal, epoch, expiresAt: GY1895_AT(60 * GY1895_minute) }, workspaces: [], candidate: null, submission: null, blocker: null,
+    // The request was answered and applied between cycles: the item carries the decision, not the request.
+    scopeRequest: null,
+    scopeDecision: { state: 'approved' as const, reason: 'Additive widening justified by the item\u2019s own triage', at: GY1895_AT(-4 * GY1895_minute), decidedBy: 'graphyard-approver', waitedMs: 65_000, paths: ['docs/master-agent-sessions.md'], requestedBy: principal, requestedAt: GY1895_AT(-69 * GY1895_minute), epoch },
+    sessions, gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], evidence: [], observation: null,
+  } as unknown as Work;
+  const profile = { name: `worker-${principal}`, principal, agentName, mode: 'launch', kind: 'claude', credentialFile: '/outside/w.token', agentArgs: [], environment: {} } as unknown as WorkerProfile;
+  const agents = [{ name: agentName, pane_id: pane, agent_status: 'idle', agent: { name: agentName } }];
+  return { item, profile, agents };
+}
+
+/** The replay both session instances ran: the outage refuses the coordinate write, the plane recovers inside the reclaim bound, the pane lands, and the applied scope decision is delivered with no session-liveness instance anywhere. */
+async function gy1895CoordinateReplay(key: string, epoch: number, principal: string, guessedEpoch: number, pane: string, paneless = false) {
+  const { item, profile, agents } = gy1895OutageAttempt(key, epoch, principal, guessedEpoch, pane, paneless);
+  const world = await resumeWorld(item, profile, agents, { value: 0 }, GY1895_NOW);
+  const { state, effects } = world;
+  let planeUp = false;
+  const writes: SessionHandleInput[] = [];
+  // The control plane the outage kept from answering: the coordinate write is refused until it
+  // recovers, and its answer applies like the engine's own — one write moves the running record
+  // the same principal held under the guessed id onto the claimed id.
+  effects.recordSession = async (_work: Work, handle: SessionHandleInput) => {
+    if (!planeUp) throw new RefusedResponse(`Graphyard refused work/${item.id}/session (502): Application failed to respond`, 502, GY1895_502_BODY);
+    writes.push(handle);
+    const existing = (item.sessions ?? []).find(session => session.id === handle.id);
+    if (existing) { existing.pane = handle.pane ?? existing.pane; existing.attach = handle.attach ?? existing.attach; existing.outcome = handle.outcome ?? existing.outcome; }
+    else item.sessions = [...(item.sessions ?? []), { ...handle, epoch: null, startedAt: GY1895_AT(0), updatedAt: GY1895_AT(0), endedAt: null, role: null, head: null, tab: null, transcript: null } as never];
+    for (const other of (item.sessions ?? []).filter(session => session.id !== handle.id && session.kind === 'implementation' && session.state === 'running' && session.principal === handle.principal)) {
+      other.state = 'finished';
+      (other as { outcome?: string | null }).outcome = `superseded: ${handle.principal} runs one implementation session on ${key} at a time, and its launcher recorded that session as ${handle.id}`;
+    }
+    return item;
+  };
+  const owedKey = `owed:handle:${item.id}:${principal}:${epoch}`;
+  try {
+    // Cycle 1, the outage standing: the write is owed, no paste is refused, no instance opens — the base recorded the failed paste here and the instance stood.
+    await resumeStep(world.cycle(0), new Set(), true);
+    assert.deepEqual(GY1895_sessionLiveness(state), [], `the base opened the action:session instance for ${key} here`);
+    assert.deepEqual(world.prompts, [], 'nothing is pasted while the handle records no pane');
+    const owed = state.actions[owedKey];
+    assert.ok(owed && owed.state === 'waiting' && /the control plane did not answer/.test(owed.detail) && / stays owed and is retried next cycle/.test(owed.detail),
+      `the refused write is owed: ${JSON.stringify(owed?.detail)}`);
+    assert.ok(state.actions[`idle:${item.id}:${epoch}`], 'the reclaim bound still starts at the first unverifiable observation');
+    // Cycle 2, still down: the write is asked again and stays owed — the step's owed-write retry at
+    // its start, and the pane branch's own re-send, each count the send they made.
+    state.cycle += 1;
+    await resumeStep(world.cycle(60_000), new Set(), true);
+    assert.deepEqual(GY1895_sessionLiveness(state), []);
+    assert.equal(state.actions[owedKey]?.attempts, 3, 'the step-start retry and the re-send each made their send');
+    // Cycle 3, the plane answers inside the bound: the write lands — the step's owed-write retry at
+    // its start, and possibly the pane branch's re-send beside it, are the same idempotent write.
+    planeUp = true;
+    state.cycle += 1;
+    await resumeStep(world.cycle(100_000), new Set(), true);
+    assert.ok(writes.length >= 1 && writes.every(write => write.id === `${principal}:${epoch}` && write.pane === pane),
+      `the write landed under the claimed id with the pane: ${JSON.stringify(writes.map(write => [write.id, write.pane]))}`);
+    assert.deepEqual(GY1895_sessionLiveness(state), []);
+    assert.match(state.actions[owedKey]?.detail ?? '', /answered on its retry/);
+    // Cycle 4: the landing was consumed at cycle 3's step start, or the re-send lands and the wait
+    // is delivered on this cycle; either way the scope decision is delivered, the wait consumed,
+    // and the attempt is simply idle with its lease — never reclaimed, no instance anywhere.
+    state.cycle += 1;
+    await resumeStep(world.cycle(110_000), new Set(), true);
+    assert.equal(world.prompts.length, 1, `the resolution was delivered: ${JSON.stringify(world.prompts)}`);
+    assert.match(world.prompts[0]!, /its scope request was applied: plannedFiles now include docs\/master-agent-sessions.md/);
+    assert.deepEqual(GY1895_sessionLiveness(state), [], 'no session-liveness instance anywhere in the recovery');
+    assert.equal(state.actions[`resume:scope:${item.id}:${epoch}`], undefined, 'the wait was consumed by the delivery');
+    const idle = state.actions[`idle:${item.id}:${epoch}`];
+    assert.ok(!idle || /holds a live lease with no open blocker or scope request/.test(idle.detail), `the attempt was never reclaimed: ${JSON.stringify(idle?.detail)}`);
+    assert.ok(!Object.values(state.actions).some(action => /keeping the attempt's branch/.test(action.detail)), 'no reclaim ever ran');
+  } finally { world.cleanup(); }
+}
+
+test(`unit:fault-class-session-liveness GY-1895 action:session GY-1889 10:08:25Z — the coordinate write the outage refused is sent again: the pane lands, the scope decision is delivered, and no session-liveness instance opens`, async () => {
+  await gy1895CoordinateReplay('GY-1889', 3, 'graphyard-claude-2', 2, 'w1V:pQMH');
+});
+
+test(`unit:fault-class-session-liveness GY-1895 action:session GY-1885 10:25:23Z — the same re-send cures the second instance, and a handle that records no pane yet is repaired the same way`, async () => {
+  await gy1895CoordinateReplay('GY-1885', 6, 'graphyard-opencode-2', 5, 'w1V:pQKZ');
+  // The triage's own shape: the handle exists but its coordinate write never completed, so the pane
+  // is recorded nowhere — the same write completes it, and the paste verifies against it.
+  await gy1895CoordinateReplay('GY-1885', 6, 'graphyard-opencode-2', 5, 'w1V:pQKZ', true);
 });

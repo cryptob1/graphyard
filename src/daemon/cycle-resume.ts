@@ -10,13 +10,13 @@ import { roleSessionMaximumMs } from '../model/sessions.js';
 import { credentialBlockedKey, credentialBlockedReason, credentialFailure } from '../worker-credential.js';
 import type { Cycle } from './cycle.js';
 import { settleEndedAttemptFence, supervisorStillRunning } from './cycle-reclaim.js';
-import { carriedRow, owedWrite, recordCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
+import { carriedRow, owedWrite, recordCarried, stepCallCarried, withinStepBudget, type OwedWriteOutcome } from './step-budget.js';
 
-/** A worker's implementation handle, written by the loop: the one record `master status` and the item's history show of it. */
-export function workerHandle(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string | null, outcome: string, finished: boolean) {
+/** A worker's implementation handle, written by the loop: the one record `master status` and the item's history show of it. What became of the write tells the caller whether the handle can be believed yet (`sent`), is still owed (`owed`), or was refused for its own sake (`refused`). */
+export function workerHandle(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string | null, outcome: string, finished: boolean): Promise<OwedWriteOutcome> {
   const { config, effects } = cycle;
-  if (!effects.recordSession) return Promise.resolve();
-  // GY-1774: a best-effort record, owed to the next cycle when carried past the step's bound, never re-sent with the action it follows; refused, it is let go as before.
+  if (!effects.recordSession) return Promise.resolve('refused');
+  // GY-1774: a best-effort record, owed to the next cycle when carried past the step's bound or refused by the plane's outage (GY-1895), never re-sent with the action it follows; refused otherwise, it is let go as before.
   return owedWrite(cycle, `handle:${item.id}:${profile.principal}:${epoch}`, { kind: 'session', work: item.key, principal: profile.principal, epoch }, `Recording ${profile.agentName}'s implementation handle on ${item.key} epoch ${epoch}`, 'recordSession',
     fx => fx.recordSession!(item, { id: `${profile.principal}:${epoch}`, kind: 'implementation', principal: profile.principal, runtime: profile.kind ?? profile.mode, host: config.hostId,
       ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
@@ -309,24 +309,26 @@ async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLi
       // delivered on a later cycle once the attempt's own pane verifies, instead of being consumed.
       const paneReason = checkPaneStillBelongs(item, handleId, pane);
       if (paneReason) {
-        performed.push(await entry(promptKey, 'failed', `${item.key} epoch ${epoch}: ${changed}; the recorded pane cannot be re-prompted: ${paneReason}`, (previous?.attempts ?? 0) + 1));
-        // A handle that records no pane (its coordinate write failed or never completed) refuses
-        // every resolution for ever: the name-based absence checks see the name's still-listed
-        // holder, and the idle recovery below stays unreachable while the waits stand. So does a
-        // handle that is not on the record at all — a launch registered this session under the
-        // previous attempt's id (its pre-claim guess was stale), so no write of this attempt's
-        // ever landed under its own (GY-1788's paste was refused for ever with no bound to answer
-        // it). The unsafe paste stays refused, but the first unverifiable observation starts the
-        // same reclaim bound a gone pane starts above, and past it the attempt is handed to a new
-        // one that keeps its branch (GY-953). Nothing is closed: no pane is verifiably this attempt's.
+        // GY-1895: an attempt whose own handle records no pane (or is not on the record at all)
+        // because its coordinate write met the plane's outage is repaired before the refusal
+        // counts: the write is sent again — the engine moves the running record the same principal
+        // held under the guessed id in the same transaction — and the cleared wait is delivered on
+        // a later cycle, once this write verifies. The GY-953 bound below still ends an attempt
+        // whose write never lands, and a refusal that is the record's own still counts, as always.
+        let writeRefused = false;
         if (!own) {
           const seen = state.actions[keys.idle];
-          if (!seen) { await entry(keys.idle, 'waiting', handle ? `${item.key} epoch ${epoch}: its handle ${handleId} records no pane yet (its coordinate write has not completed), so the cleared wait cannot be delivered and its agent name is no address; the reclaim bound starts here`
-            : `${item.key} epoch ${epoch}: its handle ${handleId} is not on the record (its launch registered this session under another attempt's id), so the cleared wait cannot be delivered and its agent name is no address; the reclaim bound starts here`); return; }
-          if (seen.cycle === state.cycle || now() - Date.parse(seen.at) < launchAppearanceMs) return;
-          await reclaimIdle(handle ? `its handle ${handleId} has recorded no pane since ${seen.at} (its coordinate write has not completed), so the cleared wait cannot be verified deliverable to it, and its agent name is no address`
-            : `its handle ${handleId} has not been on the record since ${seen.at} (its launch registered its session under another attempt's id), so the cleared wait cannot be verified deliverable to it, and its agent name is no address`, null);
+          if (seen && seen.cycle !== state.cycle && now() - Date.parse(seen.at) >= launchAppearanceMs) {
+            await reclaimIdle(handle ? `its handle ${handleId} has recorded no pane since ${seen.at} (its coordinate write has not completed), so the cleared wait cannot be verified deliverable to it, and its agent name is no address`
+              : `its handle ${handleId} has not been on the record since ${seen.at} (its launch registered its session under another attempt's id), so the cleared wait cannot be verified deliverable to it, and its agent name is no address`, null);
+            return;
+          }
+          writeRefused = await workerHandle(cycle, item, profile, epoch, pane, `re-coordinated at ${new Date(now()).toISOString()}: its handle ${handleId} records no pane (${paneReason})`, false) === 'refused';
+          if (!seen) await entry(keys.idle, 'waiting', handle ? `${item.key} epoch ${epoch}: its handle ${handleId} records no pane yet (its coordinate write has not completed), so the cleared wait cannot be delivered and its agent name is no address; the reclaim bound starts here`
+            : `${item.key} epoch ${epoch}: its handle ${handleId} is not on the record (its launch registered this session under another attempt's id), so the cleared wait cannot be delivered and its agent name is no address; the reclaim bound starts here`);
+          if (!writeRefused) return;
         }
+        performed.push(await entry(promptKey, 'failed', `${item.key} epoch ${epoch}: ${changed}; the recorded pane cannot be re-prompted: ${paneReason}`, (previous?.attempts ?? 0) + 1));
         return;
       }
       if (status === 'working') { await entry(promptKey, 'done', `${item.key} epoch ${epoch}: ${changed}; ${profile.agentName} is already active, so it is not re-prompted`); await drop(keys.blocker, keys.scope); return; }
