@@ -279,12 +279,12 @@ test('integration:goal-candidate-cut-recovery — a partial batch cuts after the
   const validated = (await call('GET', `candidates/${record.id}`, 'reader')).body as ExactCandidate;
   assert.deepEqual({ ...validated, validation: null }, record, 'the cut record itself never changes');
   assert.deepEqual(validated.validation && { release: validated.validation.release, sha: validated.validation.sha, identity: validated.validation.identity, result: validated.validation.result, cases: validated.validation.cases },
-    { release: release.id, sha: record.sourceSha, identity: record.identity, result: 'pass', cases: [{ id: 'candidate-batches-five', result: 'passed' }] });
+    { release: release.id, sha: record.sourceSha, identity: record.identity, result: 'pass', cases: [{ id: 'candidate-batches-five', result: 'pass' }] });
   assert.equal((await call('POST', `candidates/${record.id}/validation`, 'coordinator', verdict)).status, 200, 'the same verdict again answers as recorded');
   const identicalReplay = await call('POST', `candidates/${record.id}/validation`, 'coordinator', verdict, 'validation-identical-replay');
   assert.equal(identicalReplay.status, 200, 'identical content under a fresh Idempotency-Key replays the stored record');
   assert.deepEqual(identicalReplay.body.validation && { release: identicalReplay.body.validation.release, result: identicalReplay.body.validation.result, cases: identicalReplay.body.validation.cases, failed: identicalReplay.body.validation.failed },
-    { release: release.id, result: 'pass', cases: [{ id: 'candidate-batches-five', result: 'passed' }], failed: [] });
+    { release: release.id, result: 'pass', cases: [{ id: 'candidate-batches-five', result: 'pass' }], failed: [] });
   const changedCases = await call('POST', `candidates/${record.id}/validation`, 'coordinator', { ...verdict, cases: [{ id: 'candidate-batches-five', result: 'failed' }] }, 'validation-changed-cases');
   assert.equal(changedCases.status, 409); assert.match(changedCases.body.error, /a validation is recorded once/);
   const changedFailed = await call('POST', `candidates/${record.id}/validation`, 'coordinator', { ...verdict, failed: ['e2e'] }, 'validation-changed-failed');
