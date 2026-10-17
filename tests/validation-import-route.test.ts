@@ -21,12 +21,15 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
 const reader: Principal = { id: 'auditor', role: 'reader' };
-const producer: Principal = { id: 'huck-producer', role: 'producer' };
+// Importing needs the external-runs:import grant (GY-1879) beside the producer role; it grants nothing else.
+const producer: Principal = { id: 'huck-producer', role: 'producer', grants: ['external-runs:import'] };
 // A second producer principal: a candidate the first producer bound refuses its imports (N4).
-const otherProducer: Principal = { id: 'ci-collector', role: 'producer' };
+const otherProducer: Principal = { id: 'ci-collector', role: 'producer', grants: ['external-runs:import'] };
+// A producer with proof authority but no import grant: refused at the import route, naming the grant.
+const ungrantedProducer: Principal = { id: 'unit-collector', role: 'producer', proofs: ['unit:*'] };
 // The identity GRAPHYARD_RELEASE_TOKEN is provisioned as (src/master/release-filing.ts): the promotion workflows read the hold with it.
 const releaseFiler: Principal = { id: releaseFilingIdentity.id, role: 'operator-agent', capabilities: [...releaseFilingIdentity.capabilities], scope: { repositories: ['owner/project'], workItems: [] } };
-const principals = [operator, worker, reader, producer, otherProducer, releaseFiler];
+const principals = [operator, worker, reader, producer, otherProducer, ungrantedProducer, releaseFiler];
 const tokens = new Map(principals.map(p => [p.id, `${p.id}-${'t'.repeat(40)}`]));
 
 // Six candidates cut at six heads; `elsewhere` is a commit no candidate holds.
@@ -95,7 +98,7 @@ const run = (sha: string, runId: string, cases: readonly Record<string, unknown>
   ({ format: 'graphyard-external-run-v1', producer: 'huck-engineer', runId, sha, cases, ...over });
 const trace = 'https://huck.example/runs/r-1/checkout-guest/trace';
 
-test('unit:validation-import-route-binds-by-sha — POST /api/validation/import refuses a non-producer credential and a sha no candidate holds, and persists a producer run at a candidate head idempotently with every verdict, skipped kept, and its provenance', async () => {
+test('unit:validation-import-route-binds-by-sha — POST /api/validation/import refuses a non-producer credential, a producer without external-runs:import, and a sha no candidate holds, and persists a producer run at a candidate head idempotently with every verdict, skipped kept, and its provenance', async () => {
   const handIn = run(boundSha, 'huck-run-1', [
     { id: 'checkout-guest', verdict: 'passed', attempts: 1, durationMs: 4310, required: true, result: 'PASS', evidence: [trace] },
     { id: 'search-facet', verdict: 'skipped', attempts: 0, durationMs: 0, result: 'SKIPPED_BY_TAG' },
@@ -107,6 +110,9 @@ test('unit:validation-import-route-binds-by-sha — POST /api/validation/import 
     assert.equal(refused.status, 403, `${actor.role} is refused`);
     assert.match(refused.body.error, /producer credential is required/);
   }
+  const ungranted = await call('validation/import', ungrantedProducer, handIn);
+  assert.equal(ungranted.status, 403, 'a producer without the import grant is refused');
+  assert.match(ungranted.body.error, /requires the external-runs:import grant; producer unit-collector holds no grant/);
   const unbound = await call('validation/import', producer, { ...handIn, sha: elsewhere, runId: 'huck-run-elsewhere' });
   assert.equal(unbound.status, 409);
   assert.match(unbound.body.error, new RegExp(`No release candidate was cut at ${elsewhere}`));
