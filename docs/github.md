@@ -1,6 +1,8 @@
 <!-- page: Operate Graphyard | 2 | App, protection. -->
 # GitHub enforcement
 
+Organization-owned repositories register both Apps at `https://github.com/organizations/ORG/settings/apps/new`.
+
 ## App permissions
 
 Control-plane App (`src/github-permissions.ts`):

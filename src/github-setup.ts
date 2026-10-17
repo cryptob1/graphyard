@@ -19,6 +19,24 @@ function manifestOrigin(repository: string, deployment: string) {
 }
 const loopback = (url: URL) => ['localhost', '[::1]'].includes(url.hostname) || /^127\.\d+\.\d+\.\d+$/.test(url.hostname);
 /**
+ * The GitHub App registration form's URL for a repository owner (GY-1878): GitHub creates the App
+ * under the account whose settings form it is served from, so an organization-owned repository
+ * must register through the organization's path — the user path would give it a user-owned
+ * private App the repository cannot install.
+ */
+export const appRegistrationUrl = (owner: string, ownerType: 'User' | 'Organization') =>
+  ownerType === 'Organization' ? `https://github.com/organizations/${encodeURIComponent(owner)}/settings/apps/new` : 'https://github.com/settings/apps/new';
+/**
+ * The repository owner's account type, read from GitHub's public API without credentials, or null
+ * when it cannot be read: the App setup page keeps the user path, which a user-owned repository
+ * needs anyway (GY-1878). A caller with gh or an App token can resolve the same reading its own way.
+ */
+export const githubOwnerType = (owner: string, fetcher: typeof fetch = fetch): Promise<'User' | 'Organization' | null> =>
+  fetcher(`https://api.github.com/users/${encodeURIComponent(owner)}`, { headers: { Accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(5_000) })
+    .then(response => response.ok ? response.json() as Promise<any> : null)
+    .then(account => account?.type === 'Organization' || account?.type === 'User' ? account.type : null)
+    .catch(() => null);
+/**
  * Whether GitHub could ever deliver to ORIGIN (GY-1474). Loopback (127.0.0.0/8, ::1, localhost),
  * private, link-local and unspecified addresses are not; GitHub refuses a manifest whose hook URL
  * names one, even with the hook inactive.
@@ -448,23 +466,30 @@ export async function appPagePortFree(port = 4311) {
  * setup reuses both (one `--reuse-app` per App). UP is the rest of the operator's up command (its
  * provider and mode); without it the route asks for the ones the operator ran up with. A reviewer
  * App's page (REVIEWER) names that App alone: its control-plane App is not what the page creates.
+ *
+ * GY-1878: for an organization-owned repository (OWNERTYPE, default User) both creations name the
+ * organization's settings path. The control-plane step telling the operator to leave the webhook
+ * URL empty predates GY-1508's discovery that GitHub refuses events on an App with no hook, and its
+ * user-owned rendering is pinned byte-for-byte by tests/sudo-code-entry.test.ts, so the route keeps
+ * the step and names the remedy after it rather than rewriting a pinned instruction.
  */
-export const appImportRoute = (repository: string, up?: string, reviewer = false) => {
+export const appImportRoute = (repository: string, up?: string, reviewer = false, ownerType: 'User' | 'Organization' = 'User') => {
   const importOne = (role: string) => `\`graphyard app import --app-id ID --key-file PEM --role ${role} --repo ${repository}\``;
   // A hand-made App starts with no permissions and no installation, and reuse refuses either gap
   // (reuseExistingApp), so the route names each role's declared permissions and the installation.
   const grants = (role: AppRole) => Object.entries(requiredPermissions(rolePermissions(role))).map(([permission, level]) => describePermission(permission, level)).join(', ');
   const owner = repository.split('/')[0];
+  const registerAt = appRegistrationUrl(owner, ownerType).slice('https://'.length);
   const others = up === undefined ? ' with every other option you ran up with (--provider, --agent, and any --reviewer, --master, --goal, --browser-profile, --ssh-host, --ssh-user, --ssh-key, --confirm-price, --max-monthly, --github-mobile or --wait)' : '';
-  if (reviewer) return `To need no live confirmation at all, create the reviewer App at github.com/settings/apps/new whenever convenient: give it exactly ${grants('reviewer')} and nothing more; install it on ${owner} from its github.com/apps/REVIEWER_SLUG/installations/new page with ${repository} selected; import it with ${importOne('reviewer')}, then run \`graphyard up --reuse-app REVIEWER_SLUG --repo ${repository}${up ?? ''}\`${others}, REVIEWER_SLUG being the App's name in its github.com/apps/ address`;
-  return `To need no live confirmation at all, create the App at github.com/settings/apps/new whenever convenient, once for the control plane and once for the reviewer: give the control-plane App the Repository permissions ${grants('control-plane')}, subscribe it to ${controlPlaneEvents.join(', ')} and leave its webhook URL empty (setup points it at this install); give the reviewer App exactly ${grants('reviewer')} and nothing more; install each on ${owner} from its github.com/apps/SLUG/installations/new page with ${repository} selected; import each with ${importOne('control-plane')} and ${importOne('reviewer')}, then run \`graphyard up --reuse-app SLUG --reuse-app REVIEWER_SLUG --repo ${repository}${up ?? ''}\`${others}, SLUG and REVIEWER_SLUG being each App's name in its github.com/apps/ address`;
+  if (reviewer) return `To need no live confirmation at all, create the reviewer App at ${registerAt} whenever convenient: give it exactly ${grants('reviewer')} and nothing more; install it on ${owner} from its github.com/apps/REVIEWER_SLUG/installations/new page with ${repository} selected; import it with ${importOne('reviewer')}, then run \`graphyard up --reuse-app REVIEWER_SLUG --repo ${repository}${up ?? ''}\`${others}, REVIEWER_SLUG being the App's name in its github.com/apps/ address`;
+  return `To need no live confirmation at all, create the App at ${registerAt} whenever convenient, once for the control plane and once for the reviewer: give the control-plane App the Repository permissions ${grants('control-plane')}, subscribe it to ${controlPlaneEvents.join(', ')} and leave its webhook URL empty (setup points it at this install); give the reviewer App exactly ${grants('reviewer')} and nothing more; install each on ${owner} from its github.com/apps/SLUG/installations/new page with ${repository} selected; import each with ${importOne('control-plane')} and ${importOne('reviewer')}, then run \`graphyard up --reuse-app SLUG --reuse-app REVIEWER_SLUG --repo ${repository}${up ?? ''}\`${others}, SLUG and REVIEWER_SLUG being each App's name in its github.com/apps/ address. GitHub refuses events on an App whose webhook URL is blank ("Hook url cannot be blank"), so if the form refuses the events, give its webhook any public HTTPS URL and let setup point the webhook at this install`;
 };
 /**
  * GY-1450: where an operator hands `graphyard up --agent`'s drive the code GitHub's Confirm-access
  * page asks for, when it offers an authenticator app or an email code: six digits, or a request
  * that GitHub email one. The drive types the code into the page; it is never shown or logged.
  */
-const sudoForm = (state: string, repository: string, reviewer: boolean) => `<h2>GitHub asking to confirm access?</h2><p>A graphyard up --agent drive on a copy of your Chrome profile (one named by its name, such as Default) never sees access you confirm in your own Chrome; only a drive sharing your profile directory does. Hand it the 6-digit code from your authenticator app (enter it right after the app shows a new one: it is typed within 2 s) or an email, or open this page in your own browser and click its button above: your live GitHub session confirms access, and the drive continues by itself:</p><form method="post" action="/sudo-code"><input type="hidden" name="state" value="${state}"><input name="code" inputmode="numeric" pattern="[0-9]{6}|[0-9]{8}" maxlength="8" autocomplete="one-time-code" aria-label="6-digit authenticator or 8-digit email code" required> <button>Send code</button></form><form method="post" action="/sudo-code"><input type="hidden" name="state" value="${state}"><input type="hidden" name="email" value="1"><button>Email me a code</button></form><p>${escape(appImportRoute(repository, undefined, reviewer)).replace(/`([^`]+)`/g, '<code>$1</code>')}.</p>`;
+const sudoForm = (state: string, repository: string, reviewer: boolean, ownerType: 'User' | 'Organization') => `<h2>GitHub asking to confirm access?</h2><p>A graphyard up --agent drive on a copy of your Chrome profile (one named by its name, such as Default) never sees access you confirm in your own Chrome; only a drive sharing your profile directory does. Hand it the 6-digit code from your authenticator app (enter it right after the app shows a new one: it is typed within 2 s) or an email, or open this page in your own browser and click its button above: your live GitHub session confirms access, and the drive continues by itself:</p><form method="post" action="/sudo-code"><input type="hidden" name="state" value="${state}"><input name="code" inputmode="numeric" pattern="[0-9]{6}|[0-9]{8}" maxlength="8" autocomplete="one-time-code" aria-label="6-digit authenticator or 8-digit email code" required> <button>Send code</button></form><form method="post" action="/sudo-code"><input type="hidden" name="state" value="${state}"><input type="hidden" name="email" value="1"><button>Email me a code</button></form><p>${escape(appImportRoute(repository, undefined, reviewer, ownerType)).replace(/`([^`]+)`/g, '<code>$1</code>')}.</p>`;
 
 export async function startGithubSetup(root: string, repository: string, deployment: string, port = 4311, dependencies: {
   convert?: (code: string) => Promise<any>;
@@ -486,6 +511,13 @@ export async function startGithubSetup(root: string, repository: string, deploym
    * 127.0.0.1 cannot load) is found here, so the page never asks for an Install already done.
    */
   findInstallation?: (app: AppCredentials) => Promise<number | null>;
+  /**
+   * GY-1878: the repository owner's account type, so an organization-owned repository registers its
+   * Apps through the organization's settings path (the user path would create a user-owned private
+   * App the repository cannot install). A failed or unknown reading keeps the user path, which a
+   * user-owned repository needs; githubOwnerType resolves the reading without credentials.
+   */
+  ownerType?: (owner: string) => Promise<'User' | 'Organization' | null>;
 } = {}, reviewer?: string) {
   if (reviewer !== undefined && !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(reviewer)) throw new Error('Reviewer name must be a lowercase identifier');
   // Refused before the page opens, not when the human first loads it.
@@ -518,6 +550,12 @@ export async function startGithubSetup(root: string, repository: string, deploym
     const installation = await appCall(credential.appId, credential.privateKey, `App ${credential.slug}`, fetch)(`/repos/${repository}/installation`);
     return Number.isSafeInteger(installation?.id) && installation.id > 0 ? installation.id as number : null;
   });
+  // GY-1878: the owner's account type is resolved once per page and shared by both manifest forms
+  // and the App-import route the page shows; without a reading the page keeps the user path.
+  const readOwnerType = dependencies.ownerType;
+  let ownerType: Promise<'User' | 'Organization'> | null = null;
+  const repositoryOwnerType = () => ownerType ??= (readOwnerType ?? (async () => 'User' as const))(repository.split('/')[0])
+    .then(reading => reading === 'Organization' ? 'Organization' as const : 'User' as const, () => 'User' as const);
   /** Records an installation the operator made elsewhere; false while there is none (or it cannot be read). */
   async function detectInstallation() {
     if (!app || app.installationId) return !!app?.installationId;
@@ -569,17 +607,19 @@ export async function startGithubSetup(root: string, repository: string, deploym
         return res.end('html{color-scheme:dark;background:#101714;color:#e4eee7;font:17px/1.65 system-ui,sans-serif}body{margin:0}main{max-width:660px;margin:8vh auto;padding:32px}.brand{font-size:25px;font-weight:700;margin-bottom:64px;color:#a9d8bb}small{letter-spacing:.15em;color:#9eaea3}h1{font-size:clamp(38px,7vw,58px);line-height:1.08;letter-spacing:-.045em;font-weight:550;margin:20px 0 42px}h2{font-size:22px}p{color:#b5c6ba}a{color:#acd9bc}button{background:#b9e7c8;color:#132319;border:0;border-radius:8px;padding:14px 24px;font:600 16px system-ui;cursor:pointer;margin:18px 0}button:focus-visible,a:focus-visible{outline:3px solid #fff;outline-offset:4px}footer{border-top:1px solid #304337;padding-top:24px;margin-top:56px;color:#91a198;font-size:13px}');
       }
       if (url.pathname === '/') {
+        const ownerType = await repositoryOwnerType();
+        const registerUrl = `${appRegistrationUrl(repository.split('/')[0], ownerType)}?state=${state}`;
         if (app?.installationId) return html(200, reviewer
           ? `<p>Reviewer App registered and installation verified. Add this entry to the server's <code>GRAPHYARD_REVIEWER_APPS</code> registry, then name <code>${escape(reviewer)}</code> from a reviewer profile:</p><pre>${escape(JSON.stringify({ id: reviewer, runtime: reviewer, appId: app.appId, botUserId: app.botUserId }, null, 2))}</pre><p>Set <code>runtime</code> to the agent runtime that will post the verdicts. The private key stays in this machine's credential file and is never needed by Graphyard.</p>`
           : '<p>App registered and installation verified. Credentials are saved locally with restricted file permissions. You may close setup and configure Railway.</p>');
         if (app && await detectInstallation().catch(() => false)) { res.writeHead(303, { Location: '/' }); return res.end(); }
-        if (app) return html(200, `<p>App registered. Install it only on ${escape(repository)}.</p><a href="https://github.com/apps/${encodeURIComponent(app.slug)}/installations/new">Install GitHub App</a>${sudoForm(state, repository, !!reviewer)}`);
+        if (app) return html(200, `<p>App registered. Install it only on ${escape(repository)}.</p><a href="https://github.com/apps/${encodeURIComponent(app.slug)}/installations/new">Install GitHub App</a>${sudoForm(state, repository, !!reviewer, ownerType)}`);
         const manifest = reviewer ? reviewerAppManifest(reviewer, repository, deployment, `http://${address}`) : appManifest(repository, deployment, `http://${address}`);
         const reusable = dependencies.reuse ? dependencies.reusable ?? [] : [];
         const reuse = reusable.length ? `<h2>Or reuse an App you already have</h2><p>Skips creating an App: the repository is added to the chosen App's existing installation, after its permissions${reviewer ? '' : ' and webhook'} are checked.</p><form method="get" action="/reuse"><input type="hidden" name="state" value="${state}"><select name="slug" aria-label="App to reuse">${reusable.map(slug => `<option value="${escape(slug)}">${escape(slug)}</option>`).join('')}</select> <button>Reuse this App →</button></form>` : '';
         return html(200, (reviewer
-          ? `<p>Register a private reviewer App named <strong>${escape(reviewer)}</strong> for <strong>${escape(repository)}</strong>. Its runtime signs in as this App to post review verdicts.</p><p>The reviewer App reads code and writes pull request comments. It cannot publish Graphyard's gate check, change branch protection, or write source code. Use a GitHub account that is not the pull request author.</p><form method="post" action="https://github.com/settings/apps/new?state=${state}"><input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}"><button>Register reviewer App →</button></form>`
-          : `<p>Register a private App for <strong>${escape(repository)}</strong>. GitHub will ask you to sign in, name the App, and choose the repository.</p><p>The App reads code and branch protection, publishes its gate check and the graphyard/landable status, writes PR review requests, and moves release and revert branches, which is why it holds Contents: read and write. It never writes an agent's code and never merges a pull request: GitHub merges it once branch protection's required checks pass. Credentials return directly to this machine; no key copying is needed.</p><form method="post" action="https://github.com/settings/apps/new?state=${state}"><input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}"><button>Register Graphyard App →</button></form>`) + reuse + sudoForm(state, repository, !!reviewer));
+          ? `<p>Register a private reviewer App named <strong>${escape(reviewer)}</strong> for <strong>${escape(repository)}</strong>. Its runtime signs in as this App to post review verdicts.</p><p>The reviewer App reads code and writes pull request comments. It cannot publish Graphyard's gate check, change branch protection, or write source code. Use a GitHub account that is not the pull request author.</p><form method="post" action="${registerUrl}"><input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}"><button>Register reviewer App →</button></form>`
+          : `<p>Register a private App for <strong>${escape(repository)}</strong>. GitHub will ask you to sign in, name the App, and choose the repository.</p><p>The App reads code and branch protection, publishes its gate check and the graphyard/landable status, writes PR review requests, and moves release and revert branches, which is why it holds Contents: read and write. It never writes an agent's code and never merges a pull request: GitHub merges it once branch protection's required checks pass. Credentials return directly to this machine; no key copying is needed.</p><form method="post" action="${registerUrl}"><input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}"><button>Register Graphyard App →</button></form>`) + reuse + sudoForm(state, repository, !!reviewer, ownerType));
       }
       if (url.pathname === '/reuse') {
         const received = Buffer.from(url.searchParams.get('state') ?? ''), expected = Buffer.from(state);
