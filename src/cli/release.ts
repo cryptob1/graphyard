@@ -10,6 +10,7 @@ import {
 } from '../release-candidate.js';
 import { acceptancesFrom, foldHolds, foldRecord, holdItemsFor, holdTag, holdTagPrefix, releaseHolds, type HoldRecord } from '../release-holds.js';
 import { pendingFromPlane, readPlane, servingStage } from '../release-pending.js';
+import { promotionImports } from '../validation-import.js';
 import { checkRepositoryContract, contractFile, loadContract } from '../e2e/case.js';
 
 const switches = new Set(['no-push', 'api']);
@@ -127,7 +128,9 @@ export const releaseCommands = defineCommands([
         const ledger = readLedger(git), candidate = findCandidate(ledger, target), uat = ledger.uat.find(record => record.id === candidate.id);
         // Only a candidate held by flaky cases alone reads the control plane's evidence decisions; an unreachable one leaves it held.
         const acceptances = uat && unacceptedFlaky(candidate, uat)?.length ? await acceptancesOf(api, git, candidate.id).catch(error => { console.error(`Could not read evidence decisions: ${error.message}`); return []; }) : [];
-        const result = promote(git, target, { base, push, now: new Date(), acceptances });
+        // GY-1860: the candidate's imported external runs hold it; a hold the plane cannot answer refuses promotion.
+        const imported = await promotionImports(path => api(path), candidate);
+        const result = promote(git, target, { base, push, now: new Date(), acceptances, imported });
         print(result); if (!result.promoted) process.exitCode = 1; return;
       }
       const url = options.one('url');

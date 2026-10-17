@@ -16,6 +16,7 @@ import {
   awaitServing, cutAsync, deployToUatAsync, promoteAsync, readLedgerAsync, syncLedgerAsync, uatValidationWindowMs,
   findCandidate, type AsyncGit, type ReleaseCandidate, type UatRecord,
 } from '../release-candidate.js';
+import { promotionImports } from '../validation-import.js';
 import { validateProjectCandidate } from '../release-project.js';
 import { revertCandidateItem, type CandidateItemDelta, type RevertContract, type RevertPorts, type RevertRecordEvent } from '../release-revert.js';
 import type { CutCommit } from './candidate-cut.js';
@@ -73,7 +74,9 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
     /** Files a failed managed candidate's follow-up or hold item, answering its key (GY-1535). */
     file?: (item: object, requestId: string) => Promise<string>;
     /** The plane's open goals and each work item's stage, so a cut records the outcomes whose plan is not delivered yet as pending (GY-1802). */
-    plane?: { goals: () => Promise<readonly Goal[]>; stage: (key: string) => Promise<string | undefined> } }): LocalReleasePorts | null {
+    plane?: { goals: () => Promise<readonly Goal[]>; stage: (key: string) => Promise<string | undefined>;
+      /** An authenticated `GET /api/PATH`, through which promotion reads the candidate's imported-run hold (GY-1860). */
+      read?: (path: string) => Promise<any> } }): LocalReleasePorts | null {
   const environment = options.environment ?? process.env;
   const uatUrl = environment[localReleaseVariables.uatUrl], productionUrl = environment[localReleaseVariables.productionUrl], uatStatic = environment[localReleaseVariables.uatStatic];
   if (!uatUrl && !uatStatic) return null;
@@ -163,7 +166,8 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
       } finally { rmSync(scratch, { recursive: true, force: true }); }
     },
     promote: async id => {
-      const result = await promoteAsync(git, id, { base, push: true, now: new Date(now()) });
+      const read = options.plane?.read;
+      const result = await promoteAsync(git, id, { base, push: true, now: new Date(now()), imports: read ? candidate => promotionImports(read, candidate) : undefined });
       return result.promoted ? { promoted: true, sha: result.sha } : { promoted: false, refusals: result.refusals };
     },
     verify: async sha => {

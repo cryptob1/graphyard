@@ -1,6 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -8,6 +9,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal } from '../src/model.js';
+import { assessPromotion, cut, deployToUat, gitIn, productionBranch, promote, validateAndRecord, type ReleaseCandidate, type UatRecord } from '../src/release-candidate.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1860: a producer imports an external run through POST /api/validation/import. The plane binds
@@ -27,12 +29,14 @@ const tokens = new Map(principals.map(p => [p.id, `${p.id}-${'t'.repeat(40)}`]))
 const boundSha = 'a'.repeat(40), holdSha = 'b'.repeat(40), versionSha = 'c'.repeat(40), elsewhere = 'd'.repeat(40);
 const candidates = [
   { id: '20261017T010000Z', sha: boundSha }, { id: '20261017T020000Z', sha: holdSha }, { id: '20261017T030000Z', sha: versionSha },
-].map(entry => ({ ...entry, cutAt: `${entry.id.slice(0, 4)}-${entry.id.slice(4, 6)}-${entry.id.slice(6, 8)}T${entry.id.slice(9, 11)}:00:00.000Z`, trigger: 'manual', since: null, items: [] }));
+].map(entry => ({ ...entry, cutAt: `${entry.id.slice(0, 4)}-${entry.id.slice(4, 6)}-${entry.id.slice(6, 8)}T${entry.id.slice(9, 11)}:00:00.000Z`, trigger: 'manual', since: null, items: [] })) as Pick<ReleaseCandidate, 'id' | 'sha' | 'cutAt'>[];
 const tagObject = (index: number) => String(index + 1).repeat(40);
-/** The GitHub reads the import makes: the `rc/` tag refs, and each annotated tag carrying its candidate record. */
+/** The GitHub reads the import makes: the `rc/` tag refs, and each annotated tag carrying its candidate record. `down` fails every read. */
 const github = {
-  config: { repository: 'owner/project' },
+  config: { repository: 'owner/project' }, down: false, reads: 0,
   async request(path: string) {
+    github.reads++;
+    if (github.down) throw new Error('GitHub is unreachable');
     if (path.startsWith('/git/matching-refs/tags/rc/')) return /page=1(?:&|$)/.test(path) ? candidates.map((entry, index) => ({ ref: `refs/tags/rc/${entry.id}`, object: { sha: tagObject(index), type: 'tag' } })) : [];
     const index = candidates.findIndex((_, i) => path === `/git/tags/${tagObject(i)}`);
     if (index >= 0) return { object: { sha: candidates[index].sha, type: 'commit' }, message: JSON.stringify(candidates[index]) };
@@ -61,6 +65,25 @@ async function call(path: string, actor: Principal, data?: unknown) {
 }
 const imported = async (data: unknown) => { const result = await call('validation/import', producer, data); assert.equal(result.status, 200, JSON.stringify(result.body)); return result.body; };
 const hold = async (sha: string) => (await call(`validation/import/${sha}`, reader)).body.hold;
+/** `GET /api/PATH` as the CLI's api reads it: a refusal throws with its status. */
+const readAs = (actor: Principal) => async (path: string) => {
+  const { status, body } = await call(path, actor);
+  if (status >= 400) throw Object.assign(new Error(JSON.stringify(body)), { status });
+  return body;
+};
+
+/** A bare origin and a clone with one commit on main, for a real release ledger. */
+async function repository() {
+  const root = await temporaryDirectory('validation-import-ledger');
+  const origin = join(root, 'origin.git'), work = join(root, 'work');
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  git(root, 'init', '-q', '--bare', '-b', 'main', origin);
+  git(root, 'clone', '-q', origin, work);
+  for (const [key, value] of [['user.name', 'test'], ['user.email', 'test@example.test'], ['commit.gpgsign', 'false'], ['tag.gpgsign', 'false']]) git(work, 'config', key, value);
+  git(work, 'commit', '-q', '--allow-empty', '-m', 'initial');
+  git(work, 'push', '-q', 'origin', 'HEAD:main');
+  return { origin, git: gitIn(work) };
+}
 
 const run = (sha: string, runId: string, cases: readonly Record<string, unknown>[], over: Record<string, unknown> = {}) =>
   ({ format: 'graphyard-external-run-v1', producer: 'huck-engineer', runId, sha, cases, ...over });
@@ -108,6 +131,21 @@ test('unit:validation-import-route-binds-by-sha — POST /api/validation/import 
   const changed = await call('validation/import', producer, { ...handIn, cases: handIn.cases.slice(0, 1) });
   assert.equal(changed.status, 409);
   assert.match(changed.body.error, /already imported with a different document/);
+
+  // A committed run replays from its record: no GitHub read, so a replay succeeds while GitHub is unreachable.
+  github.down = true; const reads = github.reads;
+  try {
+    const offline = await imported(handIn);
+    assert.equal(offline.replayed, true);
+    assert.deepEqual(offline.imported, first.imported, 'the replay carries the candidate the run bound to');
+    assert.equal(github.reads, reads, 'a replay reads nothing from GitHub');
+    assert.equal((await call(`validation/import/${boundSha}`, reader)).body.runs.length, 1, 'an offline replay writes nothing');
+    const offlineChanged = await call('validation/import', producer, { ...handIn, cases: handIn.cases.slice(0, 1) });
+    assert.equal(offlineChanged.status, 409, 'a different document under a used run id is still refused');
+    assert.match(offlineChanged.body.error, /already imported with a different document/);
+    const fresh = await call('validation/import', producer, { ...handIn, runId: 'huck-run-new' });
+    assert.notEqual(fresh.status, 200, 'a first import needs the ledger read');
+  } finally { github.down = false; }
 });
 
 test('unit:validation-import-feeds-hold — a required failed, blocked or unrun case holds the candidate, an all-passing run releases it, and skipped follows the required-case rule', async () => {
@@ -137,6 +175,37 @@ test('unit:validation-import-feeds-hold — a required failed, blocked or unrun 
   assert.equal(released.verdict.passed, true);
   assert.deepEqual(released.hold, { held: false, cases: [], runs: 3 }, 'an all-passing run releases the candidate');
   assert.equal((await hold(boundSha)).runs, 1, 'the hold is per candidate: another head counts only its own imports');
+
+  // The hold feeds promotion: a real candidate, cut, deployed and passed on UAT, is refused production while an import holds it.
+  const { promotionImports } = await import('../src/validation-import.js');
+  const repo = await repository();
+  const { candidate } = cut(repo.git, { base: 'main', trigger: 'manual', now: new Date('2026-10-01T12:00:00Z'), push: true }) as { candidate: ReleaseCandidate };
+  deployToUat(repo.git, candidate.id, 'main');
+  const serving = (async () => new Response(JSON.stringify({ ok: true, commit: candidate.sha }))) as unknown as typeof fetch;
+  const uat = await validateAndRecord(repo.git, candidate.id, 'https://uat.example.test', [{ name: 'smoke', run: async () => ({ name: 'smoke', passed: true, detail: 'ok' }) }],
+    { base: 'main', push: true, timeoutMs: 60_000, fetcher: serving, sleep: async () => {}, now: () => new Date('2026-10-01T12:30:00Z') });
+  assert.equal(uat.record.result, 'passed', 'UAT alone would promote it');
+  candidates.push(candidate);
+  const promoteNow = async () => promote(repo.git, candidate.id, { base: 'main', push: true, now: new Date('2026-10-01T13:00:00Z'), imported: await promotionImports(readAs(reader), candidate) });
+  const productionTip = () => { try { return execFileSync('git', ['rev-parse', '--verify', '-q', `refs/heads/${productionBranch}`], { cwd: repo.origin, encoding: 'utf8' }).trim(); } catch { return null; } };
+
+  await imported(run(candidate.sha, 'promote-1', [passing('login'), { id: 'pay', verdict: 'failed', attempts: 1, durationMs: 100, required: true }]));
+  const refused = await promoteNow();
+  assert.equal(refused.promoted, false, 'a required failed import holds the candidate out of production');
+  assert.match((refused as any).refusals.join('\n'), new RegExp(`held by imported external runs at ${candidate.sha}: pay \\(failed in run promote-1\\)`));
+  assert.equal(productionTip(), null, 'production did not move');
+
+  await imported(run(candidate.sha, 'promote-2', [passing('login'), { id: 'pay', verdict: 'skipped', attempts: 0, durationMs: 0, required: true }]));
+  assert.equal((await promoteNow()).promoted, false, 'a required skipped case still holds it');
+
+  const unread = assessPromotion(candidate, uat.record as UatRecord, null, [], await promotionImports(async () => { throw new Error('plane unreachable'); }, candidate));
+  assert.equal(unread.promotable, false, 'a hold that cannot be read is never read as released');
+  assert.match(unread.refusals.join('\n'), /could not be read \(plane unreachable\)/);
+
+  await imported(run(candidate.sha, 'promote-3', [passing('login'), passing('pay')]));
+  const promoted = await promoteNow();
+  assert.equal(promoted.promoted, true, 'a covering passing import releases the restriction');
+  assert.equal(productionTip(), candidate.sha);
 });
 
 test('unit:validation-import-case-version-not-inferred — catalogCommitSha is stored as provenance only and never read into a case version', async () => {
