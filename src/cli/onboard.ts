@@ -91,9 +91,17 @@ export function ghImportSource(gh: GhApi): ImportSource {
   return {
     async openPulls(repository) {
       const raw = await listed(gh, page => `repos/${repository}/pulls?state=open&per_page=100&page=${page}`);
-      return raw.map(pull => ({
-        number: pull.number, base: pull.base?.ref, headBranch: pull.head?.ref, headSha: pull.head?.sha,
-        draft: pull.draft === true, url: pull.html_url, mergeable: typeof pull.mergeable === 'boolean' ? pull.mergeable : null,
+      // The list endpoint's shape carries no mergeability — GitHub computes it per pull request and
+      // answers it on the single-pull read, and may still be computing it there. One read each,
+      // before any disposition is proposed; a read that fails, or a value still unset, stays null
+      // (unknown), and the model never proposes adoption without a definite no-conflict.
+      return Promise.all(raw.map(async pull => {
+        const detail = await optional(`repos/${repository}/pulls/${pull.number}`);
+        return {
+          number: pull.number, base: pull.base?.ref, headBranch: pull.head?.ref, headSha: pull.head?.sha,
+          draft: pull.draft === true, url: pull.html_url,
+          mergeable: typeof detail?.mergeable === 'boolean' ? detail.mergeable : typeof pull.mergeable === 'boolean' ? pull.mergeable : null,
+        };
       }));
     },
     async compareBaseHead(repository, base, head) {
@@ -140,16 +148,22 @@ const toWorkflow = async (repository: string, decode: (path: string) => Promise<
     ? workflowTriggers(await decode(`repos/${repository}/contents/${workflow.path.split('/').map(encodeURIComponent).join('/')}`) ?? '')
     : null,
 });
-/** Check runs decide; a commit status of the same context fills only where no check run reported. */
+/** Check runs decide; a commit status of the same context fills only where no check run reported. The run with the latest reported activity decides a name: a re-run in progress, or a run still queued, is that name's state until it concludes, so a pending required check is read as not yet clean instead of silently absent. */
 const dedupeChecks = (raw: any[]) => {
-  const checks = new Map<string, string>();
+  const checks = new Map<string, { at: string; result: string }>();
   for (const entry of raw) {
-    if (typeof entry?.name !== 'string' && typeof entry?.context !== 'string') continue;
-    const name = entry.name ?? entry.context;
-    const result = entry.conclusion ?? entry.state;
-    if (typeof name === 'string' && typeof result === 'string' && !checks.has(name)) checks.set(name, result);
+    const name = typeof entry?.name === 'string' ? entry.name : typeof entry?.context === 'string' ? entry.context : null;
+    if (name === null) continue;
+    const result = typeof entry?.conclusion === 'string' ? entry.conclusion
+      : typeof entry?.state === 'string' ? entry.state
+      : typeof entry?.status === 'string' ? entry.status : null;
+    if (result === null) continue;
+    const at = typeof entry?.completed_at === 'string' && entry.completed_at ? entry.completed_at
+      : typeof entry?.started_at === 'string' && entry.started_at ? entry.started_at : '';
+    const prior = checks.get(name);
+    if (!prior || at >= prior.at) checks.set(name, { at, result });
   }
-  return [...checks.entries()].map(([name, result]) => ({ name, result }));
+  return [...checks.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([name, { result }]) => ({ name, result }));
 };
 
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`;
@@ -180,8 +194,8 @@ export const onboardCommands = defineCommands([
       '                                pull request with number, base, head branch, exact head sha, draft flag and URL; the',
       '                                release/deploy workflow triggers and required checks it detects (each fact detected',
       '                                or unknown); exactly one proposed disposition per pull request — continue (left with',
-      '                                its existing controller), hold (a draft: refs preserved, nothing acts on it), adopt',
-      '                                (not a draft, no failing required check, no reported conflict: eligible for same-PR',
+      '                                its existing controller), hold (a draft: refs preserved, nothing acts on it), adopt (not a',
+      '                                draft, mergeable with its base, no failing required check: eligible for same-PR',
       '                                adoption) or superseded (only when the compare shows the base branch holds every',
       '                                commit of the head, with that evidence). Writes nothing but an explicit --out FILE.',
       '                                --mapping FILE binds external source keys and URLs to repository and pull request',
@@ -190,8 +204,11 @@ export const onboardCommands = defineCommands([
     ],
     // The inventory reads GitHub only; it never uses the repository's connection file.
     readsConnection: () => false,
-    async run(context) {
-      await runOnboard(context.rest.slice(1), { exec: localTransport().exec, print: value => context.print(value), log: line => console.log(line) });
+    // `context.rest` holds every word after `graphyard onboard`, `inventory` included; runOnboard
+    // owns the subcommand check, so the token is forwarded, never sliced off. The dependency
+    // parameter exists for the test that runs the registered handler against a fake `gh`.
+    async run(context, _work, deps: Parameters<typeof runOnboard>[1] = { exec: localTransport().exec, print: value => context.print(value), log: line => console.log(line) }) {
+      await runOnboard(context.rest, deps);
     },
   },
 ]);

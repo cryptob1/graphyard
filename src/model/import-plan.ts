@@ -70,12 +70,13 @@ export const checkFailed = (result: string | undefined) => result !== undefined 
  * Why one pull request is proposed one disposition, in priority order: a contained patch is
  * superseded; a ready, conflict-free, non-draft request is eligible for same-PR adoption; a draft
  * is held (its refs preserved, nothing acts on it); everything else continues with its existing
- * controller. A failed required check and a GitHub-reported conflict are the only reads that
- * keep a ready request from adoption; an unknown one never does.
+ * controller. A failed required check keeps a ready request from adoption, and adoption needs a
+ * definite no-conflict: mergeability GitHub reports as a conflict — or has not computed at all —
+ * is no evidence of a clean merge, so the request continues instead.
  */
 export function proposeDisposition(pull: InventoryPull, contained: ContainmentEvidence | null, failing: readonly string[]): ImportDisposition {
   if (contained) return 'superseded';
-  if (!pull.draft && pull.mergeable !== false && failing.length === 0) return 'adopt';
+  if (!pull.draft && pull.mergeable === true && failing.length === 0) return 'adopt';
   if (pull.draft) return 'hold';
   return 'continue';
 }
@@ -218,7 +219,10 @@ export async function buildImportPlan(repository: string, source: ImportSource, 
     releaseDeploy: workflow.triggers !== null && isReleaseDeploy(workflow.triggers),
   })).sort((a, b) => byText(a.path, b.path) || byText(a.name, b.name));
   const parsed = mappingText === null ? { entries: [] as MappingEntry[], conflicts: [] as MappingConflict[] } : parseMapping(mappingText);
-  const index = new Map(planned.map(pull => [`${pull.repository}#${pull.number}`, pull]));
+  // The join is case-insensitive: GitHub matches owner/repo names case-insensitively, so a mapping
+  // entry names its pull request whatever case the operator typed either name in. The plan itself
+  // keeps reporting the repository exactly as it was given.
+  const index = new Map(planned.map(pull => [`${pull.repository.toLowerCase()}#${pull.number}`, pull]));
   return {
     repository,
     mode: 'read-only inventory',
@@ -230,7 +234,7 @@ export async function buildImportPlan(repository: string, source: ImportSource, 
     }),
     mapping: {
       entries: parsed.entries.map(entry => {
-        const pull = index.get(`${entry.repository}#${entry.number}`);
+        const pull = index.get(`${entry.repository.toLowerCase()}#${entry.number}`);
         return { ...entry, pull: pull ? { disposition: pull.disposition, headSha: pull.headSha, url: pull.url } : null };
       }),
       conflicts: parsed.conflicts,

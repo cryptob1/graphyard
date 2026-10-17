@@ -2,13 +2,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { buildImportPlan, importReads, parseMapping, type ImportSource } from '../src/model/import-plan.js';
-import { ghImportSource, onboardCommands, runOnboard, workflowTriggers } from '../src/cli/onboard.js';
+import type { ImportSource } from '../src/model/import-plan.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1847: the read-only import plan behind `graphyard onboard inventory`. Every test runs against
 // a fake GitHub listing, and the fake records every call the plan makes: the inventory is held to
 // read-only on that record, so a write cannot hide behind a fixture's politeness.
+
+// The change's two modules load inside every case, never at module scope: the file must also load
+// against the base-exercise tree, where they are absent, so each case fails at its own import there
+// and the exercise records executed, failing cases instead of a file that cannot load (GY-1839).
+const planModule = () => import('../src/model/import-plan.js');
+const onboardModule = () => import('../src/cli/onboard.js');
 
 const sha = (seed: number) => seed.toString(16).padStart(40, '0');
 const REPO = 'owner/repo';
@@ -63,6 +68,7 @@ class FakeListing implements ImportSource {
 }
 
 test('unit:onboard-inventory-read-only — every open and draft pull request is reported with its number, base, head branch, exact head sha, draft flag and URL, and one disposition each', async () => {
+  const { buildImportPlan } = await planModule();
   const fake = new FakeListing(world());
   const plan = await buildImportPlan(REPO, fake, null);
   assert.equal(plan.repository, REPO);
@@ -81,6 +87,7 @@ test('unit:onboard-inventory-read-only — every open and draft pull request is 
 });
 
 test('unit:onboard-inventory-read-only — superseded is proposed only with compare evidence that the base holds every commit of the head', async () => {
+  const { buildImportPlan } = await planModule();
   const plan = await buildImportPlan(REPO, new FakeListing(world()), null);
   for (const pull of plan.pulls) {
     if (pull.disposition === 'superseded') {
@@ -99,6 +106,7 @@ test('unit:onboard-inventory-read-only — superseded is proposed only with comp
 });
 
 test('unit:onboard-inventory-read-only — the fake records no write call of any kind: only the five reads run, and only against the named repository', async () => {
+  const { buildImportPlan, importReads } = await planModule();
   const fake = new FakeListing(world());
   await buildImportPlan(REPO, fake, null);
   assert.deepEqual(fake.calls.filter(call => !(importReads as readonly string[]).includes(call.method)), [], 'every recorded call is one of the five reads');
@@ -113,6 +121,7 @@ test('unit:onboard-inventory-read-only — the fake records no write call of any
 });
 
 test('unit:onboard-inventory-read-only — each fact is marked detected or unknown, and an unreadable read never blocks a disposition', async () => {
+  const { buildImportPlan } = await planModule();
   const plan = await buildImportPlan(REPO, new FakeListing(world()), null);
   const byNumber = Object.fromEntries(plan.pulls.map(pull => [pull.number, pull]));
   const first = byNumber[1];
@@ -131,7 +140,22 @@ test('unit:onboard-inventory-read-only — each fact is marked detected or unkno
   assert.equal(byNumber[5].disposition, 'continue');
 });
 
+test('unit:onboard-inventory-read-only — a non-draft pull request is adopted only on a definite no-conflict: mergeability unknown or conflicting continues', async () => {
+  const { buildImportPlan } = await planModule();
+  const pull = { number: 9, base: 'main', headBranch: 'feature/nine', headSha: sha(9), draft: false, url: url(9) };
+  const withMergeable = (mergeable: boolean | null) => ({ ...world(), pulls: [{ ...pull, mergeable }], compares: {}, checks: {} });
+  const unknown = await buildImportPlan(REPO, new FakeListing(withMergeable(null)), null);
+  assert.equal(unknown.pulls[0].disposition, 'continue', 'mergeability GitHub has not computed is no evidence of a clean merge');
+  assert.equal(unknown.pulls[0].facts.find(fact => fact.fact === 'mergeability')!.state, 'unknown');
+  const conflicting = await buildImportPlan(REPO, new FakeListing(withMergeable(false)), null);
+  assert.equal(conflicting.pulls[0].disposition, 'continue');
+  assert.match(conflicting.pulls[0].facts.find(fact => fact.fact === 'mergeability')!.detail, /conflict/);
+  // A definite no-conflict is still the only mergeability that adopts.
+  assert.equal((await buildImportPlan(REPO, new FakeListing(withMergeable(true)), null)).pulls[0].disposition, 'adopt');
+});
+
 test('unit:onboard-inventory-read-only — release and deploy workflows are named with their triggers, and unreadable triggers are unknown', async () => {
+  const { buildImportPlan } = await planModule();
   const plan = await buildImportPlan(REPO, new FakeListing(world()), null);
   assert.equal(plan.workflows.state, 'detected');
   assert.deepEqual(plan.workflows.items.map(item => [item.path, item.state, item.triggers, item.releaseDeploy]), [
@@ -144,6 +168,7 @@ test('unit:onboard-inventory-read-only — release and deploy workflows are name
 });
 
 test('unit:onboard-mapping-deterministic — the same mapping and listing give byte-identical JSON on two runs', async () => {
+  const { buildImportPlan } = await planModule();
   const mapping = JSON.stringify({ entries: [
     { key: 'HE-123', url: 'https://work.test/HE-123', repository: 'owner/repo', number: 1 },
     { key: 'HE-124', repository: 'OWNER/REPO', number: 3 },
@@ -165,7 +190,18 @@ test('unit:onboard-mapping-deterministic — the same mapping and listing give b
   assert.deepEqual((await buildImportPlan(REPO, new FakeListing(world()), null)).mapping, { entries: [], conflicts: [] });
 });
 
+test('unit:onboard-mapping-deterministic — the mapping joins the inventory whatever case each side names the repository in', async () => {
+  const { buildImportPlan } = await planModule();
+  const mapping = JSON.stringify({ entries: [{ key: 'HE-77', repository: 'owner/repo', number: 1 }] });
+  const joined = await buildImportPlan('Owner/Repo', new FakeListing(world()), mapping);
+  assert.equal(joined.repository, 'Owner/Repo', 'the plan reports the repository exactly as it was given');
+  assert.equal(joined.mapping.entries[0].pull!.headSha, sha(1), 'the entry joins across the case difference');
+  const again = await buildImportPlan('OWNER/REPO', new FakeListing(world()), mapping);
+  assert.equal(JSON.stringify(joined.mapping), JSON.stringify(again.mapping), 'the join is stable across spellings of the same repository');
+});
+
 test('unit:onboard-mapping-deterministic — a key mapped to two pull requests, or a pull request mapped by two keys, is a named conflict rather than a resolution', async () => {
+  const { buildImportPlan, parseMapping } = await planModule();
   const keyConflict = JSON.stringify({ entries: [
     { key: 'HE-1', repository: 'owner/repo', number: 1 },
     { key: 'HE-1', repository: 'owner/repo', number: 2 },
@@ -186,18 +222,21 @@ test('unit:onboard-mapping-deterministic — a key mapped to two pull requests, 
 });
 
 test('unit:onboard-inventory-read-only — through the gh client the command only reads: every call is `gh api` with no write flag, on read endpoints only', async () => {
+  const { runOnboard } = await onboardModule();
   const restBehind = { status: 'behind', ahead_by: 0, behind_by: 3, merge_base_commit: { sha: sha(0x31) }, files: [] };
   const restDiverged = { status: 'diverged', ahead_by: 2, behind_by: 5, merge_base_commit: { sha: sha(0x32) }, files: [] };
   const releaseYaml = 'name: release\non:\n  release:\n    types: [published]\n  workflow_dispatch:\n';
-  // The listing as GitHub's REST answers it; the adapter maps it to the model's shape.
+  // The listing as GitHub's REST answers it — the list shape carries no mergeability — plus the
+  // single-pull reads GitHub computes it on, one per pull request.
   const restPulls = [
-    { number: 1, state: 'open', draft: false, html_url: url(1), base: { ref: 'main' }, head: { ref: 'feature/one', sha: sha(1) }, mergeable: true },
-    { number: 2, state: 'open', draft: true, html_url: url(2), base: { ref: 'main' }, head: { ref: 'feature/two', sha: sha(2) }, mergeable: null },
-    { number: 3, state: 'open', draft: false, html_url: url(3), base: { ref: 'main' }, head: { ref: 'feature/three', sha: sha(3) }, mergeable: true },
-    { number: 4, state: 'open', draft: false, html_url: url(4), base: { ref: 'main' }, head: { ref: 'feature/four', sha: sha(4) }, mergeable: true },
-    { number: 5, state: 'open', draft: false, html_url: url(5), base: { ref: 'release' }, head: { ref: 'feature/five', sha: sha(5) }, mergeable: false },
-    { number: 6, state: 'open', draft: true, html_url: url(6), base: { ref: 'main' }, head: { ref: 'feature/six', sha: sha(6) }, mergeable: true },
+    { number: 1, state: 'open', draft: false, html_url: url(1), base: { ref: 'main' }, head: { ref: 'feature/one', sha: sha(1) } },
+    { number: 2, state: 'open', draft: true, html_url: url(2), base: { ref: 'main' }, head: { ref: 'feature/two', sha: sha(2) } },
+    { number: 3, state: 'open', draft: false, html_url: url(3), base: { ref: 'main' }, head: { ref: 'feature/three', sha: sha(3) } },
+    { number: 4, state: 'open', draft: false, html_url: url(4), base: { ref: 'main' }, head: { ref: 'feature/four', sha: sha(4) } },
+    { number: 5, state: 'open', draft: false, html_url: url(5), base: { ref: 'release' }, head: { ref: 'feature/five', sha: sha(5) } },
+    { number: 6, state: 'open', draft: true, html_url: url(6), base: { ref: 'main' }, head: { ref: 'feature/six', sha: sha(6) } },
   ];
+  const mergeability: Record<number, boolean | null> = { 1: true, 2: null, 3: true, 4: true, 5: false, 6: true };
   const writeFlags = ['-X', '--method', '-f', '-F', '--field', '--input', '--raw-field'];
   const calls: string[][] = [];
   const exec = async (program: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> => {
@@ -207,7 +246,9 @@ test('unit:onboard-inventory-read-only — through the gh client the command onl
     const path = args[1];
     if (writeFlags.some(flag => args.includes(flag))) return fail(`a write flag was sent: ${path}`);
     let body: unknown;
-    if (/^repos\/owner\/repo\/pulls\?/.test(path)) body = restPulls;
+    const singlePull = path.match(/^repos\/owner\/repo\/pulls\/(\d+)$/);
+    if (singlePull) body = { number: Number(singlePull[1]), mergeable: mergeability[Number(singlePull[1])] };
+    else if (/^repos\/owner\/repo\/pulls\?/.test(path)) body = restPulls;
     else if (/^repos\/owner\/repo\/compare\/main\.\.\./.test(path)) body = [sha(3), sha(6)].some(end => path.endsWith(end)) ? restBehind : restDiverged;
     else if (/^repos\/owner\/repo\/branches\/main\/protection/.test(path)) body = { contexts: [], checks: [{ context: 'ci', app_id: 1 }, { context: 'typecheck', app_id: 1 }] };
     else if (/^repos\/owner\/repo\/branches\/[^/]+\/protection/.test(path)) return fail('protection unreadable');
@@ -228,13 +269,15 @@ test('unit:onboard-inventory-read-only — through the gh client the command onl
   assert.deepEqual(plan.pulls.map((pull: any) => [pull.number, pull.disposition, pull.headSha]), [
     [1, 'adopt', sha(1)], [2, 'hold', sha(2)], [3, 'superseded', sha(3)], [4, 'continue', sha(4)], [5, 'continue', sha(5)], [6, 'superseded', sha(6)],
   ]);
+  assert.equal(calls.filter(call => /^repos\/owner\/repo\/pulls\/\d+$/.test(call[2])).length, 6, 'mergeability is read per pull request, never taken from the listing');
+  assert.equal(plan.pulls.find((pull: any) => pull.number === 5)!.facts.find((fact: any) => fact.fact === 'mergeability')!.detail, 'GitHub reports a conflict with the base branch');
   for (const [index, pull] of plan.pulls.entries()) assert.deepEqual([pull.number, pull.base, pull.headBranch, pull.headSha, pull.draft, pull.url],
     [index + 1, index === 4 ? 'release' : 'main', `feature/${['one', 'two', 'three', 'four', 'five', 'six'][index]}`, sha(index + 1), index === 1 || index === 5, url(index + 1)]);
   assert.equal(plan.workflows.items[0].releaseDeploy, true, 'the release workflow is read from its file and named release/deploy');
   for (const call of calls) {
     assert.deepEqual(call.slice(0, 2), ['gh', 'api'], `every GitHub call is gh api, never anything else: ${call.join(' ')}`);
     assert.ok(!call.some(arg => writeFlags.includes(arg)), `no write flag is sent: ${call.join(' ')}`);
-    assert.match(call[2], /^repos\/owner\/repo\/(pulls\?|compare\/|branches\/[^/]+\/protection|commits\/[^/]+\/(check-runs\?|status)|actions\/workflows\?|contents\/)/, `only read endpoints are asked: ${call[2]}`);
+    assert.match(call[2], /^repos\/owner\/repo\/(pulls\?|pulls\/\d+$|compare\/|branches\/[^/]+\/protection|commits\/[^/]+\/(check-runs\?|status)|actions\/workflows\?|contents\/)/, `only read endpoints are asked: ${call[2]}`);
   }
   // The written file holds exactly what was printed, and a rerun is byte-identical — through the
   // client and on disk — with nothing else created.
@@ -258,6 +301,7 @@ test('unit:onboard-inventory-read-only — through the gh client the command onl
 });
 
 test('unit:onboard-inventory-read-only — the launcher registers the inventory command, reads no connection file, and refuses an unusable invocation', async () => {
+  const { onboardCommands, runOnboard } = await onboardModule();
   assert.deepEqual(onboardCommands.map(command => command.name), ['onboard']);
   const onboard = onboardCommands[0];
   assert.match(onboard.help.join('\n'), /onboard inventory --repo OWNER\/REPO/);
@@ -269,7 +313,21 @@ test('unit:onboard-inventory-read-only — the launcher registers the inventory 
   await assert.rejects(() => runOnboard(['inventory', '--repo', REPO, '--mapping', '/nonexistent/mapping.json'], { ...dead, exec: async () => ({ stdout: '[]', stderr: '', code: 0 }) }), /ENOENT/);
 });
 
+test('unit:onboard-inventory-read-only — the registered command forwards the inventory token: `graphyard onboard inventory --repo …` reaches the plan', async () => {
+  const { onboardCommands } = await onboardModule();
+  const calls: string[][] = [];
+  const printed: unknown[] = [];
+  const context = { rest: ['inventory', '--repo', REPO, '--json'], print: (value: unknown) => printed.push(value) } as any;
+  // The registered handler's dependency parameter takes the place of the local `gh` transport, so
+  // the invocation runs end to end against a fake: the subcommand token must survive the dispatch.
+  await (onboardCommands[0] as any).run(context, undefined, { exec: async (program: string, args: string[]) => { calls.push([program, ...args]); return { stdout: '[]', stderr: '', code: 0 }; }, print: (value: unknown) => context.print(value), log: () => {} });
+  assert.equal((printed[0] as any).repository, REPO, 'the documented invocation reaches the inventory, subcommand token intact');
+  assert.deepEqual((printed[0] as any).pulls, []);
+  for (const call of calls) assert.deepEqual(call.slice(0, 2), ['gh', 'api'], `the handler only reads: ${call.join(' ')}`);
+});
+
 test('unit:onboard-inventory-read-only — the gh adapter maps only what the listing and the compare hold, and workflow `on:` blocks parse in their common forms', async () => {
+  const { ghImportSource, workflowTriggers } = await onboardModule();
   const source = ghImportSource(async () => null);
   assert.deepEqual(await source.requiredChecks(REPO, 'main'), null, 'a failed read is unknown, never a guess');
   assert.deepEqual(await source.compareBaseHead(REPO, 'main', sha(1)), null);
@@ -282,4 +340,20 @@ test('unit:onboard-inventory-read-only — the gh adapter maps only what the lis
   assert.deepEqual(workflowTriggers('on:\n  # a comment\n  push:\n'), ['push']);
   assert.equal(workflowTriggers('name: broken\njobs: {}\n'), null);
   assert.equal(workflowTriggers('on: [push\n'), null);
+});
+
+test('unit:onboard-inventory-read-only — a required check still in progress is reported, not silently absent, and reads as not yet clean', async () => {
+  const { ghImportSource } = await onboardModule();
+  const { checkFailed } = await planModule();
+  const runs = { total_count: 3, check_runs: [
+    { name: 'ci', conclusion: 'success', status: 'completed', completed_at: '2026-10-16T00:00:00Z' },
+    { name: 'ci', status: 'in_progress', started_at: '2026-10-17T00:00:00Z' },
+    { name: 'typecheck', status: 'queued', started_at: '2026-10-17T00:00:00Z' },
+  ] };
+  const source = ghImportSource(async args => (/check-runs/.test(args[0]) ? JSON.stringify(runs) : JSON.stringify({ statuses: [] })));
+  // The re-run in progress is ci's latest activity, so it decides, and a queued run is reported
+  // rather than dropped: a required check that has not concluded is not a clean one.
+  assert.deepEqual(await source.headChecks(REPO, sha(1)), [{ name: 'ci', result: 'in_progress' }, { name: 'typecheck', result: 'queued' }]);
+  assert.ok(checkFailed('in_progress') && checkFailed('queued'), 'a pending required check holds adoption');
+  assert.ok(!checkFailed('success'));
 });
