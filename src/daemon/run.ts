@@ -31,7 +31,7 @@ import { adoptLoopRelease, fileSlowLoopItem } from './slow-loop-item.js';
 import { mergeWriterSummary } from './cycle-merge-writer.js';
 import { wakeMasterForStalls } from './cycle-master.js';
 import { admitStalledCycle, noteCycleStalls, noteStepFailure, noteStepsSucceeded, readReviewerProfileFailures, remedyStalledSteps, stallHeldEffects, stallNeedsMaster, stallRemedyRunner, stallSubjectKey, type ProfileRemedyPorts, type StepStallRemedyRunner } from './step-stalls.js';
-import { fileStalledStepsUpstream, stallUpstreamFiler } from './stall-upstream.js';
+import { fileStalledStepsUpstream, stallUpstreamFiler, type StallUpstreamFiler } from './stall-upstream.js';
 import { detachRuns } from '../runner/registry.js';
 import type { LoopWake } from './loop-wake.js';
 
@@ -245,7 +245,9 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   /** The ports the stall step's bound remedies run through (GY-1854); absent, the loop's own are wired — the profile write, the host-owned credential renewal and the merge-ledger adoption. */
   stallRemedies?: StepStallRemedyRunner;
   /** The profile remedy's write and read-back (GY-1854); absent, `master environments --apply`'s own write and the checkout's configuration. */
-  stallProfiles?: () => ProfileRemedyPorts; } ) {
+  stallProfiles?: () => ProfileRemedyPorts;
+  /** Files an uncleared stall's one upstream item (GY-1855); absent, `master.json` `upstream` or this install as the operator-agent. */
+  stallUpstream?: StallUpstreamFiler; } ) {
   // Progress goes to stderr so stdout stays the machine-readable result the CLI prints.
   const now = options.now ?? Date.now, log = options.log ?? (line => console.error(line));
   const interval = () => typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
@@ -410,7 +412,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           for (const { signature, record } of applied)
             log(`[graphyard-master] the ${record.kind} stall remedy ${record.outcome}${record.verified ? ', verified' : ', unverified'}: ${record.detail} (${signature.slice(0, 160)})`);
           // GY-1855: a stall past its clearing bound files exactly one upstream item per signature.
-          const upstream = await fileStalledStepsUpstream(state, stallUpstreamFiler(config, options.repository ?? coordinatorCheckoutRoot(config.cliPath)), now, effects.persist);
+          const upstream = await fileStalledStepsUpstream(state, options.stallUpstream ?? stallUpstreamFiler(config, options.repository ?? coordinatorCheckoutRoot(config.cliPath)), now, effects.persist);
           if (upstream) log(`[graphyard-master] cycle ${result.metrics.cycle} ${upstream.kind} ${upstream.state}: ${upstream.detail}`);
           if (stalls.notes.length || stalls.cleared || applied.length || upstream) await effects.persist(state);
           for (const action of result.actions) log(`[graphyard-master] cycle ${result.metrics.cycle} ${action.kind} ${action.state}: ${action.detail}`);
@@ -447,7 +449,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           const stallApplied = await remedyStalledSteps(state, stallRunner, now(), effects.persist);
           for (const { record } of stallApplied)
             log(`[graphyard-master] the ${record.kind} stall remedy ${record.outcome}${record.verified ? ', verified' : ', unverified'}: ${record.detail}`);
-          const upstream = await fileStalledStepsUpstream(state, stallUpstreamFiler(config, options.repository ?? coordinatorCheckoutRoot(config.cliPath)), now, effects.persist);
+          const upstream = await fileStalledStepsUpstream(state, options.stallUpstream ?? stallUpstreamFiler(config, options.repository ?? coordinatorCheckoutRoot(config.cliPath)), now, effects.persist);
           if (upstream) log(`[graphyard-master] cycle ${failure.cycle} ${upstream.kind} ${upstream.state}: ${upstream.detail}`);
           if (stall.counted || owedCounted || cleared || stallApplied.length || upstream) await effects.persist(state);
           // A stall that needs the master is woken from here: this cycle failed before its

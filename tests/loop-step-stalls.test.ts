@@ -792,9 +792,16 @@ test('unit:loop-step-stall-upstream — a stall past six consecutive failing cyc
   assert.equal(asks.length, 1);
   assert.equal(asks[0].key, U.stallUpstreamIdempotencyKey(stall.signature));
   assert.equal(asks[0].key, `loop-step-stall:${S.stallSubjectKey(stall.signature).slice('stall:'.length)}`);
-  // The body is a pure function of the signature: a re-ask under the same key would return the same item.
-  assert.deepEqual(asks[0].input, U.stallUpstreamItem(stall.signature));
-  assert.match((asks[0].input as { title: string }).title, /refresh call fails/);
+  // The body carries the stall's evidence: step, signature, count, times, last error and remedy record.
+  assert.deepEqual(asks[0].input, U.stallUpstreamItem(stall));
+  const body = asks[0].input as { title: string; description: string };
+  assert.match(body.title, /refresh call fails/);
+  assert.match(body.description, new RegExp(`Consecutive failing cycles: ${S.stallUpstreamCycles}`));
+  assert.match(body.description, /Last error: the control plane timed out after 5000ms reading \/api\/status/);
+  assert.match(body.description, /Remedy: none: no remedy binds/);
+  assert.match(body.description, new RegExp(`First failure: ${stall.firstAt}`));
+  assert.equal(loop.stallUpstream.filed[S.stallSubjectKey(stall.signature)]?.key, 'GY-STALL-1');
+  assert.deepEqual(loop.stallUpstream.pending, {});
 
   // A later cycle past the bound files nothing more: the cursor's done row is the local dedup.
   loop.cycle = 7;
@@ -825,4 +832,57 @@ test('unit:loop-step-stall-upstream — a stall past six consecutive failing cyc
   assert.equal(earlyList.length, 1);
   assert.match(earlyList[0].text, /failed 3 cycle/);
   assert.doesNotMatch(earlyList[0].text, /upstream item/);
+});
+
+test('unit:loop-step-stall-upstream-retries — an interrupted filing, a failed one whose stall cleared, and a re-formed stall each file exactly once, with the body first composed', async () => {
+  const { S, U } = await load();
+  const failing = { kind: 'refresh', state: 'failed' as const, detail: 'the control plane timed out after 5000ms reading /api/status' };
+  const stalled = () => {
+    const loop = state();
+    for (const cycle of [1, 2, 3, 4, 5, 6]) { loop.cycle = cycle; S.noteCycleStalls(loop, [failing], cycle, tick(S.stallBackoffMs + 1)); }
+    return loop;
+  };
+  const persist = async () => {};
+  const asks: { input: unknown; key: string }[] = [];
+  const filer = async (input: unknown, key: string) => { asks.push({ input, key }); return { key: 'GY-STALL-2' } as never; };
+
+  // B1: the loop exits after persisting `started`, before the plane's answer is recorded.
+  const interrupted = stalled();
+  const [stall] = Object.values(interrupted.stepStalls);
+  void U.fileStalledStepsUpstream(interrupted, () => new Promise(() => {}), () => clock, persist);
+  await new Promise(resolve => setImmediate(resolve));
+  const subject = S.stallSubjectKey(stall.signature), key = U.stallUpstreamActionKey(stall.signature);
+  assert.equal(interrupted.actions[key]?.state, 'started', 'the ask was cut off before its answer was recorded');
+  const first = interrupted.stallUpstream.pending[subject]!.body;
+  assert.equal(await U.fileStalledStepsUpstream(interrupted, filer, () => clock, persist), null, 'the same cycle does not ask twice');
+  interrupted.cycle += 1;
+  // The stall counted on meanwhile: the re-ask still sends the body first composed.
+  S.noteCycleStalls(interrupted, [{ ...failing, detail: `${failing.detail} again` }], interrupted.cycle, tick(S.stallBackoffMs + 1));
+  const resumed = await U.fileStalledStepsUpstream(interrupted, filer, () => clock, persist);
+  assert.equal(resumed?.state, 'done');
+  assert.equal(asks.length, 1);
+  assert.deepEqual(asks[0].input, JSON.parse(first));
+  interrupted.cycle += 1;
+  assert.equal(await U.fileStalledStepsUpstream(interrupted, filer, () => clock, persist), null);
+  assert.equal(asks.length, 1, 'a started row followed by a re-run files exactly once');
+
+  // A filing that failed at the bound is asked again after its stall cleared, with the same body.
+  const cleared = stalled();
+  const failed = await U.fileStalledStepsUpstream(cleared, async () => { throw new Error('Graphyard refused work (403): forbidden'); }, () => clock, persist);
+  assert.equal(failed?.state, 'failed');
+  const body = Object.values(cleared.stallUpstream.pending)[0]!.body;
+  cleared.cycle += 1;
+  S.noteStepsSucceeded(cleared, cleared.cycle, tick(S.stallBackoffMs + 1));
+  assert.deepEqual(cleared.stepStalls, {}, 'the stall cleared');
+  cleared.cycle += 1;
+  assert.equal((await U.fileStalledStepsUpstream(cleared, filer, () => clock, persist))?.state, 'done');
+  assert.equal(asks.length, 2);
+  assert.deepEqual(asks[1].input, JSON.parse(body));
+
+  // The stall re-forms under the same signature: its filed key files nothing more.
+  for (const cycle of [20, 21, 22, 23, 24, 25]) { cleared.cycle = cycle; S.noteCycleStalls(cleared, [failing], cycle, tick(S.stallBackoffMs + 1)); }
+  assert.equal(S.stallFilesUpstream(Object.values(cleared.stepStalls)[0]!), true);
+  delete cleared.actions[U.stallUpstreamActionKey(Object.values(cleared.stepStalls)[0]!.signature)];
+  assert.equal(await U.fileStalledStepsUpstream(cleared, filer, () => clock, persist), null);
+  assert.equal(asks.length, 2, 'one item per signature, even after the done row is pruned');
 });
