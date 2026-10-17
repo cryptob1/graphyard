@@ -126,16 +126,10 @@ export async function acceptanceMergeRefusal(git: GitRunner, base: string, head:
 }
 
 /**
- * GY-1661: the land route's judgement of a merge-writer landing. GY-1922: the checkout's own
- * `refs/remotes/origin/BASE` is read first, since the loop fetches into that same checkout (bind-mounted
- * into a compose server container that has no credential or host key for an SSH origin); a ref that
- * already holds exactly that merge of the approved head on its first-parent history is enough, as
- * no obsolete merge passes that check. Only otherwise is BASE fetched, so a merge the writer pushed
- * after the checkout's last fetch is found. A failed fetch records nothing: the landing is refused
- * with 503 and the loop records it again on its next poll. The fetch is bounded by `timeoutMs` (the
- * runner kills git at it, and the route stops waiting at it whatever the runner does), so a stalled
- * origin, DNS lookup, SSH negotiation or credential helper answers with the same retryable 503
- * inside the caller's own timeout.
+ * GY-1661/GY-1922: the land route's judgement of a merge-writer landing. The checkout's own origin/BASE
+ * (fetched by the loop, so readable by a compose container with no SSH credential) is read first; only if
+ * it lacks that merge of the approved head is BASE fetched. A failed or stalled fetch, bounded by
+ * `timeoutMs`, records nothing and is refused with a retryable 503 inside the caller's own timeout.
  */
 export async function acceptanceLandingRefusal(git: GitRunner, base: string, head: string, mergeSha: string, timeoutMs = acceptanceFetchTimeoutMs): Promise<string | null> {
   const deadline = Date.now() + timeoutMs;
@@ -144,11 +138,8 @@ export async function acceptanceLandingRefusal(git: GitRunner, base: string, hea
   try {
     const held = await Promise.race([acceptanceMergeRefusal(git, base, head, mergeSha).catch(() => 'unread'), expired]);
     if (held === null) return null;
-    const fetched = held === 'expired' ? 'expired' : await Promise.race([
-      git(['fetch', '--no-tags', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`], { timeoutMs: Math.max(1, deadline - Date.now()) })
-        .catch((error: unknown): GitResult => ({ status: null, stdout: '', stderr: error instanceof Error ? error.message : String(error) })),
-      expired,
-    ]);
+    const fetch = () => git(['fetch', '--no-tags', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`], { timeoutMs: Math.max(1, deadline - Date.now()) });
+    const fetched = held === 'expired' ? 'expired' : await Promise.race([fetch().catch((error: unknown): GitResult => ({ status: null, stdout: '', stderr: error instanceof Error ? error.message : String(error) })), expired]);
     const failure = fetched === 'expired' ? `${held === 'expired' ? `reading refs/remotes/origin/${base}` : 'git fetch'} did not finish within ${timeoutMs}ms` : fetched.status === 0 ? null : fetched.stderr.trim().slice(0, 500) || `git exited ${fetched.status}`;
     if (failure) throw new Refusal(`The control plane could not fetch ${base} from origin to read the merge writer's landing (${failure}); nothing is recorded until it can`, 503);
   } finally { clearTimeout(timer); }
