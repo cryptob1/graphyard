@@ -138,11 +138,14 @@ export function stageWaitMs(item: Pick<Work, 'stageEnteredAt' | 'createdAt'>, no
 }
 const starving = (item: Work, now: number | undefined) => now !== undefined && stageWaitMs(item, now) >= dispatchStarvationMs;
 /**
- * True when the item already carries an attempt: a standing submission (a returned rework) or a
- * recorded pipeline attempt (a retry whose earlier try ended without submitting). `dispatchSort`
- * reads it once per sort, like starvation.
+ * True when the item already carries a submitted attempt: a standing submission (a returned
+ * rework) or one its pipeline timeline still records (`recordSubmission` stamps `submittedAt`, and
+ * it stands after the submission object itself is cleared). An attempt that ended without
+ * submitting — a lapsed lease, a rework before anything was offered — is not one: the repository
+ * itself calls that only an ended attempt (`recordRework`), not a rework round, and the item starts
+ * again in the existing order. `dispatchSort` reads it once per sort, like starvation.
  */
-const attempted = (work: Work) => !!work.submission || (work.pipeline?.attempts.length ?? 0) > 0;
+const attempted = (work: Work) => !!work.submission || !!work.pipeline?.submittedAt;
 function dispatchRank(a: Work, b: Work, hot: ReadonlySet<string>, starvingA: boolean, starvingB: boolean) {
   const left = scopeBreadth(a.plannedFiles), right = scopeBreadth(b.plannedFiles);
   const hotA = touchesHot(a, hot), hotB = touchesHot(b, hot);
@@ -156,8 +159,8 @@ export function dispatchOrder(a: Work, b: Work, hot: ReadonlySet<string> = new S
 }
 /**
  * `items` in dispatch order, each item's starvation read once rather than on every comparison.
- * Within one priority, an item that already carries an attempt is offered before a never-attempted
- * one (GY-1891), ahead of the starvation, hot-file and scope keys `dispatchRank` decides: a returned
+ * Within one priority, an item that already carries a submitted attempt is offered before an item
+ * without one (GY-1891), ahead of the starvation, hot-file and scope keys `dispatchRank` decides: a returned
  * rework has been built and reviewed once and is the nearest thing to a merge, so holding it while
  * fresh work starts only raises work in progress. Within each group the existing order stands
  * unchanged, and priority still decides first. The pairwise `dispatchOrder` keeps the scope/heat/wait
