@@ -26,13 +26,16 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // the seal stands no import can bind before the deploy. A held candidate is never sealed, so a
 // passing import can still release it and promotion retries.
 
-const producer: Principal = { id: 'huck-producer', role: 'producer' };
+// Importing needs the external-runs:import grant (GY-1879) beside the producer role.
+const producer: Principal = { id: 'huck-producer', role: 'producer', grants: ['external-runs:import'] };
 const reader: Principal = { id: 'coordinator-reader', role: 'reader' };
 // The identity GRAPHYARD_RELEASE_TOKEN is provisioned as (src/master/release-filing.ts): the credential a direct `release promote` holds in the uat environment.
 const releaseFiler: Principal = { id: releaseFilingIdentity.id, role: 'operator-agent', capabilities: [...releaseFilingIdentity.capabilities], scope: { repositories: ['owner/project'], workItems: [] } };
 // The loop's own operator-agent identity: the credential the daemon's plane connection seals through (scoped to the repository, as it is provisioned).
 const loopOperator: Principal = { id: 'graphyard-master-operator', role: 'operator-agent', scope: { repositories: ['owner/project'], workItems: [] } };
-const principals = [producer, reader, releaseFiler, loopOperator];
+// A producer without that grant: its import is refused 403 for the grant, before any seal is read.
+const ungranted: Principal = { id: 'unit-producer', role: 'producer', proofs: ['unit:*'] };
+const principals = [producer, ungranted, reader, releaseFiler, loopOperator];
 const tokens = new Map(principals.map(p => [p.id, `${p.id}-${'t'.repeat(40)}`]));
 
 let database: InstanceType<typeof EmbeddedPostgres>, store: Store, http: ReturnType<typeof server>, url: string, scratch: string, work: string;
@@ -198,4 +201,29 @@ test('unit:promotion-hold-sealed-before-production — a required failure import
   await imported(passingRun(z.sha, 'daemon-fix'));
   assert.deepEqual(await ports.promote(z.id), { promoted: true, sha: z.sha }, 'a released hold promotes through the daemon port');
   assert.equal(await readFile(deployLog('daemon'), 'utf8'), `${y.sha}\n${z.sha}\n`, 'the released retry deployed once');
+});
+
+test('unit:sealed-import-grant-and-seal-refusals-distinct — against the promoted candidate a producer holding external-runs:import is refused 409 because its hold was sealed at promotion, and a producer without the grant importing the same run is refused 403 for the grant before the seal is consulted', async () => {
+  const savedDeploy = process.env.GRAPHYARD_DEPLOY_DIGESTS;
+  process.env.GRAPHYARD_DEPLOY_DIGESTS = deployCommand(deployLog('distinct'));
+  try {
+    const v = await cutCandidate(5);
+    // Before promotion nothing is sealed, and the ungranted producer is refused for the grant all the same.
+    const unsealed = await call('validation/import', ungranted, requiredFailure(v.sha, 'distinct-early'));
+    assert.equal(unsealed.status, 403);
+    assert.match(unsealed.body.error, /requires the external-runs:import grant/);
+    let printed: any;
+    await releaseCommands[0].run({ command: 'release', id: 'promote', args: [v.id, '--base', 'main'], rest: [], base: url, connection: null, api: readAs(releaseFiler),
+      print: (value: unknown) => { printed = value; }, repositoryRoot: () => work } as any, undefined);
+    assert.equal(printed.promoted, true, JSON.stringify(printed));
+    // The sealed-hold control: the granted producer reaches the import and is refused for the seal, never for the grant.
+    const sealed = await call('validation/import', producer, requiredFailure(v.sha, 'distinct-run'));
+    assert.equal(sealed.status, 409, 'the granted import against the promoted candidate is refused 409: its hold was sealed at promotion');
+    assert.match(sealed.body.error, /sealed for promotion/);
+    // The grant control: the same run from a producer without the grant is refused 403 naming the grant, not the seal.
+    const refused = await call('validation/import', ungranted, requiredFailure(v.sha, 'distinct-run'));
+    assert.equal(refused.status, 403, 'the ungranted import is refused 403 before the seal is consulted');
+    assert.match(refused.body.error, /requires the external-runs:import grant; producer unit-producer holds no grant/);
+    assert.doesNotMatch(refused.body.error, /sealed/);
+  } finally { savedDeploy === undefined ? delete process.env.GRAPHYARD_DEPLOY_DIGESTS : process.env.GRAPHYARD_DEPLOY_DIGESTS = savedDeploy; }
 });
