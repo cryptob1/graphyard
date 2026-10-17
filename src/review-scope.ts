@@ -161,7 +161,7 @@ export async function baseMentions(root: string, baseBranch: string, identifier:
 export async function basePaths(root: string, baseBranch: string, paths: readonly string[], run: ChildRun): Promise<Set<string>> {
   if (!paths.length) return new Set();
   const ref = `origin/${baseBranch}`;
-  await run('git', ['-C', root, 'fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${baseBranch}:refs/remotes/${ref}`]);
+  await fetchBase(root, baseBranch, run);
   const commit = String(await run('git', ['-C', root, 'rev-parse', '--verify', `${ref}^{commit}`])).trim();
   // `<mode> <type> <object>\t<path>`: a directory named as a pathspec is listed as its own tree entry, so
   // only blobs (files and symlinks) count as present; a tree or a submodule is never a file to grant.
@@ -172,6 +172,32 @@ export async function basePaths(root: string, baseBranch: string, paths: readonl
 
 /** The most commits one successor read walks: a bound base months behind reads only the newest of them. */
 export const successionCommitLimit = 1000;
+/** How many times the base fetch is tried when git reports the remote-tracking ref contended: two processes fetching one repository race the ref's update (GY-1893). */
+export const baseFetchAttempts = 3;
+/** How long a contended base fetch waits before its retry: the fetch that moved the ref finishes in milliseconds. */
+export const baseFetchRetryMs = 250;
+/** The failure the race answers with (GY-1893's action:scope|GY-1384): git saw the ref at one commit when it negotiated and at another when it updated it. */
+export const refLockContention = /error: cannot lock ref .*: is at [0-9a-f]+ but expected [0-9a-f]+/;
+/**
+ * The loop's base fetch. A concurrent fetch — another attempt's, or the loop's own next step — can
+ * move the remote-tracking ref between git's negotiation and its update, and git answers
+ * "cannot lock ref 'refs/remotes/origin/main': is at X but expected Y" (GY-1893's
+ * action:scope|GY-1384, 17 October 2026): the read judged nothing about the base, so it is retried
+ * in place, a fresh negotiation reading the ref as the other fetch left it. Only a last attempt, or
+ * a failure that is not that race, is thrown, for the caller's own bound to retry.
+ */
+export async function fetchBase(root: string, baseBranch: string, run: ChildRun): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await run('git', ['-C', root, 'fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`]);
+      return;
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      if (attempt >= baseFetchAttempts || !refLockContention.test(text)) throw error;
+      await new Promise<void>(resolve => setTimeout(resolve, baseFetchRetryMs));
+    }
+  }
+}
 /** What one successor read found: the base tip it read, the successions since the bound base, and which successors are files at that tip. */
 export interface SuccessionRead { tip: string; successions: Succession[]; files: Set<string> }
 /**
@@ -223,7 +249,7 @@ export function successionReader(root: string, baseBranch: string, run: ChildRun
   const read = new Map<string, SuccessionRead>();
   return async (since: string): Promise<SuccessionRead> => {
     if (clock() - fetchedAt >= successionFetchMs) {
-      await run('git', ['-C', root, 'fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`]);
+      await fetchBase(root, baseBranch, run);
       fetchedAt = clock();
     }
     const tip = String(await run('git', ['-C', root, 'rev-parse', '--verify', `origin/${baseBranch}^{commit}`])).trim();
