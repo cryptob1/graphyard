@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
 import { chmod, link, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1311,32 +1311,57 @@ function liveHolder(text: string): { pid: number; host: string; startedAt: strin
   return holder.host !== hostname() || processAlive(holder.pid) ? holder : null;
 }
 
+/** Pauses for tests between the steps that race: after the standing lock is read, and after the reclaim token is taken. */
+export type ApplyLockPauses = { readStale?: () => Promise<void>; tookToken?: () => Promise<void> };
+
 /**
  * Takes the apply lock, or refuses naming the pid that holds it, before this apply writes anything
  * under the directory or to GitHub, the vault or the provider. The lock is published whole with
- * link(), which never replaces; one left by a process that is gone is moved aside and reclaimed,
- * and put back if a live apply took it in between. Answers the release, which removes only this
- * apply's own lock.
+ * link(), which never replaces. A lock left by a process that is gone is reclaimed under a token
+ * named by that lock's own bytes and taken with link(), so exactly one apply reclaims each stale
+ * lock; the token's holder re-reads the lock and only then renames its own over it, so the lock
+ * path is never absent and no live holder's lock is ever moved (a token whose holder is gone is
+ * superseded by one named for both). Answers the release, which removes only this apply's own lock.
  */
-async function acquireApplyLock(directory: string, now: number): Promise<() => Promise<void>> {
+export async function acquireApplyLock(directory: string, now: number, pauses: ApplyLockPauses = {}): Promise<() => Promise<void>> {
   const file = applyLockFile(directory);
   const content = `${JSON.stringify({ pid: process.pid, host: hostname(), startedAt: new Date(now).toISOString(), nonce: randomBytes(8).toString('hex') })}\n`;
   const temporary = `${file}.${randomBytes(8).toString('hex')}.tmp`;
+  const release = async () => { if (await readFile(file, 'utf8').catch(() => null) === content) await unlink(file).catch(() => {}); };
+  const refuse = (holder: { pid: number; host: string; startedAt: string }, what: string) =>
+    new Error(`Another install --apply (pid ${holder.pid} on ${holder.host}, since ${holder.startedAt}) ${what} the lock ${file}, so this apply wrote nothing; let it finish, then apply again`);
   await writeFile(temporary, content, { mode: 0o600, flag: 'wx' });
   try {
     for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        await link(temporary, file);
-        return async () => { if (await readFile(file, 'utf8').catch(() => null) === content) await unlink(file).catch(() => {}); };
-      } catch (error: any) { if (error?.code !== 'EEXIST') throw error; }
+      try { await link(temporary, file); return release; } catch (error: any) { if (error?.code !== 'EEXIST') throw error; }
       const standing = await readFile(file, 'utf8').catch(() => null);
       if (standing === null) continue;
       const holder = liveHolder(standing);
-      if (holder) throw new Error(`Another install --apply (pid ${holder.pid} on ${holder.host}, since ${holder.startedAt}) holds the lock ${file}, so this apply wrote nothing; let it finish, then apply again`);
-      const aside = `${file}.${randomBytes(8).toString('hex')}.stale`;
-      try { await rename(file, aside); } catch (error: any) { if (error?.code === 'ENOENT') continue; throw error; }
-      if (await readFile(aside, 'utf8') !== standing) await link(aside, file).catch(() => {});
-      await unlink(aside);
+      if (holder) throw refuse(holder, 'holds');
+      await pauses.readStale?.();
+      // The reclaim token for exactly this stale lock; a token whose holder is gone is superseded.
+      const chain = [standing], superseded: string[] = [];
+      let token: string | null = null;
+      for (let generation = 0; generation < 5 && !token; generation++) {
+        const name = `${file}.${createHash('sha256').update(chain.join('\0')).digest('hex').slice(0, 16)}.reclaim`;
+        try { await link(temporary, name); token = name; break; } catch (error: any) { if (error?.code !== 'EEXIST') throw error; }
+        const claimed = await readFile(name, 'utf8').catch(() => null);
+        if (claimed === null) continue;
+        const reclaimer = liveHolder(claimed);
+        if (reclaimer) throw refuse(reclaimer, 'is reclaiming');
+        chain.push(claimed);
+        superseded.push(name);
+      }
+      if (!token) continue;
+      try {
+        await pauses.tookToken?.();
+        // Only this token's holder may replace the stale lock, and its dead owner cannot, so it is
+        // still exactly what was read unless another apply already reclaimed it.
+        if (await readFile(file, 'utf8').catch(() => null) !== standing) continue;
+        await rename(temporary, file);
+        for (const name of superseded) await unlink(name).catch(() => {});
+        return release;
+      } finally { await unlink(token).catch(() => {}); }
     }
   } finally { await unlink(temporary).catch(() => {}); }
   throw new Error(`Could not take the lock ${file}: other applies kept taking it; apply again`);

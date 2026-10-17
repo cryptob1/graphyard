@@ -2,8 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { readdir, readFile, writeFile } from 'node:fs/promises';
-import { hostname } from 'node:os';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { hostname, tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { applyInstall, buildPlan, prepareInstall } from '../src/install/index.js';
 import { installDirectory } from '../src/install/secrets.js';
 import { fakeTransport, type Transport } from '../src/install/transport.js';
@@ -67,6 +69,59 @@ test('unit:install-apply-exclusive-lock — a second install --apply on one inst
     await assert.rejects(applyInstall(fourth, await buildPlan(fourth)), (error: Error) => error.message.includes(`pid ${process.ppid}`));
     assert.equal(await readFile(lock, 'utf8'), live);
   } finally { await fixture.cleanup(); }
+});
+
+test('unit:install-apply-lock-competing-reclaimers — two applies reclaiming one stale lock and a third arriving never run together: the lock path is never absent while its owner runs and no live lock is moved', async () => {
+  const { acquireApplyLock, applyLockFile } = await import('../src/install/index.js') as any;
+  const directory = await mkdtemp(join(tmpdir(), 'gy-apply-lock-'));
+  try {
+    const lock = applyLockFile(directory);
+    const gate = () => { let open!: () => void, reached!: () => void; const at = new Promise<void>(r => { reached = r; }), opened = new Promise<void>(r => { open = r; }); return { at, open, pause: async () => { reached(); await opened; } }; };
+    const gone = spawnSync(process.execPath, ['-e', '']).pid!;
+    const stale = `${JSON.stringify({ pid: gone, host: hostname(), startedAt: new Date(0).toISOString() })}\n`;
+    const holderOf = async () => JSON.parse(await readFile(lock, 'utf8'));
+
+    // The reviewed interleaving: A and B both read the same dead holder; A reclaims first.
+    await writeFile(lock, stale, { mode: 0o600 });
+    const [a, b] = [gate(), gate()];
+    const first = acquireApplyLock(directory, 1_000, { readStale: a.pause });
+    const second = acquireApplyLock(directory, 2_000, { readStale: b.pause });
+    await Promise.all([a.at, b.at]);
+    a.open();
+    const releaseFirst = await first;
+    const owned = await readFile(lock, 'utf8');
+    assert.equal((await holderOf()).startedAt, new Date(1_000).toISOString(), 'A did not take the lock');
+    // C arrives while B still holds its stale reading: A's lock stands, so C is refused.
+    await assert.rejects(acquireApplyLock(directory, 3_000), (error: Error) => /holds the lock/.test(error.message) && error.message.includes(`pid ${process.pid}`));
+    b.open();
+    await assert.rejects(second, (error: Error) => /holds the lock/.test(error.message));
+    assert.equal(await readFile(lock, 'utf8'), owned, 'a competing reclaimer moved or replaced the live lock');
+    await releaseFirst();
+    assert.ok(!existsSync(lock));
+
+    // A holds the reclaim token for the stale lock: B (same stale reading) and C (arriving) both refuse.
+    await writeFile(lock, stale, { mode: 0o600 });
+    const [ta, rb] = [gate(), gate()];
+    const reclaiming = acquireApplyLock(directory, 4_000, { tookToken: ta.pause });
+    const late = acquireApplyLock(directory, 5_000, { readStale: rb.pause });
+    await Promise.all([ta.at, rb.at]);
+    assert.equal(await readFile(lock, 'utf8'), stale, 'the stale lock was removed before its reclaimer replaced it');
+    await assert.rejects(acquireApplyLock(directory, 6_000), (error: Error) => /is reclaiming the lock/.test(error.message));
+    rb.open();
+    await assert.rejects(late, (error: Error) => /is reclaiming the lock/.test(error.message));
+    ta.open();
+    const releaseReclaimed = await reclaiming;
+    assert.equal((await holderOf()).startedAt, new Date(4_000).toISOString());
+    await releaseReclaimed();
+
+    // A reclaim token whose holder is gone is superseded, and every token is cleaned up.
+    await writeFile(lock, stale, { mode: 0o600 });
+    await writeFile(`${lock}.${createHash('sha256').update(stale).digest('hex').slice(0, 16)}.reclaim`, stale, { mode: 0o600 });
+    const releaseSuperseding = await acquireApplyLock(directory, 7_000);
+    assert.equal((await holderOf()).startedAt, new Date(7_000).toISOString());
+    await releaseSuperseding();
+    assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('apply.lock')), [], 'reclaiming left a file behind');
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test('unit:protection-record-no-replace — a protection record that appears between the existence check and the publish is kept byte-for-byte and read back, never replaced', async () => {
