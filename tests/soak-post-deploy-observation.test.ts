@@ -55,3 +55,43 @@ test('unit:soak-invariants-hold — over a simulated day of the real loop, an al
   assert.ok(closed.every(sample => sample.dispatches.length === 0 && sample.lease === null && sample.sessions === 0), 'closed, it is never dispatched');
   assert.ok(day.readingDay!.reads >= 4, `the report was read per due cycle on the backoff, once per cycle for the filer and the reader together: ${day.readingDay!.reads}`);
 });
+
+/**
+ * GY-1906 AC-4 under the real loop: item 1 declares GY-1910 AC-2 (`manual:post-deploy/onboarding-default-target`),
+ * and its follow-up — GY-1911's shape — is read by the loop through the release-ledger reader. The hold GY-1909
+ * clears at hour 3 on a candidate at the parent's merge; each served release's own UAT execution fails
+ * onboarding-delivery-defaults until hour 6, then passes. The loop waits while the proof is unproven, records the
+ * failed reading and escalates it, then records the pass and closes the item delivered-observation on that exact
+ * release — with no evidence but the loop's own readings, no dispatch, lease or session.
+ */
+test('integration:goal-loop-verifies-onboarding-hold-clearance — over a simulated day of the real loop, the onboarding-default-target follow-up stays unproven until the hold clears, records the serving release\'s failed execution and escalates it, then closes delivered-observation on the exact release whose own execution passed, with only the loop\'s readings as evidence', { timeout: 600_000 }, async () => {
+  const day = await simulateDay({ hours: 10, plan, observationWindow: { item: 1, windowDays: 1, filedAfterMs: 25 * minute, onboardingTarget: { clearAt: 3 * hour, passAt: 6 * hour } } });
+  const window = day.observationWindowDay!;
+  assert.deepEqual(day.violations, [], 'every system invariant holds after every cycle');
+  assert.deepEqual(day.failures, [], 'no cycle failed');
+  const followUp = window.followUp!;
+  assert.ok(followUp, 'the follow-up was filed for the parent\'s onboarding-default-target proof');
+  assert.deepEqual(followUp.criteria.flatMap(criterion => criterion.proofs), ['manual:onboarding-default-target-on-serving-release']);
+  assert.ok(day.onboardingDay!.reads > 0, 'the loop read the release ledger');
+  const at = (sample: { at: string }) => Date.parse(sample.at) - day.dayStart;
+  const open = window.samples.filter(sample => sample.stage !== 'done'), closed = window.samples.filter(sample => sample.stage === 'done');
+  for (const sample of window.samples) assert.deepEqual([sample.dispatches, sample.lease, sample.sessions], [[], null, 0], `${sample.at}: never dispatched, leased or given a session`);
+  // Before the clear the proof is unproven: the loop waits and records nothing.
+  assert.ok(open.filter(sample => at(sample) < 3 * hour).every(sample => sample.readings.length === 0), 'nothing is recorded while the hold is open');
+  // Cleared, but the serving release's own execution fails: the fail is recorded once and escalated, naming it.
+  const failedSamples = open.filter(sample => sample.readings.some(reading => reading.result === 'fail'));
+  assert.ok(failedSamples.length >= 3, `the failed reading stood on the open item: ${failedSamples.length}`);
+  assert.ok(failedSamples.every(sample => at(sample) >= 3 * hour && at(sample) < 6 * hour + hour));
+  assert.ok(failedSamples.some(sample => sample.escalations.some(detail => /onboarding-delivery-defaults failed in descendant candidate .*'s own execution .* at the release's exact SHA/.test(detail))), JSON.stringify(failedSamples.at(-1)?.escalations));
+  // Its own execution passes: the pass is recorded and the item closes delivered-observation on that release.
+  assert.ok(closed.length >= 3, `the item closed and stayed closed: ${closed.length}`);
+  assert.equal(followUp.stage, 'done');
+  assert.equal(followUp.closure?.kind, 'delivered-observation');
+  const pass = followUp.evidence.filter(entry => entry.result === 'pass');
+  assert.equal(pass.length, 1);
+  assert.equal(followUp.closure?.ref, pass[0].sha, 'closed on the release its pass was read on');
+  assert.match(pass[0].reading!.detail, /onboarding-delivery-defaults passed in descendant candidate .* deployed at the release's exact SHA .*; the onboarding-default-path hold GY-1909 cleared on candidate .* under its rule/);
+  // No master-submitted evidence, no synthetic pass: every record on the item is the loop's own reading, under the day's coordinator identity graphyard-master.
+  assert.ok(followUp.evidence.length >= 2 && followUp.evidence.every(entry => entry.reading && entry.producer === 'graphyard-master' && entry.trusted), JSON.stringify(followUp.evidence.map(entry => [entry.producer, entry.result, !!entry.reading])));
+  assert.ok(Date.parse(pass[0].at) - day.dayStart >= 6 * hour, 'the pass follows the serving release\'s own passing execution');
+});

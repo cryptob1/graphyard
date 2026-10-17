@@ -442,6 +442,7 @@
     "tests/goal-land-without-server-fetch.test.ts": 3000,
     "tests/goal-pipeline-outright-refusals.test.ts": 1238,
     "tests/goal-planner.test.ts": 2900,
+    "tests/goal-rapid-delivery-pilot.test.ts": 110000,
     "tests/goal-static-item-preview.test.ts": 4500,
     "tests/graphyard-up.test.ts": 4200,
     "tests/schema-generation-guard.test.ts": 3000,
@@ -975,6 +976,7 @@
     "tests/fault-class-loop.test.ts": 630,
     "tests/slow-tick-repeat-receipt.test.ts": 600,
     "tests/goal-exact-candidates.test.ts": 3000,
+    "tests/goal-exact-verification.test.ts": 4000,
     "tests/soak-exact-candidates.test.ts": 32000,
     "tests/goal-candidate-promotion.test.ts": 5000
   }

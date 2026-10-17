@@ -294,8 +294,10 @@ jobs:
         # the shared UAT install keeps its explicit github merger, and so does preview-serves-change, on
         # the loop's own preview step there (GY-1913), since the shared install runs no preview loop, and so
         # does preview-isolation-cleanup, on two Compose previews of the fixture's declared app (GY-1923), and so does
-        # previews-for-declared-apps, on one preview of each of the fixture's declared site and app (GY-1924). Those four exercise
-        # the UAT deployment itself; the container and chart suites ran on runners at the candidate SHA, so each
+        # previews-for-declared-apps, on one preview of each of the fixture's declared site and app (GY-1924), and so do
+        # candidate-batches-five, candidate-gates-promotion and production-exact-verification (GY-1906): the fixture lands
+        # their changes, cuts, validates and promotes exact candidates and deploys its own production, whose identity
+        # its plane verifies, so the whole GOAL-1 suite runs there. Those seven exercise the UAT deployment itself; the container and chart suites ran on runners at the candidate SHA, so each
         # of those jobs' results above joins the record as a suite of its own. `zero-touch` (GY-1481)
         # runs the zero-touch onboarding scenario on this checkout of the candidate's SHA: `graphyard up
         # --agent --goal FILE` on a throwaway repository against an in-process GitHub must reach a merged
