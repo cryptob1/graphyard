@@ -41,6 +41,20 @@ export async function intentCommand(session: MasterSession): Promise<unknown> {
     return print(await promoteToAutonomy(root, args.includes('--admin-token-stdin') ? await readSecretFromStdin(10_000) : undefined));
   }
   if (id === 'scope') return print(await approveScopeRequest(root, master, args, { coordinator: masterApi }));
+  if (id === 'adopt') {
+    // GY-1849: bind one existing pull request to one held item on its same branch and head, with the
+    // original source's key and URL kept on the item. The control plane re-reads the live head itself
+    // and refuses a moved one or a second owner, naming the holder; repeating the same adoption is a no-op.
+    const flags = ['--pr', '--head', '--source-key', '--source-url'];
+    const value = (flag: string) => { const at = args.indexOf(flag); return at >= 0 ? args[at + 1] ?? null : null; };
+    const [key] = args;
+    const reason = args.filter((arg, at) => at > 0 && !flags.includes(arg) && !flags.includes(args[at - 1]!)).join(' ');
+    const pr = Number(value('--pr')), head = value('--head'), sourceKey = value('--source-key'), sourceUrl = value('--source-url');
+    if (!key || key.startsWith('--') || !Number.isInteger(pr) || pr <= 0 || !head || !/^[0-9a-f]{40}$/.test(head) || !reason.trim())
+      throw new Error('Use master adopt GY-N --pr NUMBER --head SHA [--source-key KEY --source-url URL] REASON');
+    return print(await masterMutation(`work/${encodeURIComponent(key)}/adopt`, { pr, head, ...(sourceKey ? { sourceKey } : {}), ...(sourceUrl ? { sourceUrl } : {}), reason },
+      randomUUID(), master.operatorAgent ? await agentToken(root, master, 'operatorAgent') : masterToken));
+  }
   if (id === 'close') {
     // The master's own operator-agent identity when provisioned, else its coordinator credential.
     const { key, body } = closeRequest(args);
