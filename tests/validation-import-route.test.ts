@@ -168,12 +168,23 @@ test('unit:validation-import-feeds-hold — a required failed, blocked or unrun 
   assert.equal(held.hold.cases.find((entry: any) => entry.id === 'ship').reason, 'no carrier sandbox');
   assert.deepEqual(await hold(holdSha), held.hold, 'the read gives the same hold');
 
+  // A later report that leaves `required` out (it defaults to false) cannot release a required case without a pass.
+  const unflagged = await imported(run(holdSha, 'hold-1b', [
+    { id: 'pay', verdict: 'failed', attempts: 1, durationMs: 1 },
+    { id: 'ship', verdict: 'blocked', attempts: 0, durationMs: 0, reason: 'still no sandbox' },
+    { id: 'refund', verdict: 'unrun', attempts: 0, durationMs: 0 },
+    { id: 'export', verdict: 'skipped', attempts: 0, durationMs: 0 },
+  ]));
+  assert.equal(unflagged.hold.held, true, 'dropping the required flag does not release a case that never passed');
+  assert.deepEqual(unflagged.hold.cases.map((entry: any) => [entry.id, entry.runId]).sort(),
+    [['export', 'hold-1b'], ['pay', 'hold-1b'], ['refund', 'hold-1b'], ['ship', 'hold-1b']], 'each case is held by the newest run that reported it');
+
   const partly = await imported(run(holdSha, 'hold-2', [passing('pay'), passing('ship')]));
   assert.deepEqual(partly.hold.cases.map((entry: any) => entry.id).sort(), ['export', 'refund'], 'a later pass releases only the cases it reports');
 
   const released = await imported(run(holdSha, 'hold-3', ['login', 'pay', 'ship', 'refund', 'export'].map(passing)));
   assert.equal(released.verdict.passed, true);
-  assert.deepEqual(released.hold, { held: false, cases: [], runs: 3 }, 'an all-passing run releases the candidate');
+  assert.deepEqual(released.hold, { held: false, cases: [], runs: 4 }, 'an all-passing run releases the candidate');
   assert.equal((await hold(boundSha)).runs, 1, 'the hold is per candidate: another head counts only its own imports');
 
   // The hold feeds promotion: a real candidate, cut, deployed and passed on UAT, is refused production while an import holds it.

@@ -43,12 +43,17 @@ export interface ImportedHold { held: boolean; cases: HeldCase[]; runs: number }
  * Pure: the hold `records` (oldest first) leave on their candidate. Each case is judged by the
  * newest import that reports it, under `importedRunVerdict`'s rule for that run — so a case a
  * later run passes is released, a case a later run omits stays held by the run that last reported
- * it, and a run whose every case passes releases everything it covers.
+ * it, and a run whose every case passes releases everything it covers. A case is required once any
+ * import at the candidate reported it required, so a later report that drops the flag cannot release
+ * a required failure without a pass.
  */
 export function importedHold(records: readonly ImportedRunRecord[], acceptances: readonly FlakyAcceptance[] = [], pendingCases: readonly string[] = []): ImportedHold {
+  // A case any import at this candidate reported required stays required: a later report leaving the flag out releases it only by passing.
+  const required = new Set(records.flatMap(record => record.run.cases.filter(entry => entry.required).map(entry => entry.id)));
   const seen = new Set<string>(), cases: HeldCase[] = [];
   for (const record of [...records].reverse()) {
-    const blocking = new Map(importedRunVerdict(record.run, acceptances, pendingCases).blocking.map(entry => [entry.id, entry]));
+    const run = { ...record.run, cases: record.run.cases.map(entry => required.has(entry.id) ? { ...entry, required: true } : entry) };
+    const blocking = new Map(importedRunVerdict(run, acceptances, pendingCases).blocking.map(entry => [entry.id, entry]));
     for (const entry of record.run.cases) {
       if (seen.has(entry.id)) continue;
       seen.add(entry.id);
