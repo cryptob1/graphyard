@@ -111,8 +111,14 @@ test('unit:cycle-failure-backoff — consecutive failures wait longer each time 
     const state = emptyDaemonState(master), log: string[] = [], { states, persist } = persisted(), readAt: number[] = [];
     let reads = 0;
     const deps = effects({ persist, snapshot: async () => { readAt.push(Date.now()); reads += 1; if (reads <= 5) throw timedOut(); stop(); return { work: [], now: iso(0) }; } });
+    // GY-1854: the third identical snapshot failure is one stall, so the read after it waits a
+    // five-minute window. The loop runs on a clock skewed past that window: a wait as long as the
+    // stall's hold elapses at once, while the growing short waits below are real.
+    let skew = 0;
+    const clock = () => Date.now() + skew;
+    const wait = async (ms: number, signal: AbortSignal) => { if (ms >= 60_000) { skew += ms; return; } await new Promise<void>(resolve => { const timer = setTimeout(resolve, ms); signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true }); }); };
     const started = Date.now();
-    const result = await runDaemon(master, state, deps, options({ log: line => log.push(line) }));
+    const result = await runDaemon(master, state, deps, options({ log: line => log.push(line), now: clock, delay: wait }));
     assert.ok(result.stopped);
     assert.equal(reads, 6, 'five failures, then the cycle that succeeded');
     // Each failure waited longer than the last: 5, 10, 20, 40, 80 ms on a 5 ms interval.
@@ -128,6 +134,11 @@ test('unit:cycle-failure-backoff — consecutive failures wait longer each time 
     assert.equal(state.failures.consecutive, 0);
     assert.equal(state.failures.total, 5);
     assert.ok(log.some(line => /recovered after 5 failed cycle\(s\)/.test(line)), log.join('\n'));
+    // The third failure recorded the stall, and the read after it was held to its five-minute window.
+    const stalled = states.find(entry => Object.values(entry.stepStalls).some(run => run.stalledAt))!;
+    assert.equal(stalled.failures.consecutive, 3, 'the stall formed at the third identical failure');
+    assert.ok(skew >= 300_000, 'the read after the stall waited out its five-minute window');
+    assert.ok(log.some(line => /the next cycle is held to/.test(line)), log.join('\n'));
 
     // Under `master status`: the count and reason under daemon.failures, an attention item once
     // three cycles in a row have failed, and no stall — the loop is waiting on purpose.
