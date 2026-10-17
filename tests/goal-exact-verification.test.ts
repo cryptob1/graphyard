@@ -231,3 +231,95 @@ test('integration:goal-exact-live-verification — production observed through t
   assert.equal(production.verification.status, 'verified');
   assert.deepEqual(production.history.map(entry => [entry.releaseId, entry.outcome]), [[first.record.id, 'skipped'], [second.record.id, 'verified']]);
 });
+
+// GY-1906 AC-4: the loop's reader of manual:post-deploy/onboarding-default-target (GY-1910 AC-2, owed by
+// GY-1911) over the release ledger the release jobs write: the onboarding-default-path hold's clear record,
+// its passing UAT execution bound to the clearing candidate's exact SHA, and the serving release's own pass.
+const onboardingCriterion = { id: 'AC-2', text: 'On the serving release, onboarding-delivery-defaults passes through the repaired normal-onboarding fixture path on a newer UAT candidate served at its exact SHA and the onboarding-default-path release hold GY-1909 clears under its original rule.', proofs: ['manual:post-deploy/onboarding-default-target'] };
+
+test('integration:goal-loop-verifies-onboarding-hold-clearance — the loop reads onboarding-default-target from independently recorded UAT executions, the hold-clear record and the exact serving release: it passes only on the clearing candidate or a verified descendant with its own pass, and stays unproven on anything missing, misattributed or not contained', { timeout: 120_000 }, async () => {
+  const { loadContract } = await import('../src/e2e/case.js');
+  const { releaseHolds } = await import('../src/release-holds.js');
+  const { writeRecord, gitIn } = await import('../src/release-candidate.js');
+  const { onboardingTargetReading, ledgerPorts, onboardingTargetProof } = await import('../src/cli/master-deployment.js');
+  const { readingEffects } = await import('../src/daemon/reading-effect.js');
+  const { defaultChildRun } = await import('../src/child-runner.js');
+  const ledger = await temporaryDirectory('goal-onboarding-ledger');
+  const sync = gitIn(ledger), run = (...args: string[]) => sync(args).trim();
+  run('init', '-q', '-b', 'main');
+  for (const [key, value] of [['user.email', 't@example.com'], ['user.name', 'T'], ['commit.gpgsign', 'false'], ['tag.gpgsign', 'false']]) run('config', key, value);
+  const commit = async (file: string) => { await writeFile(join(ledger, file), `${file}\n`); run('add', '-A'); run('commit', '-q', '-m', file); return run('rev-parse', 'HEAD'); };
+  const contract = await loadContract(join(import.meta.dirname, '..'));
+  // The release jobs' own writers: release validate's UAT record and its holds step, against the repository's contract.
+  const validated = async (id: string, sha: string, verdict: 'passed' | 'failed', options: { deployedSha?: string; runId?: string } = {}) => {
+    const runId = options.runId ?? `rc-${id}`;
+    const report = { runId, url: 'https://uat.example.test', environment: 'uat', sha, startedAt: '2026-10-17T15:00:00.000Z', finishedAt: '2026-10-17T15:05:00.000Z', passed: verdict === 'passed' ? 1 : 0, failed: verdict === 'failed' ? 1 : 0,
+      cases: [{ id: 'onboarding-delivery-defaults', title: 'onboarding', file: 'e2e/cases/onboarding-delivery-defaults.json', outcome: verdict === 'passed' ? 'pass' as const : 'fail' as const, verdict, required: true, durationMs: 1, attempts: verdict === 'passed' ? 1 : 2,
+        attemptResults: [], executed: 3, failingStep: verdict === 'passed' ? null : { index: 1, name: 'read the merger mode', reason: 'mode is "github", expected "control-plane"' } }] };
+    const candidate = { id, sha, cutAt: '2026-10-17T15:00:00.000Z', trigger: 'manual' as const, since: null, items: [] };
+    const record = { id, sha, result: verdict, deployedSha: options.deployedSha ?? sha, at: `${id.slice(0, 4)}-${id.slice(4, 6)}-${id.slice(6, 8)}T${id.slice(9, 11)}:${id.slice(11, 13)}:00.000Z`, suites: [], followUp: null };
+    const holds = await releaseHolds(sync, { contract, report: async () => report, push: false, now: () => new Date(record.at), file: async (_item, requestId) => requestId === 'release-hold:onboarding-default-path:20261017T132854Z' ? 'GY-1909' : 'GY-1950' })(candidate as never, record as never);
+    writeRecord(sync, `rc-uat/${id}`, sha, { ...record, e2e: holds.e2e, holds: holds.holds }, false);
+    holds.write();
+    return holds.holds;
+  };
+  const ports = ledgerPorts(async args => sync(args));
+  const parent = { key: 'GY-1910', delivery: { mergeSha: '' } } as never as import('../src/model.js').Work;
+  const read = (release: string, using = ports) => onboardingTargetReading({ proof: onboardingTargetProof, parent, item: { key: 'GY-1911' } as never, criterion: onboardingCriterion, release, now: new Date() }, using);
+  const unavailable = async (release: string, pattern: RegExp, using = ports) => { const reading = await read(release, using); assert.ok(reading && 'unavailable' in reading, JSON.stringify(reading)); assert.match(reading.unavailable, pattern); };
+
+  const failedSha = await commit('before-repair');
+  // Any other proof is not this reader's.
+  assert.equal(await onboardingTargetReading({ proof: 'manual:post-deploy/other', parent, item: {} as never, criterion: null, release: failedSha, now: new Date() }, ports), null);
+  Object.assign(parent, { delivery: { mergeSha: failedSha } });
+  await unavailable(failedSha, /holds no onboarding-default-path release hold/);
+  // The shared-install target failed onboarding-delivery-defaults: the outcome's hold opens (GY-1909).
+  assert.deepEqual(await validated('20261017T132854Z', failedSha, 'failed'), [{ kind: 'open', outcome: 'onboarding-default-path', hold: 'onboarding-default-path', item: 'GY-1909' }]);
+  const repair = await commit('repair');
+  Object.assign(parent, { delivery: { mergeSha: repair } });
+  await unavailable(repair, /hold GY-1909 has no clear record \(it is open\)/);
+
+  // A newer candidate at the repair passes at its exact SHA: the hold clears under its rule.
+  assert.deepEqual(await validated('20261017T153000Z', repair, 'passed'), [{ kind: 'clear', outcome: 'onboarding-default-path', hold: 'onboarding-default-path', item: 'GY-1909' }]);
+  const cleared = await read(repair);
+  assert.equal(cleared?.result, 'pass', JSON.stringify(cleared));
+  assert.match((cleared as { detail: string }).detail, new RegExp(`onboarding-delivery-defaults passed in the clearing candidate's own execution rc-20261017T153000Z deployed at the release's exact SHA ${repair.slice(0, 12)}; the onboarding-default-path hold GY-1909 cleared on candidate 20261017T153000Z`));
+
+  // A descendant release needs its own pass at its exact SHA: none recorded is unproven; a failed one is a failed reading; its own pass verifies it.
+  const descendant = await commit('later-change');
+  await unavailable(descendant, /no UAT execution is recorded deployed and run at the release's exact SHA/);
+  // Its failure opens a new hold, filed as its own item; the repaired hold GY-1909 stays cleared.
+  assert.deepEqual(await validated('20261017T170000Z', descendant, 'failed'), [{ kind: 'open', outcome: 'onboarding-default-path', hold: 'onboarding-default-path', item: 'GY-1950' }]);
+  const failing = await read(descendant);
+  assert.equal(failing?.result, 'fail', JSON.stringify(failing));
+  assert.match((failing as { detail: string }).detail, /onboarding-delivery-defaults failed in descendant candidate 20261017T170000Z's own execution rc-20261017T170000Z/);
+  const next = await commit('next-change');
+  // A UAT that served another SHA is never this release's execution.
+  await validated('20261017T180000Z', next, 'passed', { deployedSha: descendant });
+  await unavailable(next, /no UAT execution is recorded deployed and run at the release's exact SHA/);
+  await validated('20261017T190000Z', next, 'passed');
+  assert.equal((await read(next))?.result, 'pass');
+
+  // A release that does not carry the repair and the clearing candidate is unproven, as is one this checkout cannot place.
+  run('checkout', '-q', '-b', 'elsewhere', failedSha);
+  const sibling = await commit('sibling');
+  await validated('20261017T200000Z', sibling, 'passed');
+  await unavailable(sibling, new RegExp(`not a descendant of GY-1910's repair merge ${repair.slice(0, 12)}`));
+  await unavailable('f'.repeat(40), /not verifiably a descendant of GY-1910's repair merge/);
+
+  // The clear record's own execution must bind the clearing candidate's exact SHA: with it missing or attributed elsewhere, nothing is proven.
+  const records = await ports.uatRecords();
+  const without = { ...ports, uatRecords: async () => records.filter(record => record.id !== '20261017T153000Z') };
+  await unavailable(repair, /no UAT execution of the clearing candidate 20261017T153000Z is recorded deployed and run at its exact SHA/, without);
+  const misattributed = { ...ports, uatRecords: async () => records.map(record => record.id === '20261017T153000Z' ? { ...record, e2e: { ...record.e2e!, sha: failedSha } } : record) };
+  await unavailable(repair, /no UAT execution of the clearing candidate/, misattributed);
+  const unclear = { ...ports, holdRecords: async () => (await ports.holdRecords()).filter(record => record.kind !== 'clear') };
+  await unavailable(repair, /has no clear record \(it is open\)/, unclear);
+
+  // Registered on the loop: the production reading effects read this checkout's ledger, so the loop's reading of GY-1911 passes on the exact release.
+  const effects = readingEffects(() => ({ cliPath: 'graphyard' }) as never, async () => ({}), async () => ({}), { root: ledger, run: defaultChildRun });
+  const loopReading = await effects.readPostDeploy({ proof: onboardingTargetProof, parent, item: { key: 'GY-1911' } as never, criterion: onboardingCriterion, release: repair, now: new Date() });
+  assert.equal(loopReading.result, 'pass', JSON.stringify(loopReading));
+  const other = await effects.readPostDeploy({ proof: 'manual:post-deploy/other', parent, item: { key: 'GY-1911' } as never, criterion: onboardingCriterion, release: repair, now: new Date() });
+  assert.match((other as { unavailable: string }).unavailable, /no reader of manual:post-deploy\/other runs on this host/);
+});
