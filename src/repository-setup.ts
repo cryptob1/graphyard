@@ -862,15 +862,17 @@ export async function readLoopCode(root: string, options: {
   else if (!readableUnitsDirectory(unitDirectory)) units = null;
   else { try { units = readInstallUnits(root, unitDirectory, home); } catch (failure) { return reading({ error: failure instanceof Error ? failure.message.split('\n')[0] : String(failure) }); } }
   if (!units) return reading({});
-  const text = async (name: string) => { try { return await readFile(resolve(unitDirectory, name), 'utf8'); } catch { return null; } };
-  const loopText = await text(units.master);
+  // A missing unit is an absent unit; any other read failure judges nothing, so it is the reading's error.
+  const text = async (name: string) => { try { return await readFile(resolve(unitDirectory, name), 'utf8'); } catch (error: any) { if (error?.code === 'ENOENT') return null; throw new Error(`${resolve(unitDirectory, name)} could not be read: ${error?.code ?? error?.message ?? error}`); } };
+  let loopText: string | null, executorText: string | null;
+  try { [loopText, executorText] = [await text(units.master), await text(units.executorTemplate)]; }
+  catch (failure) { return reading({ error: failure instanceof Error ? failure.message : String(failure) }); }
   const loop = loopText === null ? null : { unit: units.master, path: resolve(unitDirectory, units.master), checkout: unitCodeCheckout(loopText, home) };
   let loopCommit: string | null = null;
   if (loop) {
     const cursor = options.cursor !== undefined ? options.cursor : typeof master?.credentialFile === 'string' ? await readFile(loopCursorPath(master.credentialFile), 'utf8').catch(() => null) : null;
     try { const recorded = cursor === null ? null : JSON.parse(cursor)?.release?.commit; loopCommit = typeof recorded === 'string' ? recorded : null; } catch { loopCommit = null; }
   }
-  const executorText = await text(units.executorTemplate);
   const executor = executorText === null ? null : { unit: units.executorTemplate, path: resolve(unitDirectory, units.executorTemplate), checkout: unitCodeCheckout(executorText, home) };
   // The checkouts and commits that are this install's own code even when they are neither this CLI's
   // checkout nor its HEAD: the known-good pin the unit runs while one is promoted (GY-1529) and the
@@ -898,6 +900,14 @@ export async function readLoopCode(root: string, options: {
   ].filter((reason): reason is string => !!reason).join('; ') || null;
   return reading({ loop, loopCommit, executor, loopStale, executorStale });
 }
+/** Every instance of this install's executor template the manager knows: each starts from the template's own ExecStart, so restarting them reloads the binding (GY-1859). */
+const knownExecutorInstances = (run: SystemctlRunner, units: InstallUnits) => {
+  const known = new Set<string>();
+  for (const listing of [['list-units', '--all', '--plain', '--no-legend', executorGlob(units)], ['list-unit-files', '--plain', '--no-legend', executorGlob(units)]]) {
+    try { for (const match of run(listing).matchAll(executorInstancePattern(units))) known.add(match[0]); } catch { /* an older systemctl without the glob; nothing to restart by name */ }
+  }
+  return known;
+};
 /**
  * The executor template this install records, re-bound to this checkout when it runs another's, and
  * its slots restarted through systemd (GY-1859). `installExecutorSupervision` refuses a template
@@ -907,14 +917,6 @@ export async function readLoopCode(root: string, options: {
  * uninstalled template is reported, never created: installing executors stays the operator's
  * `scripts/graphyard-executor.mjs --install`.
  */
-/** Every instance of this install's executor template the manager knows: each starts from the template's own ExecStart, so restarting them reloads the binding (GY-1859). */
-const knownExecutorInstances = (run: SystemctlRunner, units: InstallUnits) => {
-  const known = new Set<string>();
-  for (const listing of [['list-units', '--all', '--plain', '--no-legend', executorGlob(units)], ['list-unit-files', '--plain', '--no-legend', executorGlob(units)]]) {
-    try { for (const match of run(listing).matchAll(executorInstancePattern(units))) known.add(match[0]); } catch { /* an older systemctl without the glob; nothing to restart by name */ }
-  }
-  return known;
-};
 export async function alignExecutorUnits(root: string, options: { run?: SystemctlRunner; unitDirectory?: string; node?: string; heldScript?: string | null; /** GY-1859: restart the slots even when the template already binds this checkout — a slot booted before the checkout moved keeps the commit it loaded. */ restart?: boolean } = {}): Promise<{ wrote: 'updated' | 'unchanged' | 'none'; reason: string | null; restarted: string[] }> {
   const primary = connectionRoots(root)[0];
   const unitDirectory = options.unitDirectory ?? executorUnitDirectory();

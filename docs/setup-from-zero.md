@@ -16,7 +16,7 @@ Only legacy `--merger github` needs a human (GitHub Mobile).
 
 A new Hetzner server waits (exit 3) for price consent; rerun `--confirm-price X` (or `--max-monthly N`) with `--ssh-key NAME`.
 
-`up` runs, in order: preflight, control plane, host supervisor and Herdr, deploy key, merger setting (legacy only), master identities (`master autonomy --apply`; without the admin credential: exit 2; `--local`: none, you review and merge ([supervised](onboarding.md#supervised-mode-up---local))), onboarding, accounts (host logins), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to merge; goals wait. Reruns skip steps (`.graphyard/up.json`), re-opening `master-loop` when a unit runs other code. Host Herdr: `install --herdr-only`. `up` rewrites it (an executor slot's registration commit included), green once the loop reports this commit; `doctor` FAILs `loop-code` (readiness, `setupFromZero`) naming both paths and the rerun.
+`up` runs, in order: preflight, control plane, host supervisor and Herdr, deploy key, merger setting (legacy only), master identities (`master autonomy --apply`; without the admin credential: exit 2; `--local`: none, you review and merge ([supervised](onboarding.md#supervised-mode-up---local))), onboarding, accounts (host logins), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to merge; goals wait. Reruns skip steps (`.graphyard/up.json`); a loop or executor unit (or slot registration) on other code re-opens `master-loop`, which rewrites it, green once loop and slots report this commit; `doctor` FAILs `loop-code` naming both paths and the rerun. Host Herdr: `install --herdr-only`.
 
 ## The Setup page
 
@@ -73,7 +73,7 @@ Legacy merger. `--apply` serves `http://127.0.0.1:4311` and prints it; it opens 
 
 ## 8. Agent environments
 
-Connect each account in Settings → Agents ([dashboard](dashboard.md#settings-agents)); host-logged-in accounts register with `gy master registry propose --apply`. **Verify:** one `agent-environment:NAME` line passes per environment.
+Connect each account in Settings → Agents ([dashboard](dashboard.md#settings-agents)); host-logged-in accounts register with `gy master registry propose --apply`. **Verify:** one `agent-environment:NAME` line passes per environment; then [roles](onboarding.md#configure-the-fleet).
 
 ## 9. Worker sandbox and harness rules
 

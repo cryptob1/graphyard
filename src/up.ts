@@ -1072,7 +1072,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // invisible to it, and setup kept saying nothing was needed. Read the units against this CLI
       // first; a loop or executor on other code is rewritten to this CLI and restarted.
       const reading = deps.loopCode ? await deps.loopCode().catch(() => null) : null;
-      const loopStale = reading?.loopStale ?? null, executorStale = reading?.executorStale ?? null;
+      const loopStale = reading?.loopStale ?? null, executorStale = deps.alignExecutors ? reading?.executorStale ?? null : null;
       let rewrote: string | null = null;
       if (loopStale) {
         const token = await deps.masterToken();
@@ -1087,6 +1087,9 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         const aligned = await deps.alignExecutors({ restart: true });
         // An uninstalled template is not created here: installing executors stays the operator's scripts/graphyard-executor.mjs --install.
         if (aligned.wrote === 'none' && aligned.reason) throw new UpStop(`master-loop: ${executorStale}, and it could not be aligned: ${aligned.reason}`, upExitCodes.failed);
+        // An alignment that rewrote nothing and restarted nothing changed nothing the reading judged,
+        // so the slots it named still run the code they loaded: that is a failure, never a replacement.
+        if (aligned.wrote !== 'updated' && !aligned.restarted.length) throw new UpStop(`master-loop: ${executorStale}, but no executor slot of this install is known to the user manager to restart onto this checkout; restart the slots named there (systemctl --user restart UNIT), then rerun ${rerun()}`, upExitCodes.failed);
         if (aligned.wrote === 'updated') deps.emit({ kind: 'note', text: `master-loop: ${executorStale}; the template now runs this checkout${aligned.restarted.length ? `, and ${aligned.restarted.join(', ')} restarted onto it` : ''}.` });
         else if (aligned.restarted.length) deps.emit({ kind: 'note', text: `master-loop: ${executorStale}; ${aligned.restarted.join(', ')} restarted onto this checkout.` });
       }
@@ -1116,24 +1119,28 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       };
       await waitGreen(['master-loop'], false, refused);
       // GY-1859: green is the restarted loop itself reporting one of this install's commits, within
-      // one cycle. A reading that failed, a cursor with no commit yet, or a cursor still naming the
-      // old code is none of those, so the wait keeps polling — a silent success here would leave the
-      // install stuck on fixes it cannot see, the same silence the restart meant to end.
-      if (loopStale) {
+      // one cycle, and every replaced executor slot reading as this install's code again. A reading
+      // that failed, a cursor with no commit yet, or a loop or slot still naming the old code is none
+      // of those, so the wait keeps polling — a silent success here would leave the install stuck on
+      // fixes it cannot see, the same silence the restart meant to end.
+      if (loopStale || executorStale) {
         const deadline = deps.now() + machineWaitMs;
         for (let polls = 0; ; polls++) {
           const now = deps.loopCode ? await deps.loopCode().catch(() => null) : null;
-          const reported = now && !now.error && !now.loopStale ? now.loopCommit : null;
-          if (now && reported) {
-            deps.emit({ kind: 'note', text: `master-loop: replaced ${loopStale}; the loop now runs ${now.cli.root} at ${reported.slice(0, 12)}.` });
+          const read = now && !now.error ? now : null;
+          const reported = read && !read.loopStale ? read.loopCommit : null;
+          const loopDone = !loopStale || !!reported, executorsDone = !executorStale || (!!read && !read.executorStale);
+          if (read && loopDone && executorsDone) {
+            if (loopStale) deps.emit({ kind: 'note', text: `master-loop: replaced ${loopStale}; the loop now runs ${read.cli.root} at ${reported!.slice(0, 12)}.` });
+            if (executorStale) deps.emit({ kind: 'note', text: `master-loop: replaced ${executorStale}; every executor slot now runs ${read.cli.root}${read.cli.commit ? ` at ${read.cli.commit.slice(0, 12)}` : ''}.` });
             break;
           }
           if (deps.now() >= deadline) {
             const detail = !now ? 'the loop\'s code could not be read again'
               : now.error ? `the loop\'s code read failed again: ${now.error}`
-              : now.loopCommit ? `it still reports ${now.loopCommit.slice(0, 12)} instead of this checkout's ${now.cli.commit ? now.cli.commit.slice(0, 12) : 'commit'}`
-              : 'its cursor records no commit';
-            throw new UpStop(`master-loop: ${loopStale}; the unit was rewritten and the loop restarted, but ${detail}; rerun ${rerun()}`, upExitCodes.failed);
+              : !loopDone ? (now.loopCommit ? `it still reports ${now.loopCommit.slice(0, 12)} instead of this checkout's ${now.cli.commit ? now.cli.commit.slice(0, 12) : 'commit'}` : 'its cursor records no commit')
+              : `the executors still run other code: ${now.executorStale}`;
+            throw new UpStop(`master-loop: ${[loopStale, executorStale].filter(Boolean).join('; ')}; the units were rewritten and restarted, but ${detail}; rerun ${rerun()}`, upExitCodes.failed);
           }
           await deps.sleep(pollMs);
         }
@@ -1760,8 +1767,12 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     cliCheckout: async () => { const checkout = await loopCheckout(); return { root: checkout.root, dirty: dirtyCheckoutPaths(checkout) }; },
     loopRefusal: async () => coordinatorCheckoutRefusal(await loopCheckout(), 'the master loop'),
     // GY-1859: the loop and executor units are judged against the CLI running up, whose launcher and checkout are this run's.
-    loopCode: () => readLoopCode(root, { cliPath }),
-    alignExecutors: (options = {}) => alignExecutorUnits(root, options),
+    // A host install's loop and executors run on the host, from a checkout install manages there, so
+    // this machine's units are never judged or rewritten for it: a leftover local unit is not that loop.
+    ...(remoteLoopProviders.includes(request.provider) ? {} : {
+      loopCode: () => readLoopCode(root, { cliPath }),
+      alignExecutors: (options: { restart?: boolean } = {}) => alignExecutorUnits(root, options),
+    }),
     onboardingMerged: async url => execFileSync('gh', ['pr', 'view', url, '--json', 'state', '--jq', '.state'], { encoding: 'utf8', timeout: 60_000 }).trim() === 'MERGED',
     fileOnboarding: async (url, commit, operatorTokenFile, requestId) => {
       const server = await serverUrl();

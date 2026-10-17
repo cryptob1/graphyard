@@ -260,6 +260,50 @@ test('unit:up-waits-for-the-loop-own-commit — the post-restart wait goes green
   assert.match(failing.run.next, /read failed again: units\.json is corrupt/);
 });
 
+test('unit:up-waits-for-the-executors-own-commit — executor slots on other code are replaced the same way as the loop: the step goes green only once a later reading finds no executor on other code, fails when the alignment restarted nothing, and fails at the deadline naming the slot still on other code', async () => {
+  const { runUp } = await up();
+  /** The loop already on this commit, one running slot still on the pilot's commit by its own registration. */
+  const slotStale = () => reading({
+    loop: { unit: MASTER_UNIT, path: MASTER_UNIT_PATH, checkout: CLI_ROOT }, executor: { unit: EXECUTOR_TEMPLATE, path: EXECUTOR_PATH, checkout: CLI_ROOT },
+    loopCommit: COMMIT, loopStale: null, executorStale: `graphyard-executor-acme-shop@1.service runs ${OLD_COMMIT.slice(0, 12)}, not this checkout's ${COMMIT.slice(0, 12)}`,
+  });
+  const aligning = (answer: { wrote: 'updated' | 'unchanged' | 'none'; reason: string | null; restarted: string[] }) => (w: UpWorld) =>
+    async () => { w.aligned++; w.calls.push({ args: ['align-executors'] }); return answer; };
+
+  // The restarted slot re-registers on this commit: green, and the note names the replacement.
+  const replacedRoot = await resumedRoot('graphyard-up-executor-replaced');
+  const replaced = world([slotStale(), cleanReading()]);
+  const replacedEvents: UpEvent[] = [];
+  const replacedRun = await runUp(request(), { ...dependencies(replacedRoot, replacedEvents, replaced), alignExecutors: aligning({ wrote: 'unchanged', reason: null, restarted: ['graphyard-executor-acme-shop@1.service'] })(replaced) });
+  assert.equal(replacedRun.exitCode, 0, replacedRun.next);
+  assert.equal(replaced.aligned, 1, 'the slots are restarted through the alignment');
+  assert.deepEqual(named(replaced, ['master', 'init', '--token-stdin', '--replace-supervisor']), [], 'a loop on this commit is not rewritten');
+  assert.ok(replacedEvents.some(event => event.kind === 'note' && event.text.includes('every executor slot now runs')), 'the step reports the slots now run this checkout');
+
+  // Nothing is known to restart while a slot is reported on other code: a failure, never a replacement.
+  const nothingRoot = await resumedRoot('graphyard-up-executor-nothing');
+  const nothing = world([slotStale(), cleanReading()]);
+  const nothingRun = await runUp(request(), { ...dependencies(nothingRoot, [], nothing), alignExecutors: aligning({ wrote: 'unchanged', reason: null, restarted: [] })(nothing) });
+  assert.equal(nothingRun.exitCode, 1, nothingRun.next);
+  assert.match(nothingRun.next, /no executor slot of this install is known to the user manager to restart/);
+  const recorded = JSON.parse(await readFile(join(nothingRoot, '.graphyard', 'up.json'), 'utf8'));
+  assert.ok(!recorded.completed.includes('master-loop'), 'the step is not recorded done');
+
+  // The restarted slot keeps reporting the old commit: the wait fails at its deadline naming it.
+  const neverRoot = await resumedRoot('graphyard-up-executor-never');
+  const never = world([slotStale()]);
+  const neverRun = await runUp(request(), { ...dependencies(neverRoot, [], never), machineWaitMs: 20, alignExecutors: aligning({ wrote: 'unchanged', reason: null, restarted: ['graphyard-executor-acme-shop@1.service'] })(never) });
+  assert.equal(neverRun.exitCode, 1, neverRun.next);
+  assert.match(neverRun.next, new RegExp(`the executors still run other code: graphyard-executor-acme-shop@1\\.service runs ${OLD_COMMIT.slice(0, 12)}`));
+
+  // Loop and slot both on other code: the loop's commit alone is not green while the slot still is.
+  const bothRoot = await resumedRoot('graphyard-up-executor-both');
+  const both = world([reading(), reading({ loopCommit: COMMIT, loopStale: null })]);
+  const bothRun = await runUp(request(), { ...dependencies(bothRoot, [], both), machineWaitMs: 20 });
+  assert.equal(bothRun.exitCode, 1, bothRun.next);
+  assert.match(bothRun.next, /the executors still run other code/);
+});
+
 test('unit:doctor-flags-loop-on-other-code — the reading judges the units against this CLI, tolerating the pin and the held snapshot; doctor reports a loop or executor on other code as one line naming both paths and the rerun; the executor alignment re-binds and restarts', async () => {
   const { readLoopCode, alignExecutorUnits, readSetupStatus } = await repositorySetup();
   const { readinessChecklist } = await readinessModule();
@@ -293,6 +337,12 @@ test('unit:doctor-flags-loop-on-other-code — the reading judges the units agai
     assert.equal(foreign.loopCommit, OLD_COMMIT, 'the cursor records the commit the running loop loaded');
     assert.match(foreign.loopStale ?? '', new RegExp(`${quote(MASTER_UNIT)} starts the CLI in ${quote(pilot)}, not this checkout`), 'the loop on another checkout is named with both paths');
     assert.match(foreign.executorStale ?? '', new RegExp(`${quote(EXECUTOR_TEMPLATE)} runs ${quote(pilot)}, not this checkout`), 'and the executor on it');
+
+    // A unit that exists but cannot be read judges nothing: the reading carries the error, never an absent unit.
+    const blockedDirectory = join(base, 'units-blocked');
+    await mkdir(join(blockedDirectory, units.master), { recursive: true });
+    const blocked = await readLoopCode(root, { cliPath: join(cliCheckout, 'bin', 'graphyard.mjs'), run, units, unitDirectory: blockedDirectory, home });
+    assert.match(blocked.error ?? '', new RegExp(`${quote(MASTER_UNIT)} could not be read: EISDIR`), 'a unit read failure other than a missing file is the reading\'s error');
 
     // Another commit on this checkout's own unit is other code too; the pin and the held snapshot a
     // restart pinned are this install's own code, and never read as stale.
