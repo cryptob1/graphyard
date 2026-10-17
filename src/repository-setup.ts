@@ -1130,6 +1130,18 @@ export function executorMergeKinds(kinds: NextActionKind[] | null, loop: { name:
 }
 
 /**
+ * The executor script an ExecStart starts: the program itself, or the script operand right after its
+ * interpreter, as the shipped template writes it (`NODE SCRIPT --slot %i`). A matching path anywhere
+ * later — an argument of some other program — starts no executor, so it is undefined (GY-1881).
+ */
+export function executorLauncherScript(execStart: string | null | undefined): string | undefined {
+  const words = execStart ? systemdCommandLineWords(execStart) : [];
+  const launcher = /\/scripts\/graphyard-executor\.mjs$/;
+  if (launcher.test(words[0] ?? '')) return words[0];
+  return /(?:^|\/)node(?:js)?[\d.]*$/.test(words[0] ?? '') && launcher.test(words[1] ?? '') ? words[1] : undefined;
+}
+
+/**
  * The stale Graphyard checkout whose executor launcher a unit starts while the unit works in ROOT:
  * a unit an earlier Graphyard checkout of this install wrote for this repository, which the
  * installer may rebind onto this checkout (GY-1881) — `up`'s host executor alignment runs the real
@@ -1144,7 +1156,7 @@ export function staleExecutorLauncherCheckout(text: string, root: string, home =
   // another checkout, or naming none, may be another install's, and the launcher naming a Graphyard
   // checkout cannot make it ROOT's.
   if (!workingDirectory || canonicalPath(workingDirectory) !== canonicalPath(root)) return null;
-  const script = execStart ? systemdCommandLineWords(execStart).find(part => /\/scripts\/graphyard-executor\.mjs$/.test(part)) : undefined;
+  const script = executorLauncherScript(execStart);
   if (!script) return null;
   const checkout = canonicalPath(dirname(dirname(script)));
   return checkout === canonicalPath(root) ? null : checkout;
@@ -1193,7 +1205,7 @@ export async function installExecutorSupervision(root: string, options: { count?
   // this checkout that starts any other program is no executor slot of this install (GY-1881).
   if (current !== null) {
     const start = unitCheckout(current).execStart, words = start ? systemdCommandLineWords(start) : [];
-    if (!words.some(part => /\/scripts\/graphyard-executor\.mjs$/.test(part))) throw new ForeignUnitRefusal(unitFile, words.slice(0, 2).join(' ') || 'no ExecStart', primary);
+    if (!executorLauncherScript(start)) throw new ForeignUnitRefusal(unitFile, words.slice(0, 2).join(' ') || 'no ExecStart', primary);
   }
   // GY-1790: while the CLI pin stands a slot starts the launcher held in the snapshot, never an
   // entry the checkout may hold dirty; a reinstall keeps that binding until the pin lifts. The

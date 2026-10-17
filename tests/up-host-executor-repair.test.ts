@@ -236,6 +236,14 @@ test('unit:up-host-executor-foreign-refused — a unit whose launcher is not a G
   assert.match(inRepositoryRefusal.message, new RegExp(quote(`${direct.repo}/serve.js`)), 'the refusal names the program the unit starts');
   assert.equal(await readFile(direct.unitFile, 'utf8'), inRepository, 'the repository\'s own program unit is never rewritten');
 
+  // A program working in the repository that merely takes an executor script path as an argument
+  // starts no executor: only the script operand right after the interpreter counts (review on #1279).
+  const argumentOnly = `[Unit]\nDescription=another program\n\n[Service]\nWorkingDirectory=${direct.repo}\nExecStart=/usr/bin/node ${direct.repo}/serve.js --worker ${direct.staleCheckout}/scripts/graphyard-executor.mjs\nRestart=always\n`;
+  await writeFile(direct.unitFile, argumentOnly);
+  const argumentRefusal = await installExecutorSupervision(direct.repo, { run: () => '', unitDirectory: direct.unitDirectory }).catch((error: any) => error);
+  assert.equal(argumentRefusal?.name, 'ForeignUnitRefusal', `an executor path as a mere argument is refused: ${argumentRefusal?.message}`);
+  assert.equal(await readFile(direct.unitFile, 'utf8'), argumentOnly, 'the program whose argument names an executor script is never rewritten');
+
   // A unit naming no WorkingDirectory whose launcher is another Graphyard checkout's executor is not
   // provably this install's, so it is refused rather than rebound (review thread on #1279).
   const unanchored = executorUnitText(direct.repo, direct.staleCheckout).replace(/^WorkingDirectory=.*\n/m, '');
