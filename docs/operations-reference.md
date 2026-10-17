@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. `daemon.stepStalls`: a call failing one signature three consecutive cycles is one stall; its bound remedy (unknown profile, 401, merge-record key reuse) runs once, verified; otherwise the master is woken; a stalled dispatch, merge or failed cycle retries once per five minutes. Log: `journalctl --user -u graphyard-master`.
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. `daemon.stepStalls`: same-signature failures three consecutive cycles stall: remedied once, verified (unknown-profile, 401, merge-record key-reuse), else master woken; dispatch/merge/cycle retry per 5min. Log: `journalctl --user -u graphyard-master`.
 
 ### Perpetual master loop
 
@@ -15,19 +15,19 @@ Leases expire 120s after last heartbeat (recorded renewal fault, plane stall: 30
 
 ## Supervisor died leaving a containment quarantine
 
-On worker, `graphyard master settle-containment GY-N "reason"` verifies nothing survives; refused: confirm stop, then [`rework`, or `recover-containment` once delivered](operations.md#recovery-recipes) ([autosettle](protocol/leases.md#watch)).
+On worker, `graphyard master settle-containment GY-N "reason"` verifies nothing survives; refused: confirm stop, [`rework`, or `recover-containment` once delivered](operations.md#recovery-recipes) ([autosettle](protocol/leases.md#watch)).
 
 ## Submitted implementation needs rework
 
-Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits. `scripts/rework-causes.mjs` classifies last 100 deliveries' rounds (55% own-change, 33% conflicts; raw median 2); `master status` `speed.reworkRounds.ownChange` excludes out-of-item causes.
+Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits. `scripts/rework-causes.mjs` classifies last 100 deliveries' rounds (55% own-change, 33% conflicts; raw median 2); `speed.reworkRounds.ownChange` (`master status`) excludes out-of-item causes.
 
 ## Retro synthesis
 
-Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables) files item per crossed pattern, drafting `retro.drafted` changes per recurring refusal/rework cause; a non-drafting operator agent [approves](protocol/work-commands.md) (`decision:approve`)/refuses each. Approved: [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`.
+Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables) files item per crossed pattern, drafting `retro.drafted` changes per recurring refusal/rework cause; a non-drafting operator agent [approves](protocol/work-commands.md) (`decision:approve`)/refuses each. Approved: [`retroStanding`](protocol/read-endpoints.md) (`graphyard status GY-N`).
 
 ## Flaky CI check
 
-[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); a pass clears it; on main, later merges wait for reruns. Cancelled/timed-out jobs rerun ≤3 times, then one `escalation:main-guard:SHA` infrastructure fault names run and step, reverting nothing. A real failure reruns once: a pass joins `mainGuardFlakes` (last 20); a second failure, refusal or unconcluded hour reverts.
+[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); a pass clears it; on main later merges await reruns. Cancelled/timed-out jobs rerun ≤3×, then one `escalation:main-guard:SHA` infrastructure fault names run and step, reverting nothing. A real failure reruns once: a pass joins `mainGuardFlakes` (last 20); a second failure, refusal or unconcluded hour reverts.
 
 ## Accepted evidence turns out to be wrong
 
@@ -64,11 +64,9 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ### Reading the budget
 
-`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also `master status`): REST-only `perHour` across replicas (`instances`), `limit`/`share`/`target` 0.6/`byEndpoint`; `lastHour` (also `master status`): the hour's requests by kind. Immutable, per-cycle, webhook-driven reads [aren't repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
+`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also `master status`): REST-only `perHour` across replicas (`instances`), `limit`/`share`/`target` 0.6/`byEndpoint`; `lastHour` (also `master status`): hourly requests by kind. Immutable, per-cycle, webhook-driven reads [aren't repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
 
-### Reading under control-plane
-
-`master merger control-plane`: control-plane-observed candidates are observed from its checkout, GitHub polled for none of their pull request, reviews or checks; a person-opened one is still observed. Diagnostician and doctor read `graphyard status GY-N`, not `gh pr view`.
+`master merger control-plane`: control-plane-observed candidates are observed from its checkout, GitHub polled for none of their pull request, reviews, checks; a person-opened one is still observed. Diagnostician, doctor read `graphyard status GY-N`, not `gh pr view`.
 
 ### Webhook liveness
 
@@ -78,19 +76,19 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 `resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume+`GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes[:ROOT]`, per `TMPDIR`/`/tmp` (any-name checkout/worktree unheld and unregistered 24h; <25% free: escalates, naming consumers); `loaded-revision`: code moves. No fault: owed restart within bound, pane unowned <10min, `/tmp` >10% free <30min past a ≥25% pass.
 
-Session-started `npm test`/`test:browser`/typecheck/`tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`); CI unbounded. Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; one fault per dip) until 1GB above.
+Session-started `npm test`/`test:browser`/typecheck/`tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`); CI unbounded. Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`, one fault per dip) until 1GB above.
 
 ## Storage retention
 
-Receipts answer retries day; compaction deletes past `GRAPHYARD_LEDGER_RETENTION_DAYS` (14), appending `ledger.compacted`.
+Receipts answer retries day; compaction deletes past `GRAPHYARD_LEDGER_RETENTION_DAYS` (14), appends `ledger.compacted`.
 
 ## Bootstrap mode for a self-proving change
 
-`policy:bootstrap` holders add `"bootstrap":{"reason":"…","contractPaths":["src/herdr/recovery.ts"]}` to criterion; other gates apply, `e2e:` proofs never defer, next item touching those paths owes it (`graphyard obligations`).
+`policy:bootstrap` holders add `"bootstrap":{"reason":"…","contractPaths":["src/herdr/recovery.ts"]}` to criterion; other gates apply; `e2e:` never defer; next item touching those paths owes it (`graphyard obligations`).
 
 ## Delivered with a failed smoke proof
 
-Stays Done, **delivered with failure**; revert via new item.
+Stays Done, **delivered with failure**; new item reverts.
 
 ## Merge bypass
 
@@ -115,7 +113,7 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥2× workers) pace per token, merge path first (`observationThroughput`). Heartbeat/claim/`complete`/`blocked` own a lease pool (`leaseHealth`). During startup validation `/healthz` reports `readiness: false`, `/healthz?ready` 503.
+`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥2× workers) pace per token, merge path first (`observationThroughput`). Heartbeat/claim/`complete`/`blocked` own a lease pool (`leaseHealth`). Starting up, `/healthz` reports `readiness: false` (`/healthz?ready`: 503).
 
 ### Concurrent reconciliation
 

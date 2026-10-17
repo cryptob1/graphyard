@@ -7,7 +7,7 @@ import { isStallHold, noteCycleStalls, noteStepFailure, noteStepsSucceeded, reme
 import type { MergerMode } from '../src/merger-mode.js';
 import { cycleFailureCeilingMs } from '../src/daemon/liveness.js';
 import { applyStepStallRemedy, stepStallRemedy, stepStallRemedyRegistry, type StepStallRemedyOutcome } from '../src/stall-remedies.js';
-import { mergeLedgerAdoption, profileRemedyOutcome, stallHeldEffects, stallRemedyRunner } from '../src/daemon/run.js';
+import { mergeLedgerAdoption, profileRemedyOutcome, stallHeldEffects, stallRemedyRunner } from '../src/daemon/step-stalls.js';
 import type { DaemonEffects } from '../src/daemon/effects.js';
 
 // GY-1854: a loop step or dispatcher call that fails with the same normalised signature on three
@@ -258,8 +258,9 @@ test('unit:held-effects-gate-the-call — while a step\u2019s stall stands insid
   assert.equal(refusal!.resource, 'work');
   assert.match(refusal!.message, new RegExp(stallHoldMarker));
   assert.equal(dispatches, 0, 'the call itself was not attempted inside the window');
-  assert.equal(await held.mergeWriter!.merger(), 'github', 'the merge writer starts no new merge inside the window');
-  assert.equal(mergers, 0, 'the recorded merger is not even read while held');
+  assert.equal(held.mergeWriter!.admit!(), false, 'the merge writer starts no new merge inside the window');
+  assert.equal(await held.mergeWriter!.merger(), 'control-plane', 'the recorded merger every other step reads (the shadow gate among them) is left as it is');
+  assert.equal(mergers, 1);
 
   // Other effects pass through untouched.
   assert.equal(held.snapshot, (effects as { snapshot?: unknown }).snapshot);
@@ -268,8 +269,23 @@ test('unit:held-effects-gate-the-call — while a step\u2019s stall stands insid
   clock += stallBackoffMs + 1;
   await held.dispatch!(work, {} as never, [] as never, {} as never);
   assert.equal(dispatches, 1, 'past the window the call is attempted');
-  assert.equal(await held.mergeWriter!.merger(), 'control-plane');
-  assert.equal(mergers, 1);
+  assert.equal(held.mergeWriter!.admit!(), true, 'past the window a new merge is admitted');
+  // The admission arms the next window: a second call before it ends is held, however late the
+  // admitted attempt settles, so the call is attempted once per window.
+  const again = await held.dispatch!(work, {} as never, [] as never, {} as never).then(() => null, error => error as DispatchReservedError);
+  assert.ok(again instanceof DispatchReservedError, 'a second launch inside the new window is held');
+  assert.equal(dispatches, 1);
+  assert.equal(held.mergeWriter!.admit!(), false, 'a second merge inside the new window is held');
+  const run = Object.values(loop.stepStalls).find(entry => entry.step === 'dispatch')!;
+  assert.ok(run.attemptAt, 'the admission is on the run until the attempt reports');
+  // The admitted attempt's failure, recorded a cycle later, counts as that window's one failure and
+  // keeps the window its admission armed.
+  const window = run.nextAttemptAt;
+  const counted = noteStepFailure(loop, 'dispatch', failing, clock + 30_000, 40);
+  assert.equal(counted.run.count, 4, 'the attempt\u2019s failure counts');
+  assert.equal(counted.run.attemptAt, null);
+  assert.equal(counted.run.nextAttemptAt, window, 'the window the admission armed stands');
+  assert.equal(counted.stalled, false, 'the standing stall is not recorded again');
 
   // A loop wired without the ports is held nothing: the wrap is transparent.
   const bare = stallHeldEffects({} as DaemonEffects, () => loop, now);

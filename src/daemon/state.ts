@@ -491,6 +491,8 @@ export const stepStallSchema = z.object({
   remedy: stepStallRemedyRecordSchema.nullable().default(null),
   /** When the stalled call may be attempted next: once per five minutes while the stall stands. */
   nextAttemptAt: z.string().nullable().default(null),
+  /** When the held call admitted its window's one attempt, until that attempt's failure is counted; null otherwise. */
+  attemptAt: z.string().nullable().default(null),
 }).strict();
 export type StepStall = z.infer<typeof stepStallSchema>;
 export const daemonStateSchema = z.object({

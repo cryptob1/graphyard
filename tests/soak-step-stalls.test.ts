@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { emptyDaemonState, runDaemon, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { retainedStepStalls, stallBackoffMs, stallCycleBound, stallSubjectKey } from '../src/daemon/step-stalls.js';
+import { retainedStepStalls, stallBackoffMs, stallCycleBound, stallSubjectKey, stallWakeSubjects } from '../src/daemon/step-stalls.js';
+import { daemonSummary } from '../src/daemon/run.js';
 import type { StepStallRemedyKind } from '../src/stall-remedies.js';
 import type { Work } from '../src/model.js';
 import type { HerdrAgent } from '../src/master/herdr.js';
@@ -50,7 +51,7 @@ const submitted = (now: number): Work => ({
   stageEnteredAt: new Date(now).toISOString(), ready: true, epoch: 1,
   lease: null, workspaces: [], submission: { epoch: 1, pr: 7 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null,
   candidate: { sha: head, baseSha: baseTip, pr: 7, branch: 'graphyard/gy-7-1', author: 'implementer' },
-  gates: [{ name: 'build', passed: true }, { name: 'test', passed: true }], violations: [],
+  gates: [{ name: 'build', passed: true }, { name: 'review', passed: true }, { name: 'test', passed: true }], violations: [],
   observation: { candidate: { sha: head, baseSha: baseTip, pr: 7, branch: 'graphyard/gy-7-1', author: 'implementer' }, checks: [], reviews: [], protected: true, mergeable: true, merged: false, prState: 'open', draft: false, source: 'control-plane', at: new Date(now).toISOString(), baseTip, baseTree: 'tree', files: ['src/a.ts'], scopeFiles: [] },
   // The server's folded ledger the adoption reads back: four events, nothing open to reconcile.
   mergeLedger: { key: 'GY-7', state: 'refused', head, mergeSha, baseTip, risk: 'ordinary', intentAt: new Date(now).toISOString(), pushedAt: null, observedTip: null, refusal: { kind: 'merge', reason: 'earlier round', at: new Date(now).toISOString() }, events: 4 },
@@ -120,13 +121,15 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
     log: (line: string) => result.logs.push(line),
     checkout: async () => ({ root: '/outside/repo', commit: 'c'.repeat(40), modified: [] as string[], untracked: [] as string[] }),
     checkoutRestore: async () => [],
-    process: { on: (_signal: NodeJS.Signals, handler: () => void) => { stop = handler; }, off: () => {} } as unknown as Pick<NodeJS.Process, 'on' | 'off'>,
+    // The loop also listens for unhandledRejection and uncaughtException on this host: only the
+    // stop signal's handler is the one the day's end calls.
+    process: { on: (signal: string, handler: () => void) => { if (signal === 'SIGTERM') stop = handler; }, off: () => {} } as unknown as Pick<NodeJS.Process, 'on' | 'off'>,
     wake: { sleep: async (wait: number) => {
       result.waits.push(wait);
       judge(`cycle at +${Math.round((now - start) / minute)}min`);
       // The remedy attempt the run carries is written once and never re-written: its record is
       // snapshotted each cycle, so a second application would show here as a change.
-      result.remedyHistory.push(JSON.stringify(Object.values(result.state.stepStalls).map(run => run.remedy)));
+      result.remedyHistory.push(JSON.stringify(Object.values(result.state.stepStalls).map(run => run.remedy).filter(Boolean)));
       now += wait;
       if (now - start >= dayMs) stop();
       return ['soak-tick'];
@@ -162,7 +165,7 @@ test('unit:soak-step-stalls-dispatch-hold — a day of dispatches refused the sa
   const standing = stallOf(result);
   assert.ok(standing, 'the day recorded the stall');
   assert.equal(Object.keys(result.state.stepStalls).length, 1, 'one signature, one run, one stall — the record stays bounded');
-  assert.match(standing.signature, /^dispatch: Graphyard refused .*upstream unavailable$/, 'the run is signed by the step and the normalised refusal');
+  assert.match(standing.signature, /^dispatch: Dispatch of GY-N to worker-a failed: Graphyard refused .*upstream unavailable/, 'the run is signed by the step and the normalised refusal');
   assert.ok(standing.stalledAt, 'the run reached three consecutive cycles and stands stalled');
 
   // The launch is attempted on every cycle until the stall stands, and from the stall on it is
@@ -206,7 +209,7 @@ test('unit:soak-step-stalls-remedy-once — a day of merge records refused as re
   const standing = stallOf(result);
   assert.ok(standing, 'the day recorded the stall');
   assert.equal(Object.keys(result.state.stepStalls).length, 1, 'one signature, one run, one stall — the record stays bounded');
-  assert.match(standing.signature, /^merge: Merge of GY-7 head .* was refused a record key reused with different input/, 'the run is signed by the merge step and the writer\u2019s own wording');
+  assert.match(standing.signature, /^merge: Merge of GY-N head <sha> was refused a record key reused with different input/, 'the run is signed by the merge step and the writer\u2019s own wording');
   assert.ok(standing.stalledAt, 'the run reached three consecutive cycles and stands stalled');
 
   // The stall binds the loop's own ledger adoption, and the remedy is applied exactly once for
@@ -218,7 +221,7 @@ test('unit:soak-step-stalls-remedy-once — a day of merge records refused as re
   assert.equal(new Set(result.remedyHistory.filter(entry => entry !== '[]')).size, 1, 'the remedy attempt is written once and never re-written over the day');
 
   // The merge is started on every cycle until the stall stands, and from the stall on only at
-  // whole windows: the gate answers the writer a merger that is not control-plane, so the refused
+  // whole windows: the writer's admit answers false inside the window, so the refused
   // key is attempted once per five minutes.
   const stalledFrom = Date.parse(standing.stalledAt!) - start;
   const after = result.records.filter(at => at >= stalledFrom);
@@ -238,7 +241,14 @@ test('unit:soak-step-stalls-remedy-once — a day of merge records refused as re
   const stallWakes = result.prompts.filter(prompt => prompt.includes(subject));
   assert.ok(stallWakes.length >= 1, 'the standing stall reaches the master session');
   assert.equal(stallWakes.length, 1, `one wake per run: ${stallWakes.length} stall prompt(s) over the day`);
-  assert.match(stallWakes[0], /merge-record-idempotency remedy was applied once/);
+  assert.match(stallWakes[0], /Changed subjects/);
+  // The task the wake names by key: the signature, the step and the remedy's one recorded outcome,
+  // and master status serves the stall under that same key.
+  const task = stallWakeSubjects(result.state, 'graphyard').find(entry => entry.key === subject)!;
+  assert.match(task.detail, /merge-record-idempotency remedy was applied once/);
+  assert.ok(task.detail.includes(standing.signature), 'the signature is the task');
+  const served = daemonSummary(result.state, start + dayMs, interval).stepStalls.find(row => row.subject === subject);
+  assert.equal(served?.needsMaster, true, 'master status serves the stall under the key the wake names');
 
   // The bookkeeping the day moved is what a restart would read.
   const stalls = JSON.parse(result.cursorStalls) as Record<string, { remedy: { verified: boolean } }>;

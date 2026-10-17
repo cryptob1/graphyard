@@ -5,7 +5,7 @@ The master (`coordinator`) routes and administers GitHub unasked, never implemen
 
 ## Operate
 
-Keep cycling: `master status`; `master run` dispatches; merge gate-passing candidates; rework findings; deployment verification (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop)); control plane performs "Close finished agent sessions". The deployment-verification step records each loop-owned observation item's due reading on the serving release (a pass closes it `delivered-observation`; a fail escalates, naming the measured values; an unrunnable one records why); `master reading GY-N pass|fail DETAIL` records one by hand. Live Confirm-access fixtures: [`master browser capture`](master-agent-reference.md#github-administration-through-the-browser), never a human. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, every merge is verified against the exact deployed release or deployment-blocked. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production`: main ahead of production.
+Keep cycling: `master status`; `master run` dispatches; merge gate-passing candidates; rework findings; deployment verification (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop)); control plane performs "Close finished agent sessions". The deployment-verification step records each loop-owned observation item's due reading on the serving release (a pass closes it `delivered-observation`; a fail escalates, naming the measured values; an unrunnable one records why); `master reading GY-N pass|fail DETAIL` records one by hand. Live Confirm-access fixtures: [`master browser capture`](master-agent-reference.md#github-administration-through-the-browser), never a human. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, merges verified against the exact deployed release or deployment-blocked. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production`: main ahead of production.
 
 `master restart` (stalled loop) runs `systemctl --user restart graphyard-master.service` if the [unit](onboarding.md#the-loop-must-be-supervised)'s ExecStart is node `cliPath` (or pin) `master run`, else detached; never from [dirty/non-forward checkouts](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level). [Confined](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level): a loop request.
 
@@ -13,7 +13,7 @@ Loop sleeps `run.intervalSeconds` (≤30s if actionable).
 
 ### System-driven items
 
-Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, `decide attest|merge`, loop-owned `decide rework` (`--precedent` answers refusals), except stopped-loop recovery, unproduced `manual:` attestations, `decide merge` unauthorized or operator-agent-less. The loop attests unproduced `manual:` proofs via an independent approver once per head, base, policy revision.
+Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, `decide attest|merge`, loop-owned `decide rework` (`--precedent` answers refusals), except stopped-loop recovery, unproduced `manual:` attestations, `decide merge` unauthorized or operator-agent-less. The loop attests unproduced `manual:` proofs via an independent approver per head, base, policy revision.
 
 ### Session liveness is reconciled, not trusted
 
@@ -21,7 +21,7 @@ Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `
 
 **Instead of closing sessions by hand:** do nothing for a finished or dead session (`graphyard master run --once` sweeps); attach to an overlong one with its handle's command. Never mark another session's handle finished to free a slot. The loop and `master approver` relaunch never-started approvers (`done`, still-screened `idle`) past the start bound; hand-launched, replaced panes [bind](master-agent-sessions.md#the-start-bound-reads-the-pane).
 
-`blocked` frees its slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) self-clear: `github-credential`, `sandbox-path`, `github-outage`, `control-plane-error`, `outside-scope-test-failure`, `runtime-denial`, `worktree-mismatch`, `dispatch-failure`, `runtime-exhaustion`, `host-supervisor`; `master-role` a master-role identity runs it and unblocks; `planned-file-scope`, `needs-decision` approver. `genuine`/`human-only` escalate, but a loop-held item's unleased inability report clears itself.
+`blocked` frees its slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) self-clear: `github-credential`, `sandbox-path`, `github-outage`, `control-plane-error`, `outside-scope-test-failure`, `runtime-denial`, `worktree-mismatch`, `dispatch-failure`, `runtime-exhaustion`, `host-supervisor`; `master-role` a master-role identity runs and unblocks; `planned-file-scope`, `needs-decision` approver. `genuine`/`human-only` escalate; a loop-held item's unleased inability report clears itself.
 
 ### System invariants
 
@@ -29,7 +29,7 @@ Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linger
 
 ## Research and diagnosis
 
-`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get diagnostician (`run.diagnostician`; none for parks); fix `plannedFiles` as `master create`; quota refusals wait `retryAt`; `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3×, then `decision-stale`; raced/delivered, [plane-wide](operations.md#incident-decision-tree) requests retry; refused `create` 409/400 is `fix-item`; matching close 409 adopted, mismatched held; no `loop` fault for restart-lost diagnoses, approver refusals, nor `merge` for base conflicts <30m.
+`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get diagnostician (`run.diagnostician`; none for parks); fix `plannedFiles` as `master create`; quota refusals wait `retryAt`; `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3×, then `decision-stale`; raced/delivered, [plane-wide](operations.md#incident-decision-tree) requests retry; refused `create` 409/400 is `fix-item`; matching close 409 adopted, mismatched held; no `loop` fault for restart-lost diagnoses/approver refusals, nor `merge` for base conflicts <30m.
 
 ## Machine-filed backlog
 
@@ -41,7 +41,7 @@ Past the build gate (`autoDispatch`): a producer request per proof group (`unit`
 
 - **Concurrency is per role**: `concurrency` (1–20, default 1; above 1 each session takes a name unique to its request; `run.reviewerProfile` and producer profiles default to 4 sessions) applies without a restart; lowering it drains first (`longestWaitMs`); starved minutes: `counts.concurrencyStarved`.
 - `pane_not_found` panes close. No request outlives its own token: one expired and unreported by Herdr settles `expired` (`dispatch.sessionReconcile.stuck` counts pending). Unanswered sessions relaunch (≤12 per request, then `dispatch.abandoned`); exhausted producer runs raise `escalation:proof-exhausted`, then rework.
-- **Every role fails over on spent quota** or waits as one uncounted `capacity` line.
+- **Every role fails over on spent quota** or waits (one uncounted `capacity` line).
 
 The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once relaunching stops.
 
