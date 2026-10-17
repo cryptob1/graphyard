@@ -29,8 +29,9 @@ export interface Closure {
   pullRequest?: { pr: number; outcome: 'owed' | 'closed' | 'already-closed' } | null;
 }
 
+/** A close that names no kind (GY-1923: a case settling its change with only a reason) is `obsolete`, the one kind that names no other item or commit. */
 export const closeSchema = z.object({
-  kind: z.enum(closureKinds),
+  kind: z.enum(closureKinds).default('obsolete'),
   reason: z.string().trim().min(1).max(2000),
   ref: z.string().trim().min(1).max(200).nullable().optional(),
 }).strict().superRefine((data, context) => {
