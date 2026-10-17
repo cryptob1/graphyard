@@ -22,6 +22,9 @@ export const applicationSchema = z.discriminatedUnion('kind', [staticApplication
 export type Application = z.infer<typeof applicationSchema>;
 export const applicationKinds = ['static', 'compose'] as const;
 
+/** A case id as src/e2e/case.ts accepts it: lowercase letters, digits, ., _ and -, at most 100 characters. */
+const boundCaseId = /^[a-z0-9][a-z0-9._-]{0,99}$/;
+
 export const previewModes = ['local', 'off'] as const;
 export type PreviewMode = (typeof previewModes)[number];
 /** The most changes one candidate holds. */
@@ -36,7 +39,7 @@ export const projectDeliveryShape = {
   productionVerification: z.boolean().optional(),
   applications: z.array(applicationSchema).max(20).optional(),
   /** E2E case id → the application id it runs against. */
-  cases: z.record(z.string().trim().regex(/^[a-z0-9][a-z0-9-]{0,79}$/, 'A bound case id is the id of an e2e/cases/ID.json case'), z.string()).optional(),
+  cases: z.record(z.string().trim().regex(boundCaseId, 'A bound case id is the id of an e2e/cases/ID.json case: 1-100 lowercase letters, digits, ., _ or -'), z.string()).optional(),
 };
 
 /**
@@ -56,7 +59,10 @@ export function applicationProblems(declared: { applications?: Application[]; ca
 }
 
 /** The repository's E2E case ids, from its file list. */
-export const caseIdsOf = (files: readonly string[]) => files.flatMap(file => /^e2e\/cases\/([a-z0-9][a-z0-9-]{0,79})\.json$/.exec(file)?.[1] ?? []);
+export const caseIdsOf = (files: readonly string[]) => files.flatMap(file => {
+  const id = /^e2e\/cases\/([^/]+)\.json$/.exec(file)?.[1];
+  return id && boundCaseId.test(id) ? [id] : [];
+});
 
 /**
  * The applications a scan finds: a Compose file at the root (its first service exposing a port), and

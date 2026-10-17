@@ -19,7 +19,7 @@ import { prepareInstall, repositoryDelivery } from '../src/install/index.js';
 import { installIdFor } from '../src/install/types.js';
 import { harness, REPOSITORY } from './install-harness.js';
 import { deliveryWorkflowFile } from '../src/onboarding.js';
-import { loadProjectDelivery, projectDeliveryAssignment, projectDeliveryVariable, setProjectDelivery } from '../src/project-applications.js';
+import { detectApplications, loadProjectDelivery, projectDeliveryAssignment, projectDeliveryVariable, setProjectDelivery } from '../src/project-applications.js';
 import { DeliveryDefaults } from '../web/components/delivery-slices.js';
 import Sidebar from '../web/components/sidebar.js';
 import { views } from '../web/pages/index.js';
@@ -72,11 +72,11 @@ const runCli = (cwd: string, args: string[], env: NodeJS.ProcessEnv) => promisif
   .then(result => result.stdout, error => { throw new Error(String((error as any).stderr || error.message)); });
 
 /** Normal onboarding: init --scan, then init --scan --apply of the reviewed proposal. */
-async function onboard(root: string, merger: 'control-plane' | 'github') {
+async function onboard(root: string, merger: 'control-plane' | 'github', scanArgs: string[] = []) {
   const stub = await statusStub(merger);
   try {
     const env = cliEnv(stub.url);
-    const scanned = JSON.parse(await runCli(root, ['init', '--scan'], env));
+    const scanned = JSON.parse(await runCli(root, ['init', '--scan', ...scanArgs], env));
     await writeFile(join(root, '.graphyard/github-app.json'), JSON.stringify({ appId: 99, slug: 'graphyard-owner-fixture', repository: 'owner/fixture', privateKey: 'test-only', webhookSecret: 'test-only', installationId: 7 }), { mode: 0o600 });
     const applied = JSON.parse(await runCli(root, ['init', '--scan', '--apply', '--url', stub.url], env));
     const config = JSON.parse(await readFile(join(root, 'graphyard.json'), 'utf8'));
@@ -124,11 +124,23 @@ test('integration:goal-local-delivery-onboarding — normal init of a fixture re
   assert.equal(github.config.delivery.deploy.adapter, 'railway');
   assert.equal(github.config.delivery.previews, undefined);
   for (const path of generatedWorkflowFiles) assert.equal(await exists(join(legacy, path)), true, `${path} is generated under the GitHub merger`);
+  // Switching that release-candidate repository to local removes the generated candidate and promotion
+  // workflows, so nothing keeps releasing outside the control plane; a hand-written one is named instead.
+  const switched = await fixtureRepository({ 'graphyard.json': `${JSON.stringify({ documentation: github.config.documentation, delivery: github.config.delivery }, null, 2)}\n` });
+  for (const path of generatedWorkflowFiles) { await mkdir(join(switched, path, '..'), { recursive: true }); await writeFile(join(switched, path), await readFile(join(legacy, path), 'utf8')); }
+  const local = await onboard(switched, 'github', ['--delivery', 'local']);
+  assert.equal(local.config.delivery.mode, 'local');
+  for (const path of generatedWorkflowFiles) assert.equal(await exists(join(switched, path)), false, `${path} is removed on the switch to local`);
+  assert.ok(generatedWorkflowFiles.every(path => local.applied.applied.some((line: string) => line.startsWith(`removed ${path}`))), 'the apply reports each removal');
+  const handWritten = await fixtureRepository({ 'graphyard.json': `${JSON.stringify({ documentation: github.config.documentation, delivery: github.config.delivery }, null, 2)}\n`, [generatedWorkflowFiles[0]]: 'name: mine\non: workflow_dispatch\n' });
+  const kept = await onboard(handWritten, 'github', ['--delivery', 'local']);
+  assert.equal(await exists(join(handWritten, generatedWorkflowFiles[0])), true, 'a workflow init did not generate is never deleted');
+  assert.ok(kept.applied.drift.some((line: string) => line.startsWith(`${generatedWorkflowFiles[0]} is not one init generated`)));
 
   // A repository's committed policy is its own choice: a control-plane merger never rewrites it.
   const committedPolicy = { ...github.config.delivery };
-  const kept = await fixtureRepository({ 'graphyard.json': `${JSON.stringify({ documentation: github.config.documentation, delivery: committedPolicy }, null, 2)}\n` });
-  const keptOnboarding = await onboard(kept, 'control-plane');
+  const keptRepository = await fixtureRepository({ 'graphyard.json': `${JSON.stringify({ documentation: github.config.documentation, delivery: committedPolicy }, null, 2)}\n` });
+  const keptOnboarding = await onboard(keptRepository, 'control-plane');
   assert.deepEqual(keptOnboarding.config.delivery, committedPolicy);
 
   // A repository with no CI of its own under the local mode still gets no workflow and no graphyard-gate requirement.
@@ -218,6 +230,15 @@ test('integration:goal-delivery-defaults-visible — /api/status and the Deliver
   serving({ mode: 'local', applications: [{ id: 'site', kind: 'static', directory: '../outside' }] });
   assert.match((await read('status')).project.error, /applications\.0\.directory: A static application directory is a repository-relative path without \.\. segments/);
 
+  // Case ids follow e2e/cases' own grammar (dots, underscores, up to 100 characters): served, discovered and bound.
+  const longest = `c${'x'.repeat(99)}`;
+  serving({ mode: 'local', applications, cases: { checkout_flow: 'site', 'api.v2': 'app', [longest]: 'site' } });
+  assert.deepEqual((await read('status')).project.delivery.cases, { checkout_flow: 'site', 'api.v2': 'app', [longest]: 'site' });
+  serving({ mode: 'local', applications, cases: { [`${longest}x`]: 'site' } });
+  assert.match((await read('status')).project.error, /does not parse: cases\.cx{100}: Invalid key in record/);
+  const discovered = detectApplications(['index.html', ...['checkout_flow', 'api.v2', longest, `${longest}x`].map(id => `e2e/cases/${id}.json`)], {}, null);
+  assert.deepEqual(discovered.cases, { checkout_flow: 'site', 'api.v2': 'site', [longest]: 'site' }, 'discovery binds every valid case id and skips one over 100 characters');
+
   // init refuses a committed declaration it cannot use, naming the binding and the fix, and writes nothing.
   const stub = await statusStub('control-plane');
   try {
@@ -231,5 +252,8 @@ test('integration:goal-delivery-defaults-visible — /api/status and the Deliver
     // and the install refuses both an undeclared application and a binding whose case file is missing.
     await assert.rejects(repositoryDelivery(undeclared), /binds case "fixture-static-home" to application "ghost"/);
     await assert.rejects(repositoryDelivery(missing), /binds case "no-such-case", but e2e\/cases\/no-such-case\.json does not exist/);
+    const dotted = await fixtureRepository({ 'e2e/cases/checkout_flow.json': '{}', 'e2e/cases/api.v2.json': '{}', 'graphyard.json': `${JSON.stringify({ documentation: { paths: ['README.md'], changelog: null }, delivery: { mode: 'local', mergeGate: { preMerge: [], perCandidate: [] }, candidateSchedule: null, deploy: { adapter: 'command', project: null, uat: null, production: null }, applications, cases: { checkout_flow: 'site', 'api.v2': 'app' } } }, null, 2)}\n` });
+    assert.deepEqual((await repositoryDelivery(dotted)).policy.cases, { checkout_flow: 'site', 'api.v2': 'app' }, 'the install accepts bindings to dotted and underscored cases');
+    assert.deepEqual(JSON.parse(await runCli(dotted, ['init', '--scan'], env)).proposal.delivery.cases, { checkout_flow: 'site', 'api.v2': 'app' }, 'and so does init');
   } finally { await stub.close(); }
 });
