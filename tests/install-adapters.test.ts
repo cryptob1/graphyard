@@ -437,6 +437,21 @@ test('Railway project creation names the resolved workspace, and a provider fail
   } finally { await refused.cleanup(); }
 });
 
+test('unit:railway-app-bind-keeps-normal-install-upload — a normal Railway install --apply still stamps GRAPHYARD_BUILD_SHA and runs railway up for the Graphyard source; the App-bind fix leaves that deploy path unchanged (GY-1908)', async () => {
+  const fixture = await harness({ provider: 'railway' });
+  try {
+    const { summary } = await apply(fixture, 'railway');
+    assert.equal(summary.health, true);
+    const lines = fixture.allCommandLines();
+    const ups = lines.filter(line => line.includes('railway up'));
+    assert.ok(ups.length >= 2, 'the normal install did not upload source');
+    for (const line of ups) assert.match(line, /railway up \S+ --service graphyard-owner-project --ci --detach/);
+    assert.ok(lines.some(line => /--set GRAPHYARD_BUILD_SHA=/.test(line)), 'the normal install did not stamp GRAPHYARD_BUILD_SHA');
+    // App bind uses redeploy; a full install must not have swapped to redeploy-only.
+    assert.ok(ups.length > lines.filter(line => /^railway redeploy /.test(line)).length, 'the normal install lost its source upload to redeploy-only');
+  } finally { await fixture.cleanup(); }
+});
+
 test('Railway runs against the Graphyard link directory and deploys the Graphyard source, never the managed checkout', async () => {
   const fixture = await harness({ provider: 'railway' });
   try {

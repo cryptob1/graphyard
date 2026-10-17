@@ -3,6 +3,7 @@ import { chmod, lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promis
 import { homedir } from 'node:os';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
+import { principalGrants, type PrincipalGrant } from '../server/principals.js';
 import { REDACTED, type DeclaredSessionKind, type PlannedPrincipal, type Role } from './types.js';
 
 /** 32 random bytes rendered base64url: 43 characters, far above the 32-character floor. */
@@ -28,7 +29,16 @@ export class Vault {
   get size() { return this.secrets.size; }
 }
 
-const principalRecordSchema = z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'worker', 'reader', 'producer']), proofs: z.array(z.string().min(1)).optional(), sessionKind: z.enum(['human', 'ai']).optional(), fingerprint: z.string().length(12) }).strict();
+/**
+ * A roster entry (GY-1879): a planned principal with the lane grants it holds — each names one
+ * lane the server checks by name (`external-runs:import` for POST /api/validation/import) and is
+ * never a proof pattern — and, for one `graphyard principal add` registered, `source`, which every
+ * later apply keeps; the installer's own entries carry none.
+ */
+export interface RosterPrincipal extends PlannedPrincipal { grants?: PrincipalGrant[]; source?: 'principal' }
+const roles: Role[] = ['admin', 'coordinator', 'worker', 'reader', 'producer'];
+/** One install.json roster entry: the principal, with its credential's fingerprint and never the credential. */
+const principalRecordSchema = z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'worker', 'reader', 'producer']), proofs: z.array(z.string().min(1)).optional(), grants: z.array(z.enum(principalGrants)).optional(), sessionKind: z.enum(['human', 'ai']).optional(), source: z.literal('principal').optional(), fingerprint: z.string().length(12) }).strict();
 export const installRecordSchema = z.object({
   version: z.literal(1),
   installId: z.string().min(1),
@@ -44,6 +54,8 @@ export const installRecordSchema = z.object({
   /** The provider service install named (`--server-name`), so `master setup` finds that service again (GY-1416). */
   service: z.string().min(1).nullable().default(null),
   url: z.string().nullable().default(null),
+  /** The coordinates `install --apply` reached the deployment with, so `principal add|remove` reaches the same one (GY-1879). */
+  deployment: z.object({ sshHost: z.string().min(1).nullable(), sshUser: z.string().min(1), local: z.boolean(), port: z.number().int().positive().nullable(), image: z.string().min(1).nullable() }).strict().nullable().default(null),
   principals: z.array(principalRecordSchema).default([]),
   github: z.object({ appId: z.number().int().positive(), installationId: z.number().int().positive(), slug: z.string().min(1), webhookFingerprint: z.string().length(12), ciAppIds: z.array(z.number().int().positive()).default([]) }).nullable().default(null),
   /**
@@ -51,6 +63,12 @@ export const installRecordSchema = z.object({
    * `derivedVariables` must not push a saved App registration onto the deployment.
    */
   noGithubApp: z.boolean().default(false),
+  /**
+   * GY-1901: the merger this installation chose, `control-plane` for one a non-observe install
+   * created, so a retry before graphyard.json is committed still proposes the local mode. Null on a
+   * record that predates it: that installation keeps the delivery model it had.
+   */
+  merger: z.enum(['control-plane', 'github']).nullable().default(null),
   reviewers: z.array(z.object({ name: z.string().min(1), appId: z.number().int().positive(), botUserId: z.number().int().positive() })).default([]),
   profiles: z.array(z.object({ name: z.string().min(1), principal: z.string().min(1), kind: z.string().min(1), role: z.enum(['worker', 'reviewer', 'master']) })).default([]),
   /** The release pipeline's deployment adapter and the plan actions --apply created for it (GY-1102). */
@@ -130,9 +148,71 @@ export async function writeInstallRecord(directory: string, record: z.input<type
   return record;
 }
 
+/** A principal's own fields, in one order, so two entries compare by content. */
+const principalFields = (principal: RosterPrincipal) => ({ id: principal.id, role: principal.role, ...(principal.sessionKind ? { sessionKind: principal.sessionKind } : {}), ...(principal.proofs?.length ? { proofs: principal.proofs } : {}), ...(principal.grants?.length ? { grants: principal.grants } : {}) });
 /** The exact value of GRAPHYARD_PRINCIPALS, matching the server's principal schema. */
-export function principalsVariable(principals: PlannedPrincipal[], tokens: Map<string, string>) {
-  return JSON.stringify(principals.map(principal => ({ id: principal.id, role: principal.role, ...(principal.sessionKind ? { sessionKind: principal.sessionKind } : {}), ...(principal.proofs?.length ? { proofs: principal.proofs } : {}), token: tokens.get(principal.id) ?? '' })));
+export function principalsVariable(principals: RosterPrincipal[], tokens: Map<string, string>) {
+  return JSON.stringify(principals.map(principal => ({ ...principalFields(principal), token: tokens.get(principal.id) ?? '' })));
+}
+/** The install.json roster for `principals`: each entry with its credential's fingerprint, never the credential. */
+export function principalRecords(principals: RosterPrincipal[], tokens: Map<string, string>) {
+  return principals.map(principal => ({ ...principalFields(principal), ...(principal.source ? { source: principal.source } : {}), fingerprint: fingerprint(tokens.get(principal.id)!) }));
+}
+/** The roster install.json records, as principals: what an apply reconciles with and `graphyard principal` edits. */
+export function recordedRoster(record: Pick<InstallRecord, 'principals'> | null): RosterPrincipal[] {
+  return (record?.principals ?? []).map(entry => ({ ...principalFields(entry), ...(entry.source ? { source: entry.source } : {}) }));
+}
+
+/**
+ * The roster an apply deploys (GY-1879): the planner's principals, then every recorded principal
+ * `graphyard principal add` registered — with its role, kind, grants and, through its token file,
+ * its credential — and, under observation-only, which plans no worker or producer, the ones an
+ * earlier apply registered. An apply reconciles the roster and revokes nothing it did not plan;
+ * only a full apply's own plan (`--workers`, `--producer-proof`) retires the installer's entries.
+ */
+export function reconcileRoster(planned: RosterPrincipal[], recorded: RosterPrincipal[], options: { observeOnly?: boolean } = {}): RosterPrincipal[] {
+  // A registered entry whose id the plan now produces is refused, never replaced: its holder's token
+  // would carry the planned role and proofs, widening a lane credential into authority nobody granted.
+  const collision = recorded.find(entry => entry.source === 'principal' && planned.some(principal => principal.id === entry.id));
+  if (collision) throw new Error(`${collision.id} is registered by graphyard principal add as ${collision.role}${collision.grants?.length ? ` with grants ${collision.grants.join(', ')}` : ''}, and this apply plans its own ${planned.find(principal => principal.id === collision.id)!.role} under the same id; nothing was written. Run graphyard principal remove ${collision.id} first, or apply without the option that plans it`);
+  const kept = recorded.filter(entry => !planned.some(principal => principal.id === entry.id) && (entry.source === 'principal' || !!options.observeOnly));
+  return [...planned, ...kept];
+}
+
+export const principalIdPattern = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/;
+/**
+ * One `graphyard principal add` entry, judged as `plannedPrincipals` judges the planner's: a
+ * producer is created only with an explicit grant, since an ungranted producer would be a
+ * standing credential with no lane; a grant names a producer lane, so no other role holds one.
+ */
+export function rosterEntry(input: { id: string; role?: string; sessionKind?: string; grants?: string[] }): RosterPrincipal {
+  if (!principalIdPattern.test(input.id)) throw new Error('A principal id is 1 to 100 letters, digits, dots, underscores and dashes, starting with a letter or digit');
+  const role = input.role as Role;
+  if (!roles.includes(role)) throw new Error(`--role takes ${roles.join(', ')}`);
+  const sessionKind = (input.sessionKind ?? 'ai') as DeclaredSessionKind;
+  if (sessionKind !== 'ai' && sessionKind !== 'human') throw new Error('--session-kind takes ai or human');
+  const grants = [...new Set(input.grants ?? [])].sort() as PrincipalGrant[];
+  const unknown = grants.filter(grant => !principalGrants.includes(grant));
+  if (unknown.length) throw new Error(`Unknown grant ${unknown.join(', ')}; --grant takes ${principalGrants.join(', ')}`);
+  if (role === 'producer' && !grants.length) throw new Error(`A producer is created only with an explicit grant (--grant ${principalGrants.join('|')}): an ungranted producer would be a standing credential with no lane, and widening it later is never automatic`);
+  if (role !== 'producer' && grants.length) throw new Error(`A grant names a producer lane; ${role} ${input.id} holds none. Use --role producer`);
+  return { id: input.id, role, sessionKind, ...(grants.length ? { grants } : {}), source: 'principal' };
+}
+const installersOwn = (roster: RosterPrincipal[], id: string) => {
+  const existing = roster.find(principal => principal.id === id);
+  if (existing && existing.source !== 'principal') throw new Error(`${id} is one of the installer's own principals; change it with graphyard install --apply (--workers, --producer-proof), not graphyard principal`);
+  return existing;
+};
+/** `roster` with `entry` added or replaced by id; `changed` is false when the roster already held exactly it. */
+export function upsertRosterEntry(roster: RosterPrincipal[], entry: RosterPrincipal) {
+  const existing = installersOwn(roster, entry.id);
+  if (existing && JSON.stringify(principalFields(existing)) === JSON.stringify(principalFields(entry))) return { roster, changed: false };
+  return { roster: existing ? roster.map(principal => principal.id === entry.id ? entry : principal) : [...roster, entry], changed: true };
+}
+/** `roster` without `id`; `changed` is false when it held no such principal. */
+export function removeRosterEntry(roster: RosterPrincipal[], id: string) {
+  const existing = installersOwn(roster, id);
+  return { roster: existing ? roster.filter(principal => principal.id !== id) : roster, changed: !!existing };
 }
 
 export function plannedPrincipals(installId: string, options: { workers?: number; producerProofs?: string[] } = {}): PlannedPrincipal[] {

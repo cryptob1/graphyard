@@ -2,8 +2,8 @@ import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { existsSync, mkdirSync, readlinkSync, symlinkSync } from 'node:fs';
+import { mkdir, readFile, readdir, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { mergeOne, mergeRecordKey, mergeRecordKinds, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
 import { previewCheckoutPrefix, previewConcurrency, previewFailureReason, previewReasonLimit, previewSkip, previewSlots, previewWithheld, runPreview, sweepPreviewCheckouts, type PreviewSite, type PreviewVerdict } from '../src/merge-writer/preview.js';
@@ -12,7 +12,7 @@ import { foldMergeLedger, mergeLedgerKinds, mergeTrialKind, previewVerdictSchema
 import { mergeRecordBodySchema, mergeRecordFingerprint } from '../src/server/merge-record.js';
 import { trialFailedGround, trialFailurePrefix } from '../src/model/rework-ground.js';
 import { masterConfigSchema } from '../src/master.js';
-import { tempOwnerMarker, writeTempOwner } from '../src/tmp-reclaim.js';
+import { tempOwnerMarker, tmpReclaimMinAgeMs, writeTempOwner } from '../src/tmp-reclaim.js';
 import type { Work } from '../src/model.js';
 import { buildStaticSite, type StaticBuildShell } from '../src/release-project.js';
 import { loadCases } from '../src/e2e/case.js';
@@ -339,6 +339,68 @@ test('unit:preview-capped-and-cleaned-up — at most two previews run at once; e
   assert.deepEqual(await sweepPreviewCheckouts(base, { procRoot: proc }), [dead]);
   assert.equal(existsSync(dead), false); assert.equal(existsSync(tempOwnerMarker(dead)), false, 'the marker goes with it');
   for (const kept of [live, unmarked, other]) assert.ok(existsSync(kept), `${kept} is kept`);
+});
+
+test('unit:preview-sweep-judges-unjudgeable-markers-as-ownerless — a foreign-namespace and a namespace-less marker keep their checkouts while young and lose them once old and unheld', { timeout: 30_000 }, async () => {
+  // GY-1896 review: the sweep's only removal rule was a pid lookup, and a marker from another PID
+  // namespace — a merge writer that restarted in another sandbox — or one written before namespaces
+  // were kept can never be judged by it, so its checkout, marker and git registration piled up
+  // forever under the managed worktree root, which the /tmp reclaim pass never scans. The sweep now
+  // judges such a marker as an ownerless directory is (reclaimRoot): kept while young, gone once
+  // old and nothing live holds it.
+  const base = await scratch('preview-sweep-ns'), proc = await scratch('preview-sweep-ns-proc');
+  // A reader that can name its own PID namespace, as a real Linux /proc lets it.
+  mkdirSync(join(proc, 'self', 'ns'), { recursive: true });
+  const reader = readlinkSync('/proc/self/ns/pid');
+  symlinkSync(reader, join(proc, 'self', 'ns', 'pid'));
+  const foreign = reader === 'pid:[4026531836]' ? 'pid:[4026539999]' : 'pid:[4026531836]';
+  const foreignMarked = join(base, `${previewCheckoutPrefix}foreign-ns`), namespaceless = join(base, `${previewCheckoutPrefix}pre-namespace`);
+  for (const directory of [foreignMarked, namespaceless]) { await mkdir(join(directory, 'checkout'), { recursive: true }); await writeFile(join(directory, 'checkout', 'index.html'), 'left behind'); }
+  await writeFile(tempOwnerMarker(foreignMarked), `${JSON.stringify({ pid: 4_194_000, startedAt: 1, pidNamespace: foreign, at: new Date().toISOString() })}\n`);
+  await writeFile(tempOwnerMarker(namespaceless), `${JSON.stringify({ pid: 4_194_001, startedAt: 1, at: new Date().toISOString() })}\n`);
+  // Young: the writer may be running where this reader cannot see pids, so both stand, markers with them.
+  assert.deepEqual(await sweepPreviewCheckouts(base, { procRoot: proc }), []);
+  for (const kept of [foreignMarked, namespaceless]) assert.ok(existsSync(kept) && existsSync(tempOwnerMarker(kept)), `${kept} is kept while young`);
+  // Old and unheld: hours past any live preview, both go, markers with them.
+  const past = new Date(Date.now() - tmpReclaimMinAgeMs - 3_600_000);
+  for (const directory of [foreignMarked, namespaceless]) {
+    await utimes(directory, past, past);
+    await utimes(join(directory, 'checkout'), past, past);
+    await utimes(join(directory, 'checkout', 'index.html'), past, past);
+  }
+  assert.deepEqual(await sweepPreviewCheckouts(base, { procRoot: proc }), [foreignMarked, namespaceless]);
+  for (const gone of [foreignMarked, namespaceless]) { assert.equal(existsSync(gone), false); assert.equal(existsSync(tempOwnerMarker(gone)), false, 'the marker goes with it'); }
+});
+
+test('unit:preview-sweep-keeps-held-checkout-under-symlinked-base — an old unjudgeable marker under a symlink base stays while a live holder names only the resolved path', { timeout: 30_000 }, async () => {
+  // GY-1896 review of 919ad4662aad: heldEntries(real, all) recorded the resolved candidate, but the
+  // membership check used only join(base, name). With base a symlink, a holder whose cwd/fd is the
+  // resolved checkout never matched, so the age-and-holder fallback deleted a live preview.
+  const root = await scratch('preview-sweep-symlink'), real = join(root, 'real'), link = join(root, 'link');
+  await mkdir(real); symlinkSync(real, link);
+  const proc = await scratch('preview-sweep-symlink-proc');
+  mkdirSync(join(proc, 'self', 'ns'), { recursive: true });
+  const reader = readlinkSync('/proc/self/ns/pid');
+  symlinkSync(reader, join(proc, 'self', 'ns', 'pid'));
+  const foreign = reader === 'pid:[4026531836]' ? 'pid:[4026539999]' : 'pid:[4026531836]';
+  const name = `${previewCheckoutPrefix}held-through-realpath`;
+  const throughLink = join(link, name), resolved = join(real, name);
+  await mkdir(join(resolved, 'checkout'), { recursive: true });
+  await writeFile(join(resolved, 'checkout', 'index.html'), 'in use');
+  await writeFile(tempOwnerMarker(throughLink), `${JSON.stringify({ pid: 4_194_002, startedAt: 1, pidNamespace: foreign, at: new Date().toISOString() })}\n`);
+  const past = new Date(Date.now() - tmpReclaimMinAgeMs - 3_600_000);
+  for (const path of [resolved, join(resolved, 'checkout'), join(resolved, 'checkout', 'index.html')]) await utimes(path, past, past);
+  // A live process holds the checkout only under its resolved spelling — what /proc reports for cwd.
+  const holderPid = 4_194_100;
+  mkdirSync(join(proc, String(holderPid)), { recursive: true });
+  symlinkSync(resolved, join(proc, String(holderPid), 'cwd'));
+  assert.deepEqual(await sweepPreviewCheckouts(link, { procRoot: proc }), []);
+  assert.ok(existsSync(resolved) && existsSync(tempOwnerMarker(throughLink)), 'a live holder through the resolved path keeps the checkout');
+  // Drop the holder: the same old unjudgeable marker then goes, as an unheld ownerless directory would.
+  await rm(join(proc, String(holderPid)), { recursive: true, force: true });
+  assert.deepEqual(await sweepPreviewCheckouts(link, { procRoot: proc }), [throughLink]);
+  assert.equal(existsSync(resolved), false);
+  assert.equal(existsSync(tempOwnerMarker(throughLink)), false);
 });
 
 test('unit:preview-holds-no-coordinator-credential — the merge\'s build runs with the host basics only, its cases with a throwaway token whose requests stay on the served origin, and a cancelled preview kills its command steps\' processes', { timeout: 60_000 }, async () => {

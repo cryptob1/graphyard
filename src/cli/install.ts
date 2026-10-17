@@ -4,19 +4,16 @@ import { parseArgs } from 'node:util';
 import { availableRuntimes, describeMergeGate, discover, installedOnboarding } from '../onboarding.js';
 import { deliveryModes, type DeliveryMode } from '../model/delivery-policy.js';
 import { appPageBusy, appPagePortFree, startGithubSetup, updateAppPermissions } from '../github-setup.js';
-import { applyProposal, loadAppliedSetup, loadProposal, readDocumentationConfig, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
+import { applyProposal, loadAppliedSetup, loadProposal, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
 import { protectionRun } from '../protection.js';
-import { appCommand, applyInstall, appStepWait, buildPlan, InstallPaused, installHerdrOnly, installProfilesOnly, installRequestFromArgs, prepareInstall } from '../install/index.js';
+import { acquireApplyLock, appCommand, applyInstall, applyRosterChange, appStepWait, buildPlan, InstallPaused, installHerdrOnly, installIdFor, installProfilesOnly, installRequestFromArgs, prepareInstall, repositoryRoot, type InstallDependencies } from '../install/index.js';
+import { installDirectory, readInstallRecord, recordedRoster, removeRosterEntry, rosterEntry, upsertRosterEntry } from '../install/secrets.js';
 import { runManifestFlow } from '../install/manifest.js';
 import { delegationLimitAssignments } from '../install/limits.js';
 import { ciProducerProvisioningSteps, readRoster, registerCiProducer } from '../install/ci-proofs.js';
-import { completionProfiles, readinessChecklist, summarizeDefinitions, type CompletionProfile } from '../readiness.js';
 import { defineCommands } from './registry.js';
 import { readSecretFromStdin } from './context.js';
-import { doctorDocumentation } from '../model/documentation.js'; import { doctorRepositoryPolicy } from '../model/repository-policy.js';
-import { agentEnvironmentRoot } from '../master/environments.js';
-import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
-import { mergerDoctorLine } from './merger.js'; import { upCommand, upHelpRequested, upUsage } from '../up.js'; import { mergerFromStatus } from './install-merger.js'; import { coordinatorDoctor } from '../master/known-good.js';
+import { upCommand, upHelpRequested, upUsage } from '../up.js'; import { mergerFromStatus } from './install-merger.js'; import { runDoctor } from './install-doctor.js';
 
 const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
   const setup = await startGithubSetup(root, repository, deployment);
@@ -49,6 +46,41 @@ export async function capacityForPrincipals(principalsFile: string, status: () =
   const limits = delegationLimitAssignments(registry.principals, deployed);
   return { variables: limits.variables, lines: limits.lines, drift: limits.drift,
     next: `Set ${limits.lines.join(' ')} beside GRAPHYARD_PRINCIPALS on the Graphyard deployment${limits.drift.length ? ` (drift: ${limits.drift.map(entry => entry.reason).join(' ')})` : error ? `; no drift can be reported because ${error}` : ''}` };
+}
+/**
+ * `graphyard principal add|remove` (GY-1879): one entry of this host's installation roster. The
+ * install.json record is the roster; `add` judges the entry as the planner judges its own
+ * (`rosterEntry`: a producer needs an explicit grant), and `applyRosterChange` writes its
+ * credential, hands the deployment GRAPHYARD_PRINCIPALS alone and reads the served roster back.
+ * The installer's own principals are refused: `install --apply` plans them. Repeating either
+ * command changes nothing and only reads the roster back.
+ */
+export async function principalCommand(args: string[], dependencies: InstallDependencies & { cwd: string }) {
+  const [action, id, ...rest] = args;
+  const { values } = parseArgs({ args: rest, options: { role: { type: 'string' }, 'session-kind': { type: 'string' }, grant: { type: 'string', multiple: true }, repo: { type: 'string' } }, allowPositionals: false });
+  if ((action !== 'add' && action !== 'remove') || !id) throw new Error('Use principal add ID --role ROLE [--session-kind ai|human] [--grant NAME]... [--repo OWNER/NAME], or principal remove ID [--repo OWNER/NAME]');
+  if (action === 'remove' && (values.role || values['session-kind'] || values.grant?.length)) throw new Error('principal remove takes only ID and --repo');
+  const entry = action === 'add' ? rosterEntry({ id, role: values.role, sessionKind: values['session-kind'], grants: values.grant }) : null;
+  const root = repositoryRoot(dependencies.cwd);
+  const repository = values.repo ?? (await discover(root)).repository;
+  if (!repository) throw new Error('Use --repo OWNER/NAME, or run from a checkout whose origin is the managed repository');
+  const directory = installDirectory(installIdFor(repository), dependencies.configHome);
+  if (!await readInstallRecord(directory)) throw new Error(`No installation of ${repository} is recorded under ${directory}; run graphyard install --apply first`);
+  // The edit holds the installation's apply lock from reading the roster until it is persisted and read back,
+  // so two edits, or an edit and an install --apply, never each deploy a roster missing the other's entry.
+  const release = await acquireApplyLock(directory, (dependencies.now ?? Date.now)());
+  try { return await editRoster(root, directory, id, entry, dependencies); } finally { await release(); }
+}
+async function editRoster(root: string, directory: string, id: string, entry: ReturnType<typeof rosterEntry> | null, dependencies: InstallDependencies & { cwd: string }) {
+  const record = await readInstallRecord(directory);
+  if (!record) throw new Error(`No installation is recorded under ${directory}; run graphyard install --apply first`);
+  const { roster, changed } = entry ? upsertRosterEntry(recordedRoster(record), entry) : removeRosterEntry(recordedRoster(record), id);
+  // The deployment is reached where install --apply reached it: its SSH host and user, local mode, port and image.
+  const at = record.deployment;
+  if (!at?.sshHost && !at?.local && (record.provider === 'docker-host' || record.provider === 'host')) throw new Error(`${directory}/install.json does not record the host this installation runs on; rerun graphyard install --apply once to record it, then edit the roster`);
+  const session = await prepareInstall(root, { repository: record.repository, provider: record.provider, baseBranch: record.baseBranch, reviewPolicy: record.reviewPolicy, ...(record.domain ? { domain: record.domain } : {}), ...(record.service ? { serverName: record.service } : {}), ...(record.selfContained ? { selfContained: true } : {}), ...(record.noGithubApp ? { noGithubApp: true } : {}),
+    ...(at ? { sshUser: at.sshUser, ...(at.sshHost ? { sshHost: at.sshHost } : {}), ...(at.local ? { local: true } : {}), ...(at.port ? { port: at.port } : {}), ...(at.image ? { image: at.image } : {}) } : {}) }, dependencies, 'apply');
+  return applyRosterChange(session, record, roster, { id, changed, entry });
 }
 /** Repository onboarding: install a control plane, propose and apply the delivery workflow, register Apps, inspect readiness. */
 export const installCommands = defineCommands([
@@ -146,7 +178,7 @@ export const installCommands = defineCommands([
     name: 'init',
     help: [
       '  init [--scan] [--apply] [--url URL] [--herdr [--herdr-rebind]] [--token-stdin]',
-      '       [--delivery release-candidate|per-pr] [--candidate-cron CRON|off]',
+      '       [--delivery local|release-candidate|per-pr] [--candidate-cron CRON|off]',
       '                                Scan and propose the delivery workflow (--scan), or apply the reviewed proposal (--apply);',
       '                                the scan shows the merge-gate split (pre-merge vs per-candidate checks) before anything is applied;',
       '                                after graphyard install, --apply reuses the install\'s identities and App and writes no principals file',
@@ -166,7 +198,9 @@ export const installCommands = defineCommands([
         // Applying rescans with the choices the operator reviewed, so a confirmed opt-out or cadence
         // is compared with the checkout rather than read back as a difference.
         const reviewed = stored?.proposal.delivery ? { mode: stored.proposal.delivery.mode, candidateSchedule: stored.proposal.delivery.candidateSchedule } : undefined;
-        const fresh = await scanProposal(root, { url: values.url ?? null, runtimes: availableRuntimes(), delivery: values.apply ? { ...reviewed, ...choices } : choices });
+        // GY-1901: the recorded merger chooses the default model; an explicit github merger keeps the GitHub pipeline.
+        const recordedMerger = await mergerFromStatus(() => context.api('status'));
+        const fresh = await scanProposal(root, { url: values.url ?? null, runtimes: availableRuntimes(), delivery: { ...(values.apply ? { ...reviewed, ...choices } : choices), merger: recordedMerger } });
         if (values.apply) {
           if (!stored) throw new Error('No stored setup proposal to apply. Run init --scan, review .graphyard/setup-proposal.json, then rerun with --apply');
           // An install that owns this repository supplies the identities and the App (GY-1413);
@@ -178,7 +212,7 @@ export const installCommands = defineCommands([
           if (differences.length) throw new Error(`${differences.join('; ')}. Rerun init --scan, review the refreshed proposal, then apply it again. The stored proposal was left unchanged.`);
           const url = selected ?? installed?.url;
           if (!url) throw new Error('Applying requires the Graphyard server URL; pass --url');
-          const merger = await mergerFromStatus(() => context.api('status'));
+          const merger = recordedMerger;
           if (installed) {
             const result = await applyProposal(root, stored.proposal, { url, installed, github: protectionRun, merger });
             return print({ proposal: stored.file, ...result, installed: installed.directory });
@@ -222,65 +256,15 @@ export const installCommands = defineCommands([
       '  doctor [--profile PROFILE]   Inspect local discovery, live integration readiness and the',
       '                                readiness checklist for a completion profile',
     ],
-    async run(context) {
-      const { base } = context;
-      const root = context.repositoryRoot();
-      // With no GRAPHYARD_TOKEN(_FILE), doctor reads as the master identity install --apply recorded (GY-1412).
-      const master = await masterCredential(root, base);
-      const api = master ? planeRequest(base, master.token) : context.api;
-      const discovered = await discover(root);
-      const { values } = parseArgs({ args: context.rest, options: { profile: { type: 'string' } }, allowPositionals: false });
-      const profile = (values.profile ?? 'through-merge') as CompletionProfile;
-      if (!completionProfiles.includes(profile)) throw new Error(`Unknown completion profile ${values.profile}; choose one of ${completionProfiles.join(', ')}`);
-      let live: any = null, failure: string | undefined;
-      try { live = await api('status'); } catch (error: any) { failure = error.message; }
-      const setup = await readSetupStatus(root).catch((error: any) => ({ error: error.message }));
-      const stored = await loadProposal(root).catch(() => null);
-      const appPermissions = live?.appPermissions ?? null;
-      const documentation = doctorDocumentation(await readDocumentationConfig(root).catch((error: any) => ({ error: error.message as string })), live?.documentation ?? null);
-      // Capacity drift and production lag, which a deploy can break silently: the server reports both.
-      const delegationLimits = live?.delegationLimits ?? null, production = live?.production ?? null;
-      // Validation definitions are readable by operators and readers; every other credential
-      // leaves the runner-path items `unknown` with the command that reads them.
-      let definitions: { kind: string; id: string; revision: number; role?: string; enabled?: boolean }[] | null = null;
-      if (live && ['admin', 'reader'].includes(live.actor?.role)) { try { definitions = (await api('validation/definitions')).definitions; } catch { definitions = null; } }
-      const readiness = readinessChecklist(profile, {
-        repository: discovered.repository ?? null,
-        server: { url: base, reachable: !!live, role: live?.actor?.role, github: !!live?.github, githubPermissions: live?.githubPermissions ?? {}, appPermissions, mainGuard: live?.mainGuard ?? null, failure },
-        setup: 'error' in setup ? { proposal: null, appliedAt: null, githubApp: null, drift: [], unreadable: [String(setup.error)] } : { ...setup, unreadable: setup.unreadable.filter((entry): entry is string => typeof entry === 'string') },
-        proposal: stored?.proposal ?? null,
-        validation: definitions ? summarizeDefinitions(definitions) : null,
-      });
-      // The machine-local prerequisites docs/setup-from-zero.md depends on (GY-1352), each naming its step.
-      const checks = await setupFromZeroChecks({ root, status: live, failure, reachable: !!live || await planeAnswers(base), masterCredential: master?.file, environments: agentEnvironmentRoot() });
-      const setupFromZero = { ready: checks.every(check => check.status === 'pass'), lines: checks.map(setupLine) };
-      // A ready checklist still deploys nothing: once every item is ready, capacity drift and
-      // an undeployed merge are the next actions; until then the checklist's own gap comes first.
-      const firstFailed = checks.find(check => check.status === 'fail');
-      const next = !readiness.ready ? setupNext(readiness, checks)
-        : firstFailed ? setupLine(firstFailed)
-        : delegationLimits?.drift?.length ? `Set ${delegationLimits.drift.map((entry: any) => `${entry.variable}=${entry.required}`).join(' ')} on the deployment: ${delegationLimits.drift[0].reason}`
-        : documentation.drift ? documentation.drift
-        : production?.incidents?.length ? `Production has not deployed ${production.incidents.map((incident: any) => incident.key).join(', ')}: ${production.incidents[0].reason}`
-        : readiness.next;
-      console.error(mergerDoctorLine(live?.mergeWriter));
-      await coordinatorDoctor(root, discovered.repository, production);
-      return context.print({ discovered, server: base, cliPath: await context.activeCliPath(), hostId: context.individualHostId(), connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, release: live?.release ?? null, failure,
-        setup,
-        appPermissions: appPermissions ? { verifiedAt: appPermissions.verifiedAt, missing: appPermissions.missing, attention: appPermissions.attention, installationUrl: appPermissions.installationUrl } : null,
-        heldJobs: live?.heldJobs ?? 0,
-        mainGuard: live?.mainGuard ?? null,
-        build: live?.build ?? null,
-        delegationLimits: delegationLimits ? { limits: delegationLimits.limits, deployed: delegationLimits.deployed, drift: delegationLimits.drift, attention: delegationLimits.attention } : null,
-        production: production ? { provider: production.provider, serving: production.serving, running: production.running, aheadBy: production.ahead?.by ?? null, incidents: production.incidents, attention: production.attention, error: production.error } : null,
-        documentation,
-        repositoryPolicy: doctorRepositoryPolicy(root),
-        setupFromZero,
-        readiness,
-        next,
-        limits: ['CI discovery is a proposal, not executed-test inventory', 'Herdr two-host recovery and GitHub refusal-to-acceptance must be demonstrated', 'A ready checklist is configuration, never evidence: the first real PR must visibly pass every gate'] });
-    },
+    async run(context) { return runDoctor(context); },
   },
+  { name: 'principal', help: ['  principal add ID --role admin|coordinator|worker|reader|producer [--session-kind ai|human] [--grant external-runs:import]... [--repo OWNER/NAME]',
+    '  principal remove ID [--repo OWNER/NAME]',
+    '                                Add or remove one principal of this host\'s installation: writes its credential and its',
+    '                                install.json roster entry, sets GRAPHYARD_PRINCIPALS alone on the deployment, and reads the',
+    '                                roster back from the control plane. A producer needs an explicit --grant; a later',
+    '                                install --apply keeps the entry. Repeating either command changes nothing.'], readsConnection: () => false,
+    async run(context) { context.print(await principalCommand([context.id, ...context.args].filter((value): value is string => value !== undefined), { cwd: process.cwd(), cliPath: await context.activeCliPath(), hostId: context.individualHostId(), log: line => console.error(line) })); } },
   { name: 'app', help: ['  app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo R]', '  app list [--repo OWNER/NAME]  Import an App made elsewhere (key proven by an App JWT, saved 0600,',
     '                                never printed) for --reuse-app without sudo; list reusable Apps per role',
     '  app bind SLUG [--plan] [--ssh-host H] [--workspace W]  Bind an imported App to the observe-only install'], readsConnection: () => false,

@@ -79,8 +79,9 @@ for (const batchMs of [20, 250]) test(`unit:reconcile-tick-bounded-under-content
   const ticks = engine.reconcileTicks.slice(before);
   assert.ok(ticks.length >= 1, 'the tick was recorded');
   assert.ok(elapsedMs < 30_000, `the tick took ${Math.round(elapsedMs)} ms under contention, over the 30 s bound`);
-  // A tick evaluates what moved (GY-1124); under raw moves other items read, that is the whole live fleet.
-  assert.ok(ticks.some(tick => tick.candidates >= 100), `a tick ran over the whole live fleet (${ticks.map(tick => tick.candidates)})`);
+  // A tick evaluates what moved (GY-1124, GY-1898): the lapsed thirty and the items the raw face
+  // moves moved or fed, no longer the whole live fleet.
+  assert.ok(ticks.some(tick => tick.candidates >= 30), `a tick ran over the moved fleet (${ticks.map(tick => tick.candidates)})`);
   for (const tick of ticks) {
     assert.ok(tick.ms < 30_000, `a tick took ${tick.ms} ms, over the 30 s bound`);
     assert.equal(tick.evaluated + tick.deferred, tick.candidates, `every candidate was evaluated or deferred (${JSON.stringify(tick)})`);
@@ -119,9 +120,12 @@ test('unit:job-wake-reconcile-no-deadlock — wakeJob, wakeJobs, resync and a re
 
 test('unit:reconcile-leaves-pool-headroom — while a tick runs, heartbeats, claims and request transactions get a connection within 1 s', { timeout: 180_000 }, async () => {
   // Slow every item's evaluation, so the tick runs for seconds; ten resyncs arrive while it does.
+  // The fifty lapsed items give the tick that length: under GY-1898 a face move brings its moved
+  // item and its readers, so a long tick comes from a candidate set, not from the whole fleet.
   const reconcileItem = (engine as unknown as { reconcileItem: (...args: unknown[]) => Promise<boolean> }).reconcileItem.bind(engine);
-  (engine as unknown as { reconcileItem: unknown }).reconcileItem = async (...args: unknown[]) => { await new Promise(resolve => setTimeout(resolve, 15)); return reconcileItem(...args); };
+  (engine as unknown as { reconcileItem: unknown }).reconcileItem = async (...args: unknown[]) => { await new Promise(resolve => setTimeout(resolve, 30)); return reconcileItem(...args); };
   engine.reconcileBatchMs = 50;
+  await lapse(items.slice(10, 60).map(work => work.id));
   let ticking = true, peakBackground = 0;
   const watch = (async () => { while (ticking) { peakBackground = Math.max(peakBackground, store.background.inUse); await new Promise(resolve => setTimeout(resolve, 2)); } })();
   const extra: Principal = { id: 'contention-headroom', role: 'worker', sessionKind: 'ai' };
@@ -129,6 +133,7 @@ test('unit:reconcile-leaves-pool-headroom — while a tick runs, heartbeats, cla
   const free = await engine.execute(operator, 'ready', (await engine.execute(operator, 'create', null, { title: 'Claimed while the tick runs', plannedFiles: ['src/headroom.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:reconcile-contention'] }] }, randomUUID())).id, {}, randomUUID());
   const timings: { what: string; ms: number }[] = [];
   const timed = async (what: string, run: () => Promise<unknown>) => { const started = performance.now(); await run(); timings.push({ what, ms: performance.now() - started }); };
+  const before = engine.reconcileTicks.length;
   try {
     const tick = engine.reconcile();
     const resyncs = items.slice(0, 10).map(work => engine.resyncWork(operator, work.id, {}));
@@ -146,7 +151,9 @@ test('unit:reconcile-leaves-pool-headroom — while a tick runs, heartbeats, cla
     ticking = false; await watch;
     (engine as unknown as { reconcileItem: unknown }).reconcileItem = reconcileItem; engine.reconcileBatchMs = 250;
   }
-  assert.ok(engine.reconcileTicks.at(-1)!.ms > 1000, 'the tick ran for over a second while the requests were made');
+  // The measured tick is the lapsed one; the resyncs' trailing tick is small and quick, so the
+  // window is judged on its slowest tick, not its last.
+  assert.ok(engine.reconcileTicks.slice(before).some(recorded => recorded.ms > 1000), 'the tick ran for over a second while the requests were made');
   for (const timing of timings) assert.ok(timing.ms < 1000, `a ${timing.what} took ${Math.round(timing.ms)} ms while the tick ran`);
   assert.ok(peakBackground <= 1, `reconciliation held ${peakBackground} background connections at once; ten resyncs must share one tick`);
 });
@@ -187,7 +194,9 @@ test('unit:commit-lock-wait-under-deadlock-timeout — the commit wait stays und
 });
 
 test('unit:deferred-batch-keeps-writer-held-turn — a row a writer held in a batch deferred as contended still gets its end-of-pass turn (GY-1212)', { timeout: 60_000 }, async () => {
-  const held = items[80].id;
+  // The held row is one of the lapsed: its own face move makes it a candidate of this pass
+  // (GY-1898), so the deferral proof still exercises its end-of-pass turn.
+  const held = items[79].id;
   await lapse(items.slice(70, 80).map(work => work.id));
   const internals = engine as unknown as { coordinationLockWithin: (...args: unknown[]) => Promise<boolean>; reconcileItem: (db: unknown, work: Work, ...rest: unknown[]) => Promise<boolean> };
   const { coordinationLockWithin, reconcileItem } = internals;

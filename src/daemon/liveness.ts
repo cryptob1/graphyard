@@ -2,7 +2,7 @@
 import { type AttentionItem, agentOwner } from '../master.js';
 import { classified, noteFault } from '../model/fault-classes.js';
 import { boundDaemonState, type CycleFailures, type CycleMetrics, type CycleStepName, type CycleSteps, type DaemonState, initialPidNamespace, liveProcess, type LoopRelease, message, pidNamespace, type SlowLoopState, type StepCost } from './state.js';
-import { approverWait, type LatencyBudget, type SilenceReport } from './metrics.js';
+import { approverWait, fleetHold, type LatencyBudget, type SilenceReport } from './metrics.js';
 import type { DaemonEffects } from './effects.js';
 import { slowestSteps } from '../master/timings.js';
 import { planeUnavailable, planeUnavailableText } from '../model/refusal.js';
@@ -289,7 +289,11 @@ export function loopAttention(report: { liveness: LoopLiveness; silence?: Silenc
     ...agentOwner('master', `graphyard master status shows daemon.failures with the failing call and its reason; clear what ${describeFailingCall(failures.last)} is refusing on`), ...classified(planeUnavailableText(failures.last.reason) ? 'plane-unavailable' : 'loop-failures') });
   const silence = report.silence;
   if (silence?.breached && silence.longest) items.push({ subject: silence.longest.work ?? 'loop', text: `Nothing has acted on ${silence.longest.detail} for ${Math.round(silence.longest.idleMs / 60_000)} minutes, past the ${Math.round(silence.budgetMs / 60_000)}-minute bound, while ${silence.actionable} subject(s) were actionable`,
-    ...agentOwner('master', `graphyard master status shows the cycle's actions under daemon.actions; ${report.liveness.state === 'running' ? 'clear what is refusing the action' : report.liveness.state === 'slow' ? shorten : report.liveness.restart}`), ...classified(approverWait(silence.longest) ? 'decision-unanswered' : 'loop-silence') });
+    ...agentOwner('master', fleetHold(silence.longest)
+      // GY-1890: a fleet-held claimable item is slot starvation, and the remedy is capacity, not the loop.
+      ? `every launch profile is held by a live attempt, so claimable work starts as slots free; graphyard master status shows the held profiles under daemon.actions, and the fleet's size is the capacity decision`
+      : `graphyard master status shows the cycle's actions under daemon.actions; ${report.liveness.state === 'running' ? 'clear what is refusing the action' : report.liveness.state === 'slow' ? shorten : report.liveness.restart}`),
+    ...classified(fleetHold(silence.longest) ? 'concurrency-starved' : approverWait(silence.longest) ? 'decision-unanswered' : 'loop-silence') });
   if (report.budget?.met === false) items.push({ subject: 'loop', text: `The unattended delivery budget is not met: ${report.budget.reasons.join('; ')}`,
     ...agentOwner('master', 'graphyard master status shows daemon.budget with every measured passage; clear what is holding the breached step'), ...classified('delivery-budget') });
   return items;

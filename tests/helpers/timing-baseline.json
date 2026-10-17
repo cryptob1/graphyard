@@ -436,6 +436,7 @@
     "tests/github-setup-manifest.test.ts": 494,
     "tests/github.test.ts": 968,
     "tests/goal-acceptance.test.ts": 2600,
+    "tests/goal-delivery-onboarding.test.ts": 6500,
     "tests/goal-pipeline-outright-refusals.test.ts": 1238,
     "tests/goal-planner.test.ts": 2900,
     "tests/graphyard-up.test.ts": 4200,
@@ -644,7 +645,8 @@
     "tests/reblocked-attempt.test.ts": 2905,
     "tests/receipt-retention.test.ts": 2749,
     "tests/reconcile-batch-setting.test.ts": 1058,
-    "tests/reconcile-contention.test.ts": 28285,
+    "tests/reconcile-face-readers.test.ts": 4300,
+    "tests/reconcile-contention.test.ts": 20800,
     "tests/reconcile-scale.test.ts": 10899,
     "tests/reconcile-tick-cause.test.ts": 4967,
     "tests/reconciliation-snapshot.test.ts": 7880,
@@ -771,7 +773,7 @@
     "tests/soak-day.test.ts": 112848,
     "tests/soak-decision-fault-restatements.test.ts": 60389,
     "tests/soak-decision-faults-settled.test.ts": 150000,
-    "tests/soak-decision-faults.test.ts": 52338,
+    "tests/soak-decision-faults.test.ts": 60000,
     "tests/soak-decisions-call-bound.test.ts": 50876,
     "tests/soak-decisions.test.ts": 227396,
     "tests/soak-diagnosis-refusals.test.ts": 25000,
@@ -949,6 +951,8 @@
     "tests/sync-timing-baseline.test.ts": 4000,
     "tests/file-durations-status.test.ts": 257,
     "tests/event-loop-lag-pending.test.ts": 729,
-    "tests/install-worker-credentials.test.ts": 900
+    "tests/install-worker-credentials.test.ts": 900,
+    "tests/fault-class-loop.test.ts": 630,
+    "tests/slow-tick-repeat-receipt.test.ts": 600
   }
 }

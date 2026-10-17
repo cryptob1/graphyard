@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { applicationProblems, projectDeliveryShape } from '../project-applications.js';
 
 // ---------------------------------------------------------------------------
 // The delivery model every installed repository gets (GY-1102).
@@ -10,10 +11,13 @@ import { z } from 'zod';
 // repository's checks into those two sets and records the result, with the deployment adapter and
 // the candidate cadence, as `delivery` in the repository's committed graphyard.json. A repository
 // opts out to the plain per-PR model with `"mode": "per-pr"`: every check stays required on pull
-// requests and no candidate workflow is generated.
+// requests and no candidate workflow is generated. `"mode": "local"` (GY-1901, the default a
+// control-plane install proposes) is the rapid path the control plane runs itself: local previews
+// of the declared applications, candidates of at most five changes and required verification of the
+// exact live release, with no generated GitHub Actions workflow and no Railway adapter.
 // ---------------------------------------------------------------------------
 
-export const deliveryModes = ['release-candidate', 'per-pr'] as const;
+export const deliveryModes = ['local', 'release-candidate', 'per-pr'] as const;
 export type DeliveryMode = (typeof deliveryModes)[number];
 export const deploymentAdapters = ['railway', 'command'] as const;
 export type DeploymentAdapterName = (typeof deploymentAdapters)[number];
@@ -50,7 +54,10 @@ export const deliveryPolicySchema = z.object({
     uat: z.string().trim().min(1).max(1000).nullable().default(null),
     production: z.string().trim().min(1).max(1000).nullable().default(null),
   }).strict(),
-}).strict();
+  ...projectDeliveryShape,
+}).strict().superRefine((policy, context) => {
+  for (const message of applicationProblems(policy)) context.addIssue({ code: 'custom', path: ['cases'], message });
+});
 export type DeliveryPolicy = z.infer<typeof deliveryPolicySchema>;
 
 /** The default cadence, matching Graphyard's own release-candidate workflow. */
@@ -62,6 +69,9 @@ export const defaultCandidateSchedule = '0 */6 * * *';
  */
 export const requiredPullRequestChecks = (policy: DeliveryPolicy) =>
   policy.mode === 'per-pr' ? [...policy.mergeGate.preMerge, ...policy.mergeGate.perCandidate].map(entry => entry.check) : policy.mergeGate.preMerge.map(entry => entry.check);
+
+/** The rapid path's committed defaults (GY-1901): what normal onboarding writes for the local mode. */
+export const localDeliveryDefaults = { previews: 'local', candidateMaxChanges: 5, productionVerification: true } as const;
 
 /** The two workflow files `init --apply` generates under the candidate model. */
 export const candidateWorkflowFile = '.github/workflows/graphyard-release-candidate.yml';
