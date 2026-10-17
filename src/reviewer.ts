@@ -959,7 +959,7 @@ export async function recordReviewerProfileRefusal(config: Pick<MasterConfig, 'c
   return refusal;
 }
 
-/** A launch got past the profile lookup on the name a refusal records: the profiles changed, so the fault is over. */
+/** A launch got past the profile lookup: reviews launch again, so the fault is over. */
 export async function clearReviewerProfileRefusal(config: Pick<MasterConfig, 'credentialFile'>): Promise<void> {
   await rm(reviewerProfileRefusalPath(config), { force: true });
 }
@@ -1044,9 +1044,9 @@ export async function launchReview(root: string, work: Work, profileName: string
     }
     throw new Error(profileName ? `Unknown reviewer profile ${profileName}` : config.reviewers.length ? 'Name the reviewer profile to launch; this master has more than one' : 'Add a reviewer profile with master reviewer add before launching a review');
   }
-  // A launch got past the profile lookup on the name a refusal records: the profiles changed, so the fault is over.
-  const refusedProfile = await readReviewerProfileRefusal(config);
-  if (refusedProfile && config.reviewers.some(item => item.name === refusedProfile.profile)) await clearReviewerProfileRefusal(config);
+  // A launch got past the profile lookup: whichever profile it found, the loop launches reviews again
+  // (the missing name written, or a replacement one the dispatcher now selects), so the fault is over.
+  if (await readReviewerProfileRefusal(config)) await clearReviewerProfileRefusal(config);
   const binding = postMerge ? await postMergeBinding(root, work, postMerge, dependencies.run) : assertReviewCandidate(work, observedAt, dependencies.request);
   if (reviewerApp && binding.author.toLowerCase() === `${reviewerApp.slug}[bot]`.toLowerCase()) throw new Error('The reviewer App authored this pull request; an identity cannot independently review its own work');
   // The reviewer principal a control-plane launch registers: the profile's agent name, which every session of the profile posts as.

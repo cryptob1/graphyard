@@ -113,6 +113,21 @@ test('unit:unknown-profile-escalates — three review launches refused for an un
   assert.equal((await workerLaunchStatus(root, await loadMasterConfig(root))).items.length, 0, 'master status raises no attention once the profiles are written');
 });
 
+// Review thread on 28d1bbcb642f (reviewer.ts): a replacement profile the dispatcher now selects launches, so the obsolete record clears too.
+test('unit:unknown-profile-escalates — a launch through a replacement profile clears the refusal of the old name, so no obsolete attention stands while reviews launch', async () => {
+  const root = await reviewerMaster('unknown-reviewer-profile-replaced');
+  const { readReviewerProfileRefusal } = await import('../src/reviewer.js');
+  const clock = 1_700_000_000_000;
+  const launch = (name: string) => launchReview(root, work(clock), name, [], new Date(clock).toISOString(), { now: () => new Date(clock) });
+  await saveReviewerProfile(root, { name: 'review-y', agentName: 'review-y-1', kind: 'claude' });
+  for (let attempt = 0; attempt < 3; attempt++) await assert.rejects(launch('review-x'), /^Error: Unknown reviewer profile review-x$/);
+  const config = await loadMasterConfig(root);
+  assert.equal((await readReviewerProfileRefusal(config))?.refusals, 3);
+  await assert.rejects(launch('review-y'), /does not require independent review/, 'the replacement gets past the profile lookup');
+  assert.equal(await readReviewerProfileRefusal(config), null, 'the old name\'s record is gone once a review launches');
+  assert.equal((await workerLaunchStatus(root, await loadMasterConfig(root))).items.length, 0);
+});
+
 /** The private file the refusals are counted in: beside the master credential, outside the checkout. */
 test('unit:unknown-profile-escalates — the refusal record lives beside the master credential at 0600, never in the checkout', async () => {
   const root = await reviewerMaster('unknown-reviewer-profile-file');
@@ -139,6 +154,8 @@ const bareMasterConfig = (credentialFile: string) => ({ version: 1, url: UP_SERV
 function upWorld(checkout: string, events: UpEvent[], profiles: { workers: number; reviewers: number } | null) {
   let installed = false, fleetReady = false, loop = false, clock = 0;
   const calls: string[][] = [];
+  /** A self-contained host's write (`install --profiles-only`): what the host's master environments --apply reports, its master.json being the host's. */
+  const hostReport = () => ({ host: 'gy-host', profiles: { counts: { environments: 1, loggedIn: 1, workers: profiles?.workers ?? 0, reviewers: profiles?.reviewers ?? 0, producers: 0 } } });
   const writeProfiles = async () => {
     const file = join(checkout, '.graphyard/master.json');
     const config = JSON.parse(await readFile(file, 'utf8'));
@@ -171,6 +188,7 @@ function upWorld(checkout: string, events: UpEvent[], profiles: { workers: numbe
       async cli(args) {
         calls.push(args);
         const joined = args.join(' ');
+        if (args[0] === 'install' && args.includes('--profiles-only')) return { code: 0, stdout: JSON.stringify(hostReport()) };
         if (args[0] === 'install' && args.includes('--plan')) {
           return { code: 0, stdout: JSON.stringify({ installId: 'owner-project', installDirectory: join(checkout, 'install-dir'), principals: [{ id: 'owner-project-operator', role: 'admin', sessionKind: 'human' }], preflight: [{ name: 'GitHub CLI', ok: true }], browserApps: [] }) };
         }
@@ -247,4 +265,54 @@ test('unit:up-writes-profiles — a resumed run whose profile write fails stops 
   const result = await runUp(request(), again.deps);
   assert.notEqual(result.exitCode, 0, 'the failed write is not swallowed');
   assert.match(result.next ?? '', /accounts/);
+});
+
+// Review of 28d1bbcb642f, finding 1: a self-contained host's loop, login homes and master.json are on the host, so the write runs there.
+test('unit:up-writes-profiles — on a self-contained host the accounts step writes the profiles there through install --profiles-only, fresh and resumed, and holds the account lines while the host reports either profile missing', async () => {
+  const { runUp } = await import('../src/up.js');
+  const hostWrite = (args: string[]) => args[0] === 'install' && args.includes('--profiles-only');
+
+  // Fresh: the host reports a reviewer and a worker profile; this machine's checkout writes none.
+  const checkout = await temporaryDirectory('up-writes-profiles-host');
+  const world = upWorld(checkout, [], { workers: 1, reviewers: 1 });
+  const result = await runUp(request({ provider: 'host' }), world.deps);
+  assert.ok(world.calls.some(hostWrite), 'the accounts step writes the profiles on the host');
+  const written = world.calls.find(hostWrite)!;
+  assert.ok(written.includes('--apply') && written.includes('--provider') && written[written.indexOf('--provider') + 1] === 'host', `the write is the host install's: ${written.join(' ')}`);
+  assert.ok(!world.calls.some(args => args.join(' ') === 'master environments --apply'), 'nothing is written on this machine for a host install');
+  for (const id of ['account:worker', 'account:reviewer'] as const) assert.equal(result.checklist.find(item => item.id === id)?.done, true, `${id}: ${result.next}`);
+
+  // Resumed over the completed accounts step: the host write runs again, and its failure stops the run naming the step.
+  const again = upWorld(checkout, [], { workers: 1, reviewers: 1 });
+  const cli = again.deps.cli;
+  again.deps.cli = async (args, options) => hostWrite(args) ? { code: 1, stdout: '', stderr: 'master environments --apply did not complete on gy-host' } : cli(args, options);
+  const failed = await runUp(request({ provider: 'host' }), again.deps);
+  assert.notEqual(failed.exitCode, 0, 'the failed host write is not swallowed');
+  assert.match(failed.next ?? '', /accounts/);
+
+  // The host has logged-in accounts but its write made no reviewer profile: the account lines are held and up waits.
+  const missing = await temporaryDirectory('up-writes-profiles-host-missing');
+  const held = await runUp(request({ provider: 'host', waitMs: 20 }), upWorld(missing, [], { workers: 1, reviewers: 0 }).deps);
+  assert.equal(held.exitCode, 3, held.next);
+  for (const id of ['account:worker', 'account:reviewer'] as const) assert.equal(held.checklist.find(item => item.id === id)?.done, false, `${id} is not green while the host lacks its reviewer profile`);
+});
+
+test('unit:up-writes-profiles — an account signed in while the accounts step waits gets its profile: a write that left a profile missing runs again on each wait, and the step ends green once both exist', async () => {
+  const { runUp } = await import('../src/up.js');
+  const checkout = await temporaryDirectory('up-writes-profiles-late');
+  const profiles = { workers: 1, reviewers: 0 };
+  const world = upWorld(checkout, [], profiles);
+  const cli = world.deps.cli;
+  let writes = 0;
+  world.deps.cli = async (args, options) => {
+    // The reviewer account finishes signing in after the step's first write.
+    if (args.join(' ') === 'master environments --apply' && ++writes === 2) profiles.reviewers = 1;
+    return cli(args, options);
+  };
+  const result = await runUp(request(), world.deps);
+  assert.equal(result.exitCode, 0, result.next);
+  assert.ok(writes >= 2, 'the write ran again while a profile was missing');
+  assert.ok(result.completed.includes('accounts'));
+  const stored = JSON.parse(await readFile(join(checkout, '.graphyard/master.json'), 'utf8'));
+  assert.equal(stored.reviewers.length, 1, 'master.json holds the reviewer profile written during the wait');
 });
