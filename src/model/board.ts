@@ -5,7 +5,7 @@ import { answerCommand, parkedOnHuman, type HumanRequestRow } from './human-requ
 import { humanAsk } from './human-ask.js';
 import { scopeRefusalBlocker } from './scope.js';
 import { scopeAskCommand, type RoutedScopeDecision } from './scope-provenance.js';
-import { shortShas } from './format.js';
+import { deliveryOutcome, shortShas } from './format.js';
 import { OVERDUE_MINUTES, statusDuration } from './duration.js';
 import { blockerSummary, phaseOf, plainReason, plainStatus, statusSince } from './plain-status.js';
 import { prSteps, stepSince } from './pr-steps.js';
@@ -248,7 +248,15 @@ export interface BoardItem {
   /** When the item entered the state its group reports: the step for timed groups, the request for Needs you. */
   since: string;
   /** Past the fault bound (`overdueAfterMs`) in a group that carries a clock. */
-  overdue: boolean; /** The standing blocker's class, whether it needs someone, and its last and next probe (GY-1008); `summary` is the one plain sentence a Work page row shows for it (GY-1739), and `until` the instant a wait names. */ blocker?: BlockerView & { summary: string; until?: string };
+  overdue: boolean;
+  /**
+   * GY-1845: a done row's outcome, the production state it headlines (`deliveryOutcome`) — one of
+   * 'Merged, awaiting deployment', 'Deployed, awaiting verification', 'Production verified' or
+   * 'Deployed with a failure', with the serving release when known; never the word Done, never
+   * Merged alone. Absent on open rows, which have no outcome yet.
+   */
+  outcome?: string;
+  /** The standing blocker's class, whether it needs someone, and its last and next probe (GY-1008); `summary` is the one plain sentence a Work page row shows for it (GY-1739), and `until` the instant a wait names. */ blocker?: BlockerView & { summary: string; until?: string };
 }
 export interface Board {
   now: string;
@@ -272,8 +280,11 @@ export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRo
       : group === 'blocked' && stalls.has(entry.id) ? stalls.get(entry.id)!.heldSince
         : timed ? stepSince(entry, now, null, release) : statusSince(entry, now);
     // The board is built on the server, so a wait's time is written in UTC and served as `until` for a reader's own zone.
-    const view = blockerView(entry), wait = view && blockerSummary(entry.blocker!, now, entry, 'UTC'), blocker = view && wait && { ...view, summary: wait.sentence, ...(wait.until ? { until: wait.until } : {}) }; return { id: entry.id, key: entry.key, title: entry.title, priority: entry.priority, group, stage: entry.stage, owner: entry.lease?.owner ?? entry.lastAssignment?.owner ?? null,
-      actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id), now, scopeDecisions?.get(entry.id)), since, overdue: timed && !windowHeld(entry, now) && statusDuration(since, now).overdue, ...(blocker ? { blocker } : {}) };
+    const view = blockerView(entry), wait = view && blockerSummary(entry.blocker!, now, entry, 'UTC'), blocker = view && wait && { ...view, summary: wait.sentence, ...(wait.until ? { until: wait.until } : {}) };
+    // GY-1845: a done row headlines its production state, so the board never reads a merged item as merely shipped.
+    const outcome = entry.stage === 'done' && !isClosed(entry) ? deliveryOutcome(entry) : null;
+    return { id: entry.id, key: entry.key, title: entry.title, priority: entry.priority, group, stage: entry.stage, owner: entry.lease?.owner ?? entry.lastAssignment?.owner ?? null,
+      actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id), now, scopeDecisions?.get(entry.id)), since, overdue: timed && !windowHeld(entry, now) && statusDuration(since, now).overdue, ...(outcome ? { outcome } : {}), ...(blocker ? { blocker } : {}) };
   };
   const board = Object.fromEntries(groups.map(group => [group, byGroup[group].map(entry => item(entry, group))])) as Record<OpenGroup, BoardItem[]>;
   return { now: new Date(now).toISOString(), overdueAfterMs: OVERDUE_MINUTES * 60_000, groups: board,
