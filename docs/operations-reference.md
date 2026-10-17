@@ -123,4 +123,4 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ### Concurrent reconciliation
 
-Reconcile evaluates moved rows plus items past their evaluation's due instant (clock-only changes); full evaluation ≥ max(`GRAPHYARD_RECONCILE_FULL_MS` (300000), 3× last full pass) is the safety net; ticks >5s log due count, event-loop lag. Batches evaluate lock-free, writing each under coordination+row locks; heartbeats lock only their item.
+Reconcile evaluates moved rows and due-past items (clock-only changes); full evaluation ≥ max(`GRAPHYARD_RECONCILE_FULL_MS` (300000), 3× its length) is the safety net; ticks >5s log due count, lag. Batches evaluate lock-free, write under coordination+row locks; heartbeats lock their item.
