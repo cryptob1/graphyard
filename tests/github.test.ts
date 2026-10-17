@@ -72,7 +72,8 @@ test('GY-1060: a required status context is read as a commit status, and protect
     return request(path, method, body);
   };
   const obs = await f.github.observe(f.work);
-  assert.deepEqual(obs.requiredChecks, [{ name: 'ci/legacy', appId: null }, { name: 'secrets', appId: 77 }]);
+  // Graphyard's own App-bound check is recorded too (GY-1884); the gates still never wait on it.
+  assert.deepEqual(obs.requiredChecks, [{ name: 'ci/legacy', appId: null }, { name: CHECK_NAME, appId: 1234 }, { name: 'secrets', appId: 77 }]);
   assert.deepEqual(obs.checks, [{ name: 'test', result: 'success', appId: 15368, id: 9 }, { name: 'ci/legacy', result: 'failure', appId: 0, source: 'status' }],
     'only the required context no check run reports is read from statuses, an error as a failure');
   await f.github.observe(f.work);
