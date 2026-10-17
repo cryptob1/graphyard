@@ -23,7 +23,7 @@ Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits
 
 ## Base-sync conflicts
 
-`graphyard sync GY-N` resolves a conflicted `tests/helpers/timing-baseline.json` itself: the base tip's file plus the branch's own test-file lines, staged and listed under `regenerated`; other conflicts report as today; CI and the merge trial read nothing new.
+`graphyard sync GY-N` resolves a conflicted `tests/helpers/timing-baseline.json` itself: base tip's file plus the branch's own test-file lines, staged, listed under `regenerated`.
 
 ## Retro synthesis
 
