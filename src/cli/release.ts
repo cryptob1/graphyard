@@ -12,11 +12,11 @@ import {
 import { commandDigestAdapter, shellRun, uatDigestSuite, verifyProductionDigests } from '../release-digests.js';
 import { acceptancesFrom, foldHolds, foldRecord, holdItemsFor, holdTag, holdTagPrefix, releaseHolds, type HoldRecord } from '../release-holds.js';
 import { pendingFromPlane, readPlane, servingStage } from '../release-pending.js';
-import { handedImports, handedImportsVariable, promotionImports, sealedImports } from '../validation-import.js';
+import { handedImports, handedImportsVariable, promotionImports, sealAuthorityOutOfScope, sealAuthorityUnserved, sealCheckRecord, sealCheckTag, sealRoles, sealedImports, type SealAuthority } from '../validation-import.js';
 import { checkRepositoryContract, contractFile, loadContract } from '../e2e/case.js';
 
 const switches = new Set(['no-push', 'api']);
-const subcommands = new Set(['contract', 'cut', 'status', 'uat', 'validate', 'follow-up', 'holds', 'fold', 'promote', 'verify', 'soak', 'imports']);
+const subcommands = new Set(['contract', 'cut', 'status', 'uat', 'validate', 'follow-up', 'holds', 'fold', 'promote', 'verify', 'soak', 'imports', 'seal-check']);
 /** Flags after the subcommand: `--name value` pairs, repeatable, and bare `--flag` switches. */
 function flags(args: string[]) {
   const values = new Map<string, string[]>(); const positional: string[] = [];
@@ -31,7 +31,7 @@ function flags(args: string[]) {
 }
 
 const workKey = (created: any) => String(created?.key ?? created?.work?.key ?? created?.id);
-const usage = 'Use release contract | release cut [--trigger schedule|manual] [--max-prs N] | release status | release uat ID | release validate ID --url URL [--api] [--check PATH]... [--suite NAME=COMMAND]... [--e2e-report FILE] | release follow-up ID | release holds | release fold OUTCOME --decision ID | release imports ID | release promote ID | release verify --url URL | release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]';
+const usage = 'Use release contract | release cut [--trigger schedule|manual] [--max-prs N] | release status | release uat ID | release validate ID --url URL [--api] [--check PATH]... [--suite NAME=COMMAND]... [--e2e-report FILE] | release follow-up ID | release holds | release fold OUTCOME --decision ID | release seal-check [ID] | release imports ID | release promote ID | release verify --url URL | release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]';
 
 /** Every applied evidence decision on the hold items the candidate's failures landed in (GY-1378). */
 async function acceptancesOf(api: (path: string) => Promise<any>, git: ReturnType<typeof gitIn>, candidate: string): Promise<FlakyAcceptance[]> {
@@ -68,6 +68,10 @@ export const releaseCommands = defineCommands([
       '  release fold OUTCOME --decision ID',
       '                                Fold an outcome\'s open hold into another\'s, as the applied fold',
       '                                decision ID on its hold item (another agent approved) names',
+      '  release seal-check [ID|latest]',
+      '                                Whether this credential may seal imports (an admin or operator',
+      '                                agent), sealing nothing; non-zero when it may not. Given a',
+      '                                candidate, records the answer as rc-seal-check/ID.AT for master status',
       '  release imports ID|latest     The hold the candidate\'s imported external runs leave; a released',
       '                                hold is sealed, so no import binds to the candidate afterwards',
       '  release promote ID|latest     Deploy a UAT-passed candidate to production by its exact SHA, or',
@@ -134,6 +138,27 @@ export const releaseCommands = defineCommands([
         // The soak job's result as the workflow reports it: success, failure, cancelled (or skipped).
         const verdict: SoakRecord['result'] = result === 'success' || result === 'passed' ? 'passed' : result === 'cancelled' ? 'cancelled' : 'failed';
         return print(recordSoak(git, target, { sha, result: verdict, run: options.one('run') ?? null, report: options.one('report') ?? null, base, now: new Date(), push }));
+      }
+      if (id === 'seal-check') {
+        // GY-1882: the read-only check the uat imports job runs first, before soak and UAT results are spent on a seal this credential cannot make.
+        // A credential the plane does not accept at all (revoked, expired) may not seal either, and is recorded as such.
+        const answer = await (api('validation/import/seal-authority') as Promise<SealAuthority | null>).catch((error: any) => {
+          if (error?.status === 401) return { mayseal: false, role: 'unauthenticated', needed: [...sealRoles] } satisfies SealAuthority;
+          // A valid operator-agent token for another repository never reaches the route; record the denial so master status names the uat secret.
+          if (sealAuthorityOutOfScope(error)) return { mayseal: false, role: 'operator-agent (other repository)', needed: [...sealRoles] } satisfies SealAuthority;
+          // A plane that predates the route (the release first carrying it is promoted by the plane before it) answers 404, or 403 to an operator agent; nothing is checked or recorded then.
+          if (sealAuthorityUnserved(error)) return null;
+          throw error;
+        });
+        if (!answer) { console.error('release seal-check: the control plane predates GET /api/validation/import/seal-authority, so the credential was not checked; the seal itself still decides'); print({ checked: false }); return; }
+        if (options.positional[0]) {
+          try {
+            syncLedger(git, base);
+            const record = sealCheckRecord(findCandidate(readLedger(git), target), answer, new Date());
+            writeRecord(git, sealCheckTag(record), record.sha, record, push);
+          } catch (error: any) { console.error(`release seal-check: the answer was not recorded on the candidate: ${error?.message ?? error}`); }
+        }
+        print(answer); if (answer.mayseal !== true) process.exitCode = 1; return;
       }
       if (id === 'imports') {
         syncLedger(git, base);
