@@ -28,7 +28,7 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | post the verdict comment (review dispatch) |
 
-`master reviewer setup` creates it (one-hour tokens); `SLUG[bot]` head approval satisfies both. Shortfalls (`appPermissions`; `github-setup --update-permissions` lists `Actions: write (failed CI reruns)`) hold jobs **not retried** (`integration-held`) until `master browser app-permissions` or `master browser installation-accept`.
+`master reviewer setup` creates it (Pull requests write; tokens last one hour); `SLUG[bot]` head approval satisfies both. Shortfalls (`appPermissions`; `github-setup --update-permissions` lists `Actions: write (failed CI reruns)`) hold jobs **not retried** (`integration-held`) until `master browser app-permissions` or `master browser installation-accept`.
 
 ## Reusing an App
 
@@ -58,4 +58,4 @@ Protected `pull_request_target` workflow per `graphyard/*` push: **plan** reads 
 
 ## Automatic merging
 
-`master init --no-auto-merge` (`policy.auto-merge.set`; admin or coordinator) holds every gate-passing head, re-read before each merge write or push, and withdraws armed ones; an approved `master decide GY-N merge REASON` releases that exact candidate; `--auto-merge` restores.
+`master init --no-auto-merge` (`policy.auto-merge.set`; admin or coordinator) holds gate-passing heads, re-read before each merge write or push, withdrawing armed ones; approved `master decide GY-N merge REASON` releases that exact candidate.
