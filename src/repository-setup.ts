@@ -14,7 +14,7 @@ import { documentationAssignment, documentationPolicySchema, parseRepositoryConf
 import { executorRunnableKinds, type NextActionKind } from './model/action-kinds.js';
 import { deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy } from './model/delivery-policy.js';
 import { renderReleasePipeline } from './install/release-pipeline.js';
-import { assertUnitOwned, executorGlob, executorInstance, executorInstancePattern, legacyExecutorTemplate, legacyInstallUnits, readInstallUnits, resolveInstallUnits, unitCheckout, type InstallUnits } from './install/units.js';
+import { assertUnitOwned, executorGlob, executorInstance, executorInstancePattern, legacyExecutorTemplate, legacyInstallUnits, readInstallUnits, resolveInstallUnits, systemdCommandLineWords, unitCheckout, type InstallUnits } from './install/units.js';
 import { coordinatorCheckoutRoot } from './master/profiles.js';
 import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
 import { herdrTarget, type HerdrInstance } from './master/herdr.js';
@@ -810,9 +810,12 @@ const shortSha = (commit: string | null | undefined) => commit ? String(commit).
 function unitCodeCheckout(text: string, home: string): string | null {
   return unitLauncherCheckout(text, home) ?? unitCheckout(text, home).workingDirectory;
 }
-/** The checkout whose Graphyard launcher a unit's ExecStart starts, null when it names none: the executable alone, never the rest of the unit (GY-1859). */
+/** The one ExecStart wording both readers share, defined beside `unitCheckout` in `src/install/units.ts` (GY-1880). */
+export { systemdCommandLineWords };
+/** The checkout whose Graphyard launcher a unit's ExecStart starts, null when it names none: the executable alone, never the rest of the unit (GY-1859). The line is worded by systemd's own quoting rules (GY-1880), so a launcher `loopUnitText` spelled quoted for a path holding whitespace reads back as exactly that checkout. */
 export function unitLauncherCheckout(text: string, home: string): string | null {
-  const launcher = unitCheckout(text, home).execStart?.split(/\s+/).map(part => part.replace(/^"|"$/g, '')).find(part => /(?:bin\/graphyard\.mjs|dist\/cli\.js|scripts\/graphyard-executor\.mjs)$/.test(part));
+  const start = unitCheckout(text, home).execStart;
+  const launcher = start ? systemdCommandLineWords(start).find(part => /(?:bin\/graphyard\.mjs|dist\/cli\.js|scripts\/graphyard-executor\.mjs)$/.test(part)) : undefined;
   return launcher ? dirname(dirname(launcher)) : null;
 }
 /** What a running executor recorded about itself beside the master credential (executor-fleet's registration), as far as the commit check reads it (GY-1859). */
