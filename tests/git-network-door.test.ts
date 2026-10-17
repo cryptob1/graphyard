@@ -166,6 +166,8 @@ export interface AllowlistEntry {
   runs: string;
   /** The credential they reach the remote with. */
   credential: string;
+  /** Why the call cannot go through the merge writer instead; every entry of a follow-up cluster that keeps its calls states it (GY-1943). */
+  whyNotMergeWriter?: string;
 }
 
 /**
@@ -174,17 +176,18 @@ export interface AllowlistEntry {
  * calls behind the merge writer); unit:git-network-door-baseline keeps the set from growing.
  */
 export const allowlist: Record<string, AllowlistEntry> = {
-  'scripts/ci-tests.mjs': { subcommands: ['ls-remote'], runs: 'the CI runner reading the merge queue refs while selecting this run\'s tests', credential: 'the Actions checkout token the runner already holds' },
-  'scripts/onboarding-delivery-fixture.mjs': { subcommands: ['fetch', 'push'], runs: 'the onboarding preview fixture standing up its scratch origin', credential: 'none: it pushes and fetches a local bare repository in scratch' },
-  'scripts/prepare-acceptance.mjs': { subcommands: ['fetch'], runs: 'the trusted acceptance job preparing the exact candidate head and base', credential: 'none stored: an anonymous https fetch of a public repository inside the candidate build context' },
+  'scripts/ci-tests.mjs': { subcommands: ['ls-remote'], runs: 'the CI runner reading the merge queue refs while selecting this run\'s tests', credential: 'the Actions checkout token the runner already holds', whyNotMergeWriter: 'it runs on a GitHub Actions runner, a different machine from the loop that hosts the merge writer, and reads the queue refs with the token Actions hands that runner; the writer has no port a CI job can call' },
+  'scripts/onboarding-delivery-fixture.mjs': { subcommands: ['fetch', 'push'], runs: 'the onboarding preview fixture standing up its scratch origin', credential: 'none: it pushes and fetches a local bare repository in scratch', whyNotMergeWriter: 'its origin is a bare repository it created in scratch, not the install\'s remote: no install, loop or merge writer exists for the fixture it stands up, and nothing it moves leaves the machine' },
+  'scripts/prepare-acceptance.mjs': { subcommands: ['fetch'], runs: 'the trusted acceptance job preparing the exact candidate head and base', credential: 'none stored: an anonymous https fetch of a public repository inside the candidate build context', whyNotMergeWriter: 'it runs inside the trusted acceptance job on a CI runner, which must build from the exact head and base it reads itself; the merge writer lives in the loop on another machine and no port reaches it from CI' },
   'src/cli/checkout-restore-release.ts': { subcommands: ['clone', 'fetch'], runs: 'the serving release\'s own CLI answering `master checkout-restore --serve` (the base-tip read and the local snapshot clone)', credential: 'the loop checkout\'s own git credential for the fetch; the --shared clone is local and needs none' },
   'src/cli/complete.ts': { subcommands: ['push'], runs: 'the worker CLI publishing its head (`complete`)', credential: 'the worker sandbox\'s own git credential (GY-1925: it fails wherever SSH cannot read /etc/ssh)' },
   'src/cli/planned-files-intent.ts': { subcommands: ['fetch'], runs: 'the worker CLI reading the planned-files intent (`sync`)', credential: 'the worker checkout\'s own git credential' },
   'src/cli/sync-push.ts': { subcommands: ['fetch'], runs: 'the worker CLI following the control plane\'s push (`sync --push-via-control-plane`)', credential: 'the worker sandbox\'s own git credential, for the local remote-tracking ref only' },
   'src/cli/workspace-worktree.ts': { subcommands: ['fetch'], runs: 'the worker launcher\'s workspace tools (`handoff`, `restore-branch`)', credential: 'the workspace checkout\'s own git credential' },
   'src/cli/workspace.ts': { subcommands: ['fetch'], runs: '`graphyard sync` in a workspace without a control plane', credential: 'the workspace checkout\'s own git credential' },
-  'src/conflicts.ts': { subcommands: ['fetch'], runs: 'the master status pipeline probing candidate conflicts', credential: 'the coordinator checkout\'s own git credential' },
-  'src/daemon/acceptance.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s acceptance step drafting a goal\'s acceptance (base read, acceptance-branch push)', credential: 'the coordinator checkout\'s own git credential' },
+  'src/conflicts.ts': { subcommands: ['fetch'], runs: 'the master status pipeline probing candidate conflicts', credential: 'the coordinator checkout\'s own git credential', whyNotMergeWriter: 'it reads the open candidates\' worker branches, which the merge writer never fetches (its one read is the base tip), synchronously inside the status probe\'s time budget; the writer has no port for branch reads and is not wired under the github merger' },
+  'src/daemon/acceptance.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s acceptance step opening a goal\'s acceptance pull request under the github merger (base read, acceptance-branch push); under control-plane its base read is the merge writer\'s fetch', credential: 'the coordinator checkout\'s own git credential',
+    whyNotMergeWriter: 'under the github merger GitHub merges the acceptance pull request, so its branch must be on the remote before one opens, and no merge writer runs; the writer pushes only a leased merge onto the base tip, never a review branch' },
   'src/daemon/blocker-probes.ts': { subcommands: ['ls-remote', 'push'], runs: 'the loop\'s blocker probes: the confined credential script (`/bin/sh -c`) and the base-tip read', credential: 'whatever credential the confined worker holds — the probe exists to test it; the base-tip read uses the coordinator checkout\'s own' },
   'src/daemon/cycle-merge-writer.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s merge-writer cycle (the base read, and the leased push it executes from pushArgs)', credential: 'the merge writer\'s deploy key alone (pushEnvironment, GIT_SSH_COMMAND)' },
   'src/daemon/cycle-shadow.ts': { subcommands: ['fetch'], runs: 'the loop\'s shadow-gate reads', credential: 'the coordinator checkout\'s own git credential' },
@@ -194,7 +197,7 @@ export const allowlist: Record<string, AllowlistEntry> = {
   'src/daemon/step-stalls.ts': { subcommands: ['ls-remote'], runs: 'the loop diagnosing a stalled merge step', credential: 'the merge writer\'s deploy key alone (pushEnvironment)' },
   'src/daemon/upgrade.ts': { subcommands: ['fetch'], runs: 'the loop\'s self-upgrade reading the base tip', credential: 'the coordinator checkout\'s own git credential' },
   'src/docs-sync.ts': { subcommands: ['fetch'], runs: 'the loop\'s docs-sync (branch and base reads)', credential: 'the coordinator checkout\'s own git credential' },
-  'src/executor.ts': { subcommands: ['fetch'], runs: 'the loop\'s scope reads (currentBaseTree, autoscope and dispatch)', credential: 'the coordinator checkout\'s own git credential' },
+  'src/executor.ts': { subcommands: ['fetch'], runs: 'the loop\'s scope reads (currentBaseTree, autoscope and dispatch)', credential: 'the coordinator checkout\'s own git credential', whyNotMergeWriter: 'a terminal scope refusal needs a base read fresh at the moment it is judged (GY-1764) under either merger; the writer\'s base fetch runs only in its control-plane cycle, and this read already runs in the same loop process with the same credential' },
   'src/install/host.ts': { subcommands: ['clone', 'fetch'], runs: 'the installer driving the host shell over ssh (`sh -c`): the managed checkout and the Graphyard source checkout', credential: 'a one-shot App installation token passed on standard input for the managed clone (never stored, never an argument); the source checkout\'s remote is public and needs none' },
   'src/master/autonomy.ts': { subcommands: ['clone', 'fetch'], runs: 'the master cloning the approver\'s own copy (approverClone) and fetching its bound sha', credential: 'the coordinator checkout\'s own git credential for the bound-sha fetch; the clone itself is local' },
   'src/master/branch-release.ts': { subcommands: ['fetch', 'push'], runs: 'the master preparing a rework workspace (submittedBranchRefusal)', credential: 'the coordinator checkout\'s own git credential' },
@@ -202,8 +205,8 @@ export const allowlist: Record<string, AllowlistEntry> = {
   'src/merge-writer/executor.ts': { subcommands: ['push'], runs: 'the merge writer itself — the one process meant to reach the remote; its leased push args run in cycle-merge-writer.ts and release-ports.ts', credential: 'the leased deploy key (deployKeySshCommand), forced only onto the tip it was tested on' },
   'src/release-candidate.ts': { subcommands: ['fetch', 'ls-remote', 'push'], runs: 'the release candidate cut, ledger sync and remote-tip reads (`graphyard release`, the loop\'s ports)', credential: 'the caller\'s own git credential: the operator\'s for the CLI, the coordinator\'s or the deploy key in the loop' },
   'src/release-project.ts': { subcommands: ['push'], runs: 'the loop\'s async promotion replaying the hold records\' tag writes', credential: 'the merge writer\'s deploy key, through the AsyncGit the release ports hand it' },
-  'src/review-scope.ts': { subcommands: ['fetch'], runs: 'the loop\'s review-scope reads', credential: 'the coordinator checkout\'s own git credential' },
-  'src/server/routes/goals.ts': { subcommands: ['fetch'], runs: 'the server\'s land route judging a merge-writer landing', credential: 'none of its own: a compose container holds no SSH credential (GY-1922), so a failed fetch answers retryable 503 and records nothing' },
+  'src/review-scope.ts': { subcommands: ['fetch'], runs: 'the loop\'s review-scope reads', credential: 'the coordinator checkout\'s own git credential', whyNotMergeWriter: 'the review-scope, cycle-scope and deployment reads need the base tip under either merger, and under the github merger no merge writer cycle runs; it is the same loop process and credential as the writer\'s own base fetch, with the contended-ref retry the writer lacks (GY-1893)' },
+  'src/server/routes/goals.ts': { subcommands: ['fetch'], runs: 'the server\'s land route judging a merge-writer landing', credential: 'none of its own: a compose container holds no SSH credential (GY-1922), so a failed fetch answers retryable 503 and records nothing', whyNotMergeWriter: 'it runs in the server process, which cannot call the loop\'s merge writer; the fetch is best-effort and a failure falls back to the origin ref the writer\'s own post-push fetch leaves, so dropping it is a change to the land route\'s judgement, not a move' },
   'src/up.ts': { subcommands: ['fetch', 'push'], runs: '`graphyard up` publishing onboarding and moving the host checkout to the installed ref', credential: 'the operator\'s own git credential on the installing machine' },
 };
 
@@ -216,6 +219,12 @@ export const allowlist: Record<string, AllowlistEntry> = {
  * promotion, GY-1942 docs-sync and workspace tooling, GY-1943 acceptance and planner, GY-1944
  * worker CLI.
  */
+/**
+ * GY-1943: the acceptance and planner cluster. Each file either leaves both lists, its calls moved
+ * behind the merge writer, or keeps an entry stating why its call cannot go through it.
+ */
+export const acceptanceAndPlannerCluster = ['src/daemon/acceptance.ts', 'src/review-scope.ts', 'src/executor.ts', 'src/conflicts.ts', 'src/server/routes/goals.ts', 'scripts/prepare-acceptance.mjs', 'scripts/ci-tests.mjs', 'scripts/onboarding-delivery-fixture.mjs'];
+
 export const baseline = [
   'scripts/ci-tests.mjs',
   'scripts/onboarding-delivery-fixture.mjs',
@@ -288,6 +297,10 @@ test('unit:git-network-door — every file that spawns a git network subcommand 
     assert.deepEqual(subcommandsOf(detected.get(path) ?? []), [...entry.subcommands].sort(), `${path}'s entry must name exactly the subcommands it spawns`);
     assert.ok(entry.runs.trim().length >= 15, `${path}'s entry names the process that runs its git network subcommands`);
     assert.ok(entry.credential.trim().length >= 10, `${path}'s entry names the credential its git network subcommands use`);
+  }
+  for (const path of acceptanceAndPlannerCluster) {
+    if (!Object.hasOwn(allowlist, path)) { assert.ok(!baseline.includes(path), `${path} left the allowlist, so it leaves the baseline in the same commit`); continue; }
+    assert.ok((allowlist[path].whyNotMergeWriter ?? '').trim().length >= 60, `${path} still spawns, so its entry states why its call cannot go through the merge writer (GY-1943)`);
   }
 });
 
