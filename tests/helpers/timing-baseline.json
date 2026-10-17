@@ -977,6 +977,7 @@
     "tests/goal-exact-candidates.test.ts": 3000,
     "tests/goal-exact-verification.test.ts": 4000,
     "tests/soak-exact-candidates.test.ts": 32000,
-    "tests/goal-candidate-promotion.test.ts": 5000
+    "tests/goal-candidate-promotion.test.ts": 5000,
+    "tests/release-uat-after-read.test.ts": 400
   }
 }
