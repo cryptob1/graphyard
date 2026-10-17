@@ -41,7 +41,7 @@ Unacted producer requests (unstarted/refused/launch-exited) relaunch on untried 
 
 ## Fault classes
 
-`faultClass` (`master status` `faults`): recurring classes file one item each; instances predating a delivered class's fix-running landing (serving, not merge) link there; triage proposes closing items holding only those, withdrawn on post-running links; doctor matches standing/cover; a resource at bound files `resource:ID`; three straight >60s cycles (restart-safe) file `slow-loop:RELEASE:STEP` naming p50/p95, step, call; filings outlive releases; asks replay per key, backing off; `fleet-capacity`/`unanswered-request` (past `settledAnswerGraceMs`), `configuration`/`decision-unanswered`/`unclassified` unless (`plane-unavailable`/`fix-item`/`decision-stale`/`overlong-session`). Review unlaunched 15min: `concurrency-starved`/`review-settlement`/`launch-review`; gh pauses `github-budget`. `no master role` → `configuration`, not `stalled-gate`. Pre-start launch failures: one; finished lease-holder files `session` past orphan watch and gone-worker preserve.
+`faultClass` (`master status` `faults`): recurring classes file one item each; instances predating a delivered class's fix-running landing link there; triage proposes closing items holding only those, withdrawn on post-running links; doctor matches standing/cover; a resource at bound files `resource:ID`; three straight >60s cycles (restart-safe) file `slow-loop:RELEASE:STEP` naming p50/p95, step, call; filings outlive releases; asks replay per key, backing off; `fleet-capacity`/`unanswered-request` (past `settledAnswerGraceMs`), `configuration`/`decision-unanswered`/`unclassified` unless (`plane-unavailable`/`fix-item`/`decision-stale`/`overlong-session`). Review unlaunched 15min: `concurrency-starved`/`review-settlement`/`launch-review`; gh pauses `github-budget`. Fleet-held claimable items past 20min file `concurrency-starved` (`capacity:<id>`). `no master role` → `configuration`, not `stalled-gate`. Pre-start launch failures: one; finished lease-holder files `session` past orphan watch.
 
 ## Shadow merge gate
 
@@ -49,10 +49,10 @@ Unacted producer requests (unstarted/refused/launch-exited) relaunch on untried 
 
 ## Pipeline speed
 
-Target: submit→merge p50 ≤30 minutes, p90 ≤60min. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; verdict `speed.submitToMerge`; `scripts/measure-pipeline-speed.mjs` feeds `manual:speed-target-met`.
+Target: submit→merge p50 ≤30min, p90 ≤60min. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; verdict `speed.submitToMerge`; `scripts/measure-pipeline-speed.mjs` feeds `manual:speed-target-met`.
 
 Steps calling an approver, decision or session budget two-fifths of the interval (30s floor), each call 10s or what's left; a slower one is carried (`waiting`, no fault), retried next cycle, joining it or consuming its answer, kept while its row stands; spent, it starts none; one `decision.*` ledger read names moved items, an unmoved history is kept unread. Master/merge-mode/record/triage-phase calls too.
 
 ## Loop-step stalls
 
-A loop step or dispatcher call failing with one normalised signature on three consecutive cycles is one stall (`daemon.stepStalls`); while it stands its failing call is retried at most once per five minutes, a bound remedy is applied once and verified, and a stall needing the master wakes it with signature, step and count. Past six uncleared cycles the loop files exactly one upstream item per signature, into the install `.graphyard/master.json` names as `upstream` or into itself, deduplicated by signature; `master status` lists each stall with signature, count, remedy and owner.
+A loop step or dispatcher call failing with one normalised signature on three consecutive cycles is one stall (`daemon.stepStalls`); while it stands its failing call is retried at most once per five minutes, a bound remedy is applied once and verified, and a stall needing the master wakes it with signature, step, count. Past six uncleared cycles the loop files exactly one upstream item per signature, into the install `.graphyard/master.json` names as `upstream` or into itself, deduplicated by signature; `master status` lists each stall with signature, count, remedy and owner.

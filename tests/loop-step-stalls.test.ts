@@ -13,7 +13,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // The modules under test are imported inside each test, so a run against code without them fails
 // its cases rather than the file (graphyard verify's exercise).
-const load = async () => ({ S: await import('../src/daemon/step-stalls.js'), R: await import('../src/stall-remedies.js') });
+const load = async () => ({ S: await import('../src/daemon/step-stalls.js'), U: await import('../src/daemon/stall-upstream.js'), R: await import('../src/stall-remedies.js') });
 
 // GY-1854: a loop step or dispatcher call that fails with the same normalised signature on three
 // consecutive cycles is recorded as one stall; a bound remedy (unknown profile, 401 credential,
@@ -766,7 +766,7 @@ test('unit:stall-kept-while-admitted-attempt-runs — a launch admitted by a sta
 
 // GY-1855 AC-2: past the clearing bound the loop files exactly one upstream item per signature; master status lists each stall.
 test('unit:loop-step-stall-upstream — a stall past six consecutive failing cycles files exactly one upstream item per signature; a later cycle and a retry after a lost reply file nothing new; master status lists signature, count, remedy and owner', async () => {
-  const { S } = await load();
+  const { S, U } = await load();
   const loop = state();
   loop.cycle = 1;
   const failing = { kind: 'refresh', state: 'failed' as const, detail: 'the control plane timed out after 5000ms reading /api/status' };
@@ -786,25 +786,25 @@ test('unit:loop-step-stall-upstream — a stall past six consecutive failing cyc
     asks.push({ input, key });
     return { key: 'GY-STALL-1' } as never;
   };
-  const filed = await S.fileStalledStepsUpstream(loop, filer, () => clock, persist);
+  const filed = await U.fileStalledStepsUpstream(loop, filer, () => clock, persist);
   assert.ok(filed);
   assert.equal(filed.state, 'done');
   assert.equal(asks.length, 1);
-  assert.equal(asks[0].key, S.stallUpstreamIdempotencyKey(stall.signature));
+  assert.equal(asks[0].key, U.stallUpstreamIdempotencyKey(stall.signature));
   assert.equal(asks[0].key, `loop-step-stall:${S.stallSubjectKey(stall.signature).slice('stall:'.length)}`);
   // The body is a pure function of the signature: a re-ask under the same key would return the same item.
-  assert.deepEqual(asks[0].input, S.stallUpstreamItem(stall.signature));
+  assert.deepEqual(asks[0].input, U.stallUpstreamItem(stall.signature));
   assert.match((asks[0].input as { title: string }).title, /refresh call fails/);
 
   // A later cycle past the bound files nothing more: the cursor's done row is the local dedup.
   loop.cycle = 7;
   S.noteCycleStalls(loop, [failing], 7, tick(S.stallBackoffMs + 1));
-  assert.equal(await S.fileStalledStepsUpstream(loop, filer, () => clock, persist), null);
+  assert.equal(await U.fileStalledStepsUpstream(loop, filer, () => clock, persist), null);
   assert.equal(asks.length, 1, 'exactly one item per signature');
 
   // master status lists the stall with signature, count, remedy and owner, and names the filed item.
   const standing = Object.values(loop.stepStalls)[0];
-  const attention = S.stallStatusAttention(loop, '/outside/graphyard.mjs');
+  const attention = U.stallStatusAttention(loop, '/outside/graphyard.mjs');
   assert.equal(attention.length, 1);
   assert.equal(attention[0].subject, S.stallSubjectKey(standing.signature));
   assert.match(attention[0].text, new RegExp(`failed ${standing.count} cycle`));
@@ -819,9 +819,9 @@ test('unit:loop-step-stall-upstream — a stall past six consecutive failing cyc
   const early = state();
   for (const cycle of [1, 2, 3]) S.noteCycleStalls(early, [failing], cycle, tick(1));
   assert.equal(S.stallFilesUpstream(Object.values(early.stepStalls)[0]), false);
-  assert.equal(await S.fileStalledStepsUpstream(early, filer, () => clock, persist), null);
+  assert.equal(await U.fileStalledStepsUpstream(early, filer, () => clock, persist), null);
   assert.equal(asks.length, 1);
-  const earlyList = S.stallStatusAttention(early, 'graphyard.mjs');
+  const earlyList = U.stallStatusAttention(early, 'graphyard.mjs');
   assert.equal(earlyList.length, 1);
   assert.match(earlyList[0].text, /failed 3 cycle/);
   assert.doesNotMatch(earlyList[0].text, /upstream item/);

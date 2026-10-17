@@ -35,7 +35,7 @@ import { hotspots } from './hotspots.js';
 import { stallAttention } from './stall-attention.js';
 import { coordinationStep } from './coordination-snapshot.js';
 import { buildPipelineStatus, reconcileLedgers } from './master-status-pipeline.js';
-import { stallStatusAttention } from '../daemon/step-stalls.js';
+import { stallStatusAttention } from '../daemon/stall-upstream.js';
 import { assembleReportedAttention, assembleStatusSections } from './master-status-sections.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
