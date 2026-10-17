@@ -282,7 +282,7 @@ test('integration:goal-loop-verifies-onboarding-hold-clearance — the loop read
   // A newer candidate at the repair passes at its exact SHA: the hold clears under its rule.
   assert.deepEqual(await validated('20261017T153000Z', repair, 'passed'), [{ kind: 'clear', outcome: 'onboarding-default-path', hold: 'onboarding-default-path', item: 'GY-1909' }]);
   const cleared = await read(repair);
-  assert.equal(cleared?.result, 'pass', JSON.stringify(cleared));
+  assert.equal((cleared as { result?: string } | null)?.result, 'pass', JSON.stringify(cleared));
   assert.match((cleared as { detail: string }).detail, new RegExp(`onboarding-delivery-defaults passed in the clearing candidate's own execution rc-20261017T153000Z deployed at the release's exact SHA ${repair.slice(0, 12)}; the onboarding-default-path hold GY-1909 cleared on candidate 20261017T153000Z`));
 
   // A descendant release needs its own pass at its exact SHA: none recorded is unproven; a failed one is a failed reading; its own pass verifies it.
@@ -291,14 +291,14 @@ test('integration:goal-loop-verifies-onboarding-hold-clearance — the loop read
   // Its failure opens a new hold, filed as its own item; the repaired hold GY-1909 stays cleared.
   assert.deepEqual(await validated('20261017T170000Z', descendant, 'failed'), [{ kind: 'open', outcome: 'onboarding-default-path', hold: 'onboarding-default-path', item: 'GY-1950' }]);
   const failing = await read(descendant);
-  assert.equal(failing?.result, 'fail', JSON.stringify(failing));
+  assert.equal((failing as { result?: string } | null)?.result, 'fail', JSON.stringify(failing));
   assert.match((failing as { detail: string }).detail, /onboarding-delivery-defaults failed in descendant candidate 20261017T170000Z's own execution rc-20261017T170000Z/);
   const next = await commit('next-change');
   // A UAT that served another SHA is never this release's execution.
   await validated('20261017T180000Z', next, 'passed', { deployedSha: descendant });
   await unavailable(next, /no UAT execution is recorded deployed and run at the release's exact SHA/);
   await validated('20261017T190000Z', next, 'passed');
-  assert.equal((await read(next))?.result, 'pass');
+  assert.equal(((await read(next)) as { result?: string } | null)?.result, 'pass');
 
   // A release that does not carry the repair and the clearing candidate is unproven, as is one this checkout cannot place.
   run('checkout', '-q', '-b', 'elsewhere', failedSha);
@@ -319,7 +319,7 @@ test('integration:goal-loop-verifies-onboarding-hold-clearance — the loop read
   // Registered on the loop: the production reading effects read this checkout's ledger, so the loop's reading of GY-1911 passes on the exact release.
   const effects = readingEffects(() => ({ cliPath: 'graphyard' }) as never, async () => ({}), async () => ({}), { root: ledger, run: defaultChildRun });
   const loopReading = await effects.readPostDeploy({ proof: onboardingTargetProof, parent, item: { key: 'GY-1911' } as never, criterion: onboardingCriterion, release: repair, now: new Date() });
-  assert.equal(loopReading.result, 'pass', JSON.stringify(loopReading));
+  assert.equal((loopReading as { result?: string }).result, 'pass', JSON.stringify(loopReading));
   const other = await effects.readPostDeploy({ proof: 'manual:post-deploy/other', parent, item: { key: 'GY-1911' } as never, criterion: onboardingCriterion, release: repair, now: new Date() });
   assert.match((other as { unavailable: string }).unavailable, /no reader of manual:post-deploy\/other runs on this host/);
 });
