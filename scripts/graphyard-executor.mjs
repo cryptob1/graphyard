@@ -171,17 +171,20 @@ export function controlPlaneEffects(modules, context) {
     observeDeployment: delivered => d.observeDeployment(current(), delivered, run, fetch, () => Date.now(), { root }),
     // GY-1831: a verify-deployment failure that only says the running release does not carry the
     // merge yet is a promotion wait while the loop's recorded promotion state has the merge in
-    // flight. The predicate reads the promotion state the loop already records on its cursor, at
-    // the cadence the loop's own read windows set: this executor runs no fetch and no GitHub
-    // request of its own, and never touches the promotion ledger's pin. The state's own reason
-    // names the gates that stop every dispatch (promotion off, the main watch's freeze, a
-    // control-plane merger without ports), so a row only ever waits on a pipeline the loop is
-    // driving; anywhere else — an unreadable state included — the failure stands as it was, and
-    // the stall it earns is what it was. The clock measures the deployment handoff after a recorded promotion.
-    promotionCarryingMerge: async mergeSha => {
+    // flight. GY-1966: the wait names the pipeline's newest demonstrated movement — its cursor's
+    // newest candidate, dispatch or promotion — so the row's unchanged run measures the stretch
+    // since the pipeline last moved, and a re-cut cycle longer than an hour no longer files. The
+    // predicate reads the promotion state the loop already records on its cursor, at the cadence
+    // the loop's own read windows set: this executor runs no fetch and no GitHub request of its
+    // own, and never touches the promotion ledger's pin. The state's own reason names the gates
+    // that stop every dispatch (promotion off, the main watch's freeze, a control-plane merger
+    // without ports), so a row only ever waits on a pipeline the loop is driving; anywhere else —
+    // an unreadable state included — the failure stands as it was, and the stall it earns is what
+    // it was. The clock measures the deployment handoff after a recorded promotion.
+    promotionWaitSuffix: async mergeSha => {
       const config = current();
       const state = await d.readDaemonState(root, config);
-      return d.promotionCarryingMerge(state.promotion ?? null, mergeSha, root, config.baseBranch, run, clock());
+      return d.promotionWaitSuffix(state.promotion ?? null, mergeSha, root, config.baseBranch, run, clock());
     },
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
   };

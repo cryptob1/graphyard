@@ -1,6 +1,7 @@
 import { agentOwner, humanOwner, type AttentionItem } from '../master.js';
 import { describeRemedyRecord, stallRemedy, standingRemedy } from '../stall-remedies.js';
 import { actionStallMaxMs, actionStallRecheckMs, queueSnapshot } from '../model/action-progress.js';
+import { namesReleaseMachinery } from '../model/action-kinds.js';
 import type { Work } from '../model.js';
 
 /**
@@ -40,6 +41,18 @@ const elapsed = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)}
  */
 export function stalledActionAttention(snapshot: { work: Work[]; now: string }): AttentionItem[] {
   return queueSnapshot(snapshot.work, new Date(snapshot.now)).stalled.map(entry => {
+    // GY-1966: a stalled verify-deployment row whose reason names the release machinery — the
+    // running release does not carry the merge, with or without the promotion wait beside it — is
+    // the machinery's fault, not the item's. What holds the row is a pipeline that has stopped
+    // moving the delivery, and only the pipeline can end the wait, so the attention names the
+    // release machinery and counts under the deployment class rather than filing a per-item
+    // stalled-action instance over a wait the item cannot clear.
+    if (entry.kind === 'verify-deployment' && namesReleaseMachinery(entry.stall!.reason)) return {
+      subject: entry.key,
+      kind: 'production' as const,
+      text: `The release machinery is not moving ${entry.key}'s delivery: its verify-deployment action has failed ${entry.stall!.failures} times in a row for one unchanged reason — ${entry.stall!.reason} — and it has been open ${elapsed(entry.waitedMs)} over ${entry.attempts} attempt(s)${entry.retryAt ? `; next attempt at ${entry.retryAt}` : ''}. The fault is the promotion pipeline's, not ${entry.key}'s: nothing the item's row attempts moves a pipeline that has stopped`,
+      ...agentOwner('master', `Find what stopped the promotion pipeline in master status's promotion report (its reason, newest candidate and last dispatch) and start it again — lift a freeze, restore the merger's ports, or fix or move main past the candidate that failed. When the report's last promotion already carries the merge, the pipeline did its part and production failed to serve it (a rollback or a wedged deploy): recover the production deployment instead, since a new candidate does not repair it. Each row's recheck picks the recovery up and records the delivery`),
+    };
     const bound = stallRemedy(entry.stall!.reason);
     const work = snapshot.work.find(item => item.id === entry.work);
     const attempt = bound?.applies === 'loop' && work ? standingRemedy(work, entry.id, entry.stall!.reason) : null;
