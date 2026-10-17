@@ -1,5 +1,5 @@
 import { documentationGlobMatches } from './documentation-glob.js';
-import { companionGround as recordCompanionGround, followUpPaths, machineryOf, timingBaseline, type FollowUpSource, type GateRecord } from './scope-companions.js';
+import { companionGround as recordCompanionGround, followUpPaths, machineryOf, timingBaseline, type FollowUpSource, type FailedCheckSource } from './scope-companions.js';
 export { followUpPaths, plannedCompanions } from './scope-companions.js';
 import { addsTestFile, timingBaselinePath } from './timing-companion.js';
 import { type NonRepositoryPath, nonRepositoryReason } from './scope-repository.js';
@@ -187,7 +187,7 @@ export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; p
  * audited reason; everything else is refused with the reason it was refused for.
  */
 export function decideScopeRequest(
-  item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; observation?: { files?: readonly string[]; checks?: readonly { name: string; result: string }[] } | null; candidate?: { sha: string } | null; gates?: readonly GateRecord[] } & FollowUpSource,
+  item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; observation?: { files?: readonly string[] } | null } & FailedCheckSource & FollowUpSource,
   request: Pick<ScopeRequestState, 'paths' | 'remove' | 'criteria'> & { reason?: string },
   options: { documentation?: readonly string[]; documentationConsumers?: readonly string[]; nonRepository?: readonly NonRepositoryPath[]; treeRead?: boolean } = {},
 ): ScopeVerdict {

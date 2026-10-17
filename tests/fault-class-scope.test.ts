@@ -717,8 +717,8 @@ const standing1893 = (entry: typeof gy1881Fixture | typeof gy1888Fixture) => {
   const work = standing(entry);
   if (entry === gy1881Fixture) {
     work.candidate = { sha: '552d4fbeedff', baseSha: 'c30a233fdea2', pr: 1247, branch: 'graphyard/gy-1881-1', author: 'graphyard-cursor-2' };
-    work.observation = { checks: [{ name: 'test', result: 'failure', appId: 15368 }], candidate: work.candidate } as Work['observation'];
-    work.gates = [{ name: 'test', passed: false, reasons: [ciCheckRefusal('test')] }];
+    work.observation = { checks: [{ name: 'test', result: 'failure', appId: 15368, id: 100 }], candidate: work.candidate } as Work['observation'];
+    work.gates = [{ name: 'test', passed: false, reasons: [ciCheckRefusal('test')], ciAppIds: [15368] }];
   }
   return work;
 };
@@ -737,17 +737,37 @@ test(`manual:fault-class-scope — scope-request|GY-1881|${gy1881At}: the failed
   assert.match(verdict.reason, /tests\/pi-provider-limit-exhaustion\.test\.ts is the test file the failed required check test on this item's current candidate names/);
   assert.deepEqual(scopeFaults(settled1893(work), gy1881At).map(fault => fault.kind), [], 'the granted ask never stands to become the fault');
   // What the rule still refuses: an item that has not run the check (the same refusal a fresh item
-  // carries), a run read on another candidate, a run the gate does not hold, an ask that names no
-  // file, a check the story does not name, a different check than the one held failed, a file the
-  // failure site does not quote, and a path that is no test file.
+  // carries), a run read on another candidate, a same-head other-base observation, a superseded or
+  // untrusted failure beside a trusted pending run, a run the gate does not hold, an ask that names
+  // no file, a check the story does not name, a different check than the one held failed, a file
+  // the failure site does not quote, and a path that is no test file.
   const unrun = standing1893(gy1881Fixture);
   unrun.candidate = null; unrun.observation = null;
   assert.equal(decideScopeRequest(unrun, unrun.scopeRequest!).state, 'refused', 'a red gate without a failing run is the no-candidate refusal, not a ground');
   const stale = standing1893(gy1881Fixture);
-  stale.observation = { checks: [{ name: 'test', result: 'failure', appId: 15368 }], candidate: { ...stale.candidate!, sha: 'older-sha' } } as Work['observation'];
+  stale.observation = { checks: [{ name: 'test', result: 'failure', appId: 15368, id: 100 }], candidate: { ...stale.candidate!, sha: 'older-sha' } } as Work['observation'];
   assert.equal(decideScopeRequest(stale, stale.scopeRequest!).state, 'refused', 'the ground is the run on the current candidate, not one an older observation read');
+  // Same head SHA, different candidate base: the test gate's freshness check refuses it.
+  const otherBase = standing1893(gy1881Fixture);
+  otherBase.observation = { checks: [{ name: 'test', result: 'failure', appId: 15368, id: 100 }], candidate: { ...otherBase.candidate!, baseSha: 'other-base' } } as Work['observation'];
+  assert.equal(decideScopeRequest(otherBase, otherBase.scopeRequest!).state, 'refused', 'a same-head other-base observation grants nothing');
+  // An older trusted failure retained beside a newer trusted pending run: the gate stays red on the
+  // pending run, but the counting run has not failed, so the ground must refuse.
+  const superseded = standing1893(gy1881Fixture);
+  superseded.observation = { checks: [
+    { name: 'test', result: 'failure', appId: 15368, id: 100 },
+    { name: 'test', result: 'pending', appId: 15368, id: 200 },
+  ], candidate: superseded.candidate } as Work['observation'];
+  assert.equal(decideScopeRequest(superseded, superseded.scopeRequest!).state, 'refused', 'a superseded failure beside a trusted pending run grants nothing');
+  // An untrusted app's failure beside a trusted pending run: only the trusted run counts.
+  const untrusted = standing1893(gy1881Fixture);
+  untrusted.observation = { checks: [
+    { name: 'test', result: 'failure', appId: 99999, id: 100 },
+    { name: 'test', result: 'pending', appId: 15368, id: 200 },
+  ], candidate: untrusted.candidate } as Work['observation'];
+  assert.equal(decideScopeRequest(untrusted, untrusted.scopeRequest!).state, 'refused', 'an untrusted failure beside a trusted pending run grants nothing');
   const unheld = standing1893(gy1881Fixture);
-  unheld.observation = { checks: [{ name: 'typecheck', result: 'failure', appId: 15368 }], candidate: unheld.candidate } as Work['observation'];
+  unheld.observation = { checks: [{ name: 'typecheck', result: 'failure', appId: 15368, id: 100 }], candidate: unheld.candidate } as Work['observation'];
   assert.equal(decideScopeRequest(unheld, unheld.scopeRequest!).state, 'refused', 'the ground is the run the gate holds, not any failing run');
   const unnamed = standing1893(gy1881Fixture);
   unnamed.scopeRequest = { ...unnamed.scopeRequest!, reason: 'The change reads better with this file refactored.' };
