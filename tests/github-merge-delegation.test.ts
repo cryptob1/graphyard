@@ -38,12 +38,18 @@ function fakeGitHub(options: { queue?: boolean; mode?: 'queued' | 'auto-merge' |
   const operations: { operation: string; variables: Record<string, unknown> }[] = [];
   const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 1, privateKey: 'not-used' });
   const prHead = options.prHead ?? head;
-  github.request = async (path: string, method = 'GET', body?: unknown) => {
+  // The check runs GitHub keeps: what a write leaves at a head is what the next listing returns (GY-1884).
+  const runs: any[] = [];
+  github.request = async (path: string, method = 'GET', body?: any) => {
     calls.push({ path, method, body });
+    if (method === 'POST' && path === '/check-runs') { const run = { ...body, id: 77 + runs.length, app: { id: 1234 } }; runs.push(run); return run; }
+    if (method === 'PATCH' && path.startsWith('/check-runs/')) { const run = runs.find(entry => entry.id === Number(path.slice('/check-runs/'.length))); if (run) Object.assign(run, body); return run ?? { id: 77 }; }
     if (method !== 'GET') return { id: 77 };
     if (path === '/pulls/42') return { number: 42, state: 'open', draft: false, head: { sha: prHead }, base: { ref: 'main', sha: base } };
     if (path === '/git/ref/heads/main') return { ref: 'refs/heads/main', object: { type: 'commit', sha: base } };
     if (/^\/commits\/[a-f0-9]{40}$/.test(path)) return { sha: path.slice(9), commit: { tree: { sha: 'e'.repeat(40) } } };
+    const listing = /^\/commits\/([a-f0-9]{40})\/check-runs\?check_name=([^&]+)&.*page=1$/.exec(path);
+    if (listing) return { check_runs: runs.filter(run => run.head_sha === listing[1] && run.name === decodeURIComponent(listing[2])) };
     if (path.includes('/check-runs')) return { check_runs: [] };
     throw new Error(`Unexpected GitHub request ${method} ${path}`);
   };
