@@ -186,6 +186,9 @@ export const allowlist: Record<string, AllowlistEntry> = {
  * allowlist must equal it on this item's merge — no file added to make the door pass, none
  * silently dropped. A follow-up that moves its cluster's calls behind the merge writer removes its
  * entries here and in the allowlist in the same commit; the set never grows.
+ * The four follow-ups, filed unreleased, own these files by cluster: GY-1941 release and
+ * promotion, GY-1942 docs-sync and workspace tooling, GY-1943 acceptance and planner, GY-1944
+ * worker CLI.
  */
 export const baseline = [
   'scripts/ci-tests.mjs',
