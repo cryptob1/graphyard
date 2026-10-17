@@ -123,4 +123,4 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ### Concurrent reconciliation
 
-Reconcile evaluates moved rows, all every `GRAPHYARD_RECONCILE_FULL_MS` (10000); ticks >5s log `reconciliation tick took N ms`; own-write moves re-evaluate only readers. Batches evaluate lock-free, write per item under coordination+row locks; heartbeats lock only their item.
+Reconcile evaluates moved rows, all ≥ max(`GRAPHYARD_RECONCILE_FULL_MS` (10000), 3× last full pass); ticks >5s log `reconciliation tick took N ms`: moved key+fields/interval, event-loop lag p50/max; own-write moves re-evaluate only readers. Batches evaluate lock-free, yield between items, write each under coordination+row locks; heartbeats lock only their item (renewal ≤1s).
