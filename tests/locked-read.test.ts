@@ -135,9 +135,10 @@ after(async () => { if (store) await store.close(); if (database) await database
  * documents its queries returned whole (a stand-in is returned as JSON text, a document as an object).
  * A transaction opened without the lock (a reconciliation batch, GY-727) holds it only from a
  * successful `pg_try_advisory_xact_lock`, or a reconciliation write's wait for the coordination lock
- * (GY-1290), to its end; `locked` says whether it held it at all.
+ * (GY-1290), to its end; `locked` says whether it held it at all, and `built` how many stand-ins its
+ * queries built — summaries or projections the in-process cache did not hold (GY-1939).
  */
-const holds: { label: string; ms: number; keys: string[]; locked: boolean }[] = [];
+const holds: { label: string; ms: number; keys: string[]; locked: boolean; built: number }[] = [];
 let label = 'other', timing = false;
 const seededDelivered = (entry: { keys: string[] }) => entry.keys.filter(key => key.startsWith('DONE-')).length;
 const seededOpen = (entry: { keys: string[] }) => entry.keys.filter(key => key.startsWith('OPEN-')).length;
@@ -147,14 +148,16 @@ function timeTransactions() {
   store.transaction = (async (fn: any, options: any) => original(async (db, now) => {
     let started = options?.coordinationLock === false ? null as number | null : performance.now();
     const keys = new Set<string>();
+    let built = 0;
     const counted = new Proxy(db, { get: (target, property) => property !== 'query' ? Reflect.get(target, property, target) : async (...args: unknown[]) => {
       const result = await (target.query as any)(...args);
       if (started === null && String(args[0]).includes('pg_try_advisory_xact_lock') && result?.rows?.[0]?.ok) started = performance.now();
       if (started === null && args[0] === 'SELECT pg_advisory_xact_lock($1)' && (args[1] as unknown[])?.[0] === advisoryLocks.coordination) started = performance.now();
+      if (/(i\.summary|x\.document)::text AS text/.test(String(args[0]))) built += result?.rows?.length ?? 0;
       for (const row of result?.rows ?? []) if (row.document && typeof row.document === 'object' && (row.document as Work).key) keys.add((row.document as Work).key);
       return result;
     } });
-    try { return await fn(counted, now); } finally { holds.push({ label, ms: started === null ? 0 : performance.now() - started, keys: [...keys], locked: started !== null }); }
+    try { return await fn(counted, now); } finally { holds.push({ label, ms: started === null ? 0 : performance.now() - started, keys: [...keys], locked: started !== null, built }); }
   }, options)) as typeof store.transaction;
 }
 async function held<T>(name: string, run: () => Promise<T>): Promise<{ result: T; ms: number; reads: typeof holds }> {
@@ -394,6 +397,7 @@ test('unit:reconcile-lock-hold-bounded — a full reconciliation pass over 1000 
   assert.equal(reread, 0, `${reread} delivered documents were read whole over ${batches.length} batches (${batches.map(seededDelivered).join(', ')})`);
   assert.ok(batches.length > 3, `${batches.length} batches`);
   assert.ok(openRead.reduce((a, b) => a + b, 0) < opened_ * 2, `the pass read ${openRead.reduce((a, b) => a + b, 0)} open documents whole for ${opened_} open items`);
+  assert.equal(batches[0].built, 0, `the opening read built ${batches[0].built} stand-ins under the lock for the rows this test seeded (GY-1939)`);
   // The total is deliberately not asserted against a wall-clock bound: a slow host spends each
   // batch's budget before its rows are done, so a pass splits into more batches and each pays the
   // per-batch lock overhead, which grows the total with the host's batch count and not with the
@@ -440,6 +444,22 @@ test('unit:reconcile-lock-hold-bounded — a full reconciliation pass over 1000 
   const evaluating = (entries: typeof holds) => entries.filter(entry => !entry.locked).length;
   assert.ok(evaluating(slowBatches) > evaluating(batches), `a 1 ms budget yields more often: ${evaluating(slowBatches)} evaluating batches against ${evaluating(batches)}`);
   assert.ok(slowRead < opened_ * 2, `with every batch yielding on its budget the pass read ${slowRead} open documents whole for ${opened_} open items`);
+});
+
+test('unit:reconcile-opening-builds-no-stand-in — rows another process wrote after this one warmed its cache are projected before a pass takes the coordination lock, never under it', async () => {
+  // GY-1939: the engine warmed the stand-in cache once per process, so every row another writer
+  // inserted or rewrote since was projected inside the pass's opening read, under the lock — on
+  // main's CI on 2026-10-17 100 freshly seeded open rows held it 517 ms against a 500 ms bound.
+  await ensureTemplate();
+  timeTransactions();
+  label = 'reconcile'; await engine.reconcile(); label = 'other';
+  await seed(30, 10);
+  label = 'reconcile'; const from = holds.length;
+  await engine.reconcile();
+  const batches = holds.slice(from).filter(entry => entry.label === 'reconcile');
+  label = 'other';
+  assert.ok(batches[0].locked, 'the opening read holds the coordination lock');
+  assert.equal(batches[0].built, 0, `the opening read built ${batches[0].built} stand-ins under the coordination lock for rows another process wrote`);
 });
 
 test('a row a reconciliation batch saved stands in as exactly the projection the database would build from it', async () => {
