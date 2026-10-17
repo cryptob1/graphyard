@@ -2,6 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { demand, operatorScopeIncludes, type Principal } from '../model.js';
 import { laneOnlyProducer } from './principals.js';
 import { readImports } from '../validation-import.js';
+import { readGrant } from '../proof-grants.js';
 import { Next, type Route, type RouteModule, type Services } from './routes.js';
 import { leaseCommandRequest } from './routes/work.js';
 
@@ -54,7 +55,8 @@ export const operatorAgentRouteGuard: Route = {
 
 /**
  * A lane-only producer (GY-1879: role producer, whose only grant is `external-runs:import`) is held
- * to the routes that grant names, derived from the grant alone. This guard is the first
+ * to the routes that grant names, derived from the grant alone, until the grant store records proof
+ * authority for it (a producer holding proof grants keeps a producer's access). This guard is the first
  * authenticated route (src/server/index.ts dispatches it ahead of the table), so nothing else runs first: it passes POST /api/validation/import on to the
  * import, answers GET /api/validation/import/{sha} with the runs this principal imported itself and
  * GET /api/principals with its own entry, and refuses every other route before any effect.
@@ -63,6 +65,8 @@ export const laneProducerRouteGuard: Route = {
   method: '*', path: /^\/api\//,
   async handle({ actor, url, req, services }) {
     if (!laneOnlyProducer(actor)) return Next;
+    // Proof authority granted later through the grant API makes it a proof producer, with that producer's access.
+    if (!laneOnlyProducer(actor, (await services.engine.store.transaction(db => readGrant(db, actor.id)))?.patterns)) return Next;
     if (req.method === 'POST' && url.pathname === '/api/validation/import') return Next;
     const head = req.method === 'GET' ? /^\/api\/validation\/import\/([a-f0-9]{40})$/.exec(url.pathname) : null;
     if (head) return readImports({ store: services.engine.store }, head[1], url.searchParams.get('candidate'), actor.id);

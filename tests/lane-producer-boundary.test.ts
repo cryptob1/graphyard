@@ -154,3 +154,46 @@ test('unit:lane-producer-not-a-reviewer-slot — a roster at GRAPHYARD_MAX_REVIE
   assert.deepEqual(delegationLimitDrift(over, env).map(entry => [entry.variable, entry.required]), [['GRAPHYARD_MAX_REVIEWERS', '3']], 'a third proof producer is over the limit');
   assert.throws(() => validateDelegationPrincipals(over, { ...defaultDelegationLimits, maxReviewers: 2 }, [admin.id, proofProducer.id, second.id, lane.id]), /Independent review\/proof agent limit exceeded: 3\/2; set GRAPHYARD_MAX_REVIEWERS=3 on the deployment before adding proof-producer-3/);
 });
+
+// A lane producer's proof authority is Graphyard state: the grant store, not the environment allowlist, decides it.
+const granted: Principal = { id: 'huck-granted', role: 'producer', sessionKind: 'ai', grants: [GRANT] };
+const alsoGranted: Principal = { id: 'huck-granted-2', role: 'producer', sessionKind: 'ai', grants: [GRANT] };
+async function serve(roster: Principal[], env: NodeJS.ProcessEnv) {
+  const served = server(new Engine(store, [15368], 120, REPOSITORY), roster.map(entry => ({ ...entry, token: tokens.get(entry.id) ?? `${entry.id}-${'t'.repeat(40)}` })), github as any, undefined, { env });
+  await served.delegationReady;
+  await new Promise<void>(resolve => served.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(served.address() as any).port}`;
+  const ask = async (method: string, path: string, actor: Principal, data?: unknown) => {
+    const response = await fetch(`${base}/api/${path}`, { method, headers: { Authorization: `Bearer ${tokens.get(actor.id) ?? `${actor.id}-${'t'.repeat(40)}`}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: method === 'GET' ? undefined : JSON.stringify(data ?? {}) });
+    return { status: response.status, body: await response.json().catch(() => null) as any };
+  };
+  return { services: served.services, ask, close: () => new Promise<void>(resolve => served.close(() => resolve())) };
+}
+
+test('unit:other-principal-roles-retain-intended-behaviour — a lane producer later granted proofs through the grant API is a producer holding proof grants: it keeps a proof producer\'s access, holds a reviewer slot counted from the persisted grant, is refused the grant once every slot is held, and is held to its lane again once the proofs are revoked', async () => {
+  const roster = [...principals, granted, alsoGranted];
+  const at = await serve(roster, { GRAPHYARD_MAX_REVIEWERS: '3' });
+  try {
+    assert.match(String((await at.ask('GET', 'validation', granted)).body?.error), laneRefusal, 'before any grant it is held to its lane');
+    assert.deepEqual(at.services.delegationLimits.drift, []);
+    const grant = await at.ask('POST', `proof-grants/${granted.id}/grant`, admin, { patterns: ['unit:*'], reason: 'Huck engineer also proves unit cases' });
+    assert.equal(grant.status, 200, JSON.stringify(grant.body));
+    assert.equal((await at.ask('GET', 'validation', granted)).status, 200, 'the persisted grant gives it a proof producer\'s access');
+    for (const [method, path, data] of refusedRoutes)
+      assert.doesNotMatch(String((await at.ask(method, path, granted, data)).body?.error ?? ''), laneRefusal, `${method} /api/${path}`);
+    // Three proof producers now hold the three slots: a grant to another lane producer would be a fourth.
+    const refused = await at.ask('POST', `proof-grants/${alsoGranted.id}/grant`, admin, { patterns: ['unit:*'], reason: 'one slot too many' });
+    assert.equal(refused.status, 409);
+    assert.match(refused.body.error, /all 3 slots GRAPHYARD_MAX_REVIEWERS=3 allows are held; set GRAPHYARD_MAX_REVIEWERS=4/);
+    assert.match(String((await at.ask('GET', 'validation', alsoGranted)).body?.error), laneRefusal, 'a refused grant records nothing');
+    // A deployment whose limit no longer covers the persisted grant reports the drift the grant opened.
+    const narrower = await serve(roster, { GRAPHYARD_MAX_REVIEWERS: '2' });
+    try { assert.deepEqual(narrower.services.delegationLimits.drift.map(entry => [entry.variable, entry.required]), [['GRAPHYARD_MAX_REVIEWERS', '3']], 'the reviewer slot is counted from the grant store'); }
+    finally { await narrower.close(); }
+    const revoked = await at.ask('POST', `proof-grants/${granted.id}/revoke`, admin, { patterns: ['unit:*'], reason: 'back to the import lane' });
+    assert.equal(revoked.status, 200, JSON.stringify(revoked.body));
+    assert.match(String((await at.ask('GET', 'validation', granted)).body?.error), laneRefusal, 'with its proofs revoked it is a lane producer again');
+    const reopened = await at.ask('POST', `proof-grants/${alsoGranted.id}/grant`, admin, { patterns: ['e2e:*'], reason: 'the slot is free again' });
+    assert.equal(reopened.status, 200, JSON.stringify(reopened.body));
+  } finally { await at.close(); }
+});

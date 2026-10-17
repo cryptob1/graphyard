@@ -9,6 +9,8 @@ import { Delivery } from '../delivery.js';
 import { OperatorAgents } from '../operator-agent.js';
 import { assembleDelegationLimits } from './limits.js';
 import { ProofGrants } from '../proof-grants.js';
+import type { Store } from '../store.js';
+import { withRecordedProofs } from '../delegation.js';
 import { AgentRegistry } from '../agent-registry.js';
 import { ProductionDelivery } from '../production-delivery.js';
 import { artifactCapacityFromEnv, type ArtifactBackend } from '../artifacts.js';
@@ -17,7 +19,7 @@ import type { ProductionWatch } from '../production-watch.js';
 import { responderFromEnv, type Responder } from '../closed-question.js';
 import { Next, Sent, matchRoute, registerApiRoutes, requestFailure, type RouteContext, type RouteModule, type Services } from './routes.js';
 import { authenticate, laneProducerScope, operatorAgentRouteGuard, operatorVisible } from './auth.js';
-import type { Credential } from './principals.js';
+import { laneOnlyProducer, type Credential } from './principals.js';
 import { healthRoutes } from './routes/health.js';
 import { signinClaimFromEnv, signinRoutes } from './routes/signin.js';
 import { githubRoutes } from './routes/github.js';
@@ -95,12 +97,67 @@ export function assembleServices(engine: Engine, credentials: Credential[], gith
   // principals exist and what role each holds; the grant store decides what they may prove.
   const configured = credentials.map(({ token, ...actor }) => actor);
   engine.principals = configured;
-  const proofGrants = new ProofGrants(engine.store, configured);
-  return { signinClaim: signinClaimFromEnv(env, credentials), engine, github, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, proofGrants, productionDelivery, agentRegistry: new AgentRegistry(engine.store), interventionPolicy: interventionPolicyFromEnv(env), responder: options.responder !== undefined ? options.responder : responderFromEnv(env) };
+  let services: Services;
+  const proofGrants = new SlotCountedProofGrants(engine.store, configured, () => services.limits.maxReviewers, () => refreshDelegationLimits(services, credentials, env, options.knownPrincipals));
+  return services = { signinClaim: signinClaimFromEnv(env, credentials), engine, github, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, proofGrants, productionDelivery, agentRegistry: new AgentRegistry(engine.store), interventionPolicy: interventionPolicyFromEnv(env), responder: options.responder !== undefined ? options.responder : responderFromEnv(env) };
+}
+
+/** Each producer's recorded proof patterns, from the grant store: a record supersedes the environment seed. */
+async function recordedProofs(store: Store): Promise<Map<string, string[]>> {
+  return new Map((await store.pool.query('SELECT document FROM proof_grants')).rows.map(row => [row.document.principalId, row.document.patterns]));
+}
+const proofProducers = (principals: readonly Principal[]) => principals.filter(p => p.role === 'producer' && !laneOnlyProducer(p)).length;
+
+/**
+ * The delegation report recomputed from effective proof authority (GY-1879): a reviewer slot is
+ * counted from the grant store, so a lane producer granted proofs through the grant API holds one.
+ * Start-up assembles the report from the environment before any query can run; this runs once the
+ * server is built and after every grant or revoke, updating the limits in force and their drift and
+ * attention in place. A roster the recorded grants put over an explicit limit is reported, not refused.
+ */
+async function refreshDelegationLimits(services: Services, credentials: Credential[], env: NodeJS.ProcessEnv, known?: readonly string[]) {
+  const effective = withRecordedProofs(credentials, await recordedProofs(services.engine.store));
+  let report: ReturnType<typeof assembleDelegationLimits>;
+  try { report = assembleDelegationLimits(effective, env, known); }
+  catch (error) {
+    if (!(error instanceof Refusal)) throw error;
+    report = { ...assembleDelegationLimits(effective, env, effective.map(p => p.id)), attention: [error.message] };
+  }
+  Object.assign(services.limits, report.limits);
+  Object.assign(services.delegationLimits, { drift: report.drift, attention: report.attention });
+}
+
+/**
+ * The grant store with reviewer capacity enforced (GY-1879): proof patterns granted to a lane-only
+ * producer make it a proof producer holding a reviewer slot, so the grant is refused once every slot
+ * GRAPHYARD_MAX_REVIEWERS allows is held; every grant or revoke then recomputes the delegation report.
+ */
+class SlotCountedProofGrants extends ProofGrants {
+  constructor(private readonly grantStore: Store, private readonly configured: readonly Principal[], private readonly maxReviewers: () => number, private readonly refresh: () => Promise<void>) { super(grantStore, configured); }
+  override async grant(actor: Principal, id: string, input: unknown, key: string) {
+    const target = this.configured.find(p => p.id === id);
+    if (actor.role === 'admin' && target) {
+      const effective = withRecordedProofs(this.configured, await recordedProofs(this.grantStore));
+      const held = proofProducers(effective);
+      demand(!laneOnlyProducer(effective.find(p => p.id === id)!) || held < this.maxReviewers(),
+        `Granting proofs to ${id} makes it an independent review/proof agent, and all ${held} slots GRAPHYARD_MAX_REVIEWERS=${this.maxReviewers()} allows are held; set GRAPHYARD_MAX_REVIEWERS=${held + 1} on the deployment first`, 409);
+    }
+    const result = await super.grant(actor, id, input, key);
+    await this.refresh();
+    return result;
+  }
+  override async revoke(actor: Principal, id: string, input: unknown, key: string) {
+    const result = await super.revoke(actor, id, input, key);
+    await this.refresh();
+    return result;
+  }
 }
 
 export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null, artifacts: ArtifactOptions = { backend: null, capacityBytes: artifactCapacityFromEnv() }, options: ServerOptions = {}) {
   const services = assembleServices(engine, credentials, github, artifacts, options);
+  // Reviewer slots counted from the grant store once it can be read; status reports it as soon as it lands.
+  const delegationReady = refreshDelegationLimits(services, credentials, options.env ?? process.env, options.knownPrincipals)
+    .catch(error => console.error('Delegation limits could not be recounted from recorded proof grants:', error instanceof Error ? error.message : 'unknown'));
   const unauthenticated: Principal = { id: '', role: 'reader' };
   // The services ride on the server so the entry announces decisions without reassembling.
   return Object.assign(createServer(async (req, res) => {
@@ -142,5 +199,5 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
       console.error(requestFailure(req.method, req.url, error));
       send(500, { error: 'Internal error; consult server logs' });
     }
-  }), { services });
+  }), { services, delegationReady });
 }

@@ -61,7 +61,16 @@ const limitDefaults: Record<DelegationLimitVariable, number> = { GRAPHYARD_MAX_S
 const countLeads = (principals: Roster) => principals.filter(p => p.role === 'slice-lead').length;
 type Roster = readonly Pick<Principal, 'id' | 'role' | 'grants' | 'proofs' | 'deploymentProviders'>[];
 // A reviewer slot is a producer that can review or prove: a lane-only producer (GY-1879) reviews nothing and holds none.
+// Callers holding the grant store pass the roster through `withRecordedProofs`, so a recorded grant decides it.
 const proofProducer = (p: Roster[number]) => p.role === 'producer' && !laneOnlyProducer(p);
+/**
+ * The roster with each producer's proofs as Graphyard's grant store records them (proof-grants.ts: a
+ * record supersedes the environment seed), so a reviewer slot is counted from effective proof
+ * authority: a lane producer later granted proofs holds one, and holds none again once they are revoked.
+ */
+export function withRecordedProofs<T extends Roster[number]>(principals: readonly T[], recorded: ReadonlyMap<string, readonly string[]>): T[] {
+  return principals.map(p => p.role === 'producer' && recorded.has(p.id) ? { ...p, proofs: [...recorded.get(p.id)!] } : p);
+}
 const countProducers = (principals: Roster) => principals.filter(proofProducer).length;
 
 /**

@@ -55,7 +55,7 @@ Skip with `--no-github-app` until App binds; else dispatch [small item](onboardi
 
 ## Principal roster
 
-`--apply` keeps `install.json`'s roster (`--observe-only`: recorded workers/producers). `principal add ID --role ROLE [--session-kind ai|human] [--grant external-runs:import]...`/`principal remove ID`: one non-installer entry; only `GRAPHYARD_PRINCIPALS`; `/api/principals` readback; idempotent. Producers need `--grant`; import-only: [lane](validation.md#release-verdicts), no reviewer slot.
+`--apply` keeps `install.json`'s roster (`--observe-only`: recorded workers/producers). `principal add ID --role ROLE [--session-kind ai|human] [--grant external-runs:import]...`/`principal remove ID`: one non-installer entry; only `GRAPHYARD_PRINCIPALS`; `/api/principals` readback; idempotent; holds `apply.lock` (an apply planned before it refuses). Producers need `--grant`; import-only: [lane](validation.md#release-verdicts), no reviewer slot.
 
 ## Self-contained host
 
