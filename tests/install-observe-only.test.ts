@@ -166,6 +166,9 @@ test('unit:install-observe-only-redacted-resumable — an existing Railway servi
     const refusal = plan.preflight.find(item => item.name === 'GitHub App')!;
     assert.equal(refusal.ok, false);
     assert.match(refusal.detail, /reads no variable of the existing graphyard-owner-project service.*GITHUB_APP_ID/);
+    const flag = /Rerun with (--[a-z-]+) NAME/.exec(refusal.fix ?? '')?.[1];
+    assert.equal(flag, '--server-name');
+    assert.equal(installRequestFromArgs(['--provider', 'railway', '--repo', REPOSITORY, '--observe-only', flag!, 'graphyard-fresh']).request.serverName, 'graphyard-fresh');
     await assert.rejects(applyInstall(session, plan), /Preflight is incomplete; the installer changed nothing/);
     const lines = fixture.allCommandLines();
     assert.ok(!lines.some(line => /^railway (variables|variable set|up|redeploy|add|init)/.test(line)), `the refused apply ran ${lines.find(line => /^railway (variables|variable set|up|redeploy|add|init)/.test(line))}`);
