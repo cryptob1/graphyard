@@ -13,7 +13,11 @@ import { type ConsentPrompt, detectConsentPrompt, screenDialog, settingsWarning,
 import { bwrapOnPath, checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, isSocketPath, readOnlyMountWrapper, secretsBusPath, type CoordinatorConfinement, type ConfinementInput } from './profiles.js';
 import type { MasterRun } from './profiles.js';
 import { type HerdrAgent, herdrCall, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
+import { deliverPrompt, herdrErrorText, nameRefusedByRuntime, readSessionScreen, sessionWords, type PromptDelivery } from './prompt-delivery.js';
 import { keyringEndpointWarning, keyringProbeBackoff } from './launch-keyring.js';
+// Prompt delivery moved to prompt-delivery.ts (GY-1863) with the screen a stalled delivery is
+// judged by; the names below are the one address every existing import has always had.
+export { promptAttempts, promptAcceptMs, promptRetryPauseMs, noticeSettleMs, PromptNotAcceptedError, herdrErrorCode, herdrErrorText, nameRefusedByRuntime, deliverPrompt, readSessionScreen, sessionWords, type PromptDelivery } from './prompt-delivery.js';
 
 /**
  * Keep what an interrupted attempt had not committed. The work is committed on the attempt's own
@@ -613,53 +617,6 @@ export function withLaunchClose(error: unknown, note: string): Error {
 }
 
 /**
- * Prompt delivery the runtime visibly accepted. Herdr submits the prompt and reports whether the
- * agent left its idle state for it; a runtime that reported ready before its input was (OpenCode
- * does, while its UI loads) drops the text and stays idle, which Herdr answers as a stalled prompt.
- * A stalled prompt is delivered again after a pause; one still refused after every attempt fails
- * the launch, whose caller closes the session and launches afresh. Anything else Herdr refuses
- * fails at once. Since GY-93 this is the path for a runtime without a request contract, for the
- * loop's one re-prompt of a session that has not taken up its request, and for the reviewer's
- * retry to post a verdict it already judged.
- */
-export const promptAttempts = 3, promptAcceptMs = 20_000, promptRetryPauseMs = 3_000;
-export class PromptNotAcceptedError extends Error { readonly promptDropped = true; }
-export function herdrErrorCode(error: unknown) {
-  const text = [(error as any)?.herdrCode, (error as any)?.stdout, (error as any)?.stderr, (error as any)?.message].filter(value => value !== undefined && value !== null).map(String).join('\n');
-  return (error as any)?.herdrCode ?? /"code"\s*:\s*"([a-z_]+)"/.exec(text)?.[1] ?? null;
-}
-/** Everything a Herdr failure said, whichever stream it said it on. */
-export function herdrErrorText(error: unknown) {
-  return [(error as any)?.stdout, (error as any)?.stderr, error instanceof Error ? error.message : error].filter(value => value !== undefined && value !== null && value !== '').map(String).join('\n');
-}
-/** A runtime refusing the name it was given, rather than failing to start the session it names. */
-export function nameRefusedByRuntime(error: unknown) {
-  return /\b(?:agent|session) name\b|\binvalid (?:agent |session )?name\b/i.test(herdrErrorText(error));
-}
-export interface PromptDelivery { attempts?: number; acceptMs?: number; pauseMs?: number }
-export async function deliverPrompt(target: string, text: string, run?: ChildRun, options: PromptDelivery & { confirm?: 'inline' | 'follow' } = {}) {
-  const attempts = options.attempts ?? promptAttempts, acceptMs = options.acceptMs ?? promptAcceptMs, pauseMs = options.pauseMs ?? promptRetryPauseMs;
-  const accepted = ['--until', 'working', '--until', 'blocked', '--timeout', String(acceptMs)];
-  const stalls: string[] = [];
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      // Herdr takes options only after the prompt text; 'follow' submits it and then waits for the
-      // agent to leave idle, which is the same confirmation for a caller whose text must come last.
-      if (options.confirm === 'follow') { await herdrJson(['agent', 'prompt', target, text], run); await herdrJson(['agent', 'wait', target, ...accepted], run); }
-      else await herdrJson(['agent', 'prompt', target, text, '--wait', ...accepted], run);
-      return { attempts: attempt, accepted: true as const };
-    } catch (error) {
-      const code = herdrErrorCode(error);
-      if (code !== 'agent_prompt_stalled' && code !== 'timeout') throw error;
-      stalls.push(code);
-      // The pause is awaited on the event loop: nothing else in the process waits with it.
-      if (attempt < attempts) await sleep(pauseMs);
-    }
-  }
-  throw new PromptNotAcceptedError(`${target} did not visibly accept its prompt after ${attempts} deliveries (${stalls.join(', ')}); the session is closed and relaunched rather than left idle`);
-}
-
-/**
  * Whether a launched session has taken up its request, judged from what Herdr shows and nothing
  * the session says (GY-93).
  *
@@ -686,19 +643,8 @@ export type SessionActivity = 'awaiting acknowledgement' | 'running';
 export const sessionActivity = (record: Pick<LaunchAcknowledgement, 'acknowledgedAt'>): SessionActivity => record.acknowledgedAt ? 'running' : 'awaiting acknowledgement';
 export const activeStates = ['working', 'blocked'];
 export const screenDigest = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 32);
-/** The session's terminal, as text; null when Herdr cannot read it. */
-export async function readSessionScreen(target: string, run: ChildRun = defaultChildRun, lines = 80): Promise<string | null> {
-  try { return String(await herdrCall(run, ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', String(lines)])); } catch { return null; }
-}
 /** How a session's screen is read when the judgement needs it: a stub in a test, one Herdr read in the process. */
 export type ScreenReader = () => string | null | Promise<string | null>;
-const screenDecoration = /^[\s─━═╌┄┈│┃╭╮╰╯┌┐└┘├┤=_*·•-]*$|^[❯⏵✻✶✳✢·]|bypass permissions on|shift\+tab to cycle|for shortcuts|esc to interrupt|\? for help/;
-/** The session's own last words: the tail of its screen without the runtime's frame, bounded for a ledger record. */
-export function sessionWords(text: string | null, limit = 400) {
-  const lines = (text ?? '').split('\n').map(line => line.trim()).filter(line => line && !screenDecoration.test(line));
-  const words = lines.slice(-8).join(' ').replace(/\s+/g, ' ').trim();
-  return words.length > limit ? `…${words.slice(-limit)}` : words;
-}
 export async function acknowledgeLaunch(record: LaunchAcknowledgement, agent: Pick<HerdrAgent, 'agent_status'> | undefined, observed: { now: number; ackMs: number; result: boolean; screen: ScreenReader }) {
   if (record.acknowledgedAt) return { changed: false, reprompt: false };
   const at = new Date(observed.now).toISOString();
