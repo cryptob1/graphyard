@@ -14,7 +14,7 @@ import { candidateValidationKind, type ExactCandidate } from '../src/model/relea
 import type { PromotedCandidate, PromotionRequest } from '../src/server/routes/candidates.js';
 import { cutAsync, readLedgerAsync, serveStaticSite, syncLedgerAsync, promoteAsync, type AsyncGit, type ReleaseCandidate } from '../src/release-candidate.js';
 import { buildStaticSite, projectCaseSuite, validateProjectCandidate } from '../src/release-project.js';
-import { candidateArtifact, exactCandidatePorts, exactPromotionGate, exactValidation, requiredCaseIds } from '../src/daemon/release-ports.js';
+import * as releasePorts from '../src/daemon/release-ports.js';
 import type { E2eLauncher, E2eReport } from '../src/e2e/runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -32,6 +32,11 @@ const credentials = [{ ...operator, token: tokens.operator }, { ...coordinator, 
 let database: EmbeddedPostgres, connection: string, store: Store, http: ReturnType<typeof server>, url: string, origin: string, checkout: string, root: string;
 const git = (...args: string[]) => execFileSync('git', ['-C', checkout, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const asyncGit: AsyncGit = async args => git(...args);
+// A namespace import, so a checkout without the gate still loads this file and fails in its cases.
+const { exactCandidatePorts, exactValidation } = releasePorts;
+const candidateArtifact: typeof releasePorts.candidateArtifact = (...args) => releasePorts.candidateArtifact(...args);
+const requiredCaseIds: typeof releasePorts.requiredCaseIds = (...args) => releasePorts.requiredCaseIds(...args);
+const exactPromotionGate: typeof releasePorts.exactPromotionGate = (...args) => releasePorts.exactPromotionGate(...args);
 const freePort = async () => { const probe = netServer(); await new Promise<void>(done => probe.listen(0, '127.0.0.1', done)); const { port } = probe.address() as AddressInfo; await new Promise<void>(done => probe.close(() => done())); return port; };
 async function start() {
   store = new Store(connection); await store.init();
