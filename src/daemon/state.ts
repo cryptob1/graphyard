@@ -466,6 +466,33 @@ export function masterSummary(master: MasterSessionState, now: number) {
 }
 
 export const dispatchFailureRunSchema = z.object({ key: z.string().max(100), cause: z.string().max(2000), count: z.number().int().min(1), epoch: z.number().int().min(0).default(0), firstAt: z.string(), lastAt: z.string() }).strict(); export type DispatchFailureRun = z.infer<typeof dispatchFailureRunSchema>;
+/** GY-1854: one attempt of the remedy a stalled loop-step signature binds to, recorded on the stall. */
+export const stepStallRemedyRecordSchema = z.object({
+  kind: z.string().max(40), at: z.string(), outcome: z.enum(['applied', 'unchanged', 'refused']), verified: z.boolean(), detail: z.string().max(2000),
+}).strict();
+export type StepStallRemedyRecord = z.infer<typeof stepStallRemedyRecordSchema>;
+/**
+ * GY-1854: one run of consecutive cycles a loop step or dispatcher call failed with one normalised
+ * signature, and the stall three of them are — recorded once, its bound remedy applied once and
+ * verified, and its call backed off to once per five minutes. The rules live in
+ * ./step-stalls.ts, which also bounds the record a cycle that fails nowhere clears.
+ */
+export const stepStallSchema = z.object({
+  signature: z.string().max(800),
+  /** The failing call: a cycle step's action kind, the dispatcher's `dispatch`, or `cycle` for a whole failed cycle. */
+  step: z.string().max(100),
+  count: z.number().int().min(1),
+  /** The loop cycle the run was last seen failing in: a cycle that ends without the step failing clears the run. */
+  lastCycle: z.number().int().min(0),
+  firstAt: z.string(), lastAt: z.string(), lastError: z.string().max(1000),
+  /** When the run reached three consecutive cycles and was recorded as this stall; null until then. */
+  stalledAt: z.string().nullable(),
+  /** The one attempt of its bound remedy, or null while none was applied. */
+  remedy: stepStallRemedyRecordSchema.nullable().default(null),
+  /** When the stalled call may be attempted next: once per five minutes while the stall stands. */
+  nextAttemptAt: z.string().nullable().default(null),
+}).strict();
+export type StepStall = z.infer<typeof stepStallSchema>;
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   /** `pidNamespace` (GY-1370): the PID namespace the pid was taken in, absent on a lock written before it was recorded. */
@@ -556,6 +583,12 @@ export const daemonStateSchema = z.object({
    * Cleared by a launch that lands and once the blocker naming the cause is recorded.
    */
   dispatchFailures: z.record(z.string(), dispatchFailureRunSchema).default(() => ({})),
+  /**
+   * Per normalised signature (GY-1854), the run of consecutive cycles a loop step or dispatcher
+   * call failed with it, and the stall three of them are. src/daemon/step-stalls.ts owns the rules
+   * and bounds the record (retainedStepStalls).
+   */
+  stepStalls: z.record(z.string(), stepStallSchema).default(() => ({})),
   /** The item keys the decisions step reached past its time budget last cycle, which this cycle reaches first (GY-1286). */
   decisionsDeferred: z.array(z.string().max(200)).max(5000).default(() => []),
   /** Shared project memory (GY-1125): recent approved decisions, recurring pitfalls with sanctioned remedies, and merges. */

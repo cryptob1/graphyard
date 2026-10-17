@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Log: `journalctl --user -u graphyard-master`.
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. `daemon.stepStalls`: a loop step or dispatcher call failing three consecutive cycles with one normalised signature is one stall; a bound remedy (unknown profile, 401 credential, merge-record idempotency reuse) is applied once per run, verified; an unbound stall wakes the master session, the stalled call retrying once per five minutes. Log: `journalctl --user -u graphyard-master`.
 
 ### Perpetual master loop
 

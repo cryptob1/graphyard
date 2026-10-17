@@ -29,6 +29,9 @@ import { mainWatchSummary } from './main-watch.js';
 import { shadowGateSummary } from './cycle-shadow.js';
 import { adoptLoopRelease, fileSlowLoopItem } from './slow-loop-item.js';
 import { mergeWriterSummary } from './cycle-merge-writer.js';
+import { noteCycleStalls, noteStepFailure, remedyStalledSteps, type StepStallRemedyRunner } from './step-stalls.js';
+import { setupAgentEnvironments } from '../master/environments.js';
+import type { StepStallRemedyOutcome } from '../stall-remedies.js';
 import { detachRuns } from '../runner/registry.js';
 import type { LoopWake } from './loop-wake.js';
 
@@ -49,6 +52,9 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     liveness,
     // Failed cycles and the process-level events the loop survived (GY-119).
     failures: state.failures,
+    // The loop-step stalls (GY-1854): the standing runs of one failing call, the stalls among them
+    // with their one recorded remedy attempt.
+    stepStalls: Object.values(state.stepStalls),
     // What it could act on and the longest any of those has waited, and the latency budgets.
     silence: silenceReport(state.silence, now),
     budget: latencyBudget(state.latency),
@@ -202,6 +208,55 @@ export async function openResearchScratch(source: string, config: MasterConfig, 
 }
 
 /**
+ * Judges the report the profile write answered with (GY-1854): applied when it wrote at least one
+ * profile change, verified when the write landed and no credential was skipped unread.
+ */
+export function profileRemedyOutcome(report: { applied?: boolean; profiles?: unknown[]; skipped?: { reason: string }[]; next?: string }): StepStallRemedyOutcome {
+  const profiles = report.profiles?.length ?? 0, skipped = report.skipped?.length ?? 0;
+  return {
+    outcome: profiles ? 'applied' : 'unchanged',
+    verified: report.applied === true && profiles > 0 && skipped === 0,
+    detail: `${profiles} profile change(s) written${skipped ? `, ${skipped} credential(s) skipped: ${report.skipped!.map(entry => entry.reason).join('; ')}` : ''}: ${report.next ?? 'no report'}`.slice(0, 2000),
+  };
+}
+
+/**
+ * Adopts the server's merge ledger for a refused merge record (GY-1854): the item's folded ledger
+ * is read back from the snapshot — the executor reads the same fold every cycle, so the attempt
+ * key it derives next carries the server's own event count — and the stale in-flight merge is
+ * cleared, so the refused head starts a new attempt instead of replaying its idempotency key.
+ */
+export function mergeLedgerAdoption(state: DaemonState, work: readonly { key: string; mergeLedger?: { events?: number } | null }[], refused: string | null): StepStallRemedyOutcome {
+  const key = refused ? /(?:^|[^A-Za-z0-9])([A-Za-z]+-\d+)\b/.exec(refused)?.[1] ?? null : null;
+  const events = work.find(entry => entry.key === key)?.mergeLedger?.events ?? null;
+  state.mergeWriter.inFlight = null;
+  return { outcome: 'applied', verified: events !== null,
+    detail: `Adopted the server's merge ledger for ${key ?? 'the refused record'} (${events === null ? 'no folded ledger read' : `${events} events`}) and cleared the stale in-flight merge, so the next attempt records under a fresh key`.slice(0, 2000) };
+}
+
+/**
+ * The stall step's own remedy ports (GY-1854): the loop writes the agent profiles exactly as
+ * `master environments --apply` does, and adopts the server's merge ledger for a refused merge
+ * record. A credential the plane answers 401 this loop holds no port to re-issue: the remedy is
+ * recorded refused once and its stall wakes the master session, whose task names the bootstrap.
+ */
+export function stallRemedyRunner(config: () => Pick<MasterConfig, 'url'>, state: () => DaemonState, read: DaemonEffects['snapshot'], root: () => string): StepStallRemedyRunner {
+  return async kind => {
+    if (kind === 'profile-unknown') {
+      return profileRemedyOutcome(await setupAgentEnvironments(root(), { apply: true, verify: async token => {
+        const response = await fetch(`${config().url}/api/status`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5_000) });
+        return response.json();
+      } }));
+    }
+    if (kind === 'merge-record-idempotency') {
+      const refused = Object.values(state().actions).filter(action => action.kind === 'merge' && action.state === 'failed' && /Idempotency key reused with different input/i.test(action.detail)).at(-1);
+      return mergeLedgerAdoption(state(), (await read()).work, refused?.detail ?? null);
+    }
+    throw new Error('this loop holds no port that re-issues a refused credential; the master session runs the install\'s bootstrap path for it');
+  };
+}
+
+/**
  * Supervised entry point. The process owns no lease and no credential beyond the coordinator token,
  * so a restart is always safe: it reconciles the cursor against Graphyard and keeps cycling.
  *
@@ -233,7 +288,9 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   /** The commit of the held-cli snapshot this process's modules were loaded from (GY-1773), null for the checkout's; defaults to reading where this module was loaded from. */
   loadedSnapshot?: () => string | null;
   /** The dispatcher's wake (GY-1490, loop-wake.ts): ends the sleep after a cycle as soon as the tick sees work the loop acts on. */
-  wake?: Pick<LoopWake, 'sleep'> } ) {
+  wake?: Pick<LoopWake, 'sleep'>;
+  /** The ports the stall step's bound remedies run through (GY-1854); absent, the loop's own are wired — the profile write and the merge-ledger adoption — and any other bound remedy is recorded refused for the master session to run. */
+  stallRemedies?: StepStallRemedyRunner; } ) {
   // Progress goes to stderr so stdout stays the machine-readable result the CLI prints.
   const now = options.now ?? Date.now, log = options.log ?? (line => console.error(line));
   const interval = () => typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
@@ -297,6 +354,9 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     // Session launches run beside the cycles, never inside one (GY-616): a cycle hands a launch over
     // and moves on, and the next cycle reports what it did. The launcher outlives every cycle.
     const launcher = new Launcher(config.run.launchConcurrency ?? defaultLaunchConcurrency);
+    // GY-1854: the ports the stall step's bound remedies run through, the loop's own where it holds
+    // them and a recorded refusal naming the master session where it does not.
+    const stallRunner = options.stallRemedies ?? stallRemedyRunner(() => config, () => state, raw.snapshot, () => options.repository ?? coordinatorCheckoutRoot(config.cliPath));
     // GY-857: the checkout guard. The modules this process imported were read from the coordinator
     // checkout at startup; when it holds uncommitted work, cycling would run unreviewed code and a
     // self-upgrade would move the checkout underneath it, so the loop refuses — at startup it never
@@ -356,6 +416,14 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           // GY-1775: three consecutive cycles past the cycle bound on one loaded release file the fix item naming the slowest step and call.
           const slowLoop = await fileSlowLoopItem(state, effects, now);
           if (slowLoop) log(`[graphyard-master] cycle ${result.metrics.cycle} ${slowLoop.kind} ${slowLoop.state}: ${slowLoop.detail}`);
+          // GY-1854: the stall step. Every action the cycle recorded failed — the dispatcher's
+          // failures among them — signs its call; three consecutive cycles with one signature are
+          // one stall; a bound remedy is applied once and verified; and a cycle that failed
+          // nowhere ends the runs it did not fail in.
+          for (const note of noteCycleStalls(state, result.actions, result.metrics.cycle, now()))
+            if (note.stalled) log(`[graphyard-master] cycle ${result.metrics.cycle} recorded one ${note.bound ? `stall bound to the ${note.bound.kind} remedy` : 'stall no remedy binds to'}: ${note.run.signature}`);
+          for (const { signature, record } of await remedyStalledSteps(state, stallRunner, now()))
+            log(`[graphyard-master] the ${record.kind} stall remedy ${record.outcome}${record.verified ? ', verified' : ', unverified'}: ${record.detail} (${signature.slice(0, 160)})`);
           for (const action of result.actions) log(`[graphyard-master] cycle ${result.metrics.cycle} ${action.kind} ${action.state}: ${action.detail}`);
           // Both halves of every cycle: what it could act on, and what it did about it — and where its
           // time went: its three slowest steps and its slowest external call (GY-377).
@@ -373,6 +441,14 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           const failure = await noteCycleFailure(state, error, phase, { now: now(), intervalMs: interval(), ceilingMs: cycleFailureCeiling(watchdog.windowMs), persist: effects.persist });
           failed.push({ cycle: failure.cycle, call: failure.call, reason: failure.reason, delayMs: failure.delayMs });
           log(`[graphyard-master] cycle ${failure.cycle} failed in ${describeFailingCall(failure)}: ${failure.reason}; ${state.failures.consecutive} consecutive failure(s), the next cycle runs in ${Math.round(failure.delayMs / 1000)}s at ${failure.nextAt}`);
+          // GY-1854: the failed cycle signs its failing call like any loop step, and a bound remedy
+          // is applied once for the stall it records. The stalled call backs off to once per five
+          // minutes through the tracker's attempt window; the loop's own retry schedule converges
+          // to the same bound (cycleFailureCeilingMs).
+          const stall = noteStepFailure(state, failure.call ?? 'cycle', failure.reason, now(), failure.cycle);
+          if (stall.stalled) log(`[graphyard-master] cycle ${failure.cycle} recorded one ${stall.bound ? `stall bound to the ${stall.bound.kind} remedy` : 'stall no remedy binds to'}: ${stall.run.signature}`);
+          for (const { record } of await remedyStalledSteps(state, stallRunner, now()))
+            log(`[graphyard-master] the ${record.kind} stall remedy ${record.outcome}${record.verified ? ', verified' : ', unverified'}: ${record.detail}`);
           wait = failure.delayMs;
         }
         // GY-437: between cycles — never mid-cycle — align this checkout with the verified deployed

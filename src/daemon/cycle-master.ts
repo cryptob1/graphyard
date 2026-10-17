@@ -8,6 +8,7 @@ import { message } from './state.js';
 import { emptyMasterSession, type MasterSessionState } from './state.js';
 import { sessionCapMs } from '../model/registry-sessions.js';
 import { masterHandover, masterSessionBudgetMs, masterHeartbeatIntervalMs, masterWakeText, masterProfile } from '../master/master-session.js';
+import { stallWakeSubjects } from './step-stalls.js';
 import { outputReadDue } from './cycle-sessions.js';
 import type { Cycle } from './cycle.js';
 import { carriedCall, owedWrite, stepCallCarried, withinStepBudget } from './step-budget.js';
@@ -128,7 +129,9 @@ async function masterSessionStepWithin(cycle: Cycle) {
 
   // Launch: nothing live holds the role, so the handover is composed from control-plane truth and one launch handed over.
   if (!live.agentName && !live.launching && !listed(config.masterAgentName)) {
-    const subjects = actionableSubjects(config, snapshot.work, clock, { approvals: state.approvals });
+    // GY-1854: the standing stalls that need the master ride the durable handover as subjects, so a
+    // replacement starts knowing them.
+    const subjects = [...actionableSubjects(config, snapshot.work, clock, { approvals: state.approvals }), ...stallWakeSubjects(state, config.cliPath)];
     const handover = masterHandover({ cliPath: config.cliPath, work: snapshot.work, now: clock, approvals: Object.values(state.approvals), subjects });
     live.launching = true;
     await effects.persist(state);
@@ -168,7 +171,11 @@ async function masterSessionStepWithin(cycle: Cycle) {
   const runtimeGone = !!agent && !agent.agent && agent.agent_status === 'unknown';
   for (const key of Object.keys(live.subjects)) if (!agent || runtimeGone) delete live.subjects[key];
   if (agent && !runtimeGone && effects.promptSession && !launching) {
-    const subjects = actionableSubjects(config, snapshot.work, clock, { approvals: state.approvals });
+    // GY-1854: an unbound stall wakes the session with the signature, last error, step and count as
+    // its task, keyed off its signature so a standing stall is never a second subject; the digest
+    // machinery below wakes once per changed task, and the 5-minute backoff bounds how often the
+    // failing call can move it.
+    const subjects = [...actionableSubjects(config, snapshot.work, clock, { approvals: state.approvals }), ...stallWakeSubjects(state, config.cliPath)];
     const causes = subjects.filter(subject => live.subjects[subject.key] !== promptDigest(subject.detail)).map(subject => subject.key);
     const reference = live.lastWake?.at ?? live.startedAt;
     const quietMs = reference ? Math.max(0, clock - Date.parse(reference)) : 0;
