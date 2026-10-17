@@ -14,10 +14,8 @@ import { defineRoutes, parseJson } from '../routes.js';
 import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
 import { executorHost } from './agent-registry.js';
 import { directMergeStatus } from '../../direct-merge.js';
-import { AutoMergeSettings, autoMergeStatus, mergeHolds, mergeWriterStatus } from '../../merger-mode.js';
+import { autoMergeStatus, mergeHolds, mergeWriterStatus } from '../../merger-mode.js';
 import { projectDelivery } from '../../project-applications.js';
-import { rerunFailedChecksEvent } from '../../merge-queue.js';
-import { maxRerunFailedChecks } from '../../master/profiles.js';
 import { eventStats } from '../../store/snapshot-delta.js';
 import { repositoryPolicy } from '../../model/repository-policy.js';
 import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment } from '../../flow-analytics.js';
@@ -166,39 +164,7 @@ export const statusRoutes = defineRoutes('status', [
       return { productionEnvironment: environment, recorded: true };
     },
   },
-  {
-    // The master loop publishes `mergeQueue.rerunFailedChecks` (GY-516) from its own configuration,
-    // which lives only on the master's host: how many times a failed required check is rerun on its
-    // sha. It is recorded once per change in the installation ledger and applied to every
-    // evaluation from then on; a restarted server reads it back from there. The retired keys an
-    // older master may still send — `optimistic` and `optimisticExclude` (GY-1233), `batchSize` and
-    // `parallelTips` of Graphyard's removed merge queue (GY-1236) — are ignored.
-    method: 'POST', path: '/api/merge-queue',
-    async handle(context) {
-      const { actor, services: { engine } } = context;
-      demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-      const body = await parseJson(context, 16384, '{}');
-      const { batchSize, parallelTips, rerunFailedChecks } = body ?? {};
-      demand(batchSize !== undefined || parallelTips !== undefined || rerunFailedChecks !== undefined, 'rerunFailedChecks is required', 400);
-      if (rerunFailedChecks !== undefined) demand(Number.isSafeInteger(rerunFailedChecks) && rerunFailedChecks >= 0 && rerunFailedChecks <= maxRerunFailedChecks, `rerunFailedChecks must be an integer from 0 to ${maxRerunFailedChecks}`, 400);
-      let recorded = false;
-      // Each value is applied only once the ledger holds it (GY-384): a failed INSERT leaves the
-      // evaluation on the recorded value and the master unpublished, so its next cycle retries.
-      const record = async (kind: string, field: string, value: number, previous: number, apply: () => void) => {
-        const latest = (await engine.store.pool.query('SELECT 1 FROM events WHERE work_id IS NULL AND kind=$1 LIMIT 1', [kind])).rowCount;
-        if (latest && JSON.stringify(previous) === JSON.stringify(value)) return apply();
-        await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, kind, JSON.stringify({ [field]: value, previous: latest ? previous : null })]);
-        apply();
-        recorded = true;
-      };
-      if (rerunFailedChecks !== undefined) await record(rerunFailedChecksEvent, 'rerunFailedChecks', rerunFailedChecks, await engine.loadRerunFailedChecks(), () => { engine.rerunFailedChecks = rerunFailedChecks; });
-      return { mergeQueue: { rerunFailedChecks: engine.rerunFailedChecks }, recorded };
-    },
-  },
   doctorRoute,
-  // Automatic merging (merger-mode.ts, GY-1927): read like the merger, set with an admin or coordinator credential only.
-  { method: 'GET', path: '/api/auto-merge', handle: ({ actor, services }) => new AutoMergeSettings(services.engine.store).status(actor) },
-  { method: 'POST', path: '/api/auto-merge', handle: async context => new AutoMergeSettings(context.services.engine.store).change(context.actor, await parseJson(context), context.idempotencyKey()) },
   {
     method: 'GET', path: '/api/work-snapshot',
     async handle({ actor, req, url, services, operatorVisible }) {

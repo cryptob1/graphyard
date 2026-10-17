@@ -2902,7 +2902,8 @@ export async function mergeRequest(engine: Engine, work: Work, hold: string | nu
   if (!mergeAuthorized(work) || hold || enqueueRequestCurrent(work, standing)) return standing;
   return engine.store.transaction(async (db, now) => {
     const current = await engine.enqueueRequest(work.id, db);
-    if (enqueueRequestCurrent(work, current)) return current;
+    // The hold read again inside the request's own transaction (GY-1927): one recorded since the observation began requests nothing.
+    if (enqueueRequestCurrent(work, current) || await mergeHold(db, work)) return current;
     const request: MergeEnqueueRequest = { sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, requestedBy: 'graphyard', at: now.toISOString() };
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'merge.enqueue.requested', JSON.stringify({ details: request })]);
     return request;
@@ -2916,9 +2917,10 @@ export async function mergeRequest(engine: Engine, work: Work, hold: string | nu
  * dequeued, and a queued entry's merge group commit is given the same verdict so the queue can land
  * it. Graphyard never merges past GitHub: branch protection and required checks decide every merge.
  * Under the automatic-merging hold (`hold`, GY-1927) the check is published as ever, but nothing is
- * enqueued, and a head GitHub already holds for merging (queued or auto-merge armed) is withdrawn.
+ * enqueued, and a head GitHub already holds for merging (queued or auto-merge armed) is withdrawn;
+ * `beforeMerge` (by default `beforeWrite`) runs just before the enqueue alone.
  */
-export async function gateMerge(github: MergeGateClient, work: Work, request: MergeEnqueueRequest | null, beforeWrite: () => Promise<void> = async () => {}, hold: string | null = null): Promise<{ action: MergeQueueAction; state: GitHubMergeQueueState | null }> {
+export async function gateMerge(github: MergeGateClient, work: Work, request: MergeEnqueueRequest | null, beforeWrite: () => Promise<void> = async () => {}, hold: string | null = null, beforeMerge: () => Promise<void> = beforeWrite): Promise<{ action: MergeQueueAction; state: GitHubMergeQueueState | null }> {
   demand(work.candidate, `${work.key} has no candidate to gate`);
   // Failure is written before a dequeue, success before an enqueue: GitHub never holds a head for
   // merging whose published verdict says otherwise.
@@ -2948,7 +2950,7 @@ export async function gateMerge(github: MergeGateClient, work: Work, request: Me
   state = { ...state, requestedAt: enqueueRequestCurrent(work, request) ? request!.at : null };
   try {
     if (action.kind === 'dequeue') await github.dequeuePullRequest(state);
-    if (action.kind === 'enqueue') { await beforeWrite(); await github.enqueuePullRequest(state, work.candidate.sha, action.mergeNow); }
+    if (action.kind === 'enqueue') { await beforeMerge(); await github.enqueuePullRequest(state, work.candidate.sha, action.mergeNow); }
     if (action.kind === 'hold' && !hold && state.mode === 'queued' && state.groupHead && state.head === work.candidate.sha && mergeAuthorized(work)) await github.publishGroupCheck(work, state.groupHead);
   } catch (error) { return { action: { kind: 'hold', reason: `GitHub refused to ${action.kind} ${work.key}: ${error instanceof Error ? error.message : String(error)}` }, state }; }
   return { action, state };
@@ -2960,7 +2962,17 @@ export async function gateMerge(github: MergeGateClient, work: Work, request: Me
  */
 export async function observeMerge(engine: Engine, github: MergeGateClient, work: Work, beforeWrite?: () => Promise<void>) {
   const hold = mergeAuthorized(work) ? await mergeHold(engine.store.pool, work) : null;
-  return { ...await gateMerge(github, work, await mergeRequest(engine, work, hold), beforeWrite, hold), hold };
+  // Read again just before GitHub is asked to enqueue, arm auto-merge or merge: a hold recorded
+  // while this observation awaited GitHub refuses the write, so authorization read earlier lands nothing.
+  const late = { hold: null as string | null };
+  const write = beforeWrite ?? (async () => {});
+  const guarded = async () => {
+    late.hold = mergeAuthorized(work) ? await mergeHold(engine.store.pool, work) : null;
+    if (late.hold) throw new Error(late.hold);
+    await write();
+  };
+  const gated = await gateMerge(github, work, await mergeRequest(engine, work, hold), write, hold, guarded);
+  return late.hold ? { action: { kind: 'hold' as const, reason: late.hold }, state: gated.state, hold: late.hold } : { ...gated, hold };
 }
 /** One pull request `master withdraw` acts on: the work item that holds it and the pull request's number. */
 export interface WithdrawEntry { key: string | null; pr: number }
