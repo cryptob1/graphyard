@@ -13,7 +13,7 @@ Loop sleeps `run.intervalSeconds` (≤30s if actionable).
 
 ### System-driven items
 
-Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, `decide attest|merge`, loop-owned `decide rework` (`--precedent` answers refusals), except stopped-loop recovery, unproduced `manual:` attestations, `decide merge` unauthorized or operator-agent-less. The loop attests unproduced `manual:` proofs via an independent approver once per head, base, policy revision.
+Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, `decide attest|merge`, loop-owned `decide rework` (`--precedent` answers refusals), except stopped-loop recovery, unproduced `manual:` attestations, `decide merge` unauthorized or operator-agent-less. The loop attests unproduced `manual:` proofs via an independent approver per head, base, policy revision.
 
 ### Session liveness is reconciled, not trusted
 
@@ -21,7 +21,7 @@ Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `
 
 **Instead of closing sessions by hand:** do nothing for a finished or dead session (`graphyard master run --once` sweeps); attach to an overlong one with its handle's command. Never mark another session's handle finished to free a slot. The loop and `master approver` relaunch never-started approvers (`done`, still-screened `idle`) past the start bound.
 
-`blocked` frees its slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) self-clear: `github-credential`, `sandbox-path`, `github-outage`, `control-plane-error`, `outside-scope-test-failure`, `runtime-denial`, `worktree-mismatch`, `dispatch-failure`, `runtime-exhaustion`, `host-supervisor`; `master-role` a master-role identity runs it and unblocks; `planned-file-scope`, `needs-decision` approver. `genuine`/`human-only` escalate; a loop-held item's unleased inability report clears itself.
+`blocked` frees its slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) self-clear: `github-credential`, `sandbox-path`, `github-outage`, `control-plane-error`, `outside-scope-test-failure`, `runtime-denial`, `worktree-mismatch`, `dispatch-failure`, `runtime-exhaustion`, `host-supervisor`; `master-role` a master-role identity runs and unblocks; `planned-file-scope`, `needs-decision` approver. `genuine`/`human-only` escalate; a loop-held item's unleased inability report clears itself.
 
 ### System invariants
 
@@ -40,14 +40,14 @@ Review follow-ups fixed in-PR; Pi (`run.research`) triages follow-ups, faults.
 Past the build gate (`autoDispatch`): a producer request per proof group (`unit`, `integration`; `manual` with `producerProofs`; github mode only), then a review once passed. **The loop launches each request within 30 seconds**, starting the reviewer (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json); `.graphyard/reviews.json`, `.graphyard/producers.json`). Reviewer launches await head's bot reviews (`run.awaitReviewers`) ≤`awaitReviewersMinutes` (8, 0 disables), skipping a bot under a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`, `dispatch.botReviewers`).
 
 - **Concurrency is per role**: `concurrency` (1–20, default 1; above 1 each takes a name unique to its request; `run.reviewerProfile` and producer profiles default to 4 sessions) applies without a restart; lowering it drains first (`longestWaitMs`); starved minutes: `counts.concurrencyStarved`.
-- `pane_not_found` panes close. No request outlives its own token: one expired and unreported by Herdr settles `expired` (`dispatch.sessionReconcile.stuck` counts pending). Unanswered sessions relaunch, then `dispatch.abandoned`); exhausted producer runs raise `escalation:proof-exhausted`, then rework.
+- `pane_not_found` panes close. No request outlives its own token: one expired and unreported by Herdr settles `expired` (`dispatch.sessionReconcile.stuck` counts pending). Unanswered sessions relaunch, then `dispatch.abandoned`; exhausted producer runs raise `escalation:proof-exhausted`, then rework.
 - **Every role fails over on spent quota** or waits as one `capacity` line.
 
 The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once relaunching stops.
 
 ### Proofs must exercise their criterion
 
-A passing producer records `"exercise"`: rerun without the criterion's behaviour, it must fail an executed case, else the pass is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); next: `request-rework` naming proof, criterion and surviving mutation. Unexercised `manual:` proofs re-attest.
+A passing producer records `"exercise"`: rerun without the criterion's behaviour, it must fail an executed case, else the pass is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`). Unexercised `manual:` proofs re-attest.
 
 ## GitHub merges
 

@@ -3,11 +3,11 @@
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Wakes dismiss autocompact suggestions, re-read; unconfirmed/unanswerable dialogs hold (`wake:master:held`).
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Wakes dismiss autocompact suggestions, re-read; unconfirmed/unanswerable dialogs hold (`wake:master:held`). `daemon.stepStalls`: 3-cycle signatures: one verified remedy (unknown-profile/401/merge-key-reuse), else master wake; 5min retries.
 
 ### Dispatch order
 
-Within a priority: an item with a submitted attempt (a returned rework) precedes items without one, ahead of starvation/cold/scope; `master status`'s schedule follows.
+Within a priority: a submitted attempt (returned rework) precedes unsubmitted items, ahead of starvation/cold/scope; `master status`'s schedule follows.
 
 ### Perpetual master loop
 
@@ -23,11 +23,11 @@ Leases expire 120s after last heartbeat (recorded renewal fault, plane stall: 30
 
 ## Submitted implementation needs rework
 
-Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits. `scripts/rework-causes.mjs` classifies last 100 deliveries' rounds (55% own-change/33% conflicts; raw median 2); `speed.reworkRounds.ownChange` excludes out-of-item causes.
+Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits. `scripts/rework-causes.mjs` classifies 100 deliveries' rounds (55% own-change/33% conflicts; raw median 2); `speed.reworkRounds.ownChange` excludes out-of-item causes.
 
 ## Base-sync conflicts
 
-`graphyard sync GY-N` resolves a conflicted `tests/helpers/timing-baseline.json`: base tip's file plus the branch's test-file lines, staged, listed under `regenerated`.
+`graphyard sync GY-N` resolves a conflicted `tests/helpers/timing-baseline.json`: base tip's file plus branch test-file lines, staged under `regenerated`.
 
 ## Retro synthesis
 
@@ -86,7 +86,7 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 `resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume+`GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes[:ROOT]`, per `TMPDIR`/`/tmp` (any-name checkout/worktree unheld/unregistered 24h; <25% free: escalates, naming consumers); `loaded-revision`: code moves.
 
-Session-started `npm test`/`test:browser`/typecheck/`tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`). Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; one fault/dip) until 1GB above.
+Session-started `npm test`/`test:browser`/typecheck/`tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`). Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`) until 1GB above.
 
 ## Storage retention
 

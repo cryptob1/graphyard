@@ -25,7 +25,7 @@ Profile `accounts` lists [agent environments](onboarding.md#agent-environments) 
 
 ## The loop's own master session
 
-`master registry role set master ACCOUNTS …` (unset: none): one session; loop and `master start` adopt live `masterAgentName`. Relaunches on exit, limit notice, `run.masterSessionMinutes` (240); changed subjects wake it; `run.masterHeartbeatMinutes` (30) silent sends heartbeat (`daemon.master`); an undeliverable wake rotates it (`deaf`, at most three straight).
+`master registry role set master ACCOUNTS …` (unset: none): one session; loop and `master start` adopt live `masterAgentName`. Relaunches on exit, limit notice, `run.masterSessionMinutes` (240); changed subjects wake it; `run.masterHeartbeatMinutes` (30) silent sends heartbeat (`daemon.master`); an undeliverable wake rotates it (`deaf`).
 
 ### The request is the session's first message
 
