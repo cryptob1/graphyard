@@ -1,6 +1,6 @@
 // Concern: the promotion drive in control-plane mode (GY-1526) — the loop cuts, validates, promotes and reverts release candidates itself, with no workflow to dispatch.
 import type { UatRecord } from '../release-candidate.js';
-import { failingRequiredCases, revertTarget, type CandidateItemDelta, type RevertContract, type RevertOutcome, type RevertTarget } from '../release-revert.js';
+import { failingRequiredCases, heldCaseClassifications, revertTarget, type CandidateItemDelta, type RevertContract, type RevertOutcome, type RevertTarget } from '../release-revert.js';
 import { defaultRepositoryPolicy, type RepositoryPolicy } from '../model/repository-policy.js';
 import type { VerificationMap } from '../model/verification-maps.js';
 import { assessCut, type CutCommit, type CutSettings } from './candidate-cut.js';
@@ -84,13 +84,16 @@ export async function finishLocalCandidate(local: LocalReleasePorts, candidate: 
   const release = local.release ?? defaultRepositoryPolicy.release;
   const hold = release.onFailure === 'hold';
   const inputs = await local.revertInputs(candidate);
-  const target = revertTarget(candidate, validation.record, inputs.items, inputs.maps, inputs.contract, hold || !release.revertUnmatched ? { unmatched: 'hold' } : undefined);
   const failedCases = failed.map(entry => `required E2E case ${entry.case} failed at step "${entry.step}"`).join('; ');
   if (hold) {
-    // GY-1848: hold names the failure and reverts nothing — the classification is the outcome.
-    outcome.detail = `Held ${name}: ${failedCases}; release.onFailure hold reverts nothing and reopens nothing; ${target ? `a matching verification map (${target.map}) would have targeted ${target.key}'s merge ${short(target.mergeSha)}` : 'no map matched'}; ${stays}; classification for an agent to act on`;
+    // GY-1848: hold names the failure and reverts nothing — the classification is the outcome, each
+    // failing case judged against its own maps so no case is tied to another case's would-be target.
+    const classified = heldCaseClassifications(candidate, validation.record, inputs.items, inputs.maps, inputs.contract)
+      .map(entry => `required E2E case ${entry.case} failed at step "${entry.step}" (${entry.target ? `a matching verification map (${entry.target.map}) would have targeted ${entry.target.key}'s merge ${short(entry.target.mergeSha)}` : 'no map matched'})`);
+    outcome.detail = `Held ${name}: ${classified.join('; ')}; release.onFailure hold reverts nothing and reopens nothing; ${stays}; classification for an agent to act on`;
     return outcome;
   }
+  const target = revertTarget(candidate, validation.record, inputs.items, inputs.maps, inputs.contract, release.revertUnmatched ? undefined : { unmatched: 'hold' });
   if (!target) {
     if (!release.revertUnmatched && candidate.items.length) {
       outcome.detail = `Held ${name}: ${failedCases}; no verification map matches any candidate item's merge delta and release.revertUnmatched is false, so the newest item is not reverted; ${stays}; classification for an agent to act on`;

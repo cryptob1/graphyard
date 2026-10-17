@@ -90,6 +90,26 @@ export function revertTarget(candidate: Pick<ReleaseCandidate, 'id' | 'sha' | 'i
     reason: `${failure}; ${selected.length ? `the matching verification map${selected.length > 1 ? 's' : ''} ${selected.map(map => map.path).join(', ')} cover${selected.length > 1 ? '' : 's'} no candidate item's merge delta` : 'no verification map names the case, its outcome or its tags'}, so the newest candidate item ${newest.key}'s merge ${short(newest.mergeSha)} is reverted` };
 }
 
+/** One failing required case of a held candidate (GY-1848): the case, the step it failed at, and the item a matching verification map would have targeted — null when no map matched. */
+export interface HeldCaseClassification { case: string; step: string; target: RevertTarget | null }
+
+/**
+ * Pure (GY-1848): what a hold names instead of reverting — each required case that failed outright,
+ * with its step and the item a matching verification map would have targeted. Each case is judged
+ * on its own, never through the aggregate `revertTarget` takes for a revert: two failing cases whose
+ * maps cover different items name two targets, and a case no map covers names none (the caller
+ * says `no map matched`), so no case is associated with another case's item. The newest-item
+ * fallback is never a would-be target: an unmatched case holds with no item named.
+ */
+export function heldCaseClassifications(candidate: Pick<ReleaseCandidate, 'id' | 'sha' | 'items'>, uat: Pick<UatRecord, 'e2e'>, items: readonly CandidateItemDelta[], maps: readonly VerificationMap[], contract: RevertContract): HeldCaseClassification[] {
+  const e2e = uat.e2e;
+  if (!e2e) return [];
+  return failingRequiredCases(uat).filter(entry => entry.verdict === 'failed').map(entry => ({
+    case: entry.case, step: entry.step,
+    target: revertTarget(candidate, { e2e: { ...e2e, blocking: [entry.case], cases: e2e.cases.filter(record => record.case === entry.case) } }, items, maps, contract, { unmatched: 'hold' }),
+  }));
+}
+
 // ---- The item's record and reopen --------------------------------------------------------------
 
 /** The rework a revert reopens the item with: it names the case and step, the candidate, the merge and its revert. */

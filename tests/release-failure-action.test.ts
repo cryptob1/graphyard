@@ -64,17 +64,20 @@ test('unit:release-failure-hold-reverts-nothing — under release.onFailure hold
   assert.deepEqual(matched.targets, [], 'no revert port call records no revert phase, so no item reopens');
   assert.equal(outcome.promoted, false, 'production never moves');
   assert.equal(outcome.revert, null);
-  assert.match(outcome.detail, new RegExp(`^Held candidate ${candidate.id} \\(${candidate.sha.slice(0, 12)}\\): required E2E case board failed at step "read the board"; release\\.onFailure hold reverts nothing and reopens nothing; a matching verification map \\(verification/work-intake\\.md\\) would have targeted GY-2's merge ${sha('merge-2').slice(0, 12)}; production stays on the previous release; classification for an agent to act on$`));
-  // No map matches: the classification says so instead of naming a target.
+  assert.match(outcome.detail, new RegExp(`^Held candidate ${candidate.id} \\(${candidate.sha.slice(0, 12)}\\): required E2E case board failed at step "read the board" \\(a matching verification map \\(verification/work-intake\\.md\\) would have targeted GY-2's merge ${sha('merge-2').slice(0, 12)}\\); release\\.onFailure hold reverts nothing and reopens nothing; production stays on the previous release; classification for an agent to act on$`));
+  // No map matches: the classification says so instead of naming a target — never the newest item.
   const unmatched = buildLocal({ release: hold, maps: [] });
   const none = await finishLocalCandidate(unmatched.local, cutCandidate, false, failedValidation([failedCase('sign-in')]));
   assert.deepEqual(unmatched.calls, [`revertInputs:${candidate.id}`]);
   assert.equal(none.revert, null);
-  assert.match(none.detail, /release\.onFailure hold reverts nothing and reopens nothing; no map matched; production stays on the previous release/);
-  // Each failing required case is named with its step, not only the first.
-  const both = buildLocal({ release: hold, maps: [] });
-  const two = await finishLocalCandidate(both.local, cutCandidate, false, failedValidation([failedCase('board', 'read the board'), failedCase('create-work-item', 'create the item')]));
-  assert.match(two.detail, /required E2E case board failed at step "read the board"; required E2E case create-work-item failed at step "create the item"/);
+  assert.match(none.detail, /: required E2E case sign-in failed at step "open the Work view" \(no map matched\); release\.onFailure hold reverts nothing and reopens nothing; production stays on the previous release/);
+  assert.doesNotMatch(none.detail, /GY-3/, 'the newest-item fallback is never a would-be target');
+  // Each failing required case is named with its step and judged against its own maps: two cases
+  // whose maps cover different items name two targets, and a case no map covers names none.
+  const both = buildLocal({ release: hold, maps: [map('verification/work-intake.md', ['src/store/**']), map('verification/sign-in.md', ['src/server/**'])] });
+  const two = await finishLocalCandidate(both.local, cutCandidate, false, failedValidation([failedCase('board', 'read the board'), failedCase('sign-in', 'submit the form'), failedCase('create-work-item', 'create the item')]));
+  assert.deepEqual(both.calls, [`revertInputs:${candidate.id}`]);
+  assert.match(two.detail, new RegExp(`: required E2E case board failed at step "read the board" \\(a matching verification map \\(verification/work-intake\\.md\\) would have targeted GY-2's merge ${sha('merge-2').slice(0, 12)}\\); required E2E case sign-in failed at step "submit the form" \\(a matching verification map \\(verification/sign-in\\.md\\) would have targeted GY-1's merge ${sha('merge-1').slice(0, 12)}\\); required E2E case create-work-item failed at step "create the item" \\(a matching verification map \\(verification/work-intake\\.md\\) would have targeted GY-2's merge ${sha('merge-2').slice(0, 12)}\\); release\\.onFailure hold reverts nothing`));
   // A port that names no policy keeps the default: today's revert, untouched.
   const fallback = buildLocal({ maps: [map('verification/work-intake.md', ['src/store/**'])] });
   const today = await finishLocalCandidate(fallback.local, cutCandidate, false, failedValidation([failedCase('board', 'read the board')]));
