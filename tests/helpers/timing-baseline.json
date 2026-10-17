@@ -297,6 +297,7 @@
     "tests/closed-question-evidence.test.ts": 2373,
     "tests/codex-protected-paths.test.ts": 500,
     "tests/codex-review.test.ts": 531,
+    "tests/complete-head-no-push.test.ts": 300,
     "tests/completion-clarity.test.ts": 250,
     "tests/confirm-access-capture.test.ts": 1000,
     "tests/conflict-rework-bound.test.ts": 1658,
@@ -967,6 +968,8 @@
     "tests/event-loop-lag-pending.test.ts": 729,
     "tests/install-worker-credentials.test.ts": 900,
     "tests/fault-class-loop.test.ts": 630,
-    "tests/slow-tick-repeat-receipt.test.ts": 600
+    "tests/slow-tick-repeat-receipt.test.ts": 600,
+    "tests/goal-exact-candidates.test.ts": 3000,
+    "tests/soak-exact-candidates.test.ts": 20000
   }
 }

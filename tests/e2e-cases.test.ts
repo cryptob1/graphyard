@@ -727,3 +727,17 @@ test('unit:pending-flaky-case-latest-run-is-labelled — a pending case that fai
   assert.equal(latest.result, 'fail', 'the latest run is the labelled failure, not the unlabelled pass');
   assert.match(latest.e2e!.failingStep!.reason, /recorded pending/);
 });
+
+test('unit:e2e-http-step-waits — a GET step with waitSeconds asks again until its expectations hold, fails naming the wait when they never do, and a waiting POST is refused at parse', async () => {
+  const waiting = (id: string, waitSeconds: number): CaseFile => ({ file: `e2e/cases/${id}.json`, definition: parseCase(`e2e/cases/${id}.json`, JSON.stringify({ id, title: `Case ${id}`, target: 'uat', required: true,
+    steps: [{ kind: 'http', name: 'the change is delivered', method: 'GET', path: '/api/work/one', status: 200, waitSeconds, expect: [{ path: 'delivery.mergeSha', type: 'string' }] }] })) });
+  let reads = 0;
+  // Delivered on the third read, as a merge the loop records while the case waits.
+  const settling = (async () => new Response(JSON.stringify(++reads >= 3 ? { delivery: { mergeSha: 'a'.repeat(40) } } : { delivery: null }), { status: 200 })) as typeof fetch;
+  const settled = await runCases([waiting('settles', 5)], { url: 'http://target.test', token: 't', fetcher: settling, waitPollMs: 10 });
+  assert.equal(settled.cases[0].outcome, 'pass', JSON.stringify(settled.cases[0].failingStep)); assert.equal(reads, 3, 'asked until the answer held, then stopped');
+  const never = (async () => new Response('{"delivery":null}', { status: 200 })) as typeof fetch;
+  const unsettled = await runCases([waiting('never', 1)], { url: 'http://target.test', token: 't', fetcher: never, waitPollMs: 100 });
+  assert.equal(unsettled.cases[0].outcome, 'fail'); assert.match(unsettled.cases[0].failingStep!.reason, /delivery\.mergeSha.*\(still, after waiting 1 s\)/);
+  assert.match(refusal('e2e/cases/post-wait.json', { id: 'post-wait', title: 'A waiting POST', target: 'uat', required: true, steps: [{ kind: 'http', method: 'POST', path: '/api/work', status: 200, waitSeconds: 5 }] }) ?? '', /only a GET step waits/);
+});
