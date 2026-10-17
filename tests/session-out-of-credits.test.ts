@@ -43,15 +43,27 @@ test('unit:out-of-credits-session-fails-over-at-once — the screen is the accou
   assert.deepEqual(judged, { reason: notice, resetsAt: null }, 'the screen names no reset, so the hold is bounded');
   assert.deepEqual(detectRuntimeExhaustion(screen, 'claude', Date.now()), judged, 'the loop\'s stopped-session judge reads the screen');
   assert.deepEqual(detectRuntimeExhaustion(screen, undefined, Date.now()), judged, 'whatever runtime the profile names');
-  // The hint wrapped beneath the notice is the same screen.
-  assert.deepEqual(outOfCreditsScreen(wrapped), { reason: "You're out of usage credits.", resetsAt: null });
-  assert.deepEqual(detectRuntimeExhaustion(wrapped, 'claude', Date.now()), { reason: "You're out of usage credits.", resetsAt: null });
+  // The hint wrapped beneath the notice is the same screen, read whole.
+  assert.deepEqual(outOfCreditsScreen(wrapped), judged);
+  assert.deepEqual(detectRuntimeExhaustion(wrapped, 'claude', Date.now()), judged);
+  // So is a narrow pane's wrap inside the notice itself, and one splitting both notice and hint.
+  const noticeWrapped = "● Working on the review.\n⎿ You're out of usage\n  credits. Run /usage-credits to keep using Fable 5.1 or /model to switch models.\n";
+  assert.deepEqual(outOfCreditsScreen(noticeWrapped), judged, 'a wrap inside the notice is the same screen');
+  assert.deepEqual(detectRuntimeExhaustion(noticeWrapped, 'claude', Date.now()), judged);
+  const narrow = "│ You're out of │\n│ usage credits. Run │\n│ /usage-credits to keep │\n│ using Fable 5.1 or /model │\n│ to switch models. │\n";
+  assert.deepEqual(outOfCreditsScreen(narrow), judged, 'a boxed screen wrapped across five lines is the same screen');
   // Terminal decoration in front of the notice is not part of it.
   const drawn = '\u001b[2m⎿ API Error\u001b[0m · You\'re out of usage credits.\n  Run /usage-credits to keep using Fable 5.1 or /model to switch models.\n';
   assert.match(outOfCreditsScreen(drawn)!.reason, /^API Error · You're out of usage credits\./);
   // The notice alone, in a summary or a transcript line, is not the screen.
   assert.equal(outOfCreditsScreen("● Summarising: the pane reads You're out of usage credits, so I stopped.\n"), null);
   assert.equal(outOfCreditsScreen('Run /usage-credits to keep going — the account is fine.\n'), null, 'the hint alone is not the screen either');
+  // An agent's sentence quoting both the notice and the hint is not the screen, wrapped or not.
+  const quoted = "The detector wrongly accepts You're out of usage credits. Run /usage-credits to continue.";
+  assert.equal(outOfCreditsScreen(`● Reviewing.\n${quoted}\n`), null, 'prose quoting the notice and a hint');
+  assert.equal(detectRuntimeExhaustion(`● Reviewing.\n${quoted}\n`, 'claude', Date.now()), null);
+  assert.equal(outOfCreditsScreen(`● The reviewer saw the screen: ${notice}\n`), null, 'prose quoting the whole screen behind a sentence');
+  assert.equal(outOfCreditsScreen(`● Finding: the pane shows\nYou're out of usage credits. Run /usage-credits to keep using Fable 5.1 or /model to switch models. Then it waited.\n`), null, 'the hint must end the screen, not run on into prose');
   // What the session scrolled away is worked past, not stopped on.
   const scrolled = [screen, ...Array.from({ length: 60 }, (_, index) => `edited file ${index}`)].join('\n');
   assert.equal(outOfCreditsScreen(scrolled), null);

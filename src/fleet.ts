@@ -76,31 +76,39 @@ export function exhaustionTail(output: string): string[] {
   return output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n')
     .map(line => line.replace(/[│┃|]\s*$/, '').trim().replace(/\s{2,}/g, ' ')).filter(Boolean).slice(-exhaustionTailLines);
 }
-/** The notice of Claude Code's out-of-usage-credits screen, wherever it stands on its line (GY-1889). */
-const outOfCreditsNotice = /\bout of usage credits\b/i;
-/** The runtime's own hint beneath that notice (`Run /usage-credits … /model to switch models`): the pair is the screen, so its first line alone — in a transcript, a summary or a report about the screen — is not one. */
-const outOfCreditsHint = /\brun\s+\/usage-credits\b/i;
+/**
+ * Claude Code's out-of-usage-credits screen, as the runtime draws it and nothing else (GY-1889): the
+ * notice leading its line — behind at most a two-word runtime label such as `API Error ·`, never an
+ * agent's sentence — and the runtime's own hint ending the screen, its model name the only free text.
+ */
+const outOfCreditsShape = /^(?:[A-Za-z]+(?: [A-Za-z]+)? ?[·:] ?)?You(?:'|\u2019)re out of usage credits\. ?Run \/usage-credits to keep using \S.{0,80}? or \/model to switch models\.$/i;
+/** How many physical lines the screen may span: a narrow pane wraps both the notice and the hint. */
+const outOfCreditsScreenLines = 6;
 /**
  * Claude Code's out-of-usage-credits screen (GY-1889). With the account's credits spent, Claude
- * Code stops on its own two lines — `You're out of usage credits. Run /usage-credits to keep
- * using Fable 5.1 or /model to switch models.` — and waits for a person nobody will send, so the
- * session never acknowledges its request: the loop read it as never started, counted the attempt
- * against the request, and relaunched onto the same spent account. The screen is matched as the
- * pair the runtime draws — the notice, and its own slash-command hint beneath it (the lines are
- * joined, as a narrow pane wraps the sentence across them) — on the tail the limit notices scan
- * (`exhaustionTailLines`): what the session scrolled away is worked past, not stopped on. The
- * screen names no reset, so the account it spends is held for the bounded unknown-reset window
- * (`recordObservedExhaustion`). A declared function on purpose: runtime-prompt.ts's
- * `detectRuntimeExhaustion` reads it through this module, and fleet.ts and master.ts import each
- * other, so only a hoisted declaration is safe at load in either order.
+ * Code stops on `You're out of usage credits. Run /usage-credits to keep using Fable 5.1 or /model
+ * to switch models.` and waits for a person nobody will send, so the session never acknowledges its
+ * request: the loop read it as never started, counted the attempt against the request, and
+ * relaunched onto the same spent account. The screen is matched whole, over the physical lines a
+ * narrow pane wraps it onto (joined, wherever the wrap falls — inside the notice as inside the
+ * hint), and only in the runtime's shape (`outOfCreditsShape`): the notice starts its line and the
+ * hint ends one, so an agent's sentence quoting either or both is not the screen. It is read on the
+ * tail the limit notices scan (`exhaustionTailLines`): what the session scrolled away is worked
+ * past, not stopped on. The screen names no reset, so the account it spends is held for the bounded
+ * unknown-reset window (`recordObservedExhaustion`). A declared function on purpose:
+ * runtime-prompt.ts's `detectRuntimeExhaustion` reads it through this module, and fleet.ts and
+ * master.ts import each other, so only a hoisted declaration is safe at load in either order.
  */
 export function outOfCreditsScreen(output: string): ExhaustionSignal | null {
   const lines = exhaustionTail(output);
-  for (let index = lines.length - 1; index >= 0; index--) {
-    const line = lines[index].replace(/^[^A-Za-z0-9]+/, '');
-    if (line.length > exhaustionNoticeMaxLength || !outOfCreditsNotice.test(line)) continue;
-    if (!outOfCreditsHint.test(`${line} ${lines.slice(index + 1, index + 4).join(' ')}`)) continue;
-    return { reason: line.slice(0, 300), resetsAt: null };
+  for (let first = lines.length - 1; first >= 0; first--) {
+    // What the terminal drew before the notice is not part of it; a wrapped line keeps a leading `/usage-credits`.
+    let screen = lines[first].replace(/^[^A-Za-z0-9]+/, '');
+    for (let last = first; last < Math.min(lines.length, first + outOfCreditsScreenLines); last++) {
+      if (last > first) screen = `${screen} ${lines[last].replace(/^[^A-Za-z0-9/]+/, '')}`;
+      if (screen.length > exhaustionNoticeMaxLength) break;
+      if (outOfCreditsShape.test(screen)) return { reason: screen.slice(0, 300), resetsAt: null };
+    }
   }
   return null;
 }
