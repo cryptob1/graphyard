@@ -14,10 +14,11 @@ import { deployKeySshCommand, firstParentHolds, pushArgs, pushEnvironment, runMe
 import { trialAuthor } from '../merge-writer/trial.js';
 import {
   awaitServing, cutAsync, deployToUatAsync, promoteAsync, readLedgerAsync, syncLedgerAsync, uatValidationWindowMs,
-  findCandidate, type AsyncGit, type ReleaseCandidate, type UatRecord,
+  findCandidate, uatServedDigests, validateAndRecord, type AsyncGit, type ReleaseCandidate, type UatRecord,
 } from '../release-candidate.js';
 import { promotionImports } from '../validation-import.js';
 import { validateProjectCandidate } from '../release-project.js';
+import { commandDigestAdapter, digestCommandTimeoutMs, uatDigestSuite, verifyProductionDigests } from '../release-digests.js';
 import { revertCandidateItem, type CandidateItemDelta, type RevertContract, type RevertPorts, type RevertRecordEvent } from '../release-revert.js';
 import type { CutCommit } from './candidate-cut.js';
 import type { LocalCandidate, LocalReleasePorts, LocalValidation } from './promotion-local.js';
@@ -90,6 +91,8 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
   const cli = async (args: string[], extra: Record<string, string>) => String(await run(process.execPath, ['bin/graphyard.mjs', ...args], {
     cwd: root, env: { ...env, ...extra }, maxBuffer: 64 * 1024 * 1024, timeoutMs: 4 * 3_600_000,
   }));
+  // GY-1844: the repository's digest adapter, its commands run in the coordinator checkout; unset ports keep sha promotion.
+  const digests = commandDigestAdapter(environment, async (command, extra) => String(await run('sh', ['-c', command], { cwd: root, env: { ...env, ...extra }, maxBuffer: 64 * 1024 * 1024, timeoutMs: digestCommandTimeoutMs })));
   const revertPorts: RevertPorts = {
     baseBranch: base, retrials: writer.retrials, now,
     fetch: async () => {
@@ -130,7 +133,17 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
   // GY-1535: a managed repository's candidate, validated in-process from a checkout of its exact SHA.
   const validateManaged = async (id: string): Promise<LocalValidation> => {
     await syncLedgerAsync(git, base);
-    const candidate = findCandidate(await readLedgerAsync(git), id);
+    const ledger = await readLedgerAsync(git), candidate = findCandidate(ledger, id);
+    // GY-1844: a candidate UAT serves by digest is attested first, like the CLI's validate: an instance on any other digest records
+    // the candidate's UAT verdict failed on that suite, so its cases never pass digests they did not test.
+    const served = uatServedDigests(ledger, candidate);
+    if (served && digests.instances && uatUrl) {
+      const suite = uatDigestSuite(served, digests.instances);
+      if (!(await suite.run(uatUrl, candidate)).passed) {
+        const result = await validateAndRecord(git, id, uatUrl, [suite], { base, push: true, timeoutMs: localServeWaitSeconds * 1000, file: options.file });
+        return { record: result.record, followUp: result.followUp ?? null };
+      }
+    }
     const checkout = mkdtempSync(join(options.base, 'candidate-cases-'));
     try {
       await git(['worktree', 'add', '--detach', checkout, candidate.sha]);
@@ -161,14 +174,14 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
       if (!due) return { cut: false, reason: `the cut rule is not due (${settings.everyMerges} merges or ${settings.idleMinutes} idle minutes)` };
       const plane = options.plane;
       const pendingOutcomes = plane ? (cutAt: { sha: string; undelivered: ReadonlySet<string> }) => pendingAtCut({ contract: async sha => { try { return await gitAsync('show', `${sha}:${contractFile}`); } catch { return null; } }, goals: plane.goals, stage: plane.stage }, cutAt) : undefined;
-      const result = await cutAsync(git, { base, trigger: 'manual', now: new Date(now()), push: true, maxPrs: settings.everyMerges, pendingOutcomes });
+      const result = await cutAsync(git, { base, trigger: 'manual', now: new Date(now()), push: true, maxPrs: settings.everyMerges, pendingOutcomes, build: digests.build });
       return result.cut ? { cut: true, candidate: toCandidate(result.candidate) } : { cut: false, reason: result.reason };
     },
     uat: async id => {
       const passed = await passedUat(id);
       if (passed) return { sha: passed.sha };
       if (options.validation) return options.validation.uat(id);
-      const deployed = await deployToUatAsync(git, id, base, new Date(now())); return { sha: deployed.sha };
+      const deployed = await deployToUatAsync(git, id, base, new Date(now()), digests.deploy); return { sha: deployed.sha };
     },
     validate: async id => {
       const passed = await passedUat(id);
@@ -185,13 +198,16 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
     },
     promote: async id => {
       const read = options.plane?.read;
-      const result = await promoteAsync(git, id, { base, push: true, now: new Date(now()), imports: read ? candidate => promotionImports(read, candidate) : undefined });
+      const result = await promoteAsync(git, id, { base, push: true, now: new Date(now()), deployDigests: digests.deploy, imports: read ? candidate => promotionImports(read, candidate) : undefined });
       return result.promoted ? { promoted: true, sha: result.sha } : { promoted: false, refusals: result.refusals };
     },
     verify: async sha => {
       if (!productionUrl) return { served: null, verified: false };
       const served = await awaitServing(productionUrl, sha, { timeoutMs: localServeWaitSeconds * 1000 });
-      return { served, verified: served === sha };
+      if (served !== sha) return { served, verified: false };
+      // GY-1844: a digest promotion verifies only when every promoted service's instances run the promoted digest.
+      await syncLedgerAsync(git, base);
+      return { served, verified: (await verifyProductionDigests(await readLedgerAsync(git), digests.instances)).verified };
     },
     history: async () => {
       await gitAsync('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${base}:${ref}`, '+refs/tags/rc/*:refs/tags/rc/*');
