@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Wakes dismiss autocompact suggestions (`esc`/"Not now"), re-read; unconfirmed/unanswerable dialogs hold (`wake:master:held`). `daemon.stepStalls`: 3-cycle signatures: one verified remedy (unknown-profile/401/merge-key-reuse), else master wake; 5min retries, every overflow invocation held.
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Wakes dismiss autocompact suggestions (`esc`/"Not now"), re-read; unconfirmed/unanswerable dialogs hold (`wake:master:held`). `daemon.stepStalls`: 3-cycle signatures: one verified remedy (unknown-profile/401/merge-key-reuse), else master wake; 5min retries.
 
 ### Dispatch order
 
