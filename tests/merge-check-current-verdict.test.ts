@@ -241,3 +241,35 @@ test('unit:no-auto-merge-on-missing-pending-failed-or-mismatched-check — with 
   }
   assert.equal(new Set(controls).size, boundChecks.length * Object.keys(spoilers).length, 'every check met every negative control');
 });
+
+test('unit:fresh-required-read-policy-success-and-cancelled-retry — the fresh read before a merge request requires success of a policy check, holding a head whose latest test run reads neutral or skipped, and reads past a cancelled retry to the run before it, holding only when no run but a cancelled one stands (review of 8c1202c600b4, P1 and P2)', async () => {
+  const observed = () => work({ observation: { ...work().observation!, requiredChecks: boundChecks } as Observation });
+  const others = (test: any[]) => [passingRun(LANDABLE_CHECK, APP, 500), passingRun('secrets', CI, 501), passingRun('typecheck', CI, 502), ...test];
+  const gate = async (test: any[], policy?: string[]) => {
+    const fake = fakeGitHub({ mergeStateStatus: 'BLOCKED', others: others(test) });
+    const item = observed();
+    if (policy) item.policy = { ...item.policy, checks: policy };
+    const gated = await gateMerge(fake.github, item, requested(item));
+    return { gated, requests: fake.requests() };
+  };
+  // P1: `test` is a policy check, so a neutral or skipped latest run holds the merge; a required check outside the policy keeps GitHub's reading.
+  for (const conclusion of ['neutral', 'skipped']) {
+    const superseded = [passingRun('test', CI, 600), { ...passingRun('test', CI, 601), conclusion }];
+    const held = await gate(superseded);
+    assert.equal(held.gated.action.kind, 'hold', `policy test ${conclusion}`);
+    assert.match(held.gated.action.reason, new RegExp(`required check test \\(app ${CI}\\) reads ${conclusion}`));
+    assert.deepEqual(held.requests, [], `no merge request while the policy check reads ${conclusion}`);
+    const loose = await gate(superseded, ['typecheck']);
+    assert.equal(loose.gated.action.kind, 'enqueue', `a non-policy required check reading ${conclusion} passes as GitHub reads it: ${loose.gated.action.reason}`);
+  }
+  // P2: a cancelled retry after a success does not supersede it; a failure before a cancelled retry still holds; only cancelled runs hold.
+  const retried = await gate([passingRun('test', CI, 600), { ...passingRun('test', CI, 601), conclusion: 'cancelled' }]);
+  assert.equal(retried.gated.action.kind, 'enqueue', retried.gated.action.reason);
+  const failedThenCancelled = await gate([{ ...passingRun('test', CI, 600), conclusion: 'failure' }, { ...passingRun('test', CI, 601), conclusion: 'cancelled' }]);
+  assert.equal(failedThenCancelled.gated.action.kind, 'hold');
+  assert.match(failedThenCancelled.gated.action.reason, /reads failure/);
+  const onlyCancelled = await gate([{ ...passingRun('test', CI, 601), conclusion: 'cancelled' }]);
+  assert.equal(onlyCancelled.gated.action.kind, 'hold');
+  assert.match(onlyCancelled.gated.action.reason, /reads cancelled/);
+  assert.deepEqual(onlyCancelled.requests, []);
+});

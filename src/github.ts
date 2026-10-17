@@ -2607,16 +2607,21 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * GY-1884. The first App-bound required check whose latest run at exact head `sha` does not pass,
    * named with why, or null when every one passes: `Graphyard / merge` from this App, then each check
    * in `checks` bound to an app (`graphyard/landable`, the CI checks on theirs), each read fresh, and
-   * only a run of that name, from that app, at that head counts. A run that is missing, still in
-   * progress, or concluded other than passing (success, neutral or skipped, as GitHub reads a required
-   * check; success alone for Graphyard's own two) is the shortfall.
+   * only a run of that name, from that app, at that head counts. The latest run is the newest one not
+   * cancelled, as `latestCheck` reads the observation (GY-1109): a cancelled retry reports nothing
+   * about the commit. A run that is missing, still in progress, or concluded other than passing
+   * (success, neutral or skipped, as GitHub reads a required check; success alone for Graphyard's own
+   * two and for every check named in `strict`, the item's policy checks, as the gates read them) is
+   * the shortfall.
    */
-  async requiredCheckShortfall(sha: string, checks: readonly { name: string; appId: number | null }[]): Promise<string | null> {
+  async requiredCheckShortfall(sha: string, checks: readonly { name: string; appId: number | null }[], strict: readonly string[] = []): Promise<string | null> {
     for (const check of [{ name: CHECK_NAME, appId: this.config.appId }, ...checks.filter(entry => entry.name !== CHECK_NAME)]) {
       if (check.appId === null) continue;
       const runs = (await this.pages(`/commits/${sha}/check-runs?check_name=${encodeURIComponent(check.name)}&filter=all`, 'check_runs'))
         .filter(run => run?.name === check.name && run?.app?.id === check.appId && run?.head_sha === sha).sort((a, b) => Number(b.id) - Number(a.id));
-      const latest = runs[0], passing = check.name === CHECK_NAME || check.name === LANDABLE_CHECK ? ['success'] : ['success', 'neutral', 'skipped'];
+      const decisive = runs.filter(run => run.conclusion !== 'cancelled');
+      const latest = (decisive.length ? decisive : runs)[0];
+      const passing = check.name === CHECK_NAME || check.name === LANDABLE_CHECK || strict.includes(check.name) ? ['success'] : ['success', 'neutral', 'skipped'];
       const named = `${check.name} (app ${check.appId})`;
       if (!latest) return `${named} has no run at ${sha.slice(0, 12)}`;
       if (latest.status !== 'completed') return `${named} is ${latest.status ?? 'pending'} at ${sha.slice(0, 12)}`;
@@ -2914,7 +2919,7 @@ export async function gateMerge(github: MergeGateClient, work: Work, request: Me
   // gates read an earlier observation, and GitHub merges on the runs standing at the request.
   if (action.kind === 'enqueue' && typeof github.requiredCheckShortfall === 'function') {
     let shortfall: string | null;
-    try { shortfall = await github.requiredCheckShortfall(work.candidate.sha, work.observation?.requiredChecks ?? []); }
+    try { shortfall = await github.requiredCheckShortfall(work.candidate.sha, work.observation?.requiredChecks ?? [], work.policy?.checks ?? []); }
     catch (error) { shortfall = `the required checks could not be read (${error instanceof Error ? error.message : String(error)})`; }
     if (shortfall) action = { kind: 'hold', reason: `${work.key}: required check ${shortfall}; the merge is not requested until it passes` };
   }
