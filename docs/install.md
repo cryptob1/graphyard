@@ -19,10 +19,10 @@ Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/gr
 
 ### Providers
 
-- `railway`: `npm i -g @railway/cli`, `railway login`. Stamps `GRAPHYARD_BUILD_SHA` (unknown/dirty refuses), uploads `--path-as-root`; failing upload or unserved commit (10 min) fails `provider.deploy`.
+- `railway`: `npm i -g @railway/cli`, `railway login`. Stamps `GRAPHYARD_BUILD_SHA` (unknown/dirty refuses), uploads `--path-as-root`; failed upload/unserved commit (10 min) fails `provider.deploy`.
 - `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; `--ssh-key NAME`, `--domain`. `manual:…install…-live` coordinators need `HCLOUD_TOKEN`, `HETZNER_SPEND_CAP_USD_MONTHLY` in repo-root `.env` (`0600`, uncommitted); optional `HETZNER_SSH_KEY` (else throwaway).
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; `--ssh-host`, `--domain`.
-- `compose` (local): `curl -fsSL https://get.docker.com | sh`. Polls GitHub, skipping webhook steps; publishes `127.0.0.1:4310`, else first free port ≤4329, kept on reruns (`up`, `master init` use it); a taken `--port N` fails preflight. Under `up`, a failed step's `next` carries its last 20 redacted lines. A stale `already exists in network` endpoint is disconnected, `up` retried once; others stand.
+- `compose` (local): `curl -fsSL https://get.docker.com | sh`. Polls GitHub, skipping webhook steps; publishes `127.0.0.1:4310`, else first free port ≤4329, kept on reruns (`up`, `master init` use it); a taken `--port N` fails preflight. Under `up`, a failed step's `next` carries its last 20 redacted lines. A stale `already exists in network` endpoint is disconnected, `up` retried once.
 - `local` (`graphyard up --local`, not with another `--provider`): no Docker; embedded Postgres (`npm install` without `--omit=optional`), cluster `INSTALL/postgres`; user unit `graphyard-local-INSTALL.service` starts, migrates (`db migrate`), serves (no systemd: prints foreground command). Polls GitHub like compose.
 
 ## Step 1: plan and approve
@@ -31,7 +31,7 @@ Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/gr
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 ```
 
-`--workers N`/`--producer-proof NAME`/`--required-check NAME` ([`init --scan`](operations-reference.md#setup-proposals-and-drift)); `delivery`/`release.*` plan [candidates](delivery.md#managed-repositories). **Verify** `secretsRedacted`, `preflight[].ok` (else `fix`; `HUMAN:` fixes are human's); human approves plan, `drift`. `Branch protection` fails on free-plan private repositories. A `graphyard` plugin bound elsewhere fails `Herdr plugin` until `--herdr-instance`/`--herdr-rebind`/`--no-herdr`. `--no-github-app` (not with `--target`/`--github-app`/`--reuse-app`/`--reviewer`): no App, `GITHUB_APP_*` unset, `/api/status.github` false; a bound App or Railway/local leftovers refuse. `--observe-only` (implies `--no-github-app --no-herdr`; refuses `--provider local`, recorded worker/producer rosters, unowned Railway services; replaces unrecorded docker-host/Hetzner environments) deploys only control-plane, rest `held`; Railway variables unread, checkout never uploaded; reruns: done steps `satisfied`. `up --merger control-plane` runs `install --no-github-app`, then deploy-key (each-run ruleset: key-only pushes; other read-write keys refuse, naming delete commands; prior protection kept, reported), `POST /api/merger`. `up` prints Herdr's attach (`XDG_CONFIG_HOME=DIR herdr session attach NAME`). Own-instance session `graphyard-INSTALL` (`gy-HASH` session, then directory, within 107 socket-path bytes; else refused). No `--base-branch`: `master` if only `origin/master` exists. `compose` mounts checkout at `/repo` (`GRAPHYARD_REPOSITORY_ROOT`) plus worktree Git directory; merger `control-plane` (App or not) observes heads there, reviews control-plane.
+`--workers N`/`--producer-proof NAME`/`--required-check NAME` ([`init --scan`](operations-reference.md#setup-proposals-and-drift)); `delivery`/`release.*` plan [candidates](delivery.md#managed-repositories). **Verify** `secretsRedacted`, `preflight[].ok` (else `fix`; `HUMAN:` fixes are human's); human approves plan, `drift`. A `graphyard` plugin bound elsewhere fails `Herdr plugin` until `--herdr-instance`/`--herdr-rebind`/`--no-herdr`. `--no-github-app` (not with `--target`/`--github-app`/`--reuse-app`/`--reviewer`): no App, `GITHUB_APP_*` unset, `/api/status.github` false; a bound App or Railway/local leftovers refuse. `--observe-only` (implies `--no-github-app --no-herdr`; refuses `--provider local`, recorded worker/producer rosters, unowned Railway services; replaces unrecorded docker-host/Hetzner environments) deploys only control-plane, rest `held`; Railway variables unread, checkout never uploaded; reruns: done steps `satisfied`. `up --merger control-plane` runs `install --no-github-app`, then deploy-key (each-run ruleset: key-only pushes; other read-write keys refuse, naming delete commands; prior protection kept, reported), `POST /api/merger`. `up` prints Herdr's attach (`XDG_CONFIG_HOME=DIR herdr session attach NAME`). Own-instance session `graphyard-INSTALL` (`gy-HASH` session, then directory, within 107 socket-path bytes; else refused). No `--base-branch`: `master` if only `origin/master` exists. `compose` mounts checkout at `/repo` (`GRAPHYARD_REPOSITORY_ROOT`) plus worktree Git directory; merger `control-plane` (App or not) observes heads there, reviews control-plane.
 
 ## Step 2: apply
 
@@ -39,7 +39,7 @@ node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --apply
 ```
 
-Writes credentials, [variables](deployment.md#variables); deploys; [protects](github.md#require-the-check) branch (not with `--no-github-app`/`--observe-only`). **Verify** `/healthz`.
+Writes credentials, [variables](deployment.md#variables); deploys; [protects](github.md#require-the-check) branch (not with `--no-github-app`/`--observe-only`), recording prior protection once (`protection-record.json`); `--restore-protection --plan|--apply` restores, re-read-verified; unrecorded/unreadable/other-branch refuses. **Verify** `/healthz`.
 
 ## Step 3: App confirmation
 
@@ -55,7 +55,7 @@ Skip with `--no-github-app` until App binds; else dispatch [small item](onboardi
 
 ## Self-contained host
 
-`--target host --ssh-host HOST` (or `--target hetzner`): server/Postgres/loop/executors/Herdr/runtimes on one systemd machine; credentials in `~graphyard/.config/graphyard/<install>/`. Public IPv4 serves `<ip>.sslip.io`; else `--domain`. Unpullable images build there at installer's commit. Workers push/open PRs as App (one-hour tokens). `--apply --profiles-only`: `master environments --apply` there.
+`--target host --ssh-host HOST` (or `--target hetzner`): server/Postgres/loop/executors/Herdr/runtimes on one systemd machine; credentials in `~graphyard/.config/graphyard/<install>/`. Public IPv4 serves `<ip>.sslip.io`; else `--domain`. Unpullable images build at installer's commit. Workers push/open PRs as App (one-hour tokens). `--apply --profiles-only`: `master environments --apply` there.
 
 Price: `--confirm-price`/`--max-monthly`. Saved Apps (`--github-app FILE`/this install's/`.graphyard/github-app.json`) reused if minting a token; `--reuse-app SLUG` (or App page) reuses host-saved Apps. `--migrate` stops loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`), restores; logins move.
 
