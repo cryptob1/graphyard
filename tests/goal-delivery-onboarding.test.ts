@@ -15,7 +15,9 @@ import { server } from '../src/server.js';
 import type { Principal } from '../src/model.js';
 import { deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks } from '../src/model/delivery-policy.js';
 import { renderReleasePipeline } from '../src/install/release-pipeline.js';
-import { repositoryDelivery } from '../src/install/index.js';
+import { prepareInstall, repositoryDelivery } from '../src/install/index.js';
+import { installIdFor } from '../src/install/types.js';
+import { harness, REPOSITORY } from './install-harness.js';
 import { deliveryWorkflowFile } from '../src/onboarding.js';
 import { loadProjectDelivery, projectDeliveryAssignment, projectDeliveryVariable, setProjectDelivery } from '../src/project-applications.js';
 import { DeliveryDefaults } from '../web/components/delivery-slices.js';
@@ -139,6 +141,26 @@ test('integration:goal-local-delivery-onboarding — normal init of a fixture re
   assert.ok(!bare.config.delivery.mergeGate.perCandidate.some((entry: { check: string }) => entry.check === 'graphyard-gate'));
   assert.deepEqual(bare.scanned.proposal.policy.checks, [], 'local mode requires no GitHub check when the repository has no CI');
   await rm(join(root, '..'), { recursive: true, force: true });
+
+  // graphyard up with no committed delivery: a new install, or a retry of one whose record names the control-plane
+  // merger, proposes local; an existing install whose record names github, or predates the field, keeps its model.
+  const install = await harness({ provider: 'compose' });
+  try {
+    const planned = async (merger?: 'control-plane' | 'github' | null) => {
+      const directory = join(install.configHome, installIdFor(REPOSITORY));
+      await rm(directory, { recursive: true, force: true });
+      if (merger !== undefined) {
+        await mkdir(directory, { recursive: true });
+        await writeFile(join(directory, 'install.json'), JSON.stringify({ version: 1, installId: installIdFor(REPOSITORY), repository: REPOSITORY, provider: 'compose', baseBranch: 'main', createdAt: 'then', updatedAt: 'then', ...(merger === null ? {} : { merger }) }));
+      }
+      const session = await prepareInstall(install.root, { repository: REPOSITORY, provider: 'compose' }, install.deps, 'plan');
+      return { mode: session.delivery.policy.mode, merger: session.delivery.merger };
+    };
+    assert.deepEqual(await planned(), { mode: 'local', merger: 'control-plane' }, 'a new install proposes local');
+    assert.deepEqual(await planned('control-plane'), { mode: 'local', merger: 'control-plane' }, 'a retry of a control-plane install keeps local');
+    assert.deepEqual(await planned('github'), { mode: 'per-pr', merger: 'github' }, 'an existing GitHub-merger install keeps its model');
+    assert.deepEqual(await planned(null), { mode: 'per-pr', merger: null }, 'a record predating the field keeps its model');
+  } finally { await install.cleanup(); }
 });
 
 // ---- The status API and the Delivery view ---------------------------------------------------------

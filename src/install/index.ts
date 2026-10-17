@@ -267,8 +267,15 @@ export interface InstallSession {
    * one a scan would propose when none is committed yet (`committed` false), with the adapter that
    * deploys its UAT and production environments.
    */
-  delivery: { policy: DeliveryPolicy; committed: boolean; adapter: DeploymentAdapter; context: DeploymentContext };
+  delivery: { policy: DeliveryPolicy; committed: boolean; adapter: DeploymentAdapter; context: DeploymentContext; merger?: InstallRecord['merger'] };
 }
+
+/**
+ * The merger an install proposes its delivery under (GY-1833, GY-1901): a new install's control plane
+ * merges; an existing one keeps the merger its record names, so a GitHub-merger install, or one whose
+ * record predates the field, keeps its model. Observation-only reads none.
+ */
+export const installMerger = (record: InstallRecord | null, observeOnly: boolean): InstallRecord['merger'] => observeOnly ? null : record ? record.merger : 'control-plane';
 
 /**
  * The committed delivery policy, or the one `init --scan` would propose for this checkout under
@@ -546,10 +553,10 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
     repositoryPolicy = { assignment: repositoryPolicyAssignment(text === null ? null : JSON.parse(text)), error: null };
   } catch (error: any) { repositoryPolicy = { assignment: null, error: `${repositoryConfigFile}'s risk, review and e2e policy does not parse: ${error.message}` }; }
   const reviewPolicy = rawInputs.reviewPolicy ?? 'github';
-  // A non-observe install proposes the local mode under the control-plane merger (GY-1833, GY-1901), including an
-  // idempotent retry after the install record exists but before graphyard.json is committed; a committed policy
-  // is its own choice and ignores this. Observation-only leaves the merger unread so it keeps whatever it had.
-  const delivery = await repositoryDelivery(root, rawInputs.observeOnly ? null : 'control-plane').catch((error: any) => { throw new Error(`${repositoryConfigFile}'s delivery policy cannot be installed: ${error.message}. Correct it (docs/delivery.md#managed-repositories), then rerun`); });
+  // A new install, or a retry of one whose record names the control-plane merger, proposes the local mode;
+  // a committed policy is its own choice and ignores this.
+  const merger = installMerger(record, !!rawInputs.observeOnly);
+  const delivery = await repositoryDelivery(root, merger).catch((error: any) => { throw new Error(`${repositoryConfigFile}'s delivery policy cannot be installed: ${error.message}. Correct it (docs/delivery.md#managed-repositories), then rerun`); });
   let detectedBase = rawInputs.baseBranch;
   if (!detectedBase && existsSync(resolve(root, '.git'))) {
     try { detectedBase = detectedBaseBranch(execFileSync('git', ['-C', root, 'branch', '-r'], { encoding: 'utf8' })) ?? undefined; } catch {}
@@ -629,7 +636,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
   return {
     root, inputs, installId, directory, adapter, context, principals, tokens, vault, record,
     reviewers: record?.reviewers ?? [], mode, materialized, generatedFiles, repositoryPolicy, savedApp, registrations,
-    delivery: { ...delivery, adapter: deploymentAdapters[delivery.policy.deploy.adapter], context: deployment },
+    delivery: { ...delivery, adapter: deploymentAdapters[delivery.policy.deploy.adapter], context: deployment, merger },
     reviewPolicy, requiredChecks,
     reviewCount: reviewPolicy === 'agent' ? 0 : Math.max(0, inputs.reviewCount ?? 1),
     deps: { fetch: dependencies.fetch ?? fetch, now: dependencies.now ?? Date.now, wait: dependencies.wait ?? ((ms: number) => new Promise(accept => setTimeout(accept, ms))), log: dependencies.log ?? (() => {}), ...dependencies },
@@ -1540,7 +1547,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   // The record names this run's App choice before the App step can pause it: a rerun without
   // --no-github-app waiting at its App page must not keep a prior no-App install's marker, or
   // `init --scan --apply` would onboard against an App still being bound (GY-1642).
-  record = { ...record, url, domain: context.domain, service: context.service, provider: context.provider, selfContained: !!context.host, migratedFrom, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, noGithubApp: !!session.inputs.noGithubApp && !keptBinding, principals: principalRecords(session.principals, session.tokens), updatedAt: new Date(deps.now()).toISOString() };
+  record = { ...record, url, domain: context.domain, service: context.service, provider: context.provider, selfContained: !!context.host, migratedFrom, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, noGithubApp: !!session.inputs.noGithubApp && !keptBinding, merger: session.delivery.merger ?? record.merger, principals: principalRecords(session.principals, session.tokens), updatedAt: new Date(deps.now()).toISOString() };
   await writeInstallRecord(session.directory, record, vault);
 
   // The master's local configuration and the profiles come before the App step (GY-1413), so
