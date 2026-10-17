@@ -126,6 +126,23 @@ test('unit:face-move-evaluates-readers-only — with 30 live items an API write 
     assert.deepEqual([...new Set(recorder.evaluated)], [x.id], `the deleted sibling's reader alone is evaluated: ${recorder.evaluated.join(', ')}`);
     recorder.evaluated.length = 0;
     await settle();
+
+    // A face moved twice before a pass decides: X takes a resource and drops it again. Neither end
+    // names it, but a pass may have evaluated its holder against the document in between, so the
+    // holder is a reader of the move all the same.
+    const holder = await create({ exclusiveResources: ['res:face-readers-transient'] });
+    await settle();
+    recorder.evaluated.length = 0;
+    const internals = engine as unknown as { reconcileView: Map<string, { face: string }>; noteFaceMove: (move: { id: string; key: string; fields: string[] }, before: string, after: Work | null) => void };
+    const face = internals.reconcileView.get(x.id)!.face, document = (await store.list()).find(work => work.id === x.id)!;
+    const transient = JSON.stringify({ ...JSON.parse(face), exclusiveResources: ['res:face-readers-transient'] });
+    const move = { id: x.id, key: x.key, fields: ['exclusiveResources'] };
+    internals.noteFaceMove(move, face, { ...document, exclusiveResources: ['res:face-readers-transient'] });
+    internals.noteFaceMove(move, transient, document);
+    await engine.reconcile();
+    assert.ok(new Set(recorder.evaluated).has(holder.id), `the holder of the resource X held only in between is evaluated: ${recorder.evaluated.join(', ')}`);
+    recorder.evaluated.length = 0;
+    await settle();
   } finally { recorder.restore(); }
 });
 

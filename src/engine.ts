@@ -847,16 +847,17 @@ function faceDocument(face: string): Work | null { return face ? JSON.parse(face
  * observed and landing-check files against the moved item's planned and observed files, the
  * contract paths of a bootstrap deferral it declares, and those of any deferral whose proof its
  * evidence may have delivered. Built from the document before and after the move — whole where the
- * view keeps it, the recorded face where it does not (`faceDocument`) — so a reader of either is
- * reached. Either side is null when the move created or deleted the item.
+ * view keeps it, the recorded face where it does not (`faceDocument`) — and every document a
+ * repeated move passed through between them (`between`), so a reader of any of them is reached.
+ * Either end is null when the move created or deleted the item.
  */
 interface FaceReach { id: string; mention: RegExp; parents: Set<string>; resources: Set<string>; paths: string[] }
-interface FaceMoveSides { move: FaceMove; before: Work | null; after: Work | null }
-function faceReach({ move, before, after }: FaceMoveSides, all: Work[]): FaceReach {
-  const proofs = new Set([...before?.evidence ?? [], ...after?.evidence ?? []].map(evidence => evidence.proof));
+interface FaceMoveSides { move: FaceMove; before: Work | null; after: Work | null; between?: Work[] }
+function faceReach({ move, before, after, between = [] }: FaceMoveSides, all: Work[]): FaceReach {
+  const sides = [before, ...between, after].filter((work): work is Work => !!work);
+  const proofs = new Set(sides.flatMap(work => work.evidence ?? []).map(evidence => evidence.proof));
   const paths = new Set<string>();
-  for (const work of [before, after]) {
-    if (!work) continue;
+  for (const work of sides) {
     for (const path of [...work.plannedFiles ?? [], ...work.observation?.files ?? []]) paths.add(path);
     for (const criterion of work.criteria ?? []) for (const path of criterion.bootstrap?.contractPaths ?? []) paths.add(path);
   }
@@ -866,8 +867,8 @@ function faceReach({ move, before, after }: FaceMoveSides, all: Work[]): FaceRea
   }
   const escaped = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return { id: move.id, mention: new RegExp(`${escaped(move.id)}|(^|[^A-Za-z0-9])${escaped(move.key)}(?![A-Za-z0-9])`),
-    parents: new Set([before?.parent, after?.parent].filter((parent): parent is string => !!parent)),
-    resources: new Set([...before?.exclusiveResources ?? [], ...after?.exclusiveResources ?? []]), paths: [...paths] };
+    parents: new Set(sides.map(work => work.parent).filter((parent): parent is string => !!parent)),
+    resources: new Set(sides.flatMap(work => work.exclusiveResources ?? [])), paths: [...paths] };
 }
 /** The paths other items' evaluations read an item on (GY-1777): its planned scope, the files its candidate was observed to change, and the ones its landing check compared. */
 function readerPaths(work: Work): string[] {
@@ -3071,11 +3072,16 @@ export class Engine {
   lastReconcile = { documentsRead: 0, evaluated: 0, live: 0, full: false };
   /** Forget the kept view, so the next pass reads the whole fleet again (GY-1124). */
   resetReconcileView() { this.reconcileView.clear(); this.reconcileOwed.clear(); this.reconcileFullAt = -Infinity; this.reconcileFaceMoves.clear(); this.reconcileOwnMoves.clear(); }
-  /** Note a face another writer moved, merging the fields of one noted already, the before face of the first and the after document of the last (GY-1777, GY-1898). */
+  /**
+   * Note a face another writer moved, merging the fields of one noted already, the before face of
+   * the first and the after document of the last (GY-1777, GY-1898). The documents in between are
+   * kept too: a pass may have evaluated another item against one of them, so its readers are owed.
+   */
   private noteFaceMove(move: FaceMove, before: string, after: Work | null) {
     const known = this.reconcileFaceMoves.get(move.id);
     const noted = { move, before: faceDocument(before), after };
-    this.reconcileFaceMoves.set(move.id, known ? { move: mergeFaceMoves([known.move, move])[0], before: known.before ?? noted.before, after: noted.after ?? known.after } : noted);
+    this.reconcileFaceMoves.set(move.id, known ? { move: mergeFaceMoves([known.move, move])[0], before: known.before ?? noted.before, after: noted.after ?? known.after,
+      between: [...known.between ?? [], ...[known.after, noted.before].filter((work): work is Work => !!work)] } : noted);
   }
   /** Note a face the pass's own planned write moved (GY-1777): the document before its first write of the pass and after its last, the fields merged. */
   private noteOwnMove(own: OwnFaceMove) {
