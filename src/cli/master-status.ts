@@ -13,6 +13,7 @@ import { timeToMergeBySize } from '../decomposition.js';
 import { stalledReviewCapAttention } from '../daemon/cycle-review-cap.js';
 import { slowCycleAttention } from '../daemon/liveness.js';
 import { promotionSummaryWithLag } from '../daemon/deployment.js';
+import { sealRefusalAttention } from '../validation-import.js';
 import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, loopMemoryAttention, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
 import { approverLaunchAttention, mergeWriterLine, nameBaseBreaks } from './status-attention.js';
@@ -105,7 +106,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // Candidate session status, conflict probe and timing failure qualification (GY-1157)
   const { probe, status: pipelined, delivery } = await buildPipelineStatus(root, master, snapshot, coordinator, runtime, credentials, containment, reviews, producers, dispatch.failures, retries, daemonState, cycling, launches, masterApi, sections);
   // A failed check a since-fixed base breakage explains names the refresh that clears it (GY-793).
-  // GY-1810: a review-gate row saying the loop relaunches the review on its own gives way to the stalled review-cap step wherever the step, not a review, holds the head.
+  // GY-1810: the stalled review-cap step replaces a review-gate row where that step holds the head.
   const status = nameBaseBreaks(stalledReviewCapAttention(pipelined, snapshot.work, cursor, master.reviewRoundCap, Date.parse(snapshot.now)), snapshot.work);
   // Time to merge by planned source-file band (GY-1858), over the timelines attached above.
   const itemSize = timeToMergeBySize(snapshot.work, Date.parse(snapshot.now));
@@ -113,7 +114,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const sudo = administration.sudo;
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing refused,
   // nothing relaunches until it is named here with the answering command; a review settled on a dismissal
-  // is the stronger statement (GY-100), reported once as the review that cannot be obtained on that commit.
+  // is the stronger statement (GY-100), reported once as the review unobtainable on that commit.
   const unobtainable = unobtainableReviewAttention(status.work, reviews.completed as SettledReviewSession[]);
   const unanswered = unansweredRequestAttention(status.work);
   // An open item the control plane names no action for. Waiting on another item or a live
@@ -126,9 +127,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // The slow intervention report: the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, executors: releases.executors, promotion: 'error' in daemonState ? null : promotionWait(daemonState) }));
-  const promotion = promotionSummaryWithLag('error' in daemonState ? null : daemonState.promotion, lag.report, lag.attention, Date.parse(snapshot.now), intervalMs);
-  // GY-1773: a loop running a held snapshot ahead of the dirty checkout it left behind, named beside the lag.
-  lag.attention.push(...leftBehindCheckoutAttention(cycling?.upgrade?.snapshot, readHeldCli(root), root));
+  const promotion = promotionSummaryWithLag(cursor?.promotion, lag.report, lag.attention, Date.parse(snapshot.now), intervalMs);
+  // GY-1773: a held snapshot ahead of the dirty checkout left behind; a refused seal check.
+  lag.attention.push(...leftBehindCheckoutAttention(cycling?.upgrade?.snapshot, readHeldCli(root), root), ...sealRefusalAttention(cursor?.promotion, master.repository));
   // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406),
   // queue-head lag (GY-492), slow renewals (GY-558) and conflict hotspots (GY-566).
   const { observation, health, stalledItems } = stallAttention(snapshot, coordinator, derivedStalls, hs.attention);

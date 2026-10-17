@@ -14,7 +14,7 @@ import { documentationAssignment, documentationPolicySchema, parseRepositoryConf
 import { executorRunnableKinds, type NextActionKind } from './model/action-kinds.js';
 import { deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy } from './model/delivery-policy.js';
 import { renderReleasePipeline } from './install/release-pipeline.js';
-import { assertUnitOwned, executorGlob, executorInstance, executorInstancePattern, legacyExecutorTemplate, legacyInstallUnits, readInstallUnits, resolveInstallUnits, systemdCommandLineWords, unitCheckout, type InstallUnits } from './install/units.js';
+import { assertUnitOwned, ForeignUnitRefusal, executorGlob, executorInstance, executorInstancePattern, legacyExecutorTemplate, legacyInstallUnits, readInstallUnits, resolveInstallUnits, systemdCommandLineWords, unitCheckout, type InstallUnits } from './install/units.js';
 import { coordinatorCheckoutRoot } from './master/profiles.js';
 import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
 import { herdrTarget, type HerdrInstance } from './master/herdr.js';
@@ -1130,6 +1130,39 @@ export function executorMergeKinds(kinds: NextActionKind[] | null, loop: { name:
 }
 
 /**
+ * The executor script an ExecStart starts: the program itself, or the script operand right after its
+ * interpreter, as the shipped template writes it (`NODE SCRIPT --slot %i`). A matching path anywhere
+ * later — an argument of some other program — starts no executor, so it is undefined (GY-1881).
+ */
+export function executorLauncherScript(execStart: string | null | undefined): string | undefined {
+  const words = execStart ? systemdCommandLineWords(execStart) : [];
+  const launcher = /\/scripts\/graphyard-executor\.mjs$/;
+  if (launcher.test(words[0] ?? '')) return words[0];
+  return /(?:^|\/)node(?:js)?[\d.]*$/.test(words[0] ?? '') && launcher.test(words[1] ?? '') ? words[1] : undefined;
+}
+
+/**
+ * The stale Graphyard checkout whose executor launcher a unit starts while the unit works in ROOT:
+ * a unit an earlier Graphyard checkout of this install wrote for this repository, which the
+ * installer may rebind onto this checkout (GY-1881) — `up`'s host executor alignment runs the real
+ * installer for exactly this rewrite. Null for every other unit: one whose WorkingDirectory is
+ * absent or another checkout may be another install's, whatever its launcher starts, and one whose launcher is no
+ * Graphyard executor script at all is nobody's Graphyard unit — `assertUnitOwned` refuses both
+ * (GY-1441), exactly as it refuses a unit that is absent.
+ */
+export function staleExecutorLauncherCheckout(text: string, root: string, home = homedir()): string | null {
+  const { workingDirectory, execStart } = unitCheckout(text, home);
+  // Only a unit that names ROOT as its WorkingDirectory may be this install's fleet: one working in
+  // another checkout, or naming none, may be another install's, and the launcher naming a Graphyard
+  // checkout cannot make it ROOT's.
+  if (!workingDirectory || canonicalPath(workingDirectory) !== canonicalPath(root)) return null;
+  const script = executorLauncherScript(execStart);
+  if (!script) return null;
+  const checkout = canonicalPath(dirname(dirname(script)));
+  return checkout === canonicalPath(root) ? null : checkout;
+}
+
+/**
  * Install and enable the executor supervision a host declares: write the declaration, bind the
  * shipped template to this checkout under the systemd user manager, enable one instance per slot
  * and start them, and disable any instance above the count. Idempotent: an unchanged declaration
@@ -1158,8 +1191,22 @@ export async function installExecutorSupervision(root: string, options: { count?
     : fileURLToPath(new URL('../examples/master/' + executorUnitTemplate, import.meta.url));
   const template = options.template ?? await readFile(templatePath, 'utf8');
   const unitFile = resolve(unitDirectory, units.executorTemplate);
-  // A template another checkout runs is that install's, and is never rewritten or restarted from here (GY-1441).
-  assertUnitOwned(unitFile, primary);
+  // The unit as it stands, read once: the ownership judgement and the rewrite below both compare it.
+  let current: string | null = null;
+  try { current = await readFile(unitFile, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+  // A template another checkout runs is that install's, and is never rewritten or restarted from
+  // here (GY-1441) — except this install's own stale launcher: a unit that works in this checkout
+  // but starts another Graphyard checkout's executor script was written by that checkout for this
+  // repository, and rebinding it onto this checkout is the repair `up`'s host alignment runs the
+  // installer for (GY-1881). A unit working in another checkout, or one whose launcher is no
+  // Graphyard executor at all, is genuinely foreign and stays refused.
+  if (current !== null && staleExecutorLauncherCheckout(current, primary) === null) assertUnitOwned(unitFile, primary);
+  // An existing unit is replaced only when it starts a Graphyard executor launcher: one working in
+  // this checkout that starts any other program is no executor slot of this install (GY-1881).
+  if (current !== null) {
+    const start = unitCheckout(current).execStart, words = start ? systemdCommandLineWords(start) : [];
+    if (!executorLauncherScript(start)) throw new ForeignUnitRefusal(unitFile, words.slice(0, 2).join(' ') || 'no ExecStart', primary);
+  }
   // GY-1790: while the CLI pin stands a slot starts the launcher held in the snapshot, never an
   // entry the checkout may hold dirty; a reinstall keeps that binding until the pin lifts. The
   // caller that knows the pin hands the script in (`heldScript`); one that does not (`graphyard
@@ -1168,8 +1215,6 @@ export async function installExecutorSupervision(root: string, options: { count?
   const heldScript = options.heldScript !== undefined ? options.heldScript : (await import('./daemon/held-cli.js')).heldExecutorEntryOf(primary);
   const held = heldScript ? { script: heldScript, checkoutRoot: primary } : {};
   const rendered = renderExecutorUnit(template, { root: primary, node: options.node ?? process.execPath, ...held });
-  let current: string | null = null;
-  try { current = await readFile(unitFile, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   if (current !== rendered) { await mkdir(dirname(unitFile), { recursive: true }); await atomicWrite(unitFile, rendered, 0o644); }
   run(['daemon-reload']);
   const wanted = Array.from({ length: declaration.count }, (_, index) => executorUnit(index + 1, units));
