@@ -72,15 +72,17 @@ test('unit:release-e2e-pending-case-never-waits — the checkout\'s candidate-ba
   assert.match(result.detail, /the install serves no deliveries \(merger github without a repository wired\)/);
   assert.equal(suite.reads.filter(read => read.startsWith('GET /api/work/')).length, 2, 'each of the two attempts asked once for the first delivery, then stopped');
 
+  // GY-1906 runs candidate-batches-five on the fixture's own plane; a delivery case the fixture does not own still runs on the shared install, so its copy stands in.
+  const shared = cases.map(entry => ({ ...entry, definition: { ...entry.definition, id: 'shared-delivery-case' } }));
   const fixture = undelivered(false);
-  const report = await runOnboardingE2e(cases, { url: 'http://uat.test', token: 't', candidate, contract, policy, root, fetcher: fixture.fetcher, now: fixture.clock.now, sleep: fixture.clock.sleep, fixture: async () => { throw new Error('no fixture case is selected'); } });
+  const report = await runOnboardingE2e(shared, { url: 'http://uat.test', token: 't', candidate, contract, policy, root, fetcher: fixture.fetcher, now: fixture.clock.now, sleep: fixture.clock.sleep, fixture: async () => { throw new Error('no fixture case is selected'); } });
   assert.equal(report.cases[0].pending, true);
   assert.equal(report.cases[0].attempts, 2);
   assert.doesNotMatch(report.cases[0].failingStep!.reason, /after waiting|wait deadline/);
-  assert.deepEqual(report.suspendedDeliveries, { cases: ['candidate-batches-five'], merger: 'github', repositoryWired: false });
-  const verdict = suiteResult(report, ['candidate-batches-five'], policy);
+  assert.deepEqual(report.suspendedDeliveries, { cases: ['shared-delivery-case'], merger: 'github', repositoryWired: false });
+  const verdict = suiteResult(report, [], policy);
   assert.equal(verdict.passed, true, verdict.detail);
-  assert.match(verdict.detail, /candidate-batches-five are pending, not blocking/);
+  assert.match(verdict.detail, /shared-delivery-case are pending, not blocking/);
 });
 
 test('unit:release-e2e-wait-bound — seven waiting GET steps of 3600 s each, in a required case not pending, share the run\'s one deadline: the suite reports inside its one-hour command timeout', async () => {
