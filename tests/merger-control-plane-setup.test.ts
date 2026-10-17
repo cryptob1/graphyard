@@ -5,177 +5,87 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setupMaster } from '../src/master.js';
-import * as checklist from '../src/model/setup-checklist.js';
-import { setupChecklist } from '../src/model/setup-checklist.js';
+import { mergerNotRequired, setupChecklist } from '../src/model/setup-checklist.js';
 import { setupFromZeroChecks, setupLine, setupSteps } from '../src/setup-from-zero.js';
-import { mergerFromStatus } from '../src/cli/install-merger.js';
 import { applyProposal, managedInstructions, scanProposal, setupRepository } from '../src/repository-setup.js';
 import { managedServerUrl } from '../src/sync.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
- * GY-1553 AC-4: while `/api/status` reports `mergeWriter.merger` as `control-plane`, the Setup
- * checklist items and doctor's setup-from-zero checks `github-app`, `reviewer-app` and
- * `branch-protection` pass as `not required (merger: control-plane)`, and the AGENTS.md worker
- * block tells the worker to submit with `complete GY-N EPOCH --head SHA`; under the `github`
- * merger (or an older server that reports none) every one of them keeps its current text.
+ * GY-1553 AC-4: the control plane is the only merge writer, so for every unsupervised install the
+ * Setup checklist items and doctor's setup-from-zero checks `github-app` and `reviewer-app` pass as
+ * `not required (merger: control-plane)`, no branch-protection item is judged, and the AGENTS.md
+ * worker block tells the worker to submit with `complete GY-N EPOCH --head SHA`.
  */
-const notRequired = ['github-app', 'reviewer-app', 'branch-protection'] as const;
-// Namespace reads, so a test against code without these symbols fails as a test case, not at load.
-const mergerNotRequired: string = (checklist as any).mergerNotRequired;
-const statusControlPlaneMerger = (status: any) => (checklist as any).statusControlPlaneMerger(status);
-/** A fresh install with no App, no reviewer App and no protection, only a worker account. */
-const bare = (merger: 'github' | 'control-plane' | null) => ({
+const notRequired = ['github-app', 'reviewer-app'] as const;
+/** A fresh install with no App and no reviewer App, only a worker account; an old `github` mergeWriter changes nothing. */
+const bare = (supervision = 'autonomous') => ({
   actor: { role: 'admin' }, github: false, githubAppId: null, githubRepository: null, baseBranch: 'main', reviewerApps: [],
-  appPermissions: null, setup: { protection: 'none', loop: true, supervision: 'autonomous' },
+  appPermissions: null, setup: { loop: true, supervision },
   fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, eligible: true }] },
-  ...(merger ? { mergeWriter: { merger, since: merger === 'control-plane' ? '2026-10-08T00:00:00.000Z' : null, setBy: merger === 'control-plane' ? 'human-operator' : null, reason: null, event: null, line: null } } : {}),
+  mergeWriter: { merger: 'github' },
 });
 
-test('unit:setup-checklist-control-plane — the Setup checklist passes github-app, reviewer-app and branch-protection as not required while the control plane is the merge writer, keeps every other item, and judges them as before under the github merger', () => {
+test('unit:setup-checklist-control-plane — the Setup checklist passes github-app and reviewer-app as not required for every unsupervised install, judges no branch protection and no merger, and judges the App only on the GitHub App path', () => {
   assert.equal(mergerNotRequired, 'not required (merger: control-plane)');
-  assert.equal(statusControlPlaneMerger(bare('control-plane')), true);
-  assert.equal(statusControlPlaneMerger(bare('github')), false); assert.equal(statusControlPlaneMerger(bare(null)), false); assert.equal(statusControlPlaneMerger(null), false);
-
-  const control = setupChecklist(bare('control-plane'));
-  assert.deepEqual(control.map(item => item.id), ['github-app', 'reviewer-app', 'account:worker', 'account:reviewer', 'branch-protection', 'master-loop', 'merger'], 'the items stay, in order, with the merger line last (GY-1833)');
+  const control = setupChecklist(bare());
+  assert.deepEqual(control.map(item => item.id), ['github-app', 'reviewer-app', 'account:worker', 'account:reviewer', 'master-loop']);
   for (const id of notRequired) {
     const item = control.find(entry => entry.id === id)!;
     assert.deepEqual({ done: item.done, line: item.line, action: item.action, human: item.human }, { done: true, line: mergerNotRequired, action: null, human: false }, `${id} reads as passed and asks nothing`);
   }
   assert.equal(control.find(item => item.id === 'account:worker')!.done, true, 'the worker account is still judged');
   assert.equal(control.find(item => item.id === 'account:reviewer')!.done, false, 'the reviewing account is still required');
-  assert.deepEqual(setupChecklist(bare(null), { merger: 'control-plane' }).map(item => [item.id, item.done, item.line]), control.map(item => [item.id, item.done, item.line]), 'the option says the same before the status reports the setting');
-  const supervised = setupChecklist({ ...bare('control-plane'), setup: { ...bare('control-plane').setup, supervision: 'supervised' } });
-  assert.ok(!supervised.some(item => item.id === 'reviewer-app' || item.id === 'account:reviewer'), 'supervision still removes the reviewer items');
-  assert.deepEqual(supervised.filter(item => item.id === 'github-app' || item.id === 'branch-protection').map(item => item.line), [mergerNotRequired, mergerNotRequired]);
-
-  for (const merger of ['github', null] as const) {
-    const items = setupChecklist(bare(merger));
-    // GY-1833: the merger line is judged only once the plane reports a merger.
-    assert.deepEqual(items.map(item => item.id), control.map(item => item.id).filter(id => merger || id !== 'merger'));
-    for (const id of notRequired) {
-      const item = items.find(entry => entry.id === id)!;
-      assert.equal(item.done, false, `${merger ?? 'no'} merger: ${id} is still required`);
-      assert.notEqual(item.line, mergerNotRequired); assert.ok(item.action, `${id} still offers its action`);
-    }
-    assert.deepEqual(setupChecklist(bare(merger), { merger: 'github' }).filter(item => merger || item.id !== 'merger'), items);
-  }
-  const github = setupChecklist(bare('github'));
-  assert.equal(github.find(item => item.id === 'github-app')!.line, 'Create the App that lets Graphyard work in your repository, then install it there.');
-  assert.equal(github.find(item => item.id === 'branch-protection')!.line, 'Turned on by itself once the GitHub App is installed.');
+  const supervised = setupChecklist(bare('supervised'));
+  assert.deepEqual(supervised.map(item => item.id), ['github-app', 'account:worker', 'master-loop'], 'supervision removes the reviewer items');
+  assert.equal(supervised[0].line, 'Create the App that lets Graphyard work in your repository, then install it there.', 'the supervised GitHub App path judges its App');
+  assert.equal(setupChecklist(bare(), { githubApps: true }).find(item => item.id === 'github-app')!.done, false, 'up\'s own App path judges its App');
 });
 
-test('unit:setup-checklist-control-plane — doctor\'s setup-from-zero checks print PASS github-app, reviewer-app and branch-protection as not required under the control-plane merger, name their steps, and fail as before under the github merger', async () => {
+test('unit:setup-checklist-control-plane — doctor\'s setup-from-zero checks print PASS github-app and reviewer-app as not required for an unsupervised install, naming their steps, and judge no branch protection or merger', async () => {
   const root = await temporaryDirectory('merger-control-plane-setup');
-  const input = (merger: 'github' | 'control-plane' | null) => ({ root, env: {}, status: bare(merger), environments: join(root, 'none'), sandbox: () => null, github: () => { throw new Error('gh: Branch not protected (HTTP 404)'); } });
-  const control = await setupFromZeroChecks(input('control-plane'));
-  assert.deepEqual(control.map(check => check.id).slice(0, 5), ['control-plane', 'credentials-file', 'github-app', 'reviewer-app', 'branch-protection'], 'the lines keep their order');
-  assert.deepEqual(control.filter(check => (notRequired as readonly string[]).includes(check.id)).map(setupLine),
-    ['PASS github-app: not required (merger: control-plane)', 'PASS reviewer-app: not required (merger: control-plane)', 'PASS branch-protection: not required (merger: control-plane)']);
-  assert.deepEqual(control.filter(check => (notRequired as readonly string[]).includes(check.id)).map(check => check.step), [setupSteps.app, setupSteps.reviewer, setupSteps.protection], 'each line still names its checklist step');
-  assert.equal(control.find(check => check.id === 'control-plane')!.status, 'pass', 'the plane itself is judged as before');
-  for (const merger of ['github', null] as const) {
-    const checks = await setupFromZeroChecks(input(merger));
-    assert.deepEqual(checks.map(check => check.id), control.map(check => check.id).filter(id => merger || id !== 'merger'));
-    assert.deepEqual(checks.filter(check => (notRequired as readonly string[]).includes(check.id)).map(check => [check.id, check.status]), notRequired.map(id => [id, 'fail']), `${merger ?? 'no'} merger: the three prerequisites are still required`);
-    assert.match(setupLine(checks.find(check => check.id === 'github-app')!), /^FAIL github-app: the server reports no bound GitHub App \(fix: /);
-  }
+  const checks = await setupFromZeroChecks({ root, env: {}, status: bare(), environments: join(root, 'none'), sandbox: () => null });
+  assert.deepEqual(checks.map(check => check.id).slice(0, 4), ['control-plane', 'credentials-file', 'github-app', 'reviewer-app'], 'the lines keep their order');
+  const lines = checks.filter(check => (notRequired as readonly string[]).includes(check.id));
+  assert.deepEqual(lines.map(setupLine), ['PASS github-app: not required (merger: control-plane)', 'PASS reviewer-app: not required (merger: control-plane)']);
+  assert.deepEqual(lines.map(check => check.step), [setupSteps.app, setupSteps.reviewer], 'each line still names its checklist step');
+  assert.ok(!checks.some(check => check.id === 'branch-protection' || check.id === 'merger'), 'no branch protection or merger line');
 });
 
-test('unit:agents-block-control-plane — the AGENTS.md worker block says complete GY-N EPOCH --head SHA while the control plane is the merge writer, keeps the current pull-request text otherwise, and this repository\'s own block is a faithful rendering', async () => {
+test('unit:agents-block-control-plane — the AGENTS.md worker block says complete GY-N EPOCH --head SHA with no push or pull request, and this repository\'s own block is a faithful rendering', async () => {
   const url = 'https://graphyard.example';
-  const github = managedInstructions('# Rules\n', url);
-  assert.equal(managedInstructions('# Rules\n', url, { merger: 'github' }), github, 'the github merger renders the current text');
-  assert.equal(managedInstructions('# Rules\n', url, { merger: null }), github, 'a server that reports no merger renders the current text');
-  assert.match(github, /Submit the PR with `complete GY-N EPOCH PR_NUMBER`\. This reports implementation\ncompletion and ends your lease in the same transaction; it does not set Done\./);
-  assert.ok(!github.includes('--head'), 'the github block never mentions --head');
-
-  const control = managedInstructions('# Rules\n', url, { merger: 'control-plane' });
-  assert.match(control, /Submit the commit with `complete GY-N EPOCH --head SHA` \(the control plane is the merge\nwriter: nothing is pushed, the shared object store already holds SHA\)\. This reports\nimplementation completion and ends your lease in the same transaction; it does not set\nDone\./);
-  assert.ok(!control.includes('PR_NUMBER'), 'the control-plane block names no pull request');
-  assert.match(control, /refused, naming the files and the shipped work they belong to, when the commit\nreverts, deletes or rewrites files outside plannedFiles/);
-  assert.match(control, /Make `complete` your last action: do not heartbeat, edit, or push after it\./);
-  const paragraphs = (text: string) => text.split(/\n\n/).filter(paragraph => !/complete GY-N EPOCH/.test(paragraph));
-  assert.deepEqual(paragraphs(control), paragraphs(github), 'only the submission paragraph differs');
-  assert.equal(managedInstructions(control, url, { merger: 'github' }), github, 'regenerating a control-plane block under the github merger restores the current text');
-  assert.equal(managedInstructions(github, url, { merger: 'control-plane' }), control, 'and the other way round');
-  assert.equal(managedInstructions(control, url, { merger: 'control-plane' }), control, 'regenerating keeps it exactly once');
-
+  const block = managedInstructions('# Rules\n', url);
+  assert.match(block, /Submit the commit with `complete GY-N EPOCH --head SHA` \(the control plane is the merge\nwriter; the shared object store already holds SHA\)\. This reports implementation\ncompletion and ends your lease in the same transaction; it does not set Done\./);
+  assert.ok(!block.includes('PR_NUMBER') && !/\bpush\b/.test(block.replace(/nothing is pushed/g, '')), 'the block names no pull request and asks for no push');
+  assert.match(block, /`complete` your last action: do not heartbeat or edit after it\./);
+  assert.equal(managedInstructions(block, url), block, 'regenerating keeps it exactly once');
   const agents = await readFile(join(import.meta.dirname, '../AGENTS.md'), 'utf8');
   const recorded = managedServerUrl(agents);
   assert.ok(recorded, 'this repository\'s AGENTS.md names its server');
-  assert.ok([managedInstructions(agents, recorded!), managedInstructions(agents, recorded!, { merger: 'control-plane' })].includes(agents), 'this repository\'s AGENTS.md is one of the two renderings, regenerated to match');
+  assert.equal(managedInstructions(agents, recorded!), agents, 'this repository\'s AGENTS.md is the rendering, regenerated to match');
 });
 
-test('unit:agents-block-control-plane — master init renders the worker block from the merger /api/status reports: --head SHA under control-plane (including with no GitHub App), the pull-request text under github, and a rerun after the setting changes rewrites it', async () => {
-  const root = await temporaryDirectory('merger-agents-block'), credentials = await temporaryDirectory('merger-agents-block-credentials');
-  execFileSync('git', ['init', '-q', root]);
-  execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
+test('unit:agents-block-control-plane — master init (with no GitHub App), worker init and init --apply write the --head block whatever merger the status reports', async () => {
   const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
-  const init = async (merger: 'github' | 'control-plane' | null, appId: number | null = 1234) => {
-    const status = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: appId, ...(merger ? { mergeWriter: { merger } } : {}) }));
-    await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wE' }, status as typeof fetch);
-    return readFile(join(root, 'AGENTS.md'), 'utf8');
+  const expected = managedInstructions('', 'https://graphyard.example');
+  const repository = async (label: string) => {
+    const root = await temporaryDirectory(label);
+    execFileSync('git', ['init', '-q', root]);
+    execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
+    return root;
   };
-  // Control-plane installs correctly have no App: master init must still write the --head block.
-  const control = await init('control-plane', null);
-  assert.match(control, /Submit the commit with `complete GY-N EPOCH --head SHA`/); assert.ok(!control.includes('PR_NUMBER'));
-  assert.equal(control, managedInstructions('', 'https://graphyard.example', { merger: 'control-plane' }), 'master init writes the control-plane rendering with no App');
-  await assert.rejects(init('github', null), /identify its GitHub App/, 'github merger still refuses a missing App');
-  const github = await init('github', 1234);
-  assert.match(github, /Submit the PR with `complete GY-N EPOCH PR_NUMBER`/); assert.ok(!github.includes('--head'));
-  assert.equal(github, managedInstructions('', 'https://graphyard.example'), 'a rerun under the github merger restores the current text');
-  assert.equal(await init(null, 1234), github, 'a server that reports no merger renders the current text');
-});
+  const master = await repository('merger-agents-block'), credentials = await temporaryDirectory('merger-agents-block-credentials');
+  const status = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: null, mergeWriter: { merger: 'github' } }));
+  await setupMaster(master, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wE' }, status as typeof fetch);
+  assert.equal(await readFile(join(master, 'AGENTS.md'), 'utf8'), expected, 'master init writes the --head block with no App');
 
-test('unit:agents-block-control-plane — worker init (setupRepository) passes the recorded merger into the AGENTS.md block: --head SHA under control-plane, the pull-request text under github', async () => {
-  const root = await temporaryDirectory('merger-worker-init');
-  execFileSync('git', ['init', '-q', root]);
-  execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
-  const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
-  const token = 'worker-token-'.padEnd(40, 'x');
-  const run = async (merger: 'github' | 'control-plane' | null) => {
-    const fetcher = (async () => new Response(JSON.stringify({
-      actor: { id: 'worker-a', role: 'worker' }, repository: 'owner/project',
-      ...(merger ? { mergeWriter: { merger } } : {}),
-    }))) as typeof fetch;
-    await setupRepository(root, { url: 'https://graphyard.example', cliPath: launcher, hostId: 'host-a', token }, { fetcher, executors: false });
-    return readFile(join(root, 'AGENTS.md'), 'utf8');
-  };
-  const control = await run('control-plane');
-  assert.match(control, /Submit the commit with `complete GY-N EPOCH --head SHA`/); assert.ok(!control.includes('PR_NUMBER'));
-  assert.equal(control, managedInstructions('', 'https://graphyard.example', { merger: 'control-plane' }));
-  const github = await run('github');
-  assert.match(github, /Submit the PR with `complete GY-N EPOCH PR_NUMBER`/); assert.ok(!github.includes('--head'));
-  assert.equal(github, managedInstructions('', 'https://graphyard.example'));
-  assert.equal(await run(null), github, 'a server that reports no merger keeps the pull-request text');
-  // Rerunning under control-plane after a github write must restore --head, not leave PR_NUMBER.
-  assert.equal(await run('control-plane'), control);
-});
+  const worker = await repository('merger-worker-init');
+  const fetcher = (async () => new Response(JSON.stringify({ actor: { id: 'worker-a', role: 'worker' }, repository: 'owner/project', mergeWriter: { merger: 'github' } }))) as typeof fetch;
+  await setupRepository(worker, { url: 'https://graphyard.example', cliPath: launcher, hostId: 'host-a', token: 'worker-token-'.padEnd(40, 'x') }, { fetcher, executors: false });
+  assert.equal(await readFile(join(worker, 'AGENTS.md'), 'utf8'), expected, 'worker init writes the --head block');
 
-test('unit:agents-block-control-plane — init --apply (applyProposal) writes the worker block from the merger its caller passes: --head SHA under control-plane, the pull-request text otherwise; mergerFromStatus reads /api/status and defaults to null on failure', async () => {
-  assert.match(await readFile(new URL('../src/cli/install.ts', import.meta.url), 'utf8'), /mergerFromStatus\(\(\) => context\.api\('status'\)\)/, 'init --apply reads the recorded merger so a control-plane apply can thread it');
-  assert.equal(await mergerFromStatus(async () => ({ mergeWriter: { merger: 'control-plane' } })), 'control-plane');
-  assert.equal(await mergerFromStatus(async () => ({ mergeWriter: { merger: 'github' } })), 'github');
-  assert.equal(await mergerFromStatus(async () => ({})), null);
-  assert.equal(await mergerFromStatus(async () => { throw new Error('unreachable'); }), null, 'a failed status read never invents control-plane');
-
-  const root = await temporaryDirectory('merger-apply');
-  execFileSync('git', ['init', '-q', root]);
-  execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
-  const proposal = await scanProposal(root, { url: 'https://graphyard.example', runtimes: [] });
-  const installed = { directory: '/tmp/graphyard-install-fixture', githubApp: { appId: 1, slug: 'graphyard-owner-project' } };
-  const apply = async (merger: string | null | undefined) => {
-    await applyProposal(root, proposal, { url: 'https://graphyard.example', installed, ...(merger !== undefined ? { merger } : {}) });
-    return readFile(join(root, 'AGENTS.md'), 'utf8');
-  };
-  const control = await apply('control-plane');
-  assert.match(control, /Submit the commit with `complete GY-N EPOCH --head SHA`/); assert.ok(!control.includes('PR_NUMBER'));
-  assert.equal(control, managedInstructions('', 'https://graphyard.example', { merger: 'control-plane' }));
-  const github = await apply('github');
-  assert.match(github, /Submit the PR with `complete GY-N EPOCH PR_NUMBER`/); assert.ok(!github.includes('--head'));
-  assert.equal(await apply(null), github, 'omitted or null merger keeps the pull-request text');
-  assert.equal(await apply(undefined), github, 'a caller that forgets merger keeps the pull-request text');
-  assert.equal(await apply('control-plane'), control, 'rerunning under control-plane restores --head');
+  const applied = await repository('merger-apply');
+  const proposal = await scanProposal(applied, { url: 'https://graphyard.example', runtimes: [] });
+  await applyProposal(applied, proposal, { url: 'https://graphyard.example', installed: { directory: '/tmp/graphyard-install-fixture', githubApp: { appId: 1, slug: 'graphyard-owner-project' } } });
+  assert.equal(await readFile(join(applied, 'AGENTS.md'), 'utf8'), expected, 'init --apply writes the --head block');
 });

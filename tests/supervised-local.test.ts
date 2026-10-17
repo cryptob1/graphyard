@@ -87,11 +87,11 @@ test('unit:supervised-setup-skips-autonomy — supervision defaults to autonomou
   // The checklist: supervised omits the reviewer App and the reviewing account; autonomous keeps both.
   const bare = status({ calls: [], installed: true, loop: true, supervised: 0 });
   const supervisedIds = setupChecklist(bare, { supervised: true }).map(item => item.id);
-  assert.deepEqual(supervisedIds, ['github-app', 'account:worker', 'branch-protection', 'master-loop']);
+  assert.deepEqual(supervisedIds, ['github-app', 'account:worker', 'master-loop']);
   assert.ok(setupChecklist(bare, { supervised: true }).every(item => item.done), 'a local install with a worker account is green');
   const autonomous = setupChecklist(bare);
-  assert.deepEqual(autonomous.map(item => item.id), ['github-app', 'reviewer-app', 'account:worker', 'account:reviewer', 'branch-protection', 'master-loop']);
-  assert.deepEqual(autonomous.filter(item => !item.done).map(item => item.id), ['reviewer-app', 'account:reviewer'], 'autonomous mode still reports them missing');
+  assert.deepEqual(autonomous.map(item => item.id), ['github-app', 'reviewer-app', 'account:worker', 'account:reviewer', 'master-loop']);
+  assert.deepEqual(autonomous.filter(item => !item.done).map(item => item.id), ['account:reviewer'], 'autonomous mode needs no reviewer App (the control plane merges) but still a reviewing account');
 
   // The dashboard's caller: /api/status names the live loop's supervision (`setup.supervision`, from
   // the header on its coordination read), and the Setup page judges the same checklist from it.

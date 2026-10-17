@@ -167,8 +167,6 @@ async function recordAutoMerge(url: string, token: string, autoMerge: boolean, f
 }
 
 export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; herdrWorkspace?: string; credentialDirectory?: string; autoMerge?: boolean; mergeMethod?: 'merge' | 'squash' | 'rebase'; run?: Partial<MasterRun>; browser?: MasterBrowser;
-  /** Accept a control plane with no GitHub App yet, recording APP_PENDING (GY-1413): only `install --apply` passes it, before its App step. */
-  allowPendingApp?: boolean;
   /** Install the loop's supervisor (GY-114). Explicit, never implied: only `master init` passes it. */
   installSupervisor?: boolean;
   /** Replace an installed unit that runs a different loop; `master init --replace-supervisor`. */
@@ -186,10 +184,8 @@ export async function setupMaster(root: string, input: { url: string; token: str
   if (status.actor?.role !== 'coordinator') throw new Error('Master setup requires a coordinator credential; worker, operator, producer, and reader credentials are not suitable');
   if (typeof status.repository !== 'string' || !status.repository) throw new Error('Master setup requires the control plane to be bound to a GitHub repository');
   if (typeof status.baseBranch !== 'string' || !status.baseBranch) throw new Error('Master setup requires the control plane to identify its managed base branch');
-  // GY-1553: control-plane merger installs correctly have no GitHub App; treat that as app-pending
-  // so master init can write the worker block before any App exists (same as install --apply's allowPendingApp).
-  const controlPlaneMerger = status.mergeWriter?.merger === 'control-plane';
-  const appPending = (input.allowPendingApp === true || controlPlaneMerger) && (status.githubAppId == null || status.githubAppId <= 0);
+  // GY-1553: the control plane is the merge writer, so an install correctly has no GitHub App; that reads as app-pending.
+  const appPending = status.githubAppId == null || status.githubAppId <= 0;
   if (!appPending && (!Number.isSafeInteger(status.githubAppId) || status.githubAppId <= 0)) throw new Error('Master setup requires the control plane to identify its GitHub App');
   assertRepository(detected.repository, status.repository);
   if (!detected.repository) throw new Error('Master setup requires a recognized GitHub origin');
@@ -223,8 +219,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   let existing = ''; let mode = 0o644;
   try { const info = await lstat(instructionsFile); if (!info.isFile()) throw new Error('Refusing to replace a non-regular AGENTS.md'); mode = info.mode & 0o777; existing = await readFile(instructionsFile, 'utf8'); }
   catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  // GY-1553: the worker block's submission form follows the install's recorded merger (control-plane: `complete GY-N EPOCH --head SHA`).
-  const instructions = managedInstructions(withoutMasterInstructions(existing), url, { merger: status.mergeWriter?.merger ?? null });
+  const instructions = managedInstructions(withoutMasterInstructions(existing), url);
   const directory = await localDirectory(root);
   await atomicPrivateText(credentialFile, token);
   await atomicPrivateWrite(resolve(directory, 'master.json'), config);

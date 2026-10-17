@@ -8,14 +8,11 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { MergerSettings } from '../src/merger-mode.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import { processControlPlaneJob } from '../src/server/control-plane-observation.js';
 import { observationWorkers } from '../src/server/main.js';
-import type { GitHub } from '../src/github.js';
 import type { Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 /**
  * GY-1675: an install with no GitHub App observes every open candidate from its own checkout, one
@@ -25,9 +22,7 @@ import { recordLegacyMerger } from './helpers/legacy-merger.js';
  * each cycle saving exactly one observation per submitted item (the freshness the stale-observation
  * check reads) and nothing more, a failed observation retried at its
  * bounded cadence and never against a stand-in base, and an item with nothing submitted deferred.
- * The workers choose the backend from the recorded merger: beside a GitHub client (an App-bound
- * install switched to the control plane) the checkout observes and the client is never consulted,
- * and once GitHub is the merger again the client observes and the checkout writes nothing.
+ * The workers always observe from the checkout: the control plane is the only merge writer.
  */
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
@@ -50,10 +45,9 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1675;
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('soak-control-plane-observation-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('soak_control_plane_observation');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/soak_control_plane_observation`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/soak_control_plane_observation`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.submissionObserver = null; engine.directMergeEnvironment = null;
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
-  await new MergerSettings(store).change(operator, { merger: 'control-plane', reason: 'the soak runs an App-less install' }, randomUUID());
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });
 
@@ -149,19 +143,6 @@ test('soak:control-plane-observation — the App-less observation job, run acros
   await cycle();
   for (const id of ids) assert.equal((await jobs()).find(row => row.work_id === id)!.error, null);
 
-  // The ledger says github: a server with no App claims nothing, so a checkout that is not the merger never writes an observation (review of 10cb17d2).
-  await new MergerSettings(store).change(operator, { merger: 'github', reason: 'GitHub merges again' }, randomUUID());
-  const gatedFrom = await Promise.all(ids.map(history));
-  for (let round = 0; round < 3; round++) {
-    await due();
-    for (let claims = 0; claims < 5; claims++) assert.equal(await processControlPlaneJob(engine), false, 'nothing is claimed while GitHub is the recorded merger');
-  }
-  assert.deepEqual(await Promise.all(ids.map(history)), gatedFrom, 'no observation is written');
-  assert.ok((await jobs()).every(row => !row.later), 'the due jobs stay due for the merger that owns them, neither taken nor deferred');
-  assert.equal((await store.pool.query('SELECT count(*)::int AS n FROM jobs WHERE token IS NOT NULL')).rows[0].n, 0, 'no job is held');
-  await new MergerSettings(store).change(operator, { merger: 'control-plane', reason: 'the soak runs an App-less install' }, randomUUID());
-  assert.equal(await cycle(), 4, 'the control plane claims again once it is the merger');
-
   // The claim race: a submission between the pre-claim fleet read and the claim creates the candidate and wakes the job claimed.
   // The claimed item is judged as it stands after the claim, so that job is observed, never dropped on the stale snapshot.
   const racedHead = git(join(checkout, '.graphyard', 'worktrees', 'GY-4-1'), 'rev-parse', 'HEAD');
@@ -182,20 +163,10 @@ test('soak:control-plane-observation — the App-less observation job, run acros
   assert.ok(racedJob, 'the job row survives the race');
   assert.equal(racedJob.error, null); assert.equal(racedJob.deferred_reason, null, 'it is finished, not deferred as unsubmitted');
 
-  // An App-bound install switched to the control plane (`master merger control-plane`, review of 355a8b88): a GitHub client
-  // exists, yet the workers observe from the checkout and never consult it, since an allocated change number answers to no
-  // pull request; switched back to GitHub, the client is what observes and the checkout writes nothing; switched again, the
-  // checkout observes again. The backend follows the recorded merger, read before every claim, never the client's presence.
-  const consulted: string[] = [];
-  const client = new Proxy({}, { get: (_target, property) => {
-    consulted.push(String(property));
-    if (property === 'observe') return () => { throw new Error('the soak\'s GitHub client observes nothing'); };
-    if (property === 'budget') return () => ({ paused: null, remaining: null, belowReserve: false, exhaustsBeforeReset: false, pace: { perMinute: null } });
-    if (property === 'recordDeferral') return () => {};
-    return undefined;
-  } }) as unknown as GitHub;
+  // The observation workers observe every candidate from the checkout (review of 355a8b88): the control plane is the
+  // only merge writer, so no GitHub client is consulted.
   let stop = false;
-  const workers = observationWorkers(engine, client, 2, () => stop, 20);
+  const workers = observationWorkers(engine, 2, () => stop, 20);
   const everyId = [...ids, pending.w.id];
   const settled = async (what: string) => {
     for (let waited = 0; waited < 500; waited++) { if ((await jobs()).every(row => row.later && !row.held)) return; await sleep(10); }
@@ -209,21 +180,6 @@ test('soak:control-plane-observation — the App-less observation job, run acros
       for (const id of everyId) assert.equal((await store.workDocument(id))!.observation?.source, 'control-plane');
       assert.ok((await jobs()).every(row => row.error === null), 'no observation failed');
     }
-    assert.equal(consulted.length, 0, `the GitHub client is never consulted while the control plane is the recorded merger (consulted: ${[...new Set(consulted)].join(', ')})`);
-
-    await new MergerSettings(store).change(operator, { merger: 'github', reason: 'GitHub merges again' }, randomUUID());
-    const githubFrom = await Promise.all(everyId.map(history));
-    for (let round = 0; round < 3; round++) { await due(); await settled(`github cycle ${round}`); }
-    assert.ok(consulted.includes('observe'), `the client is what observes once GitHub is the merger (consulted: ${[...new Set(consulted)].join(', ') || 'nothing'})`);
-    assert.deepEqual(await Promise.all(everyId.map(history)), githubFrom, 'the checkout writes no observation while GitHub is the merger');
-    for (const id of everyId) assert.match((await jobs()).find(row => row.work_id === id)!.error ?? '', /observes nothing/, 'each job failed on the client, never on the checkout');
-
-    await new MergerSettings(store).change(operator, { merger: 'control-plane', reason: 'the soak runs an App-less install' }, randomUUID());
-    consulted.length = 0;
-    await due(); await settled('control-plane again');
-    assert.deepEqual(await Promise.all(everyId.map(history)), githubFrom.map(revision => revision + 1), 'the checkout observes again, once per item');
-    for (const id of everyId) assert.equal((await jobs()).find(row => row.work_id === id)!.error, null, 'the client\'s failures are cleared by the checkout\'s observation');
-    assert.equal(consulted.length, 0, `the client is not consulted again (consulted: ${[...new Set(consulted)].join(', ')})`);
   } finally { stop = true; await workers; }
   await store.pool.query('UPDATE jobs SET available_at=now()');
 });

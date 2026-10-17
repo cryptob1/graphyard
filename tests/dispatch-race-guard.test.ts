@@ -274,7 +274,7 @@ test('unit:system-driven-items the master CLI refuses dispatch, review launch an
     assert.ok(!master.reads.some(url => url.startsWith('/api/events')));
     // GitHub merges (GY-1235): master merge has nothing to refuse, because it runs no merge at all.
     const merge = JSON.parse((await master.run(['merge', 'GY-7'])).stdout);
-    assert.equal(merge.merged, false); assert.match(merge.result, /^GitHub merges: .*There is no Graphyard merge to run\.$/);
+    assert.equal(merge.merged, false); assert.match(merge.result, /^The control plane merges: .*There is no merge to run by hand\.$/);
   } finally { await master.close(); }
 });
 
@@ -513,7 +513,7 @@ test('unit:system-driven-items the master\'s own next steps name the loop step f
   assert.match(block, /Items are system-driven unless created with `"systemDriven": false`: for them `graphyard master run` dispatches and launches review, and the master CLI refuses those hand actions, naming the loop step/);
   // An opted-out item is still driven by the loop: the instructions allow the hand commands in addition, never instead.
   assert.match(block, /The loop drives an item created `"systemDriven": false` the same way; opting out only also allows the hand actions/);
-  assert.match(block, /There is no Graphyard merge to run\. A merge of a head whose gates had not passed is held as a violation until a two-party `graphyard master decide GY-N merge` reconciles it/);
+  assert.match(block, /GitHub\smerges nothing and no pull request is opened\. A merge of a head whose gates had not passed is held as a violation until a two-party `graphyard master decide GY-N merge` reconciles it/);
   assert.doesNotMatch(workAttentionOwner(item({ systemDriven: true }), 'launch-review').next, /then graphyard master review GY-7$/);
   assert.equal(workAttentionOwner(item({ systemDriven: false }), 'launch-review').next, 'Fix the refusal reason, then graphyard master review GY-7');
   // An ordinary pending review names the loop's relaunch too, not a `master review` the CLI refuses.

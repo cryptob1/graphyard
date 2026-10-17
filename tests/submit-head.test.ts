@@ -7,7 +7,9 @@ import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { MergerSettings, recordedMergerMode } from '../src/merger-mode.js';
+import { mergeWriterStatus } from '../src/merger-mode.js';
+import { operatorAgentRoutes } from '../src/server/routes/operator-agents.js';
+import { matchRoute } from '../src/server/routes.js';
 import { allocateChangeNumber } from '../src/merge-writer/change-numbers.js';
 import { absentHeadRefusal, gitRunnerFor, observeHead, type GitRunner } from '../src/merge-writer/local-observation.js';
 import { evaluate, mergeLedgerRefusals, pushRefusal, trialRefusal, type Observation, type Principal, type Work } from '../src/model.js';
@@ -28,7 +30,7 @@ const repository = 'owner/project';
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-let pg: EmbeddedPostgres, store: Store, engine: Engine, settings: MergerSettings;
+let pg: EmbeddedPostgres, store: Store, engine: Engine;
 /** A checkout laid out like the coordinator's: an origin, the clone whose refs/remotes/origin/main is the base tip, and a worker's commit in the shared object store. */
 let checkout: string, baseTip: string, head: string, staleHead: string, fixtureRoot: string;
 
@@ -64,11 +66,9 @@ before(async () => {
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/submit_head_test`); await store.init();
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
-  settings = new MergerSettings(store);
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });
 
-const setMerger = async (merger: 'github' | 'control-plane') => { if ((await recordedMergerMode(store.pool)).merger !== merger) await settings.change(operator, { merger, reason: `test wants ${merger}` }, randomUUID()); };
 /** An item claimed by the worker with its workspace registered on `branch`, ready to submit. */
 async function assigned(n: number, branch = `graphyard/gy-${n}-1`) {
   let w = await engine.execute(operator, 'create', null, { title: `Head submission ${n}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
@@ -79,32 +79,23 @@ async function assigned(n: number, branch = `graphyard/gy-${n}-1`) {
 }
 const numbers = async () => (await store.pool.query('SELECT number::int AS number, work_id, head FROM change_numbers ORDER BY number')).rows as { number: number; work_id: string; head: string }[];
 
-test('integration:submit-head-mode-gate — submit takes exactly one of pr or head; a head is refused under the github merger naming graphyard master merger, a pr under the control-plane merger naming --head, and the mode is read in the transaction', async () => {
-  await setMerger('github');
+test('integration:submit-head-mode-gate — submit takes exactly one of pr or head; the merger is the control plane whatever old `github` history the ledger holds, nothing can set it, and a head is submitted', async () => {
+  // An install that once ran the github merger keeps that event on its append-only ledger; nothing reads it.
+  await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['test-fixture', 'policy.merger.set', JSON.stringify({ merger: 'github', reason: 'an old install', previous: null })]);
+  assert.equal(mergeWriterStatus.merger, 'control-plane', 'every reader of the merger gets the control plane');
+  assert.ok(!operatorAgentRoutes.routes.some(route => matchRoute(route, 'POST', '/api/merger')), 'no route can set a merger');
+  const read = operatorAgentRoutes.routes.find(route => matchRoute(route, 'GET', '/api/merger'))!;
+  assert.equal((await read.handle({} as never, []) as { mode: string }).mode, 'control-plane', 'GET /api/merger reads the control plane whatever the ledger holds');
   const w = await assigned(1, 'graphyard/gy-1-1');
   await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: 1 }, randomUUID()), /exactly one of pr \(a pull request number\) or head \(a 40-hex commit\)/);
   await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 7, head }, randomUUID()), /exactly one of pr/);
   await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: 1, head: 'not-a-sha' }, randomUUID()), /head/);
-  await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: 1, head }, randomUUID()), (error: any) => {
-    assert.match(error.message, /A head is submitted only while the control plane is the merge writer; this install's merger is github, so push the branch and complete GY-\d+ 1 with its pull request number, or switch the writer with graphyard master merger/);
-    assert.equal(error.status, 409); return true;
-  });
-  let item = (await store.workDocument(w.id))!;
-  assert.equal(item.submission, null); assert.ok(item.lease, 'a refused submission leaves the lease live');
-  assert.equal((await numbers()).length, 0, 'nothing was allocated under the github merger');
-  await setMerger('control-plane');
-  await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 7 }, randomUUID()), (error: any) => {
-    assert.match(error.message, /A pull request is submitted only while GitHub is the merge writer; this install's merger is control-plane, so complete GY-\d+ 1 --head instead/);
-    assert.equal(error.status, 409); return true;
-  });
-  item = (await store.workDocument(w.id))!;
-  assert.equal(item.submission, null);
   const submitted = await engine.execute(worker, 'submit', w.id, { epoch: 1, head }, randomUUID());
   assert.deepEqual(submitted.submission, { epoch: 1, pr: (await numbers())[0].number });
+  assert.equal(submitted.observation?.source, 'control-plane');
 });
 
 test('integration:change-number-allocated-once — a head submission allocates one change number per (work, head), sets candidate and submission from it, ends the lease in the same transaction, replays from its receipt and refuses a head the object store lacks naming the branch ref', async () => {
-  await setMerger('control-plane');
   const w = await assigned(3, 'graphyard/gy-3-1');
   const before = (await numbers()).length;
   await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: 1, head: 'f'.repeat(40) }, randomUUID()), (error: any) => {
@@ -168,7 +159,6 @@ test('unit:local-observation-fields — observeHead builds the control-plane obs
 });
 
 test('integration:submit-head-observed-locally — the submit transaction stores the control-plane observation as the candidate\'s, bound to the allocated number; the gates then wait on the merge writer, and a GitHub reading of the pull request bearing that number never replaces it', async () => {
-  await setMerger('control-plane');
   const w = await assigned(4, 'graphyard/gy-4-1');
   const submitted = await engine.execute(worker, 'submit', w.id, { epoch: 1, head }, randomUUID());
   const observation = submitted.observation!;
@@ -313,13 +303,12 @@ test('unit:sync-control-plane-no-fetch — sync reads mergeWriter from /api/stat
     assert.equal(git(clone, 'rev-parse', 'refs/remotes/origin/main'), sharedTip, 'nothing was fetched');
     assert.throws(() => git(clone, 'merge-base', '--is-ancestor', moved, 'HEAD'), 'the moved origin tip is not in HEAD');
     assert.deepEqual(controlPlane.files.map((finding: any) => [finding.path, finding.kind]), [['src/x.ts', 'in-scope']], 'the plannedFiles listing ran');
-    assert.match(controlPlane.next, /Nothing is pushed while the control plane is the merge writer: complete GY-9 EPOCH --head/);
+    assert.match(controlPlane.next, /Nothing is pushed: complete GY-9 EPOCH --head/);
     assert.ok(!/Push, then/.test(controlPlane.next));
-    const older = await run({ baseBranch: 'main' });
-    assert.equal(older.fetched, true); assert.equal(older.baseTip, moved, 'a status without mergeWriter fetches, as before');
-    assert.doesNotThrow(() => git(clone, 'merge-base', '--is-ancestor', moved, 'HEAD'));
-    assert.match(older.next, /Push, then complete GY-9 EPOCH PR\./);
-    const github = await run({ baseBranch: 'main', mergeWriter: { merger: 'github', line: null } });
-    assert.equal(github.fetched, true); assert.match(github.next, /Push, then complete GY-9 EPOCH PR\./);
+    // The control plane is the only merge writer: whatever the status says, nothing is fetched or pushed.
+    for (const status of [{ baseBranch: 'main' }, { baseBranch: 'main', mergeWriter: { merger: 'github', line: null } }]) {
+      const read = await run(status);
+      assert.equal(read.fetched, false); assert.equal(read.baseTip, sharedTip); assert.match(read.next, /complete GY-9 EPOCH --head/);
+    }
   } finally { process.chdir(cwd); await rm(root, { recursive: true, force: true }); }
 });

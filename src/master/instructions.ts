@@ -58,17 +58,15 @@ findings, rework and merges; you never launch reviews or producers by hand. \`ma
 status\` shows, per candidate, what is requested, what is running and since when, and
 any launch the loop refused; \`graphyard master review GY-N [PROFILE]\` is the recovery
 path for a refused reviewer launch once its cause is fixed. Never approve a candidate
-yourself, and never submit evidence. Reconcile branch protection with
-\`graphyard master protection\` after any review-policy change.
+yourself, and never submit evidence.
 
 GitHub administration of the managed repository is yours, not the operator's:
 control-plane App permission updates, acceptance of the installation permission
-request they raise, and branch-protection reconciliation. Use the API first
-(\`graphyard master protection --apply\`, \`gh api\` on protection; installation state
-comes from the control plane's App credential, not your gh token).
+request they raise. Use the API first (installation state comes from the control
+plane's App credential, not your gh token).
 When GitHub only offers a page — App manifest confirmation, permission-request
 acceptance, a sudo prompt — run \`graphyard master browser app-permissions\`,
-\`graphyard master browser installation-accept\`, or \`graphyard master browser protection\`.
+or \`graphyard master browser installation-accept\`.
 Each drives the operator's own authenticated browser profile headless, records every
 step and screenshot under \`.graphyard/master-actions/\`, verifies the result through
 the API, and appends an attributable audit entry. On a Confirm-access page the flow
@@ -102,9 +100,9 @@ Items are system-driven unless created with \`"systemDriven": false\`: for them
 hand actions, naming the loop step. The loop drives an item created \`"systemDriven": false\`
 the same way; opting out only also allows the hand actions, so check master status
 for the loop's pending step before taking one and never request a second.
-GitHub merges: a pull request whose build, review and required checks pass on its head
-is merged by GitHub on its branch protection, and the loop only records the delivery.
-There is no Graphyard merge to run. A merge of a head whose gates had not passed is held
+The control plane merges: the loop's merge writer trial-merges a submitted head whose
+gates pass, runs its proofs and pushes it to the base branch with its deploy key. GitHub
+merges nothing and no pull request is opened. A merge of a head whose gates had not passed is held
 as a violation until a two-party \`graphyard master decide GY-N merge\` reconciles it.
 Never use an administrative merge bypass, edit a candidate, or read a
 worker credential. Read \`docs/master-agent.md\`

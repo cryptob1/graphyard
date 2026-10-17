@@ -15,7 +15,6 @@ import type { Observation, Principal, Work } from '../src/model.js';
 import * as interventions from '../src/interventions.js';
 import { interventionLedgerKinds, interventionLedgerLimit, interventionLedgerSince, readInterventionLedger, reworkGroundsSql, windowOutcomes, type InterventionLedgerRow } from '../src/interventions.js';
 import { interventionPolicyDefaults } from '../src/model/interventions.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 /**
  * GY-491. GY-422 bounded the intervention report to its window, but every row of that window still
@@ -272,8 +271,6 @@ test('unit:report-pool-isolated — the report routes run on their own small poo
     work = await engine.execute(worker, 'claim', work.id, {}, key());
     return engine.execute(worker, 'workspace', work.id, { epoch: work.epoch, host: 'machine-a', path: `/srv/${work.key}`, branch: `graphyard/${work.key.toLowerCase()}-${work.epoch}` }, key());
   };
-  // GY-1833: the observed item submits a pull request, a legacy-merger submission; recorded after the count test above.
-  await recordLegacyMerger(store);
   const leased = await claimed('Report pool isolation: lease');
   let work = await claimed('Report pool isolation: observation');
   work = await engine.execute(worker, 'submit', work.id, { epoch: work.epoch, pr: 4_910 }, key());

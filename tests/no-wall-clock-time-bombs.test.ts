@@ -889,7 +889,6 @@ export const allowances: Record<string, Allowance> = {
   'tests/mechanical-findings.test.ts': { why: "Time-bomb allowance (GY-1694): the 2026-09-30 commit and verdict instants are already past their 60-minute mechanical bound and only recorded; the holds asserted come from approvals stamped new Date() and judged at Date.now(). The plan report's stamps (planOf, and the hold-freshness test's one Date.now() every plan instant derives from) are the loop's own report of a ledger the test just read, judged against the same reading.", dates: ['2026-09-30'], readings: 14 },
   'tests/merge-executor-owner.test.ts': { why: 'the 2026-09-20 merge instant is a recorded observation the status only r', dates: ['2026-09-20'], readings: 5 },
   'tests/merge-queue-removed.test.ts': { why: 'the 2026-10-05 instant is the explicit `now` of evaluate() over a legacy', dates: ['2026-10-05'], readings: 1 },
-  'tests/merger-setting.test.ts': { why: 'the 2026-10-08 `since` is a string mergerDoctorLine only renders; new Da', dates: ['2026-10-08'], readings: 1 },
   'tests/observation-capacity.test.ts': { why: '2026-10-02T12:00 is the explicit `now` of the fleet fixtures and observa', dates: ['2026-10-02'], readings: 3 },
   'tests/observation-throughput.test.ts': { why: 'the 2026-09-21 PR created_at is fixture data the observer never compares', dates: ['2026-09-21'], readings: 26 },
   'tests/one-reviewer-per-request.test.ts': { why: 'the 2026-09-22 review submittedAt instants only order verdicts and alrea', dates: ['2026-09-22'], readings: 18 },

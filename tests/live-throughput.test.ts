@@ -20,7 +20,6 @@ import { readThroughputLedger, throughputLedgerFile } from '../src/throughput-le
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error Dependency-free measurement script.
 import { claimContainment, main as measureMain, parseArguments } from '../scripts/measure-throughput.mjs';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): windows at 2099/2100/2103 are isolation fences so real-clock deliveries from other tests fall below them; the 2026-09-21 and 2026-10-07 instants are fixture dates only rendered or keyed, never aged.
 
 /**
@@ -54,7 +53,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_LIVE_THROUGHPUT_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 97);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('live-throughput'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');
   engine.submissionObserver = null;
 });

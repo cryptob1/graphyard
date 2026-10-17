@@ -175,7 +175,7 @@ test('sudo mode triggers GitHub Mobile, surfaces the code, waits with a bounded 
 
   // A page that does not need confirmation passes straight through.
   const clean = new StubGitHub(); const cleanPage = clean.page(); cleanPage.open('https://github.com/owner/project/settings/branches');
-  assert.deepEqual(await passSudo(cleanPage, { flow: 'protection', record: 'r', onCode: () => assert.fail('no code expected'), sleep: noSleep }), { passed: false, attempts: 0, code: null });
+  assert.deepEqual(await passSudo(cleanPage, { flow: 'app-permissions', record: 'r', onCode: () => assert.fail('no code expected'), sleep: noSleep }), { passed: false, attempts: 0, code: null });
 
   // An expired code is re-issued, and the new code is surfaced again.
   const expiring = new StubGitHub(); expiring.sudo.pending = 1; expiring.sudo.approveAfterPolls = 2; expiring.sudo.expireAfterPolls = 2; expiring.sudo.offerMobile = false;
@@ -196,7 +196,7 @@ test('sudo mode triggers GitHub Mobile, surfaces the code, waits with a bounded 
   const ignoredPage = ignored.page(); ignoredPage.open('https://github.com/owner/project/settings/branches');
   let clock = 0; const now = () => new Date(clock);
   const outcomes: string[] = [];
-  await assert.rejects(passSudo(ignoredPage, { flow: 'protection', record: 'r', onCode: () => {}, onSettled: state => { outcomes.push(state.state); }, sleep: async () => { clock += 1_000; }, now, pollMs: 1_000, timeoutMs: 5_000 }), /not approved within 5s.*code 41.*master browser protection/);
+  await assert.rejects(passSudo(ignoredPage, { flow: 'app-permissions', record: 'r', onCode: () => {}, onSettled: state => { outcomes.push(state.state); }, sleep: async () => { clock += 1_000; }, now, pollMs: 1_000, timeoutMs: 5_000 }), /not approved within 5s.*code 41.*master browser app-permissions/);
   assert.deepEqual(outcomes, ['expired']);
 });
 
@@ -232,23 +232,13 @@ test('the browser flows administer GitHub through the recorded page, verify via 
     assert.equal(accepted.sudo, null);
     assert.equal((await runBrowserFlow(root, config, 'installation-accept', { page: github.page(), ...common })).outcome, 'unchanged', 'a granted installation is left alone');
 
-    const item = work();
-    const protection = await runBrowserFlow(root, config, 'protection', { page: github.page(), work: [item], ...common });
-    assert.equal(protection.outcome, 'applied', protection.reason); assert.equal(protection.verified, true);
-    assert.equal(github.protection.strict, false); assert.equal(github.protection.required_approving_review_count, 0); assert.equal(github.protection.require_last_push_approval, false); assert.equal(github.protection.enforce_admins, true);
-    assert.deepEqual(protection.target, { repository: 'owner/project', appId: 1234, branch: 'main', mode: 'agent' });
-    assert.equal((protection.before as any).strictOff, false); assert.equal((protection.after as any).strictOff, true);
-    const dry = await runBrowserFlow(root, config, 'protection', { page: github.page(), work: [work({ policy: { checks: ['test'], review: true } as any })], dryRun: true, ...common });
-    assert.equal(dry.outcome, 'unchanged'); assert.match(dry.reason!, /Dry run; would change required_approving_review_count 0 to 1/);
-    assert.equal(github.protection.required_approving_review_count, 0, 'a dry run changes nothing');
-
     const ledger = await readAdministrationLedger(root);
-    assert.deepEqual(ledger.entries.map(entry => [entry.flow, entry.outcome]), [['app-permissions', 'applied'], ['installation-accept', 'applied'], ['installation-accept', 'unchanged'], ['protection', 'applied'], ['protection', 'unchanged']]);
+    assert.deepEqual(ledger.entries.map(entry => [entry.flow, entry.outcome]), [['app-permissions', 'applied'], ['installation-accept', 'applied'], ['installation-accept', 'unchanged']]);
     assert.equal((await stat(join(root, '.graphyard/master-actions/ledger.json'))).mode & 0o777, 0o600);
     for (const entry of ledger.entries) { assert.ok(entry.startedAt < entry.completedAt); assert.equal(entry.actor.host, config.hostId); assert.ok((await stat(join(root, entry.record, 'record.json'))).isFile()); }
     await assert.rejects(appendAdministrationEntry(root, ledger.entries[0]), /immutable/);
     const summary = summarizeAdministration(ledger.entries, null);
-    assert.equal(summary.total, 5); assert.equal(summary.recent[0].flow, 'protection'); assert.equal(summary.recent[0].by, 'operator-cli', 'a flow decided from the API is attributed to the CLI identity'); assert.equal(summary.recent[1].by, 'operator', 'a flow that drove the browser is attributed to the signed-in profile'); assert.equal(summary.sudo, null);
+    assert.equal(summary.total, 3); assert.equal(summary.recent[0].flow, 'installation-accept'); assert.equal(summary.recent[0].by, 'operator-cli', 'a flow decided from the API is attributed to the CLI identity'); assert.equal(summary.recent[1].by, 'operator', 'a flow that drove the browser is attributed to the signed-in profile'); assert.equal(summary.sudo, null);
   } finally { await cleanup(); }
 });
 
@@ -256,15 +246,7 @@ test('a flow that cannot find its page, verify its result, or sign in refuses wi
   const { root, config, cleanup } = await master();
   try {
     const github = new StubGitHub();
-    github.protection.hasRule = false;
     const common = { api: github.api, installation: github.installationState, sleep: noSleep, sudo: { pollMs: 10, timeoutMs: 10_000 } };
-    const missingRule = await runBrowserFlow(root, config, 'protection', { page: github.page(), work: [work()], ...common });
-    assert.equal(missingRule.outcome, 'refused'); assert.match(missingRule.reason!, /classic protection rule for main/); assert.match(missingRule.next, /record\.json/);
-    github.protection.hasRule = true; github.protection.hasCheck = false;
-    const missingCheck = await runBrowserFlow(root, config, 'protection', { page: github.page(), work: [work()], ...common });
-    assert.equal(missingCheck.outcome, 'refused'); assert.match(missingCheck.reason!, /Graphyard \/ merge/);
-    assert.equal(github.visited.filter(url => url.startsWith('https://')).length, 1, 'a refusal decided from the API opens no page');
-    github.protection.hasCheck = true;
     const appBehind = await runBrowserFlow(root, config, 'installation-accept', { page: github.page(), ...common });
     assert.equal(appBehind.outcome, 'refused'); assert.match(appBehind.reason!, /run master browser app-permissions first/);
     github.app.contents = 'write'; github.app.workflows = 'write';
@@ -274,9 +256,9 @@ test('a flow that cannot find its page, verify its result, or sign in refuses wi
     const signedOut = await runBrowserFlow(root, config, 'app-permissions', { page: github.page(), api: github.api, installation: async () => { const state = await github.installationState(); return { ...state, app: { ...state.app, contents: 'read' } }; }, sleep: noSleep });
     assert.equal(signedOut.outcome, 'refused'); assert.match(signedOut.reason!, /not signed in to GitHub/);
     const ledger = await readAdministrationLedger(root);
-    assert.equal(ledger.entries.length, 5); assert.ok(ledger.entries.every(entry => entry.reason));
+    assert.equal(ledger.entries.length, 3); assert.ok(ledger.entries.every(entry => entry.reason));
     const withoutProfile = masterConfigSchema.parse({ ...config, browser: undefined });
-    await assert.rejects(runBrowserFlow(root, withoutProfile, 'protection', { api: github.api }), /master init --browser-profile/);
+    await assert.rejects(runBrowserFlow(root, withoutProfile, 'app-permissions', { api: github.api }), /master init --browser-profile/);
     await assert.rejects(runBrowserFlow(root, config, 'export-cookies' as any, { api: github.api }), /Use master browser/);
   } finally { await cleanup(); }
 });
@@ -416,7 +398,7 @@ test('unit:sudo-passkey-page-reaches-mobile — a GitHub Mobile control that can
     locate: kind => kind === 'button' ? { selector: '#hidden', tag: 'button', checked: null, value: '', text: 'use github mobile', href: null, visible: false } : null,
     click: selector => { throw new Error(`agent-browser click failed: Element is not visible: ${selector}`); }, setChecked() {}, select() {}, screenshot() {}, wait() {}, close() {},
   };
-  await assert.rejects(passSudo(page, { flow: 'protection', record: 'r', onCode: () => assert.fail('no code expected'), sleep: noSleep }), /"Use GitHub Mobile" could not be activated \(agent-browser click failed: Element is not visible: #hidden\).*master browser protection/);
+  await assert.rejects(passSudo(page, { flow: 'app-permissions', record: 'r', onCode: () => assert.fail('no code expected'), sleep: noSleep }), /"Use GitHub Mobile" could not be activated \(agent-browser click failed: Element is not visible: #hidden\).*master browser app-permissions/);
 });
 
 test('sudo step falls back to the same-label link when a visible "Use GitHub Mobile" button cannot be clicked', async () => {
@@ -434,7 +416,7 @@ test('sudo step falls back to the same-label link when a visible "Use GitHub Mob
       click: selector => { state.clicked.push(selector); if (selector === '#button' || linkClickFails) throw new Error(`agent-browser click failed: ${selector}`); state.mobile = true; },
       setChecked() {}, select() {}, screenshot() {}, wait() {}, close() {},
     };
-    const result = await passSudo(page, { flow: 'protection', record: 'r', onCode: () => {}, sleep: noSleep, pollMs: 10, timeoutMs: 10_000 });
+    const result = await passSudo(page, { flow: 'app-permissions', record: 'r', onCode: () => {}, sleep: noSleep, pollMs: 10, timeoutMs: 10_000 });
     assert.deepEqual(result, { passed: true, attempts: 1, code: '63' });
     assert.deepEqual(state.clicked, ['#button', '#link'], 'the visible button is tried first, then the link of the same label');
     assert.deepEqual(state.opened, linkClickFails ? [mobileHref] : [], 'a failed link click is followed through its href');
@@ -483,10 +465,9 @@ test('master harness writes the allow rules the browser flows need, each with a 
     assert.ok(!allow.some(rule => rule.includes('agent-browser')), 'the session never drives agent-browser itself; only master browser does');
     assert.ok(allow.includes(`Bash(node ${config.cliPath} master browser:*)`), 'the browser flows are allowed');
     assert.ok(allow.includes(`Bash(node ${config.cliPath} master review:*)`), 'the reviewer launcher is allowed');
-    assert.ok(allow.includes('Bash(gh api repos/owner/project/branches/main/protection*)'), 'protection reads are allowed');
-    assert.ok(allow.includes('Bash(gh api --method PATCH repos/owner/project/branches/main/protection/*)'), 'protection subresource writes are allowed');
+    assert.ok(!allow.some(rule => rule.includes('/protection')), 'no branch-protection rule: GitHub protection is not used');
     assert.ok(allow.includes('Bash(gh api user/installations*)'), 'installation reads are allowed');
-    assert.ok(!allow.some(rule => /PUT|POST|DELETE/.test(rule)), 'no allow rule writes to an installation or replaces protection; only PATCH subresources and the browser flows do');
+    assert.ok(!allow.some(rule => /PUT|POST|DELETE|PATCH/.test(rule)), 'no allow rule writes to GitHub; only the browser flows do');
     assert.ok(allow.includes('Bash(gh api apps/*)') && allow.includes('Bash(gh api user)'));
     assert.ok(allow.includes('Read(./.graphyard/master-actions/**)'), 'the recorded flows are readable');
     assert.match(plan.note, /classifier otherwise refuses/);
@@ -494,8 +475,6 @@ test('master harness writes the allow rules the browser flows need, each with a 
     for (const rule of allow) assert.doesNotMatch(rule, /merge|access_tokens|reviews|graphql|\.pem|\.token|credential|cookies/i, `allow rule ${rule} must not reach a merge, a verdict, or a credential`);
     for (const rule of ['Bash(gh pr merge:*)', 'Bash(gh pr review:*)', 'Bash(gh api *pulls/*/merge*)', 'Bash(gh api *repos/*/merges*)', 'Bash(gh api *pulls/*/reviews*)', 'Bash(gh api *access_tokens*)', 'Bash(gh api graphql*mutation*)', 'Bash(gh api *DELETE*)', 'Bash(gh api *PUT*)', 'Bash(gh api *POST*)', 'Bash(agent-browser *)', 'Bash(git push:*)', 'Read(**/*.pem)', 'Read(**/*.token)']) assert.ok(deny.includes(rule), `${rule} must be denied`);
     assert.ok(!deny.includes('Bash(gh api:*)'), 'the blanket gh api deny would override every allow above');
-    const plain = masterHarnessPlan({ harness: 'claude', root, cliPath: config.cliPath, repository: 'org/repo', baseBranch: 'release/2026', credentialHome: '/home/x/.config/graphyard' });
-    assert.ok(plain.allow.some(entry => entry.rule === 'Bash(gh api repos/org/repo/branches/release%2F2026/protection*)'), 'the base branch is encoded exactly as the CLI requests it');
     const written = await writeHarnessPermissions(root, plan, true);
     assert.equal(written.applied, true);
     const settings = JSON.parse(await readFile(join(root, '.claude/settings.local.json'), 'utf8'));
@@ -512,14 +491,14 @@ test('the generated master instructions and the guides assign GitHub administrat
     assert.ok(instructions.includes(`master browser ${flow}`), `the generated instructions must name ${flow}`);
     assert.ok(masterAgent.includes(`master browser ${flow}`), `docs/master-agent.md must name ${flow}`);
   }
-  for (const fragment of ['App permission updates', 'installation permission', 'branch-protection reconciliation', 'browser profile', '.graphyard/master-actions/', 'audit entry', 'GitHub Mobile', 'two-digit code', 'only\noperator interactions', 'Never store, export, or reuse']) assert.ok(instructions.includes(fragment), `the generated instructions must state: ${fragment}`);
+  for (const fragment of ['App permission updates', 'installation permission', 'browser profile', '.graphyard/master-actions/', 'audit entry', 'GitHub Mobile', 'two-digit code', 'only\noperator interactions', 'Never store, export, or reuse']) assert.ok(instructions.includes(fragment), `the generated instructions must state: ${fragment}`);
   assert.match(instructions, /yours, not the operator's/);
   assert.match(instructions, /Never use an administrative merge bypass, edit a candidate, or read a\nworker credential/);
   for (const fragment of ['## GitHub administration through the browser', 'Confirm access', 'GitHub Mobile', 'master status', 'record.json', 'ledger.json', 'human-only', 'never stores', 'device', 'master init --browser-profile', 'must never', 'merge bypass', 'classifier']) assert.ok(masterAgent.includes(fragment), `docs/master-agent.md must document: ${fragment}`);
-  assert.match(masterAgent, /\| `app-permissions` \|/); assert.match(masterAgent, /\| `installation-accept` \|/); assert.match(masterAgent, /\| `protection` \|/);
+  assert.match(masterAgent, /\| `app-permissions` \|/); assert.match(masterAgent, /\| `installation-accept` \|/);
   for (const fragment of ['master browser', '--browser-profile', 'GitHub Mobile', 'human-only']) assert.ok(onboarding.includes(fragment), `docs/onboarding.md must document: ${fragment}`);
   assert.doesNotMatch(onboarding, /click GitHub's App confirmation for each App/, 'the install guide no longer lists App confirmation as an operator step');
-  for (const fragment of ['master browser app-permissions', 'master browser installation-accept', 'master browser protection']) assert.ok(github.includes(fragment), `docs/github.md must route the administration to the master: ${fragment}`);
+  for (const fragment of ['master browser app-permissions', 'master browser installation-accept']) assert.ok(github.includes(fragment), `docs/github.md must route the administration to the master: ${fragment}`);
   for (const command of ['master browser FLOW', '--browser-profile PROFILE']) assert.ok(help.includes(command), `${command} must appear in CLI help`);
   assert.equal(managedMasterInstructions(instructions), instructions, 'regeneration is idempotent');
 });
@@ -550,21 +529,21 @@ test('the master CLI stores the browser profile, refuses flows without one, and 
       try { return { stdout: (await child).stdout, code: 0 }; } catch (error: any) { return { stdout: error.stdout as string, stderr: error.stderr as string, code: error.code as number }; }
     };
     await cli(['master', 'init', '--url', url, '--token-stdin', '--cli-path', launcher], coordinatorToken);
-    const refused = await cli(['master', 'browser', 'protection']);
+    const refused = await cli(['master', 'browser', 'app-permissions']);
     assert.notEqual(refused.code, 0); assert.match(refused.stderr!, /master init --browser-profile/);
     const configured = JSON.parse((await cli(['master', 'init', '--url', url, '--token-stdin', '--cli-path', launcher, '--browser-profile', 'Default'], coordinatorToken)).stdout);
     assert.deepEqual(configured.browser, { profile: 'Default' });
     assert.deepEqual((await loadMasterConfig(root)).browser, { profile: 'Default' });
     assert.deepEqual(JSON.parse((await cli(['master', 'init', '--url', url, '--token-stdin', '--cli-path', launcher], coordinatorToken)).stdout).browser, { profile: 'Default' }, 'rerunning init keeps the profile');
     const usage = await cli(['master', 'browser']);
-    assert.match(usage.stderr!, /Use master browser app-permissions\|installation-accept\|protection/);
+    assert.match(usage.stderr!, /Use master browser app-permissions\|installation-accept\|capture/);
     // Without the control plane's installation read the flow refuses before opening a page, and the refusal is audited.
     const noInstallation = await cli(['master', 'browser', 'app-permissions']);
     assert.equal(noInstallation.code, 1);
     const result = JSON.parse(noInstallation.stdout); assert.equal(result.outcome, 'refused'); assert.match(result.reason, /could not read App 1234's installation with the App's own credential: .*not configured/);
     const status = JSON.parse((await cli(['master', 'status'])).stdout);
     assert.deepEqual(status.administration.browser, { profile: 'Default' }); assert.equal(status.administration.total, 1); assert.equal(status.administration.recent[0].outcome, 'refused'); assert.equal(status.administration.sudo, null);
-    const pending: SudoState = { flow: 'protection', record: 'x', code: '58', issuedAt: new Date().toISOString(), attempt: 1, deadline: new Date(Date.now() + 60_000).toISOString(), state: 'waiting' };
+    const pending: SudoState = { flow: 'app-permissions', record: 'x', code: '58', issuedAt: new Date().toISOString(), attempt: 1, deadline: new Date(Date.now() + 60_000).toISOString(), state: 'waiting' };
     await writeFile(join(root, '.graphyard/master-actions/sudo.json'), JSON.stringify(pending), { mode: 0o600 });
     const waiting = JSON.parse((await cli(['master', 'status'])).stdout);
     assert.equal(waiting.administration.sudo.code, '58'); assert.match(waiting.administration.sudo.instruction, /choose 58/);

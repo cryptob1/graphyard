@@ -23,7 +23,6 @@ import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
 import type { CliContext } from '../src/cli/context.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { acceptanceJudgementParameters, acceptanceParameters, graphyardTools as piTools, schemaErrors } from '../integrations/pi/index.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-10-07 daemon clock lies behind every approval the server stamps, so the day-after-approval verdict needs the explicit Date.now() + 25h; new Date() otherwise stamps observations and commands.
 
 // GY-1417: a goal becomes approved customer outcomes and required E2E cases before any code is
@@ -48,7 +47,7 @@ before(async () => {
   const port = await freePort();
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('goals'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('goal_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/goal_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/goal_test`); await store.init();
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   http = server(engine, credentials, null);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

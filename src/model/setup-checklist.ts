@@ -1,9 +1,8 @@
 /**
  * The first-run checklist (GY-1419): what a new installation needs before it can build anything,
  * read live from the control plane's `/api/status`. `graphyard up` waits on it and the dashboard's
- * Setup page shows it, so both judge one checklist. Every line is plain language: no sha or file
- * path, and no command but the one the legacy merger line names (GY-1833), which only an operator
- * who set up the github path reads.
+ * Setup page shows it, so both judge one checklist. Every line is plain language: no sha, file path
+ * or command.
  */
 
 /** The roles a first installation needs an agent account for: one writes the code, one reviews it. */
@@ -16,7 +15,7 @@ export type SetupAction =
   | { kind: 'connect'; label: string; role: RequiredSetupRole }
   | { kind: 'wait'; label: string };
 
-export type SetupItemId = 'merger' | 'github-app' | 'reviewer-app' | `account:${RequiredSetupRole}` | 'branch-protection' | 'master-loop';
+export type SetupItemId = 'github-app' | 'reviewer-app' | `account:${RequiredSetupRole}` | 'master-loop';
 export interface SetupItem {
   id: SetupItemId;
   title: string;
@@ -28,8 +27,6 @@ export interface SetupItem {
   action: SetupAction | null;
   /** Steps only a person can do (a click on GitHub, an account sign-in); the rest Graphyard does itself. */
   human: boolean;
-  /** A failing line that holds nothing back (the legacy merger, GY-1833): the install works, and should migrate. */
-  advisory?: boolean;
 }
 
 /** Where the installer serves the GitHub App manifest page while it waits for the App (src/install/manifest.ts). */
@@ -81,29 +78,18 @@ function roleReady(fleet: any, role: RequiredSetupRole) {
  */
 export const statusSupervised = (status: any | null) => status?.setup?.supervision === 'supervised';
 /**
- * CONTROL-PLANE MERGER (GY-1553): while the control plane is the merge writer (`mergeWriter.merger`
- * on `/api/status`, src/merger-mode.ts) no GitHub App opens pull requests, no reviewer App signs
- * reviews and no branch protection gates main, so those three items pass as not required. `doctor`'s
- * setup-from-zero checks (src/setup-from-zero.ts) say the same words for the same ids.
+ * CONTROL-PLANE MERGER (GY-1553): the control plane is the only merge writer, so for an unsupervised
+ * install no GitHub App opens pull requests and no reviewer App signs reviews: those items pass as
+ * not required. No GitHub branch protection is used. `doctor`'s setup-from-zero checks
+ * (src/setup-from-zero.ts) say the same words for the same ids.
  */
 export const mergerNotRequired = 'not required (merger: control-plane)';
-/**
- * GY-1833: the control plane is the shipped merger and GitHub merging the legacy mode. The one
- * command that migrates an install creates the deploy key and records the merger, which an admin
- * credential alone may do and the shadow-disagreement rule may still refuse (src/merger-mode.ts).
- */
-export const mergerMigrationCommand = 'graphyard up --merger control-plane';
-/** Why a github-mode install should migrate: what the migration does. `doctor` names the command as its fix. */
-export const legacyMergerReason = 'GitHub merges this installation\'s changes, the legacy mode; migrating creates the deploy key and records the control-plane merger, so the control plane merges each tested change itself';
-export const legacyMergerLine = `Legacy: ${legacyMergerReason.replace(', the legacy mode; migrating', `. Run ${mergerMigrationCommand} to migrate: it`)}.`;
-export const controlPlaneMergerLine = 'The control plane merges each tested change itself.';
-export const statusControlPlaneMerger = (status: any | null) => status?.mergeWriter?.merger === 'control-plane';
-export function setupChecklist(status: any | null, options: { appSetupUrl?: string; supervised?: boolean; merger?: 'github' | 'control-plane' } = {}): SetupItem[] {
+export function setupChecklist(status: any | null, options: { appSetupUrl?: string; supervised?: boolean; githubApps?: boolean } = {}): SetupItem[] {
   const supervised = options.supervised ?? statusSupervised(status);
-  const controlPlane = options.merger ? options.merger === 'control-plane' : statusControlPlaneMerger(status);
+  // Only an install on the GitHub App path (supervised, or `up`'s own App path) judges the App items.
+  const controlPlane = !(options.githubApps ?? supervised);
   const notRequired = (id: SetupItemId, title: string): SetupItem => ({ id, title, done: true, human: false, line: mergerNotRequired, action: null });
   const appUrl = options.appSetupUrl ?? defaultAppSetupUrl;
-  const repository = status?.githubRepository?.fullName ?? status?.githubRepository ?? status?.repository ?? null;
   const missing: unknown[] = status?.appPermissions?.missing ?? [];
   const appBound = !!status?.github;
   const appDone = appBound && missing.length === 0;
@@ -116,7 +102,7 @@ export function setupChecklist(status: any | null, options: { appSetupUrl?: stri
     action: appDone ? null : appBound && status?.appPermissions?.installationUrl ? { kind: 'link', label: 'Accept the new permissions', href: status.appPermissions.installationUrl }
       : { kind: 'link', label: 'Create the GitHub App', href: appUrl } });
   const reviewerDone = Array.isArray(status?.reviewerApps) && status.reviewerApps.length > 0;
-  if (controlPlane && !supervised) items.push(notRequired('reviewer-app', 'Reviewer App'));
+  if (controlPlane) items.push(notRequired('reviewer-app', 'Reviewer App'));
   else if (!supervised) items.push({ id: 'reviewer-app', title: 'Reviewer App', done: reviewerDone, human: true,
     line: reviewerDone ? 'A second App signs the independent code reviews.' : 'Create a second App so every change is reviewed by someone other than its author.',
     action: reviewerDone ? null : appBound ? { kind: 'link', label: 'Create the reviewer App', href: appUrl } : { kind: 'wait', label: 'Waiting for the GitHub App' } });
@@ -127,22 +113,10 @@ export function setupChecklist(status: any | null, options: { appSetupUrl?: stri
       line: done ? 'Connected and signed in.' : role === 'worker' ? 'Connect an AI coding account (an API key or a subscription sign-in) to write the code.' : 'Connect an AI coding account to review the code. It may be the same account.',
       action: done ? null : { kind: 'connect', label: 'Connect an account', role } });
   }
-  // `checks` is protected enough to start: Graphyard requires its own merge check once the first change reports it.
-  const protection = status?.setup?.protection;
-  const protectedBranch = protection === 'complete' || protection === 'checks';
-  if (controlPlane) items.push(notRequired('branch-protection', 'Branch protection'));
-  else items.push({ id: 'branch-protection', title: 'Branch protection', done: protectedBranch, human: false,
-    line: protection === 'complete' ? 'Changes reach your main branch only after they pass review and tests.'
-      : protectedBranch ? 'Your main branch requires its tests to pass; Graphyard adds its own check after the first change.' : appDone ? 'Graphyard turns this on by itself; if it stays off, open your repository\'s branch settings.' : 'Turned on by itself once the GitHub App is installed.',
-    action: protectedBranch ? null : appDone && repository ? { kind: 'link', label: 'Open branch settings', href: `https://github.com/${repository}/settings/branches` } : { kind: 'wait', label: 'Waiting for the GitHub App' } });
   const loop = status?.setup?.loop === true;
   items.push({ id: 'master-loop', title: 'Coordinator running', done: loop, human: false,
     line: loop ? 'The coordinator is running and will hand out work.' : 'The setup command starts the coordinator on your machine; this turns green once it runs.',
     action: loop ? null : { kind: 'wait', label: 'Check again' } });
-  // Supervised installs merge on GitHub by design (GY-1501): their merger is not legacy. Judged only
-  // once the merger is known: up names its own, and a plane that has not answered names none.
-  if (!supervised && (options.merger || status?.mergeWriter)) items.push(controlPlane ? { id: 'merger', title: 'Merger', done: true, human: false, line: controlPlaneMergerLine, action: null }
-    : { id: 'merger', title: 'Merger', done: false, human: true, advisory: true, line: legacyMergerLine, action: null });
   return items;
 }
 
@@ -161,7 +135,7 @@ export function paneServer(status: any | null): PaneServer {
   return { configHome: configHome && session ? configHome : null, session: configHome && session ? session : null, host: text(reported?.host), running: typeof reported?.running === 'boolean' ? reported.running : null };
 }
 
-export const checklistGreen = (items: readonly SetupItem[]) => items.every(item => item.done || item.advisory);
+export const checklistGreen = (items: readonly SetupItem[]) => items.every(item => item.done);
 
 /** The goal box's limits: a sentence to a few paragraphs, within a goal statement's bound. */
 export const goalLimits = { min: 10, max: 2000 } as const;

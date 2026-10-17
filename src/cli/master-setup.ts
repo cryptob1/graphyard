@@ -25,7 +25,7 @@ import { provisionReleaseFiling, type ReleaseFilingAudit, type ReleaseFilingDeps
  * status, is named here too: every revert it opens would be refused by main's last-push-approval
  * rule, so it is raised before a merge breaks main, not after.
  */
-export const browserProfileMissing = 'No browser profile is configured: App permission updates, installation acceptance, and page-only protection changes cannot run through master browser until the operator lends the master a signed-in Chrome profile';
+export const browserProfileMissing = 'No browser profile is configured: App permission updates and installation acceptance cannot run through master browser until the operator lends the master a signed-in Chrome profile';
 /**
  * A deployment variable the install plan derives from a credential saved on this host is the
  * master's, never the human's (GY-1416): `master setup --apply` sets it, and the loop runs that

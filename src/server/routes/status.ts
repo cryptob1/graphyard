@@ -27,12 +27,6 @@ import { snapshotPage } from '../../store/paged-snapshot.js';
 // The doctor's ledger kinds, read from here as they always were (GY-711).
 export { doctorFindingEvent, doctorRunEvent } from '../doctor-route.js';
 
-/** The first-run protection state (GY-1419): what the Setup page's branch-protection item reads. */
-async function setupProtection(github: { branchProtection?: (requireNativeReview?: boolean, shared?: boolean) => Promise<{ protected: boolean; requiredChecks: unknown[] }> } | null): Promise<'complete' | 'checks' | 'off'> {
-  if (!github || typeof github.branchProtection !== 'function') return 'off';
-  const protection = await github.branchProtection(false, true);
-  return protection.protected ? 'complete' : protection.requiredChecks.length ? 'checks' : 'off';
-}
 
 /** Control-plane status and the work reads every client polls. */
 export const statusRoutes = defineRoutes('status', [
@@ -102,8 +96,8 @@ export const statusRoutes = defineRoutes('status', [
         doctor: actor.role === 'operator-agent' ? null : (await engine.store.pool.query('SELECT payload FROM events WHERE kind=$1 ORDER BY seq DESC LIMIT 20', [doctorRunEvent])).rows.map((row: any) => row.payload),
         // Direct-merge mode (direct-merge.ts): the open windows and the one line master status shows while any is.
         directMerge: await directMergeStatus(engine.store.pool, engine.directMergeEnvironment, observedAt),
-        // The merger setting (merger-mode.ts): which writer lands heads, and one line while it is the control plane.
-        mergeWriter: await mergeWriterStatus(engine.store.pool),
+        // The merge writer (merger-mode.ts): always the control plane.
+        mergeWriter: mergeWriterStatus,
         // Automatic merging (GY-1927): off, a gate-passing candidate is held until a merge decision releases it.
         autoMerge: await autoMergeStatus(engine.store.pool),
         // Delivery defaults, applications and case bindings (GY-1901).
@@ -111,12 +105,9 @@ export const statusRoutes = defineRoutes('status', [
         // Heartbeat latency and the renewals refused or failed server-side, this process, last 10 minutes (GY-558).
         leaseHealth: engine.leaseHealth.report(),
         // The first-run facts the Setup page and `graphyard up` read beside the App and the fleet (GY-1419):
-        // the base branch's protection from the shared read (at most every five minutes) — `complete`
-        // once it requires Graphyard / merge, `checks` while it requires only the repository's own
-        // checks (the merge check is added after the first pull request reports it), else `off` — and
         // whether a master loop is live, and who reviews and merges as the live loop names it (GY-1501):
         // `supervised` drops the reviewer App and reviewing account from the Setup checklist.
-        setup: { protection: await setupProtection(github), loop: !!executors.loop?.live, supervision: loopRegistry(engine).live(observedAt)?.supervision ?? null,
+        setup: { loop: !!executors.loop?.live, supervision: loopRegistry(engine).live(observedAt)?.supervision ?? null,
           // and the pane server its agents run in as that loop last named it (GY-1511).
           panes: loopRegistry(engine).live(observedAt) ? loopPanesRegistry(engine).latest : null },
         now: observedAt.toISOString(), release: releaseInfo(), schema: schemaVersion };

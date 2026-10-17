@@ -21,7 +21,6 @@ import type { Observation, Principal, Work } from '../src/model.js';
 import HumanRequestsPage, { RequestCard } from '../web/pages/human-requests.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 /**
  * GY-102: every action the control plane will take from the operator's own credential alone is
@@ -57,7 +56,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_HUMAN_SURFACE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 82);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('human-surface'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('human_surface_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/human_surface_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/human_surface_test`); await store.init();
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

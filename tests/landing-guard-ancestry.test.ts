@@ -9,7 +9,6 @@ import { Engine } from '../src/engine.js';
 import { CHECK_NAME, GitHub } from '../src/github.js';
 import { regressionRefusals } from '../src/regression-guard.js';
 import { Refusal, type Observation, type Principal, type Work } from '../src/model.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-01-01 direct-merge window (no until) and the 2026-09-26 PR created/merged fixtures are already past; new Date() only stamps the observation, so nothing crosses the clock.
 
 /**
@@ -36,7 +35,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 744;
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('landing-ancestry'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('landing_ancestry_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/landing_ancestry_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/landing_ancestry_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/repo'); engine.submissionObserver = null;
   // The peer merged straight into main: the deployment's direct-merge window owns that merge.
   engine.directMergeEnvironment = { since: '2026-01-01T00:00:00.000Z', until: null, reason: 'test repository merges straight into main', setBy: 'environment', enabledAt: '2026-01-01T00:00:00.000Z', source: 'environment', event: null };

@@ -23,14 +23,11 @@ import { composeBundle, PRIVATE_KEY_CONTAINER_PATH, REVERT_APPROVER_KEY_CONTAINE
  */
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const appId = 7001;
-const protection = {
-  required_status_checks: { strict: false, checks: [{ context: 'test', app_id: 15368 }, { context: 'Graphyard / merge', app_id: appId }, { context: 'graphyard/landable', app_id: appId }] },
-  enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false },
-  required_pull_request_reviews: { required_approving_review_count: 0 },
-};
 const status = () => ({
   actor: { role: 'admin' }, github: true, githubAppId: appId, githubRepository: { id: 1, fullName: 'owner/scratch' }, baseBranch: 'main',
   appPermissions: { verifiedAt: '2026-10-06T00:00:00.000Z', missing: [], attention: [] }, reviewerApps: [] as unknown[],
+  // Supervised: the operator merges, so the App lines are judged; an unsupervised install passes them as not required.
+  setup: { supervision: 'supervised' },
 });
 const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
 const writePrivate = async (file: string, text: string) => { await writeFile(file, text); await chmod(file, 0o600); };
@@ -59,8 +56,7 @@ async function installation() {
 
 type Fixture = Awaited<ReturnType<typeof installation>>;
 const input = (fixture: Fixture, overrides: Partial<SetupFromZeroInput> = {}): SetupFromZeroInput => ({
-  root: fixture.root, env: {}, status: status(), environments: fixture.environments, sandbox: () => null,
-  github: (_command, args) => args[1].endsWith('/protection') ? JSON.stringify(protection) : args[1].includes('rulesets') ? '[]' : '{}', ...overrides,
+  root: fixture.root, env: {}, status: status(), environments: fixture.environments, sandbox: () => null, ...overrides,
 });
 const lineOf = async (setup: SetupFromZeroInput, id: string) => {
   const checks = await setupFromZeroChecks(setup);
@@ -72,7 +68,7 @@ const lineOf = async (setup: SetupFromZeroInput, id: string) => {
 test('unit:doctor-setup-from-zero — a complete installation passes every named line; each missing prerequisite fails exactly its own line, naming the checklist step that fixes it', async () => {
   const fixture = await installation();
   const complete = await setupFromZeroChecks(input(fixture));
-  assert.deepEqual(complete.map(check => check.id), ['control-plane', 'credentials-file', 'github-app', 'reviewer-app', 'branch-protection', 'agent-environment:claude-a', 'agent-environment:codex-a', 'worker-sandbox']);
+  assert.deepEqual(complete.map(check => check.id), ['control-plane', 'credentials-file', 'github-app', 'reviewer-app', 'agent-environment:claude-a', 'agent-environment:codex-a', 'worker-sandbox']);
   assert.deepEqual(complete.filter(check => check.status !== 'pass').map(setupLine), [], 'a complete installation passes every line');
 
   const cases: [string, string, keyof typeof setupSteps, RegExp, (fixture: Fixture) => Promise<Partial<SetupFromZeroInput> | void>][] = [
@@ -82,9 +78,6 @@ test('unit:doctor-setup-from-zero — a complete installation passes every named
     ['GitHub App unbound', 'github-app', 'app', /no bound GitHub App/, async () => ({ status: { ...status(), github: false, githubAppId: null } })],
     ['App permissions short', 'github-app', 'app', /missing permissions: deployments read/, async () => ({ status: { ...status(), appPermissions: { verifiedAt: '2026-10-06T00:00:00.000Z', missing: [{ permission: 'deployments', required: 'read' }], attention: [] } } })],
     ['reviewer App unbound', 'reviewer-app', 'reviewer', /no reviewer App/, async f => { await writePrivate(join(f.root, '.graphyard/master.json'), json({})); }],
-    ['branch unprotected', 'branch-protection', 'protection', /protection is unreadable/, async () => ({ github: () => { throw new Error('gh: Branch not protected (HTTP 404)'); } })],
-    ['protection off policy', 'branch-protection', 'protection', /Required check Graphyard \/ merge is not bound to Graphyard App 7001; Administrator enforcement is disabled/,
-      async () => ({ github: (_command: string, args: string[]) => args[1].endsWith('/protection') ? JSON.stringify({ ...protection, enforce_admins: { enabled: false }, required_status_checks: { strict: false, checks: [] } }) : '{}' })],
     ['Claude not logged in', 'agent-environment:claude-a', 'environments', /not logged in/, async f => { await rm(join(f.claude, '.credentials.json')); }],
     ['Claude consent not given', 'agent-environment:claude-a', 'environments', /bypass-permissions consent is not recorded/, async f => { await writePrivate(join(f.claude, 'settings.json'), json({})); }],
     ['Claude first run not complete', 'agent-environment:claude-a', 'environments', /first-run onboarding is not complete/, async f => { await writePrivate(join(f.claude, '.claude.json'), json({})); }],
@@ -94,7 +87,7 @@ test('unit:doctor-setup-from-zero — a complete installation passes every named
     ['sandbox cannot write the shared Git paths', 'worker-sandbox', 'sandbox', /the worker confinement cannot write the shared Git paths: bubblewrap \(bwrap\) is not installed/, async () => ({ sandbox: () => 'bubblewrap (bwrap) is not installed' })],
   ];
   // Lines judged from a missing prerequisite's answer fail with it, saying so; nothing else may.
-  const dependents: Record<string, string[]> = { 'control plane unreachable': ['github-app', 'branch-protection'], 'GitHub App unbound': ['branch-protection'] };
+  const dependents: Record<string, string[]> = { 'control plane unreachable': ['github-app'] };
   for (const [name, id, step, detail, remove] of cases) {
     const missing = await installation();
     const overrides = (await remove(missing)) ?? {};
@@ -114,8 +107,7 @@ test('unit:doctor-setup-from-zero — graphyard doctor prints the named lines fo
   const fixture = await installation();
   const shims = join(fixture.directory, 'bin');
   await mkdir(shims);
-  // gh answers the protection read as a repository admin would; bwrap's confinement probe succeeds.
-  await writeFile(join(shims, 'gh'), `#!/usr/bin/env node\nconst path = process.argv[3] ?? '';\nprocess.stdout.write(path.endsWith('/protection') ? ${JSON.stringify(JSON.stringify(protection))} : path.includes('rulesets') ? '[]' : '{}');\n`, { mode: 0o755 });
+  // bwrap's confinement probe succeeds.
   await writeFile(join(shims, 'bwrap'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
   let reviewerApps: unknown[] = [];
   const server = createServer((request, response) => {

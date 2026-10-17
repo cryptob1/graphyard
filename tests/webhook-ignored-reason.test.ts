@@ -8,7 +8,6 @@ import { server } from '../src/server.js';
 import type { GitHub } from '../src/github.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // GY-1731: a verified webhook delivery that wakes no job answers 202 with a named `ignored` reason
 // (our own check run included) and logs it with the delivery ID and event, so a deliberately ignored delivery is told from a lost one.
@@ -25,7 +24,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_WEBHOOK_IGNORED_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1731);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('webhook-ignored-reason'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');
   engine.submissionObserver = null;
   process.env.GITHUB_WEBHOOK_SECRET = secret;

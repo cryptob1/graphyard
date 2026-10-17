@@ -556,11 +556,10 @@ export function masterHarnessPlan(input: { harness: string; root: string; cliPat
   if (input.harness !== 'claude') return { harness: input.harness, file: null, allow: [], deny: [], manual: null,
     note: `Graphyard generates harness permissions for Claude Code and trust configuration for Codex; ${input.harness} has no generated rules, so its own approval configuration applies.` };
   const cli = `node ${input.cliPath}`;
-  const protection = `repos/${input.repository}/branches/${encodeURIComponent(input.baseBranch)}/protection`;
   const allow: HarnessRule[] = [
-    { rule: `Bash(${cli} master:*)`, why: 'Run the master\'s own coordinator commands: status, dispatch, review, reviewer, protection, browser, harness, run, merge, and guide.' },
+    { rule: `Bash(${cli} master:*)`, why: 'Run the master\'s own coordinator commands: status, dispatch, review, reviewer, browser, harness, run, merge, and guide.' },
     { rule: `Bash(${cli} master review:*)`, why: 'The reviewer launcher. Listed on its own because the classifier reads launching a second agent as a permission grant; the launched reviewer holds a read-only, hour-long App token and no Graphyard credential.' },
-    { rule: `Bash(${cli} master browser:*)`, why: 'The browser administration flows: App permission updates, installation acceptance, and protection reconciliation through the operator\'s own browser profile, each recorded, verified through the API, and written to the audit ledger. The flow invokes agent-browser itself, so this is the only rule the browser needs; the classifier otherwise refuses browser control as a permission grant.' },
+    { rule: `Bash(${cli} master browser:*)`, why: 'The browser administration flows: App permission updates and installation acceptance through the operator\'s own browser profile, each recorded, verified through the API, and written to the audit ledger. The flow invokes agent-browser itself, so this is the only rule the browser needs; the classifier otherwise refuses browser control as a permission grant.' },
     { rule: `Bash(${cli} status:*)`, why: 'Read control-plane and work-item status without an operator keypress.' },
     { rule: `Bash(${cli} diagnose:*)`, why: 'Explain a refusing gate for an item the master is routing.' },
     { rule: `Bash(${cli} events:*)`, why: 'Read the immutable history the master reports from.' },
@@ -572,8 +571,6 @@ export function masterHarnessPlan(input: { harness: string; root: string; cliPat
     { rule: 'Bash(gh pr diff:*)', why: 'Read the candidate diff while routing or triaging a review.' },
     { rule: 'Bash(gh pr checks:*)', why: 'Read CI results for a candidate.' },
     { rule: 'Bash(gh api user)', why: 'Name the GitHub identity an audit entry attributes an administration action to.' },
-    { rule: `Bash(gh api ${protection}*)`, why: 'Read the managed base branch\'s protection and its subresources before and after reconciliation; the classifier otherwise refuses protection reads as CI-bypass reconnaissance.' },
-    { rule: `Bash(gh api --method PATCH ${protection}/*)`, why: 'Reconcile one protection subresource (required reviews, required status checks) with the open review policies. A subresource PATCH cannot remove protection itself, and the App-bound check is re-verified before every guarded merge; the classifier otherwise refuses it as a CI bypass.' },
     { rule: 'Bash(gh api user/installations*)', why: 'Read the control-plane App\'s installation and the permissions it grants, before and after an installation acceptance. Installation writes have no API path the master may take directly; master browser installation-accept is the only one.' },
     { rule: 'Bash(gh api apps/*)', why: 'Read the permissions a public App record requests, to verify an App permission update.' },
     { rule: `Bash(node ${resolveThreadScript(input.root)}:*)`, why: 'Resolve a review thread the master has audited. The wrapper sends only resolveReviewThread, so it cannot merge or change protection.' },

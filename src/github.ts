@@ -1,5 +1,5 @@
 import { ReconciliationRetry, Refusal, MergeConflict, requireCurrent } from './model.js';
-import { mergeHold, recordedMergerMode, type MergerMode } from './merger-mode.js';
+import { mergeHold, type MergerMode } from './merger-mode.js';
 import { createHash, createSign, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -3368,11 +3368,8 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   let held: string | null = null;
   // The automatic-merging hold over this item's authorized head (GY-1927): a held head is observed at the idle cadence, not the merge band's.
   let mergeHeld: string | null = null;
-  // The recorded merger, read once per claim and only when a control-plane candidate asks for it
-  // (GY-1835): a GitHub-mode observation spends no query on it, and a mode read is cheap beside
-  // the observation it gates.
-  let merger: MergerMode | null = null;
-  const mergerNow = async (): Promise<MergerMode> => merger ??= (await recordedMergerMode(engine.store.pool)).merger;
+  // The control plane is the only merge writer.
+  const mergerNow = async (): Promise<MergerMode> => 'control-plane';
   // Whether this run saved an observation (GY-506): every claimed job either saves one or records
   // why it did not — in the job's error, hold or deferral — and the job's consecutive
   // no-observation count is reset or incremented accordingly, whichever way it ends.

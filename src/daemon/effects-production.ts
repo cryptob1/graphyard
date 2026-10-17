@@ -51,7 +51,6 @@ import { shadowReads, shadowVerdictBody, shadowVerdictKey, type ShadowReads } fr
 import { mergeRecordKey, mergeWriterReads, type MergeWriterReads } from './cycle-merge-writer.js';
 import { exactCandidatePorts, localReleasePorts } from './release-ports.js';
 import { revertRecordKey } from '../release-revert.js';
-import { readMergeWriter } from '../master/dispatch.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
 import { readingEffects } from './reading-effect.js';
@@ -173,7 +172,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   };
   let publishedEnvironment: string | null = null, publishedMergeQueue: string | null = null;
   /** GY-1524: the recorded merger, read from /api/status afresh for every merge decision (AC-6), never cached: a switch to `github` stops the next merge, not the one after a window. */
-  const recordedMerger = () => readMergeWriter(current(), deps.fetcher);
+  // The control plane is the only merge writer.
+  const recordedMerger = async () => 'control-plane' as const;
   /** GY-1927: the automatic-merging hold over one item, read from the plane afresh before the writer opens a merge and before it pushes; a plane without the route (404) records no hold, and any other failure stops the merge. */
   const recordedHold = async (work: { id: string }) => {
     try { return ((await asCoordinator(`auto-merge?work=${encodeURIComponent(work.id)}`)) as { hold?: string | null }).hold ?? null; }
@@ -374,7 +374,19 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await mutate('production-environment', { environment });
       publishedEnvironment = environment;
     },
-    selfProvision: async () => (await import('../cli/master-setup.js')).loopSelfProvision(root, current()), // imported when first run: only this step reads the install modules
+    // Imported when first run: only this step reads the install modules. Each run also registers the merge
+    // writer's deploy key with the host's gh login when it is missing (the credential-401 remedy's port);
+    // a key that cannot be registered fails the run after the setup itself ran.
+    selfProvision: async () => {
+      const [{ loopSelfProvision, masterSetup }, { hostCredentialPorts }] = await Promise.all([import('../cli/master-setup.js'), import('./step-stalls.js')]);
+      const config = current();
+      return loopSelfProvision(root, config, { setup: async (...args) => {
+        const key = hostCredentialPorts(config, root).renewDeployKey().then(() => null, (error: unknown) => error);
+        const report = await masterSetup(...args), failed = await key;
+        if (failed) throw failed;
+        return report;
+      } });
+    },
     publishMergeSettings: async () => {
       const config = { rerunFailedChecks: rerunFailedChecks(current()) };
       const published = JSON.stringify(config);

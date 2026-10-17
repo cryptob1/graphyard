@@ -1,13 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { ciConcurrencyAdvisories, protectionPlan, readWorkflow, readWorkflows, type WorkflowFile } from '../src/protection.js';
-import type { Work } from '../src/model.js';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { readWorkflow } from '../src/protection.js';
 
 // A superseded pull-request run must stop holding an Actions runner (GY-295): every base refresh and
 // rework push otherwise adds a full run while the older ones keep the concurrent-runner limit, and
-// every item waits in Test. Runs on main are never cancelled. One case per proof:
-// unit:ci-cancels-superseded-runs, unit:onboarding-ci-concurrency-advisory.
+// every item waits in Test. Runs on main are never cancelled (unit:ci-cancels-superseded-runs).
 
 // The subset of GitHub's expression language the concurrency keys use: context paths, string and
 // number literals, `!`, `==`, `!=`, `&&`, `||` (both yield an operand, as in Actions), parentheses
@@ -65,7 +64,8 @@ const supersedes = (earlier: { group: string }, later: { group: string; cancel: 
 const cancelsRunning = (earlier: { group: string }, later: { group: string; cancel: boolean }) => earlier.group === later.group && later.cancel;
 
 test('unit:ci-cancels-superseded-runs — every pull_request-triggered workflow cancels superseded runs, and runs on main are never cancelled', async () => {
-  const workflows = readWorkflows();
+  const directory = join(process.cwd(), '.github', 'workflows');
+  const workflows = readdirSync(directory).filter(name => /\.ya?ml$/.test(name)).sort().map(name => ({ path: `.github/workflows/${name}`, text: readFileSync(join(directory, name), 'utf8') }));
   const byPath = new Map(workflows.map(file => [file.path, file]));
   assert.ok(byPath.has('.github/workflows/ci.yml'), '.github/workflows/ci.yml exists');
   const pullRequestWorkflows = workflows.filter(file => readWorkflow(file.text).pullRequest);
@@ -98,37 +98,4 @@ test('unit:ci-cancels-superseded-runs — every pull_request-triggered workflow 
       }
     }
   }
-  // The advisory graphyard master protection gives a managed repository is silent on this one.
-  assert.deepEqual(ciConcurrencyAdvisories(['test', 'typecheck', 'chart'], workflows), []);
-});
-
-const openWork = (checks: string[], overrides: Partial<Work> = {}) => ({ id: 'work-id', key: 'GY-42', stage: 'review', policy: { checks, review: true }, ...overrides } as unknown as Work);
-const protection = { required_pull_request_reviews: { required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews: true }, required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }, { context: 'graphyard/landable', app_id: 1234 }] }, enforce_admins: { enabled: true } };
-// A CI limit covering the parallel-tip window, so only the cancel-in-progress advisories are planned.
-const config = { repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, mergeQueue: { ciConcurrency: 100 } };
-
-test('unit:onboarding-ci-concurrency-advisory — onboarding recommends cancelling superseded pull-request runs, and master protection reports a required check whose workflow lacks cancel-in-progress', async () => {
-  const onboarding = await readFile(new URL('../docs/onboarding.md', import.meta.url), 'utf8');
-  assert.match(onboarding, /CI workflows should cancel superseded pull-request runs/);
-  assert.ok(onboarding.includes('${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}'), 'onboarding gives the per-pull-request group');
-  assert.ok(onboarding.includes("cancel-in-progress: ${{ github.event_name == 'pull_request' }}"), 'onboarding cancels for pull_request events only');
-  assert.match(onboarding, /runs on main are never cancelled/);
-  assert.match(onboarding, /`graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`/);
-
-  const uncancelled: WorkflowFile = { path: '.github/workflows/ci.yml', text: 'name: CI\non:\n  push:\n    branches: [main]\n  pull_request:\njobs:\n  unit:\n    name: test\n    runs-on: ubuntu-latest\n  typecheck:\n    runs-on: ubuntu-latest\n' };
-  const cancelled: WorkflowFile = { path: '.github/workflows/lint.yml', text: "name: Lint\non: [pull_request]\nconcurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\njobs:\n  lint:\n    runs-on: ubuntu-latest\n" };
-  const jobLevel: WorkflowFile = { path: '.github/workflows/e2e.yml', text: 'name: E2E\non:\n  pull_request:\njobs:\n  e2e:\n    concurrency:\n      group: e2e-${{ github.ref }}\n      cancel-in-progress: true\n    runs-on: ubuntu-latest\n' };
-  const pushOnly: WorkflowFile = { path: '.github/workflows/nightly.yml', text: 'name: Nightly\non:\n  push:\n    branches: [main]\njobs:\n  soak:\n    runs-on: ubuntu-latest\n' };
-  const workflows = [uncancelled, cancelled, jobLevel, pushOnly];
-
-  const plan = protectionPlan(protection, config, [openWork(['test', 'typecheck', 'lint', 'e2e', 'soak']), openWork(['deploy'], { key: 'GY-9', stage: 'done' } as any)], undefined, workflows);
-  assert.deepEqual(plan.advisories, [
-    'Required check test runs in .github/workflows/ci.yml (job unit), which never cancels superseded pull-request runs; add a concurrency group per pull request with cancel-in-progress for pull_request events, so a run for a superseded head stops holding an Actions runner',
-    'Required check typecheck runs in .github/workflows/ci.yml (job typecheck), which never cancels superseded pull-request runs; add a concurrency group per pull request with cancel-in-progress for pull_request events, so a run for a superseded head stops holding an Actions runner',
-  ], 'the advisory names each required check (by job name or id) whose pull-request workflow lacks cancel-in-progress; cancelling workflows, job-level concurrency, push-only workflows and checks of done items are silent');
-  assert.equal(plan.consistent, true, 'an advisory is never a blocker or a change: protection itself stays consistent');
-  assert.deepEqual(plan.blockers, []);
-  const off: WorkflowFile = { ...cancelled, text: cancelled.text.replace(/cancel-in-progress: .*/, 'cancel-in-progress: false') };
-  assert.equal(ciConcurrencyAdvisories(['lint'], [off]).length, 1, 'cancel-in-progress: false is no cancellation');
-  assert.equal(ciConcurrencyAdvisories(['lint'], [{ ...cancelled, text: cancelled.text.replace(/concurrency:\n(?: {2}.*\n)+/, 'concurrency: lint-group\n') }]).length, 1, 'a bare group without cancel-in-progress only queues');
 });

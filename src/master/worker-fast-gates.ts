@@ -27,9 +27,9 @@ export const workerFastGates = {
 export const workerFastGatesPresent = (root: string) => [...workerFastGates.tests, ...workerFastGates.scripts].every(gate => existsSync(join(root, gate)));
 /** The one command line the gates run as: the test files through the suite's own harness (run-tests.ts reserves the port window a bare run lacks), then the docs checker, chained with `&&`. */
 export const workerFastGatesCommand = `node --import tsx tests/helpers/run-tests.ts ${workerFastGates.tests.join(' ')} && ${workerFastGates.scripts.map(script => `node ${script}`).join(' && ')}`;
-/** The sync instruction the gates sentence follows: the before-push discipline the repository's standing instructions state, in the request itself, with the CLI and the item it is for. */
-export const workerSyncSentence = (cliPath: string, key: string) => `Run node ${cliPath} sync ${key} before every push: it merges the base branch and lists every file outside plannedFiles that no longer matches it, and sync ${key} --restore restores them in one new commit. `;
+/** The sync instruction the gates sentence follows: the before-submit discipline the repository's standing instructions state, in the request itself, with the CLI and the item it is for. */
+export const workerSyncSentence = (cliPath: string, key: string) => `Run node ${cliPath} sync ${key} before submitting: it merges the shared base branch the merge writer advances. `;
 /** The one sentence the request adds after the sync instruction: the gates, their one command line, and what to do when one fails. */
-export const workerFastGatesSentence = `Before complete, run the fast gates — \`${workerFastGatesCommand}\` — and fix what they name before pushing, since CI fails on each of them. `;
+export const workerFastGatesSentence = `Before complete, run the fast gates — \`${workerFastGatesCommand}\` — and fix what they name first, since the merge writer's trial fails on each of them. `;
 /** The whole addition, in order: the sync instruction, then the gates; the complete instruction follows it in the request. */
 export const workerBeforePushSection = (cliPath: string, key: string) => workerSyncSentence(cliPath, key) + workerFastGatesSentence;

@@ -7,7 +7,6 @@ import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { MergerSettings, recordedMergerMode } from '../src/merger-mode.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import { CHECK_NAME, GitHub, observationThroughputStatus, processJob } from '../src/github.js';
 import { diagnosticianEffects, diagnosisPrompt } from '../src/daemon/diagnosis.js';
@@ -147,11 +146,6 @@ const due = async (...ids: string[]) => {
   if (ids.length) await store.pool.query('UPDATE jobs SET available_at=now() WHERE work_id::text = ANY($1)', [ids]);
 };
 const workOf = async (id: string) => (await store.workDocument(id))!;
-const setMerger = (merger: 'github' | 'control-plane', reason: string) => new MergerSettings(store).change(operator, { merger, reason }, randomUUID());
-/** Control-plane is the shipped default (GY-1833): a set to the recorded mode is refused, so set it only when it differs. */
-const setMergerUnlessRecorded = async (merger: 'github' | 'control-plane', reason: string) => {
-  if ((await recordedMergerMode(store.pool)).merger !== merger) await setMerger(merger, reason);
-};
 
 before(async () => {
   fixtureRoot = await realpath(await temporaryDirectory('github-polling-control-plane'));
@@ -167,17 +161,15 @@ before(async () => {
   engine = new Engine(store, [CI], 120, REPOSITORY);
   engine.submissionObserver = null; engine.directMergeEnvironment = null;
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
-  await setMergerUnlessRecorded('control-plane', 'the control plane is the merge writer');
   api = new Api();
 });
 after(async () => { if (store) await store.close(); if (postgres) await postgres.stop(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });
 
-test('unit:no-github-polling-control-plane — with the merger set to control-plane, a reconcile and an observation pass over items whose observation source is control-plane issue no GitHub pull-request, review or check-run request, while a pull request opened by a person is still observed; in github mode the requests are as today', async () => {
+test('unit:no-github-polling-control-plane — with the merger set to control-plane, a reconcile and an observation pass over items whose observation source is control-plane issue no GitHub pull-request, review or check-run request, while a pull request opened by a person is still observed', async () => {
   // One candidate the control plane submitted and observed itself (a change number, no pull
   // request), and one whose pull request a person opened and GitHub observed.
   const local = await claimed(1);
   await engine.execute(worker, 'submit', local.w.id, { epoch: 1, head: local.head }, randomUUID());
-  await setMerger('github', 'the person opens their pull request while GitHub merges');
   const person = await claimed(2);
   const tip = git(checkout, 'rev-parse', 'refs/remotes/origin/main');
   const observation = (head: string): Observation => ({
@@ -192,7 +184,6 @@ test('unit:no-github-polling-control-plane — with the merger set to control-pl
   try { await engine.execute(worker, 'submit', person.w.id, { epoch: 1, pr: 77 }, randomUUID()); }
   finally { engine.submissionObserver = null; }
   api.open(77, person.head, 'graphyard/gy-2-1');
-  await setMerger('control-plane', 'the control plane is the merge writer again');
   const localId = local.w.id, personId = person.w.id;
   controlPlaneItem = localId; personItem = personId;
   assert.equal((await workOf(localId)).observation?.source, 'control-plane');
@@ -233,14 +224,6 @@ test('unit:no-github-polling-control-plane — with the merger set to control-pl
   assert.ok(observedPerson.observation, `the person-opened pull request was observed: ${JSON.stringify((await store.pool.query('SELECT error, deferred_reason FROM jobs')).rows)}`);
   assert.equal(observedPerson.observation!.source ?? null, null, 'its observation is still GitHub\'s, never the checkout\'s');
 
-  // With GitHub the recorded merger again, the same pass reads both candidates as it always did:
-  // the control-plane candidate is read from GitHub too, whatever becomes of the reading.
-  await setMerger('github', 'GitHub merges again');
-  await due(localId);
-  const githubBefore = flat();
-  await processJob(engine, github);
-  assert.ok(api.count('pulls') > githubBefore.pulls || api.count('reviews') > githubBefore.reviews || api.count('check-runs') > githubBefore.checks,
-    'in github mode the observation pass reads GitHub as today, control-plane candidate included');
 });
 
 test('unit:doctor-reads-control-plane — under the control-plane merger the doctor reads the control plane: its allowlist excludes `gh pr view` and its request names `graphyard status`, and master status reports the hour\'s GitHub request count', async () => {
@@ -254,16 +237,13 @@ test('unit:doctor-reads-control-plane — under the control-plane merger the doc
   } as unknown as DiagnosisInput;
   const subject: DiagnosisSubject = { id: 'GY-7', kind: 'recurring', faultClass: 'stalled-gate', work: null, instances: [] };
 
-  // The diagnostician's context follows the recorded merger: under control-plane it runs no
-  // `gh pr view` for the pull requests the instances name; with GitHub the merger it reads each.
-  for (const merger of ['control-plane', 'github'] as const) {
-    const ran: string[][] = [];
-    const effects = diagnosticianEffects(config, '/fixture', async (method, path) => {
-      assert.equal(method, 'GET'); assert.equal(path, 'merger');
-      return { merger };
-    }, async (command, args) => { ran.push([command, ...args]); return '[]'; });
+  // The diagnostician's context: the control plane is the merge writer, so it runs no `gh pr view`
+  // for the pull requests the instances name.
+  {
+    const merger = 'control-plane' as const, ran: string[][] = [];
+    const effects = diagnosticianEffects(config, '/fixture', async () => { throw new Error('the merger is never read'); }, async (command, args) => { ran.push([command, ...args]); return '[]'; });
     const context = await effects.context(subject, [77, 78]);
-    if (merger === 'control-plane') {
+    {
       assert.deepEqual(ran.filter(args => args[0] === 'gh'), [], `the diagnostician polled GitHub under the control-plane merger: ${JSON.stringify(ran)}`);
       assert.deepEqual(context.pullRequests, [], 'no pull-request state is read');
       const prompt = diagnosisPrompt({ ...config, merger }, input);
@@ -271,30 +251,21 @@ test('unit:doctor-reads-control-plane — under the control-plane merger the doc
       assert.match(prompt, /graphyard status|\/bin\/graphyard" status GY-N|node \/bin\/graphyard status GY-N/);
       assert.match(prompt, /master status/, 'the doctor\'s request names `master status`');
       assert.match(prompt, /and the control plane \(node \/bin\/graphyard status GY-N, node \/bin\/graphyard master status\)\./, 'the read list is exactly the control-plane reads');
-    } else {
-      assert.deepEqual(ran.filter(args => args[0] === 'gh').map(args => args.slice(0, 3)), [['gh', 'pr', 'view'], ['gh', 'pr', 'view']], 'with GitHub the merger, each named pull request is read as before');
-      assert.equal(context.pullRequests.length, 2, 'both readings are given to the session');
-      assert.match(diagnosisPrompt({ ...config, merger }, input), /gh pr view N/, 'the github-mode read list keeps the pull-request read');
     }
   }
 
-  // The loop doctor follows the merger the same way (B4, review of 3b7408170110): its effects read
-  // the recorded merger as the operator agent, its request names no `gh pr view` under the
-  // control-plane merger, and the session environment narrows its guard's gh reads with it.
+  // The loop doctor the same way (B4, review of 3b7408170110): its merger is the control plane, its
+  // request names no `gh pr view`, and the session environment narrows its guard's gh reads with it.
   const doctorConfig = { ...config, operatorAgent: { id: 'operator-agent', credentialFile: '/outside/operator.token' } };
-  for (const merger of ['control-plane', 'github'] as const) {
-    const doctor = doctorEffects(doctorConfig, '/fixture', async (method, path) => {
-      assert.equal(method, 'GET'); assert.equal(path, 'merger');
-      return { merger };
-    });
-    assert.equal(await doctor.merger!(), merger, 'the doctor reads the recorded merger the way the diagnostician does');
-    assert.equal(await doctorEffects(doctorConfig, '/fixture', async () => { throw new Error('refused'); }).merger!(), 'github', 'an unreadable merger keeps the github reads');
+  {
+    const merger = 'control-plane' as const;
+    assert.equal(await doctorEffects(doctorConfig, '/fixture', async () => { throw new Error('the merger is never read'); }).merger!(), merger, 'the doctor\'s merger is the control plane');
     const prompt = doctorPrompt({ repository: REPOSITORY, cliPath: '/bin/graphyard', merger }, { items: [], faults: [] });
     const guard = (line: string, env?: Record<string, string>): string => {
       const verdict = doctorCommandVerdict(line, { cwd: '/fixture', cli: '/bin/graphyard', env: env ?? {} });
       return verdict.allow ? '' : verdict.reason;
     };
-    if (merger === 'control-plane') {
+    {
       assert.doesNotMatch(prompt, /gh pr view/, 'the doctor\'s request names no `gh pr view` under the control-plane merger');
       assert.match(prompt, /the control plane \(node \/bin\/graphyard status GY-N, node \/bin\/graphyard master status, node \/bin\/graphyard master decisions GY-N\)\./, 'the read list is exactly the control-plane reads');
       for (const line of ['gh pr view 12', 'gh pr list', 'gh pr checks 12', 'gh pr diff 12']) {
@@ -304,9 +275,6 @@ test('unit:doctor-reads-control-plane — under the control-plane merger the doc
       assert.equal(guard('gh issue view 3', { GRAPHYARD_MERGER: 'control-plane' }), '', 'issue reads stand under the control-plane merger');
       assert.equal(guard('node /bin/graphyard status GY-7', { GRAPHYARD_MERGER: 'control-plane' }), '', 'the control-plane reads are sanctioned');
       assert.equal(guard('git log -1', { GRAPHYARD_MERGER: 'control-plane' }), '', 'git reads stand');
-    } else {
-      assert.match(prompt, /master decisions GY-N, gh pr view\)\./, 'the github-mode request keeps the pull-request read');
-      assert.equal(guard('gh pr view 12'), '', 'with GitHub the merger, the pull-request read stands');
     }
   }
 
@@ -318,22 +286,14 @@ test('unit:doctor-reads-control-plane — under the control-plane merger the doc
   assert.deepEqual(status.budget?.lastHour, { requests: 12, byKind: [{ kind: 'pull', requests: 7 }, { kind: 'check-runs', requests: 5 }] },
     'master status carries the hour\'s GitHub request count and what it was spent on');
 
-  // A control-plane worker's own harness allows no `gh pr` command: the session opens no pull
-  // request, it submits its head; with GitHub the merge writer the rules stand as before.
+  // A worker's own harness allows no `gh pr` command: the session opens no pull request, it submits its head.
   const base = { cliPath: '/bin/graphyard', branch: 'graphyard/gy-9-1', baseBranch: 'main', credentialHome: '/creds', key: 'GY-9', epoch: 1 };
-  const control = workerHarnessPlan({ ...base, mergeWriter: 'control-plane' });
-  assert.deepEqual(control.allow.filter(rule => rule.rule.startsWith('Bash(gh pr')), [], 'the control-plane worker harness allows no pull-request command');
-  const githubWorker = workerHarnessPlan({ ...base, mergeWriter: 'github' });
-  for (const command of ['gh pr create', 'gh pr view', 'gh pr checks']) {
-    assert.ok(githubWorker.allow.some(rule => rule.rule === `Bash(${command}:*)`), `${command} is allowed in github mode`);
-    assert.ok(!control.allow.some(rule => rule.rule === `Bash(${command}:*)`), `${command} is not allowed under the control-plane merger`);
-  }
+  assert.deepEqual(workerHarnessPlan(base).allow.filter(rule => rule.rule.startsWith('Bash(gh pr')), [], 'the worker harness allows no pull-request command');
 });
 
-test('unit:control-plane-observation-unheld — with a GitHub permission shortfall standing, a control-plane candidate is still observed from the checkout while a person-opened pull request waits on the hold; with GitHub the merger the hold stops the control-plane candidate too (review of 3b7408170110, B1)', async () => {
+test('unit:control-plane-observation-unheld — with a GitHub permission shortfall standing, a control-plane candidate is still observed from the checkout while a person-opened pull request waits on the hold (review of 3b7408170110, B1)', async () => {
   const github = api.client();
   github.permissionShortfall = () => 'App 1234 installation is suspended; restore it at https://github.com/apps/graphyard';
-  await setMerger('control-plane', 'the control plane is the merge writer');
   const heldRow = async (id: string) => (await store.pool.query('SELECT held_reason FROM jobs WHERE work_id=$1', [id])).rows[0];
 
   // The control-plane branch is decided before the GitHub permission hold: the checkout answers
@@ -349,16 +309,9 @@ test('unit:control-plane-observation-unheld — with a GitHub permission shortfa
   await processJob(engine, github);
   assert.match((await heldRow(personItem)).held_reason ?? '', /suspended/, 'the person-opened pull request waits on the GitHub permission hold');
 
-  // With GitHub the merger, the hold stops the control-plane candidate as any other read would be.
-  await setMerger('github', 'GitHub merges again');
-  await due(controlPlaneItem);
-  await processJob(engine, github);
-  assert.match((await heldRow(controlPlaneItem)).held_reason ?? '', /suspended/, 'with GitHub the merger the hold stands');
 });
 
 test('unit:control-plane-observation-local-failure — a control-plane observation that fails locally is retried and finished with no GitHub request: the recovery that publishes and dequeues never names the locally allocated number (review of 3b7408170110, B2)', async () => {
-  await setMerger('control-plane', 'the control plane is the merge writer');
-  // The B1 test held this job in github mode; release it, as a released hold would be.
   await store.pool.query('UPDATE jobs SET held_until=NULL, unobserved=0 WHERE work_id=$1', [controlPlaneItem]);
   const github = api.client();
   try {
@@ -398,7 +351,6 @@ test('unit:control-plane-observation-landed-peers — a landed person-opened pee
   // GY-744's peer, which the reconcile owes a delivery at once. The person merges straight to
   // main, so the direct-merge window owns that merge.
   engine.directMergeEnvironment = { since: new Date(Date.now() - 86_400_000).toISOString(), until: null, reason: 'test repository merges straight into main', setBy: 'environment', enabledAt: new Date(Date.now() - 86_400_000).toISOString(), source: 'environment', event: null };
-  await setMerger('github', 'the person merges their pull request while GitHub is the writer');
   const mergedPerson = await claimed(4);
   api.open(88, mergedPerson.head, 'graphyard/gy-4-1', tip1);
   api.ancestryOf.set(mergedPerson.head, new Set([tip0, tip1, landedLocal.head]));
@@ -442,7 +394,6 @@ test('unit:control-plane-observation-landed-peers — a landed person-opened pee
   engine.submissionObserver = async () => openObservation(observing.head, 89, 'graphyard/gy-5-1', tip1);
   try { await engine.execute(worker, 'submit', observing.w.id, { epoch: 1, pr: 89 }, randomUUID()); }
   finally { engine.submissionObserver = null; }
-  await setMerger('control-plane', 'the control plane is the merge writer again');
 
   // The observing item's job: its landing names both peers landed; the reconcile reads the
   // control-plane peer from the checkout and the person-opened peer from GitHub.

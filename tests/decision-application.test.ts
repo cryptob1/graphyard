@@ -15,7 +15,6 @@ import { Launcher } from '../src/daemon/cycle.js';
 import { assertDispatchable, masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { approvalApplyGraceMs } from '../src/model/approval.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-10-03/10-05 instants are the explicit now handed to approvalStep, routineDecision and actionableSubjects over same-day watches; new Date() only stamps live records.
 
 const { approverWait, approverWaitWording } = metrics;
@@ -122,7 +121,7 @@ async function start() {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1300;
   const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('decision-application'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('decisions_test');
-  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/decisions_test`); await store.init(); await recordLegacyMerger(store);
+  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/decisions_test`); await store.init();
   const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   const http = server(engine, credentials);
   teardown = async () => { http.close(); await store.close(); await database.stop(); };
@@ -564,7 +563,7 @@ async function controlPlane() {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1298;
   const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('decision-application'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('application_test');
-  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/application_test`); await store.init(); await recordLegacyMerger(store);
+  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/application_test`); await store.init();
   const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   const http = server(engine, credentials);
   settlementTeardown = async () => { http.close(); await store.close(); await database.stop(); };
