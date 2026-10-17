@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readdir, writeFile } from 'node:fs/promises';
+import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { applyInstall, buildPlan, fullPlanCommand, installRequestFromArgs, prepareInstall, resumeCommand, type InstallDependencies } from '../src/install/index.js';
 import type { LocalSupervisor } from '../src/install/local.js';
@@ -37,8 +37,8 @@ const releaseCandidate = deliveryPolicySchema.parse({
   deploy: { adapter: 'railway', project: null, uat: null, production: null },
 });
 
-async function observeOnlyFixture(interrupt = 0) {
-  const railway = { project: false, database: false, service: false, interrupt };
+async function observeOnlyFixture(interrupt = 0, existing = false) {
+  const railway = { project: existing, database: existing, service: existing, interrupt };
   const fixture = await harness({ provider: 'railway', extraResponses: statefulRailway(railway),
     statusBody: { actor: { id: 'owner-project-operator', role: 'admin' }, repository: REPOSITORY, github: false, githubAppId: null, githubInstallationId: null } });
   await writeFile(join(fixture.root, 'graphyard.json'), JSON.stringify({ documentation: { paths: ['README.md'], changelog: null }, delivery: releaseCandidate }));
@@ -156,4 +156,38 @@ test('unit:install-observe-only-changes-nothing — the local provider, which wo
   const command = fullPlanCommand({ inputs: { ...request, baseBranch: 'trunk' } as any });
   assert.equal(command, 'graphyard install --provider railway --repo owner/project --base-branch trunk --domain gy.example.com --workspace team-a --plan');
   assert.deepEqual(installRequestFromArgs(command.split(' ').slice(2)).request.observeOnly, undefined);
+});
+
+test('unit:install-observe-only-redacted-resumable — an existing Railway service this installation did not create is refused before any write, since its unread variables may keep orphaned GITHUB_APP_* through the merged write', async () => {
+  const { fixture, prepare } = await observeOnlyFixture(0, true);
+  try {
+    const session = await prepare('apply');
+    const plan = await buildPlan(session);
+    const refusal = plan.preflight.find(item => item.name === 'GitHub App')!;
+    assert.equal(refusal.ok, false);
+    assert.match(refusal.detail, /reads no variable of the existing graphyard-owner-project service.*GITHUB_APP_ID/);
+    await assert.rejects(applyInstall(session, plan), /Preflight is incomplete; the installer changed nothing/);
+    const lines = fixture.allCommandLines();
+    assert.ok(!lines.some(line => /^railway (variables|variable set|up|redeploy|add|init)/.test(line)), `the refused apply ran ${lines.find(line => /^railway (variables|variable set|up|redeploy|add|init)/.test(line))}`);
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:install-observe-only-changes-nothing — an existing installation whose roster authenticates workers or producers is refused before any write, so redeploying without them revokes no credential', async () => {
+  const { fixture, prepare } = await observeOnlyFixture();
+  try {
+    const first = await prepare('apply');
+    await applyInstall(first, await buildPlan(first));
+    const file = join(first.directory, 'install.json');
+    const record = JSON.parse(await readFile(file, 'utf8'));
+    record.principals.push({ id: 'owner-project-worker-1', role: 'worker', fingerprint: record.principals[0].fingerprint }, { id: 'owner-project-producer', role: 'producer', proofs: ['unit'], fingerprint: record.principals[0].fingerprint });
+    await writeFile(file, JSON.stringify(record));
+    const before = fixture.allCommandLines().length;
+    const session = await prepare('apply');
+    const plan = await buildPlan(session);
+    const refusal = plan.preflight.find(item => item.name === 'Principals')!;
+    assert.equal(refusal.ok, false);
+    assert.match(refusal.detail, /already authenticates owner-project-worker-1, owner-project-producer/);
+    await assert.rejects(applyInstall(session, plan), /Preflight is incomplete; the installer changed nothing/);
+    assert.ok(!fixture.allCommandLines().slice(before).some(line => /^railway (variables|variable set|up|redeploy)/.test(line)), 'the refused apply wrote the deployment');
+  } finally { await fixture.cleanup(); }
 });

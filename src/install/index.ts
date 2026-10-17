@@ -867,10 +867,18 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     if (heldVariables.length && merges) preflight.push({ name: 'GitHub App', ok: false, detail: `the ${context.provider} deployment still holds ${heldVariables.join(', ')}; that adapter keeps variables absent from a write, so --no-github-app cannot leave them unset`, fix: `Remove ${heldVariables.join(', ')} from the ${context.service} service on ${context.provider}, then rerun` });
     // Observation-only never reads values, so it cannot know the names either: the server's own
     // report of a bound App after the deploy (performInstall) is what refuses a leftover one.
-    else if (unread && observeOnly) preflight.push({ name: 'GitHub App', ok: true, detail: `--observe-only: the variables of ${context.service} are not read, so their names are unknown; no App is bound, and an apply stops if the deployed server still reports one` });
+    // A service this installation's own observation-only apply created never held an App; any
+    // other existing one may keep orphaned App variables through the merged write, so refuse.
+    else if (unread && observeOnly && await observeOnlyCreated(session)) preflight.push({ name: 'GitHub App', ok: true, detail: `--observe-only: ${context.service} was created by this installation's own observation-only apply, which never sets ${APP_VARIABLES.join(', ')}; its variables are not read` });
+    else if (unread && observeOnly) preflight.push({ name: 'GitHub App', ok: false, detail: `--observe-only reads no variable of the existing ${context.service} service on ${context.provider}, so whether it still holds ${APP_VARIABLES.join(', ')} is unknown; that adapter keeps variables absent from a write, and the deploy would keep the App's access to the repository`, fix: `Rerun with --service NAME naming a service that does not exist yet, or without --observe-only so its variables can be read` });
     else if (unread) preflight.push({ name: 'GitHub App', ok: false, detail: `the variables of the ${context.service} service on ${context.provider} could not be read, so whether it still holds ${APP_VARIABLES.join(', ')} is unknown; that adapter keeps variables absent from a write, so --no-github-app cannot promise to leave them unset`, fix: `Make the ${context.provider} variable listing of ${context.service} readable (remove any ${APP_VARIABLES.join(', ')} it holds), then rerun` });
     else preflight.push({ name: 'GitHub App', ok: true, detail: `--no-github-app: no App is registered or reused, ${APP_VARIABLES.join(', ')} stay unset, and the server serves without GitHub` });
   }
+
+  // The deployed roster is replaced by the planned one: an existing installation whose workers or
+  // producers authenticate would lose them while their setup is reported held, so refuse.
+  const rosterHeld = observeOnly ? (record?.principals ?? []).filter(principal => principal.role === 'worker' || principal.role === 'producer') : [];
+  if (rosterHeld.length) preflight.push({ name: 'Principals', ok: false, detail: `--observe-only installs no worker or producer, and this installation already authenticates ${rosterHeld.map(principal => principal.id).join(', ')}; redeploying without them would revoke their credentials`, fix: `Rerun without --observe-only to keep the installation's roster` });
 
   const core = coreEnv(session);
   const drift: PlanDrift[] = [];
@@ -1127,6 +1135,14 @@ const appCredentialFile = (session: Pick<InstallSession, 'directory'>, reviewer?
   resolve(session.directory, reviewer ? `github-reviewer-${reviewer}.json` : 'github-app.json');
 /** Where an App reused as the revert approver (`--reuse-app` of a revert-approver registration) is saved as this install's own. */
 const REVERT_APPROVER_FILE = 'github-revert-approver.json';
+/** The service an observation-only apply of this installation created (GY-1846), before creating it. */
+const OBSERVE_ONLY_SERVICE_FILE = 'observe-only-service.json';
+async function observeOnlyCreated(session: InstallSession) {
+  try {
+    const created = JSON.parse(await readFile(resolve(session.directory, OBSERVE_ONLY_SERVICE_FILE), 'utf8'));
+    return created?.provider === session.context.provider && created?.service === session.context.service;
+  } catch { return false; }
+}
 
 async function performInstall(session: InstallSession, plan: InstallPlan): Promise<InstallSummary> {
   const { adapter, context, deps, vault } = session;
@@ -1139,6 +1155,8 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   await materializeInstall(session);
 
   const observation = await adapter.observe(context);
+  // Recorded before the service exists, so a rerun after an interrupted apply knows it as its own.
+  if (session.inputs.observeOnly && !observation.app) await writeFile(resolve(session.directory, OBSERVE_ONLY_SERVICE_FILE), JSON.stringify({ provider: context.provider, service: context.service }), { mode: 0o600 });
   log(`Provisioning ${context.provider} for ${session.inputs.repository}`);
   await adapter.provision(context, observation);
   await adapter.setEnv(context, coreEnv(session));
