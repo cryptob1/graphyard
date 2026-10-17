@@ -8,7 +8,7 @@ import { type HerdrAgent, type RoleCapacity, approverProfile, holdRepeatedLimitA
 import { type ApprovalWatch, approvalWatchSchema, type DaemonActionKind, message } from './state.js';
 import { readyToRetry } from './sessions.js';
 import { approvalStep, type ApprovalStep, approverLaunchKey, approverSettleMs, approverPrefixes, boundDetail, handWatchPrefix, maxApproverCloses, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, recordWatchEnded } from './decisions.js';
-import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
+import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js'; import { recoverHeldName } from './decision-holds.js';
 import { capacityRefusal, unknownRegistrySession } from '../fleet.js';
 import type { Cycle } from './cycle.js';
 import { sessionExhaustion } from './cycle-sessions.js';
@@ -220,14 +220,11 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
   };
   /** The approver launch the launcher runs, and what it did with the watch. */
   const start = async (item: Work, watch: ApprovalWatch) => {
-    // GY-849: the account grab is where oldest-first is won or lost. A cycle that settles its
-    // launches within itself runs this body inline beside the step, so it holds here while another
-    // decision's capacity-waiting relaunch is still on the launcher and makes its call only once
-    // that one has settled: first submitted, first served, whatever the concurrency. The wait is
-    // bounded; past it the launch proceeds as it did before, and the next cycle's guarded relaunch
-    // path applies. The loop's own launcher never sees that wait (GY-924): it counts a body as
-    // running for its whole duration, so a waiting approver once held a shared slot while doing no
-    // work, and `launch` holds such launches back before submission instead.
+    // GY-849: the account grab is where oldest-first is won or lost. A cycle that settles its launches within itself runs this body inline
+    // beside the step, so it holds here while another decision's capacity-waiting relaunch is still on the launcher and makes its call only
+    // once that one has settled: first submitted, first served, whatever the concurrency. The wait is bounded; past it the launch proceeds as it
+    // did before, and the next cycle's guarded relaunch path applies. The loop's own launcher never sees that wait (GY-924): it counts a body as
+    // running for its whole duration, so a waiting approver once held a shared slot while doing no work, and `launch` holds such launches back.
     if (!cycle.detached) {
       const standDownBy = Date.now() + 300_000;
       while (capacityRelaunchInFlight(watch.decision) && Date.now() < standDownBy) await new Promise(resolve => setTimeout(resolve, 50));
@@ -239,38 +236,40 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
         throw new Error(`${item.key}'s last approver sessions each ended on one account's limit notice, and the hold that keeps the next launch off it could not be placed: ${message(error).slice(0, 300)}; nothing was launched`, { cause: error });
       });
     }
-    let launched: Awaited<ReturnType<NonNullable<DaemonEffects['approver']>>>;
+    let launched: Awaited<ReturnType<NonNullable<DaemonEffects['approver']>>>, recovered: string | null = null;
     try { launched = await (cycle.detached ? cycle.effects : effects).approver!(item, watch.decision); } // GY-1774: on the launcher beside the cycle the launch holds no cycle, so it waits as long as it takes through the cycle's own effects; in place it is bound like every call of the step
     catch (error) {
-      // A launch no account could take (GY-182) ran no session either: the watch keeps why, persisted
-      // now so the wait survives a restart, and `master status` names it as waiting for a slot.
-      if ((error as { capacityExhausted?: boolean })?.capacityExhausted) { Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, launchedAt: null, account: null, runtime: null, session: null, capacity: message(error).slice(0, 500) }); await effects.persist(state); return `the decision waits for approver capacity: ${message(error)}`; }
-      // A role at its concurrency limit is a wait for a slot, not a failed session (GY-190): the
-      // launch is not counted against the decision's bound, and the next cycle makes it again, so
-      // the approver starts on the first cycle after a slot frees without anybody asking.
-      const full = capacityRefusal(error);
-      if (!full) {
-        // A registry session the failed launch could not end stays on the watch, so the next launch ends it first.
-        // The launch made no session, so it is taken back like a capacity refusal (GY-551): a
-        // registry or server timeout is retried next cycle within the bound, never spends it, and
-        // the escalation past the bound counts only the sessions that ran. GY-920: a failure for
-        // any other reason is not a capacity wait — the stale wait is cleared with the rest of the
-        // launch state, so `master status` classifies the watch by this failure and its remedy
-        // instead of reporting a wait for capacity that is over.
-        const orphan = (error as { registrySession?: string })?.registrySession;
+      // No account (GY-182) or a role at its concurrency limit (GY-190) is a wait, not a failed session: uncounted, persisted with why so it survives
+      // a restart in the oldest-first queue (GY-849), made again once a slot frees — the GY-1888 recovery's own relaunch's refusal (detail) too.
+      const waits = async (refusal: unknown): Promise<string | null> => {
+        const spent = !!(refusal as { capacityExhausted?: boolean })?.capacityExhausted, full = spent ? null : capacityRefusal(refusal);
+        if (!spent && !full) return null;
+        Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, launchedAt: null, account: null, runtime: null, session: null, capacity: (full ?? message(refusal)).slice(0, 500) });
+        await effects.persist(state);
+        return full ? `left it pending for an approver slot, launched on the first cycle one frees: ${full}` : `the decision waits for approver capacity: ${message(refusal)}`;
+      };
+      const waiting = await waits(error); if (waiting) return waiting;
+      // GY-1888: a launch refused for this decision's own session name is recovered before it fails (recoverHeldName): adopted, or relaunched once.
+      const held = await recoverHeldName({ effects: cycle.detached ? cycle.effects : effects, state, stamp, invalidate, listingLost }, item, watch, error, () => (cycle.detached ? cycle.effects : effects).approver!(item, watch.decision));
+      if ('adopted' in held) return held.adopted;
+      if ('launched' in held) ({ launched, detail: recovered } = held); else {
+        const retryWaits = 'detail' in held ? await waits(held.failed) : null; if (retryWaits) return `${held.detail}; ${retryWaits}`;
+        // A registry session the failed launch could not end stays on the watch, so the next launch ends it first. The launch made no
+        // session, so it is taken back like a capacity refusal (GY-551): a registry or server timeout is retried next cycle within the bound,
+        // never spends it, and the escalation past the bound counts only the sessions that ran. GY-920: a failure for any other reason is not
+        // a capacity wait — the stale wait is cleared with the rest of the launch state, so `master status` classifies the watch by this
+        // failure and its remedy instead of reporting a wait for capacity that is over.
+        const orphan = ('session' in held ? held.session : undefined) ?? (held.failed as { registrySession?: string })?.registrySession;
         Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, launchedAt: null, account: null, runtime: null, session: orphan ?? null, capacity: null });
         await effects.persist(state);
-        throw error;
+        throw held.failed;
       }
-      Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, launchedAt: null, account: null, runtime: null, session: null, capacity: full.slice(0, 500) });
-      await effects.persist(state);
-      return `left it pending for an approver slot, launched on the first cycle one frees: ${full}`;
     }
     Object.assign(watch, { agentName: launched?.agentName ?? name, pane: launched?.pane ?? null, account: launched?.account ?? null, runtime: launched?.runtime ?? null, session: launched?.session ?? null, capacity: null, run: launched?.run ?? null });
     // A headless approver (GY-169) reports its run when it ends; the watch keeps it, and the next
     // cycle reads the verdict it applied back from the control plane like any other.
     launched?.settled?.then(async record => { if (watch.agentName === launched.agentName) { watch.run = record; await effects.persist(state); } }).catch(() => { /* the next cycle judges the decision itself */ });
-    return `${launched?.replaced ? `${launched.replaced}; ` : ''}launched independent approver session ${watch.agentName}${watch.account ? ` on ${watch.account}` : ''} (launch ${watch.launches} of ${maxApproverLaunches})`;
+    return `${recovered ? `${recovered}; ` : ''}${launched?.replaced ? `${launched.replaced}; ` : ''}launched independent approver session ${watch.agentName}${watch.account ? ` on ${watch.account}` : ''} (launch ${watch.launches} of ${maxApproverLaunches})`;
   };
   /** Idle/done screens past the start bound share one pause (GY-1598 / GY-1705 cycle-p90). */
   let screens: { seen: unknown; reads: Map<string, Promise<ScreenMotion>> } | null = null;
