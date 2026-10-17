@@ -261,3 +261,35 @@ test('app bind refuses an installation not applied with --observe-only, records 
     assert.deepEqual((await readRecord()).github.ciAppIds, [CI_APP_ID]);
   } finally { await fixture.cleanup(); }
 });
+
+test('app bind reaches a recorded docker-host installation through --ssh-host, which its record does not keep, and refuses without it (GY-1877)', async () => {
+  const fixture = await harness({ provider: 'docker-host', apps: [{ appId: APP_ID, slug: SLUG, installationId: INSTALLATION_ID }],
+    statusBody: () => {
+      // The host's environment file is the deployment's: the served App is the one written there.
+      const bound = [...fixture.hostFiles.values(), ...[...fixture.remotes.values()].flatMap(remote => [...remote.files.values()])].some(file => file.content.includes(`GITHUB_APP_ID=${APP_ID}`));
+      return { actor: { id: 'owner-project-operator', role: 'admin' }, repository: REPOSITORY, github: bound, githubAppId: bound ? APP_ID : null, githubInstallationId: bound ? INSTALLATION_ID : null };
+    } });
+  try {
+    const target = { sshHost: '203.0.113.10', sshUser: 'deploy', domain: 'graphyard.example.test' };
+    const first = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'docker-host', observeOnly: true, ...target }, fixture.deps);
+    await applyInstall(first, await buildPlan(first));
+    await writeFile(join(first.directory, `imported-app-${SLUG}.json`), JSON.stringify({ appId: APP_ID, slug: SLUG, privateKey: appKey, webhookSecret: IMPORTED_SECRET, repository: REPOSITORY, role: 'control-plane' }), { mode: 0o600 });
+    const bind = (...flags: string[]) => appCommand(['bind', SLUG, ...flags], { root: fixture.root, configHome: fixture.configHome, install: fixture.deps });
+    await assert.rejects(bind('--plan'), /installed on a Docker host, and its record keeps no SSH target: rerun as graphyard app bind graphyard-owner-project-imported --ssh-host HOST/);
+    const plan = await bind('--plan', '--ssh-host', target.sshHost, '--ssh-user', target.sshUser) as InstallPlan;
+    assert.equal(plan.preflight.find(entry => entry.name === 'SSH target')!.detail, 'deploy@203.0.113.10');
+    assert.ok(plan.preflight.every(entry => entry.ok), JSON.stringify(plan.preflight.filter(entry => !entry.ok)));
+    const summary = await bind('--ssh-host', target.sshHost, '--ssh-user', target.sshUser) as InstallSummary;
+    assert.equal(summary.github?.appId, APP_ID);
+    assert.equal(summary.url, 'https://graphyard.example.test');
+  } finally { await fixture.cleanup(); }
+});
+
+test('app bind takes --ssh-user and --ssh-key only for an installation reached over SSH, and --ssh-host only for docker-host (GY-1877)', async () => {
+  const { fixture, bind } = await observeOnlyInstallation();
+  try {
+    await assert.rejects(bind('--ssh-host', '203.0.113.10'), /--ssh-host names a docker-host installation's target; owner\/project is installed on railway/);
+    await assert.rejects(bind('--ssh-user', 'deploy'), /--ssh-user and --ssh-key reach a docker-host or Hetzner installation/);
+    await assert.rejects(appCommand(['list', '--ssh-host', 'h'], { root: fixture.root, configHome: fixture.configHome }), /Only app bind takes/);
+  } finally { await fixture.cleanup(); }
+});

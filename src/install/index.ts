@@ -349,8 +349,8 @@ export interface AppCommandDependencies {
  */
 export async function appCommand(args: string[], dependencies: AppCommandDependencies) {
   const [action, ...rest] = args;
-  const { values, positionals } = parseArgs({ args: rest, options: { repo: { type: 'string' }, 'app-id': { type: 'string' }, 'key-file': { type: 'string' }, role: { type: 'string' }, plan: { type: 'boolean' } }, allowPositionals: true });
-  if (action !== 'bind' && (positionals.length || values.plan)) throw new Error('Only app bind takes a SLUG or --plan: use app import --app-id ID --key-file PEM [--role ROLE], app list, or app bind SLUG [--plan]');
+  const { values, positionals } = parseArgs({ args: rest, options: { repo: { type: 'string' }, 'app-id': { type: 'string' }, 'key-file': { type: 'string' }, role: { type: 'string' }, plan: { type: 'boolean' }, 'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' }, 'ssh-key': { type: 'string' } }, allowPositionals: true });
+  if (action !== 'bind' && (positionals.length || values.plan || values['ssh-host'] || values['ssh-user'] || values['ssh-key'])) throw new Error('Only app bind takes a SLUG, --plan or --ssh-host/--ssh-user/--ssh-key: use app import --app-id ID --key-file PEM [--role ROLE], app list, or app bind SLUG [--plan]');
   const repository = values.repo ?? (await discover(dependencies.root)).repository;
   if (!repository) throw new Error('Use --repo OWNER/NAME, or run from a checkout whose origin is the managed repository');
   const directory = installDirectory(installIdFor(repository), dependencies.configHome);
@@ -379,15 +379,22 @@ export async function appCommand(args: string[], dependencies: AppCommandDepende
  * `app bind SLUG [--plan]` (GY-1877): the separate step after `install --observe-only --apply`. It
  * prepares the recorded installation's own session (provider, service, domain, base branch) as an
  * observation-only one that binds SLUG, and prints its plan, or applies it: exactly the App step.
+ * The record keeps no SSH target, so a docker-host installation names its host again with --ssh-host,
+ * and an SSH-reached one its --ssh-user and --ssh-key as its install did.
  */
-async function bindAppCommand(positionals: string[], values: { 'app-id'?: string; 'key-file'?: string; role?: string; plan?: boolean }, repository: string, directory: string, record: InstallRecord | null, dependencies: AppCommandDependencies) {
+async function bindAppCommand(positionals: string[], values: { 'app-id'?: string; 'key-file'?: string; role?: string; plan?: boolean; 'ssh-host'?: string; 'ssh-user'?: string; 'ssh-key'?: string }, repository: string, directory: string, record: InstallRecord | null, dependencies: AppCommandDependencies) {
   const [slug, ...extra] = positionals;
-  if (!slug || extra.length || values['app-id'] || values['key-file'] || values.role) throw new Error('Use app bind SLUG [--plan] [--repo OWNER/NAME]');
+  if (!slug || extra.length || values['app-id'] || values['key-file'] || values.role) throw new Error('Use app bind SLUG [--plan] [--repo OWNER/NAME] [--ssh-host HOST [--ssh-user USER] [--ssh-key FILE]]');
   if (!/^[a-z0-9][a-z0-9-]{0,99}$/i.test(slug)) throw new Error(`app bind takes an App slug such as graphyard-owner-repo, not ${slug}`);
   if (!record) throw new Error(`No installation of ${repository} is recorded under ${directory}; app bind binds an App to a deployed observation-only control plane. Run graphyard install --provider PROVIDER --repo ${repository} --observe-only --apply first`);
+  if (record.provider === 'docker-host' && !values['ssh-host']) throw new Error(`${repository} is installed on a Docker host, and its record keeps no SSH target: rerun as graphyard app bind ${slug} --ssh-host HOST [--ssh-user USER] [--ssh-key FILE], naming the host its observation-only install reached`);
+  if (record.provider !== 'docker-host' && values['ssh-host']) throw new Error(`--ssh-host names a docker-host installation's target; ${repository} is installed on ${record.provider}`);
+  if (record.provider !== 'docker-host' && record.provider !== 'hetzner' && (values['ssh-user'] || values['ssh-key'])) throw new Error(`--ssh-user and --ssh-key reach a docker-host or Hetzner installation; ${repository} is installed on ${record.provider}`);
   const session = await prepareInstall(dependencies.root, {
     repository, provider: record.provider, baseBranch: record.baseBranch, reviewPolicy: record.reviewPolicy,
     ...(record.domain ? { domain: record.domain } : {}), ...(record.service ? { serverName: record.service } : {}),
+    ...(values['ssh-host'] ? { sshHost: values['ssh-host'] } : {}), ...(values['ssh-user'] ? { sshUser: values['ssh-user'] } : {}),
+    ...(values['ssh-key'] ? { sshKey: values['ssh-key'] } : {}),
     observeOnly: true, bindApp: slug,
   }, { log: line => console.error(line), ...(dependencies.configHome ? { configHome: dependencies.configHome } : {}), ...(dependencies.fetcher ? { fetch: dependencies.fetcher } : {}), ...dependencies.install }, values.plan ? 'plan' : 'apply');
   const plan = await buildPlan(session);
