@@ -67,7 +67,7 @@ Price: `--confirm-price`, `--max-monthly`. Saved Apps (`--github-app FILE`, `.gr
 
 | Symptom | Action
 | --- | ---
-| `Preflight is incomplete` | nothing created; run its `fix`
+| `Preflight is incomplete` | run its `fix`
 | `Railway workspace` `false` | `--workspace`
 | `did not become healthy` | `install … --logs`
 | `not confirmed within 900 s` | confirm, `resume`
@@ -76,7 +76,7 @@ Price: `--confirm-price`, `--max-monthly`. Saved Apps (`--github-app FILE`, `.gr
 | `Branch protection could not be applied` | admin `gh auth login`
 | `already binds` / `still holds GITHUB_APP_` / `could not be read` | remove binding/variables or drop `--no-github-app`
 | `inside the managed repository` | `GRAPHYARD_CONFIG_HOME` outside worktrees
-| fresh database (401, unlisted agents) | `up` re-issues credentials, refiles onboarding/goal, archives cursor
+| fresh database (401, unlisted agents) | `up` re-issues credentials, refiles onboarding/goal, archives cursor (hosts: `--fresh-cursor`)
 
 ## Agent execution contract
 

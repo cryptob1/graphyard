@@ -332,6 +332,8 @@ interface UpState {
    * master loop runs again, the install re-issues every credential and the loop starts a fresh cursor.
    */
   reissue?: string[] | null;
+  /** GY-1851: the host install that restarted the loop on a fresh cursor (`install --fresh-cursor`), and the old cursor's archive. */
+  hostCursor?: { host: string; archived: { file: string; cycle: number } | null } | null;
 }
 export const upStateFile = (root: string) => resolve(root, '.graphyard/up.json');
 /** GY-1833: `up --merger control-plane` over a recorded github run migrates the install; the reverse starts over. */
@@ -386,6 +388,11 @@ function installSignIn(stdout: string) {
  */
 async function rememberSignIn(root: string, state: UpState, stdout: string) {
   const { claim, operatorTokenFile, identitiesHost } = installSignIn(stdout);
+  const fresh = parseJson(stdout)?.freshCursor;
+  if (state.reissue?.length && typeof fresh?.host === 'string') {
+    state.hostCursor = { host: fresh.host, archived: typeof fresh.archived?.file === 'string' ? { file: fresh.archived.file, cycle: Number(fresh.archived.cycle) || 0 } : null };
+    await writeState(root, state);
+  }
   if ((operatorTokenFile && operatorTokenFile !== state.operatorTokenFile) || (identitiesHost && identitiesHost !== state.identitiesHost)) {
     if (operatorTokenFile) state.operatorTokenFile = operatorTokenFile;
     if (identitiesHost) state.identitiesHost = identitiesHost;
@@ -634,6 +641,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   // Supervised installs register no reviewer App (GY-1501): the operator is the reviewer.
   // Control-plane merger (GY-1552) registers no App at all: install --no-github-app, no --reviewer.
   const installArgs = (mode: '--plan' | '--apply') => ['install', '--provider', request.provider, '--repo', request.repository, ...(controlPlaneMerger ? ['--no-github-app'] : supervised ? [] : ['--reviewer', request.reviewer]), mode, ...(state.noHerdr ? ['--no-herdr'] : state.herdrInstance ? ['--herdr-instance'] : []),
+    // GY-1851: a re-issue restarts a host install's loop on a fresh cursor where it runs; other installs ignore it.
+    ...(mode === '--apply' && state.reissue?.length ? ['--fresh-cursor'] : []),
     ...([['--confirm-price', passed.confirmPrice], ['--max-monthly', passed.maxMonthly], ['--ssh-key', passed.sshKey], ['--ssh-host', passed.sshHost], ['--ssh-user', passed.sshUser]] as const).flatMap(([flag, value]) => value ? [flag, value] : []),
     ...(controlPlaneMerger ? [] : (request.reuseApps ?? []).flatMap(slug => ['--reuse-app', slug]))];
   const rerun = () => `graphyard up --repo ${request.repository} --provider ${request.provider}${controlPlaneMerger ? ' --merger control-plane' : supervised ? '' : ' --merger github'}${request.agent ? ' --agent' : ''}`;
@@ -823,7 +832,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         state.reissue = refused;
         state.completed = state.completed.filter(name => !reissueSteps.includes(name));
         // The onboarding item and the goal lived in the old database: they are filed again on the fresh one.
-        state.onboardingWork = null; state.onboardingRequest = null; state.goal = null; state.goalRequest = null;
+        state.onboardingWork = null; state.onboardingRequest = null; state.goal = null; state.goalRequest = null; state.hostCursor = null;
         await writeState(deps.root, state);
         deps.emit({ kind: 'note', text: `The control plane refused the recorded ${refused.join(', ')} credential${refused.length > 1 ? 's' : ''} (401): it serves a fresh database, so this run re-issues the coordinator, operator-agent and approver credentials and starts the master loop on a fresh cursor, archiving the old one beside itself.` });
       }
@@ -870,7 +879,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     // A self-contained host's loop and Herdr run there: its install's control-plane step, once done,
     // never runs again, so `install --herdr-only` sets Herdr up there on every run, its own instance too.
     if (remoteLoop) {
-      const args = [...installArgs('--apply'), '--herdr-only'].filter(arg => arg !== '--no-herdr' && arg !== '--herdr-instance');
+      const args = [...installArgs('--apply'), '--herdr-only'].filter(arg => arg !== '--no-herdr' && arg !== '--herdr-instance' && arg !== '--fresh-cursor');
       const result = await deps.cli(args);
       const output = parseJson(result.stdout);
       if (typeof output?.herdr?.attach === 'string') {
@@ -1013,7 +1022,13 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     await step('master-loop', async () => {
       await cleanCli('master-loop');
       let fresh: string | undefined;
-      if (state.reissue?.length) {
+      if (state.reissue?.length && state.identitiesHost) {
+        // GY-1851: a host install's loop runs on the host, never here: `install --fresh-cursor` stopped it
+        // there, archived its cursor and started it again, so nothing is stopped or started on this machine.
+        if (!state.hostCursor) throw new UpStop(`master-loop: the install on ${state.identitiesHost} reported no fresh cursor for its master loop, so the loop there may still run on the old database's cursor; rerun ${rerun()}`, upExitCodes.failed);
+        fresh = `the loop on ${state.hostCursor.host} started a fresh cursor${state.hostCursor.archived ? `; the old one (cycle ${state.hostCursor.archived.cycle}) is archived at ${state.hostCursor.archived.file}` : ''}`;
+        deps.emit({ kind: 'note', text: `Re-issued the coordinator, operator-agent and approver credentials for the fresh database; ${fresh}.` });
+      } else if (state.reissue?.length) {
         // GY-1851: stop, archive, start, in that order: a running loop holds the old cursor in memory
         // and writes it again as it stops, so the cursor is set aside (never deleted) only once the
         // loop has exited, and the loop starts again reading no cursor at all.
@@ -1032,7 +1047,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       };
       await waitGreen(['master-loop'], false, refused);
       await refused();
-      if (state.reissue?.length) { state.reissue = null; return fresh; }
+      if (state.reissue?.length) { state.reissue = null; state.hostCursor = null; return fresh; }
     });
 
     await waitGreen(last.map(item => item.id), true);

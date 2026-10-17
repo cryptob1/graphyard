@@ -184,3 +184,104 @@ test('unit:reinstall-reissues-stale-credentials — up re-issues the coordinator
   assert.deepEqual(calls.slice(kept2).filter(args => args[0] === 'install' || ['init', 'autonomy', 'restart'].includes(args[1])), []);
   assert.ok(recovered.some(event => event.kind === 'note' && /still lists the identity: its database is not fresh/.test(event.text)), JSON.stringify(recovered));
 });
+
+/**
+ * A self-contained host install: its loop runs on the host under its user unit, never on this machine.
+ * The host below is simulated: an in-memory file system behind the install's Transport, with the
+ * loop unit running and holding its cursor in memory, writing it again as systemd stops it.
+ */
+const fakeHost = (checkout: string, unit: string, cursor: string) => {
+  const files = new Map<string, string>([[`${checkout}/.graphyard/master.json`, JSON.stringify({ credentialFile: cursor.replace(/\.daemon\.json$/, '.token') })]]);
+  const commands: string[] = [];
+  let loop: { cycle: number } | null = null;
+  const start = () => { const text = files.get(cursor); loop = { cycle: text ? JSON.parse(text).cycle : 0 }; files.set(cursor, JSON.stringify({ cycle: loop.cycle })); };
+  const stop = () => { if (loop) files.set(cursor, JSON.stringify({ cycle: loop.cycle })); loop = null; };
+  const transport = {
+    description: 'fake host',
+    putFile: async () => {},
+    exec: async (program: string, args: string[]) => {
+      // asUser runs `runuser -u graphyard -- sh -c SCRIPT CWD PROGRAM ARGS...`.
+      const [command, ...rest] = program === 'runuser' ? args.slice(args.indexOf('-c') + 3) : [program, ...args];
+      commands.push([command, ...rest].join(' '));
+      if (command === 'cat') { const text = files.get(rest[0]); return text === undefined ? { stdout: '', stderr: `cat: ${rest[0]}: No such file or directory`, code: 1 } : { stdout: text, stderr: '', code: 0 }; }
+      if (command === 'systemctl' && rest[1] === 'stop' && rest[2] === unit) { stop(); return { stdout: '', stderr: '', code: 0 }; }
+      if (command === 'systemctl' && rest[1] === 'start' && rest[2] === unit) { start(); return { stdout: '', stderr: '', code: 0 }; }
+      if (command === 'mv') { const [from, to] = rest.filter(arg => !arg.startsWith('-')); files.set(to, files.get(from)!); files.delete(from); return { stdout: '', stderr: '', code: 0 }; }
+      return { stdout: '', stderr: `unexpected ${command}`, code: 127 };
+    },
+  };
+  return { files, commands, transport, start, get loop() { return loop; }, set cycle(value: number) { loop!.cycle = value; } };
+};
+
+test('unit:reinstall-reissues-stale-credentials — a self-contained host install restarts the loop on the host on a fresh cursor, archiving the running loop\'s old one there, and starts nothing on this machine', async () => {
+  const { runUp } = await up();
+  const { installRequestFromArgs, resetHostCursor, resumeCommand } = await import('../src/install/index.js');
+  const parsed = installRequestFromArgs(['--repo', 'acme/shop', '--target', 'host', '--fresh-cursor']).request;
+  assert.equal(parsed.freshCursor, true);
+  assert.match(resumeCommand({ inputs: { baseBranch: 'main', ...parsed } } as any), / --fresh-cursor --apply$/);
+  const root = await temporaryDirectory('reinstall-fresh-host');
+  execFileSync('git', ['init', '-q', root]);
+  const checkout = '/home/graphyard/install/checkout', unit = 'graphyard-master-acme-shop.service', cursor = '/home/graphyard/install/config/acme-shop-master.daemon.json';
+  const host = fakeHost(checkout, unit, cursor);
+  host.start(); host.cycle = 16602;
+
+  const calls: string[][] = [];
+  let refused = false, stops = 0, starts = 0;
+  const cli: UpDependencies['cli'] = async args => {
+    calls.push(args);
+    if (args[0] === 'install' && args.includes('--plan')) return { code: 0, stdout: JSON.stringify({ installId: 'acme-shop', installDirectory: '/install/acme-shop', principals: [{ id: 'acme-shop-operator', role: 'admin', sessionKind: 'human' }], preflight: [{ name: 'GitHub CLI', ok: true }] }) };
+    if (args[0] === 'install' && args.includes('--apply')) {
+      // The install itself: install --fresh-cursor resets the cursor on the host, through its transport.
+      const fleet = { host: 'box', units: [{ name: unit, scope: 'user' as const, path: '', role: 'master loop', active: 'active' }] };
+      const freshCursor = args.includes('--fresh-cursor') ? await resetHostCursor(host.transport, checkout, fleet, new Date('2026-10-17T03:00:00.000Z')) : undefined;
+      return { code: 0, stdout: JSON.stringify({ ok: true, host: { ...fleet, masterIdentities: true }, ...(freshCursor ? { freshCursor } : {}) }) };
+    }
+    return { code: 0, stdout: '{}' };
+  };
+  const deps = (events: UpEvent[]): UpDependencies => ({
+    root, pollMs: 1, emit: event => { events.push(event); }, cli,
+    now: () => 0, sleep: async () => { await yieldTurn(); },
+    serverUrl: async () => SERVER, masterToken: async () => MASTER, operatorToken: async () => ADMIN,
+    status: async () => green(host.loop !== null),
+    credentialAnswers: async () => refused ? [{ identity: 'operator-agent', status: 401, listed: false }, { identity: 'approver', status: 401, listed: false }] : [],
+    stopLoop: async () => { stops++; return { unit: null }; }, startUnit: async () => { starts++; },
+    publishOnboarding: async () => null, onboardingMerged: async () => true,
+  });
+  const request: UpRequest = { repository: 'acme/shop', provider: 'host', agent: false, reviewer: 'claude', master: 'claude', goalFile: null, browserProfile: null };
+  const local = () => calls.filter(args => args[0] === 'master' && args[1] === 'restart').length;
+
+  const first = await runUp(request, deps([]));
+  assert.equal(first.exitCode, 0, first.next);
+  assert.equal(JSON.parse(await readFile(join(root, '.graphyard/up.json'), 'utf8')).identitiesHost, 'box');
+  assert.ok(!calls.some(args => args.includes('--fresh-cursor')), 'a first install resets no cursor');
+
+  // The database is replaced; the host's loop runs on, and writes cycle 16603 from memory as it stops.
+  refused = true; host.cycle = 16603;
+  const before = { commands: host.commands.length, restarts: local() };
+  const events: UpEvent[] = [];
+  const reinstall = await runUp(request, deps(events));
+  assert.equal(reinstall.exitCode, 0, reinstall.next);
+  assert.ok(calls.some(args => args[0] === 'install' && args.includes('--apply') && args.includes('--fresh-cursor')), 'the install is asked to reset the host\'s cursor');
+  // On the host: stopped, its shutdown write archived, started again on no cursor.
+  const order = host.commands.slice(before.commands).map(command => command.split(' ')[0] === 'systemctl' ? command : command.split(' ')[0]);
+  assert.deepEqual(order.filter(command => command !== 'cat'), [`systemctl --user stop ${unit}`, 'mv', `systemctl --user start ${unit}`]);
+  const archive = '/home/graphyard/install/config/acme-shop-master.daemon.archived-2026-10-17T03-00-00-000Z-';
+  const archived = [...host.files.keys()].filter(file => file.startsWith(archive));
+  assert.equal(archived.length, 1, [...host.files.keys()].join(', '));
+  assert.equal(JSON.parse(host.files.get(archived[0])!).cycle, 16603, 'the archive holds the stopped loop\'s last write');
+  assert.deepEqual(host.loop, { cycle: 0 }, 'the host\'s loop runs on a fresh cursor');
+  assert.equal(JSON.parse(host.files.get(cursor)!).cycle, 0);
+  // Nothing on this machine: no local stop, archive, unit start or master restart, so no second coordinator.
+  assert.equal(stops, 0); assert.equal(starts, 0); assert.equal(local(), before.restarts);
+  const notes = events.flatMap(event => event.kind === 'note' ? [event.text] : []);
+  assert.ok(notes.some(text => text.includes(`the loop on box started a fresh cursor; the old one (cycle 16603) is archived at ${archived[0]}`)), notes.join('\n'));
+  const state = JSON.parse(await readFile(join(root, '.graphyard/up.json'), 'utf8'));
+  assert.equal(state.reissue, null); assert.equal(state.hostCursor, null);
+
+  // Accepted credentials again: no install (Herdr's own --herdr-only check runs on every run), nothing touched on the host.
+  refused = false;
+  const settled = { calls: calls.length, commands: host.commands.length };
+  assert.equal((await runUp(request, deps([]))).exitCode, 0);
+  assert.deepEqual(calls.slice(settled.calls).filter(args => (args[0] === 'install' && !args.includes('--herdr-only')) || args[1] === 'restart'), []);
+  assert.equal(host.commands.length, settled.commands);
+});
