@@ -563,7 +563,24 @@ export const daemonStateSchema = z.object({
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
+/**
+ * GY-1851: set the cursor aside so the next loop starts a fresh one, as a reinstall onto a fresh
+ * database needs. It is kept beside itself as `NAME.daemon.archived-STAMP.json`, never deleted;
+ * the archive's path and the cycle the cursor had reached come back, or null when there was none.
+ */
+export async function archiveDaemonCursor(config: Pick<MasterConfig, 'credentialFile'>, now = new Date()): Promise<{ file: string; cycle: number } | null> {
+  const file = daemonStatePath(config as MasterConfig);
+  let raw: string;
+  try { raw = await readFile(file, 'utf8'); } catch (error: any) { if (error.code === 'ENOENT') return null; throw error; }
+  let cycle = 0;
+  try { cycle = clampCount(Number(JSON.parse(raw)?.cycle), Number.MAX_SAFE_INTEGER); } catch { /* an unreadable cursor is archived all the same */ }
+  const archive = file.replace(/\.json$/, `.archived-${now.toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}.json`);
+  await rename(file, archive);
+  return { file: archive, cycle };
+}
+
 // The cursor's persistence, bounds and single-writer lock live in ./state-cursor.ts; these
 // re-export it, so every existing import keeps working.
+import { daemonStatePath, clampCount } from './state-cursor.js';
 export { standingTmpKey, retainedActions, retainedMetrics, profileCooldownMs, maxProofAttempts, retainedScopeDecisions, retainedSamples, retainedClocks, retainedBaseFailures, retainedDispatchFailureRuns, reclaimIntervalMs, gigabytes, emptyDaemonState, daemonStatePath, readDaemonState, writeDaemonState, pruneDaemonState, clampCount, storeAction, touchStanding, faultActionKey, boundDaemonState, boundDeployment, pidNamespace, initialPidNamespace, liveProcess, acquireDaemonLock, message } from './state-cursor.js';
 
