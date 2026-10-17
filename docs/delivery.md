@@ -5,7 +5,7 @@ Releases ([rollback](recovery.md#rollback)): `admin` sets policy; `builder`s bui
 
 ## Release candidates
 
-Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`/`release/production` (via `graphyard release`).
+Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`/`release/production`.
 
 - `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N first-parent merges (`GRAPHYARD_RC_MAX_PRS`=10; rest queue); `release-candidate.yml` cuts on dispatch.
 - `POST /api/candidates` (`admin`/`coordinator`/`intent:create`; Idempotency-Key; `trigger`/`waitMinutes`/`since`/`sinceSha`): ≤5 oldest uncut → `C-N` (`members`/`sourceSha`/`identity`); `schedule` waits five/`waitMinutes`; floor: newest `rc/`. Scoped `workItems` refuse out-of-scope writes; `GET` filters. Tags `rc/ID` at `sourceSha`; one validation (identical replays, else 409). `everyMerges`>5→5. `POST /api/candidates/ID/promotion` selects once on ≤4h validation passing all required cases at `sha`/`identity`/`artifact`/`release`, else 409; `production`/`/api/delivery` keep last.
@@ -16,7 +16,7 @@ Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`
 - Failures file [holds](validation.md#release-holds) per outcome, else `release follow-up ID`.
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records `rc-soak/ID`.
 
-**The master loop promotes** once main differs from the last `rc-production/`/cut SHAs, nothing queued, `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`) passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 5, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`/`GRAPHYARD_PRODUCTION_URL`; no workflow; managed repositories run [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. `release.onFailure` `hold` (default `revert`) names each failing case, step and would-be target or `no map matched`, reverting/reopening nothing; `release.revertUnmatched: false` holds an unmatched failure instead of the newest item. `GRAPHYARD_UAT_STATIC` [merge-writer](delivery-redesign.md#merge-writer) trials run required/uat cases uncredentialed: failing, secret-declaring or unrunnable fail; timeouts re-queue. `release status` lists; `release GY-N EPOCH` leases. Tip mismatch names both SHAs in `master status` (off skips stuck).
+**The master loop promotes** once main differs from the last `rc-production/`/cut SHAs, nothing queued, `run.promoteEveryMinutes` passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 5, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`/`GRAPHYARD_PRODUCTION_URL`; no workflow; managed repositories run [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. `release.onFailure` `hold` (default `revert`) names each failing case, step and would-be target or `no map matched`, reverting/reopening nothing; `release.revertUnmatched: false` holds an unmatched failure instead of the newest item. `GRAPHYARD_UAT_STATIC` [merge-writer](delivery-redesign.md#merge-writer) trials run required/uat cases uncredentialed: failing, secret-declaring or unrunnable fail; timeouts re-queue. `release status` lists; `release GY-N EPOCH` leases. Tip mismatch names both SHAs in `master status` (off skips stuck).
 
 ### Release filing credential
 
@@ -80,14 +80,14 @@ Bound cases preview items (head/main; `GRAPHYARD_PREVIEW_TITLE`): static builds 
 {"registration":{"id":"production-observer","revision":1},"epoch":4,"environment":{"id":"production","revision":1},"expectedGeneration":4,"snapshotId":"railway:snapshot:01J8Q4Z0Y3","observedAt":"2026-09-18T20:15:07Z","validFrom":"2026-09-18T20:12:31Z","validTo":"2026-09-18T20:15:07Z","services":[{"service":"api","complete":true,"deployment":{"id":"dep-a1","status":"success","deployedAt":"2026-09-18T20:12:31Z"},"instances":[{"instance":"api-1","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","measurement":"host-attestation","healthy":true}]},{"service":"web","complete":true,"deployment":{"id":"dep-w7","status":"success","deployedAt":"2026-09-18T20:12:40Z"},"instances":[{"instance":"web-1","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","measurement":"host-attestation","healthy":true}]}]}
 ```
 
-`POST /api/delivery/observe-sha` marks contained merges Deployed (any producer, or a `delivery:observe-sha` principal; [install](install.md)). Needs production's revision, every service, exact 40-hex `sha`, `observedAt` not future:
+`POST /api/delivery/observe-sha` marks contained merges Deployed (any producer, or a `delivery:observe-sha` principal; [install](install.md)). Needs production's revision, every service, exact 40-hex `sha`, `observedAt` not future; optionally `release`/`artifact`:
 
 ```json
-{"environment":{"id":"production","revision":1},"sha":"0123456789abcdef0123456789abcdef01234567","services":["api","web"],"observedAt":"2026-09-18T20:15:07Z"}
+{"environment":{"id":"production","revision":1},"sha":"0123456789abcdef0123456789abcdef01234567","services":["api","web"],"observedAt":"2026-09-18T20:15:07Z","release":"20260918T200000Z","artifact":"tree:89abcdef0123456789abcdef0123456789abcdef"}
 ```
 
-An observation never yields Production verified: smoke-required work needs an `e2e:deploy-smoke` pass naming that `sha`, executed and none skipped. Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery sweep` per `freshnessSeconds`; `graphyard delivery` shows it.
+An observation never yields Production verified: smoke-required work needs an `e2e:deploy-smoke` pass naming that `sha`, executed and none skipped. Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery sweep` per `freshnessSeconds`; `graphyard delivery` shows it. Promoted candidates verify only on a later `observe-sha` or sweep (`GRAPHYARD_PRODUCTION_IDENTITY_URL`) reading matching `release`/`sourceSha`/`artifact`; else `mismatched` (named, `expected` kept) or `unknown`.
 
 `master status` `delivery`: `readyToMerged`/`mergedToProduction`/`stages` p50/p90; 7-day p90 over `deliverySpeed` alerts.
 
-`POST /api/validation/result` binds manifest/signature/measurements; mismatches void passes as `attribution-undermined` (`GET /api/analytics/attribution`). A loop-owned post-deploy observation item never dispatches: deployment verification reads it; a pass closes it `delivered-observation`, a fail escalates; no-smoke deliveries backfill five per pass.
+`POST /api/validation/result` binds manifest/signature/measurements; mismatches void passes as `attribution-undermined` (`GET /api/analytics/attribution`). A loop-owned post-deploy observation item never dispatches: deployment verification reads it; a pass closes it `delivered-observation`, a fail escalates; no-smoke deliveries backfill five per pass. Ledger tags read `manual:post-deploy/onboarding-default-target`.
