@@ -301,7 +301,12 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
     const sample = observeItemClock(state, item, clock);
     if (sample) state.latency.push(sample);
   }
-  const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals, baseFailed: cycle.baseFailed, docsSyncs: state.docsSyncs });
+  // GY-1890: the same profile read the dispatch step acted on answers whether any launch profile is
+  // free. With none free a claimable item's wait is the fleet's slot capacity, so its silence subject
+  // is a capacity one; the bound then files the class that owns slot starvation, never the loop's.
+  const launchProfiles = health.filter(entry => entry.profile.mode === 'launch');
+  const fleetHeld = launchProfiles.length > 0 && !launchProfiles.some(entry => entry.healthy && !entry.busy);
+  const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals, baseFailed: cycle.baseFailed, docsSyncs: state.docsSyncs, fleetHeld });
   const silence = trackSilence(state, actionable, performed, clock);
   const { stages, lead, production, postDeploy, postDeployFailures } = stageMetrics(snapshot.work, clock);
   // The cycle's duration, and of it the time at least one child was in flight: the difference is

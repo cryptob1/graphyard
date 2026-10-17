@@ -315,6 +315,16 @@ async function dispatchStepWithin(cycle: Cycle, health: ReturnType<typeof profil
         const detail = `No worker profile can take ${item.key}: ${launchable.map(entry => `${entry.profile.name} (${entry.reason})`).join('; ') || 'no launch profile is configured'}`;
         const escalationKey = `escalation:dispatch:${item.id}`;
         if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+      } else {
+        // GY-1890: the fleet is saturated — every profile is held by a live attempt or otherwise
+        // unavailable while work is claimable. That wait is the fleet's slot capacity, so it is
+        // recorded on the item as the finding it is (the measure reads the same cycle's profile
+        // read and counts the subject under capacity, never as the loop's silence). Without this
+        // record the launch step said nothing at all about a queue it correctly declined to launch
+        // into, and the silence bound filed the loop class for a wait only a worker finishing ends.
+        const heldDetail = `Every worker profile is held while ${item.key} is claimable (${launchable.map(entry => `${entry.profile.name}${entry.reason ? `: ${entry.reason}` : ': held for an in-flight launch'}`).join('; ')}); ${item.key} keeps its dispatch order and starts when a slot frees`;
+        const heldKey = `capacity:${item.id}`;
+        if (detailChanged(state.actions[heldKey], heldDetail)) performed.push(await record(state, heldKey, { kind: 'capacity', work: item.key, principal: null, state: 'done', detail: heldDetail, attempts: (state.actions[heldKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       }
       return 'stop';
     }
