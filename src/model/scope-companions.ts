@@ -157,20 +157,37 @@ export async function peerModuleGround(path: string, text: string | null, planne
 }
 
 /**
+ * True when the reason's prose names the check. Paths are stripped first so a token inside
+ * `.test.ts` never counts as naming the `test` check — only the story outside the paths does.
+ */
+const reasonNamesCheck = (reason: string, name: string) => {
+  let prose = reason;
+  for (const path of namedPaths(reason)) prose = prose.split(path).join(' ');
+  prose = prose.replace(/:\d+/g, ' ');
+  return new RegExp(`(?:^|[^\\w.-])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=[^\\w.-]|$)`, 'i').test(prose);
+};
+/** True when the reason quotes the path at a failure site (`PATH:LINE`), tying the file to that failure. */
+const reasonQuotesFailureSite = (reason: string, path: string) =>
+  new RegExp(`${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:\\d+`).test(reason);
+/**
  * GY-1893: the existing test file the failed required check on the item's own candidate names, as
  * the ask's own reason quotes the failure (the GY-1881 instance: a live wall-clock bomb on the
  * base, a one-line clock answer, refused and standing past the fifteen-minute bound). The evidence
  * is the item's own record — a check run that failed on the current candidate, whose failure the
- * item's test gate holds — and the ask naming both that check and the file. A red gate alone
- * grants nothing (an item that has not run yet carries the same refusal), a story about a check the
- * record does not hold grants nothing, and only a test file is granted: the item answers the check
- * inside its attempt instead of waiting out the bound on an approver.
+ * item's test gate holds — and the ask naming both that check and the file at its failure site
+ * (`PATH:LINE`). A red gate alone grants nothing (an item that has not run yet carries the same
+ * refusal), a story about a check the record does not hold grants nothing, a story that names the
+ * file but not the held check (or names a different check) grants nothing, a file the failure site
+ * does not quote grants nothing, and only a test file is granted: the item answers the check inside
+ * its attempt instead of waiting out the bound on an approver.
  */
 export function failedCheckTestGround(path: string, item: FailedCheckSource, reason?: string): string | null {
   if (!reason || !testFile(path) || !item.candidate || !namedPaths(reason).includes(path)) return null;
+  if (!reasonQuotesFailureSite(reason, path)) return null;
   if (item.observation?.candidate?.sha !== item.candidate.sha) return null;
   const failed = [...new Set((item.observation?.checks ?? []).filter(check => check.result === 'failure').map(check => check.name)
-    .filter(name => (item.gates ?? []).some(gate => !gate.passed && gate.reasons.some(held => ciCheckName(held) === name))))];
+    .filter(name => (item.gates ?? []).some(gate => !gate.passed && gate.reasons.some(held => ciCheckName(held) === name)))
+    .filter(name => reasonNamesCheck(reason, name)))];
   return failed.length ? `${path} is the test file the failed required check ${failed.join(' and ')} on this item's current candidate names, which the item answers within its attempt` : null;
 }
 /**
@@ -178,7 +195,7 @@ export function failedCheckTestGround(path: string, item: FailedCheckSource, rea
  * need no file read: the documentation-budget gate, when the ask or the plan holds documentation;
  * the test-duration baseline, when it holds a test file; the test file named for the criteria's proofs (`proofTestFiles`); a single file under `web/`
  * when a criterion describes a change in the web UI (GY-945's page and stylesheet); and — GY-1893 — the existing test file a failed required check on the
- * item's own candidate names, which the ask's `reason` quotes. The engine's rule grants
+ * item's own candidate names, which the ask's `reason` names with that check and its `PATH:LINE`. The engine's rule grants
  * these; what needs the base branch — imports, and which proofs a file already holds — is the
  * loop's (`importingTestGround`, `newProofTestGround`, `peerModuleGround`).
  */

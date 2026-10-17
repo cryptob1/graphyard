@@ -738,7 +738,8 @@ test(`manual:fault-class-scope — scope-request|GY-1881|${gy1881At}: the failed
   assert.deepEqual(scopeFaults(settled1893(work), gy1881At).map(fault => fault.kind), [], 'the granted ask never stands to become the fault');
   // What the rule still refuses: an item that has not run the check (the same refusal a fresh item
   // carries), a run read on another candidate, a run the gate does not hold, an ask that names no
-  // file, a check the story does not name, and a path that is no test file.
+  // file, a check the story does not name, a different check than the one held failed, a file the
+  // failure site does not quote, and a path that is no test file.
   const unrun = standing1893(gy1881Fixture);
   unrun.candidate = null; unrun.observation = null;
   assert.equal(decideScopeRequest(unrun, unrun.scopeRequest!).state, 'refused', 'a red gate without a failing run is the no-candidate refusal, not a ground');
@@ -751,6 +752,19 @@ test(`manual:fault-class-scope — scope-request|GY-1881|${gy1881At}: the failed
   const unnamed = standing1893(gy1881Fixture);
   unnamed.scopeRequest = { ...unnamed.scopeRequest!, reason: 'The change reads better with this file refactored.' };
   assert.equal(decideScopeRequest(unnamed, unnamed.scopeRequest).state, 'refused');
+  // The file and its failure site are in the reason, but the prose never names the held check — a
+  // red `test` alone must not grant an arbitrary test file just because its path appears.
+  const unnamedCheck = standing1893(gy1881Fixture);
+  unnamedCheck.scopeRequest = { ...unnamedCheck.scopeRequest!, reason: `The assertion at tests/pi-provider-limit-exhaustion.test.ts:199 is flaky against the wall clock; stub Date there.` };
+  assert.equal(decideScopeRequest(unnamedCheck, unnamedCheck.scopeRequest).state, 'refused', 'a check the story does not name grants nothing');
+  // The reason names a different check than the one the gate holds failed.
+  const otherCheck = standing1893(gy1881Fixture);
+  otherCheck.scopeRequest = { ...otherCheck.scopeRequest!, reason: `CI point: the required typecheck check failed on candidate 552d4fbeedff — typecheck fails at tests/pi-provider-limit-exhaustion.test.ts:199. The one-line answer is a stub in that file.` };
+  assert.equal(decideScopeRequest(otherCheck, otherCheck.scopeRequest).state, 'refused', 'a check the record does not hold as failed grants nothing');
+  // The reason names the held check and the file, but never quotes a PATH:LINE failure site.
+  const noSite = standing1893(gy1881Fixture);
+  noSite.scopeRequest = { ...noSite.scopeRequest!, reason: `CI point: the required test check failed on candidate 552d4fbeedff. Root cause lives in tests/pi-provider-limit-exhaustion.test.ts; stub the clock there.` };
+  assert.equal(decideScopeRequest(noSite, noSite.scopeRequest).state, 'refused', 'a file the failure site does not quote grants nothing');
   const source = standing1893(gy1881Fixture);
   source.scopeRequest = { ...source.scopeRequest!, paths: ['src/up.ts'] };
   assert.equal(decideScopeRequest(source, source.scopeRequest).state, 'refused', 'only a test file is granted: the item answers the check, it does not take new source scope');
