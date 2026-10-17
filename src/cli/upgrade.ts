@@ -123,7 +123,7 @@ async function databaseSchemaOf(url: string | null): Promise<number | null> {
 }
 
 /** The real effect of each step; the backup runs on the code already loaded, the release that matches the database. */
-function liveEffects(inputs: UpgradeInputs, recordFile: string): UpgradeEffects {
+export function liveEffects(inputs: UpgradeInputs, recordFile: string, fetchHealth: (url: string) => Promise<Pick<Response, 'ok' | 'status' | 'json'>> = url => fetch(url, { signal: AbortSignal.timeout(10_000) })): UpgradeEffects {
   const shell = (command: string, cwd: string) => {
     const run = spawnSync(command, { cwd, shell: true, stdio: 'inherit' });
     if (run.status !== 0) throw new Error(`\`${command}\` exited ${run.status ?? run.signal}`);
@@ -138,7 +138,7 @@ function liveEffects(inputs: UpgradeInputs, recordFile: string): UpgradeEffects 
         finally { await store.close(); }
       } else if (step.id === 'health') {
         if (!inputs.url) throw new Error('Set GRAPHYARD_URL so the upgrade can read /healthz');
-        healthVerdict(await fetch(`${inputs.url}/healthz?strict`, { signal: AbortSignal.timeout(10_000) }), inputs.target.version);
+        await healthVerdict(await fetchHealth(`${inputs.url}/healthz?strict`), inputs.target.version);
       } else if (step.id === 'redeploy' && !inputs.install) throw new Error(step.command);
       else shell(step.command, step.id === 'checkout' || step.id === 'npm-ci' ? inputs.cliRoot : inputs.repoRoot);
     },

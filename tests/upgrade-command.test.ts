@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { healthVerdict, renderPlan, resolveTarget, runUpgrade, schemaAt, upgradePlan, type UpgradeInputs, type UpgradeStep } from '../src/cli/upgrade.js';
+import { healthVerdict, liveEffects, renderPlan, resolveTarget, runUpgrade, schemaAt, upgradePlan, type UpgradeInputs, type UpgradeStep } from '../src/cli/upgrade.js';
 import { installRequestFromArgs, redeployArguments } from '../src/install/index.js';
 import type { InstallRecord } from '../src/install/secrets.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -98,6 +98,16 @@ test('unit:upgrade-command-run — steps run in order, the previous release is r
   await assert.rejects(healthVerdict(answer(200, { ok: false, healthy: false, version: '2026.10.17', causes: ['database refuses writes'] }), '2026.10.17'), /unhealthy: database refuses writes/);
   await assert.rejects(healthVerdict(answer(503, { ok: false, healthy: false, version: '2026.10.17' }), '2026.10.17'), /HTTP 503/);
   await assert.rejects(healthVerdict(answer(200, { ok: true, healthy: true, version: '2026.10.16' }), '2026.10.17'), /reports 2026\.10\.16, not 2026\.10\.17/);
+  // Through the real health effect, an unhealthy answer stops runUpgrade at health rather than escaping it.
+  const healthOnly = { ...plan, steps: plan.steps.filter(step => step.id === 'health') };
+  const recordFile = join(await temporaryDirectory('upgrade-health-'), 'upgrade.json');
+  const live = (status: number, body: object) => runUpgrade(healthOnly, liveEffects(inputs(), recordFile, async () => answer(status, body)));
+  assert.deepEqual(await live(200, { ok: true, healthy: true, version: '2026.10.17' }), { ok: true, steps: ['health'] });
+  for (const [status, body, error] of [[503, { ok: false, healthy: false, version: '2026.10.17' }, /HTTP 503/], [200, { ok: false, healthy: false, version: '2026.10.17' }, /unhealthy/], [200, { ok: true, healthy: true, version: '2026.10.16' }, /not 2026\.10\.17/]] as const) {
+    const result = await live(status, body);
+    assert.equal(result.ok, false, `HTTP ${status} ${JSON.stringify(body)} stops the upgrade`);
+    assert.ok(!result.ok && result.failed === 'health' && error.test(result.error) && result.rollback === 'graphyard upgrade --to 2026.10.16');
+  }
 
   calls.length = 0;
   await assert.rejects(runUpgrade(upgradePlan(inputs({ databaseSchema: null })), effects()), /schema generation could not be read/);
