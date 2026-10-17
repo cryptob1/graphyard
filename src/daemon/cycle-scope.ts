@@ -63,7 +63,7 @@ export async function automaticScopeGrounds(item: Work, request: ScopeRequestSta
     if ('grounds' in named) { grounds.push(...named.grounds); continue; }
     const implied = decideScopeRequest(item, { paths: [path] });
     if (implied.state === 'approved') { grounds.push({ path, ground: implied.reason.replace(/^additive scope the item already implies — /, ''), companion: true }); continue; }
-    const companion = companionGround(path, item, paths, documentation);
+    const companion = companionGround(path, item, paths, documentation, request.reason);
     if (companion) { grounds.push({ path, ground: companion, companion: true }); continue; }
     if (held && !pathScope(path).prefix && !path.includes('*') && !exists(path)) {
       const proofs = await newProofTestGround(path, item.criteria, held);
@@ -434,7 +434,8 @@ export function transientScopeRefusal(error: unknown): string | null {
 /**
  * GY-1757. True for a failure of the call itself, which judged nothing about the item's scope: a
  * control-plane fetch aborted on timeout, a network error, or a gh CLI call that failed (rate limit
- * or network). A refusal the plane answered is never one.
+ * or network). A refusal the plane answered is never one. A git ref-lock race on the base fetch is
+ * not one either (fetchBase in review-scope.ts retries it in place).
  */
 function transportFailure(error: unknown): boolean {
   const name = error instanceof Error ? error.name : '';
