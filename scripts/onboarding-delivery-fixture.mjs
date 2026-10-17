@@ -29,7 +29,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { loadCases } from '../src/e2e/case.ts';
-import { candidatePendingOutcomes, checkoutContract, defaultStepTimeoutMs, failureDetail, releaseMaxWaitSeconds, releaseRetries, releaseVerdict, runCases, summarize } from '../src/e2e/runner.ts';
+import { candidatePendingOutcomes, checkoutContract, defaultStepTimeoutMs, deliverySuspendedCases, failureDetail, installServesDeliveries, releaseMaxWaitSeconds, releaseRetries, releaseVerdict, runCases, summarize } from '../src/e2e/runner.ts';
 import { contractPendingCases } from '../src/release-candidate.ts';
 import { checkoutRepositoryPolicy } from '../src/model/repository-policy.ts';
 import { repositoryDelivery } from '../src/install/index.ts';
@@ -263,7 +263,10 @@ export async function runOnboardingE2e(cases, { url, token, fixture, candidate =
   const selected = cases.filter(entry => entry.definition.target === 'uat');
   const runId = candidate ? `rc-${candidate.id}` : `onboarding-${randomBytes(6).toString('hex')}`;
   const pending = contractPendingCases(contract, candidate?.pendingOutcomes);
-  const pendingCases = policy.e2e.pendingOutcomes === 'blocking' ? [] : pending;
+  // GY-1938: an install that cannot serve deliveries can never satisfy its delivery cases; the run pends them, naming the probe that decided it. The fixture cases run on planes this suite started itself, never on the shared install.
+  const probed = await installServesDeliveries(url, token, fetcher ?? fetch);
+  const suspended = deliverySuspendedCases(selected.filter(entry => !fixtureCases.includes(entry.definition.id)), probed.servesDeliveries);
+  const pendingCases = policy.e2e.pendingOutcomes === 'blocking' ? [] : [...pending, ...suspended];
   const startedAt = new Date(now()).toISOString();
   const outcomes = [], served = new Set(), targets = [];
   let stoppedBy = null, open = null;
@@ -283,7 +286,7 @@ export async function runOnboardingE2e(cases, { url, token, fixture, candidate =
         }
       }
       // The step that creates an item on the fixture waits for its preview to settle, so each step there has the settling budget besides its own.
-      const report = await runCases([entry], { url: target.url, token: target.token, environment: 'uat', runId, retries: releaseRetries, maxWaitSeconds: releaseMaxWaitSeconds, root, pendingCases: pending, policy, launcher,
+      const report = await runCases([entry], { url: target.url, token: target.token, environment: 'uat', runId, retries: releaseRetries, maxWaitSeconds: releaseMaxWaitSeconds, root, pendingCases: pendingCases, policy, launcher,
         fetcher: target.settle ? settlingFetcher(fetcher ?? fetch, target) : fetcher, stepTimeoutMs: target.settle ? (stepTimeoutMs ?? defaultStepTimeoutMs) + previewSettleMs : stepTimeoutMs, now });
       served.add(report.sha);
       const known = targets.find(entry => entry.url === target.url && entry.sha === report.sha);
@@ -296,7 +299,8 @@ export async function runOnboardingE2e(cases, { url, token, fixture, candidate =
   const sha = served.size === 1 ? [...served][0] : null;
   const tally = verdict => outcomes.filter(outcome => outcome.verdict === verdict).length;
   return { runId, url, environment: 'uat', sha, startedAt, finishedAt: new Date(now()).toISOString(),
-    passed: tally('passed'), failed: tally('failed'), flaky: tally('flaky'), unrun: tally('unrun'), cases: outcomes, pendingOutcomes: policy.e2e.pendingOutcomes, targets };
+    passed: tally('passed'), failed: tally('failed'), flaky: tally('flaky'), unrun: tally('unrun'), cases: outcomes, pendingOutcomes: policy.e2e.pendingOutcomes, targets,
+    ...(suspended.length ? { suspendedDeliveries: { cases: suspended, merger: probed.merger, repositoryWired: probed.repositoryWired } } : {}) };
 }
 
 /**
@@ -316,11 +320,14 @@ export function recordingReports(report) {
 /** The suite's verdict over a report, in the e2e suite's own words. */
 export function suiteResult(report, pendingCases, policy) {
   if (!report.cases.length) return { name: 'e2e', passed: false, detail: 'no E2E case targets uat, so the suite exercised nothing' };
-  const verdict = releaseVerdict(report, [], pendingCases, policy), detail = failureDetail(report, pendingCases, policy);
+  // The run's own suspension of its delivery cases (GY-1938) rides the report; the verdict reads it from there, as the hold layer reads it beside its own probe.
+  const judged = [...pendingCases, ...report.suspendedDeliveries?.cases ?? []];
+  const verdict = releaseVerdict(report, [], judged, policy), detail = failureDetail(report, judged, policy);
+  const suspension = report.suspendedDeliveries ? `; the install serves no deliveries (merger ${report.suspendedDeliveries.merger} without a repository wired), so its delivery cases ${report.suspendedDeliveries.cases.join(', ')} are pending, not blocking` : '';
   const executed = report.cases.length - verdict.unrun.length;
   return !verdict.passed
-    ? { name: 'e2e', passed: false, detail: `${verdict.blocking.length} of ${executed} E2E cases ${verdict.blocking.every(outcome => outcome.verdict === 'flaky') ? 'were flaky' : 'failed'}: ${detail}` }
-    : { name: 'e2e', passed: true, detail: `${report.passed} E2E case${report.passed === 1 ? '' : 's'} passed against UAT serving ${report.sha ?? 'an unreported commit'}, ${fixtureCases.join(', ')} on an isolated normally onboarded project${detail ? `; ${detail}` : ''}` };
+    ? { name: 'e2e', passed: false, detail: `${verdict.blocking.length} of ${executed} E2E cases ${verdict.blocking.every(outcome => outcome.verdict === 'flaky') ? 'were flaky' : 'failed'}: ${detail}${suspension}` }
+    : { name: 'e2e', passed: true, detail: `${report.passed} E2E case${report.passed === 1 ? '' : 's'} passed against UAT serving ${report.sha ?? 'an unreported commit'}, ${fixtureCases.join(', ')} on an isolated normally onboarded project${suspension}${detail ? `; ${detail}` : ''}` };
 }
 
 /** The suite's fixture factory: the fixture built from the selected checkout `root`, whose HEAD must be CANDIDATE_SHA when set. */

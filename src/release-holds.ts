@@ -76,11 +76,15 @@ export function foldHolds(records: readonly HoldRecord[]): Hold[] {
  * the contract (GY-1802) the blocking cases are the candidate record's pending outcomes' cases
  * removed, and each case that failed or flaked against a pending outcome is kept as `pending: true`
  * with its failing step, so the record shows it ran and why it did not count. Under the repository's
- * `e2e.pendingOutcomes: blocking` (GY-1843) no case is pending, and each blocks like any required case.
+ * `e2e.pendingOutcomes: blocking` (GY-1843) no case is pending, and each blocks like any required
+ * case. The run's own suspension of the delivery cases (GY-1938) counts only when `servesDeliveries`
+ * is exactly false — the caller's own probe of the install, not the report's claim: a candidate's
+ * code never decides by itself which of its failures do not count.
  */
-export function e2eRecord(report: E2eReport | null, candidate: ReleaseCandidate, contract: ReleaseContract | null = null, policy: RepositoryPolicy = repositoryPolicy()): E2eRecord | null {
+export function e2eRecord(report: E2eReport | null, candidate: ReleaseCandidate, contract: ReleaseContract | null = null, policy: RepositoryPolicy = repositoryPolicy(), servesDeliveries?: boolean): E2eRecord | null {
   if (!report || report.sha !== candidate.sha || report.runId !== `rc-${candidate.id}`) return null;
-  const pendingCases = pendingUnder(contractPendingCases(contract, candidate.pendingOutcomes), policy);
+  const suspended = report.suspendedDeliveries?.cases.filter(id => !contractPendingCases(contract, candidate.pendingOutcomes).includes(id)) ?? [];
+  const pendingCases = pendingUnder([...contractPendingCases(contract, candidate.pendingOutcomes), ...(servesDeliveries === false ? suspended : [])], policy);
   return { runId: report.runId, sha: report.sha, blocking: releaseVerdict(report, [], pendingCases, policy).blocking.map(outcome => outcome.id),
     cases: report.cases.map(outcome => ({ case: outcome.id, verdict: outcome.verdict, required: outcome.required, ...(outcome.pending || pendingCases.includes(outcome.id) && (outcome.verdict === 'failed' || outcome.verdict === 'flaky') ? { pending: true as const } : {}), ...(outcome.stoppedBy ? { stoppedBy: outcome.stoppedBy } : {}), attempts: outcome.attempts, failingStep: outcome.failingStep })) };
 }
@@ -144,10 +148,12 @@ export function holdItem(record: HoldRecord, candidate: ReleaseCandidate) {
 export const releaseHolds = (git: Git, options: { contract: ReleaseContract | null; report: () => Promise<E2eReport | null>; push: boolean; now?: () => Date;
   /** The repository's policy (GY-1843), whose `e2e.pendingOutcomes` decides whether a pending outcome holds: by default the rule the report was judged under (the candidate checkout's own), else the one in force. */
   policy?: RepositoryPolicy;
+  /** GY-1938: the caller's own probe of the UAT install the report ran against — false only when the install cannot serve deliveries. The report's suspension of its delivery cases counts only when this probe confirms it. */
+  servesDeliveries?: boolean;
   file?: (item: ReturnType<typeof holdItem>, requestId: string) => Promise<string> }) => async (candidate: ReleaseCandidate, record: UatRecord): Promise<HoldOutcome> => {
   const report = await options.report(), inForce = repositoryPolicy();
   const policy = options.policy ?? (report?.pendingOutcomes ? { ...inForce, e2e: { ...inForce.e2e, pendingOutcomes: report.pendingOutcomes } } : inForce);
-  const e2e = e2eRecord(report, candidate, options.contract, policy);
+  const e2e = e2eRecord(report, candidate, options.contract, policy, options.servesDeliveries);
   const planned = options.contract ? assessHolds(options.contract, candidate, { deployedSha: record.deployedSha, e2e }, foldHolds(readRecords<HoldRecord>(git, holdTagPrefix)), (options.now ?? (() => new Date()))().toISOString(), policy) : [];
   let filingError: string | null = null;
   for (const entry of planned.filter(entry => entry.kind === 'open' && options.file)) {

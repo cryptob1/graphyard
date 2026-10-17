@@ -76,6 +76,8 @@ export interface E2eReport {
   passed: number; failed: number; flaky?: number; unrun?: number; cases: CaseOutcome[];
   /** GY-1843: the `e2e.pendingOutcomes` rule the run was judged under, when its caller named the repository's policy: the release holds judge its pending cases by the same rule. */
   pendingOutcomes?: RepositoryPolicy['e2e']['pendingOutcomes'];
+  /** GY-1938: the required cases this run pended because the install it ran against cannot serve deliveries, with the install's own answer the probe read. A release run pends a case only on this ground, and the hold layer counts it only when its own probe agrees. */
+  suspendedDeliveries?: { cases: string[]; merger: string; repositoryWired: boolean };
 }
 export interface RunOptions {
   url: string; token: string; environment?: string; runId?: string;
@@ -473,11 +475,39 @@ export const failureDetail = (report: E2eReport, pendingCases: readonly string[]
  * (GY-1378). The detail names each blocking case and step, then the unrun cases apart. A managed
  * repository's candidate (GY-1535, release-project.ts projectCaseSuite) selects every required
  * case beside the uat ones and runs every one of them (`runAll`): a failing required case still
- * fails the suite, but never leaves a later required case unrun.
+ * fails the suite, but never leaves a later required case unrun. Before the cases run, one probe
+ * asks the install whether it can deliver a change at all (GY-1938): an install whose merger is
+ * github and which reports no repository wiring can never satisfy the delivery cases, so the run
+ * pends them and names them, instead of failing on waits nothing can answer.
  */
 export const releaseRetries = 1;
 /** The longest a release run's GET step waits (GY-1938): a case's two attempts stay well inside the suite's one-hour command timeout, so the suite reports instead of being killed. */
 export const releaseMaxWaitSeconds = 900;
+/** Whether a case's steps exercise the install's delivery surface — the candidates, delivery and production routes whose expectations only an install that delivers changes can satisfy (GY-1938). */
+export const exercisesDelivery = (definition: Pick<CaseFile['definition'], 'steps'>): boolean =>
+  definition.steps.some(step => step.kind === 'http' && (step.path.startsWith('/api/candidates') || step.path.startsWith('/api/delivery') || step.path.startsWith('/production/')));
+/**
+ * Whether the install at `url` can deliver a change at all (GY-1938): a control-plane merger acts on
+ * the plane itself, and a GitHub merger needs the repository wiring the install reports. An install
+ * whose merger is github and which reports no repository, GitHub app or state can never make the
+ * delivery a case's steps wait for, however long they wait. A merger the probe cannot read answers
+ * `true`, so a run blocks exactly as before rather than pending on a guess.
+ */
+export const installServesDeliveries = async (url: string, token: string, fetcher: typeof fetch = fetch): Promise<{ servesDeliveries: boolean; merger: string; repositoryWired: boolean }> => {
+  const read = async (path: string, authorized: boolean): Promise<any> => {
+    try { const response = await fetcher(new URL(path, url), { ...(authorized ? { headers: { Authorization: `Bearer ${token}` } } : {}), signal: AbortSignal.timeout(10_000) }); return response.ok ? await response.json() : null; } catch { return null; }
+  };
+  const merger = await read('api/merger', true);
+  const mode = merger?.mode ?? merger?.merger;
+  if (!mode) return { servesDeliveries: true, merger: 'unreadable', repositoryWired: true };
+  if (mode !== 'github') return { servesDeliveries: true, merger: mode, repositoryWired: true };
+  const status = await read('api/status', true);
+  const repositoryWired = !!status && (status.github === true || status.repository != null || status.githubRepository != null);
+  return { servesDeliveries: repositoryWired, merger: mode, repositoryWired };
+};
+/** The required cases a release run pends because the install it runs against cannot serve deliveries (GY-1938): those that exercise the delivery surface. */
+export const deliverySuspendedCases = (cases: readonly CaseFile[], servesDeliveries: boolean): string[] =>
+  servesDeliveries ? [] : cases.filter(entry => entry.definition.required && exercisesDelivery(entry.definition)).map(entry => entry.definition.id);
 /** The candidate record the checkout's ledger holds for `id`, or why it reads none (GY-1802): its pending outcomes ride the `rc/ID` tag the cut pushed, which a validation checkout carries with no plane credential. A read that fails names none, so the suite blocks exactly as before. */
 export const candidatePendingOutcomes = (root: string, id: string | undefined): readonly string[] | undefined => {
   if (!id) return undefined;
@@ -499,15 +529,20 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
     const selected = cases.filter(options.select ?? (entry => entry.definition.target === 'uat'));
     if (!selected.length) return { name: 'e2e', passed: false, detail: options.select ? 'no required or uat E2E case is in the checkout, so the suite exercised nothing' : 'no E2E case targets uat, so the suite exercised nothing' };
     const policy = options.policy ?? (options.root ? checkoutRepositoryPolicy(options.root) : repositoryPolicy());
-    const pendingCases = pendingUnder(contractPendingCases(options.contract, candidate?.pendingOutcomes), policy);
+    // GY-1938: an install that cannot serve deliveries can never satisfy the delivery cases, so the run pends them instead of failing on waits nothing can answer; `pendingUnder` keeps a blocking-mode repository judging every case. A signal marks a budgeted run (a merge preview) against an origin of its own, whose cases are the merger's choice: it probes nothing and runs exactly the cases it named.
+    const probed = options.signal ? { servesDeliveries: true, merger: 'unreadable', repositoryWired: true } : await installServesDeliveries(url, token, options.fetcher ?? fetch);
+    const suspended = deliverySuspendedCases(selected, probed.servesDeliveries);
+    const pendingCases = pendingUnder([...contractPendingCases(options.contract, candidate?.pendingOutcomes), ...suspended], policy);
     const report = await runCases(selected, { url, token, environment: 'uat', runId: candidate ? `rc-${candidate.id}` : undefined, fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs,
       root: options.root, retries: releaseRetries, maxWaitSeconds: releaseMaxWaitSeconds, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, pendingCases, policy });
+    if (suspended.length) report.suspendedDeliveries = { cases: suspended, merger: probed.merger, repositoryWired: probed.repositoryWired };
     await options.report?.(report);
     const verdict = releaseVerdict(report, [], pendingCases, policy), detail = failureDetail(report, pendingCases, policy);
+    const suspension = suspended.length ? `; the install serves no deliveries (merger ${probed.merger} without a repository wired), so its delivery cases ${suspended.join(', ')} are pending, not blocking` : '';
     const executed = report.cases.length - verdict.unrun.length;
     return !verdict.passed
-      ? { name: 'e2e', passed: false, detail: `${verdict.blocking.length} of ${executed} E2E cases ${verdict.blocking.every(outcome => outcome.verdict === 'flaky') ? 'were flaky' : 'failed'}: ${detail}` }
-      : { name: 'e2e', passed: true, detail: `${report.passed} E2E case${report.passed === 1 ? '' : 's'} passed against UAT serving ${report.sha ?? 'an unreported commit'}${detail ? `; ${detail}` : ''}` };
+      ? { name: 'e2e', passed: false, detail: `${verdict.blocking.length} of ${executed} E2E cases ${verdict.blocking.every(outcome => outcome.verdict === 'flaky') ? 'were flaky' : 'failed'}: ${detail}${suspension}` }
+      : { name: 'e2e', passed: true, detail: `${report.passed} E2E case${report.passed === 1 ? '' : 's'} passed against UAT serving ${report.sha ?? 'an unreported commit'}${suspension}${detail ? `; ${detail}` : ''}` };
   },
 });
 

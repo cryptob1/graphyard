@@ -11,6 +11,7 @@ import {
 } from '../release-candidate.js';
 import { commandDigestAdapter, shellRun, uatDigestSuite, verifyProductionDigests } from '../release-digests.js';
 import { acceptancesFrom, foldHolds, foldRecord, holdItemsFor, holdTag, holdTagPrefix, releaseHolds, type HoldRecord } from '../release-holds.js';
+import { installServesDeliveries } from '../e2e/runner.js';
 import { pendingFromPlane, readPlane, servingStage } from '../release-pending.js';
 import { handedImports, handedImportsVariable, promotionImports, sealAuthorityOutOfScope, sealAuthorityUnserved, sealCheckRecord, sealCheckTag, sealRoles, sealedImports, type SealAuthority } from '../validation-import.js';
 import { checkRepositoryContract, contractFile, loadContract } from '../e2e/case.js';
@@ -204,7 +205,9 @@ export const releaseCommands = defineCommands([
         // GY-1378: the e2e suite's report, written by its command, decides the release holds against the candidate checkout's contract.
         const reportFile = options.one('e2e-report') ?? process.env.GRAPHYARD_E2E_REPORT;
         const contract = existsSync(join(root, contractFile)) ? await loadContract(root).catch(error => { console.error(`No release holds: ${error.message}`); return null; }) : null;
-        const holds = reportFile ? releaseHolds(git, { contract, push, file, report: async () => existsSync(reportFile) ? JSON.parse(await readFile(reportFile, 'utf8')) : null }) : undefined;
+        const holds = reportFile ? releaseHolds(git, { contract, push, file, report: async () => existsSync(reportFile) ? JSON.parse(await readFile(reportFile, 'utf8')) : null,
+          // GY-1938: the holds honor the report's suspended delivery cases only when this own probe of the install confirms it cannot serve deliveries.
+          servesDeliveries: (await installServesDeliveries(url, process.env.GRAPHYARD_UAT_TOKEN ?? '')).servesDeliveries }) : undefined;
         const result = await validateAndRecord(git, target, url, suites, { base, push, timeoutMs: waitMs, file, holds });
         print(result); if (result.record.result !== 'passed') process.exitCode = 1; return;
       }
