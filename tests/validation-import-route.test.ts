@@ -213,7 +213,17 @@ test('unit:validation-import-feeds-hold — a required failed, blocked or unrun 
   assert.equal(unread.promotable, false, 'a hold that cannot be read is never read as released');
   assert.match(unread.refusals.join('\n'), /could not be read \(plane unreachable\)/);
 
+  // A production job holds no plane credential: the job before it runs `release imports`, and promote is handed what it printed.
+  const { handedImports } = await import('../src/validation-import.js');
+  const handedNow = async (at = candidate) => handedImports(JSON.stringify({ candidate: at.id, sha: at.sha, imports: await promotionImports(readAs(reader), candidate) }), candidate);
+  assert.deepEqual(await handedNow(), await promotionImports(readAs(reader), candidate), 'a hold handed for this candidate is the hold the plane serves');
+  assert.equal((await handedNow()).held, true);
+  assert.match((await handedNow({ ...candidate, id: '20261001T000000Z' }) as any).unread, /was read for candidate 20261001T000000Z/, 'a hold read for another candidate counts for nothing');
+  assert.match((handedImports('', candidate) as any).unread, /not the JSON/, 'an empty hand-off is unread, never released');
+  assert.equal((handedImports(JSON.stringify({ candidate: candidate.id, sha: candidate.sha, imports: { unread: 'plane down' } }), candidate) as any).unread, 'plane down');
+
   await imported(run(candidate.sha, 'promote-3', [passing('login'), passing('pay')]));
+  assert.deepEqual(await handedNow(), { held: false, cases: [] }, 'the handed hold releases once a passing import covers the case');
   const promoted = await promoteNow();
   assert.equal(promoted.promoted, true, 'a covering passing import releases the restriction');
   assert.equal(productionTip(), candidate.sha);

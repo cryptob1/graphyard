@@ -184,3 +184,21 @@ export async function promotionImports(read: (path: string) => Promise<any>, can
     return { unread: error?.message ?? String(error) };
   }
 }
+
+/** The environment variable a promotion job is handed the hold in, as `release imports` printed it. */
+export const handedImportsVariable = 'GRAPHYARD_PROMOTION_IMPORTS';
+/**
+ * The hold a promotion job was handed by `release imports` in an earlier job of its run — a
+ * production job holds no plane credential, so the job before it, in the uat environment, reads the
+ * hold. It counts only for the candidate it was read for, at that head; anything else, or text that
+ * is no hold, is `unread` and refuses promotion.
+ */
+export function handedImports(text: string, candidate: Pick<ReleaseCandidate, 'id' | 'sha'>): PromotionImports {
+  let handed: any;
+  try { handed = JSON.parse(text); } catch { return { unread: `${handedImportsVariable} is not the JSON release imports prints` }; }
+  if (handed?.candidate !== candidate.id || handed?.sha !== candidate.sha) return { unread: `${handedImportsVariable} was read for candidate ${handed?.candidate ?? 'none'}, not ${candidate.id} at ${candidate.sha}` };
+  const imports = handed.imports;
+  if (imports && typeof imports.unread === 'string') return { unread: imports.unread };
+  if (!imports || typeof imports.held !== 'boolean' || !Array.isArray(imports.cases)) return { unread: `${handedImportsVariable} carries no hold` };
+  return { held: imports.held, cases: imports.cases.map((entry: any) => ({ id: String(entry.id), verdict: String(entry.verdict), runId: String(entry.runId) })) };
+}
