@@ -966,13 +966,22 @@ export function promote(git: Git, id: string, options: { base: string; push: boo
   return { promoted: true as const, candidate: candidate.id, sha: candidate.sha, branch: productionBranch, ...(digests ? { mode: 'digest' as const, digests } : {}) };
 }
 /** Async promote for the loop's local ports (GY-1526). */
-export async function promoteAsync(git: AsyncGit, id: string, options: { base: string; push: boolean; now: Date; acceptances?: readonly FlakyAcceptance[]; deployDigests?: AsyncDigestDeploy; imports?: (candidate: ReleaseCandidate) => Promise<PromotionImports> }) {
+export async function promoteAsync(git: AsyncGit, id: string, options: { base: string; push: boolean; now: Date; acceptances?: readonly FlakyAcceptance[]; deployDigests?: AsyncDigestDeploy; imports?: (candidate: ReleaseCandidate) => Promise<PromotionImports>; seal?: (candidate: Pick<ReleaseCandidate, 'id' | 'sha'>) => Promise<PromotionImports> }) {
   await syncLedgerAsync(git, options.base);
   const ledger = await readLedgerAsync(git);
   const candidate = findCandidate(ledger, id);
   const uat = ledger.uat.find(record => record.id === candidate.id) ?? null;
   const assessment = assessPromotion(candidate, uat, ledger.production[0] ?? null, options.acceptances, options.imports ? await options.imports(candidate) : undefined);
   if (!assessment.promotable) return { promoted: false as const, candidate: candidate.id, refusals: assessment.refusals };
+  // GY-1874: the hold the decision read does not bind the deploy. Before any deployer runs, the direct
+  // paths seal that hold: the seal's own transaction re-reads it under the candidate's lock, so a
+  // required failure imported after the read is seen and refused here, and once sealed no import can
+  // bind before the deploy. A caller with no seal port — a handed hold already sealed by
+  // `release imports`, or a plane connection that cannot write — keeps the decision read alone.
+  if (options.seal) {
+    const sealed = assessPromotion(candidate, uat, ledger.production[0] ?? null, options.acceptances, await options.seal(candidate));
+    if (!sealed.promotable) return { promoted: false as const, candidate: candidate.id, refusals: sealed.refusals };
+  }
   const digests = options.deployDigests && candidate.build?.artifacts?.length ? [...candidate.build.artifacts] : undefined;
   const refusal = digests ? digestPromotionRefusal(candidate, uat) : null;
   if (refusal) return { promoted: false as const, candidate: candidate.id, refusals: [refusal] };

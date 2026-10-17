@@ -16,7 +16,7 @@ import {
   awaitServing, cutAsync, deployToUatAsync, promoteAsync, readLedgerAsync, syncLedgerAsync, uatValidationWindowMs,
   findCandidate, uatServedDigests, validateAndRecord, type AsyncGit, type ReleaseCandidate, type UatRecord,
 } from '../release-candidate.js';
-import { promotionImports } from '../validation-import.js';
+import { promotionImports, sealedImports } from '../validation-import.js';
 import { validateProjectCandidate } from '../release-project.js';
 import { commandDigestAdapter, digestCommandTimeoutMs, uatDigestSuite, verifyProductionDigests } from '../release-digests.js';
 import { revertCandidateItem, type CandidateItemDelta, type RevertContract, type RevertPorts, type RevertRecordEvent } from '../release-revert.js';
@@ -77,7 +77,9 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
     /** The plane's open goals and each work item's stage, so a cut records the outcomes whose plan is not delivered yet as pending (GY-1802). */
     plane?: { goals: () => Promise<readonly Goal[]>; stage: (key: string) => Promise<string | undefined>;
       /** An authenticated `GET /api/PATH`, through which promotion reads the candidate's imported-run hold (GY-1860). */
-      read?: (path: string) => Promise<any> };
+      read?: (path: string) => Promise<any>;
+      /** An authenticated `POST /api/PATH`, through which promotion seals a released hold before any deployer runs (GY-1874); admins and operator agents seal. */
+      seal?: (path: string, data: unknown) => Promise<any> };
     /** UAT itself, for tests: run only for a candidate with no passing UAT verdict recorded. */
     validation?: Pick<LocalReleasePorts, 'uat' | 'validate'> }): LocalReleasePorts | null {
   const environment = options.environment ?? process.env;
@@ -197,8 +199,12 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
       } finally { rmSync(scratch, { recursive: true, force: true }); }
     },
     promote: async id => {
-      const read = options.plane?.read;
-      const result = await promoteAsync(git, id, { base, push: true, now: new Date(now()), deployDigests: digests.deploy, imports: read ? candidate => promotionImports(read, candidate) : undefined });
+      const read = options.plane?.read, seal = options.plane?.seal;
+      // GY-1874: the hold the promote decision reads is sealed through the plane's write port before any
+      // deployer runs, so an import landing between the read and the deploy is either seen (the seal's
+      // transaction re-reads the hold) or refused once the seal stands; a plane that cannot write keeps the read alone.
+      const result = await promoteAsync(git, id, { base, push: true, now: new Date(now()), deployDigests: digests.deploy, imports: read ? candidate => promotionImports(read, candidate) : undefined,
+        seal: seal ? candidate => sealedImports(seal, candidate) : undefined });
       return result.promoted ? { promoted: true, sha: result.sha } : { promoted: false, refusals: result.refusals };
     },
     verify: async sha => {

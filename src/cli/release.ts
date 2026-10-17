@@ -72,7 +72,9 @@ export const releaseCommands = defineCommands([
       '                                hold is sealed, so no import binds to the candidate afterwards',
       '  release promote ID|latest     Deploy a UAT-passed candidate to production by its exact SHA, or',
       '                                by its recorded digests (never a rebuild) under GRAPHYARD_DEPLOY_DIGESTS;',
-      '                                flaky required cases need applied evidence decisions at that SHA',
+      '                                flaky required cases need applied evidence decisions at that SHA; a',
+      '                                direct run seals the imported-run hold it reads (admin or the release',
+      '                                filing credential), or refuses when it cannot seal',
       '  release verify --url URL [--wait SECONDS]',
       '                                Check production serves a promoted candidate and name it; a digest',
       '                                promotion also needs every instance (GRAPHYARD_INSTANCE_DIGESTS) to run its digest',
@@ -148,7 +150,10 @@ export const releaseCommands = defineCommands([
         // A production job, which holds no plane credential, is handed the hold `release imports` read and sealed in the job before it.
         const handed = process.env[handedImportsVariable];
         const imports = async (candidate: ReleaseCandidate) => handed !== undefined ? handedImports(handed, candidate) : promotionImports(path => api(path), candidate);
-        const result = await promoteAsync(asyncGit, target, { base, push, now: new Date(), acceptances, deployDigests: digests.deploy, imports });
+        // GY-1874: a direct promotion seals the hold it read before any deployer runs — an admin or the release-filing identity seals —
+        // so a required failure imported after the read is seen and refused; a handed hold was sealed by `release imports` already.
+        const result = await promoteAsync(asyncGit, target, { base, push, now: new Date(), acceptances, deployDigests: digests.deploy, imports,
+          seal: handed === undefined ? candidate => sealedImports((path, data) => api(path, data), candidate) : undefined });
         print(result); if (!result.promoted) process.exitCode = 1; return;
       }
       const url = options.one('url');
