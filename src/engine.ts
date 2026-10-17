@@ -44,7 +44,7 @@ import { nextAction, nextActionKinds, sameAction } from './model/next-action.js'
 import { recordScenarioRun } from './test-runs.js';
 import { resolveScenario } from './scenarios.js';
 import { sameObservationInputs } from './model/observation-save.js';
-import { adoptSchema, adoptedBranchHeld, adoptionHolderRefusal, attemptLiveRefusal, closedPullRefusal, draftPullRefusal, foreignBaseRefusal, forkedPullRefusal, movedHeadRefusal, prAdoptionOf, sameAdoption, type AdoptedPull } from './model/pr-adoption.js';
+import { adoptSchema, adoptedBranchHeld, adoptionHolderRefusal, attemptLiveRefusal, closedPullRefusal, draftPullRefusal, foreignBaseRefusal, forkedPullRefusal, gitBranchName, movedHeadRefusal, prAdoptionOf, sameAdoption, type AdoptedPull } from './model/pr-adoption.js';
 import type { ObservationJobState } from './model/action-kinds.js';
 import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
 import { recordStallRemedy, remedyFlows, remedyOutcomes, stallRemedyKinds } from './stall-remedies.js';
@@ -134,7 +134,7 @@ const commands = {
   // GY-860: what this allocation released before it could create its worktree — an earlier
   // attempt's worktree that still held the branch, with the refs and uncommitted diff it carried.
   // The record is the item's preserved-attempt history, kept on the ledger.
-  workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(200).refine(branch => validBranch(branch) || externalBranchName(branch), 'Invalid Graphyard branch name'),
+  workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(255).refine(branch => validBranch(branch) || gitBranchName(branch), 'Invalid Graphyard branch name'),
     preserved: z.object({ path: z.string().min(1).max(1000), head: z.string().regex(/^[0-9a-f]{40}$/i), branchTip: z.string().regex(/^[0-9a-f]{40}$/i), op: z.enum(['rebase', 'merge', 'cherry-pick']).nullable(), refs: z.string().max(20000), diff: z.string().max(100000), at: z.iso.datetime() }).strict().optional() }).strict(),
   // `documentation` is the worker's explicit statement that the change alters no documented
   // behaviour: the other way the standard documentation criterion is met (model/documentation.ts).
@@ -205,12 +205,6 @@ const commands = {
   adopt: adoptSchema,
 } as const;
 const executorName = z.string().trim().min(1).max(200).regex(/^[^\u0000-\u001f\u007f]+$/);
-/**
- * GY-1849: a branch outside Graphyard's own `graphyard/` namespace, well-formed as a git ref. The
- * workspace command accepts one only as the adopted pull request's own branch, and only for the
- * item that adopted it; every other reservation stays inside the namespace.
- */
-const externalBranchName = (branch: string) => /^[a-zA-Z0-9][\w./-]*$/.test(branch) && !branch.endsWith('/') && !branch.includes('//') && !branch.includes('..');
 const actionClaimSchema = z.object({
   /** The identity the claim is recorded under; the credential's own principal by default. */
   executor: executorName.optional(),
@@ -1494,6 +1488,8 @@ export class Engine {
         demand((adoption!.headRepository ?? '').toLowerCase() === this.repository!.toLowerCase() && (adoption!.baseRepository ?? '').toLowerCase() === this.repository!.toLowerCase(),
           forkedPullRefusal(data.pr, adoption!.headRepository, adoption!.baseRepository, this.repository!), 409);
         demand(adoption!.baseRef === this.baseBranch, foreignBaseRefusal(data.pr, adoption!.baseRef, this.baseBranch), 409);
+        // The branch is the one every attempt will reserve, so it must be a name git accepts.
+        demand(gitBranchName(adoption!.branch), `Pull request #${data.pr}'s branch ${JSON.stringify(adoption!.branch)} is not a branch name git accepts; adoption binds a branch an attempt can check out`, 409);
         // The moved-head refusal names the head the provider reports now.
         demand(adoption!.head === data.head, movedHeadRefusal(data.pr, adoption!, data.head), 409);
         // A second owner is refused naming the holder: another item's binding or submission, or its hold on the branch.
@@ -1509,7 +1505,7 @@ export class Engine {
           const live = attemptLiveRefusal(work, now);
           demand(!live, live!, 409);
         }
-        work.prAdoption = prAdoptionOf(data, adoption!, this.repository, actor.id, now);
+        work.prAdoption = prAdoptionOf(data, adoption!, this.repository, actor.id, now, work.prAdoption);
       }
       if (command === 'reviewpolicy') {
         if (actor.role !== 'operator-agent') admin(actor);
@@ -1987,6 +1983,9 @@ export class Engine {
           // GY-1849: an adopted item completes only on its adopted pull request, so no replacement PR is created.
           demand(!work.prAdoption || work.prAdoption.pr === number, `${work.key} adopted pull request #${work.prAdoption?.pr}; complete accepts only that pull request`);
         }
+        // GY-1849: the adopted head is verified against a live observation or not at all, so an
+        // unobserved completion of an adopted item is refused rather than recorded unchecked.
+        demand(!work.prAdoption || observed, `${work.key} adopted pull request #${work.prAdoption?.pr}, whose live head could not be observed; complete is refused until it can be verified against the adopted head`, 503);
         if (observed) {
           demand(observed.candidate.pr === number, 'Observed pull request does not match the submission');
           // GY-1849: the binding is exact-head, so the head observed now is compared to the adopted

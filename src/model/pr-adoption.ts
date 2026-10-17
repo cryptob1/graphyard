@@ -131,9 +131,25 @@ export function sameAdoption(binding: PrAdoption, intent: { pr: number; head: st
   return binding.pr === intent.pr && binding.head === intent.head && binding.repository === repository;
 }
 
-/** The binding built from an accepted adoption: the intent and the live read, named and stamped. */
-export function prAdoptionOf(intent: Adopt, live: AdoptedPull, repository: string, by: string, now: Date): PrAdoption {
+/**
+ * The binding built from an accepted adoption: the intent and the live read, named and stamped. A
+ * rebind at a moved head keeps the source the earlier binding recorded wherever the new intent
+ * names none, so following the moved-head refusal never drops the adopted work's origin.
+ */
+export function prAdoptionOf(intent: Adopt, live: AdoptedPull, repository: string, by: string, now: Date, previous?: PrAdoption | null): PrAdoption {
+  const sourceKey = intent.sourceKey ?? previous?.sourceKey, sourceUrl = intent.sourceUrl ?? previous?.sourceUrl;
   return { pr: intent.pr, head: intent.head, branch: live.branch, repository,
-    ...(intent.sourceKey ? { sourceKey: intent.sourceKey } : {}), ...(intent.sourceUrl ? { sourceUrl: intent.sourceUrl } : {}),
+    ...(sourceKey ? { sourceKey } : {}), ...(sourceUrl ? { sourceUrl } : {}),
     adoptedBy: by, adoptedAt: now.toISOString() };
+}
+
+/**
+ * Whether a name is a branch git itself accepts (`git check-ref-format --branch`): an adopted pull
+ * request's branch is whatever its author chose, so `+`, `@` and Unicode are as valid as the
+ * `graphyard/` namespace. A leading `-` is refused too, so the name can never read as an option.
+ */
+export function gitBranchName(branch: string): boolean {
+  if (!branch || branch.length > 255 || branch === '@' || branch.startsWith('-') || branch.startsWith('/') || branch.endsWith('/') || branch.endsWith('.')) return false;
+  if (branch.includes('..') || branch.includes('//') || branch.includes('@{') || /[\u0000-\u0020\u007f~^:?*[\\]/.test(branch)) return false;
+  return branch.split('/').every(part => !part.startsWith('.') && !part.endsWith('.lock'));
 }

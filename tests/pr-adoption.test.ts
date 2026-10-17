@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
+import { gitBranchName } from '../src/model/pr-adoption.js';
 import { saveDocument, Store } from '../src/store.js';
 import { mergerEventKind } from '../src/merger-mode.js';
 import type { Observation, Principal, Work } from '../src/model.js';
@@ -69,6 +70,15 @@ const externalPull = (branch: string) => {
 const livePull = (pr: number) => {
   const view = github.view(pr);
   return { head: view.head.sha, branch: view.head.ref, state: view.state as 'open' | 'closed', draft: false, headRepository: repository, baseRepository: repository, baseRef: 'main' };
+};
+/** The observation complete is judged against, read from the fake as the control plane reads the pull request. */
+const observeFromFake = async (probe: Work): Promise<Observation> => {
+  const view = github.view(probe.submission!.pr);
+  return {
+    prState: view.state as 'open' | 'closed', draft: false,
+    candidate: { sha: view.head.sha, baseSha: view.base.sha, pr: probe.submission!.pr, branch: view.head.ref, author: 'person:huck' },
+    checks: [], reviews: [], merged: view.merged, mergeSha: view.merge_commit_sha, mergeable: true, protected: false, files: [], scopeFiles: [], at: new Date().toISOString(),
+  } as Observation;
 };
 /** The master's adoption intent, each call under its own idempotency key like a real client. */
 const adopt = (item: Work, pr: number, head: string) =>
@@ -180,7 +190,12 @@ test('unit:pr-adoption-refuses-unadoptable — a draft, a control-plane merge wr
 });
 
 test('unit:pr-adoption-same-pr-no-double-dispatch — an attempt on the adopted item is assigned the pull request branch, complete accepts only that pull request, two dispatch requests yield one assignment, and GitHub is left untouched', async () => {
-  const { head, pull } = externalPull('feature/huck-reviews');
+  // A branch git accepts but no narrower whitelist would: `+`, `@` and Unicode are its author's to choose.
+  const adoptedBranch = 'feature/huck+reviews@ü';
+  const { head, pull } = externalPull(adoptedBranch);
+  // The rule is git's own (`check-ref-format --branch`): names git refuses, or one reading as an option, stay refused.
+  for (const name of ['-option', 'feature/.hidden', 'feature/a..b', 'feature/a.lock', 'feature/a b', 'feature/a~1', 'feature/a@{1}', 'feature/', 'feature//a', '@'])
+    assert.equal(gitBranchName(name), false, `${name} is refused`);
   const item = await adopt(await released(), pull.number, head);
   const humanSteps = github.humanSteps.length, reviews = github.reviews.length;
 
@@ -199,22 +214,23 @@ test('unit:pr-adoption-same-pr-no-double-dispatch — an attempt on the adopted 
   const first = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
   await assert.rejects(engine.execute(worker, 'claim', item.id, {}, randomUUID()));
   // The first attempt works on the adopted branch and ends without submitting; its record stays as history.
-  await engine.execute(worker, 'workspace', item.id, { epoch: first.epoch, host: 'machine-a', path: `/tmp/adopted-1/${item.id}`, branch: 'feature/huck-reviews' }, randomUUID());
+  await engine.execute(worker, 'workspace', item.id, { epoch: first.epoch, host: 'machine-a', path: `/tmp/adopted-1/${item.id}`, branch: adoptedBranch }, randomUUID());
   await engine.execute(worker, 'heartbeat', item.id, { epoch: first.epoch }, randomUUID());
   const ended = await engine.execute(worker, 'release', item.id, { epoch: first.epoch, cause: 'stood down' }, randomUUID());
-  assert.ok(ended.workspaces.some(space => space.epoch === first.epoch && space.branch === 'feature/huck-reviews'), 'the ended attempt keeps its workspace record');
+  assert.ok(ended.workspaces.some(space => space.epoch === first.epoch && space.branch === adoptedBranch), 'the ended attempt keeps its workspace record');
 
   // The next attempt is assigned the same adopted branch: a fresh branch name is refused naming the adopted one.
   const attempt = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
   assert.notEqual(attempt.epoch, first.epoch);
   await refused(engine.execute(worker, 'workspace', item.id, { epoch: attempt.epoch, host: 'machine-a', path: `/tmp/adopted-2/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}-${attempt.epoch}` }, randomUUID()),
-    'its attempt works on the adopted branch feature/huck-reviews');
-  const worked = await engine.execute(worker, 'workspace', item.id, { epoch: attempt.epoch, host: 'machine-a', path: `/tmp/adopted-2/${item.id}`, branch: 'feature/huck-reviews' }, randomUUID());
-  assert.equal(worked.workspaces.at(-1)!.branch, 'feature/huck-reviews');
+    `its attempt works on the adopted branch ${adoptedBranch}`);
+  const worked = await engine.execute(worker, 'workspace', item.id, { epoch: attempt.epoch, host: 'machine-a', path: `/tmp/adopted-2/${item.id}`, branch: adoptedBranch }, randomUUID());
+  assert.equal(worked.workspaces.at(-1)!.branch, adoptedBranch);
 
-  // Complete naming any other pull request is refused; the adopted one is accepted.
+  // Complete naming any other pull request is refused; the adopted one is accepted once its live head is observed.
   await refused(engine.execute(worker, 'submit', item.id, { epoch: attempt.epoch, pr: pull.number + 50 }, randomUUID()), 'complete accepts only that pull request');
-  const completed = await engine.execute(worker, 'submit', item.id, { epoch: attempt.epoch, pr: pull.number }, randomUUID());
+  engine.submissionObserver = observeFromFake;
+  const completed = await engine.execute(worker, 'submit', item.id, { epoch: attempt.epoch, pr: pull.number }, randomUUID()).finally(() => { engine.submissionObserver = null; });
   assert.deepEqual(completed.submission, { epoch: attempt.epoch, pr: pull.number });
   assert.equal(completed.prAdoption!.pr, completed.submission.pr, 'the submission binds the adopted pull request, creating no replacement');
 
@@ -223,7 +239,7 @@ test('unit:pr-adoption-same-pr-no-double-dispatch — an attempt on the adopted 
   const view = github.view(pull.number);
   assert.equal(view.state, 'open');
   assert.equal(view.head.sha, head, 'the head never moved');
-  assert.equal(view.head.ref, 'feature/huck-reviews', 'the branch was never retargeted');
+  assert.equal(view.head.ref, adoptedBranch, 'the branch was never retargeted');
   assert.equal(view.title, 'Add the basket', 'the pull request was never renamed');
   assert.equal(view.merged, false, 'the pull request was never closed or merged');
   assert.equal(github.reviews.length, reviews, 'nothing commented or reviewed the pull request');
@@ -235,23 +251,21 @@ test('unit:pr-adoption-exact-head-complete — complete on an adopted item is re
   const item = await adopt(await released(), pull.number, head);
   const attempt = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
   await engine.execute(worker, 'workspace', item.id, { epoch: attempt.epoch, host: 'machine-c', path: `/tmp/adopted-3/${item.id}`, branch: 'feature/huck-head' }, randomUUID());
-  // The observation complete is judged against, read as the control plane reads the pull request.
-  engine.submissionObserver = async probe => {
-    const view = github.view(probe.submission!.pr);
-    return {
-      prState: view.state as 'open' | 'closed', draft: false,
-      candidate: { sha: view.head.sha, baseSha: view.base.sha, pr: probe.submission!.pr, branch: view.head.ref, author: 'person:huck' },
-      checks: [], reviews: [], merged: view.merged, mergeSha: view.merge_commit_sha, mergeable: true, protected: false, files: [], scopeFiles: [], at: new Date().toISOString(),
-    } as Observation;
-  };
+  // With no observation of the live head, complete on the adopted item is refused rather than recorded unverified.
+  await refused(engine.execute(worker, 'submit', item.id, { epoch: attempt.epoch, pr: pull.number }, randomUUID()), 'whose live head could not be observed');
+  assert.equal((await reload(item)).submission ?? null, null, 'the unobserved completion recorded nothing');
+  engine.submissionObserver = observeFromFake;
   try {
     // The author pushes while the attempt runs: complete is refused naming the adopted and the live head.
     const moved = github.push('feature/huck-head', { 'src/basket.ts': 'export const basket = [3];\n' }, 'Move the head', 'person:huck');
     await refused(engine.execute(worker, 'submit', item.id, { epoch: attempt.epoch, pr: pull.number }, randomUUID()),
       new RegExp(`adopted pull request #${pull.number} at head ${head.slice(0, 12)}, but its live head is ${moved.slice(0, 12)}`));
-    // The master re-adopts at the live head: a recorded rebind, and complete then accepts it.
-    const rebound = await adopt(item, pull.number, moved);
+    // The master re-adopts at the live head without repeating the source flags: a recorded rebind
+    // that keeps the source the first binding recorded, and complete then accepts it.
+    const rebound = await engine.execute(master, 'adopt', item.id, { pr: pull.number, head: moved, reason: 'Follow the moved head' }, randomUUID());
     assert.equal(rebound.prAdoption!.head, moved);
+    assert.equal(rebound.prAdoption!.sourceKey, 'Huck-123', 'the rebind keeps the source key');
+    assert.equal(rebound.prAdoption!.sourceUrl, 'https://huck.example/issues/123', 'the rebind keeps the source URL');
     assert.equal((await eventsOf(item, 'adopt')).length, 2, 'the rebind is its own recorded fact');
     const completed = await engine.execute(worker, 'submit', item.id, { epoch: attempt.epoch, pr: pull.number }, randomUUID());
     assert.deepEqual(completed.submission, { epoch: attempt.epoch, pr: pull.number });
