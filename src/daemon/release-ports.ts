@@ -273,7 +273,7 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
         const contract = existsSync(join(checkout, contractFile)) ? await loadContract(checkout).catch(error => { console.error(`No release holds: ${error.message}`); return null; }) : null;
         let report: E2eReport | null = null;
         // GY-1938: the holds honor the report's suspended delivery cases only when this own probe of the install confirms it cannot serve deliveries.
-        const servesDeliveries = (await installServesDeliveries(attested.url, environment[localReleaseVariables.uatToken] ?? '')).servesDeliveries;
+        const servesDeliveries = async () => (await installServesDeliveries(attested.url, environment[localReleaseVariables.uatToken] ?? '')).servesDeliveries;
         const result = await validateAndRecord(git, id, attested.url, [
           projectCaseSuite(checkout, environment[localReleaseVariables.uatToken] ?? '', { contract, report: value => { report = value; } }), attested.suite,
         ], { base, push: true, timeoutMs: localServeWaitSeconds * 1000, file: options.file,

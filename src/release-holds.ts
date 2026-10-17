@@ -148,12 +148,13 @@ export function holdItem(record: HoldRecord, candidate: ReleaseCandidate) {
 export const releaseHolds = (git: Git, options: { contract: ReleaseContract | null; report: () => Promise<E2eReport | null>; push: boolean; now?: () => Date;
   /** The repository's policy (GY-1843), whose `e2e.pendingOutcomes` decides whether a pending outcome holds: by default the rule the report was judged under (the candidate checkout's own), else the one in force. */
   policy?: RepositoryPolicy;
-  /** GY-1938: the caller's own probe of the UAT install the report ran against — false only when the install cannot serve deliveries. The report's suspension of its delivery cases counts only when this probe confirms it. */
-  servesDeliveries?: boolean;
+  /** GY-1938: the caller's own probe of the UAT install the report ran against — false only when the install cannot serve deliveries. The report's suspension of its delivery cases counts only when this probe confirms it; it runs once, when the holds are assessed after the suites, and only for a report that suspended a case. */
+  servesDeliveries?: () => Promise<boolean>;
   file?: (item: ReturnType<typeof holdItem>, requestId: string) => Promise<string> }) => async (candidate: ReleaseCandidate, record: UatRecord): Promise<HoldOutcome> => {
   const report = await options.report(), inForce = repositoryPolicy();
   const policy = options.policy ?? (report?.pendingOutcomes ? { ...inForce, e2e: { ...inForce.e2e, pendingOutcomes: report.pendingOutcomes } } : inForce);
-  const e2e = e2eRecord(report, candidate, options.contract, policy, options.servesDeliveries);
+  const servesDeliveries = report?.suspendedDeliveries?.cases.length && options.servesDeliveries ? await options.servesDeliveries() : undefined;
+  const e2e = e2eRecord(report, candidate, options.contract, policy, servesDeliveries);
   const planned = options.contract ? assessHolds(options.contract, candidate, { deployedSha: record.deployedSha, e2e }, foldHolds(readRecords<HoldRecord>(git, holdTagPrefix)), (options.now ?? (() => new Date()))().toISOString(), policy) : [];
   let filingError: string | null = null;
   for (const entry of planned.filter(entry => entry.kind === 'open' && options.file)) {

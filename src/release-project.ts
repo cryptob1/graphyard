@@ -124,7 +124,7 @@ export async function validateProjectCandidate(sourceGit: AnyGit, id: string, op
   try {
     const holds = asyncHolds(git, { contract, push: options.push, file: options.file, now: options.now, report: async () => report,
       // GY-1938: the holds honor the report's suspended delivery cases only when this own probe of the install confirms it cannot serve deliveries; a static site's UAT answers no merger, so nothing is suspended there.
-      servesDeliveries: 'url' in options.uat ? (await installServesDeliveries(options.uat.url, options.token)).servesDeliveries : undefined });
+      servesDeliveries: 'url' in options.uat ? async () => (await installServesDeliveries(url, options.token, options.fetcher)).servesDeliveries : undefined });
     return await validateAndRecord(git, id, url, suites, { base: options.base, push: options.push, timeoutMs: options.timeoutMs, file: options.file, holds, now: options.now, fetcher: options.fetcher });
   } finally { await served?.close(); }
 }

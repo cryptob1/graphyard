@@ -207,7 +207,7 @@ export const releaseCommands = defineCommands([
         const contract = existsSync(join(root, contractFile)) ? await loadContract(root).catch(error => { console.error(`No release holds: ${error.message}`); return null; }) : null;
         const holds = reportFile ? releaseHolds(git, { contract, push, file, report: async () => existsSync(reportFile) ? JSON.parse(await readFile(reportFile, 'utf8')) : null,
           // GY-1938: the holds honor the report's suspended delivery cases only when this own probe of the install confirms it cannot serve deliveries.
-          servesDeliveries: (await installServesDeliveries(url, process.env.GRAPHYARD_UAT_TOKEN ?? '')).servesDeliveries }) : undefined;
+          servesDeliveries: async () => (await installServesDeliveries(url, process.env.GRAPHYARD_UAT_TOKEN ?? '')).servesDeliveries }) : undefined;
         const result = await validateAndRecord(git, target, url, suites, { base, push, timeoutMs: waitMs, file, holds });
         print(result); if (result.record.result !== 'passed') process.exitCode = 1; return;
       }
