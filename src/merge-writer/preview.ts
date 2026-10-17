@@ -228,14 +228,18 @@ export async function openPreview(input: PreviewInput, options: PreviewOptions &
   const mandatory = (entry: CaseFile) => options.cases ? true : entry.definition.required;
   let directory: string | null = null, served = null as Served | null, timer: NodeJS.Timeout | undefined, running: Promise<PreviewVerdict> | null = null;
   let closed: Promise<void> | null = null, outcome: PreviewVerdict | null = null;
+  // A Compose project that could not be removed rejects close (after the checkout goes), and the next close tries it again.
   const close = () => closed ??= (async () => {
-    try { await (served as Served | null)?.close(); } catch { /* the server is gone either way */ }
+    let left: unknown = null;
+    try { await (served as Served | null)?.close(); } catch (error) { if (input.compose) left = error; /* a static server is gone either way */ }
     if (directory) {
       try { await run('git', ['-C', input.root, 'worktree', 'remove', '--force', join(directory, 'checkout')]); } catch { /* removed below; the next prune forgets it */ }
       await rm(directory, { recursive: true, force: true });
       await rm(tempOwnerMarker(directory), { force: true });
+      directory = null;
     }
-  })();
+    if (left) throw left;
+  })().catch(error => { closed = null; throw error; });
   try {
     if (options.signal?.aborted) return { verdict: outcome = verdict('error', 'the preview was cancelled before it started'), url: null, close };
     directory = await mkdtemp(join(input.base, previewCheckoutPrefix));
@@ -308,7 +312,8 @@ export async function openPreview(input: PreviewInput, options: PreviewOptions &
     const kept = options.keep && outcome?.result === 'pass' && !signal.aborted;
     if (!kept) cancel.abort();
     if (running) await running.catch(() => null);
-    if (!kept) await close();
+    // A Compose project left behind here is removed by the caller's own close, which retries it.
+    if (!kept) await close().catch(() => {});
     release();
   }
 }
@@ -393,7 +398,8 @@ async function abandon(entry: LivePreview, error: unknown, ports: Pick<ItemPrevi
   entry.stop.abort();
   console.error(`The server has not confirmed ${entry.key}'s preview record (${entry.owed[0]!.record.state}) after ${entry.failures} sends, so the preview stops serving: ${error instanceof Error ? error.message : String(error)}`);
   if (!entry.opened || previewEnded(entry.record)) return;
-  await entry.opened.close();
+  // Not removed yet: the step's `end` retries it, and records it cleaned only once it is.
+  try { await entry.opened.close(); } catch (error) { console.error(`${entry.key}'s preview was not removed, retried next step: ${error instanceof Error ? error.message : String(error)}`); return; }
   entry.owed = entry.owed.filter(owed => owed.record.state === 'starting');
   owe(entry, endedRecord(entry.record, 'unconfirmed', `${entry.record.detail ? `${entry.record.detail}; ` : ''}ended: the server did not confirm it`, new Date((ports.now ?? Date.now)()).toISOString()));
 }
@@ -458,11 +464,11 @@ export async function itemPreviewStep(live: Map<string, LivePreview>, work: read
   }
   const ended = (record: ItemPreview, reason: PreviewEndReason, detail: string) => endedRecord(record, reason, detail, at());
   const end = async (entry: LivePreview, reason: PreviewEndReason) => {
-    if (!entry.ending) {
-      entry.ending = reason;
-      entry.stop.abort();
-      // A preview still starting is closed once it settles (`start`); a served one is closed here.
-      if (entry.opened) { await entry.opened.close(); if (!previewEnded(entry.record)) owe(entry, ended(entry.record, reason, `${entry.record.detail ? `${entry.record.detail}; ` : ''}ended: ${reason}`)); }
+    if (!entry.ending) { entry.ending = reason; entry.stop.abort(); }
+    // A preview still starting is closed once it settles (`start`); a served one is closed here, each step until it is removed, and only then recorded cleaned.
+    if (entry.opened && !previewEnded(entry.record)) {
+      try { await entry.opened.close(); } catch (error) { notes.push(`${entry.key}'s preview was not removed, retried next step: ${error instanceof Error ? error.message : String(error)}`); return false; }
+      owe(entry, ended(entry.record, entry.ending, `${entry.record.detail ? `${entry.record.detail}; ` : ''}ended: ${entry.ending}`));
     }
     if (entry.opened && await settleRecords(entry, ports)) { live.delete(entry.key); return true; }
     return false;
@@ -470,8 +476,8 @@ export async function itemPreviewStep(live: Map<string, LivePreview>, work: read
   // GY-1903: a Compose preview a gone process left on the daemon is removed before this process starts any; its bounds are the loop's configuration.
   const bounds = composeBounds(ports.hostEnvironment ?? process.env);
   if (!composeSwept && delivery?.applications.some(application => application.kind === 'compose')) {
-    composeSwept = true;
-    try { for (const project of await sweepComposePreviews({ docker: ports.docker, env: dockerEnvironment({ PATH: (ports.hostEnvironment ?? process.env).PATH ?? '' }, ports.hostEnvironment ?? process.env) })) notes.push(`Removed the abandoned Compose preview ${project}`); }
+    // Retried each step until a sweep removes everything it should.
+    try { for (const project of await sweepComposePreviews({ docker: ports.docker, env: dockerEnvironment({ PATH: (ports.hostEnvironment ?? process.env).PATH ?? '' }, ports.hostEnvironment ?? process.env) })) notes.push(`Removed the abandoned Compose preview ${project}`); composeSwept = true; }
     catch (error) { notes.push(`Could not sweep abandoned Compose previews: ${error instanceof Error ? error.message : String(error)}`); }
   }
   const composing = () => [...live.values()].filter(entry => entry.compose && !entry.ending).length;
@@ -537,7 +543,11 @@ export async function itemPreviewStep(live: Map<string, LivePreview>, work: read
         try { site = opened.publish ? await opened.publish() : await readPreviewSite(opened.site!); } catch (error) { unpublished = `; not published: ${error instanceof Error ? error.message : String(error)}`; }
       }
       if (entry.ending || !opened.url || opened.verdict.result !== 'pass' || !site) {
-        await opened.close();
+        // Recorded ended only once removed: a failed removal is retried until it succeeds.
+        for (let tries = 1; ; tries++) {
+          try { await opened.close(); break; } catch (error) { console.error(`${item.key}'s preview was not removed (try ${tries}), retrying: ${error instanceof Error ? error.message : String(error)}`); }
+          await new Promise(accept => setTimeout(accept, Math.min(30_000, 1_000 * tries)));
+        }
         const why = entry.ending ?? 'failed';
         owe(entry, { ...entry.record, state: why === 'failed' ? 'failed' : 'cleaned', cases, origin: null, detail: cut(`${opened.verdict.detail}${unpublished}${omitted}`), cleanedAt: at(), endReason: why });
       } else owe(entry, { ...entry.record, state: 'running', cases, origin: opened.url, detail: cut(`${opened.verdict.detail}${omitted}`), readyAt: at() }, site);

@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer as netServer, type AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,7 +17,7 @@ import { masterConfigSchema } from '../src/master.js';
 import { emptyDaemonState } from '../src/daemon/state-cursor.js';
 import { mergeWriterReads, mergeWriterStep } from '../src/daemon/cycle-merge-writer.js';
 import { mergeRecordKey, type MergeRecordEvent } from '../src/merge-writer/executor.js';
-import { composeLeftovers, composeMountProblems, composePreviewConfig, composeProjectName, composeProjectPrefix, sweepComposePreviews, composeBounds, currentOwner } from '../src/compose-preview.js';
+import { composeLeftovers, composeMountProblems, composePreviewConfig, composeProjectName, composeProjectPrefix, sweepComposePreviews, composeBounds, currentOwner, defaultDocker, removeComposeProject, snapshotComposeSite, type Docker } from '../src/compose-preview.js';
 import { previewPath, type ItemPreview } from '../src/project-previews.js';
 import { defaultChildRun } from '../src/child-runner.js';
 import type { Cycle } from '../src/daemon/cycle.js';
@@ -49,7 +49,9 @@ const freePort = async () => { const probe = netServer(); await new Promise<void
 const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const dockerJson = (...args: string[]) => JSON.parse(execFileSync('docker', args, { encoding: 'utf8' }));
 
-/** The fixture project (tests/fixtures/goal-compose-preview): main, a static change, a Compose change, a Compose change that breaks its case, and one mounting a host credential path. */
+/** A synthetic production credential the loop's host keeps outside every checkout: an env file and a directory. */
+const outsideCredential = 'synthetic-production-credential-1903';
+/** The fixture project (tests/fixtures/goal-compose-preview): main, a static change, a Compose change, a Compose change that breaks its case, and ones reaching host credentials or the engine. */
 async function fixture() {
   execFileSync('git', ['init', '-q', '-b', 'main', repo]);
   git('config', 'user.email', 't@example.com'); git('config', 'user.name', 'T');
@@ -61,6 +63,14 @@ async function fixture() {
   await change('compose', () => writeFile(join(repo, 'app/banner.txt'), 'Compose change C is live\n'));
   await change('broken', () => writeFile(join(repo, 'app/heading.txt'), 'Something else\n'));
   await change('mount', async () => { const file = join(repo, 'compose.yml'); await writeFile(file, (await readFile(file, 'utf8')).replace('      - state:/state\n', '      - state:/state\n      - /var/run/docker.sock:/var/run/docker.sock\n')); });
+  // Reaching outside the checkout: an env file the resolution would read, a tracked symlink a bind mount follows, and the engine's implicit API socket.
+  const outside = join(scratch, 'outside'); await mkdir(join(outside, 'credentials'), { recursive: true });
+  await writeFile(join(outside, 'production.env'), `PREVIEW_LEAK=${outsideCredential}\n`); await writeFile(join(outside, 'credentials', 'token'), `${outsideCredential}\n`);
+  const compose = async (from: string, to: string) => { const file = join(repo, 'compose.yml'); await writeFile(file, (await readFile(file, 'utf8')).replace(from, to)); };
+  const web = '    command: ["sh", "/app/web-start.sh"]\n';
+  await change('envfile', () => compose(web, `${web}    env_file: ${join(outside, 'production.env')}\n`));
+  await change('symlink', async () => { await symlink(join(outside, 'credentials'), join(repo, 'credential-dir')); await compose('      - state:/state\n', '      - state:/state\n      - ./credential-dir:/credentials:ro\n'); });
+  await change('socket', () => compose(web, `${web}    use_api_socket: true\n`));
   git('checkout', '-q', 'main');
 }
 
@@ -108,14 +118,14 @@ async function submit(item: Work, name: string) {
 const close = async (item: Work, reason: string) => assert.equal((await call('POST', `work/${item.id}/close`, 'operator', { kind: 'obsolete', reason }, `close-${item.id}`)).status, 200);
 
 /** The loop's merge-writer step as the daemon wires it, in a host environment holding production credentials and the configured bounds. */
-function loop() {
+function loop(docker?: Docker) {
   const state = emptyDaemonState(config);
   const record = async (work: Pick<Work, 'id' | 'key'>, event: MergeRecordEvent) => {
     const answer = await call('POST', `work/${work.id}/merge-record`, 'coordinator', event, mergeRecordKey(work, event));
     if (answer.status !== 200) throw new Error(`${answer.status}: ${answer.body.error}`);
     return answer.body;
   };
-  const reads = { ...mergeWriterReads(config, repo, defaultChildRun, { base, record, merger: async () => 'github', environment }), advisory: undefined };
+  const reads = { ...mergeWriterReads(config, repo, defaultChildRun, { base, record, merger: async () => 'github', environment, itemPreviews: { docker } }), advisory: undefined };
   return { step: async (ids: string[]) => {
     const work = await Promise.all(ids.map(read));
     await mergeWriterStep({ state, effects: { mergeWriter: reads, persist: async () => {} }, now: Date.now, snapshot: { work }, performed: [] } as unknown as Cycle);
@@ -172,7 +182,10 @@ test('integration:goal-declared-application-previews — a declared static site 
 
 test('integration:goal-compose-preview-isolation-cleanup — two simultaneous Compose previews keep their own state and database, get no production credential and run bounded; their containers, volumes and networks are removed on success, failure and cancellation; restart recovery keeps live owners and removes abandoned previews', { timeout: 300_000 }, async t => {
   if (!docker) { assert.ok(!process.env.CI, 'CI runs the Compose previews'); t.skip('no Docker Compose or alpine:3 image on this host'); return; }
-  const run = loop();
+  // The daemon refuses removals while `failing`: cleanup must not be recorded until a later removal succeeds.
+  let failing = false;
+  const run = loop((args, options) => failing && (args[0] === 'rm' || (['volume', 'network'].includes(args[0]!) && args[1] === 'rm') || args.includes('down'))
+    ? Promise.reject(new Error(`docker ${args.slice(0, 2).join(' ')} failed: injected daemon failure`)) : defaultDocker(args, options));
   const first = await change('First compose change', 'fixture-compose-app'), second = await change('Second compose change', 'fixture-compose-app');
   await submit(first, 'compose'); await submit(second, 'compose');
   const a = await until(run, [first.id, second.id], first.id, preview => preview?.state === 'running');
@@ -244,6 +257,18 @@ test('integration:goal-compose-preview-isolation-cleanup — two simultaneous Co
   assert.match(refused.detail, /mounts the host path \/var\/run\/docker\.sock, outside the change's checkout/);
   await nothingLeft(project(mounting, refused));
 
+  // An env file outside the checkout, a tracked symlink to a host directory, and the engine's implicit API socket are refused before anything starts; the credential reaches no container.
+  for (const [name, reason] of [['envfile', /reads the env file .*production\.env, outside the change's checkout/], ['symlink', /mounts the host path .*credential-dir, outside the change's checkout/], ['socket', /asks for the Docker engine's API socket/]] as const) {
+    const item = await change(`A compose change reaching outside (${name})`, 'fixture-compose-app');
+    await submit(item, name);
+    const outcome = await until(run, [second.id, item.id], item.id, preview => preview?.state === 'failed');
+    assert.match(outcome.detail, reason, name);
+    assert.ok(!outcome.detail.includes(outsideCredential), 'the credential is never read into the record');
+    await nothingLeft(project(item, outcome));
+  }
+  for (const id of execFileSync('docker', ['ps', '-aq'], { encoding: 'utf8' }).split('\n').filter(Boolean))
+    assert.ok(!JSON.stringify(dockerJson('inspect', id)).includes(outsideCredential), `container ${id} never holds the outside credential`);
+
   // Cancellation while it starts: the item closes before its preview is up; it is stopped, cleaned and leaves nothing.
   const early = await change('Cancelled while its compose preview starts', 'fixture-compose-app');
   await submit(early, 'compose');
@@ -254,8 +279,13 @@ test('integration:goal-compose-preview-isolation-cleanup — two simultaneous Co
   assert.equal((await until(run, [second.id, early.id], early.id, preview => preview?.state === 'cleaned')).endReason, 'cancelled');
   await nothingLeft(project(early, starting));
 
-  // Cancellation of the running one: closed, cleaned, nothing left.
+  // Cancellation of the running one: closed, cleaned, nothing left — after a removal the daemon refused, which is retried and not recorded until it succeeds.
+  failing = true;
   await close(second, 'Done');
+  for (let round = 0; round < 3; round++) await run.step([second.id]);
+  assert.equal((await read(second.id)).preview!.state, 'running', 'not recorded cleaned while its containers remain');
+  assert.equal((await composeLeftovers(project(second, b))).containers.length, 2, 'the refused removal left the containers');
+  failing = false;
   assert.equal((await until(run, [second.id], second.id, preview => preview?.state === 'cleaned')).endReason, 'cancelled');
   await nothingLeft(project(second, b));
   assert.equal((await fetch(`${b.origin}/`).catch(() => null)), null, 'its loopback origin no longer answers');
@@ -283,4 +313,53 @@ test('unit:compose-preview-config — the resolved configuration is refused for 
   assert.equal(rewritten.networks.outside.labels['graphyard.preview.owner'], JSON.stringify(owner));
   assert.equal(composeProjectName('GY-12', 'ABCDEF12-0000'), 'graphyard-preview-gy-12-abcdef12');
   assert.deepEqual(composeBounds({}), { cpus: 1, memoryMb: 512, pids: 256, lifetimeMs: 720 * 60_000, concurrent: 4 });
+});
+
+test('unit:compose-preview-config-reach — symlinks out of the checkout, the API socket, another container\'s volumes and replicas never reach a preview', async () => {
+  const directory = await realpath(await temporaryDirectory('compose-reach'));
+  try {
+    const checkout = join(directory, 'checkout'), secrets = join(directory, 'secrets');
+    await mkdir(checkout); await mkdir(secrets); await symlink(secrets, join(checkout, 'credential-dir'));
+    const resolved = { services: { web: { image: 'alpine:3', use_api_socket: true, volumes_from: ['container:production', 'db'], scale: 50, volumes: [{ type: 'bind', source: join(checkout, 'credential-dir'), target: '/c' }, { type: 'bind', source: join(checkout, 'app'), target: '/app' }] },
+      db: { image: 'alpine:3', deploy: { replicas: 300, labels: { tier: 'db' } }, env_file: [{ path: join(checkout, 'credential-dir', 'prod.env') }] } }, secrets: { token: { file: join(checkout, 'credential-dir', 'token') } } };
+    assert.deepEqual(composeMountProblems(resolved, checkout, 'web'), [
+      `service web mounts the host path ${join(checkout, 'credential-dir')}, outside the change's checkout`, 'service web asks for the Docker engine\'s API socket', 'service web takes the volumes of the container production, outside the preview',
+      `service db reads the env file ${join(checkout, 'credential-dir', 'prod.env')}, outside the change's checkout`, `the secret token reads ${join(checkout, 'credential-dir', 'token')}, outside the change's checkout`]);
+    const rewritten = composePreviewConfig(resolved, { project: 'graphyard-preview-gy-1-abcdef12', service: 'web', port: 8080, bounds: composeBounds({}), variables: {}, owner: currentOwner() });
+    assert.deepEqual([rewritten.services.web.scale, rewritten.services.db.deploy], [undefined, { labels: { tier: 'db' } }], 'one container per service');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('unit:compose-preview-removal-confirmed — a removal the daemon refuses rejects, naming what remains, and succeeds only once nothing of the project is left', async () => {
+  let refuse = true;
+  const held = { containers: ['c1'], volumes: ['graphyard-preview-gy-1-abcdef12_data'], networks: ['graphyard-preview-gy-1-abcdef12_default'] };
+  const docker: Docker = async args => {
+    if (args[0] === 'ps') return held.containers.join('\n');
+    if (args[0] === 'volume' && args[1] === 'ls') return held.volumes.join('\n');
+    if (args[0] === 'network' && args[1] === 'ls') return held.networks.join('\n');
+    if (refuse) throw new Error('injected daemon failure');
+    held.containers = []; held.volumes = []; held.networks = [];
+    return '';
+  };
+  await assert.rejects(removeComposeProject('graphyard-preview-gy-1-abcdef12', { docker, env: {} }), /was not removed: container c1, volume graphyard-preview-gy-1-abcdef12_data, network graphyard-preview-gy-1-abcdef12_default remain/);
+  refuse = false;
+  await removeComposeProject('graphyard-preview-gy-1-abcdef12', { docker, env: {} });
+  assert.deepEqual(held, { containers: [], volumes: [], networks: [] });
+});
+
+test('unit:compose-preview-snapshot — root-relative links resolve under the preview link, and an answer past the byte bound is cut off while it streams', async () => {
+  const pages: Record<string, () => Response> = {
+    '/': () => new Response('<link href="/assets/app.css"><a href="/about">About</a><a href="//cdn.example/x">x</a>', { headers: { 'content-type': 'text/html' } }),
+    '/assets/app.css': () => new Response('body { background: url(/assets/bg.png) }', { headers: { 'content-type': 'text/css' } }),
+    '/assets/bg.png': () => new Response('png', { headers: { 'content-type': 'image/png' } }),
+    '/about': () => new Response('<img src="/assets/bg.png">', { headers: { 'content-type': 'text/html' } }),
+  };
+  const site = await snapshotComposeSite('http://127.0.0.1:1', (async (target: URL) => pages[target.pathname]?.() ?? new Response('', { status: 404 })) as typeof fetch);
+  const text = Object.fromEntries(site.map(file => [file.path, Buffer.from(file.content, 'base64').toString()]));
+  assert.deepEqual(text, { 'about/index.html': '<img src="../assets/bg.png">', 'assets/app.css': 'body { background: url(../assets/bg.png) }', 'assets/bg.png': 'png',
+    'index.html': '<link href="./assets/app.css"><a href="./about">About</a><a href="//cdn.example/x">x</a>' });
+  let sent = 0;
+  const endless = new ReadableStream<Uint8Array>({ pull(controller) { sent += 1 << 20; controller.enqueue(new Uint8Array(1 << 20)); } });
+  await assert.rejects(snapshotComposeSite('http://127.0.0.1:1', (async () => new Response(endless, { headers: { 'content-type': 'text/html' } })) as typeof fetch), /larger than the \d+ bytes a preview publishes/);
+  assert.ok(sent < 64 << 20, `stopped reading at the bound, not after ${sent} bytes`);
 });
