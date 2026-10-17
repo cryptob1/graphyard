@@ -158,7 +158,13 @@ export function composeStack(options: ComposeStackOptions): ComposeStack {
       const dotenv = join(options.scratch, 'preview.env');
       await writeFile(dotenv, '');
       const compose = (file: string) => ['compose', '--env-file', dotenv, '-f', file, '-p', options.project];
-      const resolved = JSON.parse(await docker([...compose(options.file), 'config', '--no-env-resolution', '--format', 'json'], { env, cwd: options.checkout, signal, timeoutMs: left() })) as Json;
+      const config = async (...flags: string[]) => JSON.parse(await docker([...compose(options.file), 'config', '--no-env-resolution', ...flags, '--format', 'json'], { env, cwd: options.checkout, signal, timeoutMs: left() })) as Json;
+      // Some Compose versions read env files despite --no-env-resolution; only an uninterpolated pass reliably keeps them declared, so they are checked there first.
+      const declared = await config('--no-interpolate');
+      const envFiles = composeMountProblems({ services: Object.fromEntries(Object.entries<Json>(declared.services ?? {}).map(([name, entry]) => [name, { env_file: entry.env_file }])) }, options.checkout, options.service);
+      for (const [name, entry] of Object.entries<Json>(declared.services ?? {})) for (const file of [entry.env_file ?? []].flat()) if (String(typeof file === 'string' ? file : file?.path).includes('$')) envFiles.push(`service ${name} names its env file by a variable`);
+      if (envFiles.length) throw new Error(`the Compose application cannot be previewed in isolation: ${envFiles.join('; ')}`);
+      const resolved = await config();
       const problems = composeMountProblems(resolved, options.checkout, options.service);
       if (problems.length) throw new Error(`the Compose application cannot be previewed in isolation: ${problems.join('; ')}`);
       const generated = join(options.scratch, 'compose.preview.json');

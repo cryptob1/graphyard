@@ -18,7 +18,7 @@ import { masterConfigSchema } from '../src/master.js';
 import { emptyDaemonState } from '../src/daemon/state-cursor.js';
 import { mergeWriterReads, mergeWriterStep } from '../src/daemon/cycle-merge-writer.js';
 import { mergeRecordKey, previewRecordEvent, type MergeRecordEvent } from '../src/merge-writer/executor.js';
-import { composeLeftovers, composeMountProblems, composePreviewConfig, composeProjectName, composeProjectPrefix, sweepComposePreviews, composeBounds, currentOwner, defaultDocker, removeComposeProject, snapshotComposeSite, type Docker } from '../src/compose-preview.js';
+import { composeLeftovers, composeMountProblems, composeStack, composePreviewConfig, composeProjectName, composeProjectPrefix, sweepComposePreviews, composeBounds, currentOwner, defaultDocker, removeComposeProject, snapshotComposeSite, type Docker } from '../src/compose-preview.js';
 import { previewPath, type ItemPreview } from '../src/project-previews.js';
 import { defaultChildRun } from '../src/child-runner.js';
 import type { Cycle } from '../src/daemon/cycle.js';
@@ -367,6 +367,24 @@ test('unit:compose-preview-config-reach — symlinks out of the checkout, the AP
       `service db reads the env file ${join(checkout, 'credential-dir', 'prod.env')}, outside the change's checkout`, `the secret token reads ${join(checkout, 'credential-dir', 'token')}, outside the change's checkout`]);
     const rewritten = composePreviewConfig(resolved, { project: 'graphyard-preview-gy-1-abcdef12', service: 'web', port: 8080, bounds: composeBounds({}), variables: {}, owner: currentOwner() });
     assert.deepEqual([rewritten.services.web.scale, rewritten.services.db.deploy], [undefined, { labels: { tier: 'db' } }], 'one container per service');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('unit:compose-preview-env-files-checked-unresolved — under a Compose that resolves env files despite --no-env-resolution, an env file outside the checkout is refused from the uninterpolated declaration and nothing starts', async () => {
+  const directory = await realpath(await temporaryDirectory('compose-env-files'));
+  try {
+    const calls: string[][] = [];
+    const docker: Docker = async args => {
+      calls.push(args);
+      if (!args.includes('config')) return '';
+      return JSON.stringify(args.includes('--no-interpolate')
+        ? { services: { web: { image: 'alpine:3', env_file: [{ path: '/srv/production.env' }] }, db: { image: 'alpine:3', env_file: ['${HOST_ENV}'] } } }
+        : { services: { web: { image: 'alpine:3', environment: { LEAK: outsideCredential } }, db: { image: 'alpine:3' } } });
+    };
+    const stack = composeStack({ checkout: directory, file: 'compose.yml', service: 'web', port: 8080, project: 'graphyard-preview-gy-1-abcdef12', environment: {}, variables: {}, bounds: composeBounds({}), scratch: join(directory, 'scratch'), docker });
+    await assert.rejects(stack.start(AbortSignal.timeout(5_000), 5_000), /service web reads the env file \/srv\/production\.env, outside the change's checkout; service db names its env file by a variable/);
+    assert.deepEqual(calls.map(args => args.includes('config') ? 'config' : args.at(-1)), ['config'], 'only the declaration was read; nothing resolved or started');
+    assert.ok(calls[0]!.includes('--env-file') && calls[0]!.includes('--no-env-resolution'), 'interpolation never reads the checkout\'s .env');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
