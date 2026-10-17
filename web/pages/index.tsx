@@ -15,6 +15,7 @@ import ReleasesView from '../releases';
 import ProofGrantsView from '../grants';
 import InsightsPage from './insights-flow';
 import TestsPage from './tests';
+import { DeliveryDefaults } from '../components/delivery-slices';
 import { readsFlowAnalytics } from '../step-moves';
 
 /**
@@ -83,6 +84,8 @@ export const views: readonly View[] = [
   // and Settings → Agents links to it, so it is not a navigation entry of its own.
   { id: 'setup', icon: '✔', label: 'Setup', adminOnly: true, render: dashboard => <SetupPage status={dashboard.status} api={dashboard.api} setView={dashboard.setView}/> },
   { id: 'guide', icon: '?', label: 'How Graphyard works', render: () => <GuidePage/> },
+  // The project's effective delivery defaults and declared applications (GY-1901), opened from the sidebar's foot like the guide.
+  { id: 'delivery', icon: '⇉', label: 'Delivery', render: dashboard => <DeliveryDefaults status={dashboard.status}/> },
 ];
 
 /** The pages this session may open, in registry order. */

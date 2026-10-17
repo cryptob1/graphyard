@@ -16,6 +16,7 @@ import { applyProtection, applyRestore, observeRestore, protectionRecordFile, re
 import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
 import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
 import { repositoryPolicyAssignment } from '../model/repository-policy.js';
+import { applicationProblems, caseIdsOf, projectDeliveryAssignment, projectDeliveryVariable } from '../project-applications.js';
 import { delegationLimitAssignments, delegationLimitVariables } from './limits.js';
 import { assertOutsideRepository, configHome, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalRecords, principalsVariable, readInstallRecord, reconcileRoster, recordedRoster, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord, type RosterPrincipal } from './secrets.js';
 import { AppStepPending, readAppFile, readSavedApp, readUninstalledApp, type SavedApp } from './manifest.js';
@@ -266,18 +267,34 @@ export interface InstallSession {
    * one a scan would propose when none is committed yet (`committed` false), with the adapter that
    * deploys its UAT and production environments.
    */
-  delivery: { policy: DeliveryPolicy; committed: boolean; adapter: DeploymentAdapter; context: DeploymentContext };
+  delivery: { policy: DeliveryPolicy; committed: boolean; adapter: DeploymentAdapter; context: DeploymentContext; merger?: InstallRecord['merger'] };
 }
 
-/** The committed delivery policy, or the one `init --scan` would propose for this checkout. */
-export async function repositoryDelivery(root: string): Promise<{ policy: DeliveryPolicy; committed: boolean }> {
+/**
+ * The merger an install proposes its delivery under (GY-1833, GY-1901): a new install's control plane
+ * merges; an existing one keeps the merger its record names, so a GitHub-merger install, or one whose
+ * record predates the field, keeps its model. Observation-only reads none.
+ */
+export const installMerger = (record: InstallRecord | null, observeOnly: boolean): InstallRecord['merger'] => observeOnly ? null : record ? record.merger : 'control-plane';
+
+/**
+ * The committed delivery policy, or the one `init --scan` would propose for this checkout under
+ * `merger` (GY-1901: a new install's control-plane merger proposes the local mode).
+ */
+export async function repositoryDelivery(root: string, merger: string | null = null): Promise<{ policy: DeliveryPolicy; committed: boolean }> {
   const { readFile } = await import('node:fs/promises');
   let text: string | null = null;
   try { text = await readFile(resolve(root, repositoryConfigFile), 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  const committed = text === null ? undefined : parseRepositoryConfig(text).delivery;
+  let committed: DeliveryPolicy | undefined;
+  try { committed = text === null ? undefined : parseRepositoryConfig(text).delivery; }
+  catch (error: any) { throw new Error(Array.isArray(error?.issues) ? error.issues.map((issue: any) => `${issue.path.join('.')}: ${issue.message}`).join('; ') : error.message); }
+  const input = await collectScanInput(root);
+  // A committed binding names a case file the checkout must hold, as init checks it (GY-1901).
+  const unknownCases = committed ? applicationProblems(committed, caseIdsOf(input.files)) : [];
+  if (unknownCases.length) throw new Error(unknownCases.join('; '));
   if (committed) return { policy: committed, committed: true };
-  const input = await collectScanInput(root), stack = detectStack(input);
-  return { policy: proposeDelivery(input, detectDeploy(input, stack), stack), committed: false };
+  const stack = detectStack(input);
+  return { policy: proposeDelivery(input, detectDeploy(input, stack), stack, { merger }), committed: false };
 }
 
 const APP_HUMAN_STEP = 'Open the page the installer serves and prints (http://127.0.0.1:4311; it opens no browser), confirm the Graphyard GitHub App there, and install it on the managed repository; when GitHub asks to Confirm access, approve the GitHub Mobile prompt.';
@@ -536,7 +553,10 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
     repositoryPolicy = { assignment: repositoryPolicyAssignment(text === null ? null : JSON.parse(text)), error: null };
   } catch (error: any) { repositoryPolicy = { assignment: null, error: `${repositoryConfigFile}'s risk, review and e2e policy does not parse: ${error.message}` }; }
   const reviewPolicy = rawInputs.reviewPolicy ?? 'github';
-  const delivery = await repositoryDelivery(root);
+  // A new install, or a retry of one whose record names the control-plane merger, proposes the local mode;
+  // a committed policy is its own choice and ignores this.
+  const merger = installMerger(record, !!rawInputs.observeOnly);
+  const delivery = await repositoryDelivery(root, merger).catch((error: any) => { throw new Error(`${repositoryConfigFile}'s delivery policy cannot be installed: ${error.message}. Correct it (docs/delivery.md#managed-repositories), then rerun`); });
   let detectedBase = rawInputs.baseBranch;
   if (!detectedBase && existsSync(resolve(root, '.git'))) {
     try { detectedBase = detectedBaseBranch(execFileSync('git', ['-C', root, 'branch', '-r'], { encoding: 'utf8' })) ?? undefined; } catch {}
@@ -616,7 +636,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
   return {
     root, inputs, installId, directory, adapter, context, principals, tokens, vault, record,
     reviewers: record?.reviewers ?? [], mode, materialized, generatedFiles, repositoryPolicy, savedApp, registrations,
-    delivery: { ...delivery, adapter: deploymentAdapters[delivery.policy.deploy.adapter], context: deployment },
+    delivery: { ...delivery, adapter: deploymentAdapters[delivery.policy.deploy.adapter], context: deployment, merger },
     reviewPolicy, requiredChecks,
     reviewCount: reviewPolicy === 'agent' ? 0 : Math.max(0, inputs.reviewCount ?? 1),
     deps: { fetch: dependencies.fetch ?? fetch, now: dependencies.now ?? Date.now, wait: dependencies.wait ?? ((ms: number) => new Promise(accept => setTimeout(accept, ms))), log: dependencies.log ?? (() => {}), ...dependencies },
@@ -721,6 +741,10 @@ export function coreEnv(session: InstallSession): EnvValue[] {
     // The repository's sensitive paths, review timing and pending-outcome rule (GY-1843): the image
     // carries no graphyard.json, so the deployed gates read them from here.
     ...(session.repositoryPolicy?.assignment ? [{ name: session.repositoryPolicy.assignment.variable, value: session.repositoryPolicy.assignment.value, secret: false }] : []),
+    // The delivery defaults, applications and case bindings (GY-1901), which /api/status shows as project.delivery:
+    // the committed policy when graphyard.json has one, else the scan's proposal so a fresh up serves them before
+    // onboarding commits the file (the control plane image carries no checkout).
+    { name: projectDeliveryVariable, value: projectDeliveryAssignment(session.delivery.policy).value, secret: false },
     ...(context.repoCheckout ? [{ name: 'GRAPHYARD_REPOSITORY_ROOT', value: '/repo', secret: false }] : []),
   ];
 }
@@ -1280,7 +1304,7 @@ export interface InstallSummary {
   freshCursor?: HostCursorReset;
   /** The single-use dashboard sign-in for the admin; printed once, stored on the host only as a hash. */
   signIn?: string;
-  release: { mode: 'release-candidate' | 'per-pr'; adapter: 'railway' | 'command'; created: string[]; pending: { id: string; command?: string; human?: string }[] };
+  release: { mode: 'local' | 'release-candidate' | 'per-pr'; adapter: 'railway' | 'command'; created: string[]; pending: { id: string; command?: string; human?: string }[] };
   /** `--observe-only` (GY-1846): every action the plan held, which a later full install performs. */
   held?: { id: string; title: string; held: string }[];
 }
@@ -1523,7 +1547,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   // The record names this run's App choice before the App step can pause it: a rerun without
   // --no-github-app waiting at its App page must not keep a prior no-App install's marker, or
   // `init --scan --apply` would onboard against an App still being bound (GY-1642).
-  record = { ...record, url, domain: context.domain, service: context.service, provider: context.provider, selfContained: !!context.host, migratedFrom, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, noGithubApp: !!session.inputs.noGithubApp && !keptBinding, principals: principalRecords(session.principals, session.tokens), updatedAt: new Date(deps.now()).toISOString() };
+  record = { ...record, url, domain: context.domain, service: context.service, provider: context.provider, selfContained: !!context.host, migratedFrom, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, noGithubApp: !!session.inputs.noGithubApp && !keptBinding, merger: session.delivery.merger ?? record.merger, principals: principalRecords(session.principals, session.tokens), updatedAt: new Date(deps.now()).toISOString() };
   await writeInstallRecord(session.directory, record, vault);
 
   // The master's local configuration and the profiles come before the App step (GY-1413), so
