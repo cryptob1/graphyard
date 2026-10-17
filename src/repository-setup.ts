@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, saveDiscovery, writeDeliveryWorkflow, setupProposalSchema, type ScanInput, type SetupProposal } from './onboarding.js';
+import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, removeDeliveryWorkflow, saveDiscovery, writeDeliveryWorkflow, setupProposalSchema, type ScanInput, type SetupProposal } from './onboarding.js';
 import { generatedFilesAssignment } from './install/generated-files.js';
 import { ensureMergeMode, type ProtectionRun } from './protection.js';
 import { autonomyContract } from './autonomy.js';
@@ -455,7 +455,10 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   // workflows only once it is on disk. It decides "no CI" itself, so a rerun that finds only
   // Graphyard's own workflows still reports it, matching the gate the proposed policy requires.
   // The local mode (GY-1901) generates no GitHub Actions workflow, delivery workflow included.
-  const deliveryWorkflow = delivery && proposal.delivery?.mode !== 'local' ? await writeDeliveryWorkflow(root) : null;
+  const local = proposal.delivery?.mode === 'local';
+  const deliveryWorkflow = delivery && !local ? await writeDeliveryWorkflow(root) : null;
+  const staleWorkflow = delivery && local ? await removeDeliveryWorkflow(root) : null;
+  if (staleWorkflow) (staleWorkflow.state === 'removed' ? applied : drift).push(staleWorkflow.state === 'removed' ? `removed ${staleWorkflow.path}: the local mode generates no GitHub Actions workflow` : `${staleWorkflow.path} is not the generated workflow; delete it to finish switching to local delivery`);
   // An operator's edit to it is drift: the edited file is kept, and still published as the workflow.
   if (delivery && deliveryWorkflow) {
     if (deliveryWorkflow.state === 'drift') drift.push(`${deliveryWorkflow.path} differs from the generated workflow; the edited file was kept`);

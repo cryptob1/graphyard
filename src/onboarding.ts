@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { accessSync, constants as fsConstants } from 'node:fs';
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { configHome } from './install/secrets.js';
@@ -245,6 +245,19 @@ export async function writeDeliveryWorkflow(root: string, base = originBase(root
   await mkdir(dirname(target), { recursive: true });
   await writeFile(target, workflow.content, { mode: 0o644 });
   return { path: workflow.path, state: 'written' };
+}
+
+/**
+ * GY-1901: under the local mode, remove the delivery workflow an earlier mode generated; null when
+ * there is none. Only the exact render is removed: an edited file is kept and reported as drift.
+ */
+export async function removeDeliveryWorkflow(root: string, base = originBase(root)): Promise<{ path: string; state: 'removed' | 'drift' } | null> {
+  const target = resolve(root, deliveryWorkflowFile);
+  let current: string;
+  try { current = await readFile(target, 'utf8'); } catch (error: any) { if (error.code === 'ENOENT') return null; throw error; }
+  if (current !== renderDeliveryWorkflow(detectStack(await collectScanInput(root)), base).content) return { path: deliveryWorkflowFile, state: 'drift' };
+  await rm(target);
+  return { path: deliveryWorkflowFile, state: 'removed' };
 }
 
 /**

@@ -152,6 +152,13 @@ test('integration:goal-local-delivery-onboarding — normal init of a fixture re
   assert.ok(!bare.config.delivery.mergeGate.preMerge.some((entry: { check: string }) => entry.check === 'graphyard-gate'));
   assert.ok(!bare.config.delivery.mergeGate.perCandidate.some((entry: { check: string }) => entry.check === 'graphyard-gate'));
   assert.deepEqual(bare.scanned.proposal.policy.checks, [], 'local mode requires no GitHub check when the repository has no CI');
+  // A no-CI repository an earlier mode gave the delivery workflow loses it on the switch to local.
+  const earlier = await fixtureRepository({ '.github/workflows/ci.yml': null });
+  await onboard(earlier, 'github');
+  assert.equal(await exists(join(earlier, deliveryWorkflowFile)), true, 'the GitHub merger generates the delivery workflow');
+  const switchedBare = await onboard(earlier, 'github', ['--delivery', 'local']);
+  assert.equal(await exists(join(earlier, deliveryWorkflowFile)), false, 'local mode removes the generated delivery workflow');
+  assert.ok(switchedBare.applied.applied.some((line: string) => line.startsWith(`removed ${deliveryWorkflowFile}`)));
   await rm(join(root, '..'), { recursive: true, force: true });
 
   // graphyard up with no committed delivery: a new install, or a retry of one whose record names the control-plane
