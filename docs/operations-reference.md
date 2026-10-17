@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Log: `journalctl --user -u graphyard-master`.
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`.
 
 ### Perpetual master loop
 
@@ -11,7 +11,7 @@
 
 ## Lost worker before submission
 
-Leases expire 120s after last heartbeat (recorded renewal fault, plane stall: 30s `stallRenewalWindowMs`); higher-epoch claim keeps worktree. Unexplained lapses raise [`lease-loss`](protocol/leases.md#how-a-lease-ends), blocking merge until [settled](delegation.md#who-may-settle-what).
+Leases expire 120s after last heartbeat (recorded renewal fault, plane stall: 30s `stallRenewalWindowMs`, not another lease period); higher-epoch claim keeps worktree. Unexplained lapses raise [`lease-loss`](protocol/leases.md#how-a-lease-ends), blocking merge until [settled](delegation.md#who-may-settle-what).
 
 ## Supervisor died leaving a containment quarantine
 
@@ -19,15 +19,15 @@ Leases expire 120s after last heartbeat (recorded renewal fault, plane stall: 30
 
 ## Submitted implementation needs rework
 
-Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits. `scripts/rework-causes.mjs` classifies last 100 deliveries' rounds; `master status` `speed.reworkRounds.ownChange` excludes out-of-item causes.
+Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits. `scripts/rework-causes.mjs` classifies last 100 deliveries' rounds (55% own-change, 33% conflicts; raw median 2); `master status` `speed.reworkRounds.ownChange` excludes out-of-item causes.
 
 ## Base-sync conflicts
 
-`graphyard sync GY-N` resolves a conflicted `tests/helpers/timing-baseline.json` itself (GY-1875): the base tip's file plus the branch's own test-file lines, a foreign line dropped, staged and listed under `regenerated`; other conflicts are reported with the items that landed them; CI and the merge trial read nothing new.
+`graphyard sync GY-N` resolves a conflicted `tests/helpers/timing-baseline.json` itself (GY-1875): the base tip's file plus the branch's own test-file lines, staged and listed under `regenerated`; other conflicts report as today; CI and the merge trial read nothing new.
 
 ## Retro synthesis
 
-Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables) files item per crossed pattern, drafting `retro.drafted` changes per recurring refusal/rework cause; a non-drafting operator agent [approves](protocol/work-commands.md) (`decision:approve`)/refuses each. Approved: [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`.
+Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables) files item per crossed pattern, drafting `retro.drafted` changes per recurring refusal/rework cause; a non-drafting operator agent [approves](protocol/work-commands.md) (`decision:approve`)/refuses each. Approved: [`retroStanding`](protocol/read-endpoints.md) in `graphyard status`.
 
 ## Flaky CI check
 
@@ -58,6 +58,10 @@ Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`).
 
 Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observations await reset (`githubBudget.deferrals`); token (`githubBudget.tokens`) projected below reserve at reset raises `github`.
 
+### What an observation costs
+
+~10 requests uncached; unchanged, none.
+
 ### What a pause means for gates
 
 `403`/`429` pauses stop requests; gates read the last observation until it lifts; GitHub merges on branch protection ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
@@ -82,7 +86,7 @@ Session-started `npm test`/`test:browser`/typecheck/`tsc --noEmit` take one of m
 
 ## Storage retention
 
-Receipts answer retries day; compaction deletes past `GRAPHYARD_LEDGER_RETENTION_DAYS` (14), appending `ledger.compacted`.
+Compaction deletes receipts past `GRAPHYARD_LEDGER_RETENTION_DAYS` (14), appending `ledger.compacted`.
 
 ## Bootstrap mode for a self-proving change
 
@@ -98,7 +102,7 @@ Ungated merges: permanent violations (never backfilled): repair access, file fol
 
 ## Credentials
 
-Rotate [`GRAPHYARD_PRINCIPALS`](deployment.md#variables), redeploy. Operator agents hold only listed capabilities (`graphyard operator-agent setup|list|rotate|revoke`); `setup` reinstates a revoked ID (`lastMutation.reinstatedAfter`).
+Rotate [`GRAPHYARD_PRINCIPALS`](deployment.md#variables), redeploy. Operator agents hold only listed capabilities (`graphyard operator-agent setup|list|rotate|revoke`); `setup` reinstates a revoked ID.
 
 ## Proof authority grants
 
