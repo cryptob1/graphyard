@@ -313,7 +313,9 @@ export function cutCandidate(input: { tip: string; now: Date; trigger: CutTrigge
 /**
  * Pure (GY-1904): the record of an exact cut — tagged at the exact candidate's source, which must be
  * a first-parent commit of main after the newest cut, and carrying exactly its members as items, so
- * UAT validates the commit that holds them and nothing a later merge brought.
+ * UAT validates the commit that holds them and nothing a later merge brought. `exact.members` keeps
+ * membership/identity order (oldest-first); `items` is newest-first so `revertTarget` selects the
+ * newest matching or fallback culprit, matching every other cut path.
  */
 function cutExact(input: Parameters<typeof cutCandidate>[0], exact: ExactCut): { cut: true; candidate: ReleaseCandidate } | { cut: false; reason: string } {
   assertSha(exact.sourceSha, `exact candidate ${exact.id} source`);
@@ -322,14 +324,15 @@ function cutExact(input: Parameters<typeof cutCandidate>[0], exact: ExactCut): {
   const after = start >= 0 ? input.commits.slice(0, start) : input.commits;
   const at = after.findIndex(commit => commit.sha === exact.sourceSha);
   if (at < 0) return { cut: false, reason: `exact candidate ${exact.id}'s source ${exact.sourceSha} is not a first-parent commit of main${latest ? ` after candidate ${latest.id} (${latest.sha})` : ''}` };
+  const asItem = (member: ExactCut['members'][number]) => ({ key: member.key, mergeSha: member.mergeSha, pr: member.pr });
   return { cut: true, candidate: {
     id: candidateId(input.now), sha: exact.sourceSha, cutAt: input.now.toISOString(), trigger: input.trigger,
     since: input.promoted ? { id: input.promoted.id, sha: input.promoted.sha } : null,
     from: latest ? { id: latest.id, sha: latest.sha } : null,
     prs: after.length - at, queued: at,
-    items: exact.members.map(member => ({ key: member.key, mergeSha: member.mergeSha, pr: member.pr })),
+    items: exact.members.map(asItem).reverse(),
     ...(input.pendingOutcomes?.length ? { pendingOutcomes: [...new Set(input.pendingOutcomes)].sort() } : {}),
-    exact: { id: exact.id, identity: exact.identity, sourceSha: exact.sourceSha, members: exact.members.map(member => ({ key: member.key, mergeSha: member.mergeSha, pr: member.pr })) },
+    exact: { id: exact.id, identity: exact.identity, sourceSha: exact.sourceSha, members: exact.members.map(asItem) },
   } };
 }
 

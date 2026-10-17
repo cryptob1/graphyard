@@ -88,15 +88,20 @@ export async function candidateBacklog(db: pg.PoolClient | pg.Pool, floor: strin
  * Cut the next candidate in `db`'s transaction, or refuse with why nothing is due. The advisory
  * lock serializes cuts, so a concurrent cut reads this one's members as taken and never repeats one.
  * The first cut fixes the backlog boundary — `since`, or none, so no waiting delivery is ever dropped
- * by age — and every later cut carries it.
+ * by age — and every later cut carries it. An operator agent's work-item scope must cover every
+ * selected member before the cut is written; any out-of-scope member refuses the whole cut.
  */
-export async function cutExactCandidate(db: pg.PoolClient, actor: Pick<Principal, 'id'>, now: Date, input: z.infer<typeof cutSchema>, cap = candidateCap()): Promise<ExactCandidate> {
+export async function cutExactCandidate(db: pg.PoolClient, actor: Principal, now: Date, input: z.infer<typeof cutSchema>, cap = candidateCap()): Promise<ExactCandidate> {
   await db.query('SELECT pg_advisory_xact_lock(hashtext($1))', [cutLock]);
   const previous = await newest(db);
   const floor = previous ? previous.floor ?? null : input.since ? new Date(input.since).toISOString() : null;
   const backlog = await candidateBacklog(db, floor, cap);
   const assessed = assessExactCut(backlog.members, { trigger: input.trigger, now: now.getTime(), cap, waitMinutes: input.waitMinutes ?? defaultCandidateIdleMinutes, total: backlog.total });
   demand(assessed.due, assessed.reason, 409);
+  for (const member of assessed.members) {
+    demand(operatorScopeIncludes(actor, { id: member.workId, key: member.key }),
+      `Cutting a candidate that names ${member.key} is outside operator agent ${actor.id}'s scope`, 403);
+  }
   const sourceSha = candidateSource(assessed.members), sequence = (previous?.sequence ?? 0) + 1;
   const candidate: ExactCandidate = {
     id: `C-${sequence}`, sequence, cutAt: now.toISOString(), cutBy: actor.id, trigger: input.trigger,
@@ -109,21 +114,27 @@ export async function cutExactCandidate(db: pg.PoolClient, actor: Pick<Principal
   return candidate;
 }
 
+/** Submitted validation content excluding server-owned `at`/`by`, for identical-replay comparison. */
+const validationContent = (value: Omit<CandidateValidation, 'at' | 'by'> | z.infer<typeof validationSchema>) =>
+  JSON.stringify({ release: value.release, sha: value.sha, identity: value.identity, result: value.result, cases: value.cases, failed: value.failed });
+
 /**
  * Append the UAT verdict for candidate `id`, once. It must name the candidate's exact source and
  * identity — a run against any other commit or membership is not this candidate's validation — and a
- * second, different verdict is refused: the first one recorded is the candidate's.
+ * second, different verdict is refused: the first one recorded is the candidate's. An operator
+ * agent's work-item scope must cover every member before a validation is written.
  */
-export async function recordCandidateValidation(db: pg.PoolClient, actor: Pick<Principal, 'id'>, now: Date, id: string, input: z.infer<typeof validationSchema>): Promise<ExactCandidate> {
+export async function recordCandidateValidation(db: pg.PoolClient, actor: Principal, now: Date, id: string, input: z.infer<typeof validationSchema>): Promise<ExactCandidate> {
   await db.query('SELECT pg_advisory_xact_lock(hashtext($1))', [cutLock]);
   const row = (await db.query('SELECT payload FROM events WHERE kind=$1 AND work_id IS NULL AND payload->>\'id\' = $2 LIMIT 1', [exactCandidateKind, id])).rows[0];
   demand(row, `Candidate ${id} not found`, 404);
   const [candidate] = await withValidation(db, [row.payload as ExactCandidate]);
+  demand(visible(actor, candidate), `Candidate ${id} names work outside operator agent ${actor.id}'s scope`, 403);
   demand(input.sha === candidate.sourceSha && input.identity === candidate.identity,
     `Validation of ${id} must name its source ${candidate.sourceSha} and identity ${candidate.identity}; ${input.sha.slice(0, 12)} / ${input.identity.slice(0, 19)} is another candidate's`, 409);
   if (candidate.validation) {
-    const same = candidate.validation.release === input.release && candidate.validation.result === input.result;
-    demand(same, `Candidate ${id} already holds ${candidate.validation.result} from ${candidate.validation.release}; a validation is recorded once`, 409);
+    demand(validationContent(candidate.validation) === validationContent(input),
+      `Candidate ${id} already holds ${candidate.validation.result} from ${candidate.validation.release}; a validation is recorded once`, 409);
     return candidate;
   }
   const validation: CandidateValidation = { ...input, at: now.toISOString(), by: actor.id };

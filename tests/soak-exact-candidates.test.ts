@@ -183,7 +183,8 @@ test('unit:soak-exact-candidates — two simulated days of the real promotion cy
       const record = ledger.candidates.find(entry => entry.exact?.id === candidate.id);
       assert.ok(record, `${candidate.id} was tagged`);
       assert.equal(record.sha, candidate.sourceSha); assert.equal(record.exact!.identity, candidate.identity);
-      assert.deepEqual(record.items.map(item => item.mergeSha), candidate.members.map(member => member.mergeSha));
+      assert.deepEqual(record.exact!.members.map(member => member.mergeSha), candidate.members.map(member => member.mergeSha));
+      assert.deepEqual(record.items.map(item => item.mergeSha), [...candidate.members].reverse().map(member => member.mergeSha));
       for (const member of candidate.members) git('merge-base', '--is-ancestor', member.mergeSha, record.sha);
       // Each candidate holds exactly the verdict its rc recorded.
       const uat = ledger.uat.find(entry => entry.id === record.id)!;

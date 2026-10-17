@@ -12,7 +12,9 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import { candidateIdentityText, type ExactCandidate } from '../src/model/release.js';
-import { cutAsync, readLedgerAsync, type AsyncGit } from '../src/release-candidate.js';
+import { cutAsync, readLedgerAsync, type AsyncGit, type ReleaseCandidate } from '../src/release-candidate.js';
+import { revertTarget, type CandidateItemDelta } from '../src/release-revert.js';
+import type { VerificationMap } from '../src/model/verification-maps.js';
 import { exactValidation } from '../src/daemon/release-ports.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -99,7 +101,8 @@ async function tag(candidate: ExactCandidate, at: Date) {
   assert.equal(result.cut, true, JSON.stringify(result));
   const record = (await readLedgerAsync(asyncGit)).candidates.find(entry => entry.exact?.id === candidate.id)!;
   assert.equal(record.sha, candidate.sourceSha, 'the rc is tagged at the candidate\'s combined source');
-  assert.deepEqual(record.items.map(item => [item.key, item.mergeSha]), candidate.members.map(member => [member.key, member.mergeSha]), 'the rc carries exactly the candidate\'s members');
+  assert.deepEqual(record.exact?.members.map(member => [member.key, member.mergeSha]), candidate.members.map(member => [member.key, member.mergeSha]), 'exact.members keep membership/identity order');
+  assert.deepEqual(record.items.map(item => [item.key, item.mergeSha]), [...candidate.members].reverse().map(member => [member.key, member.mergeSha]), 'items are newest-first for revertTarget');
   for (const member of candidate.members) git('merge-base', '--is-ancestor', member.mergeSha, record.sha);
   return record;
 }
@@ -142,6 +145,30 @@ test('integration:goal-exact-five-change-candidates — five- and six-change bac
   assert.equal(third.status, 200);
   assert.deepEqual(ids(third.body), [six[5].id], 'the sixth change is the whole of the next candidate'); pinned(third.body);
   assert.deepEqual((await tag(third.body, next())).items.map(item => item.mergeSha), [six[5].mergeSha], 'the sixth change\'s rc carries it alone');
+  // Multi-member exact cut: items newest-first so failure attribution matches the revert contract.
+  const pair = [await delivered('Revert-order older'), await delivered('Revert-order newer')];
+  const paired = await cut();
+  assert.equal(paired.status, 200);
+  assert.deepEqual(ids(paired.body), pair.map(item => item.id));
+  const release = await tag(paired.body, next()) as ReleaseCandidate;
+  assert.deepEqual(release.items.map(item => item.key), [pair[1].key, pair[0].key]);
+  assert.deepEqual(release.exact!.members.map(member => member.key), [pair[0].key, pair[1].key]);
+  const deltas: CandidateItemDelta[] = [
+    { key: pair[0].key, mergeSha: pair[0].mergeSha, files: ['src/shared/a.ts'] },
+    { key: pair[1].key, mergeSha: pair[1].mergeSha, files: ['src/shared/b.ts'] },
+  ];
+  const map: VerificationMap = { path: 'verification/shared.md', paths: ['src/shared/**'], sections: { Tests: 't', Drive: 'd', Invariants: 'i', Gotchas: 'g' } };
+  const failing = { e2e: { runId: 'run-revert-order', sha: release.sha, blocking: ['shared-case'], cases: [{ case: 'shared-case', verdict: 'failed' as const, required: true, attempts: 1, failingStep: { index: 1, name: 'open', reason: 'missing' } }] } };
+  const matched = revertTarget(release, failing, deltas, [map], { outcomes: [{ id: 'shared', cases: ['shared-case'] }], cases: [{ id: 'shared-case', tags: ['shared'] }] })!;
+  assert.equal(matched.key, pair[1].key, 'matching map covering both members reverts the newest');
+  const fallback = revertTarget(release, failing, deltas, [], { outcomes: [] })!;
+  assert.equal(fallback.key, pair[1].key, 'no map falls back to the newest member, not the oldest');
+  const olderOnly = revertTarget(release, failing, [
+    { key: pair[0].key, mergeSha: pair[0].mergeSha, files: ['src/older/only.ts'] },
+    { key: pair[1].key, mergeSha: pair[1].mergeSha, files: ['src/newer/only.ts'] },
+  ], [{ path: 'verification/older.md', paths: ['src/older/**'], sections: { Tests: 't', Drive: 'd', Invariants: 'i', Gotchas: 'g' } }],
+    { outcomes: [{ id: 'older', cases: ['shared-case'] }], cases: [{ id: 'shared-case', tags: ['older'] }] })!;
+  assert.equal(olderOnly.key, pair[0].key, 'a map covering only the older member still selects it');
 
   // Concurrent cuts over a backlog of seven: disjoint candidates of at most five that together hold all seven once.
   const seven = [];
@@ -180,7 +207,7 @@ test('integration:goal-exact-five-change-candidates — five- and six-change bac
   const everyMember = all.flatMap(ids);
   const everyPair = all.flatMap(candidate => candidate.members.map(member => `${member.workId} ${member.mergeSha}`));
   assert.equal(new Set(everyPair).size, everyPair.length, 'no change is in two candidates');
-  assert.deepEqual(new Set(everyMember), new Set([...five, ...six, ...seven].map(item => item.id).concat(late.body.id, early.body.id)));
+  assert.deepEqual(new Set(everyMember), new Set([...five, ...six, ...seven, ...pair].map(item => item.id).concat(late.body.id, early.body.id)));
   assert.ok(all.every(candidate => candidate.members.length <= 5));
   // A retried cut answers its first result rather than cutting again.
   const item = await delivered('Retried cut change');
@@ -253,15 +280,29 @@ test('integration:goal-candidate-cut-recovery — a partial batch cuts after the
   assert.deepEqual(validated.validation && { release: validated.validation.release, sha: validated.validation.sha, identity: validated.validation.identity, result: validated.validation.result, cases: validated.validation.cases },
     { release: release.id, sha: record.sourceSha, identity: record.identity, result: 'pass', cases: [{ id: 'candidate-batches-five', result: 'passed' }] });
   assert.equal((await call('POST', `candidates/${record.id}/validation`, 'coordinator', verdict)).status, 200, 'the same verdict again answers as recorded');
+  const identicalReplay = await call('POST', `candidates/${record.id}/validation`, 'coordinator', verdict, 'validation-identical-replay');
+  assert.equal(identicalReplay.status, 200, 'identical content under a fresh Idempotency-Key replays the stored record');
+  assert.deepEqual(identicalReplay.body.validation && { release: identicalReplay.body.validation.release, result: identicalReplay.body.validation.result, cases: identicalReplay.body.validation.cases, failed: identicalReplay.body.validation.failed },
+    { release: release.id, result: 'pass', cases: [{ id: 'candidate-batches-five', result: 'passed' }], failed: [] });
+  const changedCases = await call('POST', `candidates/${record.id}/validation`, 'coordinator', { ...verdict, cases: [{ id: 'candidate-batches-five', result: 'failed' }] }, 'validation-changed-cases');
+  assert.equal(changedCases.status, 409); assert.match(changedCases.body.error, /a validation is recorded once/);
+  const changedFailed = await call('POST', `candidates/${record.id}/validation`, 'coordinator', { ...verdict, failed: ['e2e'] }, 'validation-changed-failed');
+  assert.equal(changedFailed.status, 409); assert.match(changedFailed.body.error, /a validation is recorded once/);
   const contradicting = await call('POST', `candidates/${record.id}/validation`, 'coordinator', { ...verdict, result: 'fail' });
   assert.equal(contradicting.status, 409); assert.match(contradicting.body.error, /a validation is recorded once/);
-  // An operator agent scoped to some work items reads no candidate naming another's.
+  // An operator agent scoped to some work items reads no candidate naming another's, and cannot cut or validate one either.
   const scoped = await call('GET', 'candidates', 'scoped');
   assert.equal(scoped.status, 200);
   assert.ok((scoped.body.candidates as ExactCandidate[]).every(candidate => candidate.members.every(member => member.key === 'GY-1')), JSON.stringify(scoped.body.candidates.map((candidate: ExactCandidate) => candidate.id)));
   assert.ok(scoped.body.next.every((member: any) => member.key === 'GY-1'));
   const outside = await call('GET', `candidates/${record.id}`, 'scoped');
   assert.equal(outside.status, 403); assert.match(outside.body.error, /outside operator agent scoped-agent's scope/);
+  const candidatesBeforeScoped = Number((await store.pool.query("SELECT count(*) AS n FROM events WHERE kind='release.candidate'")).rows[0].n);
+  const scopedCut = await call('POST', 'candidates', 'scoped', { trigger: 'manual' }, 'scoped-cut-refused');
+  assert.equal(scopedCut.status, 403); assert.match(scopedCut.body.error, /outside operator agent scoped-agent's scope/);
+  assert.equal(Number((await store.pool.query("SELECT count(*) AS n FROM events WHERE kind='release.candidate'")).rows[0].n), candidatesBeforeScoped, 'the refused scoped cut wrote nothing');
+  const scopedValidate = await call('POST', `candidates/${record.id}/validation`, 'scoped', verdict, 'scoped-validation-refused');
+  assert.equal(scopedValidate.status, 403); assert.match(scopedValidate.body.error, /outside operator agent scoped-agent's scope/);
   const listed = await call('GET', 'candidates', 'reader');
   assert.equal(listed.body.cap, 5); assert.equal(listed.body.waiting, 1); assert.deepEqual(listed.body.next.map((member: any) => member.workId), [uncut.id], 'the refused cuts left the change waiting');
 });

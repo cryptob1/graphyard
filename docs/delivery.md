@@ -7,12 +7,12 @@ Releases ([rollback](recovery.md#rollback)): `admin` sets policy; `builder`s bui
 
 Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`/`release/production` (`graphyard release` moves them).
 
-- `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N new first-parent merges (`GRAPHYARD_RC_MAX_PRS`=10; rest queue); `release-candidate.yml` cuts on loop dispatch.
-- `POST /api/candidates` (`admin`/`coordinator`/`intent:create` agent; Idempotency-Key; `trigger` `manual`\|`schedule`, `waitMinutes` 1–240, default 15, `since`) cuts the ≤5 oldest uncut deliveries into immutable `C-N` (`members`/`sourceSha`/`identity`); `schedule` waits for five or the oldest's `waitMinutes`. The first cut's `since` (loop: newest `rc/` commit) fixes the backlog boundary; nothing ages out. The loop tags `rc/ID` at `sourceSha`, recording its verdict once (`POST /api/candidates/C-N/validation`); `GET /api/candidates[/C-N]` reads both. `everyMerges` above 5 acts as 5.
+- `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N first-parent merges (`GRAPHYARD_RC_MAX_PRS`=10; rest queue); `release-candidate.yml` cuts on dispatch.
+- `POST /api/candidates` (`admin`/`coordinator`/`intent:create`; Idempotency-Key; `trigger`/`waitMinutes`/`since`): ≤5 oldest uncut → `C-N` (`members`/`sourceSha`/`identity`); `schedule` waits for five or `waitMinutes`. First `since` (newest `rc/`) is the floor. Scoped `workItems`: cut/validation refuse out-of-scope before write; `GET` filters. Tags `rc/ID` at `sourceSha` (`items` newest-first; `exact.members` keep order); one validation (identical replays; changed `cases`/`failed` 409). `everyMerges`>5→5.
 - `release uat ID` deploys `uat`, refused while unjudged <4h candidates serve.
 - `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint/API (`GRAPHYARD_UAT_TOKEN`)/`browser`/suites ([validation](validation.md#release-verdicts); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`.
-- `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`; `release verify --url URL` confirms. Direct promotion first seals its read [imported-run hold](validation.md#release-verdicts); `admin`/`operator-agent` seal **released** holds only ([filing credential](#release-filing-credential), loop operator agent); unsealable refuses; planes without operator agents promote unsealed.
-- `GRAPHYARD_RELEASE_BUILD` records cuts' per-service digests; with `GRAPHYARD_DEPLOY_DIGESTS` `uat`/`promote` deploy them, else SHA. A recorded build promotes by digest, never rebuilt, once UAT names it via its `digests` suite.
+- `release promote ID` (or [accepted flakes](validation.md#release-verdicts)) deploys `rc-production/ID`; `release verify --url URL` confirms. Direct promotion seals its [imported-run hold](validation.md#release-verdicts); `admin`/`operator-agent` seal **released** holds only ([filing credential](#release-filing-credential)); unsealable refuses; planes without operator agents promote unsealed.
+- `GRAPHYARD_RELEASE_BUILD` records digests; with `GRAPHYARD_DEPLOY_DIGESTS` `uat`/`promote` deploy them, else SHA. A recorded build promotes by digest, never rebuilt, once UAT names it.
 - Failures file [holds](validation.md#release-holds) per outcome, else `release follow-up ID`.
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records `rc-soak/ID`.
 
@@ -40,9 +40,9 @@ Every 30s the guard reverts merges failing checks parents passed; the [revert ap
 
 `init --scan` splits checks (`delivery.mergeGate`/per-candidate); `--apply` renders `graphyard-release-candidate.yml` (`candidateSchedule`/`--candidate-cron CRON|off`), `graphyard-promotion.yml`. `deploy.adapter`: `railway` or `command` (`deploy.uat`/`deploy.production`, given `GRAPHYARD_CANDIDATE_SHA`). `--delivery local|per-pr` overrides; `install --plan` lists.
 
-`mode: local` (`control-plane` merger's default): `{"previews":"local","candidateMaxChanges":5,"productionVerification":true}`, `command` adapter, generated-workflows removed; `delivery.applications` `{id,kind:"static",directory,build}`/`{id,kind:"compose",file,service,port}`; `delivery.cases` case→application (tag/sole one); invalid ones refuse `init`/`install`/`/api/status` (`project.error`); **Delivery** shows `project.delivery` (`GRAPHYARD_PROJECT_DELIVERY`).
+`mode: local` (`control-plane` default): `{"previews":"local","candidateMaxChanges":5,"productionVerification":true}`, `command` adapter, generated workflows removed; `delivery.applications` `{id,kind:"static",directory,build}`/`{id,kind:"compose",file,service,port}`; `delivery.cases` case→application; invalid refuse `init`/`install`/`/api/status` (`project.error`); **Delivery** shows `project.delivery`.
 
-Bound cases preview items (head/main; `GRAPHYARD_PREVIEW_TITLE`): static builds publish `/preview/KEY/`; Compose apps run isolated (own project/state/database/images, no `.env`/`include`/`extends`, refusing credentials/sockets/privileges/symlinked-or-outside paths, `GRAPHYARD_PREVIEW_CPUS`/`_MEMORY_MB`/`_PIDS`/`_LIFETIME_MINUTES`/`_COMPOSE_LIMIT`/`_SERVICES`), publishing served pages; `GRAPHYARD_PREVIEW_ORIGIN` serves, else sandboxed; endings/restarts remove containers/volumes/networks/images before recording, retried until gone.
+Bound cases preview items (head/main; `GRAPHYARD_PREVIEW_TITLE`): static builds publish `/preview/KEY/`; Compose apps run isolated (own project/state/database/images; no `.env`/`include`/`extends`; refuse credentials/sockets/privileges/outside paths; `GRAPHYARD_PREVIEW_CPUS`/`_MEMORY_MB`/`_PIDS`/`_LIFETIME_MINUTES`/`_COMPOSE_LIMIT`/`_SERVICES`); `GRAPHYARD_PREVIEW_ORIGIN` serves, else sandboxed; endings/restarts remove containers/volumes/networks/images before recording.
 
 **`graphyard.json` policy**: `risk.sensitive` `{rule,glob}`, else generic; `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; `release.onFailure` `revert`/`hold`; deployed `GRAPHYARD_REPOSITORY_POLICY`; `doctor` prints it.
 
@@ -80,14 +80,14 @@ Bound cases preview items (head/main; `GRAPHYARD_PREVIEW_TITLE`): static builds 
 {"registration":{"id":"production-observer","revision":1},"epoch":4,"environment":{"id":"production","revision":1},"expectedGeneration":4,"snapshotId":"railway:snapshot:01J8Q4Z0Y3","observedAt":"2026-09-18T20:15:07Z","validFrom":"2026-09-18T20:12:31Z","validTo":"2026-09-18T20:15:07Z","services":[{"service":"api","complete":true,"deployment":{"id":"dep-a1","status":"success","deployedAt":"2026-09-18T20:12:31Z"},"instances":[{"instance":"api-1","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","measurement":"host-attestation","healthy":true}]},{"service":"web","complete":true,"deployment":{"id":"dep-w7","status":"success","deployedAt":"2026-09-18T20:12:40Z"},"instances":[{"instance":"web-1","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","measurement":"host-attestation","healthy":true}]}]}
 ```
 
-`POST /api/delivery/observe-sha` marks contained merges Deployed: any producer, or a dedicated `delivery:observe-sha` principal reaching nothing else ([install](install.md)). Production's current revision, every service, an exact 40-hex `sha`, `observedAt` not future:
+`POST /api/delivery/observe-sha` marks contained merges Deployed (any producer, or a `delivery:observe-sha` principal; [install](install.md)). Needs production's revision, every service, exact 40-hex `sha`, `observedAt` not future:
 
 ```json
 {"environment":{"id":"production","revision":1},"sha":"0123456789abcdef0123456789abcdef01234567","services":["api","web"],"observedAt":"2026-09-18T20:15:07Z"}
 ```
 
-An observation never yields Production verified: smoke-required work needs an `e2e:deploy-smoke` pass from a producer granted it, naming that observed `sha`, executed and none skipped. Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery sweep` per `freshnessSeconds`; `graphyard delivery` shows it.
+An observation never yields Production verified: smoke-required work needs an `e2e:deploy-smoke` pass naming that `sha`, executed and none skipped. Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery sweep` per `freshnessSeconds`; `graphyard delivery` shows it.
 
 `master status` `delivery`: `readyToMerged`/`mergedToProduction`/`stages` p50/p90; 7-day p90 over `deliverySpeed` alerts.
 
-`POST /api/validation/result` binds manifest/signature/measurements; mismatches void passes as `attribution-undermined` (`GET /api/analytics/attribution`). A loop-owned post-deploy observation item never dispatches: deployment verification reads it; a pass closes it `delivered-observation`, a fail escalates; no-smoke deliveries backfill five per pass.
+`POST /api/validation/result` binds manifest/signature/measurements; mismatches void passes as `attribution-undermined` (`GET /api/analytics/attribution`). A loop-owned post-deploy observation never dispatches: verification reads it; pass closes `delivered-observation`, fail escalates; no-smoke backfill five per pass.
