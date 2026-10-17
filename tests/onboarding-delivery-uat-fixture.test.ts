@@ -12,8 +12,10 @@ import { projectDeliveryAssignment } from '../src/project-applications.js';
 import { DeliveryDefaults } from '../web/components/delivery-slices.js';
 import Sidebar from '../web/components/sidebar.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { tempOwnerMarker } from '../src/tmp-reclaim.js';
+import { execFileSync } from 'node:child_process';
 // @ts-expect-error The fixture is a plain ES module the uat job runs under tsx.
-import { candidateRoot, checkoutHead, createOnboardingFixture, fixtureCases, runOnboardingE2e, startControlPlane } from '../scripts/onboarding-delivery-fixture.mjs';
+import { candidateRoot, checkoutHead, createOnboardingFixture, fixtureCases, runOnboardingE2e, startControlPlane, suiteFixture } from '../scripts/onboarding-delivery-fixture.mjs';
 
 // GY-1910 (release hold GY-1909): onboarding-delivery-defaults runs on an isolated project onboarded
 // the normal way from the candidate's source, never on the shared UAT install, which keeps its
@@ -103,9 +105,11 @@ test('integration:onboarding-uat-fresh-project-target — onboarding-delivery-de
     writeFileSync(join(hostConfig, 'workers/claude-primary.token'), 'host-owned\n');
     const host = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), GRAPHYARD_CONFIG_HOME: hostConfig };
     const hostBefore = tree(sentinel);
-    const credentials: string[][] = [];
+    const credentials: string[][] = [], owners: any[] = [];
+    // The fixture's scratch comes from the suite's tracked helper, so a killed run leaves it marked with its owner for the dead-owner sweep.
     const fixture = async () => {
-      const made = await createOnboardingFixture({ root, host }); opened.push(made);
+      const made = await createOnboardingFixture({ root, host, allocate: () => temporaryDirectory('onboarding-uat-fixture') }); opened.push(made);
+      owners.push(JSON.parse(readFileSync(tempOwnerMarker(made.scratch), 'utf8')));
       credentials.push(Object.keys(tree(made.scratch)).filter(path => path.endsWith('.token')).map(path => join(made.scratch, path)));
       return made;
     };
@@ -126,6 +130,7 @@ test('integration:onboarding-uat-fresh-project-target — onboarding-delivery-de
     assert.ok(credentials[0].length > 0 && credentials[0].every(path => path.startsWith(`${made.scratch}/`)), `the fixture wrote its credentials in scratch: ${credentials[0].join(', ')}`);
     assert.deepEqual(tree(sentinel), hostBefore, 'the host configuration and its install record are untouched');
     // Every isolated resource is gone once the run ends: the files, its credentials, the database and the plane.
+    assert.equal(owners[0].pid, process.pid, 'the scratch directory was tracked and marked with this process as its owner');
     assert.equal(existsSync(made.scratch), false);
     assert.ok(credentials.flat().every(path => !existsSync(path)));
     await assert.rejects(fetch(`${made.url}/healthz`));
@@ -151,6 +156,20 @@ test('integration:onboarding-uat-fresh-project-target — onboarding-delivery-de
     assert.equal(unbound.sha, null);
     assert.equal(e2eRecord(unbound, candidate, contract, policy), null, 'an unattributed run binds nothing to the candidate');
     await assert.rejects(createOnboardingFixture({ root, sha: '0'.repeat(40) }), /builds from the checkout's HEAD [0-9a-f]{40}, not the candidate 0{40}/);
+    // The suite builds its fixture from the selected checkout, not this script's: a selected candidate at another HEAD is checked against its own.
+    const selected = await temporaryDirectory('onboarding-uat-selected');
+    execFileSync('git', ['init', '-q', selected]); execFileSync('git', ['-C', selected, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'selected candidate']);
+    const selectedHead = checkoutHead(selected) as string;
+    assert.notEqual(selectedHead, head);
+    await assert.rejects(suiteFixture({ CANDIDATE_SHA: selectedHead }, selected)(), /serves the dashboard from dist\/, which the checkout has not built/, 'the selected candidate\'s own HEAD passed the source binding');
+    await assert.rejects(suiteFixture({ CANDIDATE_SHA: head }, selected)(), new RegExp(`builds from the checkout's HEAD ${selectedHead}, not the candidate ${head}`));
+
+    // A setup that fails after its database started stops that database before rejecting, so no live Postgres outlives it.
+    const calls: string[] = [];
+    class FailingPostgres { constructor(_options: unknown) {} async initialise() { calls.push('initialise'); } async start() { calls.push('start'); }
+      async createDatabase() { calls.push('createDatabase'); throw new Error('database creation failed'); } async stop() { calls.push('stop'); } }
+    await assert.rejects(startControlPlane({ root, sha: head, scratch: await temporaryDirectory('onboarding-uat-failed-setup'), Postgres: FailingPostgres }), /database creation failed/);
+    assert.deepEqual(calls, ['initialise', 'start', 'createDatabase', 'stop']);
   } finally {
     for (const made of opened) await made.close();
     await shared.close();

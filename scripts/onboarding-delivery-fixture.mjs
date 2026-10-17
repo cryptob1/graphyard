@@ -64,13 +64,12 @@ export const checkoutHead = (root) => execFileSync('git', ['-C', root, 'rev-pars
 /**
  * A control plane started from the checkout's own source with its own Postgres, serving `sha` as
  * its build: `GRAPHYARD_PROJECT_DELIVERY` and the rest of `env` are what the install deploys.
- * `restart(env)` redeploys it on the same database.
+ * `restart(env)` redeploys it on the same database. A setup that fails stops whatever of it started.
  */
-export async function startControlPlane({ root = candidateRoot, sha, scratch, env = {}, host = process.env, timeoutMs = 120_000 }) {
+export async function startControlPlane({ root = candidateRoot, sha, scratch, env = {}, host = process.env, timeoutMs = 120_000, Postgres }) {
   const port = await freePort();
-  const { default: EmbeddedPostgres } = await import('embedded-postgres');
-  const database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'fixture-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('fixture');
+  Postgres ??= (await import('embedded-postgres')).default;
+  const database = new Postgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'fixture-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   const token = randomBytes(32).toString('hex');
   let child = null, url = null, output = '';
   const stop = async () => {
@@ -95,7 +94,8 @@ export async function startControlPlane({ root = candidateRoot, sha, scratch, en
       await new Promise(done => setTimeout(done, 250));
     }
   };
-  try { await start(env); } catch (error) { await database.stop().catch(() => {}); throw error; }
+  try { await database.initialise(); await database.start(); await database.createDatabase('fixture'); await start(env); }
+  catch (error) { await stop(); await Promise.resolve().then(() => database.stop()).catch(() => {}); throw error; }
   return {
     get url() { return url; }, token, sha,
     restart: async (deployed) => { await stop(); await start(deployed); },
@@ -106,14 +106,15 @@ export async function startControlPlane({ root = candidateRoot, sha, scratch, en
 /**
  * The isolated fixture: a fresh repository and control plane created through normal onboarding
  * from the candidate checkout's exact HEAD. `sha`, when given, must be that HEAD, so the fixture
- * never serves another source than the candidate it is attributed to. `close()` stops the plane
- * and its database and removes every file the fixture made.
+ * never serves another source than the candidate it is attributed to. `allocate()` makes its scratch
+ * directory (a test passes its tracked temporaryDirectory). `close()` stops the plane and its database
+ * and removes every file the fixture made.
  */
-export async function createOnboardingFixture({ root = candidateRoot, sha, dashboard = false, host = process.env } = {}) {
+export async function createOnboardingFixture({ root = candidateRoot, sha, dashboard = false, host = process.env, allocate = () => mkdtemp(join(tmpdir(), 'graphyard-onboarding-fixture-')) } = {}) {
   const head = checkoutHead(root);
   if (sha && sha.toLowerCase() !== head) throw new Error(`the onboarding fixture builds from the checkout's HEAD ${head}, not the candidate ${sha}; check out the candidate's exact SHA`);
   if (dashboard && !existsSync(join(root, 'dist/index.html'))) throw new Error('the onboarding fixture serves the dashboard from dist/, which the checkout has not built: run npx vite build --configLoader runner first');
-  const scratch = await mkdtemp(join(tmpdir(), 'graphyard-onboarding-fixture-'));
+  const scratch = await allocate();
   let plane = null;
   const close = async () => { await plane?.close(); plane = null; await rm(scratch, { recursive: true, force: true }); };
   try {
@@ -191,10 +192,13 @@ export function suiteResult(report, pendingCases, policy) {
     : { name: 'e2e', passed: true, detail: `${report.passed} E2E case${report.passed === 1 ? '' : 's'} passed against UAT serving ${report.sha ?? 'an unreported commit'}, ${fixtureCases.join(', ')} on an isolated normally onboarded project${detail ? `; ${detail}` : ''}` };
 }
 
+/** The suite's fixture factory: the fixture built from the selected checkout `root`, whose HEAD must be CANDIDATE_SHA when set. */
+export const suiteFixture = (env, root) => () => createOnboardingFixture({ root, sha: env.CANDIDATE_SHA || undefined, dashboard: true, host: env });
+
 /**
  * The `e2e` suite of `release validate`, as runE2eSuite runs it (GRAPHYARD_UAT_URL, GRAPHYARD_UAT_TOKEN,
  * GRAPHYARD_CANDIDATE_ID, GRAPHYARD_E2E_REPORT, GRAPHYARD_SUITE_DETAIL), with the fixture cases on
- * the isolated fixture built from this script's own checkout, whose HEAD must be CANDIDATE_SHA when set.
+ * the isolated fixture built from the same selected checkout as the cases, policy and contract.
  */
 export async function main(env = process.env, root = env.GRAPHYARD_E2E_ROOT ?? process.cwd()) {
   const writeDetail = async text => { if (env.GRAPHYARD_SUITE_DETAIL) await writeFile(env.GRAPHYARD_SUITE_DETAIL, `${text}\n`); };
@@ -204,7 +208,7 @@ export async function main(env = process.env, root = env.GRAPHYARD_E2E_ROOT ?? p
     const contract = await checkoutContract(root), policy = checkoutRepositoryPolicy(root);
     const candidate = env.GRAPHYARD_CANDIDATE_ID ? { id: env.GRAPHYARD_CANDIDATE_ID, pendingOutcomes: candidatePendingOutcomes(root, env.GRAPHYARD_CANDIDATE_ID) } : null;
     const report = await runOnboardingE2e(await loadCases(root), { url, token, candidate, contract, policy, root,
-      fixture: () => createOnboardingFixture({ sha: env.CANDIDATE_SHA || undefined, dashboard: true, host: env }) });
+      fixture: suiteFixture(env, root) });
     console.log(summarize(report));
     if (env.GRAPHYARD_E2E_REPORT) await writeFile(env.GRAPHYARD_E2E_REPORT, `${JSON.stringify(report, null, 2)}\n`);
     const pending = policy.e2e.pendingOutcomes === 'blocking' ? [] : contractPendingCases(contract, candidate?.pendingOutcomes);
