@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import * as githubModule from '../src/github.js';
 import { CHECK_NAME, GitHub, gateMerge } from '../src/github.js';
 import { type Observation, type Work } from '../src/model.js';
 import * as mergeQueue from '../src/merge-queue.js';
@@ -112,6 +113,38 @@ test('unit:merge-verdict-after-merge — a head GitHub merged keeps the Graphyar
   assert.deepEqual(await racing.github.publish(item, reconciliationFailed, async () => { Object.assign(racing.pull, { state: 'closed', merged: true, merge_commit_sha: mergeSha }); }),
     { id: racing.latest().id, conclusion: 'success' });
   assert.equal(racing.writes.length, raced, 'a merge during the guard freezes the head');
+
+  // A success publication whose guard spans the merge, its output differing from the standing
+  // success (a new policy revision): it re-reads the pull request too and writes nothing.
+  const succeeding = fakeGitHub();
+  await succeeding.github.publish(item);
+  const succeeded = succeeding.writes.length;
+  assert.deepEqual(await succeeding.github.publish({ ...item, policyRevision: 3 }, undefined, async () => { Object.assign(succeeding.pull, { state: 'closed', merged: true, merge_commit_sha: mergeSha }); }),
+    { id: succeeding.latest().id, conclusion: 'success' });
+  assert.equal(succeeding.writes.length, succeeded, 'a success publication spanning the merge writes nothing');
+  assert.equal(succeeding.latest().output.summary, `Candidate ${head}; base ${base}; policy 2`);
+
+  // A refusal on an open head whose update GitHub answers with the completed run's unchanged
+  // success, and GitHub merges during that update: no fallback run is created over the delivery.
+  const patching = fakeGitHub();
+  await patching.github.publish(item);
+  const request = patching.github.request.bind(patching.github);
+  patching.github.request = async (path: string, method = 'GET', body?: any) => {
+    if (method !== 'PATCH') return request(path, method, body);
+    patching.writes.push(`PATCH ${body.conclusion} (kept)`);
+    Object.assign(patching.pull, { state: 'closed', merged: true, merge_commit_sha: mergeSha });
+    return patching.latest();
+  };
+  assert.deepEqual(await patching.github.publish(item, reconciliationFailed), { id: patching.latest().id, conclusion: 'success' });
+  assert.equal(patching.runs.length, 1, 'no run is created after the merge');
+  assert.deepEqual([patching.latest().conclusion, patching.latest().output.title], ['success', 'All required gates passed']);
+  // The same answer on a head that stays open still creates the REFUSED run, as before.
+  const kept = fakeGitHub();
+  await kept.github.publish(item);
+  const keptRequest = kept.github.request.bind(kept.github);
+  kept.github.request = async (path: string, method = 'GET', body?: any) => method === 'PATCH' ? kept.latest() : keptRequest(path, method, body);
+  assert.equal((await kept.github.publish(item, reconciliationFailed))?.conclusion, 'failure');
+  assert.deepEqual([kept.runs.length, kept.latest().output.title], [2, 'REFUSED']);
 });
 
 /** An observer of PR #1300 merged at `head`, its App's latest `Graphyard / merge` run reading `conclusion`. */
@@ -164,4 +197,33 @@ test('unit:merge-verdict-contradiction-attention — master status names a deliv
   assert.deepEqual(verdictContradictions([delivered(contradicted, { closure: { reason: 'closed' } as any })]), []);
   assert.deepEqual(verdictContradictions([work({ observation: contradicted })]), []);
   assert.deepEqual(mergeStallAttention({ work: [delivered(agreeing)], now: new Date().toISOString() }), []);
+
+  // A run rewritten after the item reached done: the delivered-verdict refresh re-reads it, records
+  // it on the delivered observation, and master status then names it; a second refresh saves nothing.
+  const refreshDeliveredVerdicts = (githubModule as any).refreshDeliveredVerdicts as (engine: any, github: any) => Promise<number>;
+  assert.equal(typeof refreshDeliveredVerdicts, 'function', 'the delivered verdict is re-read after done');
+  const stored = delivered(structuredClone(agreeing), { delivery: { mergedAt: new Date().toISOString(), mergeSha, authorizationRevision: 9 } as any });
+  const saves: string[] = [];
+  const db = { query: async (sql: string, params: any[] = []) => {
+    if (/^SELECT document FROM work_items/.test(sql)) return { rows: [{ document: structuredClone(stored) }], rowCount: 1 };
+    if (/^UPDATE work_items SET document/.test(sql)) { Object.assign(stored, JSON.parse(params[1])); return { rows: [], rowCount: 1 }; }
+    if (/^INSERT INTO events/.test(sql)) { saves.push(params[2]); return { rows: [], rowCount: 1 }; }
+    return { rows: [], rowCount: 0 };
+  } };
+  const engine = { store: {
+    pool: { query: async () => ({ rows: [{ id: stored.id, head: stored.observation!.candidate.sha, verdict: stored.observation!.mergeVerdict }] }) },
+    transaction: (fn: (client: any, at: Date) => Promise<unknown>) => fn(db, new Date()),
+  } };
+  let live = { id: 117431141906, conclusion: 'success' as string | null };
+  const reads: string[] = [];
+  const reader = { mergeVerdictOf: async (sha: string) => { reads.push(sha); return live; } };
+  assert.equal(await refreshDeliveredVerdicts(engine, reader), 0, 'an unchanged verdict saves nothing');
+  live = { id: 117431141907, conclusion: 'failure' };
+  assert.equal(await refreshDeliveredVerdicts(engine, reader), 1);
+  assert.deepEqual(saves, ['merge-verdict.refreshed']);
+  assert.equal(stored.stage, 'done', 'the delivery stands');
+  assert.deepEqual(verdictContradictions([stored]).map(entry => [entry.key, entry.head, entry.run, entry.conclusion]), [['GY-1912', head, 117431141907, 'failure']]);
+  assert.match(mergeStallAttention({ work: [stored], now: new Date().toISOString() })[0].text, /^public-verdict-contradicts-delivery: GY-1912 merged head 7{12} .*run 117431141907 reads failure/);
+  assert.equal(await refreshDeliveredVerdicts(engine, reader), 0, 'the recorded contradiction is not saved again');
+  assert.deepEqual([reads.length, saves.length], [3, 1], 'one read per delivered head per refresh, one save per change');
 });

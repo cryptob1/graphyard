@@ -2573,6 +2573,10 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
     this.cacheLandableBody(body.head_sha, body);
   }
+  /** GY-1917. The App's latest `Graphyard / merge` run at a merged head, read fresh: one listing request. */
+  async mergeVerdictOf(sha: string): Promise<{ id: number; conclusion: string | null } | null> {
+    return mergeVerdictRun(await this.pages(`/commits/${sha}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=all`, 'check_runs'), this.config.appId, sha);
+  }
   /**
    * Publish the `Graphyard / merge` verdict on the candidate's head and answer the run that now
    * stands there: `{ id, conclusion }` of the App's latest run of the check. The newest of the App's
@@ -2599,10 +2603,11 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     if (!reasons.length || !forcedReason) requireCurrent(pr.head.sha === work.candidate.sha && this.boundBase(work, pr, await this.baseBranch()) === work.candidate.baseSha, 'PR changed before check publication; retry');
     if (!reasons.length) requireCurrent(pr.state === 'open' && !pr.draft && pr.base.ref === this.config.base, 'PR is closed, draft, or retargeted; refusing success');
     await beforeWrite();
-    // A merge landing while the guard ran freezes the head too: a refusal re-reads the pull request first.
-    if (reasons.length && frozen(await this.request(`/pulls/${work.candidate.pr}`))) return standing();
     if (existing?.status === body.status && existing.conclusion === body.conclusion && existing.external_id === body.external_id
       && existing.output?.title === body.output.title && existing.output?.summary === body.output.summary) return { id: existing.id ?? null, conclusion: existing.conclusion };
+    // A merge landing while the guard ran freezes the head too: every write re-reads the pull request first.
+    const mergedMeanwhile = async () => frozen(await this.request(`/pulls/${work.candidate!.pr}`));
+    if (await mergedMeanwhile()) return standing();
     const answered = (run: any, fallback: number | null) => ({ id: typeof run?.id === 'number' ? run.id : fallback, conclusion: typeof run?.conclusion === 'string' ? run.conclusion : body.conclusion });
     if (existing) {
       const updated = answered(await this.request(`/check-runs/${existing.id}`, 'PATCH', body), existing.id ?? null);
@@ -2610,6 +2615,8 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
       // keeps answering the old conclusion is held by the merge gate, not answered with a new run
       // on every observation.
       if (updated.conclusion === body.conclusion || runs.length >= verdictRunsPerHead) return updated;
+      // Nor does a head GitHub merged during the update: the run it kept stands.
+      if (await mergedMeanwhile()) return updated;
     }
     return answered(await this.request('/check-runs', 'POST', body), null);
   }
@@ -3187,6 +3194,37 @@ export function landedPeerObserver(engine: Engine, github: GitHub, peers: Work[]
     ? engine.observeControlPlaneCandidate(peer).then(local => local ?? peer.observation!)
     : github.observe(peer, peers);
 }
+/** GY-1917. How often delivered heads' verdicts are re-read, for how long after the merge, and at most how many per read. */
+export const deliveredVerdictIntervalMs = 5 * 60_000, deliveredVerdictWatchMs = 24 * 60 * 60_000, deliveredVerdictBatch = 25;
+const deliveredVerdictsRead = new WeakMap<Engine, number>();
+/**
+ * GY-1917. Re-read the latest `Graphyard / merge` run of every head delivered within
+ * `deliveredVerdictWatchMs` (newest first, at most `deliveredVerdictBatch`) and record a changed one
+ * on the delivered observation, so `public-verdict-contradicts-delivery` sees a run rewritten after
+ * the item reached done. Reads only GitHub; the delivery itself is never touched, and an unchanged
+ * verdict saves nothing. Answers how many verdicts it recorded.
+ */
+export async function refreshDeliveredVerdicts(engine: Engine, github: Pick<GitHub, 'mergeVerdictOf'>): Promise<number> {
+  const since = new Date(Date.now() - deliveredVerdictWatchMs).toISOString();
+  const rows = (await engine.store.pool.query(`SELECT id, document->'observation'->'candidate'->>'sha' AS head, document->'observation'->'mergeVerdict' AS verdict FROM work_items
+    WHERE document->>'stage'='done' AND document->'observation'->>'merged'='true' AND document->'observation' ? 'mergeVerdict' AND document->'delivery'->>'mergedAt' IS NOT NULL
+      AND (document->'delivery'->>'mergedAt')::timestamptz >= $1::timestamptz ORDER BY (document->'delivery'->>'mergedAt')::timestamptz DESC LIMIT $2`, [since, deliveredVerdictBatch])).rows as { id: string; head: string | null; verdict: Observation['mergeVerdict'] }[];
+  let recorded = 0;
+  for (const row of rows) {
+    if (!row.head) continue;
+    const verdict = await github.mergeVerdictOf(row.head).catch(() => undefined);
+    if (verdict === undefined || (verdict?.id === row.verdict?.id && verdict?.conclusion === row.verdict?.conclusion)) continue;
+    if (await engine.store.transaction(async (db, at) => {
+      const work: Work | undefined = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [row.id])).rows[0]?.document;
+      if (work?.stage !== 'done' || !work.observation?.merged || work.observation.candidate.sha !== row.head) return false;
+      const previous = work.observation.mergeVerdict ?? null;
+      work.observation.mergeVerdict = verdict;
+      await save(db, work, 'graphyard', 'merge-verdict.refreshed', at, { head: row.head, previous, verdict });
+      return true;
+    })) recorded++;
+  }
+  return recorded;
+}
 /**
  * Claim and run one due observation job. `spent`, when given, is told what the job charged the
  * budget (its non-304 requests), which is what the worker returns its paced slot with (GY-567).
@@ -3228,6 +3266,13 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     const failed = await guardGitHubMain(engine, github, new Date(), verdicts, approved, cancelled, reruns, runIds, testNames).then(tick => tick.errors.join('; '), error => error instanceof Error ? error.message : String(error));
     if (failed && mainGuardFailure.get(engine) !== failed) await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', 'main-guard.failed', JSON.stringify({ details: { error: failed, at: new Date().toISOString() } })]).catch(() => {});
     mainGuardFailure.set(engine, failed);
+  }
+  // A delivered head's public verdict is re-read on its own interval (GY-1917): the observation job
+  // ends at delivery, so a run rewritten afterwards would otherwise never reach master status.
+  const verdictsReadAt = deliveredVerdictsRead.get(engine);
+  if (typeof github.mergeVerdictOf === 'function' && (verdictsReadAt === undefined || Date.now() - verdictsReadAt >= deliveredVerdictIntervalMs)) {
+    deliveredVerdictsRead.set(engine, Date.now());
+    await refreshDeliveredVerdicts(engine, github).catch(() => {});
   }
   // The fleet is read before the claim, so the claim order can name it (GY-492): with a backlog
   // due, a mergeable item's job is claimed first however recently it became due, instead of

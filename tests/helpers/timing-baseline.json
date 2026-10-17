@@ -809,7 +809,7 @@
     "tests/soak-master-role-blockers.test.ts": 6834,
     "tests/soak-merge-preview.test.ts": 14000,
     "tests/soak-item-preview.test.ts": 7000,
-    "tests/soak-merge-verdict-after-merge.test.ts": 8000,
+    "tests/soak-merge-verdict-after-merge.test.ts": 20000,
     "tests/soak-merge-verdict.test.ts": 30000,
     "tests/soak-merge-writer.test.ts": 4000,
     "tests/soak-observation-window.test.ts": 45000,

@@ -5,6 +5,7 @@ import pg from 'pg';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
+import * as githubModule from '../src/github.js';
 import { CHECK_NAME, GitHub, processJob, verdictRunsPerHead } from '../src/github.js';
 import * as mergeQueue from '../src/merge-queue.js';
 import { LANDABLE_CHECK, type Observation, type Principal, type Work } from '../src/model.js';
@@ -22,11 +23,14 @@ import { clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
  * GY-1912 sequence: GitHub merged the head before the item reached done), so it waits on
  * reconciliation through repeated failures; for one hour every open item's observation throws too.
  * One merged head's passing run is rewritten to REFUSED by another writer (a pre-GY-1917 executor)
- * before Graphyard observes the merge. Throughout: no App write reaches a merged head, while an open
- * head whose observation failed reads REFUSED; nothing merges while its latest run is not success;
- * runs per head and writes per observation stay bounded; the rewritten delivery is one
- * public-verdict-contradicts-delivery attention item on every cycle from its delivery, and no other
- * item is ever named; every item is delivered; and every system invariant holds after every cycle.
+ * before Graphyard observes the merge, and two more an hour after their items reached done.
+ * Throughout: no App write reaches a merged head, while an open head whose observation failed reads
+ * REFUSED; nothing merges while its latest run is not success; runs per head and writes per
+ * observation stay bounded; the delivered-verdict refresh reads at most its batch per pass, stops
+ * reading a head once its watch ends, and saves each post-delivery rewrite once; each rewritten
+ * delivery is one public-verdict-contradicts-delivery attention item on every cycle from its
+ * delivery (or from the first refresh after its rewrite), and no other item is ever named; every
+ * item is delivered; and every system invariant holds after every cycle.
  */
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
@@ -40,6 +44,10 @@ const base = sha('base');
 const outage = (at: number) => at >= start + 21 * hour + 5 * minute && at < start + 22 * hour + 5 * minute;
 /** The delivery whose passing run another writer rewrites after the merge. */
 const rewritten = 5;
+/** The deliveries whose passing run another writer rewrites an hour after the item reached done. */
+const rewrittenAfterDone = [8, 11], rewriteAfterDoneMs = hour;
+// Read through the namespace, so the file still loads (and its case fails) against a base without them.
+const { deliveredVerdictIntervalMs = 0, deliveredVerdictWatchMs = 0, deliveredVerdictBatch = 0 } = githubModule as any;
 const protection = [{ name: CHECK_NAME, appId: APP }, { name: LANDABLE_CHECK, appId: APP }, { name: 'secrets', appId: CI }, { name: 'test', appId: CI }, { name: 'typecheck', appId: CI }];
 // Read through the namespace, so the file still loads (and its cases fail) against a base without them.
 const mergeVerdictRun = (runs: any[], head: string) => (mergeQueue as any).mergeVerdictRun?.(runs, APP, head) ?? undefined;
@@ -53,6 +61,8 @@ class World {
   /** Every App write that reached a head after GitHub merged it. */
   afterMerge: string[] = [];
   merges: { n: number; head: string; latest: string | null }[] = [];
+  /** Every read of a merged head's verdict runs, at the instant it was made. */
+  mergedReads: { head: string; at: number }[] = [];
   latest(head: string, name = CHECK_NAME, app = APP) { return this.runs.filter(run => run.name === name && run.head_sha === head && run.app.id === app).sort((a, b) => b.id - a.id)[0] ?? null; }
   passing(head: string) { return protection.every(check => this.latest(head, check.name, check.appId)?.conclusion === 'success'); }
   prOfHead(head: string) { return [...this.prs.values()].find(pr => pr.head === head)!; }
@@ -101,6 +111,7 @@ class World {
       if (path === '/git/ref/heads/main') return { ref: 'refs/heads/main', object: { type: 'commit', sha: base } };
       if (/^\/commits\/[a-f0-9]{40}$/.test(path)) return { sha: path.slice(9), commit: { tree: { sha: sha('tree', path) } } };
       const listing = /^\/commits\/([a-f0-9]{40})\/check-runs\?check_name=([^&]+)&/.exec(path);
+      if (listing && [...world.prs.values()].some(pr => pr.merged?.head === listing[1]) && path.includes('page=1')) world.mergedReads.push({ head: listing[1], at: clock.now() });
       if (listing) return { check_runs: path.includes('page=1') ? world.runs.filter(run => run.head_sha === listing[1] && run.name === decodeURIComponent(listing[2])) : [] };
       throw new Error(`Unexpected GitHub request ${method} ${path}`);
     };
@@ -155,14 +166,15 @@ test('unit:soak-merge-verdict-after-merge — two simulated days of the real obs
   const world = new World(), github = world.client();
   const adapter = {
     observe: async (item: Work) => world.observation(item, clock.now()),
-    publish: github.publish.bind(github), requiredCheckShortfall: github.requiredCheckShortfall.bind(github),
+    publish: github.publish.bind(github), mergeVerdictOf: github.mergeVerdictOf?.bind(github), requiredCheckShortfall: github.requiredCheckShortfall.bind(github),
     mergeQueueState: github.mergeQueueState.bind(github), enqueuePullRequest: github.enqueuePullRequest.bind(github),
     dequeuePullRequest: github.dequeuePullRequest.bind(github), publishGroupCheck: async () => {},
   } as unknown as GitHub;
   const record = emptyInvariantRecord(), violations: string[] = [], observed = new Set<string>();
-  const contradictions: { at: number; subjects: string[]; text: string }[] = [];
+  const contradictions: { at: number; subjects: string[]; texts: string[] }[] = [];
   const refusedOpen: string[] = [];
-  let mostWrites = 0, awaitingAfterMerge = 0;
+  let mostWrites = 0, awaitingAfterMerge = 0, mostReadsPerCycle = 0;
+  const doneAt = new Map<string, number>(), rewrittenAt = new Map<number, number>();
   for (let cycle = 0; cycle < (days * 24 * hour) / cycleMs; cycle++) {
     const now = clock.now();
     for (let n = 1; n <= items; n++) {
@@ -192,13 +204,26 @@ test('unit:soak-merge-verdict-after-merge — two simulated days of the real obs
         refusedOpen.push(`#${pr.n}`);
       }
     }
+    // The refresh also runs when no item is open: one more pass of the job with nothing due.
+    await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
+    const readsBefore = world.mergedReads.length;
+    await processJob(engine, adapter);
     const work = await store.list();
+    for (const item of work) if (item.stage === 'done' && !doneAt.has(item.key)) doneAt.set(item.key, now);
+    // Another writer rewrites a delivered head's passing run an hour after its item reached done.
+    for (const n of rewrittenAfterDone) {
+      const item = work.find(entry => entry.submission?.pr === n), head = world.prs.get(n)?.merged?.head;
+      if (!item || !head || rewrittenAt.has(n) || !doneAt.has(item.key) || now < doneAt.get(item.key)! + rewriteAfterDoneMs) continue;
+      Object.assign(world.latest(head), { conclusion: 'failure', output: { title: 'REFUSED', summary: '- Reconciliation failed; fresh verification required' } });
+      rewrittenAt.set(n, now);
+    }
+    mostReadsPerCycle = Math.max(mostReadsPerCycle, world.mergedReads.length - readsBefore);
     for (const check of checkInvariants(record, { work, now, agents: [] })) {
       if (check.observed) observed.add(check.invariant);
       if (!check.holds) violations.push(`+${Math.round((now - start) / minute)} min ${check.line}`);
     }
     const attention = mergeStallAttention({ work, now: new Date(now).toISOString() }).filter(entry => entry.text.startsWith('public-verdict-contradicts-delivery'));
-    contradictions.push({ at: now, subjects: attention.map(entry => entry.subject), text: attention[0]?.text ?? '' });
+    contradictions.push({ at: now, subjects: attention.map(entry => entry.subject), texts: attention.map(entry => entry.text) });
     assert.deepEqual(world.afterMerge, [], `cycle ${cycle}: no App write reaches a merged head`);
     assert.deepEqual(world.merges.filter(entry => entry.latest !== 'success'), [], `cycle ${cycle}: a head merged while its latest ${CHECK_NAME} run was not success`);
     for (const pr of world.prs.values())
@@ -214,14 +239,30 @@ test('unit:soak-merge-verdict-after-merge — two simulated days of the real obs
   assert.ok(refusedOpen.length > 0, 'the outage refused open heads');
   const final = await store.list();
   assert.deepEqual(final.filter(item => item.stage !== 'done' || !item.delivery).map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'every item is delivered after recovery');
-  // Every delivered head but the rewritten one still reads the success it was merged under.
-  for (const pr of world.prs.values()) assert.equal(world.latest(pr.merged!.head).conclusion, pr.n === rewritten ? 'failure' : 'success', `#${pr.n}'s run after delivery`);
-  // The contradiction: one attention item naming the rewritten delivery on every cycle from its delivery, no other item ever.
-  const contradicted = final.find(item => item.submission?.pr === rewritten)!;
-  const delivered = Date.parse(contradicted.updatedAt);
-  assert.deepEqual(contradictions.filter(entry => entry.subjects.some(subject => subject !== contradicted.key)), [], 'no other delivery is ever named');
-  const named = contradictions.filter(entry => entry.subjects.length);
-  assert.ok(named.length > 0 && named.every(entry => entry.subjects.length === 1), 'one attention item for the one contradicted delivery');
-  assert.deepEqual(contradictions.filter(entry => entry.at > delivered && !entry.subjects.length).map(entry => entry.at), [], 'the item stays on every cycle after the delivery');
-  assert.match(named[0].text, new RegExp(`^public-verdict-contradicts-delivery: ${contradicted.key} merged head ${world.prs.get(rewritten)!.head.slice(0, 12)} .*run \\d+ reads failure`));
+  // Every delivered head but the rewritten ones still reads the success it was merged under.
+  const rewrites = [rewritten, ...rewrittenAfterDone];
+  for (const pr of world.prs.values()) assert.equal(world.latest(pr.merged!.head).conclusion, rewrites.includes(pr.n) ? 'failure' : 'success', `#${pr.n}'s run after delivery`);
+  assert.deepEqual([...rewrittenAt.keys()].sort((a, b) => a - b), rewrittenAfterDone, 'every post-delivery rewrite happened');
+  // The contradictions: one attention item per rewritten delivery on every cycle from when it is
+  // seen — its delivery, or the first refresh pass after its rewrite — and no other item ever.
+  const keyOf = (n: number) => final.find(item => item.submission?.pr === n)!.key;
+  const keys = rewrites.map(keyOf);
+  assert.deepEqual(contradictions.filter(entry => entry.subjects.some(subject => !keys.includes(subject))), [], 'no other delivery is ever named');
+  assert.ok(contradictions.every(entry => new Set(entry.subjects).size === entry.subjects.length), 'one attention item per contradicted delivery');
+  for (const n of rewrites) {
+    const key = keyOf(n), seenFrom = n === rewritten ? doneAt.get(key)! : rewrittenAt.get(n)! + deliveredVerdictIntervalMs + cycleMs;
+    assert.deepEqual(contradictions.filter(entry => entry.at >= seenFrom && !entry.subjects.includes(key)).map(entry => new Date(entry.at).toISOString()), [], `${key} is named on every cycle from ${new Date(seenFrom).toISOString()}`);
+    if (n !== rewritten) assert.deepEqual(contradictions.filter(entry => entry.at < rewrittenAt.get(n)! && entry.subjects.includes(key)), [], `${key} is not named before its rewrite`);
+    const text = contradictions.flatMap(entry => entry.texts).find(entry => entry.includes(` ${key} `))!;
+    assert.match(text, new RegExp(`^public-verdict-contradicts-delivery: ${key} merged head ${world.prs.get(n)!.head.slice(0, 12)} .*run \\d+ reads failure`));
+  }
+  // The refresh is bounded: at most its batch per pass, never past a head's watch, and one save per rewrite.
+  assert.ok(deliveredVerdictBatch > 0 && mostReadsPerCycle <= deliveredVerdictBatch, `at most ${deliveredVerdictBatch} delivered heads read per pass (${mostReadsPerCycle})`);
+  for (const pr of world.prs.values()) {
+    const late = world.mergedReads.filter(read => read.head === pr.merged!.head && read.at > pr.merged!.at + deliveredVerdictWatchMs + deliveredVerdictIntervalMs + cycleMs);
+    assert.deepEqual(late, [], `#${pr.n}'s verdict is not read after its watch`);
+  }
+  assert.ok(world.mergedReads.some(read => rewrittenAfterDone.map(n => world.prs.get(n)!.head).includes(read.head)), 'delivered heads were re-read');
+  const refreshed = (await store.pool.query("SELECT work_id FROM events WHERE kind='merge-verdict.refreshed'")).rows.map(row => String(row.work_id)).sort();
+  assert.deepEqual(refreshed, rewrittenAfterDone.map(n => final.find(item => item.submission?.pr === n)!.id).sort(), 'each post-delivery rewrite is saved once');
 });
