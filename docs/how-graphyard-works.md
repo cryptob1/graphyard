@@ -14,9 +14,9 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions, each sta
 
 ## From goal to work items
 
-Goal passes intake, acceptance, approval, planning, approval and delivery. `graphyard goal FILE` records it; acceptance role writes outcomes and required `uat` cases ([validation](validation.md)), non-author-approved. Merged, `planner` role writes architecture note (at most 400 words) and items, each naming outcomes, cases, `plannedFiles` and predecessors; a serving-release criterion carries `manual:post-deploy/NAME` beside a buildable one. A plan leaving outcome uncovered, parallel items sharing file, naming a criterion twice or touching a required case is refused with the reason; three refused rounds hand goal to master. Another identity approves the plan (`goal plan-approve`); loop creates and releases items (`planned`, then `delivering`), dispatching none before its dependencies are delivered. Goal is `delivered` once every item is done and production serves it (deployed; smoke proof where policy asks).
+Goal passes intake, acceptance, approval, planning, approval and delivery. `graphyard goal FILE` records it; acceptance role writes outcomes and required `uat` cases ([validation](validation.md)), non-author-approved. Merged, `planner` role writes architecture note (at most 400 words) and items, each naming outcomes, cases, `plannedFiles` and predecessors; a serving-release criterion carries `manual:post-deploy/NAME` beside a buildable one. A plan leaving outcome uncovered, parallel items sharing file, naming a criterion twice or touching a required case is refused with reason; three refused rounds go to master. Another identity approves the plan (`goal plan-approve`); loop creates and releases items (`planned`, then `delivering`), dispatching none before dependencies deliver. Goal is `delivered` once every item is done and production serves it (deployed; smoke proof where policy asks).
 
-A 401/403/409/422 refusal redrafts acceptance or re-releases plan an hour later (noted); a 422 plan post is a refused round; so is a validation-failed payload: reason fed back as `lastRefusal`, retried in ten minutes; others re-post then. `POST /goals/GY-N/land` fetches base first (≤20s), else `503` unrecorded.
+A 401/403/409/422 refusal redrafts acceptance or re-releases plan an hour later (noted); a 422 plan post or validation-failed payload is a refused round: reason fed back as `lastRefusal`, retried in ten minutes; others re-post then. `POST /goals/GY-N/land` fetches base first (≤20s), else `503` unrecorded.
 
 ## Risk lanes
 
@@ -34,7 +34,7 @@ All lanes require `e2e:` proofs; low/medium reworks need no approver (`graphyard
 
 ![Bootstrap: one supervised worker; normal operation: a fleet.](diagrams/bootstrap-vs-normal.svg)
 
-Text equivalent: operator supervises one bootstrap worker; later master runs credentialed fleet.
+Text equivalent: in bootstrap the human operator supervises one worker; later master runs a credentialed fleet.
 
 ![Authority of operator, Graphyard, Herdr sessions, reviewer, producer.](diagrams/roles-and-authority.svg)
 
@@ -46,4 +46,4 @@ Text equivalent: operator makes human-only decisions; Herdr hosts master (`coord
 
 Text equivalent: mutations, events commit in locked Postgres transactions; reconciliation syncs GitHub, merging passing heads; webhooks wake jobs.
 
-Gates deterministically check one candidate, `(PR, head SHA, base SHA)`; claims bump epoch; latest trusted proof wins; merge is not [delivery](delivery.md).
+Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`; claims bump epoch; latest trusted proof wins; merge is not [delivery](delivery.md).
