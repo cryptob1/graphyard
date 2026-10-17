@@ -1,8 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { applyInstall, buildPlan, installRequestFromArgs, prepareInstall, resumeCommand, type InstallDependencies } from '../src/install/index.js';
+import { applyInstall, buildPlan, fullPlanCommand, installRequestFromArgs, prepareInstall, resumeCommand, type InstallDependencies } from '../src/install/index.js';
+import type { LocalSupervisor } from '../src/install/local.js';
 import { fingerprint } from '../src/install/secrets.js';
 import { deliveryPolicySchema } from '../src/model/delivery-policy.js';
 import { allText, harness, REPOSITORY } from './install-harness.js';
@@ -99,6 +101,7 @@ test('unit:install-observe-only-changes-nothing — install --observe-only --app
     const roster = fixture.transport.commands.find(command => command.args.includes('GRAPHYARD_PRINCIPALS'))!.input!;
     assert.ok(!JSON.parse(roster).some((principal: { role: string }) => principal.role === 'worker' || principal.role === 'producer'));
     assert.ok(summary.nextSteps.some(step => /Observation-only: the control plane is deployed and nothing owner\/project or its product owns was changed/.test(step)));
+    assert.ok(summary.nextSteps.some(step => step.includes(`"${fullPlanCommand(session)}"`)));
     assert.ok(logs.length > 0);
   } finally { await fixture.cleanup(); }
 });
@@ -112,7 +115,9 @@ test('unit:install-observe-only-redacted-resumable — the Railway observation r
 
     const replanned = await buildPlan(await prepare('plan'));
     const state = (id: string) => replanned.actions.find(action => action.id === id)!.state;
-    for (const id of ['local.credentials', 'provider.provision.project', 'provider.provision.database', 'provider.provision.app', 'provider.env.core']) assert.equal(state(id), 'satisfied', `${id} is not reported satisfied after the interrupted apply`);
+    for (const id of ['local.credentials', 'provider.provision.project', 'provider.provision.database', 'provider.provision.app']) assert.equal(state(id), 'satisfied', `${id} is not reported satisfied after the interrupted apply`);
+    // The variables are written again on every apply, and the plan says so: their names cannot be compared unread.
+    assert.equal(state('provider.env.core'), 'update');
     assert.match(replanned.actions.find(action => action.id === 'provider.env.core')!.title, /variable names are unknown \(observation-only reads no values\)/);
 
     const second = await prepare('apply');
@@ -131,4 +136,24 @@ test('unit:install-observe-only-redacted-resumable — the Railway observation r
       assert.ok(!output.includes(`sha:${fingerprint(value)}`) && !output.includes(fingerprint(value)), 'a seeded value fingerprint reached the output');
     }
   } finally { await fixture.cleanup(); }
+});
+
+test('unit:install-observe-only-changes-nothing — the local provider, which would install a systemd supervisor unit, is refused before anything is written, and the full-plan command keeps every input but --observe-only', async () => {
+  assert.throws(() => installRequestFromArgs(['--provider', 'local', '--repo', REPOSITORY, '--observe-only', '--apply']), /--observe-only changes nothing the repository owns.*--provider local/);
+  const unitDirectory = await mkdtemp(join(tmpdir(), 'gy-observe-units-'));
+  const calls: string[][] = [];
+  const supervisor: LocalSupervisor = { systemd: { unitDirectory }, reason: null, systemctl: async args => { calls.push(args); return ''; },
+    detach: async () => { throw new Error('observation-only starts nothing'); }, kill: async () => {} };
+  const fixture = await harness({ provider: 'local' });
+  try {
+    await assert.rejects(prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'local', observeOnly: true }, { ...fixture.deps, localSupervisor: supervisor }, 'apply'), /installs no supervisor unit/);
+    assert.deepEqual(calls, []);
+    assert.deepEqual(await readdir(unitDirectory), []);
+    assert.ok(!fixture.allCommandLines().some(line => /systemctl (--user )?(enable|daemon-reload)/.test(line)));
+  } finally { await fixture.cleanup(); await rm(unitDirectory, { recursive: true, force: true }); }
+
+  const { request } = installRequestFromArgs(['--provider', 'railway', '--repo', REPOSITORY, '--observe-only', '--workspace', 'team-a', '--base-branch', 'trunk', '--domain', 'gy.example.com', '--apply']);
+  const command = fullPlanCommand({ inputs: { ...request, baseBranch: 'trunk' } as any });
+  assert.equal(command, 'graphyard install --provider railway --repo owner/project --base-branch trunk --domain gy.example.com --workspace team-a --plan');
+  assert.deepEqual(installRequestFromArgs(command.split(' ').slice(2)).request.observeOnly, undefined);
 });

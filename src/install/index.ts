@@ -185,7 +185,9 @@ export function installRequestFromArgs(args: string[]) {
 function observeOnlyConflicts(values: Record<string, string | boolean | string[] | undefined>, provider: string) {
   const given = (name: string) => Array.isArray(values[name]) ? (values[name] as string[]).length > 0 : !!values[name];
   return [...['github-app', 'reuse-app', 'reviewer', 'workers', 'producer-proof', 'create-environments', 'migrate', 'herdr-rebind', 'herdr-instance', 'herdr-only'].filter(given).map(name => `--${name}`),
-    ...(values.target || provider === 'host' ? ['--target'] : [])];
+    ...(values.target || provider === 'host' ? ['--target'] : []),
+    // The local provider runs the control plane as a systemd user unit on this machine, a supervisor unit observation-only never installs.
+    ...(provider === 'local' ? ['--provider local'] : [])];
 }
 
 /** The reason every action an observation-only install (GY-1846) leaves to a later full install carries. */
@@ -397,7 +399,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
   if (!provider) throw new Error('Use --provider railway|hetzner|docker-host|compose|local, or --target host|hetzner');
   // Observation-only (GY-1846) binds no App and leaves Herdr untouched, whoever builds the request.
   if (rawInputs.observeOnly) {
-    if (provider === 'host' || rawInputs.selfContained || rawInputs.migrate || rawInputs.createEnvironments) throw new Error('--observe-only deploys only the control plane: it cannot install a self-contained host, migrate, or create environments');
+    if (provider === 'host' || provider === 'local' || rawInputs.selfContained || rawInputs.migrate || rawInputs.createEnvironments) throw new Error('--observe-only deploys only the control plane and installs no supervisor unit: it cannot install a self-contained host or the local provider\'s systemd unit, migrate, or create environments');
     rawInputs = { ...rawInputs, noGithubApp: true, herdr: 'skip' };
   }
   // A self-contained install puts the whole of Graphyard on one machine: an existing one (host) or
@@ -895,7 +897,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   const coreDrift = variableDrift(session, 'provider.env.core', core, observation.variables);
   drift.push(...coreDrift);
   const namesUnknown = observation.installed && observation.variablesObserved !== true && observeOnly;
-  actions.push({ id: 'provider.env.core', target: 'provider', state: !observation.installed ? 'create' : coreDrift.length ? 'update' : 'satisfied', title: `Set the control-plane variables on the application service${namesUnknown ? '; the deployed variable names are unknown (observation-only reads no values), so no drift is reported' : ''}`, values: core.map(value => planValue(value, session.materialized)), drift: coreDrift });
+  actions.push({ id: 'provider.env.core', target: 'provider', state: !observation.installed ? 'create' : coreDrift.length || namesUnknown ? 'update' : 'satisfied', title: `Set the control-plane variables on the application service${namesUnknown ? '; the deployed variable names are unknown (observation-only reads no values), so every one is written again and no drift is reported' : ''}`, values: core.map(value => planValue(value, session.materialized)), drift: coreDrift });
   actions.push({ id: 'provider.deploy', target: 'provider', state: observation.app ? 'update' : 'create', title: 'Deploy the application and wait for it to become healthy' });
   actions.push({ id: 'provider.url', target: 'provider', state: observation.url ? 'satisfied' : 'create', title: context.domain ? `Bind ${context.domain} to the service over HTTPS` : 'Obtain the public HTTPS URL of the service', values: observation.url ? [{ name: 'url', value: observation.url, secret: false }] : [] });
   actions.push({ id: 'verify.health', target: 'graphyard', state: 'update', title: 'Verify GET /healthz returns {"ok":true}' });
@@ -1525,12 +1527,18 @@ function observedProfiles(): ProfileRegistration {
     master: { configured: false, kind: null, detail: `${OBSERVE_ONLY_HELD}: no master profile, supervisor unit or master loop is installed` }, workers: [], reviewers: [] };
 }
 
+/** This install's own command with --observe-only and the flags it implied dropped, as a --plan (GY-1846). */
+export function fullPlanCommand(session: Pick<InstallSession, 'inputs'>) {
+  const { observeOnly: _observeOnly, noGithubApp: _noGithubApp, herdr: _herdr, ...inputs } = session.inputs;
+  return resumeCommand({ inputs: inputs as InstallSession['inputs'] }).replace(/ --apply$/, ' --plan');
+}
+
 function observeOnlySteps(session: InstallSession, url: string, plan: InstallPlan) {
   const heldIds = plan.actions.filter(action => action.state === 'held').map(action => action.id);
   return [
     `Open ${url} and sign in with the credential in ${tokenFile(session.directory, principalOfRole(session.principals, 'admin').id)}.`,
     `Observation-only: the control plane is deployed and nothing ${session.inputs.repository} or its product owns was changed. Held for a later full install: ${heldIds.join(', ')}.`,
-    `Rerun "graphyard install --provider ${session.context.provider} --repo ${session.inputs.repository} --plan" without --observe-only to see what the full install would change before applying it.`,
+    `Rerun "${fullPlanCommand(session)}" (this install's inputs without --observe-only) to see what the full install would change before applying it.`,
   ];
 }
 
