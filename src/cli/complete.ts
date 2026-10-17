@@ -112,11 +112,17 @@ export const completeCommand: CliCommand = {
     '                                control plane allocates its change number and ends the lease',
   ],
   run: async (context, work) => {
+    const body = completionBody(context.args, () => worktreeHead(context.repositoryRoot())), requestId = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();
+    // GY-1925: the two forms map one-to-one onto the merger modes the engine enforces at submit
+    // (GY-1523 — a head is accepted only while the control plane is the merge writer, a pull request
+    // only while GitHub is), so the form alone decides whether anything is pushed. The `--head` form
+    // pushes nothing: the shared object store already holds the commit, so a sandbox that cannot
+    // push (no SSH inside its user namespace) still completes. The PR form keeps its push of the
+    // graphyard/ (or adopted) branch and its refusal when that push fails.
     let push: { pushed: string | null; failure?: string } = { pushed: null };
-    try { push = pushGraphyardBranch(context.repositoryRoot(), spawnSync, work.prAdoption?.branch ?? null); } catch { /* no readable worktree: nothing to push; the head read below reports it */ }
+    if (body.head === undefined) try { push = pushGraphyardBranch(context.repositoryRoot(), spawnSync, work.prAdoption?.branch ?? null); } catch { /* no readable worktree: nothing to push; the head the PR is observed at reports it */ }
     let verification: Awaited<ReturnType<typeof selfVerification>> | { state: 'unavailable'; reason: string };
     try { verification = await selfVerification(context.repositoryRoot(), work.key); } catch (error: any) { verification = { state: 'unavailable', reason: `the worktree could not be read: ${error.message}` }; }
-    const body = completionBody(context.args, () => worktreeHead(context.repositoryRoot())), requestId = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();
     // A failed push leaves the remote head at an earlier commit: nothing is submitted (and no lease ended) for it.
     if (push.failure !== undefined) throw new Error(`complete refused: pushing the graphyard/ branch failed, so the pull request would not hold this head: ${push.failure || 'git push failed'}`);
     const submitted = await submitThroughPause(() => context.api(`work/${work.id}/submit`, body, requestId));
