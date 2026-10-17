@@ -7,6 +7,7 @@ import { commands } from '../src/cli/index.js';
 import { localReleasePorts } from '../src/daemon/release-ports.js';
 import { masterConfigSchema } from '../src/master.js';
 import { cut, digestPromotionRefusal, type AsyncGit, type CandidateBuild, type DeploymentOutcome, type DeploymentRecord, type Git, type Ledger, type ReleaseCandidate, type UatRecord } from '../src/release-candidate.js';
+import { handedImportsVariable } from '../src/validation-import.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -95,7 +96,7 @@ function uatServer(sha: string) {
 
 /** The digest variables the CLI's adapter reads from the environment, set for the call and restored after. */
 async function withReleaseEnvironment<T>(variables: Record<string, string | undefined>, body: () => Promise<T>): Promise<T> {
-  const names = ['GRAPHYARD_DEPLOY_DIGESTS', 'GRAPHYARD_INSTANCE_DIGESTS', 'GRAPHYARD_E2E_REPORT', 'GRAPHYARD_UAT_TOKEN'];
+  const names = ['GRAPHYARD_DEPLOY_DIGESTS', 'GRAPHYARD_INSTANCE_DIGESTS', 'GRAPHYARD_E2E_REPORT', 'GRAPHYARD_UAT_TOKEN', handedImportsVariable];
   const saved = names.map(name => [name, process.env[name]] as const);
   try {
     for (const name of names) delete process.env[name];
@@ -187,7 +188,10 @@ test('unit:uat-digests-require-observation — a UAT verdict names the digests U
   const savedExit = process.exitCode;
   try {
     // The observer set and its report matching the manifest: the verdict carries the digests and promotion is allowed.
-    await withReleaseEnvironment({ GRAPHYARD_DEPLOY_DIGESTS: shellDeployCommand, GRAPHYARD_INSTANCE_DIGESTS: shellInstancesCommand }, async () => {
+    // Promotion's imported-run hold (GY-1860) is handed released and sealed, as a production job with no plane
+    // credential receives it, so the digest gate is what the promotion answers.
+    await withReleaseEnvironment({ GRAPHYARD_DEPLOY_DIGESTS: shellDeployCommand, GRAPHYARD_INSTANCE_DIGESTS: shellInstancesCommand,
+      [handedImportsVariable]: JSON.stringify({ candidate: cutCandidate.id, sha, imports: { held: false, cases: [], sealed: true } }) }, async () => {
       await releaseCommand('uat', [cutCandidate.id, '--base', 'main'], observedRepo.work);
       const [validated] = await releaseCommand('validate', [cutCandidate.id, '--url', await server.url(), '--wait', '1', '--base', 'main'], observedRepo.work);
       assert.equal(validated.record.result, 'passed');
@@ -206,7 +210,8 @@ test('unit:uat-digests-require-observation — a UAT verdict names the digests U
     const { candidate: second } = cut(unobservedRepo.git, { base: 'main', trigger: 'manual', now, push: true, build: () => buildOf(unobservedSha) }) as any;
     const bareServer = uatServer(unobservedSha);
     try {
-      await withReleaseEnvironment({ GRAPHYARD_DEPLOY_DIGESTS: shellDeployCommand, GRAPHYARD_INSTANCE_DIGESTS: undefined }, async () => {
+      await withReleaseEnvironment({ GRAPHYARD_DEPLOY_DIGESTS: shellDeployCommand, GRAPHYARD_INSTANCE_DIGESTS: undefined,
+        [handedImportsVariable]: JSON.stringify({ candidate: second.id, sha: unobservedSha, imports: { held: false, cases: [], sealed: true } }) }, async () => {
         await releaseCommand('uat', [second.id, '--base', 'main'], unobservedRepo.work);
         const [validated] = await releaseCommand('validate', [second.id, '--url', await bareServer.url(), '--wait', '1', '--base', 'main'], unobservedRepo.work);
         assert.equal(validated.record.result, 'passed');
@@ -230,7 +235,8 @@ test('unit:uat-digests-require-observation — a UAT verdict names the digests U
     const { candidate: third } = cut(forgedRepo.git, { base: 'main', trigger: 'manual', now, push: true, build: () => buildOf(forgedSha) }) as any;
     const forgedServer = uatServer(forgedSha);
     try {
-      await withReleaseEnvironment({ GRAPHYARD_DEPLOY_DIGESTS: shellDeployCommand, GRAPHYARD_INSTANCE_DIGESTS: undefined }, async () => {
+      await withReleaseEnvironment({ GRAPHYARD_DEPLOY_DIGESTS: shellDeployCommand, GRAPHYARD_INSTANCE_DIGESTS: undefined,
+        [handedImportsVariable]: JSON.stringify({ candidate: third.id, sha: forgedSha, imports: { held: false, cases: [], sealed: true } }) }, async () => {
         await releaseCommand('uat', [third.id, '--base', 'main'], forgedRepo.work);
         const [validated] = await releaseCommand('validate', [third.id, '--url', await forgedServer.url(), '--wait', '1', '--base', 'main', '--suite', 'digests=true'], forgedRepo.work);
         assert.equal(validated.record.result, 'passed', 'the caller-named digests suite passed, like any other suite');
