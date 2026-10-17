@@ -18,7 +18,7 @@ Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`
 
 ### Release filing credential
 
-UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds and follow-ups as `graphyard-release-follow-up` (only `intent:create`, work items `*`). Hourly `master setup --apply` (admin token) issues, rotates, stores it; else `master status` names the step (`graphyard operator-agent setup FILE --token-stdin`, FILE `{"id":"graphyard-release-follow-up","displayName":"Release follow-up","capabilities":["intent:create"],"scope":{"repositories":["OWNER/REPO"],"workItems":["*"]},"reason":"..."}`). `doctor`: `FAIL release-filing`. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` (only `e2e:record`), never admin.
+UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds and follow-ups as `graphyard-release-follow-up` (only `intent:create`, work items `*`). Hourly `master setup --apply` (admin token) issues, rotates, stores it; else `master status` names the step (`graphyard operator-agent setup FILE --token-stdin`, FILE `{"id":"graphyard-release-follow-up","displayName":"Release follow-up","capabilities":["intent:create"],"scope":{"repositories":["OWNER/REPO"],"workItems":["*"]},"reason":"..."}`). `doctor`: `FAIL release-filing`. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` with only `e2e:record`, never admin.
 
 ### Pre-merge gate and release-candidate validation
 
