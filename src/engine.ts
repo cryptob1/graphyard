@@ -845,7 +845,7 @@ const eventLoopLagSamples = 60_000;
  * per tick (on Node 24 `reset()` stops it recording, and a histogram enabled after one was disabled
  * never fires). The timer holds the process open for nothing.
  */
-class EventLoopLag {
+export class EventLoopLag {
   private samples: number[] = [];
   private timer: NodeJS.Timeout | null = null;
   private due = 0;
@@ -860,10 +860,20 @@ class EventLoopLag {
     }, eventLoopLagResolutionMs);
     this.timer.unref();
   }
-  /** The window's lag so far: p50 and max in ms, or null when the window holds no sample yet. */
+  /**
+   * The window's lag so far: p50 and max in ms, or null when the window holds no observation yet.
+   * A sample exists only once its timer callback has run, so a hold of the loop that ended just
+   * before this read — the callback that elapsed during it still queued behind the caller's own
+   * work — would go unrecorded and the tick would read no lag at all (GY-1886). The overrun the
+   * next callback is still owed counts beside the recorded samples, so a block is seen however the
+   * event loop orders its read against the timers phase; when nothing is owed and no callback has
+   * run, nothing has been observed and the read says so. Nothing owed is no observation, so it adds
+   * no 0 ms sample to pull p50 below what the recorded callbacks saw.
+   */
   read(): { p50: number; max: number } | null {
-    if (!this.samples.length) return null;
-    const sorted = [...this.samples].sort((a, b) => a - b);
+    const pending = this.timer ? Math.max(0, performance.now() - this.due) : 0;
+    const sorted = (pending > 0 ? [...this.samples, pending] : [...this.samples]).sort((a, b) => a - b);
+    if (!sorted.length) return null;
     return { p50: Math.round(sorted[Math.ceil(sorted.length / 2) - 1]), max: Math.round(sorted[sorted.length - 1]) };
   }
   /** Close the window and forget its samples. */
