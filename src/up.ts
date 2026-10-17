@@ -226,6 +226,16 @@ export interface UpDependencies {
    * Defaults to `master merger MERGER` with the admin credential.
    */
   setMerger?(adminToken: string, requestId: string, merger: MergerMode): Promise<void>;
+  /**
+   * GY-1851: the HTTP status the control plane gave each credential this install recorded (the
+   * coordinator, operator-agent and approver) at a status read; one that drew no answer is left out.
+   * Absent, nothing is judged stale; the real dependencies read recordedCredentialAnswers.
+   */
+  credentialAnswers?(): Promise<{ identity: string; status: number }[]>;
+  /** GY-1851: set the loop's cursor aside beside itself (archiveDaemonCursor); null when there was none. */
+  archiveCursor?(): Promise<{ file: string; cycle: number } | null>;
+  /** GY-1851: the cycle the loop's cursor has reached, or null when there is none. */
+  cursorCycle?(): Promise<number | null>;
   pollMs?: number;
   /** How long a step waits on a person before the run stops (resumable); Infinity interactively. */
   humanWaitMs?: number;
@@ -313,6 +323,11 @@ interface UpState {
   herdrInstance?: boolean;
   /** GY-1511: why Herdr is left out (noHerdr): the named failure of the step that could not set it up. */
   herdrFailure?: string | null;
+  /**
+   * GY-1851: the credentials the control plane refused (401), so it serves a fresh database: until the
+   * master loop runs again, the install re-issues every credential and the loop starts a fresh cursor.
+   */
+  reissue?: string[] | null;
 }
 export const upStateFile = (root: string) => resolve(root, '.graphyard/up.json');
 /** GY-1833: `up --merger control-plane` over a recorded github run migrates the install; the reverse starts over. */
@@ -423,6 +438,40 @@ const childStop = (step: string, args: string[], result: { code: number; stdout:
   new ChildStop(childFailure(step, args, result, more), exitCode, args.map(redactLine), childFirstStderr(result));
 
 export const signInAt = (link: string, base: string) => { const at = link.indexOf('#'); return at < 0 ? link : `${base.replace(/\/+$/, '')}/${link.slice(at)}`; };
+/** The steps a reinstall onto a fresh database runs again (GY-1851): the install, master init, the merger, the agent identities, the accounts and the loop. */
+const reissueSteps: readonly UpStep[] = ['control-plane', 'host-supervisor', 'merger-setting', 'master-autonomy', 'accounts', 'master-loop'];
+const masterJson = (root: string) => readFile(resolve(root, '.graphyard/master.json'), 'utf8').then(parseJson, () => null);
+/**
+ * GY-1851: GET /api/status at SERVER with each credential master.json records (the coordinator's,
+ * the operator-agent's and the approver's), answering the HTTP status of each. A credential with no
+ * readable file, or a request that drew no answer, is left out: only the plane's answer judges it.
+ */
+export async function recordedCredentialAnswers(root: string, server: string, fetcher: typeof fetch = fetch) {
+  const config = await masterJson(root);
+  const recorded = [['coordinator', config?.credentialFile], ['operator-agent', config?.operatorAgent?.credentialFile], ['approver', config?.approver?.credentialFile]] as const;
+  const answers: { identity: string; status: number }[] = [];
+  for (const [identity, file] of recorded) {
+    if (typeof file !== 'string') continue;
+    const token = await readFile(resolve(file), 'utf8').then(text => text.trim(), () => '');
+    if (token.length < 32) continue;
+    const status = await fetcher(`${server.replace(/\/+$/, '')}/api/status`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000) }).then(response => response.status, () => null);
+    if (status !== null) answers.push({ identity, status });
+  }
+  return answers;
+}
+/** GY-1851: the master loop's cursor, found from the coordinator credential master.json records. */
+const recordedCursor = async (root: string) => { const file = (await masterJson(root))?.credentialFile; return typeof file === 'string' ? { credentialFile: resolve(file) } : null; };
+export async function archiveRecordedCursor(root: string) {
+  const config = await recordedCursor(root);
+  return config ? (await import('./daemon/state.js')).archiveDaemonCursor(config) : null;
+}
+export async function recordedCursorCycle(root: string) {
+  const config = await recordedCursor(root);
+  if (!config) return null;
+  const cursor = parseJson(await readFile((await import('./daemon/state.js')).daemonStatePath(config as any), 'utf8').catch(() => ''));
+  return typeof cursor?.cycle === 'number' ? cursor.cycle : null;
+}
+
 /** Both of the master's agent identities are recorded in master.json and their credential files are readable. */
 async function provisioned(root: string) {
   const config = await readFile(resolve(root, '.graphyard/master.json'), 'utf8').then(parseJson, () => null);
@@ -718,6 +767,19 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         deps.emit({ kind: 'note', text: 'The App page is still waiting for a person; serving it again' });
       }
     });
+    // GY-1851: an install whose recorded credentials the control plane refuses (401) is a fresh
+    // database behind a kept install directory: a new installation. Its credentials are re-issued
+    // through the install, master init and master autonomy, and the loop starts a fresh cursor.
+    if (state.completed.includes('control-plane') && !state.reissue?.length) {
+      const answers = await (deps.credentialAnswers?.() ?? Promise.resolve([])).catch(() => []);
+      const refused = answers.filter(answer => answer.status === 401).map(answer => answer.identity);
+      if (refused.length) {
+        state.reissue = refused;
+        state.completed = state.completed.filter(name => !reissueSteps.includes(name));
+        await writeState(deps.root, state);
+        deps.emit({ kind: 'note', text: `The control plane refused the recorded ${refused.join(', ')} credential${refused.length > 1 ? 's' : ''} (401): it serves a fresh database, so this run re-issues the coordinator, operator-agent and approver credentials and starts the master loop on a fresh cursor, archiving the old one beside itself.` });
+      }
+    }
     const installedBefore = state.completed.includes('control-plane');
     await controlPlane();
     await resolveSetupUrl();
@@ -857,7 +919,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       if (state.identitiesHost) return `the master's agent identities were provisioned on ${state.identitiesHost}, where its loop runs`;
       const admin = await deps.operatorToken?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
       // An install whose operator already ran the command keeps those identities; the admin credential only refreshes them.
-      if (!admin && await provisioned(deps.root)) return 'the master\'s operator-agent and approver identities were already provisioned';
+      // A re-issue (GY-1851) never keeps the files the fresh database refused.
+      if (!admin && !state.reissue?.length && await provisioned(deps.root)) return 'the master\'s operator-agent and approver identities were already provisioned';
       if (!admin) throw new UpStop(`master-autonomy: the operator's admin credential is not on this machine${state.operatorTokenFile ? ` (${state.operatorTokenFile} is unreadable)` : ''}, so the master's agent identities cannot be provisioned; pipe it to graphyard master autonomy --admin-token-stdin --apply here, then rerun ${rerun()}`, upExitCodes.prerequisite);
       await run('master-autonomy', ['master', 'autonomy', '--admin-token-stdin', '--apply', '--harness', request.master], { stdin: admin });
       return 'the master creates, releases and unblocks work with its own operator-agent identity';
@@ -901,7 +964,21 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
 
     await step('master-loop', async () => {
       await cleanCli('master-loop');
-      if (!(await checklist()).find(item => item.id === 'master-loop')?.done) await run('master-loop', ['master', 'restart']);
+      let fresh: string | undefined;
+      if (state.reissue?.length) {
+        // GY-1851: the old cursor is set aside, never deleted, and the loop restarts onto a fresh one.
+        // A loop still running the old cursor may write it again before the restart stops it: then
+        // that copy, at or past the archived cycle, is set aside too and the loop restarted once more.
+        const archiveCursor = deps.archiveCursor ?? (() => archiveRecordedCursor(deps.root));
+        const archived = await archiveCursor();
+        await run('master-loop', ['master', 'restart']);
+        if (archived && (await (deps.cursorCycle ?? (() => recordedCursorCycle(deps.root)))() ?? -1) >= archived.cycle) {
+          await archiveCursor();
+          await run('master-loop', ['master', 'restart']);
+        }
+        fresh = archived ? `the loop started a fresh cursor; the old one (cycle ${archived.cycle}) is archived at ${archived.file}` : 'the loop started a fresh cursor';
+        deps.emit({ kind: 'note', text: `Re-issued the coordinator, operator-agent and approver credentials for the fresh database; ${fresh}.` });
+      } else if (!(await checklist()).find(item => item.id === 'master-loop')?.done) await run('master-loop', ['master', 'restart']);
       // A loop that refuses to run is a failed setup step naming its cause, never a wait that stalls.
       const refused = async () => {
         const reason = await deps.loopRefusal?.();
@@ -909,6 +986,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       };
       await waitGreen(['master-loop'], false, refused);
       await refused();
+      if (state.reissue?.length) { state.reissue = null; return fresh; }
     });
 
     await waitGreen(last.map(item => item.id), true);
@@ -1580,6 +1658,8 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
       });
       child.stdin.end(options.stdin ?? '');
     }),
+    credentialAnswers: async () => { const url = await serverUrl(); return url ? recordedCredentialAnswers(root, url) : []; },
+    archiveCursor: () => archiveRecordedCursor(root), cursorCycle: () => recordedCursorCycle(root),
     status: async () => {
       const url = await serverUrl(), token = await masterToken();
       return url && token ? planeRequest(url, token)('status') : null;

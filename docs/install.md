@@ -43,7 +43,7 @@ Writes credentials, [variables](deployment.md#variables); deploys; [protects](gi
 
 ## Step 3: App confirmation
 
-Skip with `--no-github-app`; else `--apply` serves `http://127.0.0.1:4311` (no browser) 900s; the human installs the App (existing installs count). **Verify** *App registered and installation verified*; unconfirmed: exit 1, rerun `resume`.
+Skip with `--no-github-app`; else `--apply` serves `http://127.0.0.1:4311` (no browser) 900s; human installs the App (existing installs count). **Verify** *App registered and installation verified*; unconfirmed: exit 1, `resume`.
 
 ## Step 4: summary
 
@@ -57,7 +57,7 @@ Skip with `--no-github-app` until an App binds; else dispatch a [small item](onb
 
 `--target host --ssh-host HOST` (or `--target hetzner`): server, Postgres, loop, executors, Herdr, runtimes on one systemd machine; credentials in `~graphyard/.config/graphyard/<install>/`. Public IPv4 serves `<ip>.sslip.io`; else `--domain`. Unpullable images build there at the installer's commit. Workers push, open PRs as the App (one-hour tokens).
 
-Price: `--confirm-price`, `--max-monthly`. Saved Apps (`--github-app FILE`, this install's, `.graphyard/github-app.json`) are reused if they mint a token; `--reuse-app SLUG` (or the App page) reuses the account's host-saved App. `--migrate` stops the loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`), restores; logins move.
+Price: `--confirm-price`, `--max-monthly`. Saved Apps (`--github-app FILE`, `.graphyard/github-app.json`) are reused if they mint a token; `--reuse-app SLUG` (or the App page) reuses a host-saved App. `--migrate` stops the loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`), restores; logins move.
 
 ## Upgrading an existing installation
 
@@ -68,14 +68,15 @@ Price: `--confirm-price`, `--max-monthly`. Saved Apps (`--github-app FILE`, this
 | Symptom | Action
 | --- | ---
 | `Preflight is incomplete` | nothing created; run its `fix`
-| `Railway workspace` `false` | a listed `--workspace`
-| `did not become healthy` | `install --provider PROVIDER --repo OWNER/REPO --logs`
-| `not confirmed within 900 s` | `resume` once confirmed
+| `Railway workspace` `false` | `--workspace`
+| `did not become healthy` | `install … --logs`
+| `not confirmed within 900 s` | confirm, `resume`
 | `already serves a GitHub App setup page` | finish/stop it
 | `webhook.delivered` `false`, 401 | rerun
 | `Branch protection could not be applied` | admin `gh auth login`
 | `already binds` / `still holds GITHUB_APP_` / `could not be read` | remove binding/variables or drop `--no-github-app`
 | `inside the managed repository` | `GRAPHYARD_CONFIG_HOME` outside worktrees
+| fresh database (401) | `up` re-issues credentials, archives cursor (`.archived-`)
 
 ## Agent execution contract
 
