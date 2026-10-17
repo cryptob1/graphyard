@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Wakes dismiss autocompact suggestions (`esc`/"Not now"), re-read; unconfirmed/unanswerable dialogs hold (`wake:master:held`).
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Wakes dismiss autocompact suggestions (`esc`), re-read; unconfirmed/unanswerable dialogs hold (`wake:master:held`).
 
 ### Dispatch order
 
@@ -23,7 +23,7 @@ Leases expire 120s after last heartbeat (recorded renewal fault, plane stall: 30
 
 ## Submitted implementation needs rework
 
-Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits. `scripts/rework-causes.mjs` classifies last 100 deliveries' rounds (55% own-change/33% conflicts; raw median 2); `speed.reworkRounds.ownChange` excludes out-of-item causes.
+Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits. `scripts/rework-causes.mjs` classifies last 100 deliveries' rounds; `speed.reworkRounds.ownChange` excludes out-of-item causes.
 
 ## Base-sync conflicts
 
@@ -53,7 +53,7 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 | --- | ---
 | `merge` | gates pass: 20s
 | `active` | awaiting check/review/refresh/rework: 1min
-| `steady` | unchanged: 5min, fleet-stretched; review requests ≤10min
+| `steady` | unchanged: 5min, fleet-stretched; reviews ≤10min
 | `idle` | awaiting dispatch/escalation: 5min, stretched
 
 Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`).
@@ -72,7 +72,7 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ### Reading the budget
 
-`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also `master status`): REST-only `perHour` across replicas (`instances`), `limit`/`share`/`target` 0.6/`byEndpoint`; `lastHour`: hourly requests by kind. Immutable, per-cycle, webhook-driven reads [aren't repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
+`graphyard status` → `githubBudget`; `billable` (also `master status`): REST-only `perHour` across replicas (`instances`), `limit`/`share`/`target` 0.6/`byEndpoint`; `lastHour`: hourly requests by kind. Immutable, per-cycle, webhook-driven reads [aren't repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
 
 ### Reading under control-plane
 
