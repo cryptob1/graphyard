@@ -608,6 +608,7 @@
     "tests/park-requirements-bare-noun.test.ts": 196,
     "tests/park-requirements-question-refused.test.ts": 4500,
     "tests/park-requirements-question-structural.test.ts": 192,
+    "tests/pages-environment-detection.test.ts": 500,
     "tests/pending-restart-dirty-snapshot.test.ts": 3000,
     "tests/per-item-locking.test.ts": 34217,
     "tests/pi-account-key.test.ts": 1854,

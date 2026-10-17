@@ -422,10 +422,13 @@ export async function mergeAcceptanceChange(writer: AcceptanceWriterPorts, goal:
   return { state: 'waiting', mergeSha: null, detail: `${named}'s push was refused: ${baseMovedReason(writer.retrials + 1)}` };
 }
 
-/** The draft's cases and contract bindings committed on the goal's branch for this revision, in a throwaway checkout of the base tip that shares `root`'s object store; `after` runs before it is removed. */
+/**
+ * The draft's cases and contract bindings committed on the goal's branch for this revision, in a throwaway checkout of the base tip that shares `root`'s object store; `after` runs before it is removed.
+ * `fetchBase` refreshes `origin/BASE` first: the merge writer's own fetch under the control-plane merger (GY-1943), the checkout's under `github`.
+ */
 async function commitDraft<T>(run: ChildRun, root: string, scratch: string, config: { baseBranch: string }, goal: Goal, draft: AcceptanceDraft,
-  after: (commit: { directory: string; branch: string; head: string }) => Promise<T>): Promise<T> {
-  await run('git', ['-C', root, 'fetch', '--no-tags', 'origin', config.baseBranch]);
+  fetchBase: () => unknown, after: (commit: { directory: string; branch: string; head: string }) => Promise<T>): Promise<T> {
+  await fetchBase();
   await mkdir(scratch, { recursive: true });
   const directory = await mkdtemp(join(scratch, 'graphyard-acceptance-'));
   try {
@@ -452,9 +455,9 @@ async function commitDraft<T>(run: ChildRun, root: string, scratch: string, conf
   }
 }
 
-/** GY-1535: the draft committed for the merge writer on its branch of the coordinator checkout `root`: nothing is pushed and no pull request is opened. */
-export const commitAcceptanceChange = (run: ChildRun, root: string, scratch: string, config: { baseBranch: string }, goal: Goal, draft: AcceptanceDraft) =>
-  commitDraft(run, root, scratch, config, goal, draft, async ({ branch, head }) => ({ branch, head }));
+/** GY-1535: the draft committed for the merge writer on its branch of the coordinator checkout `root`, on the base tip the writer's own fetch read (GY-1943): nothing is pushed and no pull request is opened. */
+export const commitAcceptanceChange = (run: ChildRun, root: string, scratch: string, config: { baseBranch: string }, goal: Goal, draft: AcceptanceDraft, writer: Pick<MergeWriterReads, 'fetch'>) =>
+  commitDraft(run, root, scratch, config, goal, draft, () => writer.fetch(), async ({ branch, head }) => ({ branch, head }));
 
 /** The merge commit on `ref`'s first-parent history whose second parent is `head`, or null when the base holds none. */
 export async function mergedOnBase(git: (...args: string[]) => Promise<string>, ref: string, head: string): Promise<string | null> {
@@ -465,7 +468,8 @@ export async function mergedOnBase(git: (...args: string[]) => Promise<string>, 
 }
 
 export const openAcceptancePullRequest = (run: ChildRun, root: string, scratch: string, config: { repository: string; baseBranch: string }, goal: Goal, draft: AcceptanceDraft) =>
-  commitDraft(run, root, scratch, config, goal, draft, async ({ directory, branch, head }) => {
+  // Under the `github` merger no merge writer runs: the pull request's branch is the loop's to push, and its base read with it.
+  commitDraft(run, root, scratch, config, goal, draft, () => run('git', ['-C', root, 'fetch', '--no-tags', 'origin', config.baseBranch]), async ({ directory, branch, head }) => {
     // A retry force-pushes the draft's branch and reuses its open pull request.
     await run('git', ['-C', directory, 'push', '--force', 'origin', `HEAD:refs/heads/${branch}`]);
     const open = JSON.parse(String(await run('gh', ['pr', 'list', '--repo', config.repository, '--head', branch, '--state', 'open', '--json', 'number', '--limit', '1']))) as { number: number }[];
@@ -533,7 +537,7 @@ export function acceptanceEffects(config: MasterConfig, root: string, calls: Cal
     closed: (goal, pr, reason) => calls.asOperatorAgent('POST', `goals/${goal.key}/closed`, { pr, reason }, `acceptance:${goal.id}:${goal.revision}:closed`),
     ...(calls.merger && calls.writer ? {
       merger: calls.merger,
-      commit: (goal: Goal, draft: AcceptanceDraft) => commitAcceptanceChange(run, root, worktreeRoot(root, config), config, goal, draft),
+      commit: (goal: Goal, draft: AcceptanceDraft) => commitAcceptanceChange(run, root, worktreeRoot(root, config), config, goal, draft, calls.writer!),
       writer: { ...calls.writer, merged: (head: string) => mergedOnBase(async (...args) => String(await run('git', ['-C', root, ...args])), `refs/remotes/origin/${calls.writer!.baseBranch}`, head) },
       landed: (goal: Goal, mergeSha: string) => calls.asOperatorAgent('POST', `goals/${goal.key}/land`, { mergeSha }, `acceptance:${goal.id}:${goal.revision}:landed:${mergeSha}`),
     } : {}),

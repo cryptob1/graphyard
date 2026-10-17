@@ -77,8 +77,12 @@ export async function pushViaControlPlane({ api, print, args }: CliContext, work
   const commit = git('rev-parse', '--verify', `${named}^{commit}`);
   const request = describeSyncCommit(git, (...gitArgs) => run(gitArgs), commit, workspace.epoch);
   const outcome = await api(`work/${work.id}/sync-push`, request, randomUUID()) as SyncPushOutcome;
-  // The local remote-tracking ref follows the push the control plane made, so the next plain push fast-forwards.
-  try { run(['fetch', '--quiet', '--no-tags', 'origin', `refs/heads/${outcome.branch}:refs/remotes/origin/${outcome.branch}`]); }
-  catch { /* A failure of the local remote-tracking fetch does not mask the successful push on the control plane */ }
+  // The control plane moved the branch onto exactly this commit — it validated the fast-forward and
+  // patched the ref with force:false (src/sync.ts) — so the worker's own object store already holds
+  // the remote's new tip and the remote-tracking ref follows locally: no network, no git credential
+  // (GY-1925: a sandbox where SSH cannot run still ends with the true ref), and the next plain push
+  // fast-forwards.
+  try { run(['update-ref', `refs/remotes/origin/${outcome.branch}`, outcome.commit]); }
+  catch { /* A failure of the local remote-tracking ref update does not mask the successful push on the control plane */ }
   print({ ...outcome, next: `The control plane pushed ${commit.slice(0, 12)} to ${outcome.branch}. Later commits that leave .github/workflows alone push plainly; then complete ${work.key} ${outcome.epoch} PR.` });
 }
