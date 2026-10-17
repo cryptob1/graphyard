@@ -4,9 +4,11 @@ import { z } from 'zod';
 import { demand, operatorScopeIncludes, type Principal, type Work } from './model.js';
 import { broadScope } from './coordination.js';
 import { isDelivered } from './model/closure.js';
-import { pathScopeContains } from './model/scope.js';
+import { documentationGlobMatches } from './model/documentation-glob.js';
+import { itemDocumentationPaths, pathScope, pathScopeContains, testFile } from './model/scope.js';
 import { settleDelivered } from './model/actions.js';
-import { decompositionPayloadSchema, decompositionSettingsSchema, type DecompositionPayload, type DecompositionSettings } from './runner/payloads.js';
+import { acceptedMergeAt } from './pipeline-speed.js';
+import { decompositionPayloadSchema, decompositionSettingsSchema, estimatedLinesBound, type DecompositionPayload, type DecompositionSettings } from './runner/payloads.js';
 import { save } from './store.js';
 import { lockedWork, workIdByRef } from './store/locked-read.js';
 import type { Services } from './server/routes.js';
@@ -44,6 +46,8 @@ export interface DecompositionRecord {
   runtime: string; model: string; timeoutMs: number;
   /** Why the item was judged over the size bounds. */
   bounds: string[];
+  /** The planned-source-file bound the run splits under (GY-1858): the split holds each child to it. A record an older binary started omits it, and its decision then holds the default bound. */
+  maxPlannedFiles?: number;
   reason: string | null;
   children: string[];
   failure: { reason: string; detail: string } | null;
@@ -59,20 +63,43 @@ export const decompositionSettings = (run: { decomposition?: unknown } | Record<
   return decompositionSettingsSchema.parse(run);
 };
 
-/** A rough size of the change an item asks for, in lines: per criterion, per root-level directory, per narrower path. */
-export function estimatedLines(work: Pick<Work, 'criteria' | 'plannedFiles'>) {
-  const planned = work.plannedFiles ?? [];
+/**
+ * A planned path that names a test (any file `testFile` recognises — `tests/`, `test/`,
+ * `__tests__/`, `browser-tests/`, `spec/`, or a colocated `*.test.ts` — or a directory scope of one)
+ * or the item's documentation (its repository's configured documentation globs, `docs/`,
+ * `AGENTS.md` and `README.md` by default): a companion of the source change, which a worker builds
+ * beside the code it proves or documents, never a measure of the source change itself (GY-1858).
+ */
+export const companionScope = (path: string, documentation: readonly string[] = itemDocumentationPaths({})) => {
+  const { path: scope } = pathScope(path);
+  return testFile(scope) || /(^|\/)(tests?|__tests__|browser-tests|spec)(\/|$)/.test(scope)
+    || documentation.some(glob => documentationGlobMatches(glob, scope) || pathScopeContains(glob, path));
+};
+
+/** The distinct planned source paths, normalized (`./src/a.ts` and `src/a.ts` are one, `src/**` is `src/`): every planned path but its companions, each counted once. */
+export const distinctSourcePaths = (plannedFiles: readonly string[], documentation?: readonly string[]) =>
+  [...new Set(plannedFiles.filter(path => !companionScope(path, documentation)).map(path => pathScope(path).path))];
+
+/** The planned paths that are the source change, distinct: every planned path but its companions. */
+export const plannedSourceFiles = (work: Pick<Work, 'plannedFiles' | 'documentation'>) => distinctSourcePaths(work.plannedFiles ?? [], itemDocumentationPaths(work));
+
+/** The planned source paths that name a directory (`src/`, `src/runner/`, `src/runner/**`) rather than a file: their file count is unknown, so no count of planned source files measures them. */
+export const sourceDirectoryScopes = (plannedFiles: readonly string[], documentation?: readonly string[]) => distinctSourcePaths(plannedFiles, documentation).filter(path => path.endsWith('/'));
+
+/** A rough size of the change an item asks for, in lines: per criterion, per root-level source directory, per narrower source path. Companions add nothing. */
+export function estimatedLines(work: Pick<Work, 'criteria' | 'plannedFiles' | 'documentation'>) {
+  const planned = plannedSourceFiles(work);
   return work.criteria.length * 150 + planned.reduce((sum, path) => sum + (broadScope(path) ? 400 : path.endsWith('/') ? 200 : 60), 0);
 }
 
 /** Every size bound the item exceeds, named; empty when it is within all of them. */
-export function sizeBoundsExceeded(work: Pick<Work, 'criteria' | 'plannedFiles'>, settings: DecompositionSettings): string[] {
-  const planned = work.plannedFiles ?? [], broad = planned.filter(broadScope), lines = estimatedLines(work);
+export function sizeBoundsExceeded(work: Pick<Work, 'criteria' | 'plannedFiles' | 'documentation'>, settings: DecompositionSettings): string[] {
+  const sources = plannedSourceFiles(work), broad = (work.plannedFiles ?? []).filter(broadScope), lines = estimatedLines(work), lineBound = estimatedLinesBound(settings);
   return [
     ...(work.criteria.length > settings.maxCriteria ? [`${work.criteria.length} criteria, over ${settings.maxCriteria}`] : []),
     ...(broad.length > settings.maxBroadScopes ? [`${broad.length} root-level planned directories (${broad.join(', ')}), over ${settings.maxBroadScopes}`] : []),
-    ...(planned.length > settings.maxPlannedFiles ? [`${planned.length} planned paths, over ${settings.maxPlannedFiles}`] : []),
-    ...(lines > settings.maxEstimatedLines ? [`an estimated ${lines} changed lines, over ${settings.maxEstimatedLines}`] : []),
+    ...(sources.length > settings.maxPlannedFiles ? [`${sources.length} planned source files, over ${settings.maxPlannedFiles}`] : []),
+    ...(lines > lineBound ? [`an estimated ${lines} changed lines, over ${lineBound}`] : []),
   ];
 }
 
@@ -81,12 +108,15 @@ export const neverDispatched = (work: Work) => work.epoch === 0 && !work.lease &
 
 /**
  * Why the item is split before dispatch, or null when it is dispatched unchanged: it must be open,
- * never dispatched, not opted out, not itself a child or already decided, have at least two
- * criteria to share out, and exceed a size bound (or opt in with `"split": true`).
+ * never dispatched, not opted out, not itself a child or already decided, and exceed a size bound
+ * (or opt in with `"split": true`). The bounds judge the source change, however many criteria
+ * carry it (GY-1858): a one-criterion item planning six source files is over the file bound too,
+ * so it is sent, though its session can only keep it whole — each criterion goes to exactly one
+ * child and a split names at least two children.
  */
 export function decompositionWanted(work: Work, settings: DecompositionSettings): string[] | null {
   if (!settings.enabled || work.split === false || work.stage === 'done' || work.repair || work.parent || work.children?.length || work.decomposition) return null;
-  if (!neverDispatched(work) || work.criteria.length < 2) return null;
+  if (!neverDispatched(work)) return null;
   const exceeded = sizeBoundsExceeded(work, settings);
   return exceeded.length ? exceeded : work.split === true ? ['opted in with "split": true'] : null;
 }
@@ -138,13 +168,28 @@ export function validateChildOrder(children: DecompositionPayload['children']) {
 }
 
 /**
+ * Each child plans at most the run's bound of source files, each named as a file: the parent was
+ * split for planning more, and a child is never put to decomposition itself. A source directory
+ * scope covers an unknown number of files, so it could hide any count and is refused (GY-1858).
+ */
+export function validateChildSizes(children: DecompositionPayload['children'], maxPlannedFiles: number, documentation?: readonly string[]) {
+  children.forEach((child, index) => {
+    const directories = sourceDirectoryScopes(child.plannedFiles, documentation);
+    demand(!directories.length, `Child ${index + 1} plans the source directory scope ${directories.join(', ')}, which covers an unknown number of files; each child names its source files, at most ${maxPlannedFiles}`, 422);
+    const sources = distinctSourcePaths(child.plannedFiles, documentation);
+    demand(sources.length <= maxPlannedFiles, `Child ${index + 1} plans ${sources.length} source files, over ${maxPlannedFiles}; each child plans at most ${maxPlannedFiles}`, 422);
+  });
+}
+
+/**
  * The child items of a split, before the store numbers them: ordinary open items carrying the
  * parent's release, policy, dependencies, exclusive resources and documentation obligation, and
  * exactly the criteria (text and proofs copied) the payload gives each.
  */
-export function childItems(parent: Work, payload: DecompositionPayload, now: Date): Work[] {
+export function childItems(parent: Work, payload: DecompositionPayload, now: Date, maxPlannedFiles: number): Work[] {
   validateSplitCriteria(parent, payload.children);
   validateChildScopes(parent, payload.children);
+  validateChildSizes(payload.children, maxPlannedFiles, itemDocumentationPaths(parent));
   validateChildOrder(payload.children);
   const at = now.toISOString(), ids = payload.children.map(() => randomUUID());
   return payload.children.map((child, index) => {
@@ -176,7 +221,7 @@ export function childItems(parent: Work, payload: DecompositionPayload, now: Dat
 
 const line = (max: number) => z.string().trim().min(1).max(max);
 export const decompositionEventSchema = z.discriminatedUnion('event', [
-  z.object({ event: z.literal('started'), runtime: line(40), model: line(200), timeoutMs: z.number().int().positive().max(3_600_000), bounds: z.array(line(300)).min(1).max(10) }).strict(),
+  z.object({ event: z.literal('started'), runtime: line(40), model: line(200), timeoutMs: z.number().int().positive().max(3_600_000), bounds: z.array(line(300)).min(1).max(10), maxPlannedFiles: z.number().int().min(1).max(200).default(5) }).strict(),
   z.object({ event: z.literal('decided'), payload: decompositionPayloadSchema }).strict(),
   z.object({ event: z.literal('failed'), reason: line(40), detail: line(1000) }).strict(),
 ]);
@@ -192,7 +237,7 @@ export function applyDecompositionEvent(work: Work, input: DecompositionEvent, a
   if (event.event === 'started') {
     demand(!work.decomposition, `${work.key} was already put to decomposition (${work.decomposition?.state}); one run per item`);
     demand(neverDispatched(work) && !work.parent && work.split !== false, `${work.key} is a child, opted out, or already dispatched; only an item before its first dispatch is split`);
-    work.decomposition = { state: 'running', startedAt: at, endedAt: null, runtime: event.runtime, model: event.model, timeoutMs: event.timeoutMs, bounds: event.bounds,
+    work.decomposition = { state: 'running', startedAt: at, endedAt: null, runtime: event.runtime, model: event.model, timeoutMs: event.timeoutMs, bounds: event.bounds, maxPlannedFiles: event.maxPlannedFiles,
       reason: null, children: [], failure: null, recordedBy: actor };
     return [];
   }
@@ -209,7 +254,8 @@ export function applyDecompositionEvent(work: Work, input: DecompositionEvent, a
   // A worker may have claimed it since the run started: a split then would race the attempt.
   demand(neverDispatched(work), `${work.key} was dispatched while it was being split; it is built whole`);
   demand(work.split !== false, `${work.key} was opted out of splitting while it was being split; it is built whole`);
-  const children = childItems(work, event.payload, now);
+  // A record an older binary started carries no bound; the default bound is what such a run split under.
+  const children = childItems(work, event.payload, now, record!.maxPlannedFiles ?? decompositionSettingsSchema.parse({}).maxPlannedFiles);
   work.decomposition = { ...record!, state: 'split', endedAt: at, reason: event.payload.reason };
   return children;
 }
@@ -348,4 +394,67 @@ export function splitRelation(work: Work) {
 export function splitReport(all: readonly Work[]) {
   return all.filter(work => work.children?.length).map(parent => ({ key: parent.key, title: parent.title, delivered: isDelivered(parent),
     children: parent.children!.map(key => { const child = all.find(entry => entry.key === key); return { key, stage: child?.stage ?? null, delivered: !!child && isDelivered(child) }; }) }));
+}
+
+// ---- The bound, measured: time to merge by item size -----------------------------------------
+
+/** The planned-source-file bands `master status` reports merged items by, so `maxPlannedFiles` can be tuned from data (GY-1858). */
+export const sourceFileBands = ['1-2', '3-5', '6-10', 'over 10'] as const;
+export type SourceFileBand = (typeof sourceFileBands)[number];
+/** The band a planned-source-file count falls in; null for an item that plans no source file at all — it has no size to tune the bound by. */
+export const sourceFileBand = (count: number): SourceFileBand | null =>
+  count <= 0 ? null : count <= 2 ? '1-2' : count <= 5 ? '3-5' : count <= 10 ? '6-10' : 'over 10';
+
+export interface SizeSpeed {
+  /** Deliveries in the window in this group. */
+  items: number;
+  /** Those whose timeline records a first claim: the population both medians are over. */
+  measured: number;
+  /** Median minutes from an item's first claim to its merge; null while nothing in the band is measured. */
+  medianMinutesToMerge: number | null;
+  /** Median attempts per merged item, over the same population. */
+  medianAttempts: number | null;
+}
+export interface SizeBandSpeed extends SizeSpeed { band: SourceFileBand }
+/** `directoryScoped`: deliveries whose planned source scope names a directory, reported apart — their file count is unknown, so no band holds them. */
+export interface ItemSizeReport { windowDays: number; bands: SizeBandSpeed[]; directoryScoped: SizeSpeed }
+
+/** The middle value, the mean of the middle pair for an even count (fractional, never rounded); null over an empty set. */
+const median = (values: number[]) => {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+};
+
+/**
+ * Time to merge by item size (GY-1858): over the last `windowDays` days, the deliveries the plane
+ * observed, grouped by planned-source-file band, with the median minutes from an item's first
+ * claim to its merge and the median attempts per band. Deliveries in the window are read on the
+ * repository clock (`mergedAtRepository`, as every speed reading is); an item without a recorded
+ * first claim (its timeline not reconstructed yet) is counted but not measured. An item planning a
+ * source directory scope has no known file count, so it is reported apart in `directoryScoped`
+ * rather than banded by its count of paths, which would put the widest items in the smallest
+ * band. This is the data
+ * `run.decomposition.maxPlannedFiles` is tuned from: where the merged minutes or attempts climb,
+ * the bound sits.
+ */
+export function timeToMergeBySize(work: readonly Work[], now: number, windowDays = 7): ItemSizeReport {
+  const from = now - windowDays * 24 * 3_600_000;
+  type Bucket = { items: number; minutes: number[]; attempts: number[] };
+  const empty = (): Bucket => ({ items: 0, minutes: [], attempts: [] }), directoryScoped = empty();
+  const buckets = new Map<SourceFileBand, Bucket>(sourceFileBands.map(band => [band, empty()]));
+  for (const item of work) {
+    const merged = acceptedMergeAt(item), at = merged ? Date.parse(merged) : NaN;
+    const directory = sourceDirectoryScopes(item.plannedFiles ?? [], itemDocumentationPaths(item)).length > 0, band = sourceFileBand(plannedSourceFiles(item).length);
+    if (!band || !Number.isFinite(at) || at < from || at > now) continue;
+    const bucket = directory ? directoryScoped : buckets.get(band)!, claims = (item.pipeline?.attempts ?? []).map(claim => Date.parse(claim.claimedAt)).filter(Number.isFinite);
+    bucket.items += 1;
+    if (claims.length) {
+      bucket.minutes.push(Math.max(0, (at - Math.min(...claims)) / 60_000));
+      bucket.attempts.push(Math.max(1, item.pipeline?.attempts.length ?? claims.length));
+    }
+  }
+  const speed = (bucket: Bucket): SizeSpeed => ({ items: bucket.items, measured: bucket.minutes.length, medianMinutesToMerge: median(bucket.minutes), medianAttempts: median(bucket.attempts) });
+  return { windowDays, bands: sourceFileBands.map(band => ({ band, ...speed(buckets.get(band)!) })), directoryScoped: speed(directoryScoped) };
 }
