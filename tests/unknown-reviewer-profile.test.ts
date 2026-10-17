@@ -1,0 +1,224 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { Work } from '../src/model.js';
+import { loadMasterConfig, setupMaster } from '../src/master.js';
+import { launchReview, saveReviewerProfile } from '../src/reviewer.js';
+import { workerLaunchStatus } from '../src/master/dispatch.js';
+import type { UpDependencies, UpEvent, UpRequest } from '../src/up.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
+
+/**
+ * GY-1850: reviewer profiles exist before the first review, and a review launch refused for an
+ * unknown profile is the configuration fault it is. Two proofs:
+ * - unit:up-writes-profiles: `up`'s accounts step runs the same profile write `master environments
+ *   --apply` runs, and the accounts checklist lines are green only once a worker and a reviewer
+ *   profile exist.
+ * - unit:unknown-profile-escalates: three consecutive review launches refused for an unknown
+ *   reviewer profile raise one configuration attention naming the profile and the command that
+ *   writes the profiles; the launch boundary then backs off to one attempt every five minutes
+ *   until the profiles change, and a launch past the profile lookup clears the fault.
+ */
+
+const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
+const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
+const H = sha40('c1'), B = sha40('b1');
+const UP_SERVER = 'http://127.0.0.1:4310', UP_ADMIN = 'a'.repeat(40);
+
+/** A master checkout with its own credential directory and no reviewer profiles yet. */
+async function reviewerMaster(label: string) {
+  const root = await temporaryDirectory(label), credentials = await temporaryDirectory(`${label}-cred`);
+  execFileSync('git', ['init', '-q', root]);
+  execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
+  const coordinator = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
+  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials }, coordinator as typeof fetch);
+  return root;
+}
+
+/** A control-plane-observed item, so a launch needs no reviewer App to reach the profile lookup; review itself is not required, so a launch past the lookup stops there. */
+function work(clock: number): Work {
+  const candidate = { sha: H, baseSha: B, pr: 1850, branch: 'graphyard/gy-1850-1', author: 'implementer' };
+  const at = new Date(clock).toISOString();
+  return {
+    id: 'work-1850', key: 'GY-1850', title: 'Reviewer profiles before the first review', description: '', type: 'bug', priority: 0, dependencies: [],
+    plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }],
+    policy: { checks: [], review: false }, stage: 'review', revision: 1, policyRevision: 1,
+    createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null,
+    workspaces: [], candidate, submission: { epoch: 1, pr: 1850 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
+    observation: { source: 'control-plane', candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
+      files: ['src/a.ts'], scopeFiles: [], at, prState: 'open', draft: false, baseTip: B, baseTree: sha40('7b'), baseTipContained: true },
+    blocker: null, gates: [], violations: [],
+  } as unknown as Work;
+}
+
+test('unit:unknown-profile-escalates — three review launches refused for an unknown reviewer profile raise one configuration attention naming the profile and graphyard master environments --apply, later attempts back off to once per five minutes until the profiles change, and the attention rides master status', async () => {
+  const root = await reviewerMaster('unknown-reviewer-profile');
+  // Late-bound so the file loads, and its cases fail, on a tree without the change (the proof's exercise).
+  const { readReviewerProfileRefusal, reviewerProfileRefusalAttention } = await import('../src/reviewer.js');
+  let clock = 1_700_000_000_000;
+  const launch = (name: string) => launchReview(root, work(clock), name, [], new Date(clock).toISOString(), { now: () => new Date(clock) });
+  const config = await loadMasterConfig(root);
+  await saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude' });
+
+  // Three consecutive launches refused for the one unknown profile: each is counted, the last attempt dated.
+  await assert.rejects(launch('review-codex'), /^Error: Unknown reviewer profile review-codex$/);
+  await assert.rejects(launch('review-codex'), /^Error: Unknown reviewer profile review-codex$/);
+  await assert.rejects(launch('review-codex'), /^Error: Unknown reviewer profile review-codex$/);
+  const counted = await readReviewerProfileRefusal(config);
+  assert.equal(counted?.profile, 'review-codex');
+  assert.equal(counted?.refusals, 3);
+  assert.equal(counted?.at, new Date(clock).toISOString());
+
+  // One configuration attention: the profile named, the command that writes the profiles named, owned by the master, classified setup/configuration.
+  const [attention] = reviewerProfileRefusalAttention(await readReviewerProfileRefusal(config));
+  assert.ok(attention, 'the attention stands at the limit');
+  assert.match(attention.subject, /review-codex/);
+  assert.match(attention.text, /graphyard master environments --apply/);
+  assert.equal(attention.next, 'Run graphyard master environments --apply; it writes the reviewer and worker profiles, and the loop\'s next review launch succeeds and clears this');
+  assert.equal(attention.role, 'master');
+  assert.equal(attention.human, false);
+  assert.equal(attention.kind, 'setup');
+  assert.equal(attention.faultClass, 'configuration');
+  // Before the limit it stands down: the dispatcher's first widening retries are answer enough.
+  assert.deepEqual(reviewerProfileRefusalAttention({ version: 1, profile: 'review-codex', refusals: 2, at: counted!.at, profiles: counted!.profiles }), []);
+  // master status carries it beside the never-starting accounts (GY-417's wiring).
+  const status = await workerLaunchStatus(root, await loadMasterConfig(root));
+  assert.ok(status.items.some(item => item.subject === attention.subject && item.text.includes('graphyard master environments --apply')), 'master status raises the configuration attention');
+
+  // Inside five minutes the launch boundary refuses the knock without making an attempt: nothing is recounted, the last attempt stands.
+  clock += 60_000;
+  await assert.rejects(launch('review-codex'), /refused 3 launches in a row.*backing off to one attempt every 5 minutes until the profiles change — write them with graphyard master environments --apply/);
+  const held = await readReviewerProfileRefusal(config);
+  assert.equal(held?.refusals, 3, 'a knock inside the window counts no attempt');
+  assert.equal(held?.at, counted?.at);
+
+  // Past five minutes the boundary attempts again: the refusal is counted and dated now.
+  clock += 5 * 60_000;
+  await assert.rejects(launch('review-codex'), /^Error: Unknown reviewer profile review-codex$/);
+  const again = await readReviewerProfileRefusal(config);
+  assert.equal(again?.refusals, 4);
+  assert.equal(again?.at, new Date(clock).toISOString());
+
+  // The profiles change: review-codex exists, the launch gets past the profile lookup, and the record — with it the attention and the backoff — is gone.
+  clock += 60_000;
+  await saveReviewerProfile(root, { name: 'review-codex', agentName: 'review-codex-1', kind: 'codex' });
+  await assert.rejects(launch('review-codex'), /does not require independent review/, 'the launch is refused no longer for the profile but by the item itself');
+  assert.equal(await readReviewerProfileRefusal(config), null, 'the profiles changed, so the fault is over');
+  assert.deepEqual(reviewerProfileRefusalAttention(await readReviewerProfileRefusal(config)), []);
+  assert.equal((await workerLaunchStatus(root, await loadMasterConfig(root))).items.length, 0, 'master status raises no attention once the profiles are written');
+});
+
+/** The private file the refusals are counted in: beside the master credential, outside the checkout. */
+test('unit:unknown-profile-escalates — the refusal record lives beside the master credential at 0600, never in the checkout', async () => {
+  const root = await reviewerMaster('unknown-reviewer-profile-file');
+  const { stat } = await import('node:fs/promises');
+  const { reviewerProfileRefusalPath } = await import('../src/reviewer.js');
+  const config = await loadMasterConfig(root);
+  let clock = 1_700_000_000_000;
+  await assert.rejects(launchReview(root, work(clock), 'review-codex', [], new Date(clock).toISOString(), { now: () => new Date(clock) }), /Unknown reviewer profile/);
+  const file = reviewerProfileRefusalPath(config);
+  assert.match(file, /^.+\.reviewer-profile-refusals\.json$/);
+  assert.ok(!file.startsWith(root), 'the record is outside the checkout, beside the credential');
+  assert.equal((await stat(file)).mode & 0o777, 0o600, 'the record is private');
+  const stored = JSON.parse(await readFile(file, 'utf8'));
+  assert.deepEqual(Object.keys(stored).sort(), ['at', 'profile', 'profiles', 'refusals', 'version']);
+});
+
+// GY-1850 AC-1: the accounts step writes the profiles before the loop starts, and the checklist answers for them.
+const request = (extra: Partial<UpRequest> = {}): UpRequest => ({ repository: 'owner/project', provider: 'compose', agent: false, reviewer: 'claude', master: 'claude', goalFile: null, browserProfile: null, merger: 'control-plane', ...extra });
+
+/** Minimal master.json, as install --apply leaves it: configured, with no reviewer or worker profiles yet. */
+const bareMasterConfig = (credentialFile: string) => ({ version: 1, url: UP_SERVER, credentialFile, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 0, hostId: 'test-host', masterAgentName: 'master-1', workers: [], reviewers: [], producers: [] });
+
+/** An agent-mode control-plane world: install writes master.json, the proposal readies the fleet, and `master environments --apply` writes what PROFILES says. */
+function upWorld(checkout: string, events: UpEvent[], profiles: { workers: number; reviewers: number } | null) {
+  let installed = false, fleetReady = false, loop = false, clock = 0;
+  const calls: string[][] = [];
+  const writeProfiles = async () => {
+    const file = join(checkout, '.graphyard/master.json');
+    const config = JSON.parse(await readFile(file, 'utf8'));
+    config.reviewers = Array.from({ length: profiles?.reviewers ?? 0 }, (_, index) => ({ name: `review-claude-${index}`, agentName: `review-claude-${index + 1}`, kind: 'claude' }));
+    config.workers = Array.from({ length: profiles?.workers ?? 0 }, (_, index) => ({ name: `claude-${index + 1}`, principal: `owner-project-worker-${index + 1}`, agentName: `worker-claude-${index + 1}`, mode: 'launch', kind: 'claude', credentialFile: `/creds/worker-${index + 1}.token` }));
+    await writeFile(file, JSON.stringify(config), { mode: 0o600 });
+  };
+  return {
+    calls,
+    deps: {
+      root: checkout, pollMs: 1, emit: event => { events.push(event); },
+      now: () => clock, sleep: async ms => { clock += ms; },
+      serverUrl: async () => installed ? UP_SERVER : null,
+      masterToken: async () => installed ? 'm'.repeat(40) : null,
+      operatorToken: async () => UP_ADMIN,
+      signIn: async () => null,
+      status: async () => installed ? {
+        repository: 'owner/project', mergeWriter: { merger: 'control-plane' },
+        fleet: fleetReady
+          ? { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] }
+          : { roles: [], accounts: [] },
+        setup: { protection: 'off', loop },
+      } : null,
+      publishOnboarding: async () => null,
+      onboardingMerged: async () => true,
+      installDirectory: () => join(checkout, 'install-dir'),
+      ensureDeployKey: async (installDir: string, repository: string) => join(installDir, 'deploy-key'),
+      setMerger: async () => {},
+      gh: async args => args[0] === 'repo' && args[1] === 'view' ? { code: 0, stdout: '{"name":"project"}' } : { code: 1, stdout: '', stderr: `unexpected gh ${args.join(' ')}` },
+      async cli(args) {
+        calls.push(args);
+        const joined = args.join(' ');
+        if (args[0] === 'install' && args.includes('--plan')) {
+          return { code: 0, stdout: JSON.stringify({ installId: 'owner-project', installDirectory: join(checkout, 'install-dir'), principals: [{ id: 'owner-project-operator', role: 'admin', sessionKind: 'human' }], preflight: [{ name: 'GitHub CLI', ok: true }], browserApps: [] }) };
+        }
+        if (args[0] === 'install' && args.includes('--apply')) {
+          installed = true;
+          // What install --apply leaves behind: the configured checkout, with no profiles yet.
+          await mkdir(join(checkout, '.graphyard'), { recursive: true });
+          await writeFile(join(checkout, '.graphyard/master.json'), JSON.stringify(bareMasterConfig(join(checkout, 'install-dir', 'master.token'))), { mode: 0o600 });
+          return { code: 0, stdout: JSON.stringify({ ok: true, installDirectory: join(checkout, 'install-dir'), principals: [{ id: 'owner-project-operator', role: 'admin' }] }) };
+        }
+        if (joined === 'master registry propose --apply') { fleetReady = true; return { code: 0, stdout: '{}' }; }
+        if (joined === 'master environments --apply') {
+          await writeProfiles();
+          return { code: 0, stdout: JSON.stringify({ counts: { environments: 1, loggedIn: 1, workers: profiles?.workers ?? 0, reviewers: profiles?.reviewers ?? 0, producers: 0 } }) };
+        }
+        if (joined === 'master restart') { loop = true; return { code: 0, stdout: '{}' }; }
+        return { code: 0, stdout: '{}' };
+      },
+    } as UpDependencies,
+  };
+}
+
+test('unit:up-writes-profiles — up\'s accounts step runs the profile write master environments --apply, so master.json holds a reviewer and a worker profile, and an account line is not green while either is missing', async () => {
+  const { runUp } = await import('../src/up.js');
+
+  // The host has logged-in environments: the write puts a reviewer and a worker profile in master.json, and the accounts step ends green.
+  const checkout = await temporaryDirectory('up-writes-profiles');
+  const events: UpEvent[] = [];
+  const world = upWorld(checkout, events, { workers: 1, reviewers: 1 });
+  const result = await runUp(request(), world.deps);
+  assert.equal(result.exitCode, 0, result.next);
+  const order = world.calls.map(args => args.join(' '));
+  assert.ok(order.includes('master environments --apply'), 'the accounts step runs the profile write');
+  assert.ok(order.indexOf('master registry propose --apply') < order.indexOf('master environments --apply'), 'the profile write follows the registry proposal');
+  const stored = JSON.parse(await readFile(join(checkout, '.graphyard/master.json'), 'utf8'));
+  assert.ok(stored.reviewers.length >= 1, 'master.json holds a reviewer profile for the logged-in environment');
+  assert.ok(stored.workers.some((worker: { mode?: string }) => worker.mode === 'launch'), 'master.json holds a worker profile');
+  for (const id of ['account:worker', 'account:reviewer'] as const) assert.equal(result.checklist.find(item => item.id === id)?.done, true, `${id} is green once both profiles exist`);
+
+  // The write finds no profile to make (nothing logged in verifies): the fleet is green but the account lines are not, and up waits rather than finishing.
+  const empty = await temporaryDirectory('up-writes-profiles-empty');
+  const emptyEvents: UpEvent[] = [];
+  const emptyWorld = upWorld(empty, emptyEvents, { workers: 0, reviewers: 0 });
+  const held = await runUp(request({ waitMs: 20 }), emptyWorld.deps);
+  assert.equal(held.exitCode, 3, held.next);
+  for (const id of ['account:worker', 'account:reviewer'] as const) {
+    const item = held.checklist.find(entry => entry.id === id);
+    assert.equal(item?.done, false, `${id} is not green while its profile is missing`);
+    assert.match(item?.line ?? '', /no agent profile/, `${id} says what is missing in plain language`);
+    assert.doesNotMatch(item?.line ?? '', /graphyard|master\.json|--apply/, `${id} names no command or path: the checklist is plain language`);
+  }
+  assert.ok(emptyEvents.some(event => event.kind === 'step' && event.step === 'accounts' && event.state === 'waiting'), 'the accounts step is a wait, not a failure');
+  assert.ok(!held.completed.includes('accounts'), 'the accounts step did not complete');
+});

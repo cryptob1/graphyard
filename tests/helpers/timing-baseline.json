@@ -884,6 +884,7 @@
     "tests/unblock-stale-revision.test.ts": 2991,
     "tests/unbounded-attempt.test.ts": 561,
     "tests/unknown-registry-session.test.ts": 1734,
+    "tests/unknown-reviewer-profile.test.ts": 700,
     "tests/unproduced-manual-attestation.test.ts": 537,
     "tests/unresolved-threads.test.ts": 816,
     "tests/up-control-plane.test.ts": 2500,
