@@ -8,10 +8,11 @@ import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1867: the reconciliation's full re-evaluation never runs back to back. The next full pass is
-// due no sooner than max(the configured interval, 3× the last full pass's duration), while a fleet
-// face a request moved still makes the next tick full; and the batched evaluation yields to the
-// event loop between items, so timers scheduled while it runs fire between them and the evaluation
-// still writes what it wrote.
+// due no sooner than max(the configured interval, 3× the last full pass's duration), and since
+// GY-1898 a fleet face any writer moved no longer brings one on at all: the moved item and the
+// items that read it are evaluated on the next tick, and the interval keeps its own schedule. The
+// batched evaluation yields to the event loop between items, so timers scheduled while it runs fire
+// between them and the evaluation still writes what it wrote.
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 
@@ -27,7 +28,7 @@ before(async () => {
   await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');
   engine.principals = [operator];
-  // Only a reset or a moved face makes a pass full here; each test says when it wants the clock to.
+  // Only a reset or the clock makes a pass full here; each test says when it wants the clock to.
   engine.reconcileFullEvaluationMs = 300_000;
 });
 
@@ -72,7 +73,7 @@ function evaluations({ holdMs = 0, arm, instant = false }: { holdMs?: number; ar
   return { evaluated, marks, restore: () => { internals.reconcileItem = original; } };
 }
 
-test('unit:full-evaluation-interval-stretches — the next full pass is due no sooner than max(the interval, 3× the last full pass), and a moved face is still full on the next tick', { timeout: 120_000 }, async () => {
+test('unit:full-evaluation-interval-stretches — the next full pass is due no sooner than max(the interval, 3× the last full pass), and a moved face is decided without one', { timeout: 120_000 }, async () => {
   const parent = await create();
   const fed = await create({ dependencies: [parent.id] });
   await engine.execute(operator, 'ready', parent.id, {}, randomUUID());
@@ -107,21 +108,25 @@ test('unit:full-evaluation-interval-stretches — the next full pass is due no s
   assert.equal(engine.reconcileTicks.at(-1)!.full?.cause, 'interval');
   await settle();
 
-  // A fleet face a writer outside the commands moved is full on the next tick whatever the stretch
-  // says, and the items it feeds are evaluated against it.
+  // A fleet face a writer outside the commands moved is decided on the next tick without a full
+  // pass (GY-1898): the moved item and the items its face feeds are evaluated, and the interval
+  // keeps its own schedule.
   engine.reconcileFullEvaluationMs = 300_000;
   const recorder = evaluations();
   try {
     await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{title}', to_jsonb($2::text)) WHERE id = $1`, [parent.id, 'Full interval 1, moved']);
     await engine.reconcile();
-    assert.equal(engine.reconcileTicks.at(-1)!.full?.cause, 'faces', 'the moved face makes the next tick full');
-    assert.ok(recorder.evaluated.includes(fed.id), 'the item the moved face feeds is evaluated on the next tick');
+    assert.ok(!engine.reconcileTicks.at(-1)!.full, 'the moved face does not make the next tick full');
+    assert.deepEqual(engine.reconcileTicks.at(-1)!.faces.map(move => move.key), [parent.key], 'the tick names the moved face');
+    const saw = new Set(recorder.evaluated);
+    assert.ok(saw.has(parent.id), 'the moved item is evaluated on the next tick');
+    assert.ok(saw.has(fed.id), 'the item the moved face feeds is evaluated on the next tick');
   } finally { recorder.restore(); }
 });
 
-test('unit:face-full-pass-restarts-the-interval — a slow pass a moved face made full restarts the clock and records its length, so the next tick is not a clock full pass', { timeout: 120_000 }, async () => {
+test('unit:face-move-pass-keeps-the-interval — a pass a moved face drove is not full, so it neither restarts the full-evaluation clock nor stretches it, and no stream of face moves can hold the safety net off', { timeout: 120_000 }, async () => {
   const parent = await create();
-  await create({ dependencies: [parent.id] });
+  const fed = await create({ dependencies: [parent.id] });
   await settle();
 
   // A quick full pass the reset brings; the interval is set past three of its lengths, so its deadline is I from when it began.
@@ -134,26 +139,21 @@ test('unit:face-full-pass-restarts-the-interval — a slow pass a moved face mad
   engine.reconcileFullEvaluationMs = interval;
   await settle();
 
-  // A face moved outside the commands late in that interval makes the next pass full; slowed, it ends past the clock pass's deadline.
+  // A face moved outside the commands late in that interval makes the next pass evaluate the moved
+  // item and the one its face feeds — slowed here to end past the deadline. It is not full (GY-1898),
+  // so the clock keeps the deadline the earlier full pass set and records none of this pass's length.
   await sleep(viewStarted + 0.6 * interval - performance.now());
   await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{title}', to_jsonb($2::text)) WHERE id = $1`, [parent.id, `Face moved ${randomUUID()}`]);
   const slow = evaluations({ holdMs: 0.8 * interval });
-  const faceStarted = performance.now();
   try { await engine.reconcile(); } finally { slow.restore(); }
   const face = engine.reconcileTicks.at(-1)!;
-  assert.equal(face.full?.cause, 'faces', 'the moved face makes the pass full');
+  assert.ok(!face.full, `the moved face does not make the pass full: ${JSON.stringify(face.full)}`);
+  assert.deepEqual(face.faces.map(move => move.key), [parent.key]);
   assert.ok(performance.now() > viewStarted + interval, 'the face pass ended past the deadline the earlier full pass set');
 
-  // Straight after it: not a clock full pass — the face pass restarted the clock from when it began.
+  // Straight after it the safety net runs on the schedule the full pass set: a face move moved no deadline.
   await engine.reconcile();
-  assert.equal(engine.lastReconcile.full, false, `the tick after a slow face full pass is not full: ${JSON.stringify(engine.reconcileTicks.at(-1)!.full)}`);
-
-  // Past I from the face pass, inside 3× its length: still not full — its length was recorded too.
-  const stretch = 3 * face.ms;
-  assert.ok(stretch > interval, `the face pass outlasts a third of the interval (D=${face.ms} ms)`);
-  await sleep(faceStarted + (interval + stretch) / 2 - performance.now());
-  await engine.reconcile();
-  assert.equal(engine.lastReconcile.full, false, `not due before max(I, 3D) = ${stretch} ms after the face pass began (D=${face.ms} ms)`);
+  assert.equal(engine.reconcileTicks.at(-1)!.full?.cause, 'interval', JSON.stringify(engine.reconcileTicks.at(-1)!.full));
   engine.reconcileFullEvaluationMs = 300_000;
   await settle();
 });
