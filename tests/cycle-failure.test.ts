@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import { cycleFailureAttentionAfter, cycleFailureCeiling, cycleFailureCeilingMs, cycleFailureDelay, daemonStateSchema, daemonSummary, emptyDaemonState, loopAttention, loopLiveness, runDaemon, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): the 2030-01-01 iso() values are the stub snapshot's own now and deployment stamp handed back to the daemon; Date.now() only measures how long the loop waited between retries.
+// Time-bomb allowance (GY-1694): the 2030-01-01 iso() values are the stub snapshot's own now and deployment stamp handed back to the daemon; Date.now() only measures how long the loop waited between retries, or offsets it by the stall hold the backoff test skips.
 
 // Each test is named for the proof it produces (GY-119): unit:cycle-failure-survived,
 // unit:cycle-failure-backoff and unit:detached-rejection-survived.
