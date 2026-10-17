@@ -126,7 +126,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // The slow intervention report: the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, executors: releases.executors, promotion: 'error' in daemonState ? null : promotionWait(daemonState) }));
-  const promotion = promotionSummaryWithLag('error' in daemonState ? null : daemonState.promotion, lag.report, lag.attention, Date.parse(snapshot.now));
+  const promotion = promotionSummaryWithLag('error' in daemonState ? null : daemonState.promotion, lag.report, lag.attention, Date.parse(snapshot.now), intervalMs);
   // GY-1773: a loop running a held snapshot ahead of the dirty checkout it left behind, named beside the lag.
   lag.attention.push(...leftBehindCheckoutAttention(cycling?.upgrade?.snapshot, readHeldCli(root), root));
   // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406),

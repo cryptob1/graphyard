@@ -10,16 +10,16 @@ Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`
 - `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N new first-parent merges (`GRAPHYARD_RC_MAX_PRS`=10; rest queue); `.github/workflows/release-candidate.yml` cuts on loop dispatch.
 - `release uat ID` deploys `uat`; refused while an unjudged <4h candidate serves.
 - `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint/API (`GRAPHYARD_UAT_TOKEN`)/`browser`/suites ([validation](validation.md#release-verdicts); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`.
-- `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`; `release verify --url URL` confirms. A direct promotion seals the [imported-run hold](validation.md#release-verdicts) it read before any deployer runs — an import in between refuses it; `admin`/`operator-agent` seal a **released** hold only ([release-filing credential](#release-filing-credential) in workflows, the loop's operator agent); unsealable refuses; a plane with no operator-agent identity keeps its read alone, promoting unsealed.
-- `GRAPHYARD_RELEASE_BUILD` records cuts' per-service digests; with `GRAPHYARD_DEPLOY_DIGESTS` `uat`/`promote` deploy them, else SHA. A recorded build promotes by digest, never rebuilt, once UAT names it, else refused.
-- Failures file a [hold](validation.md#release-holds) per outcome, else `release follow-up ID`.
+- `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`; `release verify --url URL` confirms. A direct promotion seals the [imported-run hold](validation.md#release-verdicts) it read — an intervening import refuses; `admin`/`operator-agent` seal a **released** hold only ([release-filing credential](#release-filing-credential) in workflows, the loop's operator agent); unsealable refuses; a plane with no operator-agent identity keeps its read alone, promoting unsealed.
+- `GRAPHYARD_RELEASE_BUILD` records cuts' per-service digests; with `GRAPHYARD_DEPLOY_DIGESTS` `uat`/`promote` deploy them, else SHA. A recorded build promotes by digest, never rebuilt, once UAT names it — refused unless the UAT `digests` suite observed it.
+- Failures file a [hold](validation.md#release-holds) per outcome, else `release follow-up ID` ([filing credential](#release-filing-credential)).
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records `rc-soak/ID`.
 
-**The master loop promotes** once main differs from the last `rc-production/`/cut SHAs, nothing queued, `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`) passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`/`GRAPHYARD_PRODUCTION_URL`; no workflow); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. `release.onFailure` `hold` (default `revert`) names each failing case, step and would-be target or `no map matched`, reverting/reopening nothing; `release.revertUnmatched: false` holds an unmatched failure instead of the newest item. `GRAPHYARD_UAT_STATIC` [merge-writer](delivery-redesign.md#merge-writer) trials run required/uat cases uncredentialed: failing, secret-declaring or unrunnable ones fail; timeouts re-queue. `release status` lists; `release GY-N EPOCH` leases. An in-flight candidate is settled against the runs before nothing-to-promote, so a merge is cut within one ledger-read window; a ledger past that window on a moved tip is `master status` attention.
+**The master loop promotes** once main differs from the last `rc-production/`/cut SHAs, nothing queued, `run.promoteEveryMinutes` (`master config promoteEveryMinutes=N`) passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`/`GRAPHYARD_PRODUCTION_URL`; no workflow; managed repositories run [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. `release.onFailure` `hold` (default `revert`) names each failing case, step and would-be target or `no map matched`, reverting/reopening nothing; `release.revertUnmatched: false` holds an unmatched failure instead of the newest item. `GRAPHYARD_UAT_STATIC` [merge-writer](delivery-redesign.md#merge-writer) trials run required/uat cases uncredentialed: failing, secret-declaring or unrunnable ones fail; timeouts re-queue. `release status` lists; `release GY-N EPOCH` leases. In-flight candidates settle against the runs before nothing-to-promote; moved tips past its window are `master status` attention.
 
 ### Release filing credential
 
-UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds/follow-ups as `graphyard-release-follow-up` (only `intent:create`, work items `*`); the loop's hourly `master setup --apply` keeps it, else `master status` names the administrator's step (`graphyard operator-agent setup FILE --token-stdin`). `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` with only `e2e:record`, never admin.
+UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds/follow-ups as `graphyard-release-follow-up` (only `intent:create`, work items `*`); the loop's hourly `master setup --apply` keeps it, else `master status` names the administrator's step (`graphyard operator-agent setup FILE --token-stdin`). `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` (`e2e:record` only, never admin).
 
 ### Pre-merge gate and release-candidate validation
 
@@ -33,13 +33,13 @@ Exact-head gates merge; [candidates](#release-candidates) deploy. Only Graphyard
 
 ### Main guard
 
-Every 30s the guard reruns, reverting merges failing checks parents passed; the [revert approver App](deployment.md#variables) approves only green exact inverses; three refusals abandon (`approval-refused`). A revert failing the merge's named tests closes `base-failure`; later merges failing only that set are covered (`coveredBy`) until main passes. Failing trial files rerun on merge, then base: [flakes](validation.md#flake-ledger) land; base failures file P0; no rework/proof loss.
+Every 30s the guard reruns, reverting merges failing checks parents passed; the [revert approver App](deployment.md#variables) approves only green exact inverses; three refusals abandon (`approval-refused`). A revert failing the merge's named tests closes `base-failure`; later merges failing only that set are `coveredBy` until main passes. Failing trial files rerun on merge, then base: [flakes](validation.md#flake-ledger) land; base failures file P0; no rework/proof loss.
 
 ## Managed repositories
 
 `init --scan` splits checks (`delivery.mergeGate`/per-candidate); `--apply` renders `graphyard-release-candidate.yml` (`candidateSchedule`/`--candidate-cron CRON|off`), `graphyard-promotion.yml`. `deploy.adapter`: `railway` or `command` (`deploy.uat`/`deploy.production` `GRAPHYARD_CANDIDATE_SHA`; unset none). `--delivery per-pr` keeps per-PR checks; `install --plan` lists resources.
 
-**`graphyard.json` policy**: `e2e.pendingOutcomes` `non-blocking`/`blocking`; `release.onFailure` `revert`/`hold`; deployed `GRAPHYARD_REPOSITORY_POLICY`; `doctor` prints it.
+**`graphyard.json` policy**: `risk.sensitive` `{rule,glob}`, else generic; `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; `release.onFailure` `revert`/`hold`; deployed `GRAPHYARD_REPOSITORY_POLICY`; `doctor` prints it.
 
 ```json
 {"kind":"environment","id":"production","expectedRevision":0,"repository":"owner/repository","url":"https://app.example.test","instance":"production-cluster","immutable":true,"services":["api","web"],"resources":["production-smoke-account"],"delivery":{"freshnessSeconds":300,"approvalRequired":true}}
@@ -61,7 +61,7 @@ Every 30s the guard reruns, reverting merges failing checks parents passed; the 
 {"id":"2026.09.18-1","expectedRevision":0,"environment":{"id":"production","revision":1},"sourceSha":"0123456789abcdef0123456789abcdef01234567","buildId":"5d7c6b7e-8c35-4b3f-9c4a-0a1f2e3d4c5b","manifest":[{"service":"api","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},{"service":"web","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"}],"members":[{"workId":"2f7d1a5e-3b8c-4d9e-8f10-1a2b3c4d5e6f","mergeSha":"89abcdef0123456789abcdef0123456789abcdef","included":true},{"workId":"3a8e2b6f-4c9d-4eaf-9021-2b3c4d5e6f70","mergeSha":"9abcdef0123456789abcdef0123456789abcdef0","included":false,"note":"Reverted"}]}
 ```
 
-`POST /api/delivery/approve`, select:
+`POST /api/delivery/approve` selects:
 
 ```json
 {"environment":{"id":"production","revision":1},"release":{"id":"2026.09.18-1","revision":1},"expectedGeneration":3,"approvalId":"0c1d2e3f-4a5b-4c6d-8e7f-90a1b2c3d4e5"}
@@ -85,4 +85,4 @@ Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery swee
 
 `master status` `delivery`: `readyToMerged`/`mergedToProduction`/`stages` p50/p90; 7-day p90 over `deliverySpeed` alerts.
 
-`POST /api/validation/result` binds manifest/signature/measurements; mismatches void passes as `attribution-undermined` (`GET /api/analytics/attribution`). A loop-owned post-deploy observation item never dispatches — verification reads it (`delivered-observation` pass, escalation fail); no-smoke deliveries backfill five per pass.
+`POST /api/validation/result` binds manifest/signature/measurements; mismatches void passes as `attribution-undermined` (`GET /api/analytics/attribution`). Loop-owned post-deploy observation items never dispatch — verification reads them (`delivered-observation` pass, escalation fail); no-smoke deliveries backfill five per pass.
