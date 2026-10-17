@@ -279,6 +279,49 @@ async function pinnedReplacement() {
   assert.ok(lifted.events.some(event => event.kind === 'note' && event.text.includes(`at ${COMMIT.slice(0, 12)}`)), 'and the commit the loop now reports');
 }
 
+test('unit:up-rewrites-self-managed-loop-on-the-managed-checkout — when Graphyard manages itself, a loop whose ExecStart starts the managed checkout\'s launcher is rewritten onto this CLI, never only restarted, and goes green on this CLI\'s commit', async () => {
+  const { runUp } = await up();
+  const { readLoopCode } = await repositorySetup();
+  const { loopUnitText } = await import('../src/supervisor.js');
+  const units: InstallUnits = perInstallUnits('acme/shop');
+  const base = await temporaryDirectory('graphyard-up-loop-self-managed');
+  // The managed checkout B (this repository, at the older commit) and this CLI's checkout A at COMMIT.
+  const root = await resumedRoot('graphyard-up-loop-self-managed-root'), unitDirectory = join(base, 'units'), home = join(base, 'home'), installDir = join(base, 'install');
+  const cliPath = join(base, 'cli', 'bin', 'graphyard.mjs'), managedPath = join(root, 'bin', 'graphyard.mjs');
+  for (const directory of [unitDirectory, home, installDir]) await mkdir(directory, { recursive: true });
+  const unitFile = join(unitDirectory, units.master);
+  await writeFile(unitFile, loopUnitText({ root, cliPath: managedPath, repository: 'acme/shop', intervalSeconds: 30, installDir, heldLauncher: null }));
+  assert.match(await readFile(unitFile, 'utf8'), new RegExp(`ExecStart=\\S+ ${quote(managedPath)} master run`), 'the loop starts the managed checkout\'s launcher');
+  // Each checkout's HEAD; the loop reports the commit of the launcher its unit starts.
+  const run = (_command: string, args: string[]) => args[2] === 'rev-parse' ? `${args[1] === root ? OLD_COMMIT : COMMIT}\n` : '';
+  const loaded = async () => (await readFile(unitFile, 'utf8')).includes(`${cliPath} master run`) ? COMMIT : OLD_COMMIT;
+  const read = async () => readLoopCode(root, { cliPath, run, units, unitDirectory, home, master: { repository: 'acme/shop', credentialFile: join(home, 'master.token') }, executors: null, cursor: JSON.stringify({ release: { commit: await loaded(), dirty: false } }) });
+  const before = await read();
+  assert.equal(before.loop?.launcher, root, 'the reading records the launcher\'s checkout');
+  assert.equal(before.loopReplace, 'unit', 'a launcher in the managed checkout is not this CLI: the unit is rewritten');
+  assert.match(before.loopStale ?? '', new RegExp(`starts the CLI in ${quote(root)} at ${OLD_COMMIT.slice(0, 12)}, not this checkout \\(${quote(join(base, 'cli'))}\\)`), 'and names both checkouts');
+  // A unit naming no launcher whose WorkingDirectory is the repository checkout still reads as this install's own.
+  const { judgeLoopCode } = await repositorySetup();
+  const fallback = judgeLoopCode({ cli: { root: CLI_ROOT, commit: COMMIT }, primary: REPOSITORY_ROOT, primaryCommit: OLD_COMMIT, repository: 'acme/shop', loop: { unit: MASTER_UNIT, path: MASTER_UNIT_PATH, checkout: REPOSITORY_ROOT, launcher: null }, executor: null, cursor: JSON.stringify({ release: { commit: COMMIT, dirty: false } }), fleet: [], canonical: path => path });
+  assert.equal(fallback.loopStale, null, 'the WorkingDirectory fallback accepts the repository checkout');
+  const w = world([]), events: UpEvent[] = [];
+  const deps = dependencies(root, events, w);
+  const outcome = await runUp(request(), { ...deps,
+    loopCode: read,
+    cli: async (args, options = {}) => {
+      if (args[0] === 'master' && args[1] === 'init') { w.calls.push({ args }); await writeFile(unitFile, loopUnitText({ root, cliPath, repository: 'acme/shop', intervalSeconds: 30, installDir, heldLauncher: null })); return { code: 0, stdout: '{"supervisor":{"state":"updated"}}' }; }
+      return deps.cli(args, options);
+    } });
+  assert.equal(outcome.exitCode, 0, outcome.next);
+  assert.equal(named(w, ['master', 'init', '--token-stdin', '--replace-supervisor']).length, 1, 'the unit is rewritten, not only restarted');
+  const unit = await readFile(unitFile, 'utf8');
+  assert.match(unit, new RegExp(`ExecStart=\\S+ ${quote(cliPath)} master run`), 'the rewritten unit starts this CLI');
+  assert.doesNotMatch(unit, new RegExp(quote(managedPath)), 'and no longer the managed checkout\'s launcher');
+  const after = await read();
+  assert.equal(after.loopCommit, COMMIT, 'the final reading reports this CLI\'s commit');
+  assert.equal(after.loopStale, null, 'and judges the loop as this code');
+});
+
 test('unit:up-reopens-a-recorded-master-loop-step — a rerun whose up.json already records master-loop re-opens it when the units read as other code or their reading failed, and leaves it recorded when they read as this checkout', async () => {
   const { runUp } = await up();
 

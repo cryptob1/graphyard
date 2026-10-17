@@ -774,7 +774,13 @@ export async function alignExecutorUnitScript(root: string, script: string | nul
 // systemd; `doctor` flags the same mismatch as one line naming both paths and the rerun.
 
 /** What one of the install's units runs, read beside the install's own record (GY-1859). */
-export interface UnitCode { unit: string; path: string; /** The checkout the unit loads its code from: the directory above the launcher its ExecStart starts, else its WorkingDirectory. */ checkout: string | null }
+export interface UnitCode {
+  unit: string; path: string;
+  /** The checkout the unit loads its code from: the directory above the launcher its ExecStart starts, else its WorkingDirectory. */
+  checkout: string | null;
+  /** The checkout above the Graphyard launcher its ExecStart starts; null when it names none and `checkout` fell back to the WorkingDirectory. */
+  launcher?: string | null;
+}
 /** GY-1859: the loop and executor code this install's units run, against the CLI running the command. */
 export interface LoopCodeReading {
   /** The master loop's unit; null while none is installed for the units this checkout records. */
@@ -881,7 +887,12 @@ export function judgeLoopCode(facts: LoopCodeFacts): LoopCodeReading {
   const same = (commit: string | null | undefined, expected: string | null) => !!commit && !!expected && commit.toLowerCase() === expected.toLowerCase();
   let loopStale: string | null = null, loopReplace: LoopCodeReading['loopReplace'] = null;
   if (loop) {
-    if (loop.checkout && !own.has(canonical(loop.checkout))) { loopStale = `${loop.path} starts the CLI in ${loop.checkout}${release.commit ? ` at ${shortSha(release.commit)}` : ''}, not this checkout (${cli.root}) at ${shortSha(cli.commit)}`; loopReplace = 'unit'; }
+    // The loop always starts a CLI, never the repository's own entry, so a launcher its ExecStart
+    // names must be this CLI's: one in the managed checkout (Graphyard managing itself from a second
+    // checkout) loads that checkout's code on every restart, so only a rewrite moves it. The
+    // repository checkout is accepted only as the WorkingDirectory of a unit naming no launcher.
+    const foreign = loop.launcher ? canonical(loop.launcher) !== canonical(cli.root) : !!loop.checkout && !own.has(canonical(loop.checkout));
+    if (foreign) { loopStale = `${loop.path} starts the CLI in ${loop.checkout}${release.commit ? ` at ${shortSha(release.commit)}` : ''}, not this checkout (${cli.root}) at ${shortSha(cli.commit)}`; loopReplace = 'unit'; }
     else if (!release.commit) { loopStale = `${loop.path} runs a loop whose cursor records no commit it loaded, so it is not known to run this checkout's ${shortSha(cli.commit)}`; loopReplace = 'restart'; }
     else if (!same(release.commit, cli.commit)) { loopStale = `${loop.path} runs ${shortSha(release.commit)}, not this checkout's ${shortSha(cli.commit)}`; loopReplace = 'restart'; }
     else if (release.dirty === true) { loopStale = `${loop.path} runs ${shortSha(release.commit)} with uncommitted changes it loaded, not this checkout's clean ${shortSha(cli.commit)}`; loopReplace = 'restart'; }
@@ -948,7 +959,7 @@ export async function readLoopCode(root: string, options: {
   else if (!readableUnitsDirectory(unitDirectory)) units = null;
   else { try { units = readInstallUnits(root, unitDirectory, home); } catch (failure) { return failed(failure); } }
   try {
-    const unit = async (name: string): Promise<UnitCode | null> => { const path = resolve(unitDirectory, name), text = units ? await files.read(path) : null; return text === null ? null : { unit: name, path, checkout: unitCodeCheckout(text, home) }; };
+    const unit = async (name: string): Promise<UnitCode | null> => { const path = resolve(unitDirectory, name), text = units ? await files.read(path) : null; return text === null ? null : { unit: name, path, checkout: unitCodeCheckout(text, home), launcher: unitLauncherCheckout(text, home) }; };
     const loop = units ? await unit(units.master) : null, executor = units ? await unit(units.executorTemplate) : null;
     const credentialFile = typeof master?.credentialFile === 'string' ? resolve(master.credentialFile) : null;
     const cursor = !loop ? null : options.cursor !== undefined ? options.cursor : credentialFile ? await files.read(loopCursorPath(credentialFile)) : null;
@@ -981,7 +992,7 @@ export async function readHostLoopCode(run: (program: string, args: string[]) =>
     const units = parseInstallUnits(recorded, `${layout.checkout}/${installUnitsFile} on ${host}`, () => unrecordedInstallUnits(layout.checkout, legacy, layout.home));
     const masterText = await files.read(`${layout.checkout}/.graphyard/master.json`);
     const master = masterText === null ? null : JSON.parse(masterText);
-    const unit = async (name: string): Promise<UnitCode | null> => { const path = `${layout.userUnitDirectory}/${name}`, text = await files.read(path); return text === null ? null : { unit: name, path, checkout: unitCodeCheckout(text, layout.home) }; };
+    const unit = async (name: string): Promise<UnitCode | null> => { const path = `${layout.userUnitDirectory}/${name}`, text = await files.read(path); return text === null ? null : { unit: name, path, checkout: unitCodeCheckout(text, layout.home), launcher: unitLauncherCheckout(text, layout.home) }; };
     const loop = await unit(units.master), executor = await unit(units.executorTemplate);
     const credentialFile = typeof master?.credentialFile === 'string' ? master.credentialFile : null;
     const cursor = loop && credentialFile ? await files.read(loopCursorPath(credentialFile)) : null;
