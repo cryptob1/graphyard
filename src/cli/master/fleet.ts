@@ -85,7 +85,8 @@ export function ghMergeQueueTransport(repository: string, base: string, run: Pro
     const args = ['api', 'graphql', '-f', `query=${query}`];
     for (const [name, value] of Object.entries(variables)) args.push(typeof value === 'number' ? '-F' : '-f', `${name}=${String(value)}`);
     const response = JSON.parse(run('gh', args));
-    demand(!Array.isArray(response?.errors) || response.errors.length === 0, `GitHub refused the GraphQL read: ${(response.errors as { message?: unknown }[]).map(error => error?.message).filter(Boolean).join('; ') || 'unreported error'}`, 502);
+    const errors: { message?: unknown }[] = Array.isArray(response?.errors) ? response.errors : [];
+    demand(errors.length === 0, `GitHub refused the GraphQL read: ${errors.map(error => error?.message).filter(Boolean).join('; ') || 'unreported error'}`, 502);
     return response?.data;
   };
   return {

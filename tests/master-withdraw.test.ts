@@ -134,8 +134,8 @@ test('unit:withdraw-gh-transport-reads-the-recorded-envelope — the real gh pat
   const run = (command: string, args: string[]) => { calls.push([command, ...args]); return outputs.shift()!; };
   const report = await withdrawEnqueuedPullRequests(ghMergeQueueTransport('owner/project', 'main', run), [{ key: 'GY-11', pr: 11 }], { id: 'vishrog', role: 'admin' }, true);
   assert.ok(calls.every(call => call[0] === 'gh' && call[1] === 'api' && call[2] === 'graphql'), 'every call rides the operator gh credential');
-  assert.deepEqual(calls[0].slice(4), ['-f', 'owner=owner', '-f', 'name=project', '-F', 'number=11', '-f', 'branch=main'], 'the state read names the repository, pull request and base');
-  assert.deepEqual(calls[1].slice(4), ['-f', `id=${idOf(11)}`], 'the take-back names the pull request GitHub reported');
+  assert.deepEqual(calls[0].slice(5), ['-f', 'owner=owner', '-f', 'name=project', '-F', 'number=11', '-f', 'branch=main'], 'the state read names the repository, pull request and base');
+  assert.deepEqual(calls[1].slice(5), ['-f', `id=${idOf(11)}`], 'the take-back names the pull request GitHub reported');
   assert.deepEqual([report.rows[0].pr, report.rows[0].head, report.rows[0].mode, report.rows[0].result], [11, heads[11], 'queued', 'dequeued'], 'the recorded envelope is read as the pull request\u2019s state, not as an empty report');
   assert.equal(report.failed, 0);
 

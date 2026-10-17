@@ -68,7 +68,7 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ### Reading under control-plane
 
-`master merger control-plane`: control-plane-observed candidates are observed from its checkout, GitHub polled for none of their pull request, reviews or checks; a person-opened one is still observed.
+`master merger control-plane`: control-plane-observed candidates are observed from its checkout, GitHub polled for none of their pull request, reviews or checks; a person-opened one is still observed. Diagnostician and doctor read `graphyard status GY-N`, not `gh pr view`.
 
 ### Webhook liveness
 
@@ -98,7 +98,7 @@ Ungated merges: permanent violations (never backfilled): repair access, file fol
 
 ## Merge-intent withdrawal
 
-`graphyard master withdraw [--repo OWNER/NAME] [--apply] --admin-token-stdin` (admin credential on stdin) takes every work-item pull request out of GitHub's hands: queued entries dequeued, auto-merge disabled, through the gates' take-back; each reported with number, head, prior mode, result; `none` rows untouched; a rerun writes nothing. Without `--apply` the plan prints; writes ride the `gh` credential `master protection` writes through; gates re-enqueue only through their own paths.
+`graphyard master withdraw [--repo OWNER/NAME] [--apply] [--json] --admin-token-stdin` (admin; stop the loop first) dequeues or disarms auto-merge on each open item's pull request via `gh`, reporting number, head, prior mode, result; `none` rows untouched, so reruns write nothing; failed rows exit 1. Without `--apply`: the plan.
 
 ## Credentials
 
