@@ -45,11 +45,11 @@ Railway reports `<project> / production`. Startup uses `production.environment`,
 
 ### Webhook delivery
 
-Hosted: `failing` ([liveness](operations-reference.md#webhook-liveness)) codes 0/404 → URL ≠ `https://YOUR-HOST/api/github/webhook`; 401 → secret ≠ `GITHUB_WEBHOOK_SECRET`. Fix, redeliver (`webhooks.settingsUrl` Advanced).
+Hosted: `failing` ([liveness](operations-reference.md#webhook-liveness)) codes 0/404 → URL ≠ `https://YOUR-HOST/api/github/webhook`; 401 → secret ≠ `GITHUB_WEBHOOK_SECRET`. Fix, redeliver (`webhooks.settingsUrl`).
 
 ## Backup, upgrade, rollback
 
-**Backup:** `graphyard db backup ./graphyard.json` (`DATABASE_URL`), `graphyard db verify FILE`; `graphyard db fence` before move (`--release` undoes). **Upgrade:** back up, deploy, check `graphyard version`, run [App-permission migrations](install.md#upgrading-an-existing-installation); **rollback**: older-schema images refuse to start. **Restore:** `graphyard db migrate` empty database, `graphyard db restore FILE`.
+**Backup:** `graphyard db backup ./graphyard.json` (`DATABASE_URL`), `graphyard db verify FILE`; `graphyard db fence` before move (`--release` undoes). **Upgrade:** back up, deploy, check `graphyard version`, run [App-permission migrations](install.md#upgrading-an-existing-installation); **rollback**: older-schema images refuse to start; state (`master.json`, connection file, daemon cursor) keeps fields a newer version wrote. **Restore:** `graphyard db migrate` empty database, `graphyard db restore FILE`.
 
 ## Manual fallback
 
@@ -57,6 +57,6 @@ Set the variables table; `node "$GRAPHYARD_CLI" github-setup https://YOUR-DOMAIN
 
 - Compose: `cp .env.example .env`, set secrets, `docker compose --profile full up -d`; TLS on 4310, Postgres private.
 - Kubernetes: `helm install graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials …`.
-- Railway: `railway init`, `railway add --database postgres`, variables, `railway up`. Production redeploy (no `init`): `railway link --project graphyard --environment production --service graphyard`, `railway up`.
+- Railway: `railway init`, `railway add --database postgres`, variables, `railway up`. Redeploy (no `init`): `railway link --project graphyard --environment production --service graphyard`, `railway up`.
 - `graphyard master setup` plans variables saved credentials derive; `--apply` sets them (Railway: `variable set --stdin`), audited in `.graphyard/setup-audit.jsonl`; no install record: `--provider railway --service graphyard --link-dir DIR`. `park` refuses host-doable asks (repository, derived variable, held credential, Confirm-access capture, coordinator checkout or unit record, agent identity); a person's sign-in, enrolment or browser profile stays human.
 - Railway revert approver: `node scripts/provision-railway.mjs` sets `GRAPHYARD_REVERT_APPROVER_*` from `.graphyard/revert-approver.json` (0600) or `--revert-approver-stdin` (`--revert-approver-only`: only those). Redeploy; `--verify` exits 0 once the live guard names it.

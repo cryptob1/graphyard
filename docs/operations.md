@@ -3,7 +3,7 @@
 
 ## Daily checklist
 
-- `/healthz` at expected `commit`; `/api/status`: no job errors, `delegationLimits.attention`, `production.incidents`.
+- `/healthz` at expected `commit` (a CLI at another release refuses: `graphyard upgrade`); `/api/status`: no job errors, `delegationLimits.attention`, `production.incidents`.
 - `master status`: `daemon.liveness` `running`, attention owned; recent verified `graphyard db backup`.
 
 ## Incident decision tree
@@ -22,11 +22,11 @@
 
 ```sh
 graphyard rework GY-N --previous-worker-stopped "reason"
-graphyard master settle-containment GY-N "reason"                       # settleable
-graphyard recover-containment GY-N --previous-worker-stopped "reason"   # delivered
-graphyard unblock GY-N "reason"                                         # unowned
-systemctl --user restart graphyard-master-OWNER-NAME                    # loop down
-graphyard master checkout-restore "reason"                              # dirty/drifted/diverged
+graphyard master settle-containment GY-N "reason"
+graphyard recover-containment GY-N --previous-worker-stopped "reason"
+graphyard unblock GY-N "reason"
+systemctl --user restart graphyard-master-OWNER-NAME
+graphyard master checkout-restore "reason"
 ```
 
 Never attest a stop you have not confirmed. Outside its namespace, `master status` judges by stall bound; stalled/absent: stop hand-started loops, install `examples/master/graphyard-master.service`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-master`.
@@ -44,7 +44,7 @@ Confined masters/approvers/producers (not workers/reviewers) read GitHub through
 
 ## Deeper references
 
-[Operations reference](operations-reference.md), [delegation](delegation.md).
+[Operations reference](operations-reference.md).
 
 ## Resources and disk
 

@@ -20,6 +20,8 @@ test('unit:retired-merge-queue-keys — parsing keeps the live merge-queue setti
   assert.deepEqual(masterConfigSchema.parse(rewritten).mergeQueue, { rerunFailedChecks: 1 }, 'and re-parses unchanged');
 });
 
-test('unit:retired-merge-queue-keys — unknown merge-queue keys are still refused', () => {
-  assert.throws(() => masterConfigSchema.parse({ ...base, mergeQueue: { parallelTips: 4, optimisticLane: true } }), 'the object stays strict');
+test('unit:retired-merge-queue-keys — unknown merge-queue keys are kept and written back (GY-1960), the retired declared ones still drop', () => {
+  const parsed = masterConfigSchema.parse({ ...base, mergeQueue: { parallelTips: 4, optimisticLane: true } });
+  assert.deepEqual(parsed.mergeQueue, { optimisticLane: true }, 'the retired declared key drops; the unknown one a newer version wrote is kept (GY-1960)');
+  assert.deepEqual(masterConfigSchema.parse(JSON.parse(JSON.stringify(parsed))).mergeQueue, { optimisticLane: true }, 'and re-parses unchanged');
 });

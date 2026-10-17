@@ -15,13 +15,15 @@ import { executorRunnableKinds, type NextActionKind } from './model/action-kinds
 import { deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy } from './model/delivery-policy.js';
 import { renderReleasePipeline } from './install/release-pipeline.js';
 import { assertUnitOwned, ForeignUnitRefusal, executorGlob, executorInstance, executorInstancePattern, legacyExecutorTemplate, legacyInstallUnits, readInstallUnits, resolveInstallUnits, systemdCommandLineWords, unitCheckout, type InstallUnits } from './install/units.js';
-import { coordinatorCheckoutRoot } from './master/profiles.js';
+import { coordinatorCheckoutRoot, forwardTolerant } from './master/profiles.js';
 import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
 import { herdrTarget, type HerdrInstance } from './master/herdr.js';
 import { herdrSync } from './herdr-host.js';
 
 export const hostIdSchema = z.string().trim().min(1).max(200);
-export const connectionSchema = z.object({ url: z.string(), cliPath: z.string(), hostId: hostIdSchema, token: z.string().min(32).optional(), principal: z.string().optional() }).strict();
+// GY-1960: connection.json is forward-tolerant — a field a newer CLI wrote that this one does not
+// declare parses and is written back unchanged (setupRepository serializes the parsed object).
+export const connectionSchema = forwardTolerant(z.object({ url: z.string(), cliPath: z.string(), hostId: hostIdSchema, token: z.string().min(32).optional(), principal: z.string().optional() }).strict());
 export type Connection = z.infer<typeof connectionSchema>;
 export function serverOrigin(value: string) {
   const url = new URL(value);
