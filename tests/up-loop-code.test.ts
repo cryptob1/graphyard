@@ -199,7 +199,67 @@ test('unit:up-replaces-loop-on-other-code — the master-loop step rewrites a lo
   const neverRun = await runUp(request(), dependencies(neverRoot, [], never));
   assert.equal(neverRun.exitCode, 1, neverRun.next);
   assert.match(neverRun.next, new RegExp(`still reports ${OLD_COMMIT.slice(0, 12)} instead of this checkout's ${COMMIT.slice(0, 12)}`));
+
+  // A pinned install whose promoted release trails this CLI, through the real renderer: the unit
+  // starts the known-good coordinator (loopUnitText renders it while the pin stands) and the held
+  // snapshot's pointer stands beside it. Without lifting them a rewrite renders the pin again, the
+  // restarted loop reports its older commit and the step fails; the step lifts both first, the
+  // rewrite renders this CLI's launcher, and green comes only from the loop reporting this commit.
+  await pinnedReplacement();
 });
+
+/** GY-1859: AC-1 on a pinned install, through supervisor's loopUnitText and repository-setup's reading and liftLoopPins. */
+async function pinnedReplacement() {
+  const { runUp } = await up();
+  const { readLoopCode, liftLoopPins } = await repositorySetup();
+  const { loopUnitText } = await import('../src/supervisor.js');
+  const { knownGoodCli, knownGoodState } = await import('../src/master/known-good.js');
+  const { heldCliSnapshotAt, heldLauncherOf } = await import('../src/daemon/held-cli.js');
+  const units: InstallUnits = perInstallUnits('acme/shop');
+  const attempt = async (lift: boolean) => {
+    const base = await temporaryDirectory(`graphyard-up-loop-pinned-${lift ? 'lifted' : 'kept'}`);
+    const root = await resumedRoot(`graphyard-up-loop-pinned-root-${lift}`), installDir = join(base, 'install'), unitDirectory = join(base, 'units'), home = join(base, 'home');
+    const cliPath = join(base, 'cli', 'bin', 'graphyard.mjs'), snapshot = heldCliSnapshotAt(root, OLD_COMMIT);
+    for (const directory of [join(installDir, 'coordinator'), unitDirectory, home, join(snapshot, 'src')]) await mkdir(directory, { recursive: true });
+    await writeFile(join(installDir, 'coordinator', 'state.json'), JSON.stringify({ sha: OLD_COMMIT, pinnedAt: 'an earlier promotion', previous: null }));
+    await writeFile(join(snapshot, 'src', 'cli.ts'), '// the held snapshot\n');
+    await writeFile(join(root, '.graphyard', 'held-cli.json'), JSON.stringify({ commit: OLD_COMMIT, root: snapshot }));
+    // What `master init --replace-supervisor` writes: the real renderer, reading the pins as installLoopSupervisor does.
+    const render = () => loopUnitText({ root, cliPath, repository: 'acme/shop', intervalSeconds: 30, installDir, heldLauncher: heldLauncherOf(root) });
+    const unitFile = join(unitDirectory, units.master);
+    await writeFile(unitFile, loopUnitText({ root, cliPath, repository: 'acme/shop', intervalSeconds: 30, installDir, heldLauncher: null }));
+    assert.match(await readFile(unitFile, 'utf8'), new RegExp(`ExecStart=\\S+ ${quote(knownGoodCli(installDir))} master run`), 'the pinned unit starts the known-good coordinator');
+    // The loop reports the commit of whichever launcher its unit starts: this CLI's, or the pin's.
+    const loaded = async () => (await readFile(unitFile, 'utf8')).includes(`${cliPath} master run`) ? COMMIT : OLD_COMMIT;
+    const run = (_command: string, args: string[]) => args[2] === 'rev-parse' ? `${COMMIT}\n` : '';
+    const read = async () => readLoopCode(root, { cliPath, run, units, unitDirectory, home, master: { repository: 'acme/shop', credentialFile: join(home, 'master.token') }, executors: null, cursor: JSON.stringify({ release: { commit: await loaded(), dirty: false } }) });
+    const before = await read();
+    assert.equal(before.loopReplace, 'unit', 'a unit starting the pin is another checkout, rewritten');
+    const w = world([]), events: UpEvent[] = [];
+    const deps = dependencies(root, events, w);
+    const outcome = await runUp(request(), { ...deps,
+      loopCode: read,
+      liftLoopPins: lift ? async () => liftLoopPins(root, { installDir }) : undefined,
+      cli: async (args, options = {}) => {
+        if (args[0] === 'master' && args[1] === 'init') { w.calls.push({ args }); await writeFile(unitFile, render()); return { code: 0, stdout: '{"supervisor":{"state":"updated"}}' }; }
+        return deps.cli(args, options);
+      } });
+    return { outcome, events, unit: await readFile(unitFile, 'utf8'), installDir, root, cliPath };
+  };
+  const kept = await attempt(false);
+  assert.equal(kept.outcome.exitCode, 1, 'with the pin left standing the rewrite renders the pin again');
+  assert.match(kept.outcome.next, new RegExp(`still reports ${OLD_COMMIT.slice(0, 12)}`), 'and the exact-commit wait refuses the pinned commit');
+  const lifted = await attempt(true);
+  assert.equal(lifted.outcome.exitCode, 0, lifted.outcome.next);
+  assert.match(lifted.unit, new RegExp(`ExecStart=\\S+ ${quote(lifted.cliPath)} master run`), 'the rewritten unit starts this CLI');
+  assert.doesNotMatch(lifted.unit, /coordinator\/current|held-cli/, 'neither the pin nor the held snapshot is started');
+  assert.equal(knownGoodState(lifted.installDir), null, 'the pin is lifted');
+  assert.ok(JSON.parse(await readFile(join(lifted.installDir, 'coordinator', 'lifted.json'), 'utf8')).sha === OLD_COMMIT, 'and its record is kept beside it');
+  assert.equal(heldLauncherOf(lifted.root), null, 'the held pointer is lifted');
+  const note = lifted.events.find(event => event.kind === 'note' && event.text.startsWith('master-loop: lifted')) as { text: string } | undefined;
+  assert.match(note?.text ?? '', new RegExp(`known-good pin at ${OLD_COMMIT.slice(0, 12)}.* and the held snapshot at ${OLD_COMMIT.slice(0, 12)}`), 'the step names what it lifted');
+  assert.ok(lifted.events.some(event => event.kind === 'note' && event.text.includes(`at ${COMMIT.slice(0, 12)}`)), 'and the commit the loop now reports');
+}
 
 test('unit:up-reopens-a-recorded-master-loop-step — a rerun whose up.json already records master-loop re-opens it when the units read as other code, and leaves it recorded when they read as this checkout or cannot be read', async () => {
   const { runUp } = await up();
@@ -430,6 +490,7 @@ test('unit:doctor-flags-loop-on-other-code — the reading judges the units agai
     const status = await readSetupStatus(root);
     assert.ok(status.loopCode && typeof status.loopCode.cli.root === 'string', 'doctor reads what the units run');
     assert.equal(status.loopCode!.loop, null, 'under the test runner the operator\'s real units are never read');
+    await hostDoctor();
 
     // The executor alignment: a template on the pilot checkout is re-bound to this checkout and its
     // slots restarted; an aligned template is left alone; a missing template is reported, never created.
@@ -460,6 +521,63 @@ test('unit:doctor-flags-loop-on-other-code — the reading judges the units agai
     if (configHome === undefined) delete process.env.GRAPHYARD_CONFIG_HOME; else process.env.GRAPHYARD_CONFIG_HOME = configHome;
   }
 });
+
+/**
+ * GY-1859: AC-2 for a self-contained host install: doctor reads the host's units through the install
+ * arguments the last `up` run recorded, never this machine's. Stale units on the host with none here
+ * are one FAIL line naming the host's paths; a host install no run recorded the route to is a FAIL
+ * naming the rerun, never a silent pass from this machine's empty unit directory.
+ */
+async function hostDoctor() {
+  const { readInstallLoopCode } = await up();
+  const { readHostLoopCode, readSetupStatus } = await repositorySetup();
+  const { setupFromZeroChecks, setupLine } = await import('../src/setup-from-zero.js');
+  const units: InstallUnits = perInstallUnits('acme/shop');
+  const layout = { home: '/home/graphyard', graphyard: '/home/graphyard/graphyard', checkout: '/home/graphyard/code/acme-shop', userUnitDirectory: '/home/graphyard/.config/systemd/user' };
+  const credential = '/home/graphyard/.config/graphyard/acme-shop/coordinator.token';
+  // The host's loop unit and executor template start the host checkout, whose loop still reports the commit it held before.
+  const files: Record<string, string> = {
+    [`${layout.checkout}/.graphyard/units.json`]: JSON.stringify(units),
+    [`${layout.checkout}/.graphyard/master.json`]: JSON.stringify({ repository: 'acme/shop', credentialFile: credential }),
+    [`${layout.userUnitDirectory}/${units.master}`]: `[Service]\nWorkingDirectory=${layout.checkout}\nExecStart=/usr/bin/node ${layout.graphyard}/bin/graphyard.mjs master run\n`,
+    [`${layout.userUnitDirectory}/${units.executorTemplate}`]: `[Service]\nWorkingDirectory=${layout.checkout}\nExecStart=/usr/bin/node ${layout.graphyard}/scripts/graphyard-executor.mjs --slot %i\n`,
+    [credential.replace(/\.token$/, '.daemon.json')]: JSON.stringify({ release: { commit: OLD_COMMIT, dirty: false } }),
+  };
+  const hostRun = async (program: string, args: string[]) => {
+    if (program === 'cat') return args[0] in files ? { code: 0, stdout: files[args[0]], stderr: '' } : { code: 1, stdout: '', stderr: `cat: ${args[0]}: No such file or directory` };
+    if (program === 'ls') return { code: 2, stdout: '', stderr: `ls: cannot access '${args[1]}': No such file or directory` };
+    if (program === 'git') return { code: 0, stdout: `${'e'.repeat(40)}\n`, stderr: '' };
+    return { code: 1, stdout: '', stderr: 'unexpected' };
+  };
+  const hostInstall = ['install', '--provider', 'host', '--repo', 'acme/shop', '--plan', '--ssh-host', 'host.example'];
+  const root = await temporaryDirectory('graphyard-doctor-host-loop');
+  await mkdir(join(root, '.graphyard'), { recursive: true });
+  await writeFile(join(root, '.graphyard', 'up.json'), JSON.stringify({ version: 1, repository: 'acme/shop', provider: 'host', merger: 'control-plane', noHerdr: false, goal: null, completed: [], hostInstall }));
+  const reached: string[][] = [];
+  let localReads = 0;
+  const code = await readInstallLoopCode(root, {
+    host: async args => { reached.push(args); return readHostLoopCode(hostRun, layout, COMMIT, 'host.example'); },
+    local: async () => { localReads++; throw new Error('this machine\'s units are read for a host install'); },
+  });
+  assert.deepEqual(reached, [hostInstall], 'the host is reached through the install arguments up recorded');
+  assert.equal(localReads, 0, 'this machine\'s units are never read in the host\'s place');
+  assert.equal(code.host, 'host.example');
+  const line = (await setupFromZeroChecks({ root, status: null, environments: join(root, 'none'), loopCode: code })).find(check => check.id === 'loop-code');
+  assert.equal(line?.status, 'fail', 'stale units on the host, none here: doctor fails');
+  assert.match(line!.detail, new RegExp(`${quote(`${layout.userUnitDirectory}/${units.master}`)} runs ${OLD_COMMIT.slice(0, 12)}, not this checkout's ${COMMIT.slice(0, 12)}`), 'naming the host\'s unit and the commit it runs');
+  assert.match(line!.detail, new RegExp(`from this checkout \\(${quote(layout.graphyard)}\\)`), 'and the host checkout it must run');
+  assert.match(setupLine(line!), /^FAIL loop-code: .*rerun graphyard up --repo acme\/shop --agent/);
+
+  // A host install whose up.json records no route to the host (an earlier up run): doctor's own
+  // reading, unstubbed, is an error naming the rerun, and the setup line fails on it.
+  const unrouted = await temporaryDirectory('graphyard-doctor-host-unrouted');
+  await mkdir(join(unrouted, '.graphyard'), { recursive: true });
+  await writeFile(join(unrouted, '.graphyard', 'up.json'), JSON.stringify({ version: 1, repository: 'acme/shop', provider: 'host', merger: 'control-plane', noHerdr: false, goal: null, completed: [] }));
+  const status = await readSetupStatus(unrouted);
+  assert.match(status.loopCode?.error ?? '', /loop runs on its host, and no graphyard up run here recorded how to reach it.*graphyard up --repo acme\/shop --provider host --agent/, 'doctor\'s status reads the host route, never this machine\'s units');
+  const unroutedLine = (await setupFromZeroChecks({ root: unrouted, status: null, environments: join(unrouted, 'none') })).find(check => check.id === 'loop-code');
+  assert.equal(unroutedLine?.status, 'fail', 'and its setup line fails rather than passing on this machine\'s empty unit directory');
+}
 
 test('unit:doctor-loop-code-setup-line — setupFromZero carries the loop-code line: one FAIL naming both paths and the rerun, a PASS once the units run this checkout, a FAIL for an unreadable record, and no line while no unit of this install stands', async () => {
   const { setupFromZeroChecks, setupLine } = await import('../src/setup-from-zero.js');
@@ -551,4 +669,6 @@ test('unit:up-replaces-host-loop-on-other-code — a host install\'s loop and sl
   assert.deepEqual(named(w, ['master', 'restart']), [], 'nothing is restarted on this machine for a host install');
   assert.deepEqual(named(w, ['master', 'init', '--token-stdin', '--replace-supervisor']), [], 'and nothing is rewritten here');
   assert.ok(events.some(event => event.kind === 'note' && event.text.includes(`the loop now runs ${layout.graphyard} at ${COMMIT.slice(0, 12)}`)), 'the step reports the host loop now on this commit');
+  const recorded = JSON.parse(await readFile(join(root, '.graphyard', 'up.json'), 'utf8')).hostInstall;
+  assert.deepEqual(recorded, seen[0], 'the route to the host is recorded, so doctor reads the host\'s units too');
 });

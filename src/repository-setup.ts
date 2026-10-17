@@ -1,5 +1,5 @@
 import { existsSync, realpathSync } from 'node:fs';
-import { chmod, lstat, mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { execFileSync, spawn } from 'node:child_process';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
@@ -366,7 +366,8 @@ export async function readSetupStatus(root: string) {
     drift,
     // GY-1859: what the host's loop and executor units run against this CLI's code, so `doctor`'s
     // readiness checklist flags a unit on other code as one line naming both paths and the rerun.
-    loopCode: await readLoopCode(root).catch(() => null),
+    // Read where the units run, as doctor's setup line reads them: a self-contained host's on that host.
+    loopCode: await import('./up.js').then(module => module.readInstallLoopCode(root)).catch(() => null),
   };
 }
 
@@ -978,6 +979,37 @@ export async function readHostLoopCode(run: (program: string, args: string[]) =>
     const managedHead = await run('git', ['-C', layout.checkout, 'rev-parse', 'HEAD']);
     return judgeLoopCode({ cli, primary: layout.checkout, primaryCommit: managedHead.code === 0 ? managedHead.stdout.trim() || null : null, repository: typeof master?.repository === 'string' ? master.repository : null, loop, executor, cursor, fleet, host, canonical: path => path.replace(/\/+$/, '') });
   } catch (failure) { return failed(failure); }
+}
+/**
+ * GY-1859: the pins that hold this install's loop and slots on code other than this CLI's, lifted so
+ * a replacement starts this CLI. `loopUnitText` renders the known-good coordinator's launcher while
+ * its pin stands (GY-1529), and the unit, `master init` and the executor alignment start the held
+ * snapshot's while a held restart's pointer stands (GY-1790): a rewrite under either comes back on
+ * the pinned commit, and the loop's own alignment would put a unit rewritten past them back. The
+ * pin's record is kept beside it (`coordinator/lifted.json`, whose pin `master recover --to SHA`
+ * restores) and the held pointer is removed, its snapshot left; the next promotion pins afresh.
+ * Returns what was lifted, one phrase each; nothing standing lifts nothing.
+ */
+export async function liftLoopPins(root: string, options: { installDir?: string | null; repository?: string | null } = {}): Promise<string[]> {
+  const [{ knownGoodDirectory, knownGoodState }, { heldCliPointer, readHeldCli }] = await Promise.all([import('./master/known-good.js'), import('./daemon/held-cli.js')]);
+  const installDir = options.installDir !== undefined ? options.installDir : await (async () => {
+    if (!options.repository) return null;
+    const [{ installDirectory }, { installIdFor }] = await Promise.all([import('./install/secrets.js'), import('./install/types.js')]);
+    try { return installDirectory(installIdFor(options.repository)); } catch { return null; }
+  })();
+  const lifted: string[] = [];
+  const pin = installDir ? knownGoodState(installDir) : null;
+  if (installDir && pin) {
+    const directory = knownGoodDirectory(installDir);
+    await rename(join(directory, 'state.json'), join(directory, 'lifted.json'));
+    lifted.push(`the known-good pin at ${shortSha(pin.sha)} (${join(directory, 'state.json')}, kept as lifted.json)`);
+  }
+  const held = readHeldCli(root);
+  if (held) {
+    await rm(heldCliPointer(root), { force: true });
+    lifted.push(`the held snapshot at ${shortSha(held)} (${heldCliPointer(root)})`);
+  }
+  return lifted;
 }
 /** Every instance of this install's executor template the manager knows: each starts from the template's own ExecStart, so restarting them reloads the binding (GY-1859). */
 const knownExecutorInstances = (run: SystemctlRunner, units: InstallUnits) => {

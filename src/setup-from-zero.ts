@@ -8,7 +8,7 @@ import type { AgentEnvironment } from './master/profiles.js';
 import { sharedGitPaths, workerPaths } from './worker-sandbox.js';
 import { controlPlaneMergerLine, legacyMergerReason, mergerMigrationCommand, mergerNotRequired, statusControlPlaneMerger, statusSupervised } from './model/setup-checklist.js';
 import { followUpFilingExcess, followUpFilingRefusal } from './release-candidate.js';
-import { readLoopCode, type LoopCodeReading } from './repository-setup.js';
+import type { LoopCodeReading } from './repository-setup.js';
 
 /**
  * The prerequisites docs/setup-from-zero.md depends on that `graphyard doctor` can check from this
@@ -213,7 +213,8 @@ export const setupLine = (check: SetupCheck) => check.status === 'pass' ? `PASS 
  * unit of this install records no line at all, since there is nothing on it to judge.
  */
 async function loopCodeCheck(root: string, injected: LoopCodeReading | null | undefined): Promise<SetupCheck | null> {
-  const code = injected !== undefined ? injected : await readLoopCode(root).catch(() => null);
+  // Read where the units run (up's readInstallLoopCode): a self-contained host's on that host, never this machine's.
+  const code = injected !== undefined ? injected : await (await import('./up.js')).readInstallLoopCode(root).catch(() => null);
   const check = (status: SetupCheck['status'], detail: string): SetupCheck => ({ id: 'loop-code', status, step: setupSteps.loopCode, detail });
   if (!code) return check('fail', 'the units this install runs could not be read');
   if (code.error) return check('fail', `the units this install records are unreadable: ${code.error}`);
