@@ -28,8 +28,10 @@ human pushing to main is reported by the main watch, not blocked.
 - Measured latencies: the two daemon cursors on this host
   (`~/.config/graphyard/masters/315f05eed4a3245a5167.daemon.json` for this repository,
   `5e69f79fa209a4349c51.daemon.json` for the Snake install `cryptob1/graphyard-snake-v4`), field
-  `latency[].approvalToMergeMs` — what the loop itself measured from the review gate passing
-  (build + review green) to the observed merge (`src/daemon/metrics.ts`, `observeItemClock`).
+  `latency[].approvalToMergeMs` (review + build green → merge, CI may still be running) and
+  `latency[].mergeableToMergeMs` (every gate green → merge), plus `shadow[].durationMs` (this
+  install's writer trials) — what the loop itself measured (`src/daemon/metrics.ts`,
+  `observeItemClock`).
 
 ## Summary table
 
@@ -52,7 +54,7 @@ human pushing to main is reported by the main watch, not blocked.
 | 15 | Operator `gh` login on the host + gh-pause | `src/install/github.ts` (`githubCli`), `src/gh-pause.ts`, `src/protection.ts` (`protectionRun`) | Nothing repo-side: it is the administrative hand (deploy-key registration, protection writes, secret stores); gh-pause pauses every ungoverned gh read on a rate-limit refusal | none | Setup and administration steps fail; the loop skips reads instead of burning the quota | **keep** |
 | 16 | App request budgets + pacing (hourly budget, observation pacer, cadence bands, one-page compares) | `src/github.ts` (`GitHubBudget`, `TokenBudgets`, `ObservationPacer`, `observationCadence`, `comparePath`), `src/gh-pause.ts` | Spending the App's hourly quota or the gh login's rate limit (the 5 October merge burst is the recorded lesson: twenty candidates spent the hour in forty minutes) | none | 403s mid-observation; the loop stalls until reset | **keep** |
 | 17 | Main guard (github-mode revert engine, job loop every 30 s) | `src/main-guard.ts`, `src/github.ts` (`guardGitHubMain`), row 3's revert-approver App | A merge that breaks main is reverted through a revert PR the independent App merges; flakes rerun once; cancelled runs escalate instead of reverting; the reverted item reopens for rework | the writer's trial runs build + proofs on the merge commit **before** push (prevention); candidate reverts on failed UAT (`src/release-revert.ts`); main watch (detection) | In github mode a red main stays red until an agent notices; joint merges keep breaking main. After D1 the path is dead code | **delete** after D1 (item D4, filed as GY-1937) |
-| 18 | Main watch (report-only; promotion freeze with `GRAPHYARD_MAIN_WATCH_FREEZE`; admin acknowledgement) | `src/daemon/main-watch.ts`, `src/routes/main-watch.ts` (route: `src/server/routes/main-watch.ts`) | Unexplained main commits (a human's direct push, anything no delivery/ledger/revert/window explains) are reported once per sha; with the freeze on, promotion holds until an admin acknowledges | it **is** the control plane's detector — the model for this whole layer | Manual pushes to main go unnoticed; delivery provenance drifts silently | **keep** |
+| 18 | Main watch (report-only; promotion freeze with `GRAPHYARD_MAIN_WATCH_FREEZE`; admin acknowledgement) | `src/daemon/main-watch.ts`, `src/server/routes/main-watch.ts` | Unexplained main commits (a human's direct push, anything no delivery/ledger/revert/window explains) are reported once per sha; with the freeze on, promotion holds until an admin acknowledges | it **is** the control plane's detector — the model for this whole layer | Manual pushes to main go unnoticed; delivery provenance drifts silently | **keep** |
 | 19 | Required CI checks `test`/`typecheck` (`ci.yml`; `policy.checks` per item) | `.github/workflows/ci.yml`, `graphyard.json` policy, engine test gate (reads the check runs GitHub reports) | The control plane refuses a candidate whose CI did not pass on the exact head (the `test` gate reasons name the failing check) | the writer's trial runs the same proofs pre-push (`criterionProofs`) | In github mode the quality signal is gone; after D1 nothing — the trial covers it and the `pull_request` trigger is inert (no Graphyard PRs) | **keep** while github mode; trigger cleanup folds into D2 |
 | 20 | `acceptance.yml` protected harness (`pull_request_target` from main; `graphyard/*` candidate branches only; forks never planned; attempt-scoped artifacts) | `.github/workflows/acceptance.yml`, `scripts/enumerate-ci-proofs.mjs`, `scripts/prepare-acceptance.mjs`, `scripts/publish-acceptance.mjs` | Proof integrity: candidate code never meets producer secrets; evidence is ciRun-bound to the exact job GitHub reports | ciRun-bound evidence verification (`src/server/routes/work.ts`, `isCiProducer`) | No CI-produced evidence; proofs fall back to producer sessions | **keep** |
 | 21 | `Graphyard / install verification` neutral check run | `src/install/github.ts` (`VERIFICATION_CHECK`) | Nothing — a confirmation that webhook delivery works (explicitly not required) | none | Install verification loses its read-back | **keep** (trivial) |
@@ -68,72 +70,103 @@ writer reconciles queued heads, runs a trial merge, runs the item's proofs on th
 then pushes once by deploy key (`src/merge-writer/trial.ts`, `src/merge-writer/executor.ts`,
 `src/daemon/cycle-merge-writer.ts`).
 
-**This repository — GitHub mode** (cursor `315f05eed4a3245a5167.daemon.json`, deliveries sampled on
-2026-10-17; the item description's "p50 7.8 min, p90 46.2 min over 67 deliveries" is the same
-population measured a few cycles earlier):
+**What each clock measures** (`observeItemClock`, `src/daemon/metrics.ts`). `approvedAt` is
+stamped on the first cycle the `review` and `build` gates both pass; the `test` gate (CI
+`test`/`typecheck`) need **not** have passed yet, so approval→merge includes whatever CI time
+remains after approval. `mergeableAt` is stamped on the first cycle `mergeableCandidate`
+(`src/daemon/decisions.ts`) holds: stage `merge`, a candidate, no violations, **every** gate
+passed. mergeable→merge is therefore the only interval that isolates post-green merge delay.
 
-- 67 deliveries with an approval→merge measurement.
-- p50 **7.6 min**, p90 **46.6 min**, mean 15.9 min, max **85.2 min**.
-- 28 of 67 (42%) exceeded the loop's own 10-minute approval→merge p90 target
-  (`latencyTargets.approvalToMergeP90Ms`, `src/daemon/metrics.ts`); 58 of 67 exceeded one minute;
-  9 came in under a minute.
-- The interval is pure GitHub merge machinery: the control-plane gates (CI `test`/`typecheck`,
-  review, `Graphyard / merge`) are already green when the clock starts, so what is measured is
-  required-check propagation plus auto-merge/queue wait.
+**This repository — GitHub mode** (latency samples in cursor `315f05eed4a3245a5167.daemon.json`,
+read 2026-10-17T19:37Z; all 69 deliveries fall on 2026-10-17 — the item description's "p50 7.8
+min, p90 46.2 min over 67 deliveries" is the same population read two deliveries earlier):
 
-**Snake install — control-plane merger** (`cryptob1/graphyard-snake-v4`, cursor
-`5e69f79fa209a4349c51.daemon.json`, same day): 6 deliveries — GY-1 185.5 s (the install's first),
-then GY-5 3.7 s, GY-6 3.9 s, GY-7 3.6 s, GY-10 4.0 s, GY-8 4.0 s; p50 **3.9 s** (65.5 s including
-the first). Caveat for honesty: this interval includes the writer's queue wait, trial merge,
-trial build + proofs and the push, and on the Snake repository those trials are near-instant
-(small proof set). On this repository the trial pays the repository's own proof time inside the
-interval — but that is the same suite github mode already runs as PR CI before the clock even
-starts, paid once here instead of twice (PR run + queue/auto-merge re-validation), and it buys
-**prevention**: a merge commit that fails its proofs is never pushed to main at all.
+- approval→merge, 69 deliveries: p50 7.8 min, p90 47.1 min, max 85.2 min. This is mostly CI, not
+  merging: on the 19 deliveries that carry both clocks, approval→all-gates-green alone has p50
+  8.1 min and p90 24.5 min.
+- mergeable→merge (all gates green → merged), 19 deliveries: **18 measured 0 s** — the merge was
+  already observed on the cycle that first saw every gate green, so GitHub's post-green delay is
+  below the loop's observation resolution (cycle p50 39 s over the last 100 cycles). The one
+  outlier is 17.3 min. The other 50 deliveries carry no mergeable sample at all, for the same
+  reason: GitHub merged between two cycles, before the loop ever saw the item all-green and open.
+- Conclusion: the earlier draft's reading — that approval→merge is "pure GitHub merge machinery"
+  — was wrong. GitHub mode spends its minutes on CI after approval, and GitHub itself merges
+  within one loop cycle of the last check turning green.
 
-**Reading.** The measured difference is two orders of magnitude (minutes vs seconds) on the same
-day, on the same loop code, with the same gate semantics. GitHub mode's latency is not GitHub
-being slow at merging — it is the price of routing the merge decision through GitHub-side state
-(required checks, queue position, auto-merge triggers) that the control plane then has to
-observe and reconcile. Every gate rows 4–7 and 17 exist to make that detour safe. Under the
-writer they are all redundant with machinery the control plane already runs.
+**Control-plane merger — measured.** Snake install (`cryptob1/graphyard-snake-v4`, cursor
+`5e69f79fa209a4349c51.daemon.json`, same day): 6 deliveries, GY-1 185.5 s (the install's first),
+then 3.6–4.0 s each. That interval includes the writer's trial build + proofs, which are
+near-instant on Snake's small proof set, so it does **not** predict this repository. The
+predictive number is this install's own shadow writer trials (`shadow`, same cursor; trial merge +
+build + tests on the merge commit, 200 trials 2026-10-08..17): p50 **11.7 min**, p90 **14.1 min**
+per trial — paid serially, one head at a time, after approval.
+
+**Reading.** Measured honestly, the control-plane merger does **not** make delivery faster on this
+repository: GitHub's own post-green delay is under one loop cycle, while the writer's serial trial
+costs about 12 minutes per merge — the same CI time github mode already pays in parallel on the
+pull request. The case for the switch is not latency; it is one authority per fact
+(the GY-878 direction) and **prevention**: a merge commit whose trial fails is
+never pushed, where github mode detects it after the fact (row 17). The deletion verdicts below
+rest on that redundancy, not on merge speed, and D1 must keep the latency targets
+(`latencyTargets`, `src/daemon/metrics.ts`) as a stated risk: at 12 min per serial trial, more
+than about five deliveries an hour would queue behind the writer.
 
 ## The switch: github → control-plane merger, and its rollback
 
-Steps (each named by the code that performs it):
+**No shipped command converts this install today.** `graphyard install --apply` never registers
+the deploy key or applies the ruleset; that path is `graphyard up --merger control-plane`
+(`src/up.ts`, `deploy-key` step then `ensureMainWriteProtection`), and `up --merger control-plane`
+runs `install --no-github-app`, which refuses an install with a bound App (`docs/install.md`) —
+this install has one. And `ensureMainWriteProtection` (`src/install/deploy-key.ts`) creates
+nothing while classic protection exists: it returns `operator-protected` and leaves main as is,
+which is not the writer-only lock. D1 therefore has to ship the conversion before it can run it.
+The procedure, in order, each step's prerequisite checked before the next:
 
-1. **Prove the writer ready.** The switch is refused while any shadow disagreement stands
-   unexplained (GY-1560): the shadow gate (`run.shadow`, `src/server/shadow-verdict.ts`) must have
-   compared writer trials against github merges and every shadow-only-fail or shadow-missed
-   verdict must be explained.
-2. **Flip the setting.** Admin credential: `graphyard master merger control-plane --reason TEXT`
-   (`src/cli/merger.ts`, `src/merger-mode.ts`; append-only `policy.merger.set` event; admin-only;
-   switching back to `github` is never refused).
-3. **Give the writer its hand and lock the door.** `graphyard install --apply` registers the
-   merge-writer deploy key (`ensureDeployKey`: ed25519, read-write, titled
-   `graphyard-merge-writer-<host>`) and applies the "Graphyard merge writer only" ruleset
-   (`ensureMainWriteProtection`, GY-1715). The ruleset step refuses unless the writer key is the
-   repository's **only** read-write deploy key, and reports `operator-protected` instead of
-   touching a branch the operator protects by other means.
-4. **Let the loop land.** The writer reconciles intents, trial-merges, runs the proofs, pushes by
-   deploy key and records the merge ledger entry. Workers submit heads (no pull requests);
-   reviewer sessions receive head + base tip + a one-time verdict token. Cuts and promotions run
-   on the loop's own cadence (`run.candidates.everyMerges` 5 / `idleMinutes` 15;
-   `promoteEveryMinutes`).
-5. **Retire the GitHub-side gates** — the deletion items below, each its own reviewed change,
-   never in the same change as the switch.
+1. **Preflight, read-only — refuse to continue on any failure.**
+   - Shadow gate clean: no unexplained shadow-only-fail / shadow-missed verdict (GY-1560;
+     `unexplainedShadowDisagreements`, `src/server/shadow-verdict.ts`). `master merger` refuses on
+     this too (409), but checking first keeps step 3 from being half done.
+   - Deploy keys: `gh repo deploy-key list -R cryptob1/graphyard --json id,key,title,readOnly`
+     shows no read-write key other than the writer's (`ensureMainWriteProtection` refuses
+     otherwise; GitHub's deploy-key bypass covers every deploy key).
+   - Record the current classic protection (`gh api repos/cryptob1/graphyard/branches/main/protection`)
+     to a file: rollback restores from it, and `master protection --apply` reproduces it.
+   - Throughput: the writer's trial p50 (12 min above) is accepted against the open queue.
+2. **Register the writer's key** — `ensureDeployKey` (ed25519, read-write,
+   `graphyard-merge-writer-<host>`, held 0600 under the install directory). Harmless while github
+   mode stands: classic protection refuses a deploy key's direct push to main. D1 ships this as a
+   command for an App-backed install (today only `up --merger control-plane` and the loop's
+   stall remedy `renewDeployKey`, `src/daemon/step-stalls.ts`, call it).
+3. **Swap the lock, with the loop paused** (no candidate observed or merged mid-swap):
+   1. Create the "Graphyard merge writer only" ruleset (`mainWriteRuleset('main')`,
+      `src/protection.ts`) **while classic protection still stands**. From this moment GitHub
+      refuses every merge but a deploy-key push — the App's auto-merge included — so no PR can
+      merge through the gap. D1 must add this transition to `ensureMainWriteProtection` (create
+      Graphyard's ruleset alongside classic protection when asked to transition, instead of
+      returning `operator-protected`).
+   2. Delete classic protection on main (it would also refuse the writer: deploy keys cannot
+      bypass required reviews/checks). `ensureMainWriteProtection` then reports `unchanged`.
+   3. `graphyard master merger control-plane --reason TEXT` (admin; `src/cli/merger.ts`,
+      `src/merger-mode.ts`; append-only `policy.merger.set`).
+   4. Resume the loop.
+4. **Let the loop land.** The writer trial-merges, runs the proofs, pushes by deploy key and
+   records the merge-ledger entry. Workers submit heads (no pull requests); reviewer sessions
+   receive head + base tip + a one-time verdict token.
+5. **Retire the remaining GitHub-side gates** — D2–D4 below, each its own reviewed change, never in
+   the same change as the switch. (Classic protection is already gone at step 3.2; D2 removes the
+   code that would recreate it.)
 
-Rollback (documented so no deletion can become irreversible):
+Rollback (documented so no deletion can become irreversible), loop paused:
 
-1. **Lift the write lock first** — delete the "Graphyard merge writer only" ruleset; GitHub's
-   deploy-key bypass would otherwise let only deploy keys push while github mode needs the App to
-   merge pull requests.
-2. `graphyard master merger github --reason TEXT` (never refused, no shadow precondition).
-3. Recreate whatever the deletions removed, all by setup commands that already exist:
-   `graphyard master protection --apply` (classic protection + auto-merge mode for a user-owned
-   repository), `graphyard master reviewer setup` (reviewer App), `graphyard install --apply`
-   (App permissions, environments), `graphyard master setup --apply` (uat release-filing secret).
-4. `graphyard master tip-cleanup --apply` deletes leftover speculative-tip refs.
+1. Restore classic protection from the step-1 record (or `graphyard master protection --apply`)
+   **before** lifting the ruleset, so main is never unprotected.
+2. Delete the "Graphyard merge writer only" ruleset — while it stands, only deploy keys may update
+   main and github mode's App merges are refused.
+3. `graphyard master merger github --reason TEXT` (never refused, no shadow precondition).
+4. Recreate whatever D2–D4 removed: `graphyard master protection --apply` (auto-merge mode),
+   `graphyard master reviewer setup` (reviewer App), `graphyard install --apply` (App
+   permissions, environments), `graphyard master setup --apply` (uat release-filing secret);
+   `graphyard master tip-cleanup --apply` deletes leftover speculative-tip refs. Resume the loop.
 5. No work is lost in either direction: candidates, submissions and their evidence are
    control-plane records and survive the flip.
 
@@ -174,6 +207,32 @@ Filed as **GY-1934** (2026-10-17T19:12:49Z, backlog):
   "reason": "GY-1933 AC-2: measured approval-to-merge p50 7.6 min / p90 46.6 min under github mode vs seconds under the writer (Snake install, same day); the deletion items D2-D4 are safe only after this lands"
 }
 ```
+
+**D1 requirements revision owed before GY-1934 is released.** The filed payload above predates
+the corrected switch procedure: its description names `graphyard install --apply` as the
+provisioning step (it is not one) and its reason cites a latency gain the corrected measurement
+does not show. Before release, the operator revises GY-1934 (`graphyard requirements GY-1934 FILE`,
+operator-only; this worker identity cannot) to this file:
+
+```json
+{
+  "plannedFiles": ["src/install/deploy-key.ts", "src/cli/merger.ts", "src/merger-mode.ts", "tests/main-write-protection.test.ts", "tests/deploy-key.test.ts", "tests/merger-setting.test.ts", "tests/docs-budget.test.ts", "docs/delivery.md", "docs/github.md", "docs/operations.md"],
+  "description": "GY-1933 D1. Convert this App-backed github-mode install to the control-plane merger, following research/github-gates-inventory.md 'The switch': read-only preflight (shadow clean, no other read-write deploy key, classic protection recorded, throughput accepted); a command that registers the writer deploy key on an App-backed install; with the loop paused, create the 'Graphyard merge writer only' ruleset alongside classic protection (a transition ensureMainWriteProtection does not do today), delete classic protection, then 'graphyard master merger control-plane'. Rollback restores classic protection before lifting the ruleset.",
+  "criteria": [
+    { "id": "AC-1", "text": "A shipped command registers the merge-writer deploy key on an App-backed install and refuses before writing anything when any preflight check fails (unexplained shadow disagreement, another read-write deploy key, unreadable classic protection); tests cover each refusal.", "proofs": ["manual:switch-preflight-refuses"] },
+    { "id": "AC-2", "text": "The protection transition creates 'Graphyard merge writer only' while classic protection stands and reports created, never operator-protected; a test shows no window in which main has neither classic protection nor the ruleset, in the switch and in the rollback.", "proofs": ["manual:protection-transition-gapless"] },
+    { "id": "AC-3", "text": "On cryptob1/graphyard: the recorded merger is control-plane (policy.merger.set by an admin, with a reason), the ruleset is active on main, classic protection is gone, the writer key is the only read-write deploy key, and at least five deliveries land through the writer (merge-ledger entry, first parent the previous tip, recorded passing trial, no pull request) with no unexplained main-watch commit.", "proofs": ["manual:merger-switch-recorded"] },
+    { "id": "AC-4", "text": "No control-plane gate is loosened: every open item still requires independent review and its full proof set, no requirements revision weakened a criterion in the switch window, and leases/plannedFiles enforcement is untouched.", "proofs": ["manual:switch-no-gate-loosened"] }
+  ],
+  "reason": "GY-1933 review: the filed D1 named a provisioning step that does not convert an App-backed install, and the case for the switch is one authority per fact plus prevention, not latency (writer trial p50 11.7 min here)"
+}
+```
+
+**Test paths for D2–D4.** Their filed plannedFiles list no code tests; widen at release so the
+workers need no scope request: GY-1935 `tests/protection-merge-mode.test.ts`,
+`tests/protection-merge-mode-persistence.test.ts`, `tests/protection-operator-rulesets.test.ts`,
+`tests/protection-restore.test.ts`, `tests/landable-check.test.ts`; GY-1936
+`tests/review-post.test.ts`; GY-1937 `tests/main-guard.test.ts`, `tests/soak-main-guard.test.ts`.
 
 **D2 — after D1 (rows 4, 5, 7, 19's inert trigger).**
 Filed as **GY-1935** (depends on GY-1934, backlog):
