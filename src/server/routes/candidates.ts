@@ -25,6 +25,11 @@ const cutSchema = z.object({
   waitMinutes: z.number().int().min(1).max(maxCandidateIdleMinutes).optional(),
   /** The first cut's backlog boundary: deliveries merged at or before it are history. Later cuts carry the first's. */
   since: z.string().datetime().optional(),
+  /**
+   * The first cut's newest legacy `rc/` source: the plane records its delivery's merge time after the
+   * commit, so the boundary is the later of `since` and that recorded time, never re-cutting what it shipped.
+   */
+  sinceSha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
 }).strict();
 const sha = z.string().regex(/^[0-9a-f]{40}$/, 'a full 40-character lower-case commit SHA');
 const validationSchema = z.object({
@@ -84,6 +89,14 @@ export async function candidateBacklog(db: pg.PoolClient | pg.Pool, floor: strin
   };
 }
 
+/** The first cut's boundary: `since`, moved up to the recorded merge time of the delivery `sinceSha` names. */
+export async function firstFloor(db: pg.PoolClient | pg.Pool, input: z.infer<typeof cutSchema>): Promise<string | null> {
+  const recorded = input.sinceSha ? (await db.query(`SELECT max((document->'delivery'->>'mergedAt')::timestamptz) AS at FROM work_items
+    WHERE lower(document->'delivery'->>'mergeSha') = $1`, [input.sinceSha])).rows[0]?.at as Date | null : null;
+  const times = [input.since ? Date.parse(input.since) : null, recorded ? new Date(recorded).getTime() : null].filter((time): time is number => time !== null);
+  return times.length ? new Date(Math.max(...times)).toISOString() : null;
+}
+
 /**
  * Cut the next candidate in `db`'s transaction, or refuse with why nothing is due. The advisory
  * lock serializes cuts, so a concurrent cut reads this one's members as taken and never repeats one.
@@ -94,7 +107,7 @@ export async function candidateBacklog(db: pg.PoolClient | pg.Pool, floor: strin
 export async function cutExactCandidate(db: pg.PoolClient, actor: Principal, now: Date, input: z.infer<typeof cutSchema>, cap = candidateCap()): Promise<ExactCandidate> {
   await db.query('SELECT pg_advisory_xact_lock(hashtext($1))', [cutLock]);
   const previous = await newest(db);
-  const floor = previous ? previous.floor ?? null : input.since ? new Date(input.since).toISOString() : null;
+  const floor = previous ? previous.floor ?? null : await firstFloor(db, input);
   const backlog = await candidateBacklog(db, floor, cap);
   const assessed = assessExactCut(backlog.members, { trigger: input.trigger, now: now.getTime(), cap, waitMinutes: input.waitMinutes ?? defaultCandidateIdleMinutes, total: backlog.total });
   demand(assessed.due, assessed.reason, 409);
@@ -142,6 +155,17 @@ export async function recordCandidateValidation(db: pg.PoolClient, actor: Princi
   return { ...candidate, validation };
 }
 
+/**
+ * The listing, newest first: the newest 20 and every candidate still without a verdict however old,
+ * so a loop resuming untagged cuts always sees the oldest one and never tags a later one past it.
+ */
+export async function listCandidates(db: pg.PoolClient | pg.Pool): Promise<ExactCandidate[]> {
+  return withValidation(db, (await db.query(`SELECT payload FROM events c WHERE c.kind=$1 AND c.work_id IS NULL
+      AND (c.seq >= COALESCE((SELECT min(seq) FROM (SELECT seq FROM events WHERE kind=$1 AND work_id IS NULL ORDER BY seq DESC LIMIT 20) newest), 0)
+        OR NOT EXISTS (SELECT 1 FROM events v WHERE v.kind=$2 AND v.work_id IS NULL AND v.payload->>'candidate' = c.payload->>'id'))
+    ORDER BY c.seq DESC`, [exactCandidateKind, candidateValidationKind])).rows.map(row => row.payload as ExactCandidate));
+}
+
 /** A cut runs once per Idempotency-Key, as the other mutating routes do; a key reused with other input is refused. */
 async function once<T>(context: RouteContext, input: unknown, run: (db: pg.PoolClient, now: Date) => Promise<T>): Promise<T> {
   const key = context.idempotencyKey();
@@ -164,14 +188,14 @@ export const candidateRoutes = defineRoutes('candidates', [
   { method: 'GET', path: '/api/candidates', handle: async context => {
     reader(context);
     const pool = context.services.engine.store.pool;
-    const listed = await withValidation(pool, (await pool.query('SELECT payload FROM events WHERE kind=$1 AND work_id IS NULL ORDER BY seq DESC LIMIT 20', [exactCandidateKind])).rows.map(row => row.payload as ExactCandidate));
+    const listed = await listCandidates(pool);
     const waiting = await candidateBacklog(pool, listed[0] ? listed[0].floor ?? null : null, candidateCap());
     return { candidates: listed.filter(candidate => visible(context.actor, candidate)), waiting: waiting.total,
       next: waiting.members.filter(member => operatorScopeIncludes(context.actor, { id: member.workId, key: member.key })), cap: candidateCap() };
   } },
   { method: 'POST', path: '/api/candidates', handle: async context => {
     cutter(context);
-    const input = parsed(cutSchema.safeParse(await parseJson(context, 10_000, '{}')), 'A cut takes only {trigger: manual|schedule, waitMinutes?, since?}');
+    const input = parsed(cutSchema.safeParse(await parseJson(context, 10_000, '{}')), 'A cut takes only {trigger: manual|schedule, waitMinutes?, since?, sinceSha?}');
     return once(context, input, (db, now) => cutExactCandidate(db, context.actor, now, input));
   } },
   { method: 'POST', path: validationPath, handle: async (context, [id]) => {

@@ -11,7 +11,8 @@ import { lockedWork } from '../src/store/locked-read.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
-import { candidateIdentityText, type ExactCandidate } from '../src/model/release.js';
+import { candidateIdentityText, candidateValidationKind, exactCandidateKind, type ExactCandidate } from '../src/model/release.js';
+import { candidateBacklog, firstFloor, listCandidates } from '../src/server/routes/candidates.js';
 import { cutAsync, readLedgerAsync, type AsyncGit, type ReleaseCandidate } from '../src/release-candidate.js';
 import { revertTarget, type CandidateItemDelta } from '../src/release-revert.js';
 import type { VerificationMap } from '../src/model/verification-maps.js';
@@ -305,4 +306,36 @@ test('integration:goal-candidate-cut-recovery — a partial batch cuts after the
   assert.equal(scopedValidate.status, 403); assert.match(scopedValidate.body.error, /outside operator agent scoped-agent's scope/);
   const listed = await call('GET', 'candidates', 'reader');
   assert.equal(listed.body.cap, 5); assert.equal(listed.body.waiting, 1); assert.deepEqual(listed.body.next.map((member: any) => member.workId), [uncut.id], 'the refused cuts left the change waiting');
+});
+
+test('integration:goal-candidate-cut-recovery — the first cut after legacy rc candidates starts after the newest rc source\'s recorded delivery, never re-cutting it, and every candidate without a verdict stays listed however many newer ones were cut', async () => {
+  // The plane records a delivery's merge time when its push lands, after the merge commit's own time.
+  const answer = await call('POST', 'work', 'operator', { title: 'Shipped by the newest legacy rc', description: 'A change the newest legacy rc candidate already holds.', type: 'feature', priority: 3,
+    policy: { checks: ['test'], review: true }, criteria: [{ id: 'AC-1', text: 'The change is delivered', proofs: ['unit:delivered'] }] });
+  assert.equal(answer.status, 200, JSON.stringify(answer.body));
+  const legacySha = await mergeOnMain('Shipped by the newest legacy rc');
+  const committed = new Date(git('show', '-s', '--format=%cI', legacySha)).toISOString();
+  await deliver(answer.body.id, legacySha, { mergedAt: new Date(Date.parse(committed) + 30_000).toISOString() });
+  const byCommit = await firstFloor(store.pool, { trigger: 'schedule', since: committed });
+  assert.ok((await candidateBacklog(store.pool, byCommit, 100)).members.some(member => member.workId === answer.body.id), 'the commit time alone leaves the shipped change as backlog');
+  const floor = await firstFloor(store.pool, { trigger: 'schedule', since: committed, sinceSha: legacySha });
+  assert.equal(floor, new Date(Date.parse(committed) + 30_000).toISOString(), 'the boundary moves up to the recorded delivery');
+  assert.ok(!(await candidateBacklog(store.pool, floor, 100)).members.some(member => member.workId === answer.body.id), 'the change the legacy rc shipped is history, not backlog');
+  assert.equal(await firstFloor(store.pool, { trigger: 'schedule', since: committed, sinceSha: sha('never delivered') }), committed, 'a source with no recorded delivery keeps since');
+
+  // An untagged candidate behind 21 newer, validated ones stays listed; a validated one past the newest 20 does not.
+  const client = await store.pool.connect();
+  try {
+    await client.query('BEGIN');
+    const insert = (kind: string, payload: unknown) => client.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', kind, JSON.stringify(payload)]);
+    await insert(exactCandidateKind, { id: 'C-untagged-old', members: [] });
+    for (let index = 0; index < 21; index++) {
+      await insert(exactCandidateKind, { id: `C-window-${index}`, members: [] });
+      await insert(candidateValidationKind, { candidate: `C-window-${index}`, validation: { result: 'pass' } });
+    }
+    const listed = (await listCandidates(client)).map(candidate => candidate.id);
+    assert.ok(listed.indexOf('C-untagged-old') > listed.indexOf('C-window-1'), 'the old unvalidated candidate is listed, after every newer one');
+    assert.ok(!listed.includes('C-window-0'), 'a validated candidate older than the newest 20 is not');
+    assert.ok(listed.includes('C-window-1') && listed.includes('C-window-20'));
+  } finally { await client.query('ROLLBACK'); client.release(); }
 });

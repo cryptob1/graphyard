@@ -68,7 +68,7 @@ export function lastJson(output: string): unknown {
  * the newest candidates with their validations; `validated` appends one candidate's UAT verdict.
  */
 export interface ExactCandidatePorts {
-  cut(input: { trigger: 'schedule'; waitMinutes: number; since?: string }): Promise<ExactCandidate | { refused: string }>;
+  cut(input: { trigger: 'schedule'; waitMinutes: number; since?: string; sinceSha?: string }): Promise<ExactCandidate | { refused: string }>;
   list(): Promise<ExactCandidate[]>;
   validated(id: string, validation: Omit<CandidateValidation, 'at' | 'by'>): Promise<unknown>;
 }
@@ -252,7 +252,7 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
    * GY-1904: the exact candidate the next cut takes. One the plane cut whose record was never tagged (a
    * crash between the two) is taken first, so no member is cut past; any whose `rc/ID` was judged but
    * whose verdict never reached the plane has it recorded first. Else the plane's scheduled cut, its
-   * refusal naming what it waits for. The first cut's boundary is the newest record's commit: every
+   * refusal naming what it waits for. The first cut's boundary is the newest record's commit, moved up to its delivery's recorded merge time: every
    * delivery merged after the last cut is backlog, every earlier one is history.
    */
   const nextExact = async (ports: ExactCandidatePorts, ledger: Awaited<ReturnType<typeof readLedgerAsync>>): Promise<ExactCandidate | { refused: string }> => {
@@ -263,9 +263,10 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
     }
     const untagged = listed.filter(entry => !entry.validation && !ledger.candidates.some(record => record.exact?.id === entry.id)).at(-1);
     if (untagged) return untagged;
-    let since: string | undefined;
-    if (!listed.length && ledger.candidates[0]) since = new Date((await gitAsync('show', '-s', '--format=%cI', ledger.candidates[0].sha)).trim()).toISOString();
-    return ports.cut({ trigger: 'schedule', waitMinutes: settings.idleMinutes, ...(since ? { since } : {}) });
+    // The newest record's source names its delivery too: the plane records that merge's time after the commit's own.
+    const legacy = !listed.length ? ledger.candidates[0] : undefined;
+    const since = legacy ? { since: new Date((await gitAsync('show', '-s', '--format=%cI', legacy.sha)).trim()).toISOString(), sinceSha: legacy.sha.toLowerCase() } : {};
+    return ports.cut({ trigger: 'schedule', waitMinutes: settings.idleMinutes, ...since });
   };
   /** GY-1904: the verdict of an exact cut's `rc/ID`, recorded on the plane's candidate; a refused record is retried by the next cut. */
   const recordExact = async (id: string, validation: LocalValidation): Promise<LocalValidation> => {
