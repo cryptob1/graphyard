@@ -708,8 +708,9 @@ export async function applyOperatorRulesetAdd(api: GhApi, config: RulesetWriteCo
   if (inherited) throw new Error(inherited);
   // Requiring a check the App has never published would block every pull request, so the add waits for it.
   if (missing.some(entry => entry.context === CHECK_NAME)) {
-    const published = await confirmedGet(api, `repos/${config.repository}/commits/${config.baseBranch}/check-runs?per_page=100`, `the check runs on ${config.repository}@${config.baseBranch}`);
-    if (!(published?.check_runs ?? []).some((run: any) => Number(run?.app?.id) === config.githubAppId)) throw new Error(`App ${config.githubAppId} has not yet published ${CHECK_NAME} on ${config.baseBranch}, so requiring it in operator ruleset ${target.id} (${target.name}) would block every pull request; nothing was written. Once Graphyard has published it on a pull request, rerun graphyard master protection --apply`);
+    // Only a run named Graphyard / merge from the App counts: its install-verification check publishes independently of it.
+    const published = await confirmedGet(api, `repos/${config.repository}/commits/${config.baseBranch}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&app_id=${config.githubAppId}&filter=all&per_page=100`, `the ${CHECK_NAME} runs on ${config.repository}@${config.baseBranch}`);
+    if (!(published?.check_runs ?? []).some((run: any) => run?.name === CHECK_NAME && Number(run?.app?.id) === config.githubAppId)) throw new Error(`App ${config.githubAppId} has not yet published ${CHECK_NAME} on ${config.baseBranch}, so requiring it in operator ruleset ${target.id} (${target.name}) would block every pull request; nothing was written. Once Graphyard has published it on a pull request, rerun graphyard master protection --apply`);
   }
   const written = await writeRulesetEdit(api, { repository: config.repository, branch: config.baseBranch, id: target.id, snapshots: config.snapshots, now: config.now,
     describe: missing.map(entry => `${entry.context}@${entry.integration_id}`).join(' and ') + ' added',

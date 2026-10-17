@@ -231,6 +231,12 @@ test('unit:protection-adds-graphyard-checks-to-operator-ruleset — --apply adds
     fresh.state.baseRuns = [{ id: 1, name: 'ci', status: 'completed', conclusion: 'success', app: { id: CI } }];
     await assert.rejects(applyProtection(config, [work], fresh.run, [], { snapshots, now: 4_000 }), /App 1234 has not yet published Graphyard \/ merge on main, so requiring it in operator ruleset 22322922 \(main\) would block every pull request; nothing was written/);
     assert.deepEqual(fresh.state.writes, []);
+    // The App's own install-verification check is not Graphyard / merge: with only that published, the add still refuses.
+    const verifiedOnly = fakeGitHub();
+    verifiedOnly.state.baseRuns = [{ id: 2, name: 'Graphyard / install verification', status: 'completed', conclusion: 'neutral', app: { id: APP } }];
+    await assert.rejects(applyProtection(config, [work], verifiedOnly.run, [], { snapshots, now: 4_500 }), /App 1234 has not yet published Graphyard \/ merge on main, so requiring it in operator ruleset 22322922 \(main\) would block every pull request; nothing was written/);
+    assert.deepEqual(verifiedOnly.state.writes, []);
+    assert.deepEqual(verifiedOnly.state.rulesets.get(22322922), mainRuleset());
 
     // Another governing ruleset that comes to require checks after discovery makes the target no longer
     // unique: every governing ruleset is read again just before the write, and the write refuses.
