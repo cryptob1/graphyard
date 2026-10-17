@@ -13,7 +13,9 @@ import { daemonEffects } from '../src/daemon/effects-production.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { alignLoopUnit, loopUnitOf, loopUnitText } from '../src/supervisor.js';
 import { upDependencies } from '../src/up.js';
-import { judgeLoopCode } from '../src/repository-setup.js';
+import { alignExecutorUnitScript, judgeLoopCode, renderExecutorUnit } from '../src/repository-setup.js';
+import { installUnitsFile, perInstallUnits } from '../src/install/units.js';
+import { writeExecutorRegistration } from '../src/executor-fleet.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -413,5 +415,42 @@ test('unit:upgrade-acts-on-cli-checkout-only — up lifts the pin from the CLI c
   assert.ok((lifted[0] ?? '').includes(heldCliPointer(cli.checkout)), 'the lift names the pointer it removed, under the CLI checkout');
   assert.equal(readHeldCli(cli.checkout), null, 'up lifted the actual pin');
   assert.ok(!existsSync(heldCliPointer(managed.root)));
+  assert.equal(git(managed.root, 'rev-parse', 'HEAD'), managed.head);
+});
+
+test('unit:upgrade-acts-on-cli-checkout-only — with no pin the executor template binds the CLI checkout\u2019s entry, not a managed Graphyard checkout\u2019s, and status compares the fleet with the CLI checkout\u2019s commit', async () => {
+  const cli = await cliCheckout();
+  const managed = await managedCloneOf(cli.origin, cli.tip); // a second Graphyard checkout, at another commit
+  for (const root of [cli.checkout, managed.root]) { await mkdir(join(root, 'scripts'), { recursive: true }); await writeFile(join(root, 'scripts', 'graphyard-executor.mjs'), '// entry\n'); }
+  // The template as the installer rendered it for the managed repository: its own entry.
+  const template = await readFile(fileURLToPath(new URL('../examples/master/graphyard-executor@.service', import.meta.url)), 'utf8');
+  const installed = renderExecutorUnit(template, { root: managed.root, node: process.execPath });
+  assert.match(installed, new RegExp(`^ExecStart=.* ${managed.root}/scripts/graphyard-executor\\.mjs --slot`, 'm'));
+  const units = perInstallUnits('owner/managed');
+  await writeFile(join(managed.root, installUnitsFile), `${JSON.stringify(units)}\n`);
+  const unitDirectory = join(await temporaryDirectory('loop-code-root-units'), 'systemd-user');
+  await mkdir(unitDirectory, { recursive: true });
+  const unitFile = join(unitDirectory, units.executorTemplate);
+  await writeFile(unitFile, installed);
+  const reloads: string[][] = [], systemctl = (args: string[]) => { reloads.push(args); return ''; };
+  // The unpinned alignment the upgrade runs before restarting the fleet onto the CLI checkout's commit.
+  assert.deepEqual(await alignExecutorUnitScript(managed.root, null, { run: systemctl, unitDirectory, codeRoot: cli.checkout }), { wrote: 'updated', reason: null });
+  const bound = await readFile(unitFile, 'utf8');
+  assert.match(bound, new RegExp(`^ExecStart=.* ${cli.checkout}/scripts/graphyard-executor\\.mjs --slot %i$`, 'm'), 'a slot starts the CLI checkout\u2019s entry, so it registers the commit the upgrade waits for');
+  assert.match(bound, new RegExp(`^WorkingDirectory=${managed.root}$`, 'm'), 'the slot still runs in the managed repository');
+  assert.deepEqual(await alignExecutorUnitScript(managed.root, null, { run: systemctl, unitDirectory, codeRoot: cli.checkout }), { wrote: 'unchanged', reason: null }, 'a retry writes nothing');
+  assert.deepEqual(await alignExecutorUnitScript(managed.root, null, { run: systemctl, unitDirectory, codeRoot: managed.root }), { wrote: 'updated', reason: null });
+  assert.equal(await readFile(unitFile, 'utf8'), installed, 'one directory: the install\u2019s own binding, byte for byte');
+  assert.deepEqual(reloads, [['daemon-reload'], ['daemon-reload']]);
+
+  // The daemon's own attention report passes no CLI commit: an executor on the CLI checkout's commit is no split.
+  const credentials = await temporaryDirectory('loop-code-root-credentials');
+  const master = config(join(cli.checkout, 'bin', 'graphyard.mjs'), credentials);
+  const stamp = new Date(now).toISOString();
+  await writeExecutorRegistration(master, { version: 1, name: 'exec-1', host: master.hostId, pid: process.pid, principal: 'graphyard-master', kinds: ['resync'], intervalSeconds: 5, root: cli.checkout,
+    release: { commit: cli.loaded, dirty: false }, supervisor: null, state: 'running', standDown: null, startedAt: stamp, updatedAt: stamp, stoppedAt: null, claims: 0, lastClaim: null, inFlight: null, claiming: null, interrupted: null });
+  const report = await masterStatusReport(managed.root, master, statusApi, { actor: { id: 'coordinator-1' } }, { commit: null }, { now: () => now });
+  const split = report.attentionItems.filter(item => item.subject === 'executors' && /a release other than the coordinator/.test(item.text));
+  assert.deepEqual(split.map(item => item.text), [], 'the fleet is compared with the CLI checkout\u2019s commit, never the managed repository\u2019s HEAD');
   assert.equal(git(managed.root, 'rev-parse', 'HEAD'), managed.head);
 });

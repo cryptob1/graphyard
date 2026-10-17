@@ -194,7 +194,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // GY-1790: the executor units' entry follows the pin — the held snapshot's scripts/graphyard-executor.mjs
     // while a snapshot restart's pin stands, the checkout's when it lifts — so a slot its unit starts
     // never boots from an entry the checkout holds dirty.
-    alignExecutorUnits: script => alignExecutorUnitScript(root, script),
+    alignExecutorUnits: script => alignExecutorUnitScript(root, script, { codeRoot: loopCodeRoot(current().cliPath, root) }),
     persist: persistLoop,
   });
   return Object.defineProperties({

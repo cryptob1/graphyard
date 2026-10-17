@@ -747,7 +747,7 @@ export function renderExecutorUnit(template: string, binding: { root: string; no
  * installer renders it, and nothing is restarted — a slot's next start picks the entry up. A unit
  * that is not installed is reported, not written.
  */
-export async function alignExecutorUnitScript(root: string, script: string | null, options: { run?: SystemctlRunner; unitDirectory?: string } = {}): Promise<{ wrote: 'updated' | 'unchanged' | 'none'; reason: string | null }> {
+export async function alignExecutorUnitScript(root: string, script: string | null, options: { run?: SystemctlRunner; unitDirectory?: string; /** GY-1899: the running CLI's checkout, whose entry a lifted pin restores when it is not ROOT. */ codeRoot?: string } = {}): Promise<{ wrote: 'updated' | 'unchanged' | 'none'; reason: string | null }> {
   const primary = connectionRoots(root)[0];
   const unitDirectory = options.unitDirectory ?? executorUnitDirectory();
   const units = await executorInstallUnits(primary, unitDirectory);
@@ -758,7 +758,9 @@ export async function alignExecutorUnitScript(root: string, script: string | nul
     if (error.code === 'ENOENT') return { wrote: 'none', reason: `${unitFile} is not installed; node scripts/graphyard-executor.mjs --install installs it` };
     throw error;
   }
-  const rendered = renderExecutorUnit(current, { root: primary, node: process.execPath, ...(script ? { script, checkoutRoot: primary } : {}) });
+  // GY-1899: with no pin a slot runs the CLI checkout's entry, the commit the upgrade restarts the fleet onto, never the managed repository's.
+  const own = options.codeRoot && resolve(options.codeRoot) !== resolve(primary) ? resolve(options.codeRoot, 'scripts/graphyard-executor.mjs') : null;
+  const rendered = renderExecutorUnit(current, { root: primary, node: process.execPath, ...(script ? { script, checkoutRoot: primary } : own && existsSync(own) ? { script: own } : {}) });
   if (current === rendered) return { wrote: 'unchanged', reason: null };
   await atomicWrite(unitFile, rendered, 0o644);
   (options.run ?? systemctl)(['daemon-reload']);

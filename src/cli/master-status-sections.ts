@@ -168,9 +168,10 @@ export async function assembleReportedAttention(
   const resources = await timedStep('attention: resources', () => resourceStatus(root, master, { reviews: observed.reviews, producers: observed.producers, agents: observed.runtime.available ? observed.runtime.agents : null, work: snapshot.work, loop: observed.loop }, Number.isFinite(at) ? { now: at } : {}));
   // GY-1619: the fleet beside the checkout, read with what the loop's own self-upgrade is doing about a split: the pin a held
   // restart places, and the restart the cursor owes, so an advance under way is in motion rather than a configuration fault.
-  // GY-1899: the pin is read under the running CLI's checkout, where the loop's holdCliAt wrote it.
-  const releases = executorFleetReport(await readExecutorRegistrations(master).catch(() => []), { commit: observed.commit ?? readCommit(root) },
-    { hostId: master.hostId, ...(Number.isFinite(at) ? { now: at } : {}), held: readHeldCli(loopCodeRoot(master.cliPath, root)), upgrade: resources.upgrade, boundMs: upgradeBoundMs(observed.loop) });
+  // GY-1899: the pin and the fallback commit are read under the running CLI's checkout, where the loop's holdCliAt wrote it.
+  const codeRoot = loopCodeRoot(master.cliPath, root);
+  const releases = executorFleetReport(await readExecutorRegistrations(master).catch(() => []), { commit: observed.commit ?? readCommit(codeRoot) },
+    { hostId: master.hostId, ...(Number.isFinite(at) ? { now: at } : {}), held: readHeldCli(codeRoot), upgrade: resources.upgrade, boundMs: upgradeBoundMs(observed.loop) });
   const derived = await timedStep('attention: derived', () => derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } }));
   if (!derived.executors.presence.available && /^GET \/api\/actions failed/.test(derived.executors.presence.reason)) sections.mark('executors', 'GET /api/actions', derived.executors.presence.reason);
   const docs = await timedStep('docs budget', () => docsBudgetAttention(root, master.baseBranch, generatedFiles));
