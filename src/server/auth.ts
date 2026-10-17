@@ -1,8 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { Refusal, demand, operatorScopeIncludes, type Principal } from '../model.js';
-import { laneOnlyProducer, type Credential } from './principals.js';
-import { readImports } from '../validation-import.js';
-import { ProofGrants, readGrant } from '../proof-grants.js';
+import type { Credential } from './principals.js';
+import { ProofGrants } from '../proof-grants.js';
 import { proofProducer, withRecordedProofs } from '../delegation.js';
 import type { Store } from '../store.js';
 import type { Engine } from '../engine.js';
@@ -78,41 +77,8 @@ export const operatorAgentRouteGuard: Route = {
   },
 };
 
-/**
- * Whether `actor` is confined to the external-runs:import lane under effective proof authority.
- * A grant record (including an empty revoke) supersedes the environment `proofs` seed, so a
- * producer configured with both proofs and the import grant is re-confined once those proofs are
- * fully revoked; with no record yet, the seed decides (matching proof-grants.ts `effectiveAuthority`).
- */
-export async function confinedLaneProducer(services: Pick<Services, 'engine'>, actor: Principal): Promise<boolean> {
-  if (actor.role !== 'producer') return false;
-  const record = await services.engine.store.transaction(db => readGrant(db, actor.id));
-  return laneOnlyProducer(actor, record ? record.patterns : undefined);
-}
-
-/**
- * A lane-only producer (GY-1879: role producer, whose only grant is `external-runs:import`) is held
- * to the routes that grant names, derived from the grant alone, until the grant store records proof
- * authority for it (a producer holding proof grants keeps a producer's access). This guard is the first
- * authenticated route (src/server/index.ts dispatches it ahead of the table), so nothing else runs first: it passes POST /api/validation/import on to the
- * import, answers GET /api/validation/import/{sha} with the runs this principal imported itself and
- * GET /api/principals with its own entry, and refuses every other route before any effect.
- */
-export const laneProducerRouteGuard: Route = {
-  method: '*', path: /^\/api\//,
-  async handle({ actor, url, req, services }) {
-    // Read the grant store before any env-seed early return: a revoked seed must re-confine.
-    if (!await confinedLaneProducer(services, actor)) return Next;
-    if (req.method === 'POST' && url.pathname === '/api/validation/import') return Next;
-    const head = req.method === 'GET' ? /^\/api\/validation\/import\/([a-f0-9]{40})$/.exec(url.pathname) : null;
-    if (head) return readImports({ store: services.engine.store }, head[1], url.searchParams.get('candidate'), actor.id);
-    if (req.method === 'GET' && url.pathname === '/api/principals')
-      return { principals: [{ id: actor.id, role: actor.role, sessionKind: actor.sessionKind ?? null, grants: actor.grants ?? [], leases: [] }] };
-    demand(false, `${req.method} ${url.pathname} is outside the external-runs:import lane of producer ${actor.id}: it may import a run, read its own imports and read its own principal`, 403);
-    return Next;
-  },
-};
-export const laneProducerScope: RouteModule = { name: 'lane-producer-scope', routes: [laneProducerRouteGuard] };
+// A lane-only producer's routes (GY-1879, GY-1912) live in producer-lanes.ts.
+export { confinedLaneProducer, laneProducerRouteGuard, laneProducerScope } from './producer-lanes.js';
 
 /**
  * The human operator signs into the dashboard without handling a token (GY-738). `graphyard login`,
