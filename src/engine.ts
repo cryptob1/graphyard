@@ -45,6 +45,7 @@ import type { ActionAccount } from './model/action-account.js';
 import { recordScenarioRun } from './test-runs.js';
 import { resolveScenario } from './scenarios.js';
 import { sameObservationInputs } from './model/observation-save.js';
+import { adoptSchema, adoptedBranchHeld, adoptionHolderRefusal, attemptLiveRefusal, closedPullRefusal, draftPullRefusal, foreignBaseRefusal, forkedPullRefusal, gitBranchName, movedHeadRefusal, prAdoptionOf, sameAdoption, type AdoptedPull } from './model/pr-adoption.js';
 import type { ObservationJobState } from './model/action-kinds.js';
 import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
 import { recordStallRemedy, remedyFlows, remedyOutcomes, stallRemedyKinds } from './stall-remedies.js';
@@ -134,7 +135,7 @@ const commands = {
   // GY-860: what this allocation released before it could create its worktree — an earlier
   // attempt's worktree that still held the branch, with the refs and uncommitted diff it carried.
   // The record is the item's preserved-attempt history, kept on the ledger.
-  workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(200).refine(validBranch, 'Invalid Graphyard branch name'),
+  workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(255).refine(branch => validBranch(branch) || gitBranchName(branch), 'Invalid Graphyard branch name'),
     preserved: z.object({ path: z.string().min(1).max(1000), head: z.string().regex(/^[0-9a-f]{40}$/i), branchTip: z.string().regex(/^[0-9a-f]{40}$/i), op: z.enum(['rebase', 'merge', 'cherry-pick']).nullable(), refs: z.string().max(20000), diff: z.string().max(100000), at: z.iso.datetime() }).strict().optional() }).strict(),
   // `documentation` is the worker's explicit statement that the change alters no documented
   // behaviour: the other way the standard documentation criterion is met (model/documentation.ts).
@@ -200,6 +201,9 @@ const commands = {
   refresh: z.object({ reason: z.string().trim().min(1).max(2000), base: sha }).strict(),
   // No `mergerefused`: GitHub merges on every passing gate (GY-1235) and Graphyard keeps no guarded
   // merge (GY-1236), so nothing reports a merge refusal and none sends a candidate back (GY-1391).
+  // GY-1849: one existing pull request adopted into this item on its same branch and head; the live
+  // head is read before the transaction and the binding's rules are model/pr-adoption.ts's.
+  adopt: adoptSchema,
 } as const;
 const executorName = z.string().trim().min(1).max(200).regex(/^[^\u0000-\u001f\u007f]+$/);
 const actionClaimSchema = z.object({
@@ -231,7 +235,7 @@ const pullAssignmentSchema = z.object({ host: executorName.optional(), work: z.s
 /** The refusal a replay of one idempotency key with different input earns; read back by the pull. */
 export const idempotencyMismatch = 'Idempotency key reused with different input';
 export type Command = keyof typeof commands;
-const operatorCapabilitiesByCommand: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', refresh: 'intent:unblock', window: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
+const operatorCapabilitiesByCommand: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', refresh: 'intent:unblock', window: 'intent:unblock', adopt: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
 
 function authorizeOperatorCommand(actor: Principal, command: Command, data: any, work: Work | undefined, repository: string) {
   const capability = operatorCapabilitiesByCommand[command];
@@ -932,6 +936,36 @@ export class Engine {
   reviewerApps: ReviewerApp[] = [];
   controlPlaneAppId?: number;
   /**
+   * GY-1849: reads the pull request an adoption names, outside any coordination transaction. Left
+   * undefined, the deployment's GitHub App (from the environment) reads it; null reads none, and
+   * every adoption is refused as unverifiable, since a binding without its live head binds nothing.
+   */
+  adoptionObserver: ((pr: number) => Promise<AdoptedPull>) | null | undefined = undefined;
+  /** The reader `adoptionObserver` stands for while undefined: the deployment's own GitHub App, or none. */
+  private async adoptionReader(): Promise<((pr: number) => Promise<AdoptedPull>) | null> {
+    if (this.adoptionObserver !== undefined) return this.adoptionObserver;
+    const github = await githubFromEnv();
+    this.adoptionObserver = github ? async pr => {
+      const pull = await github.request(`/pulls/${pr}`);
+      return { head: String(pull.head.sha), branch: String(pull.head.ref), state: pull.state === 'open' ? 'open' as const : 'closed' as const, draft: pull.draft === true,
+        headRepository: typeof pull.head.repo?.full_name === 'string' ? pull.head.repo.full_name : null,
+        baseRepository: typeof pull.base?.repo?.full_name === 'string' ? pull.base.repo.full_name : null,
+        baseRef: typeof pull.base?.ref === 'string' ? pull.base.ref : null };
+    } : null;
+    return this.adoptionObserver;
+  }
+  /**
+   * GY-1849: the live read an `adopt` is judged against. A replayed key answers from its receipt,
+   * so it must not depend on the provider again; a read that fails leaves null, and the transaction
+   * refuses the adoption as unverifiable rather than binding an unverified head.
+   */
+  private async observeAdoptionTarget(actorId: string, data: { pr: number }, key: string): Promise<AdoptedPull | null> {
+    if ((await this.store.pool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actorId, key])).rowCount) return null;
+    const read = await this.adoptionReader();
+    if (!read) return null;
+    try { return await read(data.pr); } catch { return null; }
+  }
+  /**
    * Observes the pull request a worker submits before the submission is recorded, so a candidate
    * that reverts shipped code outside its planned files is refused at `complete` instead of after
    * review. Left undefined, the deployment's GitHub App (from the environment) observes; null
@@ -1080,7 +1114,8 @@ export class Engine {
     // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
     const work = (await lockedWork(this.store.leasePool, [id])).find(w => w.id === id || w.key === id);
     const workspace = work?.workspaces.find(w => w.epoch === data.epoch);
-    if (!work || work.stage === 'done' || !workspace) return null;
+    // GY-1849: an adopted item never completes as a head (the transaction refuses it), so no git is read for one.
+    if (!work || work.stage === 'done' || !workspace || work.prAdoption) return null;
     if (this.gitRunner === undefined) this.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd());
     demand(this.gitRunner, 'The control plane has no checkout to read a submitted head from; a head submission needs the merge writer checkout', 503);
     return observeLocalHead(this.gitRunner, { head: data.head, base: this.baseBranch, branch: workspace.branch, author: actor.id });
@@ -1328,6 +1363,9 @@ export class Engine {
       return work;
     }, { lane: 'lease', fleetLock: false, itemLock: id });
     const observation = command === 'submit' ? context.observation ?? await this.observeSubmission(actor, id, data, key) : null;
+    // GY-1849: an adoption judges the pull request's live head, read outside the coordination
+    // transaction exactly as a submission's observation is; the transaction refuses without it.
+    const adoption = command === 'adopt' ? await this.observeAdoptionTarget(actor.id, data, key) : null;
     // GY-1735: a command that may derive a legacy follow-up's window reads the report's projection first; a claim reads the item on its lease pool.
     const projections = command === 'create' ? await this.followUpProjections(data) : command === 'ready' || command === 'unblock' || command === 'claim'
       ? await this.followUpProjections((await (command === 'claim' ? this.store.leasePool : this.store.pool).query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [id])).rows[0]?.document) : {};
@@ -1467,6 +1505,48 @@ export class Engine {
         demand(!requestedBaseRefresh(work), `A refresh of ${work.key} head ${candidate!.sha.slice(0, 12)} is already requested; the reconciliation job runs it`);
         // Beside `baseRefresh`, not in it: an approval an earlier refresh carried onto this head still binds until the merge runs.
         work.baseRefreshRequest = { head: candidate!.sha, base: data.base, policyRevision: work.policyRevision, by: actor.id, at: now.toISOString(), reason: data.reason };
+      }
+      if (command === 'adopt') {
+        // The master's own non-weakening intent — an adoption rewrites no criterion: the operator-agent
+        // capability was checked with every other command; a hand master needs the coordinator.
+        if (actor.role !== 'operator-agent') demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+        // One pull request per item: an item already past adoption or submission takes no other.
+        demand(!work.submission, `${work.key} already links pull request #${work.submission?.pr}; adoption binds an item with no pull request`, 409);
+        demand(!work.prAdoption || work.prAdoption.pr === data.pr, `${work.key} already adopted pull request #${work.prAdoption?.pr}; one binding stands per item`, 409);
+        // The binding names this repository, so the number and head mean one pull request.
+        demand(!!this.repository, 'The control plane has no repository configured; adoption binds a pull request of one repository', 503);
+        // A GitHub pull request can never complete while the control plane is the merge writer, so
+        // the binding would strand the item: the writer is switched first, never adopted around.
+        demand((await recordedMergerMode(db)).merger !== 'control-plane', `This install's merge writer is the control plane, so no GitHub pull request can complete here; switch the writer with graphyard master merger before adopting`, 409);
+        // The live read ran outside this transaction; without it the head cannot be verified, so nothing binds.
+        demand(adoption, `Pull request #${data.pr} could not be read from ${this.repository}; adoption binds a live head and is refused unreadable`, 503);
+        demand(adoption!.state === 'open', closedPullRefusal(data.pr), 409);
+        // A draft's author is still reshaping it: the adoption waits for it to be marked ready.
+        demand(adoption!.draft === false, draftPullRefusal(data.pr), 409);
+        // A fork's head is outside the managed origin and a foreign base never lands on the managed
+        // branch: either could never be worked or completed, so both are refused at adoption, the
+        // same-repository and managed-base invariants the observation path holds.
+        demand((adoption!.headRepository ?? '').toLowerCase() === this.repository!.toLowerCase() && (adoption!.baseRepository ?? '').toLowerCase() === this.repository!.toLowerCase(),
+          forkedPullRefusal(data.pr, adoption!.headRepository, adoption!.baseRepository, this.repository!), 409);
+        demand(adoption!.baseRef === this.baseBranch, foreignBaseRefusal(data.pr, adoption!.baseRef, this.baseBranch), 409);
+        // The branch is the one every attempt will reserve, so it must be a name git accepts.
+        demand(gitBranchName(adoption!.branch), `Pull request #${data.pr}'s branch ${JSON.stringify(adoption!.branch)} is not a branch name git accepts; adoption binds a branch an attempt can check out`, 409);
+        // The moved-head refusal names the head the provider reports now.
+        demand(adoption!.head === data.head, movedHeadRefusal(data.pr, adoption!, data.head), 409);
+        // A second owner is refused naming the holder: another item's binding or submission, or its hold on the branch.
+        const holder = adoptionHolderRefusal(all, work, data.pr, adoption!.branch);
+        demand(!holder, holder!, 409);
+        // Repeating the same adoption is the no-op: the one binding stands, nothing else is recorded.
+        if (work.prAdoption && sameAdoption(work.prAdoption, data, this.repository)) return work;
+        // A first adoption never races work in flight: an attempt with a live lease is working the
+        // item now, so the master adopts once it ends. A rebind of the adopted pull request may
+        // pass a live attempt — the moved-head refusal at complete is what sent the master here,
+        // and complete re-checks the observed head and branch against the binding it names.
+        if (!work.prAdoption) {
+          const live = attemptLiveRefusal(work, now);
+          demand(!live, live!, 409);
+        }
+        work.prAdoption = prAdoptionOf(data, adoption!, this.repository, actor.id, now, work.prAdoption);
       }
       if (command === 'reviewpolicy') {
         if (actor.role !== 'operator-agent') admin(actor);
@@ -1898,9 +1978,19 @@ export class Engine {
         }
       }
       if (command === 'workspace') {
+        // GY-1849: a branch outside Graphyard's own namespace is only the adopted pull request's own
+        // branch, and only the adopting item's attempt works there; every other reservation stays inside the namespace.
+        demand(validBranch(data.branch) || !!work.prAdoption && data.branch === work.prAdoption.branch,
+          `Only a Graphyard branch${work.prAdoption ? `, or the adopted pull request's own branch ${work.prAdoption.branch},` : ''} can be reserved`);
         demand(!work.workspaces.some(w => w.epoch === data.epoch), 'This assignment already has a workspace');
-        demand(!all.some(w => w.workspaces.some(s => (s.branch === data.branch && (w.id !== work!.id || !work!.reworkRequested)) || s.host === data.host && pathsOverlap(s.path, data.path))), 'Branch or host/path is already reserved or overlaps a reservation; use a fresh workspace');
+        // GY-1849: the adopted branch is shared by every attempt on the adopted item, so only an open attempt's record of it holds.
+        const adoptedBranch = !!work.prAdoption && data.branch === work.prAdoption.branch;
+        demand(!all.some(w => w.workspaces.some(s => (s.branch === data.branch && !adoptedBranch && (w.id !== work!.id || !work!.reworkRequested)) || s.host === data.host && pathsOverlap(s.path, data.path))), 'Branch or host/path is already reserved or overlaps a reservation; use a fresh workspace');
+        if (adoptedBranch) { const holder = adoptedBranchHeld(all, data.branch); demand(!holder, `${holder?.key} holds ${data.branch} in an open attempt; the adopted branch is reserved by one attempt at a time`, 409); }
         if (work.submission) demand(data.branch === work.workspaces.find(w => w.epoch === work!.submission!.epoch)?.branch, 'Rework must use the already linked PR branch in a fresh workspace');
+        // GY-1849: an attempt on an adopted item is assigned the adopted pull request's own branch —
+        // it works there from the pull request's existing commits, and no fresh branch is reserved beside it.
+        else if (work.prAdoption) demand(data.branch === work.prAdoption.branch, `${work.key} adopted pull request #${work.prAdoption.pr}; its attempt works on the adopted branch ${work.prAdoption.branch}, not ${data.branch}`, 409);
         const { preserved, ...workspace } = data;
         work.workspaces.push({ ...workspace, owner: actor.id });
         // The preserved-attempt record (GY-860): what the released holder of this branch carried —
@@ -1921,6 +2011,9 @@ export class Engine {
         else demand(merger !== 'control-plane', `A pull request is submitted only while GitHub is the merge writer; this install's merger is ${merger}, so complete ${work.key} ${data.epoch} --head instead`, 409);
         let observed = observation, number: number;
         if (data.head !== undefined) {
+          // GY-1849: an adoption binds its pull request's own number, and that binding outlives a later
+          // switch of the merge writer: a head would complete it as a newly allocated change instead.
+          demand(!work.prAdoption, `${work.key} adopted pull request #${work.prAdoption?.pr} and completes only as that pull request, never as a head; switch the writer back to github with graphyard master merger, then complete ${work.key} ${data.epoch} ${work.prAdoption?.pr}`, 409);
           demand(observation?.source === 'control-plane' && observation.candidate.sha === data.head, `${data.head.slice(0, 12)} was not observed by the control plane (the merger changed while it was read); complete ${work.key} ${data.epoch} --head again`, 409);
           // One change number per (item, head), allocated under the item lock this transaction holds:
           // the candidate, the submission and the number commit together, and a retried or repeated
@@ -1931,9 +2024,18 @@ export class Engine {
           number = data.pr;
           demand(!all.some(w => w.id !== work!.id && w.submission?.pr === number), 'Pull request is already linked to another task');
           demand(!work.submission || work.submission.pr === number, 'A submitted task cannot switch pull requests');
+          // GY-1849: an adopted item completes only on its adopted pull request, so no replacement PR is created.
+          demand(!work.prAdoption || work.prAdoption.pr === number, `${work.key} adopted pull request #${work.prAdoption?.pr}; complete accepts only that pull request`);
         }
+        // GY-1849: the adopted head is verified against a live observation or not at all, so an
+        // unobserved completion of an adopted item is refused rather than recorded unchecked.
+        demand(!work.prAdoption || observed, `${work.key} adopted pull request #${work.prAdoption?.pr}, whose live head could not be observed; complete is refused until it can be verified against the adopted head`, 503);
         if (observed) {
           demand(observed.candidate.pr === number, 'Observed pull request does not match the submission');
+          // GY-1849: the binding is exact-head, so the head observed now is compared to the adopted
+          // one; a moved head is refused naming both shas, and the master re-adopts at the live head.
+          if (work.prAdoption && observed!.candidate.sha !== work.prAdoption.head)
+            demand(false, `${work.key} adopted pull request #${work.prAdoption.pr} at head ${work.prAdoption.head.slice(0, 12)}, but its live head is ${observed!.candidate.sha.slice(0, 12)}; adopt naming the live head, then complete again`, 409);
           demand(work.workspaces.some(w => w.epoch === data.epoch && w.branch === observed!.candidate.branch), 'PR branch does not match the assigned workspace');
           // GY-1528: under the control-plane merger the submit refuses nothing on plannedFiles.
           const regressions = merger === 'control-plane' ? [] : regressionRefusals(work, observed, all);
