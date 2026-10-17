@@ -18,7 +18,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * GY-1922. On a compose install the control plane's checkout is bind-mounted into the server container,
  * whose `git fetch origin` over SSH fails (no GitHub host key, no credential), while the loop fetches
  * into that same checkout from the host. The land route judges a merge-writer acceptance landing from
- * the checkout's refs/remotes/origin/BASE first, fetching only when that ref does not hold it; GY-1661's
+ * the checkout's refs/remotes/origin/BASE when its own fetch fails; GY-1661's
  * refusals still hold for a ref that does not show the merge of the approved head on its first-parent history.
  */
 const admin: Principal = { id: 'gl-admin', role: 'admin', sessionKind: 'human' };
@@ -115,7 +115,7 @@ test('unit:goal-land-without-server-fetch — with the server\'s fetch failing o
   const landed = await call(author, `goals/${goal.key}/land`, { mergeSha });
   assert.equal(landed.status, 200, landed.text);
   assert.equal(landed.body.landing.state, 'merged');
-  assert.deepEqual(fetches, [], 'a landing the checkout already holds is judged without a fetch');
+  assert.equal(fetches.length, 1, 'the route tried its fetch, and judged the checkout\'s ref once it failed');
   const merged = await readGoal(goal.key);
   assert.equal(merged.stage, 'planning');
   assert.equal(merged.merged!.pr, null); assert.equal(merged.merged!.mergeSha, mergeSha);

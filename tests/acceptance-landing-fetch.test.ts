@@ -7,9 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { gitRunnerFor, type GitRunner } from '../src/merge-writer/local-observation.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-// GY-1661 AC-2: the goals route fetches the base branch from origin when its checkout's origin ref
-// does not yet hold a merge-writer acceptance landing (GY-1922: one it already holds needs no fetch),
-// so a merge commit pushed after the control plane's checkout last fetched is accepted rather than
+// GY-1661 AC-2: the goals route fetches the base branch from origin before it judges a merge-writer
+// acceptance landing (GY-1922: only a failed fetch falls back to the checkout's origin ref), so a merge commit pushed after the control plane's checkout last fetched is accepted rather than
 // refused as unlanded; and the image carries git, which that fetch runs.
 const root = fileURLToPath(new URL('..', import.meta.url));
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -43,21 +42,26 @@ test('unit:acceptance-landing-fetch — a merge commit pushed after the plane la
     assert.match(await acceptanceMergeRefusal(runner, 'main', head, mergeSha) ?? '', /is not a merge of the approved head|does not hold/);
     // The land route's judgement fetches first, and accepts it.
     assert.equal(await acceptanceLandingRefusal(recording, 'main', head, mergeSha), null);
-    assert.deepEqual(calls.find(args => args[0] === 'fetch'), ['fetch', '--no-tags', 'origin', '+refs/heads/main:refs/remotes/origin/main'], 'the base is fetched from origin when the checkout\'s ref does not hold the landing');
+    assert.deepEqual(calls.find(args => args[0] === 'fetch'), ['fetch', '--no-tags', 'origin', '+refs/heads/main:refs/remotes/origin/main'], 'the base is fetched from origin before anything is judged');
     assert.equal(git(plane, 'rev-parse', 'refs/remotes/origin/main'), mergeSha);
     // A merge that is not of the approved head is still refused after the fetch.
     assert.match(await acceptanceLandingRefusal(runner, 'main', 'd'.repeat(40), mergeSha) ?? '', /is not a merge of the approved head/);
 
-    // GY-1922: once the plane's origin/main holds the merge, a failing fetch is never needed; a merge it
-    // does not hold is refused with a retryable 503 and nothing past the failed fetch is read.
+    // GY-1922: a fetch that succeeds is authoritative. Rewritten on origin to omit the merge, BASE refuses
+    // the landing although the plane's ref held it before this fetch.
+    git(writer, 'reset', '-q', '--hard', 'HEAD^1'); git(writer, 'push', '-q', '--force', 'origin', 'main');
+    assert.match(await acceptanceLandingRefusal(runner, 'main', head, mergeSha) ?? '', /does not hold/);
+    git(writer, 'reset', '-q', '--hard', mergeSha); git(writer, 'push', '-q', '--force', 'origin', 'main');
+    assert.equal(await acceptanceLandingRefusal(runner, 'main', head, mergeSha), null);
+
+    // GY-1922: only a failed fetch falls back to the plane's origin/main: holding the merge, it lands; a merge
+    // it does not hold is refused with a retryable 503.
     git(plane, 'remote', 'set-url', 'origin', join(fixture, 'missing.git'));
     const judged: string[][] = [], failing: GitRunner = args => { judged.push([...args]); return runner(args); };
     assert.equal(await acceptanceLandingRefusal(failing, 'main', head, mergeSha), null);
-    assert.ok(!judged.some(args => args[0] === 'fetch'), 'a ref already holding the landing is not fetched');
-    judged.length = 0;
+    assert.equal(judged[0]?.[0], 'fetch', 'the fetch is tried before the checkout\'s ref is read');
     await assert.rejects(acceptanceLandingRefusal(failing, 'main', 'd'.repeat(40), mergeSha), (error: { status?: number; message: string }) =>
       error.status === 503 && /could not fetch main from origin .*nothing is recorded until it can/s.test(error.message));
-    assert.equal(judged.at(-1)?.[0], 'fetch', 'nothing past the failed fetch is read');
     // A runner that throws is a failed fetch too.
     await assert.rejects(acceptanceLandingRefusal(async () => { throw new Error('spawn git ENOENT'); }, 'main', head, mergeSha), (error: { status?: number; message: string }) => error.status === 503 && /spawn git ENOENT/.test(error.message));
   } finally { await rm(fixture, { recursive: true, force: true }); }
@@ -76,9 +80,9 @@ test('unit:acceptance-landing-fetch — a fetch that stalls is bounded and refus
   const fetches = asked.filter(call => call.args[0] === 'fetch');
   assert.equal(fetches.length, 1); assert.ok(fetches[0].timeoutMs! > 0 && fetches[0].timeoutMs! <= 200, 'the runner is asked to kill git within the same bound');
   assert.equal(asked.at(-1)!.args[0], 'fetch', 'nothing past the fetch is read');
-  // GY-1922: a stalled read of the checkout's own ref is bounded by the same deadline.
-  await assert.rejects(acceptanceLandingRefusal(() => new Promise(() => {}), 'main', 'a'.repeat(40), 'b'.repeat(40), 200), (error: { status?: number; message: string }) =>
-    error.status === 503 && /\(reading refs\/remotes\/origin\/main did not finish within 200ms\)/.test(error.message));
+  // GY-1922: after a failed fetch, a stalled read of the checkout's own ref is bounded by the same deadline.
+  await assert.rejects(acceptanceLandingRefusal(args => args[0] === 'fetch' ? Promise.resolve({ status: 128, stdout: '', stderr: 'Host key verification failed.' }) : new Promise(() => {}), 'main', 'a'.repeat(40), 'b'.repeat(40), 200), (error: { status?: number; message: string }) =>
+    error.status === 503 && /Host key verification failed\.; reading refs\/remotes\/origin\/main did not finish within 200ms\)/.test(error.message));
 
   // The default runner kills a git that outlasts its bound and says so.
   const fixture = await realpath(await temporaryDirectory('landing-fetch-timeout'));
