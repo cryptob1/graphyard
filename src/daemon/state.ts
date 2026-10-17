@@ -154,6 +154,7 @@ export type DeploymentObservation = z.infer<typeof deploymentObservationSchema>;
  * gap. GY-1488: `cutSha` is the tip the newest candidate cut; one concluded unpromoted is not re-cut.
  * GY-1491: `candidates`, the newest (merges each carries, merges on main behind it); `candidateAtDispatch`, the newest at the last dispatch.
  */
+const sealCheckSchema = z.object({ mayseal: z.boolean(), role: z.string().max(64), needed: z.array(z.string().max(64)).max(8), at: z.string().max(64), secret: z.string().max(100), environment: z.string().max(100) }).strict();
 export const promotionStateSchema = z.object({
   checkedAt: z.string(),
   mainSha: z.string().nullable(),
@@ -177,7 +178,12 @@ export const promotionStateSchema = z.object({
     queued: z.number().int().min(0).nullable(),
     /** GY-1513: the advisory soak's verdict as the candidate's record (rc-soak/ID) keeps it, once its run recorded one. */
     soak: z.object({ result: z.string().max(32), at: z.string().max(64), run: z.string().max(500).nullable() }).strict().nullable().optional(),
+    /** GY-1882: the candidate's newest seal check (rc-seal-check/ID.AT): whether the uat release credential may seal its imports. */
+    sealCheck: sealCheckSchema.optional(),
   }).strict()).max(5).optional(),
+  /** GY-1882: the newest candidates' seal checks, read on their own while the drive reads no ledger (promotion off, or no local ports). */
+  sealChecks: z.array(z.object({ id: z.string().max(100), sealCheck: sealCheckSchema.optional() }).strict()).max(5).optional(),
+  sealChecksReadAt: z.string().nullable().optional(),
   /** GY-1513: the newest advisory soak runs (release-candidate-soak.yml), by the SHA each soaks; never holds promotion back. */
   soaks: z.array(z.object({
     sha: z.string().max(64),

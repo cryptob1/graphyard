@@ -8,7 +8,7 @@ import { Refusal, demand } from './model/refusal.js';
 import type { Store } from './store.js';
 import { importExternalRun, type ExternalRunResult } from './runner-report.js';
 import { importedRunVerdict, type FlakyAcceptance, type ImportedBlockingCase } from './e2e/runner.js';
-import { candidateAtHead, candidateTagPrefix, type PromotionImports, type ReleaseCandidate } from './release-candidate.js';
+import { candidateAtHead, candidateTagPrefix, releaseFilingIdentity, type PromotionImports, type ReleaseCandidate } from './release-candidate.js';
 import { externalRunsImportGrant } from './server/principals.js';
 
 /**
@@ -201,6 +201,62 @@ export async function readImports(plane: Pick<ImportPlane, 'store'>, sha: string
   return { sha, candidate: id ? { id, sha } : null, runs, hold: importedHold(runs), sealed: id ? !!await importSeal(plane.store.pool, { id, sha }) : false };
 }
 
+/** The roles that may seal a candidate's imports for promotion: an admin, or an operator agent (the release-filing identity). */
+export const sealRoles = ['admin', 'operator-agent'] as const;
+export type SealAuthority = { mayseal: true; role: string } | { mayseal: false; role: string; needed: string[] };
+/**
+ * GY-1882: whether `actor` may seal, answered without sealing anything or writing an event, so a
+ * promotion workflow checks its credential before soak and UAT results are spent on a seal it
+ * cannot make (`GET /api/validation/import/seal-authority`, `graphyard release seal-check`).
+ */
+export const sealAuthority = (actor: Principal): SealAuthority =>
+  (sealRoles as readonly string[]).includes(actor.role) ? { mayseal: true, role: actor.role } : { mayseal: false, role: actor.role, needed: [...sealRoles] };
+/** Whether a seal-authority read failed only because the plane predates its route: 404, or the operator-agent guard's 403 for a route it did not yet allow. */
+export const sealAuthorityUnserved = (error: { status?: number; message?: string } | null | undefined) =>
+  error?.status === 404 || (error?.status === 403 && /Route is not available to operator agents/.test(error.message ?? ''));
+/**
+ * A valid operator-agent token scoped to another repository: auth refuses 403 before the route runs
+ * (`Repository is outside operator-agent scope`). Seal-check records that as a denial — the uat secret
+ * cannot seal here — without weakening the server's scope rule.
+ */
+export const sealAuthorityOutOfScope = (error: { status?: number; message?: string } | null | undefined) =>
+  error?.status === 403 && /Repository is outside operator-agent scope/.test(error.message ?? '');
+/** Where the workflows hold the credential `release imports` seals with: the uat environment's release-filing secret. */
+export const sealCredential = { secret: 'GRAPHYARD_RELEASE_TOKEN', environment: 'uat' } as const;
+/** The ledger records `release seal-check ID` writes, one per check, on the candidate's exact SHA (`rc-seal-check/ID.AT`). */
+export const sealCheckTagPrefix = 'rc-seal-check/';
+export interface SealCheckRecord { id: string; sha: string; at: string; mayseal: boolean; role: string; needed: string[]; secret: string; environment: string }
+export function sealCheckRecord(candidate: Pick<ReleaseCandidate, 'id' | 'sha'>, answer: SealAuthority, now: Date): SealCheckRecord {
+  return { id: candidate.id, sha: candidate.sha, at: now.toISOString(), mayseal: answer.mayseal, role: answer.role, needed: answer.mayseal ? [] : answer.needed, ...sealCredential };
+}
+export const sealCheckTag = (record: SealCheckRecord) => `${sealCheckTagPrefix}${record.id}.${record.at.replace(/[-:]/g, '')}`;
+/**
+ * The one attention item (owned by the master) master status raises while the newest seal check, by its
+ * time across every listed candidate, was refused: an older candidate checked again after a newer one
+ * passed is the current answer. It names the secret, its environment, the role it holds and the role it
+ * needs; null when no candidate was checked, or the newest check may seal.
+ */
+export function sealRefusalLine(candidates: readonly { id: string; sealCheck?: Omit<SealCheckRecord, 'id' | 'sha'> | null }[], repository = 'OWNER/REPO') {
+  const at = (check?: { at: string } | null) => { const ms = check ? Date.parse(check.at) : NaN; return Number.isFinite(ms) ? ms : -Infinity; };
+  const checked = candidates.reduce<(typeof candidates)[number] | null>((newest, candidate) => candidate.sealCheck && (!newest || at(candidate.sealCheck) > at(newest.sealCheck)) ? candidate : newest, null);
+  const check = checked?.sealCheck;
+  if (!checked || !check || check.mayseal) return null;
+  // `master setup --apply` reads a secret newer than its credential as current whatever it holds, so the remedy rotates and re-stores it outright.
+  const store = `TOKEN=$(openssl rand -hex 32); printf %s "$TOKEN" | graphyard operator-agent rotate ${releaseFilingIdentity.id} 600 "seal check refused" --token-stdin; printf %s "$TOKEN" | gh secret set ${check.secret} --repo ${repository} --env ${check.environment}; unset TOKEN`;
+  return { subject: 'installation', role: 'master' as const, approvedBy: null, human: false, humanOnly: null, text: `Promotion of candidate ${checked.id} was refused for seal authority at ${check.at}: ${check.secret} in the ${check.environment} environment authenticates as ${check.role}, and sealing a candidate's imports needs ${check.needed.join(' or ')}`,
+    next: `replace ${check.secret} in the ${check.environment} environment with a fresh ${releaseFilingIdentity.id} (operator agent) token, as admin: ${store} (a revoked identity is reinstated by graphyard master setup --apply instead); the next candidate's seal check then passes` };
+}
+type SealChecked = Parameters<typeof sealRefusalLine>[0];
+/**
+ * The loop cursor's promotion state as master status reads it: the refused seal check's item, or none. The checks come from
+ * whichever read was later: the ledger's candidates, or the seal checks read on their own while the drive reads no ledger.
+ */
+export function sealRefusalAttention(promotion?: { candidates?: SealChecked; ledgerReadAt?: string | null; sealChecks?: SealChecked; sealChecksReadAt?: string | null } | null, repository?: string) {
+  const own = promotion?.sealChecksReadAt && promotion.sealChecks && !(Date.parse(promotion.ledgerReadAt ?? '') >= Date.parse(promotion.sealChecksReadAt));
+  const line = sealRefusalLine((own ? promotion.sealChecks : promotion?.candidates) ?? [], repository);
+  return line ? [line] : [];
+}
+
 /**
  * Read candidate `id`'s hold at `sha` for promotion and, when it is released, seal it in the same
  * transaction under the candidate's lock: no import binds to the candidate afterwards, so the hold a
@@ -209,7 +265,7 @@ export async function readImports(plane: Pick<ImportPlane, 'store'>, sha: string
  * release-filing identity the workflows hold) seal; sealing twice answers the standing seal.
  */
 export async function sealImports(plane: Pick<ImportPlane, 'store'>, actor: Principal, sha: string, input: unknown, now = new Date()) {
-  demand(actor.role === 'admin' || actor.role === 'operator-agent', 'Sealing a candidate\'s imports for promotion needs an admin or the release-filing identity', 403);
+  demand(sealAuthority(actor).mayseal, 'Sealing a candidate\'s imports for promotion needs an admin or the release-filing identity', 403);
   demand(/^[a-f0-9]{40}$/.test(sha), 'A candidate head is a 40-hex commit', 400);
   const id = (input as { candidate?: unknown } | null)?.candidate;
   demand(typeof id === 'string' && /^[0-9A-Za-z._-]{1,100}$/.test(id), 'Name the candidate whose imports are sealed: {"candidate":"ID"}', 400);

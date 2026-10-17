@@ -70,6 +70,8 @@ export const operatorAgentRouteGuard: Route = {
       || (/^\/api\/scenarios(?:\/[^/]+\/runs)?$/.test(url.pathname) && !!actor.capabilities?.includes('e2e:record'))
       // A candidate's imported runs and hold (GY-1860): the promotion workflows read it, and seal a released one, as the release-filing identity; never import.
       || (req.method === 'GET' && /^\/api\/validation\/import\/[a-f0-9]{40}$/.test(url.pathname))
+      // GY-1882: whether the release-filing identity may seal, which the uat imports job checks before any seal.
+      || (req.method === 'GET' && url.pathname === '/api/validation/import/seal-authority')
       || (req.method === 'POST' && /^\/api\/validation\/import\/[a-f0-9]{40}\/seal$/.test(url.pathname)),
       'Route is not available to operator agents', 403);
     return Next;
