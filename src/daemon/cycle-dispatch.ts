@@ -85,16 +85,17 @@ export async function rekeyLaunchedSession(record: ((handle: SessionHandleInput)
 /**
  * GY-1890: whether the launch step's own dispatch is stopped by a saturated fleet — some launch
  * profile could take work if it were free (`busy` counts: a profile that is working is capacity,
- * not a breakdown), and none is both healthy and not already held by an in-flight launch. The
+ * not a breakdown), and none is both healthy and not `held` — the step's own availability test: taken by
+ * an in-flight launch, or occupied by an agent its fresh inventory read returns. The
  * step's hold branch below and the measure's reclassification of a claimable item's wait decide
  * by this one predicate, so the signal that reclasses a subject is the step's own decision. A
  * fleet with no launch profile, or none that could take work even free (every credential spent,
  * every profile cooling off after a failed launch), is not saturation: that is the escalation,
  * whose remedy is a working credential, not a bigger fleet.
  */
-export function saturatedFleet(health: readonly ProfileHealth[], taken: ReadonlySet<string>): boolean {
+export function saturatedFleet(health: readonly ProfileHealth[], held: (entry: ProfileHealth) => boolean): boolean {
   const launchable = health.filter(entry => entry.profile.mode === 'launch');
-  return launchable.length > 0 && launchable.some(entry => entry.healthy || entry.busy) && !launchable.some(entry => entry.healthy && !taken.has(entry.profile.name));
+  return launchable.length > 0 && launchable.some(entry => entry.healthy || entry.busy) && !launchable.some(entry => entry.healthy && !held(entry));
 }
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
@@ -320,13 +321,14 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
     // A finished session no live assignment owns does not hold its profile (GY-1322 / GY-1708): the
     // launch closes it, and occupiesRoleBound keeps the role's bound counter truthful through a
     // mid-attempt capacity redispatch so a second session of the same role is not launched beside it.
-    const pick = () => order.find(entry => entry.healthy && !taken.has(entry.profile.name) && !free.some(agent => agent.name === entry.profile.agentName && occupiesRoleBound(entry.profile, agent, snapshot.work, clock)));
+    const held = (entry: ProfileHealth) => taken.has(entry.profile.name) || free.some(agent => agent.name === entry.profile.agentName && occupiesRoleBound(entry.profile, agent, snapshot.work, clock));
+    const pick = () => order.find(entry => entry.healthy && !held(entry));
     let choice = pick();
     if (!choice) {
       // Every launch profile working is capacity, not a decision for anyone. Escalate only when no
       // profile could take work even if it were free, which `saturatedFleet` refuses.
       const launchable = health.filter(entry => entry.profile.mode === 'launch');
-      if (!saturatedFleet(health, taken)) {
+      if (!saturatedFleet(health, held)) {
         const detail = `No worker profile can take ${item.key}: ${launchable.map(entry => `${entry.profile.name} (${entry.reason})`).join('; ') || 'no launch profile is configured'}`;
         const escalationKey = `escalation:dispatch:${item.id}`;
         if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));

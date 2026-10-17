@@ -273,6 +273,64 @@ test('manual:fault-class-loop — GY-1890: a fleet whose free profiles are all h
   await launcher.idle();
 });
 
+test('manual:fault-class-loop — GY-1890: a profile free in the cycle-start snapshot but occupied in the launch step’s fresh inventory read is held: saturation follows the step’s own availability, so the queue is capacity, not an escalation', async () => {
+  const master = masterConfigSchema.parse({ ...config(), workers: JSON.parse(JSON.stringify(workerFleet(2))) });
+  const work = [item('GY-1886', '2026-10-17T08:10:58.270Z'), item('GY-1888', '2026-10-17T08:31:54.081Z')];
+  const occupying: HerdrAgent[] = workerFleet(2).map(profile => ({ name: profile.agentName, pane_id: `pane-${profile.name}`, agent_status: 'working' }));
+  const clock = firstSeen;
+  const state = emptyDaemonState(master);
+  state.lock = { pid: process.pid, host: 'machine-a', startedAt: iso(clock), heartbeatAt: iso(clock) } as DaemonState['lock'];
+  // The cycle-start reads (observe, profile health) see an empty fleet, so every profile is healthy
+  // and free there, and no launcher holds one. Only the dispatch step's own fresh read finds both
+  // profiles' agents at work, as when an attempt starts between the snapshot and the launch step.
+  const fresh = () => /dispatchStepWithin/.test(new Error().stack ?? '');
+  const effects: DaemonEffects = {
+    agents: () => fresh() ? occupying : [],
+    herdr: async () => ({ agents: [], available: true }),
+    credentials: async () => ({}),
+    snapshot: async () => ({ work, now: iso(clock) }),
+    closeSession: () => {},
+    dispatch: async () => { throw new Error('no profile is free: nothing may launch'); },
+    requestProof: () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(clock), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {},
+    requestSmoke: () => {},
+    persist: async () => {},
+  };
+  const launcher = new Launcher();
+  const result = await runCycle(master, state, effects, () => clock, launcher);
+  await launcher.idle();
+  assert.equal(state.actions['escalation:dispatch:work-GY-1886'], undefined, 'an occupied fleet is capacity, never an escalation for a working credential');
+  const held = Object.entries(state.actions).filter(([key]) => key.startsWith('capacity:work-'));
+  assert.equal(held.length, 1, 'the step records the held fleet on the item it could not place');
+  assert.match(held[0][1].detail, /worker-0, worker-1/);
+  assert.deepEqual(result.silence.subjects.map(entry => entry.kind), ['capacity', 'capacity'], 'the measure follows the step’s fresh availability, not the snapshot');
+});
+
+test('manual:fault-class-loop — GY-1890: a continuous wait keeps its age when it is reclassed between dispatch and capacity, in both directions, so repeated saturation transitions still reach the bound', () => {
+  const master = config(), state = daemonState(master), work = [item('GY-2003', '2026-10-17T08:10:58.270Z')];
+  const filed: Filed[] = [];
+  let silence = trackSilence(state, actionableSubjects(master, work, firstSeen, { fleetHeld: false }), [], firstSeen);
+  // Nineteen minutes as a dispatch subject, then the fleet saturates and frees every four minutes.
+  for (let at = firstSeen + minute; at <= firstSeen + 45 * minute; at += minute) {
+    const elapsed = (at - firstSeen) / minute, fleetHeld = elapsed >= 19 && Math.floor((elapsed - 19) / 4) % 2 === 0;
+    silence = trackSilence(state, actionableSubjects(master, work, at, { fleetHeld }), [], at);
+    assert.equal(silence.subjects.length, 1, 'one subject, never a dispatch and a capacity copy side by side');
+    assert.equal(silence.longest?.since, iso(firstSeen), `the wait still runs from its first sight at minute ${elapsed}`);
+    assert.equal(silence.longest?.kind, fleetHeld ? 'capacity' : 'dispatch', 'the subject carries the class it is now');
+    for (const line of loopAttention({ liveness: runningLiveness(state), silence })) filed.push({ at: iso(at), kind: line.kind, subject: line.subject, text: line.text, owner: '' });
+  }
+  // Minute 21 is saturated (19–22), minute 23 is not (23–26): each class files the moment its own
+  // stretch stands past the bound on the one continuous wait.
+  assert.equal(filed[0]?.at, iso(firstSeen + 21 * minute), 'the first breach files at the bound, not twenty minutes after the reclass');
+  assert.equal(filed[0]?.kind, 'concurrency-starved');
+  assert.ok(filed.some(entry => entry.kind === 'loop-silence' && entry.at === iso(firstSeen + 23 * minute)), 'reclassed back to dispatch, the wait files as the loop’s at once');
+  assert.match(filed.at(-1)!.text, /for 45 minutes, past the 20-minute bound/);
+  // A successful action for the subject still restarts it, under whichever class it now has.
+  const restarted = trackSilence(state, actionableSubjects(master, work, firstSeen + 46 * minute, { fleetHeld: true }), [{ kind: 'capacity', work: 'GY-2003', principal: null, state: 'done', detail: 'acted', attempts: 1, epoch: null, cycle: 1, at: iso(firstSeen + 46 * minute) }], firstSeen + 46 * minute);
+  assert.equal(restarted.longest?.since, iso(firstSeen + 46 * minute));
+});
+
 test('manual:fault-class-loop — GY-1890: a fleet that cannot launch at all is not a held fleet: the wait stays the loop\u2019s dispatch subject, escalates for a working credential, and breaches as loop-silence, never as capacity with a false remedy', async () => {
   const master = masterConfigSchema.parse({ ...config(), workers: JSON.parse(JSON.stringify(workerFleet(2))) });
   const work = [item('GY-2002', '2026-10-17T08:10:58.270Z')];

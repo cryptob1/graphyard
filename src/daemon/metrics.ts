@@ -390,12 +390,18 @@ export function trackSilence(state: DaemonState, subjects: ActionableSubject[], 
   // on each refusal would never reach the bound that puts it in front of someone.
   const acted = new Set(performed.filter(action => action.state === 'done').map(action => `${action.kind}:${action.work ?? 'pipeline'}`));
   const live = new Map(subjects.map(subject => [subject.key, subject]));
+  // GY-1890: a claimable item's wait is one wait whether the fleet is saturated or not, so a subject
+  // reclassed between `dispatch:<item>` and `capacity:<item>` keeps the age of the key it replaces;
+  // restarting it there would let saturation transitions hold either class short of the bound.
+  const counterpart = (key: string) => key.startsWith('dispatch:') ? `capacity:${key.slice(9)}` : key.startsWith('capacity:') ? `dispatch:${key.slice(9)}` : null;
+  const reclassed = new Map<string, DaemonState['silence']['subjects'][string]>();
+  for (const key of live.keys()) { const other = counterpart(key), prior = other ? record.subjects[other] : undefined; if (other && prior && !record.subjects[key] && !live.has(other)) reclassed.set(key, prior); }
   for (const key of Object.keys(record.subjects)) if (!live.has(key)) delete record.subjects[key];
   for (const [key, subject] of live) {
-    const previous = record.subjects[key];
+    const previous = record.subjects[key] ?? reclassed.get(key);
     // First sight, or an action for this exact subject: the wait starts again from now.
     if (!previous || acted.has(key)) record.subjects[key] = { since: at, work: subject.work, kind: subject.kind, detail: subject.detail };
-    else record.subjects[key] = { ...previous, detail: subject.detail };
+    else record.subjects[key] = { ...previous, kind: subject.kind, detail: subject.detail };
   }
   if (performed.length) record.lastActionAt = at;
   return silenceReport(record, now);
