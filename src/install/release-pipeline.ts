@@ -270,9 +270,9 @@ ${deployStep(policy, 'production', '${{ steps.promote.outputs.sha }}')}
 `;
 }
 
-/** The generated files for a policy: both workflows under the candidate model, none under per-PR. */
+/** The generated files for a policy: both workflows under the candidate model, none under per-PR or the local mode (GY-1901), whose candidates the control plane runs itself. */
 export function renderReleasePipeline(policy: DeliveryPolicy, options: PipelineOptions = {}): { path: string; content: string }[] {
-  if (policy.mode === 'per-pr') return [];
+  if (policy.mode !== 'release-candidate') return [];
   return [
     { path: candidateWorkflowFile, content: renderCandidateWorkflow(policy, options) },
     { path: promotionWorkflowFile, content: renderPromotionWorkflow(policy, options) },

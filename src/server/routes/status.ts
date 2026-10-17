@@ -15,6 +15,7 @@ import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
 import { executorHost } from './agent-registry.js';
 import { directMergeStatus } from '../../direct-merge.js';
 import { mergeWriterStatus } from '../../merger-mode.js';
+import { projectDelivery } from '../../project-applications.js';
 import { rerunFailedChecksEvent } from '../../merge-queue.js';
 import { maxRerunFailedChecks } from '../../master/profiles.js';
 import { eventStats } from '../../store/snapshot-delta.js';
@@ -34,6 +35,9 @@ async function setupProtection(github: { branchProtection?: (requireNativeReview
   const protection = await github.branchProtection(false, true);
   return protection.protected ? 'complete' : protection.requiredChecks.length ? 'checks' : 'off';
 }
+
+/** `project` on /api/status: the delivery in force, or why its declaration is refused (the defaults are then not claimed). */
+const projectStatus = () => { const { delivery, error } = projectDelivery(); return { delivery, ...(error ? { error } : {}) }; };
 
 /** Control-plane status and the work reads every client polls. */
 export const statusRoutes = defineRoutes('status', [
@@ -107,6 +111,9 @@ export const statusRoutes = defineRoutes('status', [
         directMerge: await directMergeStatus(engine.store.pool, engine.directMergeEnvironment, observedAt),
         // The merger setting (merger-mode.ts): which writer lands heads, and one line while it is the control plane.
         mergeWriter: await mergeWriterStatus(engine.store.pool),
+        // The project's effective delivery defaults, applications and case bindings (GY-1901), from the
+        // committed policy the install deployed, else the checkout's graphyard.json, else the defaults.
+        project: projectStatus(),
         // Heartbeat latency and the renewals refused or failed server-side, this process, last 10 minutes (GY-558).
         leaseHealth: engine.leaseHealth.report(),
         // The first-run facts the Setup page and `graphyard up` read beside the App and the fleet (GY-1419):

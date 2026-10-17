@@ -37,7 +37,9 @@ Every 30s the guard reruns, reverting merges failing checks parents passed; the 
 
 ## Managed repositories
 
-`init --scan` splits checks (`delivery.mergeGate`/per-candidate); `--apply` renders `graphyard-release-candidate.yml` (`candidateSchedule`/`--candidate-cron CRON|off`), `graphyard-promotion.yml`. `deploy.adapter`: `railway` or `command` (`deploy.uat`/`deploy.production` with `GRAPHYARD_CANDIDATE_SHA`; unset none). `--delivery per-pr` keeps per-PR checks; `install --plan` lists resources.
+`init --scan` splits checks (`delivery.mergeGate`/per-candidate); `--apply` renders `graphyard-release-candidate.yml` (`candidateSchedule`/`--candidate-cron CRON|off`), `graphyard-promotion.yml`. `deploy.adapter`: `railway` or `command` (`deploy.uat`/`deploy.production` with `GRAPHYARD_CANDIDATE_SHA`; unset none). `--delivery local|per-pr` overrides; `install --plan` lists resources.
+
+`mode: local` (`control-plane` merger's `init --scan` default): `{"previews":"local","candidateMaxChanges":5,"productionVerification":true}`, `command` adapter, no workflow; `delivery.applications` `{id,kind:"static",directory,build}`/`{id,kind:"compose",file,service,port}`; `delivery.cases` case→application (tag/sole application); invalid ones refuse `init`/`install`/`/api/status` (`project.error`); sidebar **Delivery** shows `project.delivery` (`GRAPHYARD_PROJECT_DELIVERY`).
 
 **`graphyard.json` policy**: `risk.sensitive` `{rule,glob}`, else generic; `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; `release.onFailure` `revert`/`hold`; deployed `GRAPHYARD_REPOSITORY_POLICY`; `doctor` prints it.
 

@@ -7,7 +7,8 @@ import { configHome } from './install/secrets.js';
 import { sessionNameField, suffixedSessionName } from './session-name.js';
 import { installDirectory, readInstallRecord } from './install/secrets.js';
 import { installIdFor } from './install/types.js';
-import { defaultCandidateSchedule, deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy, type GateCheck, type MergeGate } from './model/delivery-policy.js';
+import { applicationProblems, caseIdsOf, detectApplications } from './project-applications.js';
+import { defaultCandidateSchedule, deliveryPolicySchema, generatedWorkflowFiles, localDeliveryDefaults, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy, type GateCheck, type MergeGate } from './model/delivery-policy.js';
 import { onboardingBranch, onboardingWorkRequest, pullRequestNumber } from './model/onboarding-work.js';
 
 export function repositoryFromRemote(remote: string) {
@@ -83,7 +84,7 @@ const scanInteresting: RegExp[] = [
   /^package\.json$/, /^pyproject\.toml$/, /^requirements(?:-dev)?\.txt$/, /^setup\.(?:py|cfg)$/, /^Pipfile$/, /^tox\.ini$/,
   /^Dockerfile(?:\.[^/]*)?$/, /^(?:docker-)?compose\.ya?ml$/, /^railway\.(?:json|toml)$/, /^vercel\.json$/, /^fly\.toml$/, /^netlify\.toml$/,
   /^\.nojekyll$/, /^CNAME$/, /^index\.html$/, /^\.env\.example$/, /^pytest\.ini$/, /^conftest\.py$/,
-  /^\.github\/workflows\/[^/]+\.ya?ml$/, /^graphyard\.json$/,
+  /^\.github\/workflows\/[^/]+\.ya?ml$/, /^graphyard\.json$/, /^e2e\/cases\/[^/]+\.json$/,
 ];
 const scanLimits = { files: 5000, depth: 6, bytes: 262_144 };
 
@@ -419,21 +420,37 @@ export function deliveryWorkflowGate(classified: MergeGate, mode: DeliveryMode):
  * The repository's delivery policy as a scan proposes it: the committed graphyard.json `delivery`
  * when the repository has one (its own reviewed choice, which a rescan must not undo), otherwise
  * the classified split, the adapter the deploy target implies, and the default cadence. Explicit
- * choices passed to `init --scan` win over both.
+ * choices passed to `init --scan` win over both. A repository with no committed policy whose control
+ * plane merges (`merger` control-plane, the default of a new install) is proposed the local mode
+ * (GY-1901) with its detected applications and case bindings; an explicit `github` merger, or one
+ * not known, keeps the GitHub release-candidate or per-PR model.
+ * A committed declaration whose applications or case bindings are invalid refuses with the reason.
  */
-export function proposeDelivery(input: ScanInput, deploy: DeployDetection, stack: StackDetection, overrides: { mode?: DeliveryMode; candidateSchedule?: string | null } = {}): DeliveryPolicy {
+export function proposeDelivery(input: ScanInput, deploy: DeployDetection, stack: StackDetection, overrides: { mode?: DeliveryMode; candidateSchedule?: string | null; merger?: string | null } = {}): DeliveryPolicy {
   let committed: DeliveryPolicy | null = null;
-  const parsed = deliveryPolicySchema.safeParse(parseJson(input, 'graphyard.json')?.delivery);
+  const declared = parseJson(input, 'graphyard.json')?.delivery;
+  const parsed = deliveryPolicySchema.safeParse(declared);
   if (parsed.success) committed = parsed.data;
+  else if (declared !== undefined) {
+    const declarations = parsed.error.issues.filter(issue => ['applications', 'cases'].includes(String(issue.path[0])));
+    if (declarations.length) throw new Error(`graphyard.json delivery declares applications or case bindings Graphyard cannot use: ${declarations.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ')}. Correct them (docs/delivery.md#managed-repositories), then rescan`);
+  }
+  const unknownCases = committed ? applicationProblems(committed, caseIdsOf(input.files)).filter(problem => problem.includes('does not exist')) : [];
+  if (unknownCases.length) throw new Error(`${unknownCases.join('; ')} (docs/delivery.md#managed-repositories)`);
   // A repository with no deploy target has no UAT or production to promote a candidate to, so
-  // each pull request is its own delivery and merged is its end state (setup-from-zero step 12).
-  const mode = overrides.mode ?? committed?.mode ?? (deploy.target === 'none' ? 'per-pr' : 'release-candidate');
+  // under the GitHub merger each pull request is its own delivery (setup-from-zero step 12).
+  const mode = overrides.mode ?? committed?.mode ?? (overrides.merger === 'control-plane' ? 'local' : deploy.target === 'none' ? 'per-pr' : 'release-candidate');
   const mergeGate = committed?.mergeGate ?? (hasNoCi(input) ? deliveryWorkflowGate(classifyChecks(input, stack), mode) : classifyChecks(input, stack));
+  // The local mode deploys through commands the operator names, never a Railway adapter it would depend on.
+  const adapter = mode === 'local' || deploy.target !== 'railway' ? 'command' : 'railway';
+  const local = mode === 'local' ? { ...localDeliveryDefaults, ...detectApplications(input.files, input.contents, stack.commands.find(command => command.check === 'build')?.command ?? null) } : {};
+  const kept = Object.fromEntries((['previews', 'candidateMaxChanges', 'productionVerification', 'applications', 'cases'] as const).filter(key => committed?.[key] !== undefined).map(key => [key, committed![key]]));
   return deliveryPolicySchema.parse({
     mode,
     mergeGate,
     candidateSchedule: overrides.candidateSchedule !== undefined ? overrides.candidateSchedule : committed ? committed.candidateSchedule : defaultCandidateSchedule,
-    deploy: committed?.deploy ?? { adapter: deploy.target === 'railway' ? 'railway' : 'command', project: null, uat: null, production: null },
+    deploy: committed?.deploy ?? { adapter, project: null, uat: null, production: null },
+    ...local, ...kept,
   });
 }
 
@@ -447,7 +464,10 @@ export function describeMergeGate(policy: DeliveryPolicy): string[] {
   return [
     ...policy.mergeGate.preMerge.map(entry => `pre-merge — ${line(entry)}`),
     ...policy.mergeGate.perCandidate.map(entry => `per-candidate — ${line(entry)}`),
-    `candidates: ${policy.candidateSchedule ? `cut on schedule ${policy.candidateSchedule} and on demand` : 'cut on demand only'}; deployed to UAT then production through the ${policy.deploy.adapter} adapter`,
+    ...(policy.mode === 'local' ? [
+      `local: changes preview locally (${policy.previews ?? 'local'}), candidates hold at most ${policy.candidateMaxChanges ?? 5} changes, production verification ${policy.productionVerification === false ? 'off' : 'required'}; no GitHub Actions workflow is generated`,
+      ...(policy.applications ?? []).map(application => `application ${application.id} (${application.kind}: ${application.kind === 'static' ? application.directory : `${application.file} ${application.service}:${application.port}`}), cases ${Object.entries(policy.cases ?? {}).filter(([, id]) => id === application.id).map(([id]) => id).join(', ') || 'none'}`),
+    ] : [`candidates: ${policy.candidateSchedule ? `cut on schedule ${policy.candidateSchedule} and on demand` : 'cut on demand only'}; deployed to UAT then production through the ${policy.deploy.adapter} adapter`]),
   ];
 }
 
@@ -503,7 +523,7 @@ export const setupProposalSchema = z.object({
 }).strict();
 export type SetupProposal = z.infer<typeof setupProposalSchema>;
 
-export function buildProposal(input: ScanInput, options: { repository?: string | null; server?: string | null; runtimes?: string[]; credentialDirectory?: string; delivery?: { mode?: DeliveryMode; candidateSchedule?: string | null } } = {}): SetupProposal {
+export function buildProposal(input: ScanInput, options: { repository?: string | null; server?: string | null; runtimes?: string[]; credentialDirectory?: string; delivery?: { mode?: DeliveryMode; candidateSchedule?: string | null; merger?: string | null } } = {}): SetupProposal {
   const stack = detectStack(input);
   const deploy = detectDeploy(input, stack);
   const database = hasSharedDatabase(input);

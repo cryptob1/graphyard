@@ -294,7 +294,7 @@ export function handoff(work: any, status: any, hostId: string, cliPath: string)
 export const proposalFileName = 'setup-proposal.json', appliedFileName = 'repository-setup.json';
 
 /** Read-only scan plus the proposal it produces. Nothing is written here. */
-export async function scanProposal(root: string, options: { url?: string | null; runtimes?: string[]; delivery?: { mode?: DeliveryMode; candidateSchedule?: string | null } } = {}) {
+export async function scanProposal(root: string, options: { url?: string | null; runtimes?: string[]; delivery?: { mode?: DeliveryMode; candidateSchedule?: string | null; merger?: string | null } } = {}) {
   const [input, detected] = await Promise.all([collectScanInput(root), discover(root)]);
   return buildProposal(input, { repository: detected.repository, server: options.url ?? null, runtimes: options.runtimes, delivery: options.delivery });
 }
