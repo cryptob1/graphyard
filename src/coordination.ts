@@ -137,6 +137,12 @@ export function stageWaitMs(item: Pick<Work, 'stageEnteredAt' | 'createdAt'>, no
   return Number.isNaN(since) ? Infinity : now - since;
 }
 const starving = (item: Work, now: number | undefined) => now !== undefined && stageWaitMs(item, now) >= dispatchStarvationMs;
+/**
+ * True when the item already carries an attempt: a standing submission (a returned rework) or a
+ * recorded pipeline attempt (a retry whose earlier try ended without submitting). `dispatchSort`
+ * reads it once per sort, like starvation.
+ */
+const attempted = (work: Work) => !!work.submission || (work.pipeline?.attempts.length ?? 0) > 0;
 function dispatchRank(a: Work, b: Work, hot: ReadonlySet<string>, starvingA: boolean, starvingB: boolean) {
   const left = scopeBreadth(a.plannedFiles), right = scopeBreadth(b.plannedFiles);
   const hotA = touchesHot(a, hot), hotB = touchesHot(b, hot);
@@ -148,10 +154,21 @@ function dispatchRank(a: Work, b: Work, hot: ReadonlySet<string>, starvingA: boo
 export function dispatchOrder(a: Work, b: Work, hot: ReadonlySet<string> = new Set(), now?: number) {
   return dispatchRank(a, b, hot, starving(a, now), starving(b, now));
 }
-/** `items` in dispatch order, each item's starvation read once rather than on every comparison. */
+/**
+ * `items` in dispatch order, each item's starvation read once rather than on every comparison.
+ * Within one priority, an item that already carries an attempt is offered before a never-attempted
+ * one (GY-1891), ahead of the starvation, hot-file and scope keys `dispatchRank` decides: a returned
+ * rework has been built and reviewed once and is the nearest thing to a merge, so holding it while
+ * fresh work starts only raises work in progress. Within each group the existing order stands
+ * unchanged, and priority still decides first. The pairwise `dispatchOrder` keeps the scope/heat/wait
+ * order it has always had; whole-set ordering goes through here, as the loop's dispatch step and
+ * master status's schedule already do.
+ */
 export function dispatchSort(items: readonly Work[], hot: ReadonlySet<string> = new Set(), now?: number) {
-  const starved = new Map(items.map(item => [item, starving(item, now)]));
-  return [...items].sort((a, b) => dispatchRank(a, b, hot, starved.get(a)!, starved.get(b)!));
+  const starved = new Map(items.map(item => [item, starving(item, now)])), attemptedOnce = new Map(items.map(item => [item, attempted(item)]));
+  return [...items].sort((a, b) => a.priority - b.priority
+    || (attemptedOnce.get(a)! !== attemptedOnce.get(b)! ? (attemptedOnce.get(a)! ? -1 : 1) : 0)
+    || dispatchRank(a, b, hot, starved.get(a)!, starved.get(b)!));
 }
 
 export function diagnose(work: Work, all: Work[], now: number, jobs: IntegrationJob[] = []): Diagnostic[] {
