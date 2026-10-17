@@ -15,7 +15,13 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 ## GitHub administration through the browser
 
-`master protection --apply` reconciles protection; flows (`master browser app-permissions`, `master browser installation-accept`, `master browser protection`) drive the `master init --browser-profile` profile.
+`master protection --apply` reconciles protection; flows (`master browser app-permissions`, `master browser installation-accept`, `master browser protection`) drive the `master init --browser-profile` profile:
+
+| Flow | Effect
+| --- | ---
+| `app-permissions` | Permissions raised
+| `installation-accept` | Requests accepted
+| `protection` | Protection reconciled
 
 Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` (`record.json`, `ledger.json`, redacted Confirm-access markup: `master browser fixtures`); a criterion needing a live one runs `master browser capture [--dry-run]` on the sudo-protected App permissions page, submitting nothing, never a human, following each offered method's control as a button or a link; a refused capture's record names the controls it saw. Approving *Confirm access* GitHub Mobile on device: human-only; master never stores cookies, uses merge bypass, pushes code, reads worker credentials. On classifier refusals `master harness claude|codex --apply` writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`, token-minting or mutating `gh api`; missing/retired rules: `harness` drift, reapplied each cycle to the loop's CLI checkout; `master status` too.
 
@@ -35,7 +41,7 @@ Unacted producer requests (unstarted/refused/launch-exited) relaunch on untried 
 
 ## Fault classes
 
-`faultClass` (`master status` `faults`): recurring classes file one item each; instances predating a delivered class's fix-running landing (serving, not merge) link there; triage proposes closing items holding only those, withdrawn on post-running links; doctor matches standing/cover; a resource at bound files `resource:ID`; three straight >60s cycles (restart-safe) file `slow-loop:RELEASE:STEP` naming p50/p95, step, call; filings outlive releases; asks replay per key, backing off; `fleet-capacity`/`unanswered-request` (past `settledAnswerGraceMs`), `configuration`/`decision-unanswered`/`unclassified` unless (`plane-unavailable`/`fix-item`/`decision-stale`/`overlong-session`). Review unlaunched 15min: `concurrency-starved`/`review-settlement`/`launch-review`; gh pauses `github-budget`. `no master role` blockers group as `configuration`, not `stalled-gate`. Pre-start launch failures: one; a session finished against its live lease files `session` only past the orphan watch and gone-worker preserve, or their first 30 minutes.
+`faultClass` (`master status` `faults`): recurring classes file one item each; instances predating a delivered class's fix-running landing (serving, not merge) link there; triage proposes closing items holding only those, withdrawn on post-running links; doctor matches standing/cover; a resource at bound files `resource:ID`; three straight >60s cycles (restart-safe) file `slow-loop:RELEASE:STEP` naming p50/p95, step, call; filings outlive releases; asks replay per key, backing off; `fleet-capacity`/`unanswered-request` (past `settledAnswerGraceMs`), `configuration`/`decision-unanswered`/`unclassified` unless (`plane-unavailable`/`fix-item`/`decision-stale`/`overlong-session`). Review unlaunched 15min: `concurrency-starved`/`review-settlement`/`launch-review`; gh pauses `github-budget`. `no master role` blockers group as `configuration`, not `stalled-gate`. Pre-start launch failures: one; a finished lease-holder files `session` past the orphan watch and gone-worker preserve.
 
 ## Shadow merge gate
 
