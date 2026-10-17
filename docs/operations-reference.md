@@ -52,7 +52,7 @@ Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`).
 
 ### The merge-path reserve
 
-Below **500 requests** unless `GRAPHYARD_GITHUB_RESERVE`, non-merge observations await reset (`githubBudget.deferrals`); token (`githubBudget.tokens`) projected below reserve at reset raises `github`.
+Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observations await reset (`githubBudget.deferrals`); token (`githubBudget.tokens`) projected below reserve at reset raises `github`.
 
 ### What an observation costs
 
@@ -64,7 +64,7 @@ Below **500 requests** unless `GRAPHYARD_GITHUB_RESERVE`, non-merge observations
 
 ### Reading the budget
 
-`graphyard status` (`GET /api/status`) → `githubBudget`; `billable` (also `master status`): REST-only `perHour` across replicas (`instances`), `limit`/`share`/`target` 0.6/`byEndpoint`; `lastHour` (also `master status`): the hour's requests by kind. Immutable, per-cycle, webhook-driven reads [aren't repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
+`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also `master status`): REST-only `perHour` across replicas (`instances`), `limit`/`share`/`target` 0.6/`byEndpoint`; `lastHour` (also `master status`): the hour's requests by kind. Immutable, per-cycle, webhook-driven reads [aren't repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
 
 ### Reading under control-plane
 
@@ -76,7 +76,7 @@ Below **500 requests** unless `GRAPHYARD_GITHUB_RESERVE`, non-merge observations
 
 ## Control-plane resources
 
-`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume+`GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes[:ROOT]`, per `TMPDIR`/`/tmp` (any-name checkout/worktree unheld, unregistered 24h; <25% free: escalates, naming consumers); `loaded-revision`: code moves. No fault: owed restart within bound, pane unowned <10min, `/tmp` >10% free <30min past a ≥25% pass.
+`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume+`GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes[:ROOT]`, per `TMPDIR`/`/tmp` (any-name checkout/worktree unheld and unregistered 24h; <25% free: escalates, naming consumers); `loaded-revision`: code moves. No fault: owed restart within bound, pane unowned <10min, `/tmp` >10% free <30min past a ≥25% pass.
 
 Session-started `npm test`/`test:browser`/typecheck/`tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`); CI unbounded. Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; one fault per dip) until 1GB above.
 
@@ -119,4 +119,4 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ### Concurrent reconciliation
 
-Reconcile evaluates moved rows, all ≥ max(`GRAPHYARD_RECONCILE_FULL_MS` (10000), 3× the last full pass); ticks >5s log `reconciliation tick took N ms`: moved key+fields, interval, event-loop lag p50/max; own-write moves re-evaluate only readers. Batches evaluate lock-free, yield between items, write each under coordination+row locks; heartbeats lock only their item (renewal ≤1s).
+Reconcile evaluates moved rows, all ≥ max(`GRAPHYARD_RECONCILE_FULL_MS` (10000), 3× last full pass); ticks >5s log `reconciliation tick took N ms`: moved key+fields/interval, event-loop lag p50/max; own-write moves re-evaluate only readers. Batches evaluate lock-free, yield between items, write each under coordination+row locks; heartbeats lock only their item (renewal ≤1s).
