@@ -323,7 +323,7 @@ export function approvedUnappliedSince(watch: Pick<ApprovalWatch, 'decision' | '
 export interface ActionableSubject { key: string; kind: DaemonActionKind; work: string | null; detail: string }
 export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run'>, work: Work[], now: number,
   context: { assessments?: Record<string, ContainmentAssessment>; approvals?: DaemonState['approvals']; baseFailed?: Map<string, Set<string>>; docsSyncs?: DaemonState['docsSyncs'];
-    /** GY-1890: the cycle's profile read found no free launch profile, so a claimable item's wait is the fleet's slot capacity, not the loop's silence. */ fleetHeld?: boolean } = {}): ActionableSubject[] {
+    /** GY-1890: the dispatch step stopped on a saturated fleet — no launch profile free by its own `saturatedFleet` decision — so a claimable item's wait is the fleet's slot capacity, not the loop's silence. */ fleetHeld?: boolean } = {}): ActionableSubject[] {
   const subjects: ActionableSubject[] = [];
   // The silence record keeps each detail to 500 characters; a refusal or proof list quoted here is cut to fit.
   const add = (kind: DaemonActionKind, item: Work | null, detail: string) => subjects.push({ key: `${kind}:${item?.key ?? 'pipeline'}`, kind, work: item?.key ?? null, detail: boundDetail(detail, 500) });

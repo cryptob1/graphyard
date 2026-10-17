@@ -14,7 +14,7 @@ import { coordinateAttempts, coordinateRetryMs, registeredLaunch } from '../mode
 import type { SessionHandleInput } from '../model/sessions.js';
 import { type DaemonAction, message } from './state.js';
 import { decisionKey, dispatchKey } from './reconcile.js';
-import { clearProfileFailure, occupiesRoleBound, profileHealth, readyToRetry, recordProfileFailure } from './sessions.js';
+import { clearProfileFailure, occupiesRoleBound, profileHealth, readyToRetry, recordProfileFailure, type ProfileHealth } from './sessions.js';
 import { detailChanged, fitDecisionReason, routineDecision } from './decisions.js';
 import { capacityKey, record, stoppedStates } from './effects.js';
 import type { Cycle } from './cycle.js';
@@ -82,10 +82,25 @@ export async function rekeyLaunchedSession(record: ((handle: SessionHandleInput)
   return { outcome: 'failed', from: handle.id, to: moved, reason: reason.slice(0, 300) };
 }
 
+/**
+ * GY-1890: whether the launch step's own dispatch is stopped by a saturated fleet — some launch
+ * profile could take work if it were free (`busy` counts: a profile that is working is capacity,
+ * not a breakdown), and none is both healthy and not already held by an in-flight launch. The
+ * step's hold branch below and the measure's reclassification of a claimable item's wait decide
+ * by this one predicate, so the signal that reclasses a subject is the step's own decision. A
+ * fleet with no launch profile, or none that could take work even free (every credential spent,
+ * every profile cooling off after a failed launch), is not saturation: that is the escalation,
+ * whose remedy is a working credential, not a bigger fleet.
+ */
+export function saturatedFleet(health: readonly ProfileHealth[], taken: ReadonlySet<string>): boolean {
+  const launchable = health.filter(entry => entry.profile.mode === 'launch');
+  return launchable.length > 0 && launchable.some(entry => entry.healthy || entry.busy) && !launchable.some(entry => entry.healthy && !taken.has(entry.profile.name));
+}
+
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
 export const dispatchStep = (cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) =>
-  withinStepBudget(cycle, 'dispatch', ['decide', 'approver', 'agents', 'roleHealth', 'escalationSessions', 'reportCapacity', 'planeHealth', 'hostMemory', 'blockDispatch', 'decisions', 'recordDecomposition', 'recordResearch'], bounded => dispatchStepWithin(bounded, health, assessments)); // GY-1774: every call the step makes — the role and plane health reads, the escalation listing, each capacity report, the memory reading, the split and research records, the blocker record, the decision history, the cap decision and its approver launch — is bounded
-async function dispatchStepWithin(cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) {
+  withinStepBudget(cycle, 'dispatch', ['decide', 'approver', 'agents', 'roleHealth', 'escalationSessions', 'reportCapacity', 'planeHealth', 'hostMemory', 'blockDispatch', 'decisions', 'recordDecomposition', 'recordResearch'], bounded => dispatchStepWithin(bounded, cycle, health, assessments)); // GY-1774: every call the step makes — the role and plane health reads, the escalation listing, each capacity report, the memory reading, the split and research records, the blocker record, the decision history, the cap decision and its approver launch — is bounded; the body runs on a copy of the cycle, so its saturation report is set on the original the measure reads
+async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, credentials, open } = cycle;
   // 4. Dispatch claimable work to a healthy profile. The launcher claims under the worker's own
   //    identity; the daemon never holds a lease. An unhealthy profile is skipped, not waited on.
@@ -309,22 +324,29 @@ async function dispatchStepWithin(cycle: Cycle, health: ReturnType<typeof profil
     let choice = pick();
     if (!choice) {
       // Every launch profile working is capacity, not a decision for anyone. Escalate only when no
-      // profile could take work even if it were free.
+      // profile could take work even if it were free, which `saturatedFleet` refuses.
       const launchable = health.filter(entry => entry.profile.mode === 'launch');
-      if (!launchable.some(entry => entry.healthy || entry.busy)) {
+      if (!saturatedFleet(health, taken)) {
         const detail = `No worker profile can take ${item.key}: ${launchable.map(entry => `${entry.profile.name} (${entry.reason})`).join('; ') || 'no launch profile is configured'}`;
         const escalationKey = `escalation:dispatch:${item.id}`;
         if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       } else {
         // GY-1890: the fleet is saturated — every profile is held by a live attempt or otherwise
         // unavailable while work is claimable. That wait is the fleet's slot capacity, so it is
-        // recorded on the item as the finding it is (the measure reads the same cycle's profile
-        // read and counts the subject under capacity, never as the loop's silence). Without this
-        // record the launch step said nothing at all about a queue it correctly declined to launch
-        // into, and the silence bound filed the loop class for a wait only a worker finishing ends.
-        const heldDetail = `Every worker profile is held while ${item.key} is claimable (${launchable.map(entry => `${entry.profile.name}${entry.reason ? `: ${entry.reason}` : ': held for an in-flight launch'}`).join('; ')}); ${item.key} keeps its dispatch order and starts when a slot frees`;
+        // recorded on the item as the finding it is, and `cycle.fleetHeld` reports this stop so
+        // the measure counts the subject under capacity, never as the loop's silence. Without
+        // this record the launch step said nothing at all about a queue it correctly declined to
+        // launch into, and the silence bound filed the loop class for a wait only a worker
+        // finishing ends. The detail names the held profiles and nothing that moves — an agent's
+        // live status and a cooldown instant change every cycle, and a detail that moved with them
+        // would re-record for a fleet that has not moved — and the record acts on no subject
+        // (`work: null`), so the item's wait keeps running to the bound instead of restarting on
+        // the loop's own finding of it.
+        // `saturation` is the cycle the measure reads: the bounded `cycle` here is its copy (GY-1774).
+        saturation.fleetHeld = true;
+        const heldDetail = `Every worker profile is held while ${item.key} is claimable (${launchable.map(entry => entry.profile.name).join(', ')}); ${item.key} keeps its dispatch order and starts when a slot frees`;
         const heldKey = `capacity:${item.id}`;
-        if (detailChanged(state.actions[heldKey], heldDetail)) performed.push(await record(state, heldKey, { kind: 'capacity', work: item.key, principal: null, state: 'done', detail: heldDetail, attempts: (state.actions[heldKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+        if (detailChanged(state.actions[heldKey], heldDetail)) performed.push(await record(state, heldKey, { kind: 'capacity', work: null, principal: null, state: 'done', detail: heldDetail, attempts: (state.actions[heldKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       }
       return 'stop';
     }

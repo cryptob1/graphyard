@@ -301,12 +301,12 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
     const sample = observeItemClock(state, item, clock);
     if (sample) state.latency.push(sample);
   }
-  // GY-1890: the same profile read the dispatch step acted on answers whether any launch profile is
-  // free. With none free a claimable item's wait is the fleet's slot capacity, so its silence subject
-  // is a capacity one; the bound then files the class that owns slot starvation, never the loop's.
-  const launchProfiles = health.filter(entry => entry.profile.mode === 'launch');
-  const fleetHeld = launchProfiles.length > 0 && !launchProfiles.some(entry => entry.healthy && !entry.busy);
-  const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals, baseFailed: cycle.baseFailed, docsSyncs: state.docsSyncs, fleetHeld });
+  // GY-1890: the dispatch step's own saturation report answers whether any launch profile was free
+  // when it dispatched. With none free a claimable item's wait is the fleet's slot capacity, so its
+  // silence subject is a capacity one; the bound then files the class that owns slot starvation,
+  // never the loop's. The flag is the step's own stop (`saturatedFleet` in the launch step), not a
+  // recomputation beside it, so what reclasses a subject is what the step decided.
+  const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals, baseFailed: cycle.baseFailed, docsSyncs: state.docsSyncs, fleetHeld: cycle.fleetHeld });
   const silence = trackSilence(state, actionable, performed, clock);
   const { stages, lead, production, postDeploy, postDeployFailures } = stageMetrics(snapshot.work, clock);
   // The cycle's duration, and of it the time at least one child was in flight: the difference is
@@ -379,6 +379,8 @@ export interface Cycle {
   launch: (kind: DaemonActionKind, item: Work | null, key: string, holds: string[], body: (sink: DaemonAction[]) => Promise<void>) => boolean;
   /** Whether launches outlive this cycle (the loop's launcher), or are settled within it (a cycle run on its own). */
   detached: boolean;
+  /** GY-1890: the dispatch step stopped on a saturated fleet this cycle — no launch profile free while work is claimable, by `saturatedFleet`. The measure reads this, the step's own decision, to count a claimable item's wait under capacity instead of the loop's silence. Absent where the step never stopped. */
+  fleetHeld?: boolean;
   /** The decision histories read on earlier cycles of this loop (GY-1142), which the decisions step keeps while their ledger has not moved. */
   heldDecisions: HeldDecisions;
   /** The panes this cycle's steps have closed so far: the cycle-start inventory still lists them. */
