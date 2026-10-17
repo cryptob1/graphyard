@@ -804,7 +804,12 @@ export async function validate(candidate: ReleaseCandidate, url: string, suites:
   if (before !== candidate.sha) return assessUat(candidate, { deployedSha: before, suites: [], now: clock(), digests: options.digests });
   const results: SuiteResult[] = [];
   for (const suite of suites) results.push(await suite.run(url, candidate));
-  const after = await readServed(url, options.fetcher);
+  // A read that answers nothing (UAT busy after the suites) is read again, a few times; only a different commit means UAT moved.
+  let after = await readServed(url, options.fetcher);
+  for (let retry = 0; after === null && retry < 3; retry++) {
+    await (options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(5_000);
+    after = await readServed(url, options.fetcher);
+  }
   if (after !== candidate.sha) results.push({ name: 'deployment', passed: false, detail: `UAT moved from ${candidate.sha} to ${after ?? 'no observable commit'} while the suites ran` });
   return assessUat(candidate, { deployedSha: candidate.sha, suites: results, now: clock(), digests: options.digests });
 }
