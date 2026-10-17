@@ -133,7 +133,7 @@ export interface ObserveOnlyChoice {
  * It touches nothing else, so every flag but --repo and --base-branch is refused beside it.
  */
 export interface RestoreProtectionChoice { restoreProtection?: boolean }
-export interface ProtectionRestorePlan { version: 1; action: 'restore-protection'; repository: string; branch: string; record: string; recordedAt: string; changes: RestoreChange[]; operatorRulesets?: { rulesets: { id: number; name: string }[]; restored: false; note: string } }
+export interface ProtectionRestorePlan { version: 1; action: 'restore-protection'; repository: string; branch: string; record: string; recordedAt: string | null; changes: RestoreChange[]; operatorRulesets?: { rulesets: { id: number; name: string }[]; restored: false; note: string } }
 export type InstallRequest = InstallInputs & HerdrChoice;
 /** The variables an App binding writes; `--no-github-app` leaves every one of them unset. */
 export const APP_VARIABLES = ['GITHUB_APP_ID', 'GITHUB_INSTALLATION_ID', 'GITHUB_PRIVATE_KEY', 'GITHUB_WEBHOOK_SECRET', 'GITHUB_CI_APP_IDS'] as const;
@@ -659,26 +659,55 @@ async function prepareRestore(rawInputs: InstallRequest & RestoreProtectionChoic
   const installId = installIdFor(rawInputs.repository);
   const directory = installDirectory(installId, dependencies.configHome);
   const record = await readProtectionRecord(directory);
-  if (!record) throw new Error(`No protection record exists for ${rawInputs.repository}: ${protectionRecordFile(directory)} is missing, so there is no pre-Graphyard protection to restore. Install writes it before its first branch-protection write.`);
-  if (record.repository.toLowerCase() !== rawInputs.repository.toLowerCase()) throw new Error(`The protection record ${protectionRecordFile(directory)} is for ${record.repository}, not ${rawInputs.repository}`);
-  if (rawInputs.baseBranch && rawInputs.baseBranch !== record.branch) throw new Error(`The protection record ${protectionRecordFile(directory)} is for branch ${record.branch}, not ${rawInputs.baseBranch}`);
   const transport = dependencies.transport ?? localTransport();
   const deps = { fetch, now: Date.now, wait: (ms: number) => new Promise<void>(accept => setTimeout(accept, ms)), log: (line: string) => console.error(line), ...dependencies };
+  if (!record) {
+    // An operator-ruleset install takes no classic record (GY-1926) but notes the rulesets it found:
+    // planRestore re-reads them and explains their restore route. With neither, it refuses as before.
+    const operator = await readOperatorRulesetNote(directory);
+    if (!operator || operator.repository.toLowerCase() !== rawInputs.repository.toLowerCase() || (rawInputs.baseBranch && rawInputs.baseBranch !== operator.branch)) throw new Error(`No protection record exists for ${rawInputs.repository}: ${protectionRecordFile(directory)} is missing, so there is no pre-Graphyard protection to restore. Install writes it before its first branch-protection write.`);
+    const missing: RestoreWithoutRecord = { repository: operator.repository, branch: operator.branch, file: operatorRulesetNoteFile(directory) };
+    return { inputs: { ...rawInputs, baseBranch: operator.branch }, installId, directory, mode, restore: null, restoreWithoutRecord: missing, vault: new Vault(), deps, context: { transport } } as unknown as InstallSession;
+  }
+  if (record.repository.toLowerCase() !== rawInputs.repository.toLowerCase()) throw new Error(`The protection record ${protectionRecordFile(directory)} is for ${record.repository}, not ${rawInputs.repository}`);
+  if (rawInputs.baseBranch && rawInputs.baseBranch !== record.branch) throw new Error(`The protection record ${protectionRecordFile(directory)} is for branch ${record.branch}, not ${rawInputs.baseBranch}`);
   // Only the fields buildPlan and applyInstall read on a restore are set: no provider is planned or deployed.
   return { inputs: { ...rawInputs, baseBranch: record.branch }, installId, directory, mode, restore: record, vault: new Vault(), deps, context: { transport } } as unknown as InstallSession;
 }
 
 /** The writes that return the branch to the record, against what GitHub answers now; nothing is written. */
 async function planRestore(session: InstallSession): Promise<ProtectionRestorePlan> {
-  const record = session.restore!;
   const gh = githubCli(session.context.transport);
+  const missing = (session as InstallSession & { restoreWithoutRecord?: RestoreWithoutRecord }).restoreWithoutRecord;
+  if (missing) {
+    const operator = await readOperatorRulesets(gh, missing.repository, missing.branch);
+    if (!operator.rulesets.length) throw new Error(`No protection record exists for ${missing.repository}, and no operator ruleset governs ${missing.branch} any more (${missing.file} noted one at install), so there is nothing install --restore-protection can restore`);
+    return { version: 1, action: 'restore-protection', repository: missing.repository, branch: missing.branch, record: missing.file, recordedAt: null, changes: [], operatorRulesets: operatorRestoreNote(operator.rulesets, missing.branch) };
+  }
+  const record = session.restore!;
   const changes = restoreChanges(record, await observeRestore(gh, record.repository, record.branch));
   // The record never holds the operator's rulesets (GY-1926): say so instead of implying their restore.
   const operator = await readOperatorRulesets(gh, record.repository, record.branch);
   return { version: 1, action: 'restore-protection', repository: record.repository, branch: record.branch, record: protectionRecordFile(session.directory), recordedAt: record.recordedAt, changes,
-    ...(operator.rulesets.length ? { operatorRulesets: { rulesets: operator.rulesets.map(ruleset => ({ id: ruleset.id, name: ruleset.name })), restored: false as const,
-      note: `install --restore-protection restores only classic protection, auto-merge and Graphyard's queue ruleset; operator ruleset(s) ${operator.rulesets.map(ruleset => ruleset.id).join(', ')} on ${record.branch} are restored only through graphyard master protection --restore SNAPSHOT, from a snapshot under .graphyard/protection-snapshots/` } } : {}) };
+    ...(operator.rulesets.length ? { operatorRulesets: operatorRestoreNote(operator.rulesets, record.branch) } : {}) };
 }
+interface RestoreWithoutRecord { repository: string; branch: string; file: string }
+/**
+ * What an install on an operator-ruleset base notes in place of the classic record (GY-1926): the
+ * repository, branch and governing rulesets, so `install --restore-protection` can name their route.
+ */
+const operatorRulesetNoteFile = (directory: string) => resolve(directory, 'operator-rulesets.json');
+async function writeOperatorRulesetNote(directory: string, note: { repository: string; branch: string; rulesets: { id: number; name: string }[]; snapshots: string; now: number }) {
+  await writeFile(operatorRulesetNoteFile(directory), `${JSON.stringify({ format: 'graphyard-operator-rulesets-v1', repository: note.repository, branch: note.branch, rulesets: note.rulesets, snapshots: note.snapshots, notedAt: new Date(note.now).toISOString() }, null, 2)}\n`, { mode: 0o600 });
+}
+async function readOperatorRulesetNote(directory: string): Promise<{ repository: string; branch: string } | null> {
+  let parsed: any;
+  try { parsed = JSON.parse(await readFile(operatorRulesetNoteFile(directory), 'utf8')); } catch (error: any) { if (error?.code === 'ENOENT') return null; throw new Error(`${operatorRulesetNoteFile(directory)} cannot be read: ${error.message}`); }
+  if (parsed?.format !== 'graphyard-operator-rulesets-v1' || typeof parsed.repository !== 'string' || typeof parsed.branch !== 'string') throw new Error(`${operatorRulesetNoteFile(directory)} is not a graphyard-operator-rulesets-v1 note`);
+  return { repository: parsed.repository, branch: parsed.branch };
+}
+const operatorRestoreNote = (rulesets: any[], branch: string) => ({ rulesets: rulesets.map(ruleset => ({ id: ruleset.id as number, name: ruleset.name as string })), restored: false as const,
+  note: `install --restore-protection restores only classic protection, auto-merge and Graphyard's queue ruleset; operator ruleset(s) ${rulesets.map(ruleset => ruleset.id).join(', ')} on ${branch} are restored only through graphyard master protection --restore SNAPSHOT, from a snapshot under .graphyard/protection-snapshots/` });
 
 export async function materializeInstall(session: InstallSession): Promise<InstallSession> {
   if (session.mode !== 'apply') throw new Error('Apply requires a session prepared in apply mode; --plan sessions create nothing');
@@ -984,7 +1013,7 @@ type WebhookProof = DeliveryProof & { skipped?: true };
 
 export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   // A restore session plans the restore, not an install; the CLI prints either plan as it is.
-  if (session.restore) return await planRestore(session) as unknown as InstallPlan;
+  if (session.restore || (session as any).restoreWithoutRecord) return await planRestore(session) as unknown as InstallPlan;
   if (session.inputs.bindApp) return buildBindAppPlan(session);
   const { adapter, context, record } = session;
   const preflight = await adapter.preflight(context);
@@ -1215,13 +1244,6 @@ function deliverySummary(session: InstallSession): InstallPlan['delivery'] {
     perCandidate: policy.mode === 'per-pr' ? [] : policy.mergeGate.perCandidate.map(entry => entry.check), adapter: policy.deploy.adapter };
 }
 
-
-/**
- * GitHub's answer for the base branch's protection, read before anything is created (GY-1413).
- * 404 (not protected yet) is fine: the plan creates it. 403 "Upgrade to GitHub Pro or make this
- * repository public" means a private repository on a free plan, which can never have branch
- * protection, so the merge gate is impossible — a human choice of public or paid, not an agent's.
- */
 /**
  * The plan's github.protection step on a base an operator ruleset governs (GY-1926): AC-2's add to
  * the one ruleset requiring checks, or the refusal naming each candidate. Classic protection is
@@ -1236,6 +1258,12 @@ function rulesetPlanAction(operator: OperatorRulesets, branch: string, appId: nu
       title: `Add ${GRAPHYARD_CHECKS.join(' and ')} from App ${appId ?? '<the bound App>'} to the required checks of operator ruleset ${target ? `${target.id} (${target.name})` : `<none qualifies among ${governing}>`} on ${branch}, after snapshotting it; every other rule, condition, bypass actor and check stays as the operator wrote it, and classic protection is never written while an operator ruleset governs ${branch}` } };
 }
 
+/**
+ * GitHub's answer for the base branch's protection, read before anything is created (GY-1413).
+ * 404 means no classic protection: the plan creates it, or extends the operator ruleset that governs the branch. 403 "Upgrade to GitHub Pro or make this
+ * repository public" means a private repository on a free plan, which can never have branch
+ * protection, so the merge gate is impossible — a human choice of public or paid, not an agent's.
+ */
 export async function protectionAvailability(gh: ReturnType<typeof githubCli>, repository: string, branch: string): Promise<PreflightItem> {
   const result = await gh(['api', `repos/${repository}/branches/${branch}/protection`], { allowFailure: true });
   const answer = `${result.stderr}\n${result.stdout}`;
@@ -1248,7 +1276,13 @@ export async function protectionAvailability(gh: ReturnType<typeof githubCli>, r
   // Only GitHub's 404 "Branch not protected" means unprotected. Any other failure (SSO, missing
   // admin rights, rate limit, 5xx, network) says nothing about the branch, so the preflight stops
   // here instead of deploying and failing later at github.protection.
-  if (/branch not protected/i.test(answer)) return { name: 'Branch protection', ok: true, detail: `${branch} is not protected yet; the plan creates its protection` };
+  if (/branch not protected/i.test(answer)) {
+    // A 404 means no classic protection, not an unprotected branch: an operator ruleset may govern it (GY-1926).
+    const operator = await readOperatorRulesets(gh, repository, branch).catch((error: Error) => error);
+    if (operator instanceof Error) return { name: 'Branch protection', ok: false, detail: `${repository}@${branch} has no classic protection (GitHub answered 404 Branch not protected), and its rulesets could not be read: ${operator.message}`, fix: `gh api repos/${repository}/rulesets, fix what GitHub answers, then rerun the installer` };
+    if (operator.rulesets.length) return { name: 'Branch protection', ok: true, detail: `${branch} has no classic protection; operator ruleset(s) ${operator.rulesets.map(ruleset => `${ruleset.id} (${ruleset.name})`).join(', ')} govern it, so the plan adds Graphyard's checks to the one requiring checks and writes no classic protection` };
+    return { name: 'Branch protection', ok: true, detail: `${branch} is not protected yet; the plan creates its protection` };
+  }
   const error = answer.trim().split('\n').filter(Boolean).at(-1) ?? `gh exited ${result.code}`;
   return {
     name: 'Branch protection', ok: false,
@@ -1393,6 +1427,10 @@ async function refuseMovedRoster(session: InstallSession) {
  * line and the summary.
  */
 export async function applyInstall(session: InstallSession, plan: InstallPlan): Promise<InstallSummary> {
+  if ((session as any).restoreWithoutRecord) {
+    // Nothing classic was recorded, so nothing is written: the plan's note names the operator rulesets' restore route.
+    return { ...(plan as unknown as ProtectionRestorePlan), restored: false, verified: false } as unknown as InstallSummary;
+  }
   if (session.restore) {
     // Exactly the reviewed plan's writes, then a re-read that must match the record.
     const restore = plan as unknown as ProtectionRestorePlan;
@@ -1621,12 +1659,14 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
     if (operator.rulesets.length) {
       // GY-1926: an operator ruleset governs the base, so no classic protection is recorded or written.
       const governing = operator.rulesets.map(ruleset => `${ruleset.id} (${ruleset.name})`).join(', ');
-      if (!mergeCheckExists) protectionDetail = `governed by operator ruleset(s) ${governing}; classic protection is not written, and ${GRAPHYARD_CHECKS.join(' and ')} are added to the ruleset once App ${facts.appId} has published them (rerun install --apply, or graphyard master protection --apply)`;
-      else {
-        const added = await applyOperatorRulesetAdd(gh, { repository: session.inputs.repository, baseBranch: session.inputs.baseBranch, githubAppId: facts.appId, snapshots: protectionSnapshots(session.root), now: deps.now() })
-          .catch((error: any) => { throw new Error(`${session.inputs.baseBranch} is governed by operator ruleset(s) ${governing}, so the installer writes no classic protection there, and adding Graphyard's checks was refused: ${error.message}`); });
-        protectionDetail = added.result;
-      }
+      await writeOperatorRulesetNote(session.directory, { repository: session.inputs.repository, branch: session.inputs.baseBranch, rulesets: operator.rulesets.map(ruleset => ({ id: ruleset.id, name: ruleset.name })), snapshots: protectionSnapshots(session.root), now: deps.now() });
+      const refused = (reason: string) => new Error(`${session.inputs.baseBranch} is governed by operator ruleset(s) ${governing}, so the installer writes no classic protection there, and adding Graphyard's checks was refused: ${reason}`);
+      // Requiring a check App ${facts.appId} has never published would block every pull request, so
+      // the add waits for it, and the install stops naming that refusal rather than finishing unprotected.
+      if (!mergeCheckExists) throw refused(`App ${facts.appId} has not yet published ${CHECK_NAME} on ${session.inputs.baseBranch}, so requiring it would block every pull request; once Graphyard has published it on a pull request, rerun install --apply (or graphyard master protection --apply)`);
+      const added = await applyOperatorRulesetAdd(gh, { repository: session.inputs.repository, baseBranch: session.inputs.baseBranch, githubAppId: facts.appId, snapshots: protectionSnapshots(session.root), now: deps.now() })
+        .catch((error: any) => { throw refused(error.message); });
+      protectionDetail = added.result;
     } else {
     const satisfied = protectionSatisfied(protectionInputs, current);
     // Before the first write, the protection, auto-merge and queue ruleset found are recorded once,

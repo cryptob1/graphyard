@@ -329,11 +329,12 @@ export function readProtection(config: { repository: string; baseBranch: string 
   catch (error: any) { if (!classicAbsent(`${error?.stderr ?? ''}\n${error?.message ?? ''}`)) throw error; answer = null; }
   const protection = answer === null ? {} : JSON.parse(answer);
   // The merge queue lives in the branch's rules, not its protection; an unreadable answer leaves it unknown.
-  let rules: unknown = null;
-  try { rules = JSON.parse(run('gh', ['api', `repos/${config.repository}/rules/branches/${encodeURIComponent(config.baseBranch)}`])); } catch { rules = null; }
+  // Both failures are kept: where an operator ruleset governs the base they refuse below (GY-1926).
+  let rules: unknown = null, rulesFailure: unknown = null;
+  try { rules = JSON.parse(run('gh', ['api', `repos/${config.repository}/rules/branches/${encodeURIComponent(config.baseBranch)}`])); } catch (error) { rules = null; rulesFailure = error; }
   // Who owns the repository decides whether it can have a merge queue at all.
-  let repository: any = null;
-  try { repository = JSON.parse(run('gh', ['api', `repos/${config.repository}`])); } catch { repository = null; }
+  let repository: any = null, repositoryFailure: unknown = null;
+  try { repository = JSON.parse(run('gh', ['api', `repos/${config.repository}`])); } catch (error) { repository = null; repositoryFailure = error; }
   const settings = repositoryMergeSettings(repository);
   let listed: any[] | null = null, listing: unknown = null;
   try {
@@ -351,8 +352,9 @@ export function readProtection(config: { repository: string; baseBranch: string 
     if (found?.id) queueRuleset = JSON.parse(run('gh', ['api', `repos/${config.repository}/rulesets/${found.id}`]));
   } catch { queueRuleset = null; }
   // With no classic protection, an unread listing would leave the branch's governance unknown.
-  if (!listed && answer === null) throw new Error(`${config.repository}@${config.baseBranch} has no classic protection, and GitHub did not answer its rulesets listing (${String((listing as any)?.stderr || (listing as any)?.message || listing).trim().split('\n')[0]}), so which rulesets govern it is unknown`);
-  const operator = listed ? readOperatorRulesetsSync(config, run, listed, repository?.default_branch ?? null) : null;
+  if (!listed && answer === null) throw new Error(`${config.repository}@${config.baseBranch} has no classic protection, and GitHub did not answer its rulesets listing (${failureLine(listing)}), so which rulesets govern it is unknown`);
+  const operator = listed ? readOperatorRulesetsSync(config, run, listed, repository ? repository.default_branch ?? null : undefined, repositoryFailure) : null;
+  if (operator?.length && rulesFailure) throw new Error(`Operator ruleset(s) ${operator.map(ruleset => `${ruleset.id} (${ruleset.name})`).join(', ')} govern ${config.repository}@${config.baseBranch}, and GitHub did not answer its effective rules (${failureLine(rulesFailure)}), so no protection change can be planned; rerun`);
   if (protection && typeof protection === 'object') {
     Object.defineProperty(protection, branchRules, { value: rules, enumerable: false });
     withMergeSettings(protection, settings);
@@ -540,13 +542,20 @@ export async function readOperatorRulesets(api: GhApi, repository: string, branc
   const effectiveRules = rulesets.length ? await confirmedGet(api, `repos/${repository}/rules/branches/${encodeURIComponent(branch)}`, `the effective rules of ${repository}@${branch}`) : null;
   return { rulesets, effectiveRules };
 }
-/** The synchronous read readProtection makes from the listing it already holds; a failed document read refuses. */
-function readOperatorRulesetsSync(config: { repository: string; baseBranch: string }, run: ProtectionRun, listed: any[], defaultBranch: string | null) {
+const failureLine = (error: any) => String(error?.stderr || error?.message || error).trim().split('\n')[0];
+const namesDefaultBranch = (document: any) => [...(document?.conditions?.ref_name?.include ?? []), ...(document?.conditions?.ref_name?.exclude ?? [])].includes('~DEFAULT_BRANCH');
+/**
+ * The synchronous read readProtection makes from the listing it already holds; a failed document read
+ * refuses, and so does an unread default branch (undefined) that a ruleset's ~DEFAULT_BRANCH needs.
+ */
+function readOperatorRulesetsSync(config: { repository: string; baseBranch: string }, run: ProtectionRun, listed: any[], defaultBranch: string | null | undefined, repositoryFailure: unknown) {
   const documents = listed.filter(operatorListed).map(entry => {
     try { return JSON.parse(run('gh', ['api', `repos/${config.repository}/rulesets/${entry.id}`])); }
-    catch (error: any) { throw new Error(`GitHub did not answer ruleset ${entry.id} of ${config.repository}: ${String(error?.stderr || error?.message || error).trim().split('\n')[0]}`); }
+    catch (error: any) { throw new Error(`GitHub did not answer ruleset ${entry.id} of ${config.repository}: ${failureLine(error)}`); }
   });
-  return governing(documents, config.baseBranch, defaultBranch);
+  const unresolved = defaultBranch === undefined ? documents.filter(document => !graphyardRulesets.includes(document?.name) && namesDefaultBranch(document)) : [];
+  if (unresolved.length) throw new Error(`GitHub did not answer the repository ${config.repository} (${failureLine(repositoryFailure)}), so whether operator ruleset(s) ${unresolved.map(document => `${document.id} (${document.name})`).join(', ')}, which target ~DEFAULT_BRANCH, govern ${config.baseBranch} is unknown; rerun`);
+  return governing(documents, config.baseBranch, defaultBranch ?? null);
 }
 
 /** The one operator ruleset that already requires checks on the base, or a refusal naming each candidate. */
@@ -598,21 +607,40 @@ async function readRuleset(api: GhApi, repository: string, id: number) {
   return document;
 }
 
+/** The rules a branch-rules answer should hold after EDIT: ruleset ID's required checks edited, every other rule and its provenance as read before. */
+function expectedEffective(before: any[], id: number, edit: (checks: any[]) => any[]) {
+  return before.map(rule => rule?.ruleset_id === id && rule?.type === 'required_status_checks' ? { ...rule, parameters: { ...rule.parameters, required_status_checks: edit(rule.parameters?.required_status_checks ?? []) } } : rule);
+}
+/** Null when AFTER holds exactly EXPECTED's rules (in any order), else what is missing and what is unexpected. */
+function effectiveMismatch(expected: any[], after: unknown, describe: string) {
+  if (!Array.isArray(after)) return `the effective rules of the base read back as ${JSON.stringify(after)}, not a list of rules`;
+  const remaining = after.map(canonical), missing: string[] = [];
+  for (const rule of expected.map(canonical)) { const at = remaining.indexOf(rule); if (at < 0) missing.push(rule); else remaining.splice(at, 1); }
+  return missing.length || remaining.length ? `the effective rules of the base differ from those read before the write by more than ${describe}: missing ${missing.join(', ') || 'nothing'}; unexpected ${remaining.join(', ') || 'nothing'}` : null;
+}
+const effectivePath = (repository: string, branch: string) => `repos/${repository}/rules/branches/${encodeURIComponent(branch)}`;
+
 /**
- * Snapshot ruleset ID's fresh document, PUT it with EDIT applied, then re-read the ruleset and the
- * branch's effective rules: both must show exactly the edit. On any mismatch the snapshot is put
- * back and its digest verified, and the refusal reports both.
+ * Snapshot ruleset ID's fresh document and write it with an edit. PREPARE judges the fresh document
+ * itself, so every precondition binds to what is written: it refuses by throwing, answers null when
+ * there is nothing to write, or answers the edit. The branch's effective rules are read before the
+ * write, and after it the ruleset and the effective rules must both differ by exactly that edit; on
+ * any mismatch the snapshot is put back and its digest verified, and the refusal reports both.
  */
-async function writeRulesetEdit(api: GhApi, input: { repository: string; branch: string; id: number; snapshots: string; now: number; describe: string; edit: (checks: any[]) => any[]; effective: (rules: unknown) => string | null }) {
+async function writeRulesetEdit(api: GhApi, input: { repository: string; branch: string; id: number; snapshots: string; now: number; describe: string; prepare: (fresh: any) => ((checks: any[]) => any[]) | null }) {
   const fresh = await readRuleset(api, input.repository, input.id);
+  const edit = input.prepare(fresh);
+  if (!edit) return null;
+  const before = await confirmedGet(api, effectivePath(input.repository, input.branch), `the effective rules of ${input.repository}@${input.branch}`);
+  if (!Array.isArray(before) || !before.some(rule => rule?.ruleset_id === input.id && rule?.type === 'required_status_checks')) throw new Error(`The effective rules of ${input.repository}@${input.branch} do not show ruleset ${input.id}'s required checks, so a write to it cannot be verified; nothing was written`);
   const snapshot = await saveSnapshot(input.snapshots, { repository: input.repository, branch: input.branch, document: fresh, now: input.now });
-  const expected = editChecks(rulesetBody(fresh), input.edit);
+  const expected = editChecks(rulesetBody(fresh), edit);
   let mismatch: string | null = null;
   try {
     await putRuleset(api, input.repository, input.id, expected);
     const reread = await readRuleset(api, input.repository, input.id);
     if (canonical(rulesetBody(reread)) !== canonical(expected)) mismatch = `ruleset ${input.id} reads back ${JSON.stringify(rulesetBody(reread))}, not the snapshot with only ${input.describe}`;
-    else mismatch = input.effective(await confirmedGet(api, `repos/${input.repository}/rules/branches/${encodeURIComponent(input.branch)}`, `the effective rules of ${input.repository}@${input.branch}`));
+    else mismatch = effectiveMismatch(expectedEffective(before, input.id, edit), await confirmedGet(api, effectivePath(input.repository, input.branch), `the effective rules of ${input.repository}@${input.branch}`), input.describe);
   } catch (error: any) { mismatch = error.message; }
   if (!mismatch) return { ruleset: input.id, snapshot: snapshot.file, digest: snapshot.digest, written: rulesetBody(expected) };
   const rollback = await restoreDocument(api, input.repository, fresh).then(digest => `rolled ruleset ${input.id} back to ${snapshot.file}; it reads back digest ${digest}, ${digest === snapshot.digest ? 'equal to' : 'NOT equal to'} the snapshot's ${snapshot.digest}`, (error: any) => `rolling ruleset ${input.id} back to ${snapshot.file} failed: ${error.message}`);
@@ -623,7 +651,6 @@ async function restoreDocument(api: GhApi, repository: string, document: any) {
   await putRuleset(api, repository, document.id, rulesetBody(document));
   return rulesetDigest(await readRuleset(api, repository, document.id));
 }
-const effectiveHasGraphyard = (githubAppId: number) => (rules: unknown) => mergeQueueState(rules, githubAppId)?.requiredCheck ? null : `the effective rules of the base do not require ${GRAPHYARD_CHECKS.join(' and ')} from App ${githubAppId}`;
 
 export interface RulesetWriteConfig { repository: string; baseBranch: string; githubAppId: number; snapshots: string; now: number }
 /** AC-2's add: both Graphyard checks from the App joined to the one operator ruleset requiring checks on the base. Writes nothing when both stand. */
@@ -631,11 +658,17 @@ export async function applyOperatorRulesetAdd(api: GhApi, config: RulesetWriteCo
   const { rulesets } = await readOperatorRulesets(api, config.repository, config.baseBranch);
   const { target, refusal } = rulesetTarget(rulesets, config.baseBranch);
   if (!target) throw new Error(refusal!);
+  const standing = { applied: false, ruleset: target.id, result: `operator ruleset ${target.id} (${target.name}) already requires ${GRAPHYARD_CHECKS.join(' and ')} from App ${config.githubAppId}; nothing was written` };
   const missing = missingGraphyardChecks(target, config.githubAppId);
-  if (!missing.length) return { applied: false, ruleset: target.id, result: `operator ruleset ${target.id} (${target.name}) already requires ${GRAPHYARD_CHECKS.join(' and ')} from App ${config.githubAppId}; nothing was written` };
+  if (!missing.length) return standing;
   const written = await writeRulesetEdit(api, { repository: config.repository, branch: config.baseBranch, id: target.id, snapshots: config.snapshots, now: config.now,
     describe: missing.map(entry => `${entry.context}@${entry.integration_id}`).join(' and ') + ' added',
-    edit: checks => [...checks, ...graphyardEntries(config.githubAppId).filter(entry => !checks.some(check => sameCheck(check, entry)))], effective: effectiveHasGraphyard(config.githubAppId) });
+    prepare: fresh => {
+      // The fresh document decides: it must still carry the required-checks rule, and what it already has is not added again.
+      if (!checksRule(fresh)) throw new Error(`Operator ruleset ${target.id} (${target.name}) no longer requires status checks on ${config.baseBranch}; rerun`);
+      return missingGraphyardChecks(fresh, config.githubAppId).length ? checks => [...checks, ...graphyardEntries(config.githubAppId).filter(entry => !checks.some(check => sameCheck(check, entry)))] : null;
+    } });
+  if (!written) return standing;
   return { applied: true, ...written, added: missing, result: `operator ruleset ${target.id} (${target.name}) now requires ${GRAPHYARD_CHECKS.join(' and ')} from App ${config.githubAppId}; every other rule, condition, bypass actor and check is unchanged, and the snapshot taken before the write is ${written.snapshot}` };
 }
 
@@ -659,9 +692,13 @@ export async function retireOperatorRulesetCheck(api: GhApi, config: RulesetWrit
   const { rulesets } = await readOperatorRulesets(api, config.repository, config.baseBranch);
   const { target, refusal } = rulesetTarget(rulesets, config.baseBranch);
   if (!target) return refuse(refusal!);
-  const missing = missingGraphyardChecks(target, config.githubAppId);
-  if (missing.length) refuse(`operator ruleset ${target.id} does not yet require ${missing.map(entry => entry.context).join(' and ')} from App ${config.githubAppId}; run master protection --apply first`);
-  if (!checksOf(target).some(check => sameCheck(check, config.check))) refuse(`operator ruleset ${target.id} does not require ${label}`);
+  // The ruleset's requirements, judged on the discovered document and again on the fresh one the write edits.
+  const judge = (document: any) => {
+    const missing = missingGraphyardChecks(document, config.githubAppId);
+    if (missing.length) refuse(`operator ruleset ${target.id} does not yet require ${missing.map(entry => entry.context).join(' and ')} from App ${config.githubAppId}; run master protection --apply first`);
+    if (!checksOf(document).some(check => sameCheck(check, config.check))) refuse(`operator ruleset ${target.id} does not require ${label}`);
+  };
+  judge(target);
   const pull = async () => confirmedGet(api, `repos/${config.repository}/pulls/${config.proof}`, `pull request #${config.proof} of ${config.repository}`);
   const before = await pull(), sha = String(before?.head?.sha ?? '');
   if (!/^[0-9a-f]{40}$/.test(sha)) refuse(`pull request #${config.proof} has no readable head`);
@@ -673,13 +710,16 @@ export async function retireOperatorRulesetCheck(api: GhApi, config: RulesetWrit
     runs.push(...entries);
     if (entries.length < 100) break;
   }
-  const staying = checksOf(target).filter(check => !sameCheck(check, config.check));
-  const unproven = staying.flatMap(check => { const run = latestRun(runs, check); return run?.status === 'completed' && run?.conclusion === 'success' ? [] : [`${check.context}@${check.integration_id ?? 'any'} ${run ? `reads ${run.status}/${run.conclusion}` : 'has no run'}`]; });
-  if (unproven.length) refuse(`on #${config.proof}'s head ${sha} the latest run of ${unproven.join('; ')}`);
+  /** Every check DOCUMENT keeps after the removal must have succeeded on the proof head. */
+  const prove = (document: any) => {
+    const unproven = checksOf(document).filter(check => !sameCheck(check, config.check)).flatMap(check => { const run = latestRun(runs, check); return run?.status === 'completed' && run?.conclusion === 'success' ? [] : [`${check.context}@${check.integration_id ?? 'any'} ${run ? `reads ${run.status}/${run.conclusion}` : 'has no run'}`]; });
+    if (unproven.length) refuse(`on #${config.proof}'s head ${sha} the latest run of ${unproven.join('; ')}`);
+  };
+  prove(target);
   if (String((await pull())?.head?.sha ?? '') !== sha) refuse(`pull request #${config.proof}'s head moved from ${sha} while its runs were read; rerun`);
   const written = await writeRulesetEdit(api, { repository: config.repository, branch: config.baseBranch, id: target.id, snapshots: config.snapshots, now: config.now, describe: `${label} removed`,
-    edit: checks => checks.filter(check => !sameCheck(check, config.check)), effective: effectiveHasGraphyard(config.githubAppId) });
-  return { retired: label, proof: { pullRequest: config.proof, head: sha }, ...written, result: `operator ruleset ${target.id} (${target.name}) no longer requires ${label}; the snapshot taken before the write is ${written.snapshot}` };
+    prepare: fresh => { judge(fresh); prove(fresh); return checks => checks.filter(check => !sameCheck(check, config.check)); } });
+  return { retired: label, proof: { pullRequest: config.proof, head: sha }, ...written!, result: `operator ruleset ${target.id} (${target.name}) no longer requires ${label}; the snapshot taken before the write is ${written!.snapshot}` };
 }
 
 /** `master protection --restore SNAPSHOT`: PUT the saved document back to its ruleset and verify the digest. */
