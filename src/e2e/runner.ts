@@ -76,12 +76,20 @@ export interface E2eReport {
   passed: number; failed: number; flaky?: number; unrun?: number; cases: CaseOutcome[];
   /** GY-1843: the `e2e.pendingOutcomes` rule the run was judged under, when its caller named the repository's policy: the release holds judge its pending cases by the same rule. */
   pendingOutcomes?: RepositoryPolicy['e2e']['pendingOutcomes'];
+  /** GY-1938: the required cases this run pended because the install it ran against cannot serve deliveries, with the install's own answer the probe read. A release run pends a case only on this ground, and the hold layer counts it only when its own probe agrees. */
+  suspendedDeliveries?: { cases: string[]; merger: string; repositoryWired: boolean };
+  /** GY-1938: set when the delivery probe could not read the install's merger, so every case ran as blocking. */
+  deliveryProbe?: 'unreadable';
 }
 export interface RunOptions {
   url: string; token: string; environment?: string; runId?: string;
   stepTimeoutMs?: number; retries?: number;
   /** How often a step with `waitSeconds` asks again (`httpWaitPollMs` by default), and the longest any step waits (its own `waitSeconds` by default); tests shorten both. */
   waitPollMs?: number; maxWaitSeconds?: number;
+  /** GY-1938: the one instant, on `now`'s clock, at which every waiting step of the run stops asking again, whatever its own `waitSeconds`: all cases, steps and attempts share it, so their waits together never pass it. None by default. */
+  waitUntil?: number;
+  /** How a waiting step pauses between asks (a real timer by default); tests pair it with `now` as a fake clock. */
+  sleep?: (ms: number) => Promise<void>;
   /** Stop at the first required case that fails: every case after it is unrun, naming it. A case bound to an outcome still pending on the candidate (GY-1802) never stops the run. */
   stopOnRequiredFailure?: boolean;
   /** GY-1802: the required case ids bound to an outcome still pending on the candidate (`contractPendingCases`): their failure records as pending, never blocking. */
@@ -173,12 +181,15 @@ const withTimeout = <T>(work: Promise<T>, ms: number, what: string) => {
   return Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} did not finish within ${ms} ms`)), ms); })]).finally(() => clearTimeout(timer));
 };
 
-interface CaseContext { url: string; vars: Record<string, string>; timeoutMs: number; pollMs: number; maxWaitSeconds: number; fetcher: typeof fetch; page: () => Promise<E2ePage>; pageErrors: string[]; idempotency: (index: number) => string;
+interface CaseContext { url: string; vars: Record<string, string>; timeoutMs: number; pollMs: number; maxWaitSeconds: number; waitUntil: number; now: () => number; sleep: (ms: number) => Promise<void>; fetcher: typeof fetch; page: () => Promise<E2ePage>; pageErrors: string[]; idempotency: (index: number) => string;
   secrets: Record<string, string>; general: { root: string; env: Record<string, string>; run: ProcessRunner; artifacts: string; session: (index: number) => string; signal?: AbortSignal } }
 
-/** A step's own timeout: a command or agent step declares one; the request and browser steps share the run's. */
-const timeoutOf = (step: E2eStep, context: Pick<CaseContext, 'timeoutMs'>) => step.kind === 'command' || step.kind === 'agent' ? step.timeoutSeconds * 1000
-  : step.kind === 'http' && step.waitSeconds ? step.waitSeconds * 1000 + context.timeoutMs : context.timeoutMs;
+/** A step's own timeout: a command or agent step declares one; the request and browser steps share the run's, a waiting GET's widened by the wait it may still take. */
+const timeoutOf = (step: E2eStep, context: Pick<CaseContext, 'timeoutMs' | 'maxWaitSeconds' | 'waitUntil' | 'now'>) => step.kind === 'command' || step.kind === 'agent' ? step.timeoutSeconds * 1000
+  : step.kind === 'http' && step.waitSeconds ? waitMs(step.waitSeconds, context) + context.timeoutMs : context.timeoutMs;
+/** How long a waiting GET may still wait: its own `waitSeconds`, capped by the run's per-step cap and by what is left before the run's shared deadline (GY-1938). */
+const waitMs = (waitSeconds: number, context: Pick<CaseContext, 'maxWaitSeconds' | 'waitUntil' | 'now'>) =>
+  Math.max(0, Math.min(Math.min(waitSeconds, context.maxWaitSeconds) * 1000, context.waitUntil - context.now()));
 /** How often a waiting GET step asks again. */
 export const httpWaitPollMs = 5_000;
 
@@ -192,8 +203,9 @@ async function runStep(step: E2eStep, index: number, context: CaseContext): Prom
   if (step.kind === 'http') {
     const path = substitute(step.path, context.vars);
     const body = step.body === undefined ? undefined : JSON.stringify(substitute(step.body, context.vars));
-    // A waiting GET asks again until its answer holds or `waitSeconds` pass; the last answer's failure is the step's.
-    const waitSeconds = Math.min(step.waitSeconds ?? 0, context.maxWaitSeconds), deadline = Date.now() + waitSeconds * 1000;
+    // A waiting GET asks again until its answer holds, `waitSeconds` pass or the run's shared deadline comes; the last answer's failure is the step's.
+    const waitSeconds = Math.min(step.waitSeconds ?? 0, context.maxWaitSeconds), allowed = waitMs(step.waitSeconds ?? 0, context), deadline = context.now() + allowed;
+    const waited = !waitSeconds ? '' : allowed < waitSeconds * 1000 ? ` (still, at the run's shared wait deadline after ${Math.round(allowed / 1000)} s)` : ` (still, after waiting ${waitSeconds} s)`;
     let parsed: unknown = undefined;
     for (;;) {
       const response = await context.fetcher(onTarget(path, context.url), { method: step.method, signal: AbortSignal.timeout(context.timeoutMs),
@@ -203,8 +215,8 @@ async function runStep(step: E2eStep, index: number, context: CaseContext): Prom
       try { parsed = text ? JSON.parse(text) : undefined; } catch { /* a non-JSON answer passes only checks that need no body */ }
       const failure = checkAnswer(substitute(step, context.vars), response.status, parsed, text);
       if (!failure) break;
-      if (Date.now() + context.pollMs > deadline) throw new Error(waitSeconds ? `${failure} (still, after waiting ${waitSeconds} s)` : failure);
-      await new Promise(resolve => setTimeout(resolve, context.pollMs));
+      if (context.now() + context.pollMs > deadline) throw new Error(`${failure}${waited}`);
+      await context.sleep(context.pollMs);
     }
     for (const [name, at] of Object.entries(step.save ?? {})) {
       const value = valueAt(parsed, at);
@@ -227,7 +239,7 @@ async function runStep(step: E2eStep, index: number, context: CaseContext): Prom
 }
 
 /** Run one case once: its declared secrets resolved first, then its steps in order, stopping at the first that fails. */
-async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, 'url' | 'token' | 'stepTimeoutMs' | 'root' | 'artifactsDirectory' | 'hostEnvironment' | 'processRunner'>> & { runId: string; attempt: number; fetcher: typeof fetch; launcher: () => Promise<E2eLauncher>; secretsDirectory: () => string; signal?: AbortSignal; withholdSecrets?: boolean; waitPollMs?: number; maxWaitSeconds?: number }) {
+async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, 'url' | 'token' | 'stepTimeoutMs' | 'root' | 'artifactsDirectory' | 'hostEnvironment' | 'processRunner'>> & { runId: string; attempt: number; fetcher: typeof fetch; launcher: () => Promise<E2eLauncher>; secretsDirectory: () => string; signal?: AbortSignal; withholdSecrets?: boolean; waitPollMs?: number; maxWaitSeconds?: number; waitUntil?: number; now: () => number; sleep: (ms: number) => Promise<void> }) {
   const { definition } = entry;
   const steps: StepRecord[] = [];
   let secrets: Record<string, string>;
@@ -240,7 +252,7 @@ async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, '
   const pageErrors: string[] = [];
   let browser: E2eBrowser | null = null, page: E2ePage | null = null;
   const session = (index: number) => `graphyard-e2e-${options.runId}-${definition.id}-${options.attempt}-${index + 1}`.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 120);
-  const context: CaseContext = { url: options.url, vars, timeoutMs: options.stepTimeoutMs, pollMs: options.waitPollMs ?? httpWaitPollMs, maxWaitSeconds: options.maxWaitSeconds ?? Infinity, fetcher: options.fetcher, pageErrors, secrets,
+  const context: CaseContext = { url: options.url, vars, timeoutMs: options.stepTimeoutMs, pollMs: options.waitPollMs ?? httpWaitPollMs, maxWaitSeconds: options.maxWaitSeconds ?? Infinity, waitUntil: options.waitUntil ?? Infinity, now: options.now, sleep: options.sleep, fetcher: options.fetcher, pageErrors, secrets,
     general: { root: options.root, env: stepEnvironment(options.url, secrets, options.hostEnvironment), run: options.processRunner, artifacts: options.artifactsDirectory, session, signal: options.signal },
     idempotency: index => `e2e:${definition.id}:${options.runId}:${options.attempt}:${index}`,
     page: async () => {
@@ -283,7 +295,7 @@ async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, '
  * steps never race each other on the same target; a case's browser steps share one page.
  */
 export async function runCases(cases: readonly CaseFile[], options: RunOptions): Promise<E2eReport> {
-  const now = options.now ?? Date.now, signal = options.signal, fetcher = signal ? cancellable(options.fetcher ?? fetch, signal) : options.fetcher ?? fetch;
+  const now = options.now ?? Date.now, sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))), signal = options.signal, fetcher = signal ? cancellable(options.fetcher ?? fetch, signal) : options.fetcher ?? fetch;
   const runId = options.runId ?? randomUUID();
   const retries = options.retries ?? 0, stepTimeoutMs = options.stepTimeoutMs ?? defaultStepTimeoutMs;
   const pendingCases = pendingUnder(options.pendingCases ?? [], options.policy);
@@ -305,7 +317,9 @@ export async function runCases(cases: readonly CaseFile[], options: RunOptions):
     const attemptResults: AttemptResult[] = [];
     do {
       const began = now();
-      const result = await attemptCase(entry, { url: options.url, token: options.token, stepTimeoutMs, runId, attempt: attemptResults.length + 1, fetcher, launcher: launch, signal, withholdSecrets: options.withholdSecrets, waitPollMs: options.waitPollMs, maxWaitSeconds: options.maxWaitSeconds, ...general });
+      const result = await attemptCase(entry, { url: options.url, token: options.token, stepTimeoutMs, runId, attempt: attemptResults.length + 1, fetcher, launcher: launch, signal, withholdSecrets: options.withholdSecrets, waitPollMs: options.waitPollMs,
+        // A case pending on the candidate cannot block it, so it asks once and never holds the run on a wait (GY-1938).
+        maxWaitSeconds: required && pendingCases.includes(id) ? 0 : options.maxWaitSeconds, waitUntil: options.waitUntil, now, sleep, ...general });
       attemptResults.push({ attempt: attemptResults.length + 1, outcome: result.failingStep ? 'fail' : 'pass', durationMs: Math.max(0, now() - began), ...result });
     } while (attemptResults.at(-1)!.outcome === 'fail' && attemptResults.length <= retries && !signal?.aborted);
     const last = attemptResults.at(-1)!;
@@ -471,9 +485,42 @@ export const failureDetail = (report: E2eReport, pendingCases: readonly string[]
  * (GY-1378). The detail names each blocking case and step, then the unrun cases apart. A managed
  * repository's candidate (GY-1535, release-project.ts projectCaseSuite) selects every required
  * case beside the uat ones and runs every one of them (`runAll`): a failing required case still
- * fails the suite, but never leaves a later required case unrun.
+ * fails the suite, but never leaves a later required case unrun. Before the cases run, one probe
+ * asks the install whether it can deliver a change at all (GY-1938): an install whose merger is
+ * github and which reports no repository wiring can never satisfy the delivery cases, so the run
+ * pends them and names them, instead of failing on waits nothing can answer.
  */
 export const releaseRetries = 1;
+/** How long after a release run starts its one shared wait deadline falls (GY-1938): every waiting step of every case and attempt stops asking again by then, half the suite's one-hour command timeout, so the suite reports instead of being killed however many steps wait. */
+export const releaseWaitBudgetSeconds = 1800;
+/** The shared wait deadline of a release run starting at `start` (ms). */
+export const releaseWaitUntil = (start: number) => start + releaseWaitBudgetSeconds * 1000;
+/** Whether a case's steps exercise the install's delivery surface — the candidates, delivery and production routes whose expectations only an install that delivers changes can satisfy (GY-1938). */
+export const exercisesDelivery = (definition: Pick<CaseFile['definition'], 'steps'>): boolean =>
+  definition.steps.some(step => step.kind === 'http' && (step.path.startsWith('/api/candidates') || step.path.startsWith('/api/delivery') || step.path.startsWith('/production/')));
+/**
+ * Whether the install at `url` can deliver a change at all (GY-1938): a control-plane merger acts on
+ * the plane itself, and a GitHub merger needs the repository wiring the install reports. An install
+ * whose merger is github and which reports no repository, GitHub app or state can never make the
+ * delivery a case's steps wait for, however long they wait. A merger the probe cannot read answers
+ * `true`, so a run blocks exactly as before rather than pending on a guess.
+ */
+export const installServesDeliveries = async (url: string, token: string, fetcher: typeof fetch = fetch): Promise<{ servesDeliveries: boolean; merger: string; repositoryWired: boolean }> => {
+  const read = async (path: string, authorized: boolean): Promise<any> => {
+    try { const response = await fetcher(new URL(path, url), { ...(authorized ? { headers: { Authorization: `Bearer ${token}` } } : {}), signal: AbortSignal.timeout(10_000) }); return response.ok ? await response.json() : null; } catch { return null; }
+  };
+  const merger = await read('api/merger', true);
+  const mode = merger?.mode ?? merger?.merger;
+  if (!mode) return { servesDeliveries: true, merger: 'unreadable', repositoryWired: true };
+  if (mode !== 'github') return { servesDeliveries: true, merger: mode, repositoryWired: true };
+  const status = await read('api/status', true);
+  // `repository` is only the configured name, present with no GitHub App; wiring is the App the install reports.
+  const repositoryWired = !!status && (status.github === true || status.githubRepository != null);
+  return { servesDeliveries: repositoryWired, merger: mode, repositoryWired };
+};
+/** The required cases a release run pends because the install it runs against cannot serve deliveries (GY-1938): those that exercise the delivery surface. */
+export const deliverySuspendedCases = (cases: readonly CaseFile[], servesDeliveries: boolean): string[] =>
+  servesDeliveries ? [] : cases.filter(entry => entry.definition.required && exercisesDelivery(entry.definition)).map(entry => entry.definition.id);
 /** The candidate record the checkout's ledger holds for `id`, or why it reads none (GY-1802): its pending outcomes ride the `rc/ID` tag the cut pushed, which a validation checkout carries with no plane credential. A read that fails names none, so the suite blocks exactly as before. */
 export const candidatePendingOutcomes = (root: string, id: string | undefined): readonly string[] | undefined => {
   if (!id) return undefined;
@@ -489,21 +536,29 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
   /** The checkout's release contract: a candidate outcome still pending on the record it was cut with (GY-1802) runs its failing cases as pending, never blocking. */
   contract?: ReleaseContract | null;
   /** The repository's policy (GY-1843), whose `e2e.pendingOutcomes` decides whether a pending case blocks: by default the graphyard.json of `root`, the candidate's own checkout, never the plane's installed GRAPHYARD_REPOSITORY_POLICY; with no root, the policy in force. */
-  policy?: RepositoryPolicy } = {}) => ({
+  policy?: RepositoryPolicy;
+  /** The run's clock and pause between asks; tests substitute a fake clock (GY-1938). */
+  now?: () => number; sleep?: (ms: number) => Promise<void> } = {}) => ({
   name: 'e2e',
   run: async (url: string, candidate: { id: string; pendingOutcomes?: readonly string[] } | null) => {
     const selected = cases.filter(options.select ?? (entry => entry.definition.target === 'uat'));
     if (!selected.length) return { name: 'e2e', passed: false, detail: options.select ? 'no required or uat E2E case is in the checkout, so the suite exercised nothing' : 'no E2E case targets uat, so the suite exercised nothing' };
     const policy = options.policy ?? (options.root ? checkoutRepositoryPolicy(options.root) : repositoryPolicy());
-    const pendingCases = pendingUnder(contractPendingCases(options.contract, candidate?.pendingOutcomes), policy);
+    // GY-1938: an install that cannot serve deliveries can never satisfy the delivery cases, so the run pends them instead of failing on waits nothing can answer; `pendingUnder` keeps a blocking-mode repository judging every case. A signal marks a budgeted run (a merge preview) against an origin of its own, whose cases are the merger's choice: it probes nothing and runs exactly the cases it named.
+    const probed = options.signal ? { servesDeliveries: true, merger: 'unreadable', repositoryWired: true } : await installServesDeliveries(url, token, options.fetcher ?? fetch);
+    const suspended = deliverySuspendedCases(selected, probed.servesDeliveries);
+    const pendingCases = pendingUnder([...contractPendingCases(options.contract, candidate?.pendingOutcomes), ...suspended], policy);
     const report = await runCases(selected, { url, token, environment: 'uat', runId: candidate ? `rc-${candidate.id}` : undefined, fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs,
-      root: options.root, retries: releaseRetries, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, pendingCases, policy });
+      root: options.root, retries: releaseRetries, waitUntil: releaseWaitUntil((options.now ?? Date.now)()), now: options.now, sleep: options.sleep, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, pendingCases, policy });
+    if (suspended.length) report.suspendedDeliveries = { cases: suspended, merger: probed.merger, repositoryWired: probed.repositoryWired };
+    if (!options.signal && probed.merger === 'unreadable') report.deliveryProbe = 'unreadable';
     await options.report?.(report);
     const verdict = releaseVerdict(report, [], pendingCases, policy), detail = failureDetail(report, pendingCases, policy);
+    const suspension = suspended.length ? `; the install serves no deliveries (merger ${probed.merger} without a repository wired), so its delivery cases ${suspended.join(', ')} are pending, not blocking` : '';
     const executed = report.cases.length - verdict.unrun.length;
     return !verdict.passed
-      ? { name: 'e2e', passed: false, detail: `${verdict.blocking.length} of ${executed} E2E cases ${verdict.blocking.every(outcome => outcome.verdict === 'flaky') ? 'were flaky' : 'failed'}: ${detail}` }
-      : { name: 'e2e', passed: true, detail: `${report.passed} E2E case${report.passed === 1 ? '' : 's'} passed against UAT serving ${report.sha ?? 'an unreported commit'}${detail ? `; ${detail}` : ''}` };
+      ? { name: 'e2e', passed: false, detail: `${verdict.blocking.length} of ${executed} E2E cases ${verdict.blocking.every(outcome => outcome.verdict === 'flaky') ? 'were flaky' : 'failed'}: ${detail}${suspension}` }
+      : { name: 'e2e', passed: true, detail: `${report.passed} E2E case${report.passed === 1 ? '' : 's'} passed against UAT serving ${report.sha ?? 'an unreported commit'}${suspension}${detail ? `; ${detail}` : ''}` };
   },
 });
 
