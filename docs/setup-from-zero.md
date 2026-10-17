@@ -16,7 +16,7 @@ Only legacy `--merger github` needs a human (GitHub Mobile).
 
 A new Hetzner server waits (exit 3) for price consent; rerun `--confirm-price X` (or `--max-monthly N`) with `--ssh-key NAME`.
 
-`up` runs, in order: preflight, control plane, host supervisor and Herdr, deploy key, merger setting (legacy only), master identities (`master autonomy --apply`; without the admin credential: exit 2; `--local`: none, you review and merge ([supervised](onboarding.md#supervised-mode-up---local))), onboarding, accounts (host logins), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to merge; goals wait. Reruns skip recorded steps (`.graphyard/up.json`). Host Herdr: `install --herdr-only`. `up` rewrites a coordinator or executor unit on another checkout or commit to this CLI and restarts it, green once the loop reports this commit; `doctor` readiness `loop-code` FAILs naming both paths and the rerun.
+`up` runs, in order: preflight, control plane, host supervisor and Herdr, deploy key, merger setting (legacy only), master identities (`master autonomy --apply`; without the admin credential: exit 2; `--local`: none, you review and merge ([supervised](onboarding.md#supervised-mode-up---local))), onboarding, accounts (host logins), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to merge; goals wait. Reruns skip steps (`.graphyard/up.json`), re-opening `master-loop` when a unit runs other code. Host Herdr: `install --herdr-only`. `up` rewrites it (an executor slot's registration commit included), green once the loop reports this commit; `doctor` FAILs `loop-code` (readiness, `setupFromZero`) naming both paths and the rerun.
 
 ## The Setup page
 
@@ -65,7 +65,7 @@ The repository needs a GitHub `origin` and an Actions `pull_request` test workfl
 
 ## 4. Register the GitHub App
 
-Legacy merger. `--apply` serves `http://127.0.0.1:4311` and prints it; no browser opens ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`. Branch protection: `--apply` protects the base; rerun once `Graphyard / merge` is required; **Verify:** `branch-protection`.
+Legacy merger. `--apply` serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`. Branch protection: `--apply` protects the base; rerun once `Graphyard / merge` is required; **Verify:** `branch-protection`.
 
 ## 6. Onboard the checkout
 

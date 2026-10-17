@@ -2,7 +2,7 @@ import { existsSync, realpathSync } from 'node:fs';
 import { chmod, lstat, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { execFileSync, spawn } from 'node:child_process';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -791,7 +791,7 @@ export interface LoopCodeReading {
   repository: string | null;
   /** Why the loop runs other code than this CLI's — another checkout, or another commit — or null. */
   loopStale: string | null;
-  /** Why the executor template runs other code than this CLI's or the repository's own, or null. */
+  /** Why the executor template, or a running slot's own registration, runs other code than this CLI's or the repository's own, or null. */
   executorStale: string | null;
   /** Why the reading could not be taken at all; null when it was. */
   error: string | null;
@@ -804,6 +804,14 @@ function unitCodeCheckout(text: string, home: string): string | null {
   const launcher = execStart?.split(/\s+/).map(part => part.replace(/^"|"$/g, '')).find(part => /(?:bin\/graphyard\.mjs|dist\/cli\.js|scripts\/graphyard-executor\.mjs)$/.test(part));
   return launcher ? dirname(dirname(launcher)) : workingDirectory;
 }
+/** What a running executor recorded about itself beside the master credential (executor-fleet's registration), as far as the commit check reads it (GY-1859). */
+export interface ExecutorCodeRecord { state?: string; root?: string | null; release?: { commit?: string | null } | null; supervisor?: { unit?: string } | null }
+/** The executor registrations beside the master credential, as executor-fleet records them; [] when no credential names a directory or the directory is unreadable (GY-1859). */
+const readExecutorFleet = async (master: { credentialFile?: string | null } | null): Promise<ExecutorCodeRecord[]> => {
+  if (typeof master?.credentialFile !== 'string') return [];
+  try { return await (await import('./executor-fleet.js')).readExecutorRegistrations({ credentialFile: master.credentialFile }); }
+  catch { return []; }
+};
 /** Under the test runner only a unit directory under the system temporary directory is read, as legacyUnitFiles guards: the operator's real units belong to no checkout a test made. */
 const readableUnitsDirectory = (unitDirectory: string) => {
   const underTestRunner = !!process.env.NODE_TEST_CONTEXT || process.execArgv.includes('--test') || process.env.npm_lifecycle_event === 'test';
@@ -812,8 +820,7 @@ const readableUnitsDirectory = (unitDirectory: string) => {
   return `${canonicalPath(unitDirectory)}${sep}`.startsWith(`${temporary}${sep}`);
 };
 /** The loop's cursor, beside its credential as daemonStatePath keeps it: what reports the commit the running loop loaded. */
-const loopCursorPath = (credentialFile: string) => resolve(dirname(credentialFile), `${basenameFile(credentialFile).replace(/\.token$/, '')}.daemon.json`);
-const basenameFile = (path: string) => path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf(sep)) + 1);
+const loopCursorPath = (credentialFile: string) => resolve(dirname(credentialFile), `${basename(credentialFile).replace(/\.token$/, '')}.daemon.json`);
 /** The CLI launcher a pin of REPOSITORY runs: beside the install directory, as knownGoodCli keeps it. */
 const knownGoodCliPath = (installDirectory: string) => resolve(installDirectory, 'coordinator', 'current', 'dist', 'cli.js');
 /**
@@ -836,6 +843,8 @@ export async function readLoopCode(root: string, options: {
   master?: { cliPath?: string | null; credentialFile?: string | null; repository?: string | null } | null;
   /** The loop cursor's text; default read beside the master credential. */
   cursor?: string | null;
+  /** The executor registrations this host holds; default read beside the master credential; null forces none. */
+  executors?: ExecutorCodeRecord[] | null;
 } = {}): Promise<LoopCodeReading> {
   const run = options.run ?? ((command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 }));
   const unitDirectory = options.unitDirectory ?? executorUnitDirectory(), home = options.home ?? homedir();
@@ -873,7 +882,20 @@ export async function readLoopCode(root: string, options: {
   const loopStale = !loop ? null
     : loop.checkout && !ownCheckouts.has(canonicalPath(loop.checkout)) ? `${loop.path} starts the CLI in ${loop.checkout}, not this checkout (${cliRoot})`
     : loopCommit && !ownCommits.has(loopCommit.toLowerCase()) ? `${loop.path} runs ${shortSha(loopCommit)}, not this checkout's ${shortSha(cliCommit)}` : null;
-  const executorStale = executor?.checkout && !ownCheckouts.has(canonicalPath(executor.checkout)) ? `${executor.path} runs ${executor.checkout}, not this checkout (${cliRoot}) or the repository checkout (${primary})` : null;
+  // An executor slot started from this checkout before it moved to a new commit runs code no unit
+  // file names, so each slot's own registration is judged the same way: a running or standing-down
+  // slot whose recorded release is none of this install's commits is other code too. A stopped slot
+  // runs nothing, and the pin and held snapshot above are this install's commits for a slot too.
+  const fleet = options.executors !== undefined ? options.executors ?? [] : await readExecutorFleet(master);
+  const fleetStale = fleet.flatMap(entry => {
+    if (entry.state !== 'running' && entry.state !== 'standing-down') return [];
+    const commit = entry.release?.commit ?? null;
+    return commit && !ownCommits.has(commit.toLowerCase()) ? [`${entry.supervisor?.unit ?? entry.root ?? 'an executor'} runs ${shortSha(commit)}, not this checkout's ${shortSha(cliCommit)}`] : [];
+  });
+  const executorStale = [
+    executor?.checkout && !ownCheckouts.has(canonicalPath(executor.checkout)) ? `${executor.path} runs ${executor.checkout}, not this checkout (${cliRoot}) or the repository checkout (${primary})` : null,
+    ...fleetStale,
+  ].filter((reason): reason is string => !!reason).join('; ') || null;
   return reading({ loop, loopCommit, executor, loopStale, executorStale });
 }
 /**
@@ -885,7 +907,15 @@ export async function readLoopCode(root: string, options: {
  * uninstalled template is reported, never created: installing executors stays the operator's
  * `scripts/graphyard-executor.mjs --install`.
  */
-export async function alignExecutorUnits(root: string, options: { run?: SystemctlRunner; unitDirectory?: string; node?: string; heldScript?: string | null } = {}): Promise<{ wrote: 'updated' | 'unchanged' | 'none'; reason: string | null; restarted: string[] }> {
+/** Every instance of this install's executor template the manager knows: each starts from the template's own ExecStart, so restarting them reloads the binding (GY-1859). */
+const knownExecutorInstances = (run: SystemctlRunner, units: InstallUnits) => {
+  const known = new Set<string>();
+  for (const listing of [['list-units', '--all', '--plain', '--no-legend', executorGlob(units)], ['list-unit-files', '--plain', '--no-legend', executorGlob(units)]]) {
+    try { for (const match of run(listing).matchAll(executorInstancePattern(units))) known.add(match[0]); } catch { /* an older systemctl without the glob; nothing to restart by name */ }
+  }
+  return known;
+};
+export async function alignExecutorUnits(root: string, options: { run?: SystemctlRunner; unitDirectory?: string; node?: string; heldScript?: string | null; /** GY-1859: restart the slots even when the template already binds this checkout — a slot booted before the checkout moved keeps the commit it loaded. */ restart?: boolean } = {}): Promise<{ wrote: 'updated' | 'unchanged' | 'none'; reason: string | null; restarted: string[] }> {
   const primary = connectionRoots(root)[0];
   const unitDirectory = options.unitDirectory ?? executorUnitDirectory();
   const units = await executorInstallUnits(primary, unitDirectory);
@@ -903,19 +933,20 @@ export async function alignExecutorUnits(root: string, options: { run?: Systemct
   let rendered: string;
   try { rendered = renderExecutorUnit(current, { root: primary, node: options.node ?? process.execPath, ...(heldScript ? { script: heldScript, checkoutRoot: primary } : {}) }); }
   catch (error) { return { wrote: 'none', reason: `${unitFile} could not be re-bound to this checkout: ${error instanceof Error ? error.message : String(error)}`, restarted: [] }; }
-  if (current === rendered) return { wrote: 'unchanged', reason: null, restarted: [] };
+  if (current === rendered) {
+    // The binding is already right, but the restart is still the alignment when `restart` asks for
+    // it: a slot booted before the checkout moved keeps running the commit it loaded until restarted.
+    if (!options.restart) return { wrote: 'unchanged', reason: null, restarted: [] };
+    const run = options.run ?? systemctl;
+    const restarted = [...knownExecutorInstances(run, units)].sort();
+    if (restarted.length) run(['restart', ...restarted]);
+    return { wrote: 'unchanged', reason: null, restarted };
+  }
   await mkdir(dirname(unitFile), { recursive: true });
   await atomicWrite(unitFile, rendered, 0o644);
   const run = options.run ?? systemctl;
   run(['daemon-reload']);
-  // Every instance of this install's template the manager knows: each starts from the template's
-  // own ExecStart, so all of them reload the binding, not only the slots a restart would have
-  // picked for another reason.
-  const known = new Set<string>();
-  for (const listing of [['list-units', '--all', '--plain', '--no-legend', executorGlob(units)], ['list-unit-files', '--plain', '--no-legend', executorGlob(units)]]) {
-    try { for (const match of run(listing).matchAll(executorInstancePattern(units))) known.add(match[0]); } catch { /* an older systemctl without the glob; nothing to restart by name */ }
-  }
-  const instances = [...known].sort();
+  const instances = [...knownExecutorInstances(run, units)].sort();
   if (instances.length) run(['restart', ...instances]);
   return { wrote: 'updated', reason: null, restarted: instances };
 }

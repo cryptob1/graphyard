@@ -207,8 +207,8 @@ export interface UpDependencies {
    * master-loop step does not check the code and keeps its earlier behaviour.
    */
   loopCode?(): Promise<LoopCodeReading | null>;
-  /** GY-1859: re-bind the install's executor template to this CLI's code and restart its slots (repository-setup's alignExecutorUnits). */
-  alignExecutors?(): Promise<{ wrote: 'updated' | 'unchanged' | 'none'; reason: string | null; restarted: string[] }>;
+  /** GY-1859: re-bind the install's executor template to this CLI's code and restart its slots (repository-setup's alignExecutorUnits); `restart` restarts the slots even when the template already binds this checkout, for a slot still running a commit the checkout left. */
+  alignExecutors?(options?: { restart?: boolean }): Promise<{ wrote: 'updated' | 'unchanged' | 'none'; reason: string | null; restarted: string[] }>;
   /** Agent mode: drive the App manifest page at URL in the master's browser profile, recorded as a master browser flow. */
   driveApp?(url: string, handoff: Handoff): Promise<DriveOutcome>;
   /** GY-1477: this host's Tailscale node (its MagicDNS name and tailnet address), or null without a running Tailscale. */
@@ -1052,6 +1052,19 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
 
     await step('harness', async () => { await run('harness', ['master', 'harness', request.master, '--apply']); });
 
+    // GY-1859: a recorded master-loop step says an earlier run finished setup, not that the loop
+    // still runs this CLI's code — the install this check exists for is one whose earlier run
+    // recorded the step while its loop served an earlier checkout. So the recorded step is re-opened
+    // whenever the units read as other code, and the step below runs again instead of printing the
+    // same false green; a reading that cannot be taken re-opens nothing, since it judges nothing.
+    if (state.completed.includes('master-loop') && deps.loopCode) {
+      const recorded = await deps.loopCode().catch(() => null);
+      if (recorded?.loopStale || recorded?.executorStale) {
+        state.completed = state.completed.filter(name => name !== 'master-loop');
+        await writeState(deps.root, state);
+      }
+    }
+
     await step('master-loop', async () => {
       await cleanCli('master-loop');
       // GY-1859: a live checklist item says only that a loop runs, not whose code it runs. The loop
@@ -1069,10 +1082,13 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         if (rewrote === 'refused') throw new UpStop(`master-loop: the loop unit was not rewritten: ${String(init?.supervisor?.refused ?? 'the install refused it')}; rerun ${rerun()} once that is fixed`, upExitCodes.failed);
       }
       if (executorStale && deps.alignExecutors) {
-        const aligned = await deps.alignExecutors();
+        // GY-1859: the restart runs even when the template already binds this checkout — a slot
+        // booted before the checkout moved keeps running the commit it loaded until it is restarted.
+        const aligned = await deps.alignExecutors({ restart: true });
         // An uninstalled template is not created here: installing executors stays the operator's scripts/graphyard-executor.mjs --install.
         if (aligned.wrote === 'none' && aligned.reason) throw new UpStop(`master-loop: ${executorStale}, and it could not be aligned: ${aligned.reason}`, upExitCodes.failed);
         if (aligned.wrote === 'updated') deps.emit({ kind: 'note', text: `master-loop: ${executorStale}; the template now runs this checkout${aligned.restarted.length ? `, and ${aligned.restarted.join(', ')} restarted onto it` : ''}.` });
+        else if (aligned.restarted.length) deps.emit({ kind: 'note', text: `master-loop: ${executorStale}; ${aligned.restarted.join(', ')} restarted onto this checkout.` });
       }
       let fresh: string | undefined;
       if (state.reissue?.length && state.identitiesHost) {
@@ -1099,19 +1115,26 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         if (reason) throw new UpStop(`master-loop: the master loop refuses to run: ${reason}`, upExitCodes.failed);
       };
       await waitGreen(['master-loop'], false, refused);
-      // GY-1859: green is the restarted loop reporting this CLI's commit, within one cycle — a cursor
-      // still naming the old code would leave the install stuck on fixes it cannot see, the same
-      // silence the restart meant to end.
+      // GY-1859: green is the restarted loop itself reporting one of this install's commits, within
+      // one cycle. A reading that failed, a cursor with no commit yet, or a cursor still naming the
+      // old code is none of those, so the wait keeps polling — a silent success here would leave the
+      // install stuck on fixes it cannot see, the same silence the restart meant to end.
       if (loopStale) {
         const deadline = deps.now() + machineWaitMs;
         for (let polls = 0; ; polls++) {
           const now = deps.loopCode ? await deps.loopCode().catch(() => null) : null;
-          if (!now?.loopStale) {
-            const commit = now?.loopCommit ?? now?.cli.commit ?? null;
-            deps.emit({ kind: 'note', text: `master-loop: replaced ${loopStale}; the loop now runs ${now?.cli.root ?? 'this checkout'} at ${commit ? commit.slice(0, 12) : 'its commit'}.` });
+          const reported = now && !now.error && !now.loopStale ? now.loopCommit : null;
+          if (now && reported) {
+            deps.emit({ kind: 'note', text: `master-loop: replaced ${loopStale}; the loop now runs ${now.cli.root} at ${reported.slice(0, 12)}.` });
             break;
           }
-          if (deps.now() >= deadline) throw new UpStop(`master-loop: ${loopStale}; the unit was rewritten and the loop restarted, but it still reports ${now.loopCommit ? now.loopCommit.slice(0, 12) : 'no commit'} instead of this checkout's ${now.cli.commit ? now.cli.commit.slice(0, 12) : 'commit'}; rerun ${rerun()}`, upExitCodes.failed);
+          if (deps.now() >= deadline) {
+            const detail = !now ? 'the loop\'s code could not be read again'
+              : now.error ? `the loop\'s code read failed again: ${now.error}`
+              : now.loopCommit ? `it still reports ${now.loopCommit.slice(0, 12)} instead of this checkout's ${now.cli.commit ? now.cli.commit.slice(0, 12) : 'commit'}`
+              : 'its cursor records no commit';
+            throw new UpStop(`master-loop: ${loopStale}; the unit was rewritten and the loop restarted, but ${detail}; rerun ${rerun()}`, upExitCodes.failed);
+          }
           await deps.sleep(pollMs);
         }
       }
@@ -1738,7 +1761,7 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     loopRefusal: async () => coordinatorCheckoutRefusal(await loopCheckout(), 'the master loop'),
     // GY-1859: the loop and executor units are judged against the CLI running up, whose launcher and checkout are this run's.
     loopCode: () => readLoopCode(root, { cliPath }),
-    alignExecutors: () => alignExecutorUnits(root),
+    alignExecutors: (options = {}) => alignExecutorUnits(root, options),
     onboardingMerged: async url => execFileSync('gh', ['pr', 'view', url, '--json', 'state', '--jq', '.state'], { encoding: 'utf8', timeout: 60_000 }).trim() === 'MERGED',
     fileOnboarding: async (url, commit, operatorTokenFile, requestId) => {
       const server = await serverUrl();

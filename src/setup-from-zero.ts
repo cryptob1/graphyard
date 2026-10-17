@@ -8,6 +8,7 @@ import type { AgentEnvironment } from './master/profiles.js';
 import { sharedGitPaths, workerPaths } from './worker-sandbox.js';
 import { controlPlaneMergerLine, legacyMergerReason, mergerMigrationCommand, mergerNotRequired, statusControlPlaneMerger, statusSupervised } from './model/setup-checklist.js';
 import { followUpFilingExcess, followUpFilingRefusal } from './release-candidate.js';
+import { readLoopCode, type LoopCodeReading } from './repository-setup.js';
 
 /**
  * The prerequisites docs/setup-from-zero.md depends on that `graphyard doctor` can check from this
@@ -23,6 +24,7 @@ export const setupSteps = {
   sandbox: 'docs/setup-from-zero.md step 9 (worker sandbox)',
   releaseFiling: 'docs/delivery.md#release-filing-credential',
   merger: `run ${mergerMigrationCommand} (docs/setup-from-zero.md step 4)`,
+  loopCode: 'rerun graphyard up --agent from this checkout (docs/setup-from-zero.md step 10, start the master)',
 } as const;
 
 export interface SetupCheck { id: string; status: 'pass' | 'fail'; detail: string; step: string }
@@ -46,6 +48,8 @@ export interface SetupFromZeroInput {
   sandbox?: (paths: string[]) => string | null;
   /** GY-1614: the `/api/status` answer to GRAPHYARD_RELEASE_TOKEN, or the failure it met; read from the plane when unset here. */
   releaseFiling?: { status: any | null; failure?: string };
+  /** GY-1859: what the install's loop and executor units run against this CLI; read beside the install when unset here. */
+  loopCode?: LoopCodeReading | null;
 }
 
 const writable = async (path: string) => { try { await access(path, constants.W_OK); return true; } catch { return false; } };
@@ -202,6 +206,23 @@ async function readReleaseFiling(root: string, env: NodeJS.ProcessEnv) {
 /** One printable line per check: `PASS id: detail`, or `FAIL id: detail (fix: step)`. */
 export const setupLine = (check: SetupCheck) => check.status === 'pass' ? `PASS ${check.id}: ${check.detail}` : `FAIL ${check.id}: ${check.detail} (fix: ${check.step})`;
 
+/**
+ * GY-1859: the loop-code line. A loop or executor unit on another checkout or commit — a slot's
+ * own registration commit included — is one FAIL naming both paths and the rerun that rewrites the
+ * units to this CLI; an install whose units record is unreadable fails too, and a host holding no
+ * unit of this install records no line at all, since there is nothing on it to judge.
+ */
+async function loopCodeCheck(root: string, injected: LoopCodeReading | null | undefined): Promise<SetupCheck | null> {
+  const code = injected !== undefined ? injected : await readLoopCode(root).catch(() => null);
+  const check = (status: SetupCheck['status'], detail: string): SetupCheck => ({ id: 'loop-code', status, step: setupSteps.loopCode, detail });
+  if (!code) return check('fail', 'the units this install runs could not be read');
+  if (code.error) return check('fail', `the units this install records are unreadable: ${code.error}`);
+  if (!code.loop && !code.executor) return null;
+  const stale = [code.loopStale, code.executorStale].filter(Boolean).join('; ');
+  if (stale) return check('fail', `${stale}: rerun graphyard up${code.repository ? ` --repo ${code.repository}` : ''} --agent from this checkout (${code.cli.root}); its master-loop step rewrites the units to it and restarts them`);
+  return check('pass', `the loop${code.loop ? ` (${code.loop.unit} at ${code.loop.path})` : ''}${code.loopCommit ? ` at ${code.loopCommit.slice(0, 12)}` : ''} and its executors run this checkout (${code.cli.root})`);
+}
+
 /** Every setup-from-zero line for this machine and installation, in checklist order. */
 export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<SetupCheck[]> {
   const env = input.env ?? process.env, status = input.status;
@@ -226,6 +247,8 @@ export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<Se
   }
   lines.push(...await environmentChecks(input.environments));
   lines.push(await sandboxCheck(input.root, input.sandbox ?? bubblewrapProbe));
+  const loopCode = await loopCodeCheck(input.root, input.loopCode);
+  if (loopCode) lines.push(loopCode);
   const releaseFiling = input.releaseFiling ?? await readReleaseFiling(input.root, env);
   if (releaseFiling) lines.push(releaseFilingCheck(releaseFiling, status?.repository ?? null));
   // GY-1833: github merging is the legacy mode; its FAIL names the one command that migrates it.
