@@ -37,7 +37,7 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 
 ### The live budget
 
-`x-ratelimit-*` headers project `projectedExhaustionAt`.
+`x-ratelimit-remaining`/`-limit`/`-reset` project `projectedExhaustionAt`.
 
 ### Observation cadence by state
 
