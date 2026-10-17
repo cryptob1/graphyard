@@ -1106,17 +1106,29 @@ test('unit:fault-class-session-liveness GY-1863 action:session — a stall reads
   assert.equal(waited.attempts, 1, 'the accepted submission is waited for, not delivered twice');
   assert.deepEqual(slow.map(herdrSubcommand), ['agent read', 'agent prompt', 'agent read', 'agent wait']);
 
-  // A consent dialog is not a notice: it is never put away, and the refusal
-  // that finally stands carries the pane's own words instead of a stall triple.
+  // A consent dialog is not a notice: it is never put away and never typed at —
+  // the submission's text could fill its input and its Enter choose the
+  // highlighted option — and the refusal carries the pane's own words.
   const consent: string[][] = [];
   let consentDeliveries = 0;
   await assert.rejects(
     deliverPrompt('w1V:pQ35', 'resume', herdrRunOf(consent, args => herdrSubcommand(args) === 'agent prompt' && ++consentDeliveries ? GY1863_STALLED
       : herdrSubcommand(args) === 'agent read' ? GY1863_TRUST
       : herdrSubcommand(args) === 'agent wait' ? GY1863_TIMEOUT : GY1863_OK), { acceptMs: 1_000, pauseMs: 0 }),
-    (error: unknown) => error instanceof PromptNotAcceptedError && /after 3 deliveries/.test(error.message)
+    (error: unknown) => error instanceof PromptNotAcceptedError && /folder consent dialog/.test(error.message)
       && /Yes, I trust this folder/.test(error.message) && error.promptDropped);
-  assert.equal(consentDeliveries, 3, 'the dropped text is still re-delivered, at most three times');
+  assert.equal(consentDeliveries, 0, 'nothing is submitted into a consent dialog the pane already shows');
+  // A consent dialog that appears only after a stalled submission stops the
+  // delivery there: the text is never submitted into it again.
+  const later: string[][] = [];
+  let laterDeliveries = 0, laterReads = 0;
+  await assert.rejects(
+    deliverPrompt('w1V:pQ35', 'resume', herdrRunOf(later, args => herdrSubcommand(args) === 'agent prompt' && ++laterDeliveries ? GY1863_STALLED
+      : herdrSubcommand(args) === 'agent read' ? (++laterReads === 1 ? 'the session sits idle, output unchanged' : GY1863_TRUST) : GY1863_OK), { acceptMs: 1_000, pauseMs: 0 }),
+    (error: unknown) => error instanceof PromptNotAcceptedError && /folder consent dialog/.test(error.message) && /agent_prompt_stalled/.test(error.message));
+  assert.equal(laterDeliveries, 1, 'the stalled submission is not delivered again into the consent dialog');
+  assert.deepEqual(later.map(herdrSubcommand), ['agent read', 'agent prompt', 'agent read']);
+  assert.ok(!later.some(args => herdrSubcommand(args) === 'agent send-keys'), 'no keystroke reaches a consent dialog');
   assert.ok(!consent.some(args => herdrSubcommand(args) === 'agent send-keys'), 'no keystroke reaches a consent dialog');
 
   // The fault the base recorded on GY-1833: the failed re-prompt opens one

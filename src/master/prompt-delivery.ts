@@ -1,7 +1,7 @@
 // Concern: prompt delivery — the submissions a runtime visibly accepts, and the pane's screen a stalled one is judged by.
 import { setTimeout as sleep } from 'node:timers/promises';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
-import { detectNoticeDialog } from '../consent-prompt.js';
+import { detectConsentPrompt, detectNoticeDialog } from '../consent-prompt.js';
 import { herdrCall, herdrJson, herdrRun } from './herdr.js';
 
 /**
@@ -28,12 +28,19 @@ import { herdrCall, herdrJson, herdrRun } from './herdr.js';
  * A dismissal never spends one of the attempts: the delivery it enabled is granted on top, so a
  * notice put away on the last attempt is followed by the delivery it cleared the pane for. What
  * the pane last showed travels on the error a final refusal carries, so the record names the
- * dialog instead of a stall triple.
+ * dialog instead of a stall triple. A consent dialog the pane ends on (credential, payment, trust
+ * and the rest the catalogue names) is never typed at: the submission's text could fill its input
+ * and its Enter choose the highlighted option, so delivery ends there, naming the dialog.
  */
 export const promptAttempts = 3, promptAcceptMs = 20_000, promptRetryPauseMs = 3_000;
 /** How long a dismissed notice is given to clear before the text is delivered again. */
 export const noticeSettleMs = 2_000;
 export class PromptNotAcceptedError extends Error { readonly promptDropped = true; }
+/** The delivery that stops at a consent dialog rather than submit into it. */
+function consentRefusal(target: string, screen: string | null, stalls: string[]) {
+  const consent = detectConsentPrompt(screen);
+  return consent ? new PromptNotAcceptedError(`${target} shows a ${consent.kind} consent dialog, so its prompt is not submitted into it${stalls.length ? ` (${stalls.join(', ')})` : ''}; the session is closed and relaunched rather than left idle; the pane showed: "${consent.text}"`) : null;
+}
 export function herdrErrorCode(error: unknown) {
   const text = [(error as any)?.herdrCode, (error as any)?.stdout, (error as any)?.stderr, (error as any)?.message].filter(value => value !== undefined && value !== null).map(String).join('\n');
   return (error as any)?.herdrCode ?? /"code"\s*:\s*"([a-z_]+)"/.exec(text)?.[1] ?? null;
@@ -61,6 +68,8 @@ export async function deliverPrompt(target: string, text: string, run?: ChildRun
       // would take the submission's Enter as its own menu choice, before any stall is ever judged.
       if (attempt === 1) {
         shown = await readSessionScreen(target, run);
+        const refused = consentRefusal(target, shown, stalls);
+        if (refused) throw refused;
         const showing = detectNoticeDialog(shown);
         if (showing) {
           await herdrRun(['agent', 'send-keys', target, 'esc'], run);
@@ -74,6 +83,7 @@ export async function deliverPrompt(target: string, text: string, run?: ChildRun
       else await herdrJson(['agent', 'prompt', target, text, '--wait', ...accepted], run);
       return { attempts: attempt, accepted: true as const, ...(dismissed.length ? { dismissed } : {}) };
     } catch (error) {
+      if (error instanceof PromptNotAcceptedError) throw error;
       const code = herdrErrorCode(error);
       if (code !== 'agent_prompt_stalled' && code !== 'timeout') throw error;
       stalls.push(code);
@@ -81,6 +91,8 @@ export async function deliverPrompt(target: string, text: string, run?: ChildRun
       // dismisses is put away and the text delivered again; anything else is a submission Herdr
       // already accepted, so the start it owes is waited out before the text is judged dropped.
       shown = await readSessionScreen(target, run);
+      const refused = consentRefusal(target, shown, stalls);
+      if (refused) throw refused;
       const notice = detectNoticeDialog(shown);
       if (notice) {
         await herdrRun(['agent', 'send-keys', target, 'esc'], run);
