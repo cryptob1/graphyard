@@ -316,7 +316,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   // Exactly one component merges (GY-245): while a live master loop on this installation runs the
   // guarded merge, this executor leaves merge rows to it rather than claiming one, since the claim
   // itself writes the item and defeats the loop's revision check.
-  const single = x.loopMergeGuardedEffects(effects, () => x.detectLoopMerger(root, { config: current() }), line => console.error(line));
+  const single = x.loopMergeGuardedEffects(effects, () => x.detectLoopMerger(root, { config: current(), autoMerge: status.autoMerge ? status.autoMerge.autoMerge !== false : true }), line => console.error(line));
   const guarded = x.releaseGuardedEffects(single, {
     loaded: release, current: checkoutCommit,
     claimed: action => registrar.claimed(action), settled: () => registrar.settled(),

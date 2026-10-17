@@ -627,7 +627,7 @@ export interface LoopMerger {
  * when its unit is installed (`master init` installs it) or its cursor holds a live lock (a loop
  * run by hand). No master.json means no loop could run here at all.
  */
-export async function detectLoopMerger(root: string, options: { config?: MasterConfig; unitDirectory?: string; now?: number } = {}): Promise<LoopMerger | null> {
+export async function detectLoopMerger(root: string, options: { config?: MasterConfig; unitDirectory?: string; now?: number; autoMerge?: boolean } = {}): Promise<LoopMerger | null> {
   let config = options.config ?? null;
   if (!config) { try { config = await loadMasterConfig(root); } catch { return null; } }
   const loopUnit = loopUnitOf(root);
@@ -640,8 +640,10 @@ export async function detectLoopMerger(root: string, options: { config?: MasterC
     lock = live ? state.lock : null;
   } catch { /* an unreadable cursor is no evidence of a running loop */ }
   if (!installed && !live) return null;
-  const name = `the master loop (${[installed ? loopUnit : null, lock ? `pid ${lock.pid} on ${lock.host}` : null].filter(Boolean).join(', ')}${config.autoMerge ? ', automatic merging on' : ', merging approved decisions'})`;
-  return { live, unit: installed ? loopUnit : null, host: lock?.host ?? null, pid: lock?.pid ?? null, autoMerge: config.autoMerge, name };
+  // GY-1927: the plane's recorded setting (`/api/status` `autoMerge`) when the caller read it; master.json's preference holds nothing on its own.
+  const autoMerge = options.autoMerge ?? config.autoMerge;
+  const name = `the master loop (${[installed ? loopUnit : null, lock ? `pid ${lock.pid} on ${lock.host}` : null].filter(Boolean).join(', ')}${autoMerge ? ', automatic merging on' : ', merging approved decisions'})`;
+  return { live, unit: installed ? loopUnit : null, host: lock?.host ?? null, pid: lock?.pid ?? null, autoMerge, name };
 }
 
 /** Why an executor declines a merge row the loop runs. */
