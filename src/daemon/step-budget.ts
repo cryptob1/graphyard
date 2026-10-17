@@ -7,6 +7,7 @@ import { actionableIntervalMs } from './liveness.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import { coordinateOwed } from '../model/launch-sentinel.js';
 import { type DaemonAction, type DaemonActionKind, type DaemonState, message } from './state.js';
+import type { SessionHandleInput } from '../model/sessions.js';
 
 /**
  * GY-1286: what a step may spend before it hands the rest of its work to the next cycle. Every
@@ -255,7 +256,7 @@ export function boundedCalls(effects: DaemonEffects, kept: object, clockMs: () =
 /** What a carried record needs of the cycle: its cursor, clock, journal and the persist beneath its effects. */
 type CarriedCycle = Pick<Cycle, 'state' | 'now' | 'performed' | 'effects'>;
 /** A carried row's identity: what the row is about. */
-interface CarriedRow { kind: DaemonActionKind; work: string | null; principal?: string | null; epoch?: number | null }
+interface CarriedRow { kind: DaemonActionKind; work: string | null; principal?: string | null; epoch?: number | null; owed?: DaemonAction['owed'] }
 
 /**
  * Record a carried call on its row as `waiting` — the outcome is still in flight, so the row gates
@@ -269,7 +270,7 @@ export async function recordCarried(cycle: CarriedCycle, key: string, row: Carri
   oweCarried(key, error); // the row owes the call's answer to its retry, kept until that retry consumes it
   // A `started` row already counted this attempt, and a call never sent (a join, or a spent budget) takes that count off again; a row of any other state counts it here, unless nothing was sent.
   const attempts = previous?.state === 'started' ? Math.max(0, previous.attempts - (carriedCallSent(error) ? 0 : 1)) : !previous ? (carriedCallSent(error) ? 1 : 0) : carriedCallSent(error) ? previous.attempts + 1 : previous.attempts;
-  performed.push(await record(state, key, { kind: row.kind, work: row.work, principal: row.principal ?? null, epoch: row.epoch ?? null, state: 'waiting', detail: wording.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist, null));
+  performed.push(await record(state, key, { kind: row.kind, work: row.work, principal: row.principal ?? null, epoch: row.epoch ?? null, state: 'waiting', detail: wording.slice(0, 2000), attempts, cycle: state.cycle, ...(row.owed ? { owed: row.owed } : {}) }, now(), effects.persist, null));
 }
 /** Retire a carried row once its call answered, or its handling ran through without it: the row is done, with the carried attempts it counted, so nothing stays carried past the answer, and an answer the row still owed is released to the cycle keep. */
 export async function retireCarried(cycle: CarriedCycle, key: string, previous: DaemonAction, detail: string) {
@@ -366,8 +367,9 @@ export async function owedWrite(cycle: CarriedCycle, key: string, row: CarriedRo
  * one the resume fence refused and the name lookup resolved. A refusal that is the record's own is
  * raised, so the launch sees the truth (not registered, not moved) and reports it as it always did.
  */
-export async function launchWrite(cycle: CarriedCycle, key: string, row: CarriedRow, what: string, write: OwedWrite['write']): Promise<unknown> {
-  const result = await owedWriteOnce(cycle, key, row, what, 'recordSession', write);
+export async function launchWrite(cycle: CarriedCycle, key: string, row: CarriedRow, what: string, work: Pick<Work, 'id' | 'key'>, handle: SessionHandleInput): Promise<unknown> {
+  // The row keeps the payload itself, so the retry survives a restart that empties the stash.
+  const result = await owedWriteOnce(cycle, key, { ...row, owed: { work: { id: work.id, key: work.key }, handle } }, what, 'recordSession', launchPayloadWrite(work, handle));
   if (result.outcome === 'refused') throw result.error;
   return result.answer;
 }
@@ -377,12 +379,27 @@ export async function supersedeOwed(cycle: CarriedCycle, key: string, why: strin
   owedWrites.get(cycle.state)?.delete(rowKey);
   if (carriedRow(previous)) await retireCarried(cycle, rowKey, previous, `${previous.detail.replace(/ was carried to the next cycle: .*$/, '')} was superseded by ${why} and is not sent`);
 }
-/** The owed writes a step's start retries: those its bound covers; a row owed by a loop since restarted names a write in flight when it stopped, whose landing is unknown, so it is retired unsent. A launch's stashed coordinate is retried like any owed write: a refusal that is the record's own is let go, an unanswered one stays owed. */
+const launchPayloadWrite = (work: Pick<Work, 'id' | 'key'>, handle: SessionHandleInput) => (effects: DaemonEffects) => effects.recordSession!(work as Work, handle);
+const ownWhat = (row: DaemonAction) => row.detail.replace(/ was carried to the next cycle: .*$/, '');
+/**
+ * The owed writes a step's start retries: those its bound covers; a row owed by a loop since restarted names a write in flight when it stopped, whose landing is unknown, so it is retired unsent.
+ * A launch's coordinate is retried like any owed write: a refusal that is the record's own is let go, an unanswered one stays owed. GY-1895: its row carries its payload, so a restarted loop
+ * rebuilds the write from the row and sends it again — the launch's own handle, the pane its runtime returned — rather than leaving the launch without its coordinates. A newer write of
+ * the same handle replaced the payload, and a superseded row is already retired, so the restart resends neither an older payload nor a superseded one.
+ */
 export async function retryOwedWrites(cycle: CarriedCycle, calls: readonly (keyof DaemonEffects)[]) {
   const owed = owedWrites.get(cycle.state);
   for (const [rowKey, entry] of owed ?? []) if (calls.includes(entry.call)) await owedWrite(cycle, rowKey.slice(owedPrefix.length), entry.row, entry.what, entry.call, entry.write);
-  for (const [rowKey, row] of Object.entries(cycle.state.actions)) if (rowKey.startsWith(owedPrefix) && carriedRow(row) && !owed?.has(rowKey))
-    await retireCarried(cycle, rowKey, row, `${row.detail.replace(/ was carried to the next cycle: .*$/, '')} was in flight when the loop last stopped: whether it landed is unknown, and a best-effort record is not sent again`);
+  for (const [rowKey, row] of Object.entries(cycle.state.actions)) {
+    if (!rowKey.startsWith(owedPrefix) || !carriedRow(row) || owed?.has(rowKey)) continue;
+    if (row.owed) {
+      if (!calls.includes('recordSession') || !cycle.effects.recordSession) continue;
+      const handle = row.owed.handle as SessionHandleInput;
+      await owedWrite(cycle, rowKey.slice(owedPrefix.length), { kind: row.kind, work: row.work, principal: row.principal, epoch: row.epoch, owed: row.owed }, ownWhat(row), 'recordSession', launchPayloadWrite(row.owed.work, handle));
+      continue;
+    }
+    await retireCarried(cycle, rowKey, row, `${ownWhat(row)} was in flight when the loop last stopped: whether it landed is unknown, and a best-effort record is not sent again`);
+  }
 }
 
 /**

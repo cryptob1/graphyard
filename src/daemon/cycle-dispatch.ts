@@ -445,7 +445,7 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
         // pane a retry carries is the one this launch's own runtime returned, never one the fence
         // refused and the agent-name lookup resolved.
         const launchRecord = effects.recordSession ? (handle: SessionHandleInput) => launchWrite(cycle, `handle:${item.id}:${handle.id}`, { kind: 'session', work: item.key, principal: handle.principal ?? null, epoch: null },
-          `Recording ${handle.id}'s coordinates on ${item.key}`, fx => fx.recordSession!(item, handle)) : undefined;
+          `Recording ${handle.id}'s coordinates on ${item.key}`, item, handle) : undefined;
         const guessed: SessionHandleInput = {
           id: `${current.profile.principal}:${item.epoch + 1}`, kind: 'implementation', principal: current.profile.principal, runtime: current.profile.kind ?? current.profile.mode, host: config.hostId,
           ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),

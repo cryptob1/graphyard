@@ -31,7 +31,7 @@ import { headlessConfinementWrapper, sessionConfinement } from '../../src/master
 import { type DaemonEffects, type DaemonState, answeringWidening, emptyDaemonState, runCycle } from '../../src/master-daemon.js';
 import { type HostMemoryReading, owedUpgrade, readReclaimReports, selfUpgradeBoundMs, readResources, reclaimResources, resourceAttention, settleTmpReclaim } from '../../src/master-resources.js';
 import { type DoctorFile } from '../../src/daemon/doctor.js';
-import { approvalWatchSchema, retainedActions } from '../../src/daemon/state.js';
+import { approvalWatchSchema, daemonStateSchema, retainedActions } from '../../src/daemon/state.js';
 import { adoptHeadlessRuns, coordinatorCheckoutGuard, noteWatchdog } from '../../src/daemon/run.js';
 import { holdBoundWait } from '../../src/daemon/cycle-decisions.js';
 import { type ExhaustedProof, handWatchPrefix } from '../../src/daemon/decisions.js';
@@ -203,7 +203,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   readiness?: { from: number; to: number };
   /** GY-1751: with `acceptance`, the plane answers the acceptance role's draft post the startup-readiness 503 in this window (ms from the day's start), then answers. */
   acceptanceOutage?: { from: number; to: number };
-  /** GY-1895: in this window (ms from the day's start) the plane answers Railway's 502 to every session-coordinate write that carries a pane — a launch's own registration coordinate, a record move, a re-prompt's handle record — for every item and epoch the window covers, then answers; the reports, which carry no pane, still land. */
+  /** GY-1895: in this window (ms from the day's start) the plane answers Railway's 502 to every session-coordinate write that carries a pane — a launch's own registration coordinate, a record move, a re-prompt's handle record — for every item and epoch the window covers, then answers; the reports, which carry no pane, still land. Past its midpoint, with a launch coordinate owed, the loop restarts from its cursor. */
   coordinateOutage?: { from: number; to: number };
   /** GY-1758: in this window (ms from the day's start) the plane times out the loop's blocker-probe record and every dispatch is refused as an item parked on a human-only decision, cycle after cycle; both are waits, then they resolve. */
   waits?: { from: number; to: number };
@@ -2307,7 +2307,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   }
   const outageDay = { refused: 0, answered: 0 };
   // GY-1895: the coordinate writes the outage window refused, pane-carrying and one per send, and the ones that landed beside and after it.
-  const coordinateOutageDay = { refused: [] as { key: string; id: string; pane: string; at: number }[], landed: [] as { key: string; id: string; pane: string; at: number }[] };
+  const coordinateOutageDay = { refused: [] as { key: string; id: string; pane: string; at: number }[], landed: [] as { key: string; id: string; pane: string; at: number }[], restartedAt: null as number | null, owedAtRestart: [] as string[] };
   if (options.acceptanceOutage && effects.acceptance) {
     const window = options.acceptanceOutage, draft = effects.acceptance.draft;
     effects.acceptance.draft = async (goal, input) => {
@@ -3093,6 +3093,13 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       && refused.every(entry => state.actions[`escalation:decision-refused:${entry.decision}`]?.state === 'done')) {
       state = emptyDaemonState(config);
       restarted = true;
+    }
+    // GY-1895: past the outage's midpoint, while a launch's coordinate stands owed, the loop restarts:
+    // its cursor is read back from disk and nothing it held in memory survives, so the owed coordinate
+    // is resent only from what its row carries.
+    if (options.coordinateOutage && coordinateOutageDay.restartedAt === null && elapsed >= (options.coordinateOutage.from + options.coordinateOutage.to) / 2 && elapsed < options.coordinateOutage.to) {
+      const owed = Object.entries(state.actions).filter(([key, row]) => key.startsWith('owed:') && row.state === 'waiting' && row.owed).map(([key]) => key);
+      if (owed.length) { state = daemonStateSchema.parse(JSON.parse(JSON.stringify(state))); coordinateOutageDay.restartedAt = elapsed; coordinateOutageDay.owedAtRestart = owed; }
     }
     const deploying = deploys < plan.deploys.length && elapsed >= plan.deploys[deploys];
     if (options.releaseLag) releaseLagDay.tips.push({ at: now, tip: github.tip });

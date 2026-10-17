@@ -15,7 +15,8 @@ import { simulateDay } from './helpers/soak-simulation.js';
  * 502, for an hour across several items' launches and epochs, then answers: every retried write
  * carries the pane its own launch returned, the retries stay bounded and converge, each cleared
  * wait is delivered once, no pane is closed or pasted that a launch did not return, and every
- * system invariant holds after every cycle.
+ * system invariant holds after every cycle. Midway through the window the loop restarts from its
+ * cursor alone: every coordinate it still owed is resent from its row, never retired unsent.
  */
 soakControlPlanes('soak-coordinate-outage', 420);
 
@@ -41,6 +42,13 @@ test('unit:soak-invariants-hold — an outage that refuses every pane-carrying c
       `every pane a coordinate write carried is the one its own launch returned: ${JSON.stringify(write)}`);
   }
 
+  // A restart inside the window: the loop came back from its cursor alone while launch coordinates
+  // stood owed, and each was resent from its row — the landings below include every one of them.
+  assert.ok(coordinateOutageDay.restartedAt !== null, 'the loop restarted inside the outage with a launch coordinate owed');
+  for (const key of coordinateOutageDay.owedAtRestart) {
+    assert.equal(state.actions[key]?.state, 'done', `${key}, owed across the restart, retired`);
+    assert.doesNotMatch(state.actions[key]!.detail, /was in flight when the loop last stopped/, `${key} was resent after the restart, not retired unsent`);
+  }
   // Bounded and convergent: a refused write is retried at the start of each step that bounds the
   // call — a few sends per cycle, the same cadence every carried call has — and by the day's end
   // every ledger row has retired: nothing stays owed.

@@ -30,6 +30,7 @@ import { Engine, readPlaneStalls } from '../src/engine.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { DaemonState } from '../src/master-daemon.js';
+import { daemonStateSchema } from '../src/daemon/state.js';
 import type { DaemonEffects } from '../src/daemon/effects.js';
 // A namespace import, so the proof producer's run of this file at the base, which has no screenDialog,
 // fails only the case that reads it.
@@ -1526,8 +1527,8 @@ function gy1895Engine(world: Awaited<ReturnType<typeof resumeWorld>>, key: strin
 /** The launch's own coordinate write, stashed the way the dispatch's launch stashes it: `launchWrite` under the handle key, refused by the outage, owed to the next cycle's retry. */
 async function gy1895StashLaunchCoordinate(world: Awaited<ReturnType<typeof resumeWorld>>, key: string, principal: string, epoch: number, pane: string, plane: { up: boolean }, writes: SessionHandleInput[], refused: SessionHandleInput[]) {
   const outcome = await launchWrite(world.cycle(0), `handle:${world.item.id}:${principal}:${epoch}`, { kind: 'session', work: key, principal, epoch: null },
-    `Recording ${principal}:${epoch}'s coordinates on ${key}`, fx => fx.recordSession!(world.item, { id: `${principal}:${epoch}`, kind: 'implementation', principal, runtime: 'claude', host: 'vishrog',
-      workspace: 'w1V', subject: `${key}: Item ${key}`, state: 'running', pane, attach: `herdr pane attach ${pane} --workspace w1V` }));
+    `Recording ${principal}:${epoch}'s coordinates on ${key}`, world.item, { id: `${principal}:${epoch}`, kind: 'implementation', principal, runtime: 'claude', host: 'vishrog',
+      workspace: 'w1V', subject: `${key}: Item ${key}`, state: 'running', pane, attach: `herdr pane attach ${pane} --workspace w1V` });
   assert.equal(outcome, coordinateOwed, 'the outage kept the plane from answering, so the launch\u2019s own write is stashed owed');
   assert.equal(writes.length, 0, 'nothing landed while the plane was down');
   assert.equal(refused.length, 1, 'the plane refused the one send');
@@ -1635,6 +1636,64 @@ test(`unit:fault-class-session-liveness GY-1895 action:session GY-1885 — an ou
   } finally { world.cleanup(); }
 });
 
+test(`unit:fault-class-session-liveness GY-1895 action:session GY-1885 — a loop restart inside the outage keeps the launch's own coordinate: the owed row carries its payload, the restarted loop resends it, the guessed write it superseded stays unsent, and the cleared wait is delivered once with no reclaim and no fault`, async () => {
+  const key = 'GY-1885', epoch = 6, guessedEpoch = 5, principal = 'graphyard-opencode-2', pane = 'w1V:pQKZ';
+  const { item, profile, agents } = gy1895OutageAttempt(key, epoch, principal, guessedEpoch, pane, 'paneless');
+  const world = await resumeWorld(item, profile, agents, { value: 0 }, GY1895_NOW);
+  const plane = { up: false }, writes: SessionHandleInput[] = [], refused: SessionHandleInput[] = [];
+  gy1895Engine(world, key, plane, writes, refused);
+  const owedKey = `owed:handle:${item.id}:${principal}:${epoch}`, guessedKey = `owed:handle:${item.id}:${principal}:${guessedEpoch}`;
+  const reclaimed = (state: DaemonState) => Object.values(state.actions).some(action => /keeping the attempt's branch/.test(action.detail));
+  try {
+    // The launch happened inside the outage: its coordinate is owed, and the guessed id's write was
+    // superseded by the owed move, as the dispatch retires it.
+    await gy1895StashLaunchCoordinate(world, key, principal, epoch, pane, plane, writes, refused);
+    await launchWrite(world.cycle(0), `handle:${item.id}:${principal}:${guessedEpoch}`, { kind: 'session', work: key, principal, epoch: null }, `Recording ${principal}:${guessedEpoch}'s coordinates on ${key}`, item,
+      { id: `${principal}:${guessedEpoch}`, kind: 'implementation', principal, runtime: 'claude', host: 'vishrog', subject: `${key}: Item ${key}`, state: 'running' });
+    await retireGuessedCoordinate(world.cycle(0), item, `${principal}:${guessedEpoch}`, { outcome: 'owed', from: `${principal}:${guessedEpoch}`, to: `${principal}:${epoch}` });
+    await resumeStep(world.cycle(0), new Set(), true);
+    assert.equal(world.state.actions[owedKey]?.state, 'waiting', 'the coordinate stands owed when the loop stops');
+    assert.deepEqual(world.state.actions[owedKey]?.owed, { work: { id: item.id, key }, handle: { id: `${principal}:${epoch}`, kind: 'implementation', principal, runtime: 'claude', host: 'vishrog', workspace: 'w1V',
+      subject: `${key}: Item ${key}`, state: 'running', pane, attach: `herdr pane attach ${pane} --workspace w1V` } }, 'the row carries the launch\u2019s own payload, the pane its runtime returned');
+    // The loop restarts: the cursor is read back from disk, and nothing in memory survives it. The
+    // base retired the owed row unsent here, as a write whose landing was unknown.
+    const restarted = daemonStateSchema.parse(JSON.parse(JSON.stringify(world.state)));
+    const after = (ms: number) => ({ ...world.cycle(ms), state: restarted } as unknown as Cycle);
+    const refusedBefore = refused.length;
+    // First restarted cycle, the outage still standing: the rebuilt write is refused and stays owed, payload kept.
+    restarted.cycle += 1;
+    await resumeStep(after(60_000), new Set(), true);
+    assert.ok(refused.length > refusedBefore && refused.slice(refusedBefore).every(write => write.id === `${principal}:${epoch}` && write.pane === pane), 'the restarted loop resent the launch\u2019s own coordinate, never the superseded guess');
+    assert.equal(restarted.actions[owedKey]?.state, 'waiting');
+    assert.equal(restarted.actions[owedKey]?.owed?.handle.pane, pane, 'a refusal after the restart keeps the payload for the next one');
+    assert.equal(reclaimed(restarted), false, 'the owed coordinate holds the reclaim across the restart');
+    assert.deepEqual(GY1895_sessionLiveness(restarted), [], 'no session-liveness instance while it stands owed');
+    // The plane answers: the coordinate lands once, under the claimed id with the launch's own pane.
+    plane.up = true;
+    restarted.cycle += 1;
+    await resumeStep(after(120_000), new Set(), true);
+    restarted.cycle += 1;
+    await resumeStep(after(150_000), new Set(), true);
+    // The launch's coordinate carries no outcome; the delivery's own handle record, which follows the paste, does.
+    assert.deepEqual(writes.filter(write => !write.outcome).map(write => [write.id, write.state, write.pane]), [[`${principal}:${epoch}`, 'running', pane]], 'one landing of the coordinate, the launch\u2019s own; the superseded guessed write never reopened its record');
+    assert.ok(writes.every(write => write.id === `${principal}:${epoch}`), 'nothing was ever written under the guessed id after the restart');
+    assert.equal(restarted.actions[owedKey]?.state, 'done');
+    assert.equal(restarted.actions[owedKey]?.owed, undefined, 'the retired row drops the payload');
+    assert.equal(restarted.actions[guessedKey]?.state, 'done');
+    assert.equal(world.prompts.length, 1, `the cleared wait was delivered once: ${JSON.stringify(world.prompts)}`);
+    restarted.cycle += 1;
+    await resumeStep(after(180_000), new Set(), true);
+    assert.equal(world.prompts.length, 1, 'the delivery is never repeated');
+    assert.equal(reclaimed(restarted), false, 'no coordinate-driven reclaim ran');
+    assert.deepEqual(GY1895_sessionLiveness(restarted), [], 'no session-liveness instance anywhere through the restart');
+    // A best-effort record with no payload is still a write whose landing is unknown: retired unsent, as always.
+    await record(restarted, 'owed:handle:other:x:running', { kind: 'session', work: key, principal: null, state: 'waiting', detail: 'Recording a handle was carried to the next cycle: slow; the write stays owed and is retried next cycle', attempts: 1, cycle: restarted.cycle }, GY1895_NOW, world.effects.persist);
+    const reread = daemonStateSchema.parse(JSON.parse(JSON.stringify(restarted)));
+    await retryOwedWrites({ ...after(210_000), state: reread } as unknown as Cycle, ['recordSession']);
+    assert.match(reread.actions['owed:handle:other:x:running']!.detail, /was in flight when the loop last stopped/);
+  } finally { world.cleanup(); }
+});
+
 test('unit:fault-class-session-liveness GY-1895 session isolation — a paneless handle and a reused agent name pointing at another session\'s pane bind nothing, paste nothing and close nothing, and a refusal whose coordinate write is not owed still counts', async () => {
   // The profile's agent name resolves to a pane this item's finished previous attempt holds: the
   // name was reassigned to whatever the listing still shows there, and no launch identity ties it
@@ -1679,7 +1738,7 @@ test('unit:fault-class-session-liveness GY-1895 launch coordinates — a launch 
   try {
     // The launch record goes through the ledger exactly as the dispatch's launch wires it.
     const record = (write: SessionHandleInput) => launchWrite(world.cycle(0), `handle:${item.id}:${write.id}`, { kind: 'session', work: item.key, principal: write.principal ?? null, epoch: null },
-      `Recording ${write.id}'s coordinates on ${item.key}`, fx => fx.recordSession!(item, write));
+      `Recording ${write.id}'s coordinates on ${item.key}`, item, write);
     // Registration, coordinates, move: every write is stashed owed, and the coordinate loop stops
     // at the first unanswered answer instead of hammering the silent plane three times.
     const launched = await registeredLaunch(record, handle, async () => ({ epoch: 6, pane: 'w1V:pQKZ', agentName: profile.agentName }),
