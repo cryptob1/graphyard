@@ -196,10 +196,6 @@ test('integration:pi-provider-limit-exhaustion — an idle pi session on the 131
   assert.equal(exhaustion.resetsAt, resetAt);
   assert.equal(exhaustion.partialWork.state, 'committed', 'the partial work is kept');
   assert.equal(git(worktree, 'status', '--porcelain'), '', 'the partial work is a commit on the attempt branch');
-  // The hold is read back on this file's own fixed clock: observedExhaustions' default clock is the
-  // host's, and the hold's until is the incident's reset (2026-10-17T08:27:35Z), already past when
-  // the suite runs later that day — the default filtered the hold out and the read said none (CI,
-  // candidate f5c7b0e16690, run 39018417554 shard 7).
   assert.equal((await observedExhaustions(config, now()))['pi-a']?.until, resetAt, 'the spent account is held until the UTC reset');
 
   // The next cycle redispatches the item onto the healthy account, with no master action.

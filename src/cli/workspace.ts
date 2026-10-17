@@ -1,11 +1,13 @@
 // Concern: workspace commands — sync with the base branch tip, and the supervised worker watch under lease.
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { Work } from '../model.js';
 import { containmentFailureNote, controlPlaneRestartWindowMs, restartTolerantApi, setupLine, supervise, systemdContainment } from '../supervisor.js';
-import { attributeConflicts, hasConflictMarkers, localScopeFindings, managedServerUrl, regenerateManagedBlocks } from '../sync.js';
+import { attributeConflicts, hasConflictMarkers, localScopeFindings, managedServerUrl, parseLocalScopeDiff, regenerateManagedBlocks } from '../sync.js';
+import { resolveTimingBaseline, timedTestFile, timingBaselinePath } from '../model/timing-companion.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
 import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
 import { superviseSessionCredential, type MintedPushCredential } from '../worker-credential.js';
@@ -74,6 +76,19 @@ export async function syncWork({ api, print, base: serverUrl, args }: CliContext
     const rendered = regenerateManagedBlocks(conflicted, text => renderers.managedInstructions(renderers.withoutMasterInstructions(text), url, { merger: status.mergeWriter?.merger ?? null }));
     if (rendered !== null) { await writeFile(resolve(cwd, 'AGENTS.md'), rendered); git('add', '--', 'AGENTS.md'); regenerated.push(`AGENTS.md (managed blocks rendered from the ${renderers.source} templates)`); }
   }
+  // The timing baseline conflicts by construction (GY-1875): every new test file adds one line to
+  // a single map, so two items adding neighbouring test files conflict over lines that only balance
+  // CI shards. Its merge is resolved the way the companion rule already lets the branch write it:
+  // the base tip's file with this branch's own test-file lines, staged and listed as regenerated;
+  // anything that cannot be so resolved, and every other conflict, is still the worker's. While a
+  // timed test file is itself conflicted the baseline waits with it, so the rerun that continues the
+  // merge resolves it against the tests the worker kept, never a line for one the base deleted.
+  if (conflicts.includes(timingBaselinePath) && !conflicts.some(path => path !== timingBaselinePath && timedTestFile(path))) {
+    const sides = await Promise.all([baseTip, 'HEAD', mergeBase].map(rev => quietly('show', `${rev}:${timingBaselinePath}`)));
+    const resolved = resolveTimingBaseline(sides[0].stdout, sides[1].stdout, parseLocalScopeDiff(git('diff', '--raw', '-M', '-z', '--no-abbrev', mergeBase, 'HEAD'), ''),
+      { mergeBase: sides[2].status === 0 ? sides[2].stdout : null, exists: path => existsSync(resolve(cwd, path)) });
+    if (resolved !== null) { await writeFile(resolve(cwd, timingBaselinePath), resolved); git('add', '--', timingBaselinePath); regenerated.push(`${timingBaselinePath} (the base tip's file with this branch's own test-file lines)`); }
+  }
   conflicts = unmerged();
   if (conflicts.length) {
     const landed = new Set(git('rev-list', `${mergeBase}..${baseTip}`).split('\n').filter(Boolean));
@@ -123,10 +138,10 @@ export const workspaceCommands = defineCommands([
     scope: 'work',
     help: [
       '  sync GY-N [--restore]         Merge origin/BASE (never rebase), regenerate generated files',
-      '                                (docs indexes, AGENTS.md blocks) instead of hand-merging them,',
-      '                                name the shipped items behind each remaining conflict, and',
-      '                                list every file outside plannedFiles that no longer matches',
-      '                                the base; run before every push. While the control plane is',
+      '                                (docs indexes, AGENTS.md blocks, the timing baseline) instead of',
+      '                                hand-merging them, name the shipped items behind each remaining',
+      '                                conflict, and list every file outside plannedFiles that no longer',
+      '                                matches the base; run before every push. While the control plane is',
       '                                the merge writer it fetches nothing: the shared origin/BASE',
       '                                is the writer\'s tip, and complete --head follows',
       '  sync GY-N --restore           The same, then restore every such file to the base in one new',
