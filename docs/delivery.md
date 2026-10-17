@@ -9,9 +9,9 @@ Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`
 
 - `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N new first-parent merges (`GRAPHYARD_RC_MAX_PRS`=10; rest queue); `.github/workflows/release-candidate.yml` cuts on loop dispatch.
 - `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*`); refused while an unjudged <4h candidate serves.
-- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint/API (`GRAPHYARD_UAT_TOKEN`)/`browser`/suites ([below](#pre-merge-gate-and-release-candidate-validation); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`; a [pending](validation.md#release-verdicts) case never blocks.
-- `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`; `release verify --url URL` confirms.
-- `GRAPHYARD_RELEASE_BUILD` records cuts' per-service digests; with `GRAPHYARD_DEPLOY_DIGESTS` (`GRAPHYARD_DEPLOY_ENVIRONMENT`/`_MANIFEST`/`_GENERATION`) `uat`/`promote` deploy them, else SHA. A recorded build promotes by digest, never rebuilt, once UAT names it. `verify`/UAT `digests` check `GRAPHYARD_INSTANCE_DIGESTS`. Deploys take `rc-deploy/ENV/N` (exclusive), then `rc-deployed/ENV/N`.
+- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint/API/`browser`/suites ([below](#pre-merge-gate-and-release-candidate-validation); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`; a [pending](validation.md#release-verdicts) case never blocks.
+- `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`.
+- `GRAPHYARD_RELEASE_BUILD` records cuts' per-service digests; with `GRAPHYARD_DEPLOY_DIGESTS` (`GRAPHYARD_DEPLOY_ENVIRONMENT`/`_MANIFEST`/`_GENERATION`) `uat`/`promote` deploy them, else SHA. A recorded build promotes by digest, never rebuilt, once a `digests`-suite-observed UAT verdict (`GRAPHYARD_INSTANCE_DIGESTS`) names it, else promotion refuses; `release verify` checks production's instances. Deploys take `rc-deploy/ENV/N`, then `rc-deployed/ENV/N`.
 - Failures file a [hold](validation.md#release-holds) per outcome, else `release follow-up ID` ([filing credential](#release-filing-credential)).
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records `rc-soak/ID` (advisory).
 

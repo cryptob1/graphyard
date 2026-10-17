@@ -6,7 +6,7 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, join, resolve, sep } from 'node:path';
 import { buildSchema, type Manifest } from './delivery.js';
 import {
-  currentDeployment, deploymentOutcomeTagPrefix, deploymentsIn, deploymentTagPrefix, fencedDeploy, fencedDeployAsync, outcomeOf,
+  currentDeployment, deploymentOutcomeTagPrefix, deploymentsIn, deploymentTagPrefix, digestVariables, fencedDeploy, fencedDeployAsync, outcomeOf,
   type DeploymentOutcome, type DeploymentRecord, type DeployFence,
 } from './release-digests.js';
 export type { DeploymentOutcome, DeploymentRecord, DeployFence } from './release-digests.js';
@@ -719,7 +719,8 @@ export async function awaitServing(url: string, sha: string, options: { timeoutM
 /**
  * Validate a candidate on UAT: wait for UAT to serve its exact SHA, run every suite against it,
  * and confirm UAT still serves that SHA afterwards so no verdict is attributed across a redeploy.
- * A digest deployment records the digests it served on the verdict (GY-1844).
+ * A digest deployment's `digests` option — what an observation backed — is stamped on the verdict
+ * (GY-1844); `validateAndRecord` names it only when an observation ran (GY-1868).
  */
 export async function validate(candidate: ReleaseCandidate, url: string, suites: readonly Suite[], options: { timeoutMs: number; now?: () => Date; fetcher?: typeof fetch; sleep?: (ms: number) => Promise<void>; digests?: Manifest }) {
   const clock = options.now ?? (() => new Date());
@@ -806,10 +807,12 @@ export function assessUatDeploy(candidate: ReleaseCandidate, ledger: Ledger, uat
  * GY-1844: a digest promotion deploys the candidate's recorded build, so it needs the UAT record to
  * name exactly those digests; a record taken by SHA, or without the digests, never showed that
  * these artifacts were tested, and promoting them by digest would deploy something UAT never named.
+ * The refusal names `GRAPHYARD_INSTANCE_DIGESTS` (GY-1868): the observer a UAT validation runs its
+ * `digests` suite through, without which a record taken by digest names no digests at all.
  */
 export function digestPromotionRefusal(candidate: ReleaseCandidate, uat: UatRecord | null) {
   if (!candidate.build?.artifacts?.length || (uat?.digests?.length && sameDigests(uat.digests, candidate.build.artifacts))) return null;
-  return `Candidate ${candidate.id}'s UAT record names no digests, so it never showed that its recorded build was tested; deploy the recorded digests to UAT and validate them before promoting by digest`;
+  return `Candidate ${candidate.id}'s UAT record names no digests, so it never showed that its recorded build was tested; set ${digestVariables.instances} so UAT validation observes the instances, deploy the recorded digests to UAT and validate them before promoting by digest`;
 }
 /** GY-1844: the digests UAT serves for this candidate — its current generation, when that deployed this candidate by digest — which its validation tested. */
 export const uatServedDigests = (ledger: Ledger, candidate: ReleaseCandidate) => {
@@ -910,7 +913,12 @@ export async function validateAndRecord(sourceGit: AnyGit, id: string, url: stri
   const candidate = findCandidate(ledger, id);
   const existing = ledger.uat.find(record => record.id === candidate.id);
   if (existing) throw new Error(`Candidate ${candidate.id} was already validated on UAT (${existing.result} at ${existing.at}); cut a new candidate to validate again`);
-  const record = await validate(candidate, url, suites, { ...options, digests: options.digests ?? uatServedDigests(ledger, candidate) });
+  // GY-1868: the verdict names the digests UAT serves only when an observation backed them — the
+  // suites include the `digests` suite the instance observer runs, or the caller names `digests`
+  // itself, attesting its own observation. Without the observer the verdict names none, so digest
+  // promotion refuses and names it (digestPromotionRefusal) instead of accepting unobserved digests.
+  const digests = options.digests ?? (suites.some(suite => suite.name === 'digests') ? uatServedDigests(ledger, candidate) : undefined);
+  const record = await validate(candidate, url, suites, { ...options, digests });
   let filingError: string | null = null;
   const holds = options.holds ? await options.holds(candidate, record) : null;
   if (holds) { Object.assign(record, { e2e: holds.e2e, holds: holds.holds }); filingError = holds.filingError; }

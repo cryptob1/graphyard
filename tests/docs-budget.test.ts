@@ -104,8 +104,8 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   ['docs/operations.md', /`disk` attention under `run\.diskThresholdGb` is answered \(reported, faultless\) while the latest worktree-reclaim pass is ≤30 min old and out of reach \(nothing disposable now, no backlog or error, its removals included; no fault standing\); ≤ half the threshold, or ENOSPC\/EDQUOT, always raises; a standing low reading holds to a tenth of the threshold above it, whatever the pass answers/],
   // GY-1690 AC-3 and GY-1729: the release-candidate section says the chart exercise forwards a free port it re-establishes, waits for the rollout, retries transient API failures and names the last line a failed job ends on.
   ['docs/delivery.md', /`deploy\/helm\/exercise\.sh` forwards a kubectl-chosen free port, re-forwarding a lost or foreign one within `FORWARD_BUDGET` seconds; waits for the rollout's new Ready pod, retrying transient API failures \(empty reply, reset, stall, non-2xx, bodiless 2xx\), else ending `api METHOD \/api\/PATH failed after 15 attempts: status STATUS, body: BODY`/],
-  // GY-1844: the release-candidate section states digest promotion: a candidate's recorded build promotes by its exact digests, never a rebuild.
-  ['docs/delivery.md', /A recorded build promotes by digest, never rebuilt, once UAT names it/],
+  // GY-1844, GY-1868: the release-candidate section states digest promotion: a candidate's recorded build promotes by its exact digests, never a rebuild, on a UAT verdict the digests suite (GRAPHYARD_INSTANCE_DIGESTS) observed; without it promotion refuses.
+  ['docs/delivery.md', /A recorded build promotes by digest, never rebuilt, once a `digests`-suite-observed UAT verdict \(`GRAPHYARD_INSTANCE_DIGESTS`\) names it, else promotion refuses/],
 ];
 
 test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and every docs page) keep every page within its per-page budget and 200 words under it, counted as wc -w counts them; a total within 3% of the budget fails a change that adds to it and warns otherwise', () => {
