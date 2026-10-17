@@ -15,13 +15,19 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 ## GitHub administration through the browser
 
-`master protection --apply` reconciles protection; flows drive the `master init --browser-profile` profile: `master browser app-permissions` raises permissions, `installation-accept` accepts requests, `protection` reconciles protection.
+`master protection --apply` reconciles protection; flows (`master browser app-permissions`, `master browser installation-accept`, `master browser protection`) drive the `master init --browser-profile` profile:
+
+| Flow | Effect
+| --- | ---
+| `app-permissions` | Permissions raised
+| `installation-accept` | Requests accepted
+| `protection` | Protection reconciled
 
 Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` (`record.json`, `ledger.json`, redacted Confirm-access markup (`master browser fixtures`)); a criterion needing a live one runs `master browser capture [--dry-run]` on the sudo-protected App permissions page, submitting nothing, never a human, following each offered method's control as a button or a link; a refused capture's record names the controls it saw. Approving *Confirm access* GitHub Mobile on device: human-only; master never stores cookies, uses merge bypass, pushes code, reads worker credentials. On classifier refusals `master harness claude|codex --apply` writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`, token-minting or mutating `gh api`; missing/retired rules: `harness` drift, reapplied each cycle.
 
 ## Typed actions and executors
 
-`nextAction` (one per item): `dispatch`/`request-review`/`request-rework`/`approve-scope`/`resync`/`reclaim`/`merge`/`verify-deployment`/`escalate`; judgements: `actions.needsHuman`. `init` starts executors; `master executors restart` refreshes slots; verified deployments advance clean checkouts, restart executors and loop. `resync` needs newer observation. `dispatch`/`request-review` complete if a session answers the head; busy profiles stall after 30min. Three failures, unchanged reason: stalled rather than retrying (fleet looks idle; plane-wide failures, human-only parks, a promotion's `verify-deployment` failure within `promotionWaitBoundMs` (60min), never stall); counted and listed only in `actions.stalled` and on its card; backoff never outlives it; eight escalate. Ticks requeue ownerless items (`liveness.violations`). One origin fetch per dispatch cycle builds its worktrees; each records preparation time (`master status` `launches.prepare`: daily p50/p90).
+`nextAction` (one per item): `dispatch`/`request-review`/`request-rework`/`approve-scope`/`resync`/`reclaim`/`merge`/`verify-deployment`/`escalate`; judgements: `actions.needsHuman`. `init` starts executors; `master executors restart` refreshes slots; verified deployments advance clean checkouts, restart executors and loop. `resync` needs newer observation. `dispatch`/`request-review` complete if a session answers the head; busy profiles stall after 30min. Three failures, unchanged reason: stalled rather than retrying (fleet looks idle; plane-wide failures, human-only parks, a promotion's `verify-deployment` failure within `promotionWaitBoundMs` (60min), never stall); in no count and no list, but in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate. Ticks requeue ownerless items (`liveness.violations`). One origin fetch per dispatch cycle builds its worktrees; each records preparation time (`master status` `launches.prepare`: daily p50/p90).
 
 Declared slot not `active`: `resources` fault naming `journalctl --user -u graphyard-executor@N.service` unless stopped <2min; `--install` needs `Restart=always`, `RestartSec` ≤60s. Worker starts fenced <2min retry after lapse.
 
@@ -43,6 +49,6 @@ Unacted producer requests (unstarted/refused/launch-exited) relaunch on untried 
 
 ## Pipeline speed
 
-Target: submit→merge p50 ≤30min, p90 ≤60min. Row `speed`: `executionMs`/`waitMs`/`reworkRounds`/`interventions`; verdict `speed.submitToMerge`; `scripts/measure-pipeline-speed.mjs` feeds `manual:speed-target-met`.
+Target: submit→merge p50 ≤30 minutes, p90 ≤60 minutes. Row `speed`: `executionMs`/`waitMs`/`reworkRounds`/`interventions`; verdict `speed.submitToMerge`; `scripts/measure-pipeline-speed.mjs` feeds `manual:speed-target-met`.
 
 Steps calling an approver, decision or session budget two-fifths of the interval (30s floor), each call 10s or what's left; a slower one is carried (`waiting`, no fault), retried next cycle, joining it or consuming its answer, kept while its row stands; spent, it starts none; one `decision.*` ledger read names moved items, an unmoved history is kept unread. Master/merge-mode/record/triage-phase calls too.
