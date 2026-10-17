@@ -355,3 +355,30 @@ test('unit:merge-decision-releases-exact-candidate-only — only an applied, ind
   assert.deepEqual(restored.merges(), ['enablePullRequestAutoMerge']);
   assert.equal((await writerQueue([moved, bystander])).queue.length, 2);
 });
+
+test('unit:merge-hold-annotation-reads-each-decision-row-once — the coordination view\'s bulk hold reads each decision row once per poll, however many candidates and decisions accumulate', async () => {
+  await setAutoMerge(false);
+  const candidates: Work[] = [];
+  for (let index = 0; index < 40; index += 1) candidates.push(await mergeable());
+  // Every candidate carries decisions bound to heads it has left; the last one is released.
+  for (const work of candidates) for (let round = 0; round < 5; round += 1) await decision(work, { sha: other, baseSha: base, policyRevision: 2 }, { requester: 'master-agent', approver: 'approver-agent' });
+  const released = candidates[candidates.length - 1];
+  await decision(released, { sha: head, baseSha: base, policyRevision: 2 }, { requester: 'master-agent', approver: 'approver-agent' });
+  // The pool as the status route reads it, every decision row's work_id read counted.
+  let rows = 0, reads = 0;
+  const counted = { query: async (text: string, values?: unknown[]) => {
+    const result = await store.pool.query(text, values as any[]);
+    if (!/kind LIKE 'decision\.%'/.test(text)) return result;
+    rows += result.rows.length;
+    return { ...result, rows: result.rows.map(row => { const { work_id, ...rest } = row; return Object.defineProperty(rest, 'work_id', { enumerable: true, get: () => { reads += 1; return work_id; } }); }) };
+  } };
+  for (let poll = 0; poll < 3; poll += 1) {
+    const holds = await mergeHolds(counted, candidates);
+    assert.equal(holds.size, candidates.length);
+    assert.equal(holds.get(released.id), null, 'the released candidate is not held');
+    for (const work of candidates.slice(0, -1)) assert.match(holds.get(work.id) ?? '', /automatic merging is off/);
+  }
+  assert.equal(rows, 3 * (candidates.length * 5 * 3 + 3), 'each poll reads every candidate\'s decision rows in one query');
+  assert.equal(reads, rows, `grouping reads each row's work id once per poll, not once per candidate: ${reads} reads of ${rows} rows`);
+  await setAutoMerge(true);
+});

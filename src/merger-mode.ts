@@ -124,7 +124,8 @@ export async function mergeHolds(db: Queryable, work: readonly Work[]): Promise<
   if (setting.autoMerge) { for (const item of work) holds.set(item.id, null); return holds; }
   const held = work.filter(item => item.stage !== 'done' && !!item.candidate);
   const decisions = await decisionsByWork(db, held.map(item => item.id));
-  for (const item of work) holds.set(item.id, held.includes(item) ? mergeHoldReason(item, setting, decisions[item.id] ?? []) : null);
+  for (const item of work) holds.set(item.id, null);
+  for (const item of held) holds.set(item.id, mergeHoldReason(item, setting, decisions[item.id] ?? []));
   return holds;
 }
 /** One item's hold (see `mergeHolds`). */
