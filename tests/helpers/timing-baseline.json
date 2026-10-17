@@ -559,6 +559,7 @@
     "tests/master.test.ts": 4419,
     "tests/mechanical-findings.test.ts": 1000,
     "tests/merge-base-ancestry.test.ts": 761,
+    "tests/merge-check-current-verdict.test.ts": 800,
     "tests/merge-delegation-clean.test.ts": 2085,
     "tests/merge-executor-owner.test.ts": 1617,
     "tests/merge-executor.test.ts": 4000,
@@ -797,6 +798,7 @@
     "tests/soak-master-lock-refusal.test.ts": 30150,
     "tests/soak-master-role-blockers.test.ts": 6834,
     "tests/soak-merge-preview.test.ts": 14000,
+    "tests/soak-merge-verdict.test.ts": 30000,
     "tests/soak-merge-writer.test.ts": 4000,
     "tests/soak-observation-window.test.ts": 45000,
     "tests/soak-orphan-supervisor.test.ts": 1500,
@@ -906,6 +908,7 @@
     "tests/unknown-reviewer-profile.test.ts": 800,
     "tests/unproduced-manual-attestation.test.ts": 537,
     "tests/unresolved-threads.test.ts": 816,
+    "tests/unit-launcher-quoted-path.test.ts": 700,
     "tests/up-control-plane.test.ts": 2500,
     "tests/upgrade-dirty-snapshot.test.ts": 4000,
     "tests/upgrade-slot-restart.test.ts": 1800,
@@ -938,6 +941,9 @@
     "tests/worktree-reclaim.test.ts": 3054,
     "tests/zero-touch-control-plane.test.ts": 4000,
     "tests/zero-touch-onboarding.test.ts": 5900,
-    "tests/evaluator-recovery.test.ts": 4000
+    "tests/evaluator-recovery.test.ts": 4000,
+    "tests/sync-timing-baseline.test.ts": 4000,
+    "tests/file-durations-status.test.ts": 257,
+    "tests/event-loop-lag-pending.test.ts": 729
   }
 }
