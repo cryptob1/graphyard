@@ -17,12 +17,13 @@ const steps = () => {
   return section[1].split('\n').filter(line => /^\d+\. /.test(line)).map(line => line.replace(/^\d+\. /, ''));
 };
 
-/** Steps 1 to 3 and 5 to 8 as they read on main today: GY-1785 changes step 4 only. */
+/** Steps 1 to 3 and 5 to 8 as they read on main today: GY-1785 changes step 4 only; GY-1866 later
+ * attributed step 5's review timing to the repository's graphyard.json. */
 const UNCHANGED_ON_MAIN: Record<number, string> = {
   1: 'You give Graphyard a goal in a plain-language file.',
   2: 'A planner agent turns the goal into small work items with acceptance criteria.',
   3: 'A worker agent takes over: the worker builds each work item on its own branch.',
-  5: 'An independent agent reviews, before the merge for sensitive changes and after the merge for everything else.',
+  5: "An independent agent reviews, before the merge for sensitive changes and after the merge for everything else, by default; graphyard.json sets both.",
   6: 'About every ten merges a release candidate goes to a test environment for UAT + E2E (user acceptance, end-to-end suite).',
   7: 'A passing candidate is promoted to production and checked there: production verified.',
   8: 'A failure anywhere is reverted or fixed by a new work item.',
