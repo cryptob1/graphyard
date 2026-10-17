@@ -65,15 +65,15 @@ async function postStallWork(origin: string, token: string, input: StallUpstream
   return result as Work;
 }
 
-/** Production filer: `upstream` absent files into this install as the operator-agent (slow-loop precedent); present files into the named install with its credential file. */
-export function stallUpstreamFiler(config: MasterConfig, root: string): StallUpstreamFiler {
+/** Production filer: `upstream` absent files into this install as the operator-agent (slow-loop precedent); present files into the named install with its credential file. The checkout `root` is read only when a filing is made. */
+export function stallUpstreamFiler(config: MasterConfig, root: () => string): StallUpstreamFiler {
   const upstream = config.upstream;
   if (!upstream) return async (input, key) => {
     if (!config.operatorAgent) throw new Error('No master operator-agent identity is provisioned; run graphyard master autonomy --admin-token-stdin --apply so the loop can file the stalls it cannot clear');
-    return postStallWork(config.url, await agentToken(root, config, 'operatorAgent'), input, key);
+    return postStallWork(config.url, await agentToken(root(), config, 'operatorAgent'), input, key);
   };
   return async (input, key) => {
-    await externalCredential(root, upstream.credentialFile, 'Upstream filing');
+    await externalCredential(root(), upstream.credentialFile, 'Upstream filing');
     return postStallWork(serverOrigin(upstream.url), await readCredentialFile(upstream.credentialFile), input, key);
   };
 }

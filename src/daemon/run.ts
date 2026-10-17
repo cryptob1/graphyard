@@ -321,6 +321,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     // loaded. Either refusal is an escalation naming the dirty paths and which live leases' planned
     // files they match: those matches are the checkout's writes attributed to the attempts most
     // likely to have made them.
+    const stallUpstream = options.stallUpstream ?? stallUpstreamFiler(config, () => options.repository ?? coordinatorCheckoutRoot(config.cliPath));
     const checkoutOf = async () => options.checkout?.() ?? await readCoordinatorCheckout(coordinatorCheckoutRoot(config.cliPath));
     const guard = coordinatorCheckoutGuard({ state: () => state, read: checkoutOf, agents: raw.agents, snapshot: raw.snapshot, persist: effects.persist, now, log, recover: effects.recoverHead, runsSnapshot: () => snapshot,
       diverged: (checkout, loaded) => divergedHead(checkout.root, { base: `refs/remotes/origin/${config.baseBranch}`, loaded }).then(head => head === checkout.commit) });
@@ -412,7 +413,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           for (const { signature, record } of applied)
             log(`[graphyard-master] the ${record.kind} stall remedy ${record.outcome}${record.verified ? ', verified' : ', unverified'}: ${record.detail} (${signature.slice(0, 160)})`);
           // GY-1855: a stall past its clearing bound files exactly one upstream item per signature.
-          const upstream = await fileStalledStepsUpstream(state, options.stallUpstream ?? stallUpstreamFiler(config, options.repository ?? coordinatorCheckoutRoot(config.cliPath)), now, effects.persist);
+          const upstream = await fileStalledStepsUpstream(state, stallUpstream, now, effects.persist);
           if (upstream) log(`[graphyard-master] cycle ${result.metrics.cycle} ${upstream.kind} ${upstream.state}: ${upstream.detail}`);
           if (stalls.notes.length || stalls.cleared || applied.length || upstream) await effects.persist(state);
           for (const action of result.actions) log(`[graphyard-master] cycle ${result.metrics.cycle} ${action.kind} ${action.state}: ${action.detail}`);
@@ -449,7 +450,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           const stallApplied = await remedyStalledSteps(state, stallRunner, now(), effects.persist);
           for (const { record } of stallApplied)
             log(`[graphyard-master] the ${record.kind} stall remedy ${record.outcome}${record.verified ? ', verified' : ', unverified'}: ${record.detail}`);
-          const upstream = await fileStalledStepsUpstream(state, options.stallUpstream ?? stallUpstreamFiler(config, options.repository ?? coordinatorCheckoutRoot(config.cliPath)), now, effects.persist);
+          const upstream = await fileStalledStepsUpstream(state, stallUpstream, now, effects.persist);
           if (upstream) log(`[graphyard-master] cycle ${failure.cycle} ${upstream.kind} ${upstream.state}: ${upstream.detail}`);
           if (stall.counted || owedCounted || cleared || stallApplied.length || upstream) await effects.persist(state);
           // A stall that needs the master is woken from here: this cycle failed before its
