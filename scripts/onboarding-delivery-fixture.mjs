@@ -1,4 +1,4 @@
-// The isolated normal-onboarding fixture of the UAT e2e suite (GY-1910, release hold GY-1909).
+// The isolated normal-onboarding fixture of the UAT e2e suite (GY-1910, release hold GY-1909; GY-1913).
 //
 // onboarding-delivery-defaults describes a repository onboarded the normal way: it reads the
 // project's delivery defaults and the merger mode, then opens the Delivery view. The shared UAT
@@ -7,7 +7,10 @@
 // gives the case its own target instead: from the candidate checkout's exact HEAD it creates a fresh
 // fixture repository and a fresh control plane (its own Postgres), runs normal onboarding with the
 // candidate's own CLI (`init --scan`, then `init --scan --apply`), deploys the declaration init
-// committed to that plane as the install does, and runs the case there. Every other uat case runs
+// committed to that plane as the install does, and runs the case there. preview-serves-change runs
+// there too (GY-1913): the shared install declares no application and runs no preview loop, so the
+// fixture serves the loop's own item-preview step against its plane, previewing the site onboarding
+// declared with its declared fixture-static-home case. Every other uat case runs
 // against UAT as before, in one report and one verdict, so the release holds read it unchanged.
 // Nothing here reconfigures the shared install or writes the host's configuration (the fixture's
 // configuration and data homes sit in its scratch directory), and every fixture resource is removed afterwards.
@@ -15,7 +18,7 @@
 //   node --import tsx scripts/onboarding-delivery-fixture.mjs   (the uat job's `e2e` suite)
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -27,21 +30,30 @@ import { candidatePendingOutcomes, checkoutContract, failureDetail, releaseRetri
 import { contractPendingCases } from '../src/release-candidate.ts';
 import { checkoutRepositoryPolicy } from '../src/model/repository-policy.ts';
 import { repositoryDelivery } from '../src/install/index.ts';
-import { projectDeliveryAssignment } from '../src/project-applications.ts';
+import { loadProjectDelivery, projectDeliveryAssignment } from '../src/project-applications.ts';
+import { mergeRecordKey, mergeWriterReads } from '../src/daemon/cycle-merge-writer.ts';
+import { itemPreviewStep } from '../src/merge-writer/preview.ts';
+import { previewDemand } from '../src/project-previews.ts';
+import { defaultChildRun } from '../src/child-runner.ts';
 
 export const candidateRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 /** The uat cases that describe a freshly onboarded project, and so run against the fixture, never the shared install. */
-export const fixtureCases = ['onboarding-delivery-defaults'];
-/** The fixture repository: a static site, a Compose application, its own CI and its own cases, as normal onboarding meets one. */
-export const fixtureFiles = {
+export const fixtureCases = ['onboarding-delivery-defaults', 'preview-serves-change'];
+/** The candidate's own definition of a fixture case, tagged with the application it exercises so onboarding's scan binds it by evidence. */
+const declaredCase = (root, id, application) => { const definition = JSON.parse(readFileSync(join(root, 'e2e/cases', `${id}.json`), 'utf8')); return JSON.stringify({ ...definition, tags: [...definition.tags, application] }); };
+/**
+ * The fixture repository: a static site whose build shows the change it previews
+ * (GRAPHYARD_PREVIEW_TITLE), a Compose application, its own CI and the candidate's own fixture cases, as normal onboarding meets one.
+ */
+export const fixtureFiles = (root = candidateRoot) => ({
   'package.json': JSON.stringify({ name: 'fixture-project', scripts: { test: 'node --test', build: 'node build.mjs' } }),
-  'build.mjs': 'console.log("built");\n',
+  'build.mjs': 'import { appendFileSync } from "node:fs";\nconst title = process.env.GRAPHYARD_PREVIEW_TITLE;\nif (title) appendFileSync("public/index.html", `<p>${title.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`)}</p>\\n`);\nconsole.log("built");\n',
   '.github/workflows/ci.yml': 'name: ci\non:\n  pull_request:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n',
-  'public/index.html': '<!doctype html><title>Fixture static site</title>\n',
+  'public/index.html': '<!doctype html><title>Fixture static site</title>\n<h1>Fixture static site</h1>\n',
   'compose.yml': 'services:\n  web:\n    build: .\n    ports:\n      - "8080:3000"\n  db:\n    image: postgres:16\n',
-  'e2e/cases/fixture-static-home.json': JSON.stringify({ id: 'fixture-static-home', title: 'Home', tags: ['fixture', 'site'], target: 'any', required: false, steps: [] }),
-  'e2e/cases/fixture-compose-app.json': JSON.stringify({ id: 'fixture-compose-app', title: 'App', tags: ['fixture', 'app'], target: 'any', required: false, steps: [] }),
-};
+  'e2e/cases/fixture-static-home.json': declaredCase(root, 'fixture-static-home', 'site'),
+  'e2e/cases/fixture-compose-app.json': declaredCase(root, 'fixture-compose-app', 'app'),
+});
 const fixtureRepository = 'owner/fixture';
 
 const freePort = async () => {
@@ -63,14 +75,15 @@ export const checkoutHead = (root) => execFileSync('git', ['-C', root, 'rev-pars
 
 /**
  * A control plane started from the checkout's own source with its own Postgres, serving `sha` as
- * its build: `GRAPHYARD_PROJECT_DELIVERY` and the rest of `env` are what the install deploys.
+ * its build: `GRAPHYARD_PROJECT_DELIVERY` and the rest of `env` are what the install deploys. Its
+ * admin answers `token` and the loop's coordinator identity `coordinatorToken`.
  * `restart(env)` redeploys it on the same database. A setup that fails stops whatever of it started.
  */
 export async function startControlPlane({ root = candidateRoot, sha, scratch, env = {}, host = process.env, timeoutMs = 120_000, Postgres }) {
   const port = await freePort();
   Postgres ??= (await import('embedded-postgres')).default;
   const database = new Postgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'fixture-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  const token = randomBytes(32).toString('hex');
+  const token = randomBytes(32).toString('hex'), coordinatorToken = randomBytes(32).toString('hex');
   let child = null, url = null, output = '';
   const stop = async () => {
     if (!child) return;
@@ -82,7 +95,7 @@ export async function startControlPlane({ root = candidateRoot, sha, scratch, en
     output = '';
     child = spawn(process.execPath, ['--import', 'tsx', join(root, 'src/server.ts')], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], env: {
       ...isolated(host), ...confinedHomes(scratch), ...deployed, DATABASE_URL: `postgres://graphyard:fixture-only@127.0.0.1:${port}/fixture`, PORT: String(listen), HOST: '127.0.0.1',
-      GRAPHYARD_PRINCIPALS: JSON.stringify([{ id: 'fixture-operator', role: 'admin', token }]), GRAPHYARD_BUILD_SHA: sha, GRAPHYARD_BUILD_REVISION: sha, GITHUB_CI_APP_IDS: '15368' } });
+      GRAPHYARD_PRINCIPALS: JSON.stringify([{ id: 'fixture-operator', role: 'admin', token }, { id: 'graphyard', role: 'coordinator', token: coordinatorToken }]), GRAPHYARD_BUILD_SHA: sha, GRAPHYARD_BUILD_REVISION: sha, GITHUB_CI_APP_IDS: '15368' } });
     const keep = chunk => { output = `${output}${chunk}`.slice(-4000); };
     child.stdout.on('data', keep); child.stderr.on('data', keep);
     url = `http://127.0.0.1:${listen}`;
@@ -97,7 +110,7 @@ export async function startControlPlane({ root = candidateRoot, sha, scratch, en
   try { await database.initialise(); await database.start(); await database.createDatabase('fixture'); await start(env); }
   catch (error) { await stop(); await Promise.resolve().then(() => database.stop()).catch(() => {}); throw error; }
   return {
-    get url() { return url; }, token, sha,
+    get url() { return url; }, token, coordinatorToken, sha,
     restart: async (deployed) => { await stop(); await start(deployed); },
     close: async () => { await stop(); await database.stop().catch(() => {}); },
   };
@@ -107,19 +120,21 @@ export async function startControlPlane({ root = candidateRoot, sha, scratch, en
  * The isolated fixture: a fresh repository and control plane created through normal onboarding
  * from the candidate checkout's exact HEAD. `sha`, when given, must be that HEAD, so the fixture
  * never serves another source than the candidate it is attributed to. `allocate()` makes its scratch
- * directory (a test passes its tracked temporaryDirectory). `close()` stops the plane and its database
- * and removes every file the fixture made.
+ * directory (a test passes its tracked temporaryDirectory). Once onboarded, the operator commits and
+ * pushes what init wrote, and the loop's preview step serves the plane (`loop`); `settle(item)` waits
+ * for an item's automatic preview. `close()` stops the loop and its previews, the plane and its
+ * database, and removes every file the fixture made.
  */
 export async function createOnboardingFixture({ root = candidateRoot, sha, dashboard = false, host = process.env, allocate = () => mkdtemp(join(tmpdir(), 'graphyard-onboarding-fixture-')) } = {}) {
   const head = checkoutHead(root);
   if (sha && sha.toLowerCase() !== head) throw new Error(`the onboarding fixture builds from the checkout's HEAD ${head}, not the candidate ${sha}; check out the candidate's exact SHA`);
   if (dashboard && !existsSync(join(root, 'dist/index.html'))) throw new Error('the onboarding fixture serves the dashboard from dist/, which the checkout has not built: run npx vite build --configLoader runner first');
   const scratch = await allocate();
-  let plane = null;
-  const close = async () => { await plane?.close(); plane = null; await rm(scratch, { recursive: true, force: true }); };
+  let plane = null, loop = null;
+  const close = async () => { await loop?.stop(); loop = null; await plane?.close(); plane = null; await rm(scratch, { recursive: true, force: true }); };
   try {
     const repository = join(scratch, 'repo');
-    for (const [path, text] of Object.entries(fixtureFiles)) { await mkdir(join(repository, path, '..'), { recursive: true }); await writeFile(join(repository, path), text); }
+    for (const [path, text] of Object.entries(fixtureFiles(root))) { await mkdir(join(repository, path, '..'), { recursive: true }); await writeFile(join(repository, path), text); }
     const git = (...args) => execFileSync('git', args, { cwd: repository, stdio: 'ignore' });
     git('init', '-q', '-b', 'main'); git('remote', 'add', 'origin', `git@github.com:${fixtureRepository}.git`);
     // A new install: a fresh database, nothing recorded, and no delivery declaration deployed yet.
@@ -135,9 +150,90 @@ export async function createOnboardingFixture({ root = candidateRoot, sha, dashb
     // The install deploys the committed declaration to the plane it serves.
     const { variable, value } = projectDeliveryAssignment((await repositoryDelivery(repository)).policy);
     await plane.restart({ [variable]: value });
-    return { url: plane.url, token: plane.token, sha: head, cli, scratch, repository, config, onboarding: { scanned, applied }, close };
+    // The operator commits what init wrote and pushes it, so the loop's checkout holds the base it previews:
+    // the push goes to a bare repository in scratch standing in for origin, whose main the checkout then tracks.
+    const origin = join(scratch, 'origin.git');
+    execFileSync('git', ['init', '-q', '--bare', origin], { stdio: 'ignore' });
+    git('add', '-A'); git('-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-q', '-m', 'Onboard with graphyard init');
+    git('push', '-q', origin, 'main'); git('fetch', '-q', origin, 'main:refs/remotes/origin/main');
+    const delivery = loadProjectDelivery({}, repository);
+    loop = startPreviewLoop({ url: plane.url, token: plane.coordinatorToken, root: repository, base: join(scratch, 'worktrees'), environment: { ...isolated(host), ...confinedHomes(scratch) } });
+    const settle = item => settlePreview({ url: plane.url, token: plane.token, item, delivery });
+    return { url: plane.url, token: plane.token, sha: head, cli, scratch, repository, config, delivery, onboarding: { scanned, applied }, loop, settle, close };
   } catch (error) { await close(); throw error; }
 }
+
+/**
+ * The loop's own item-preview step (merge-writer/preview.ts `itemPreviewStep`) over the ports the
+ * daemon wires (`mergeWriterReads`), run against the plane at `url` as its coordinator identity every
+ * `intervalMs`: it reads the coordination snapshot and previews every item whose criteria cite a case
+ * bound to a declared static application from the checkout `root`, recording each preview through
+ * the plane's merge-record route. `stop()` ends the loop, then every preview it started.
+ */
+export function startPreviewLoop({ url, token, root, base, environment, intervalMs = 1_000 }) {
+  const call = async (method, path, body, key) => {
+    const response = await fetch(`${url}/api/${path}`, { method, signal: AbortSignal.timeout(60_000), body: body === undefined ? undefined : JSON.stringify(body),
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(key ? { 'Idempotency-Key': key } : {}) } });
+    const text = await response.text();
+    if (response.status !== 200) throw new Error(`${method} /api/${path} answered ${response.status}: ${text.slice(0, 300)}`);
+    return JSON.parse(text);
+  };
+  const config = { baseBranch: 'main', repository: fixtureRepository, run: { mergeWriter: { deployKeyFile: join(base, 'no-deploy-key') } } };
+  const ports = mergeWriterReads(config, root, defaultChildRun, { base, environment, merger: async () => (await call('GET', 'merger')).mode,
+    record: (work, event) => call('POST', `work/${work.id}/merge-record`, event, mergeRecordKey(work, event)) }).itemPreviews;
+  const live = new Map(), notes = [];
+  let stopped = false, wake = () => {};
+  const running = (async () => {
+    await mkdir(base, { recursive: true });
+    while (!stopped) {
+      try { notes.push(...await itemPreviewStep(live, (await call('GET', 'work-snapshot?view=coordination')).work, ports)); }
+      catch (error) { notes.push(`The preview step failed: ${error instanceof Error ? error.message : String(error)}`); }
+      await new Promise(done => { const timer = setTimeout(done, intervalMs); wake = () => { clearTimeout(timer); done(); }; });
+    }
+  })();
+  return {
+    live, notes,
+    stop: async () => {
+      stopped = true; wake(); await running;
+      // A preview still starting settles once cancelled; every one is then closed, its server ended and checkout removed.
+      for (const entry of live.values()) entry.stop.abort();
+      for (let waited = 0; [...live.values()].some(entry => !entry.opened) && waited < 60_000; waited += 100) await new Promise(done => setTimeout(done, 100));
+      await Promise.all([...live.values()].map(entry => entry.opened?.close()));
+    },
+  };
+}
+
+/** How long a case waits for an item's automatic preview to settle before it reads the item. */
+export const previewSettleMs = 300_000;
+/**
+ * Waits until `item`'s automatic preview has settled — recorded and no longer `starting` — read
+ * through the plane's own API, when the item's cases need one under `delivery`; at once otherwise.
+ * It writes nothing: a preview that never settles leaves the case's next step to read what is there.
+ */
+export async function settlePreview({ url, token, item, delivery, timeoutMs = previewSettleMs, intervalMs = 500 }) {
+  if (!item?.id || !previewDemand(item, delivery)) return null;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const response = await fetch(`${url}/api/work/${encodeURIComponent(item.id)}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000) }).catch(() => null);
+    const preview = response?.status === 200 ? (await response.json()).preview : null;
+    if (preview && preview.state !== 'starting') return preview;
+    if (Date.now() >= deadline) return preview ?? null;
+    await new Promise(done => setTimeout(done, intervalMs));
+  }
+}
+
+/**
+ * `fetcher` for a case on `target`: an item the case creates there (POST /api/work) is answered only
+ * once `target.settle` saw its automatic preview settle, so the case's next step reads the preview the
+ * loop recorded, as an operator opening the item later would. Every response is the plane's own.
+ */
+export const settlingFetcher = (fetcher, target) => async (input, init) => {
+  const response = await fetcher(input, init);
+  const url = new URL(input instanceof Request ? input.url : String(input));
+  if (!target.settle || (init?.method ?? 'GET').toUpperCase() !== 'POST' || url.origin !== new URL(target.url).origin || url.pathname !== '/api/work' || response.status !== 200) return response;
+  await target.settle(await response.clone().json().catch(() => null));
+  return response;
+};
 
 /**
  * The uat cases in id order, each fixture case against a fresh `fixture()` and every other one
@@ -170,7 +266,8 @@ export async function runOnboardingE2e(cases, { url, token, fixture, candidate =
           continue;
         }
       }
-      const report = await runCases([entry], { url: target.url, token: target.token, environment: 'uat', runId, retries: releaseRetries, root, pendingCases: pending, policy, launcher, fetcher, stepTimeoutMs, now });
+      const report = await runCases([entry], { url: target.url, token: target.token, environment: 'uat', runId, retries: releaseRetries, root, pendingCases: pending, policy, launcher,
+        fetcher: target.settle ? settlingFetcher(fetcher ?? fetch, target) : fetcher, stepTimeoutMs, now });
       served.add(report.sha);
       const known = targets.find(entry => entry.url === target.url && entry.sha === report.sha);
       if (known) known.cases.push(id); else targets.push({ url: target.url, sha: report.sha, cases: [id] });
