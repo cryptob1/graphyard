@@ -8,7 +8,7 @@ Releases ([rollback](recovery.md#rollback)): `admin` sets policy; `builder`s bui
 Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`/`release/production` (moved only by `graphyard release`) to candidates' SHAs.
 
 - `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N new first-parent merges (`GRAPHYARD_RC_MAX_PRS`, 10; rest queue); `.github/workflows/release-candidate.yml` cuts on loop dispatch (cron fallback).
-- `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*` credentials); refused while an unjudged candidate <4h old serves, digest deploys (`rc-uat-deploy/ID`) included.
+- `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*`); refused while an unjudged candidate <4h old serves, digest deploys (`rc-uat-deploy/ID`) included.
 - `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser`, suites ([below](#pre-merge-gate-and-release-candidate-validation); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`; a [pending](validation.md#release-verdicts) case never blocks.
 - `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`; `release verify --url URL` confirms. A candidate's recorded build (one digest per service) promotes by those digests, never a rebuild.
 - Failed candidates file a [hold](validation.md#release-holds) per outcome, else `release follow-up ID` as the [filing credential](#release-filing-credential).
@@ -18,7 +18,7 @@ Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`
 
 ### Release filing credential
 
-UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds and follow-ups as `graphyard-release-follow-up` (only `intent:create`, work items `*`). The loop's hourly `master setup --apply` keeps it with the admin token (issues, rotates, stores the uat secret); without one `master status` names the administrator's step (`graphyard operator-agent setup FILE --token-stdin`). `doctor`: `FAIL release-filing`. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`; `graphyard-e2e-recorder` holds only `e2e:record`, never admin.
+UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds and follow-ups as `graphyard-release-follow-up` (only `intent:create`, work items `*`). The loop's hourly `master setup --apply` keeps it with the admin token (issues, rotates, stores the uat secret); without one `master status` names the administrator's step (`graphyard operator-agent setup FILE --token-stdin`). `doctor`: `FAIL release-filing`. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` with only `e2e:record`, never admin.
 
 ### Pre-merge gate and release-candidate validation
 
