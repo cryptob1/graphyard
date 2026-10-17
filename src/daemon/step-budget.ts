@@ -5,6 +5,7 @@ import type { Cycle } from './cycle.js';
 import { record, type DaemonEffects } from './effects.js';
 import { actionableIntervalMs } from './liveness.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
+import { coordinateOwed } from '../model/launch-sentinel.js';
 import { type DaemonAction, type DaemonActionKind, type DaemonState, message } from './state.js';
 
 /**
@@ -332,26 +333,43 @@ export type OwedWriteOutcome = 'sent' | 'owed' | 'refused';
  * stays owed like a carried call and is sent again, which is what puts a session's pane back on its
  * handle after an outage-window coordinate write.
  */
-export async function owedWrite(cycle: CarriedCycle, key: string, row: CarriedRow, what: string, call: keyof DaemonEffects, write: OwedWrite['write']): Promise<OwedWriteOutcome> {
+async function owedWriteOnce(cycle: CarriedCycle, key: string, row: CarriedRow, what: string, call: keyof DaemonEffects, write: OwedWrite['write']): Promise<{ outcome: OwedWriteOutcome; answer: unknown; error: unknown }> {
   const { state } = cycle, rowKey = `${owedPrefix}${key}`, previous = state.actions[rowKey], owed = owedWrites.get(state) ?? owedWrites.set(state, new Map()).get(state)!;
   // A write that throws before it is made is the caller's own failure, as it always was; only its answer is best effort.
   const pending = write(cycle.effects);
-  try { await pending; }
+  let answer: unknown;
+  try { answer = await pending; }
   catch (error) {
-    if (stepCallCarried(error)) { owed.set(rowKey, { call, row, what, write }); await recordCarried(cycle, rowKey, row, error, what); return 'owed'; }
+    if (stepCallCarried(error)) { owed.set(rowKey, { call, row, what, write }); await recordCarried(cycle, rowKey, row, error, what); return { outcome: 'owed', answer: coordinateOwed, error }; }
     if (planeWideRefusal(error)) {
       owed.set(rowKey, { call, row, what, write });
       await recordCarried(cycle, rowKey, row, error, what,
         `${what} was carried to the next cycle: the control plane did not answer (${message(error).slice(0, 300)}), so it stays owed and is retried next cycle`);
-      return 'owed';
+      return { outcome: 'owed', answer: coordinateOwed, error };
     }
     owed.delete(rowKey);
     if (carriedRow(previous)) await retireCarried(cycle, rowKey, previous, `${what}, carried on cycle ${previous.cycle}, was refused on its retry and is let go, as a refused record always was: ${message(error)}`);
-    return 'refused';
+    return { outcome: 'refused', answer: null, error };
   }
   owed.delete(rowKey);
   if (carriedRow(previous)) await retireCarried(cycle, rowKey, previous, `${what}, carried on cycle ${previous.cycle}, answered on its retry`);
-  return 'sent';
+  return { outcome: 'sent', answer, error: null };
+}
+export async function owedWrite(cycle: CarriedCycle, key: string, row: CarriedRow, what: string, call: keyof DaemonEffects, write: OwedWrite['write']): Promise<OwedWriteOutcome> {
+  return (await owedWriteOnce(cycle, key, row, what, call, write)).outcome;
+}
+/**
+ * A launch's own coordinate write (GY-1895): the registration, the pane the launch's runtime returned,
+ * the record move onto the claimed epoch. Like `owedWrite`, an answer the plane's outage kept from
+ * coming, or one its bound carried, is stashed owed under `key` with this exact payload and sent
+ * again at the next step that bounds the call — the pane a retry carries is the launcher's own, never
+ * one the resume fence refused and the name lookup resolved. A refusal that is the record's own is
+ * raised, so the launch sees the truth (not registered, not moved) and reports it as it always did.
+ */
+export async function launchWrite(cycle: CarriedCycle, key: string, row: CarriedRow, what: string, write: OwedWrite['write']): Promise<unknown> {
+  const result = await owedWriteOnce(cycle, key, row, what, 'recordSession', write);
+  if (result.outcome === 'refused') throw result.error;
+  return result.answer;
 }
 /** A newer write of the same subject makes an owed older one moot (a running handle record once the handle is finished): it is let go unsent and its row retired, so a late retry never lands after the newer write and reopens what it ended. */
 export async function supersedeOwed(cycle: CarriedCycle, key: string, why: string) {
@@ -359,7 +377,7 @@ export async function supersedeOwed(cycle: CarriedCycle, key: string, why: strin
   owedWrites.get(cycle.state)?.delete(rowKey);
   if (carriedRow(previous)) await retireCarried(cycle, rowKey, previous, `${previous.detail.replace(/ was carried to the next cycle: .*$/, '')} was superseded by ${why} and is not sent`);
 }
-/** The owed writes a step's start retries: those its bound covers; a row owed by a loop since restarted names a write in flight when it stopped, whose landing is unknown, so it is retired unsent. */
+/** The owed writes a step's start retries: those its bound covers; a row owed by a loop since restarted names a write in flight when it stopped, whose landing is unknown, so it is retired unsent. A launch's stashed coordinate is retried like any owed write: a refusal that is the record's own is let go, an unanswered one stays owed. */
 export async function retryOwedWrites(cycle: CarriedCycle, calls: readonly (keyof DaemonEffects)[]) {
   const owed = owedWrites.get(cycle.state);
   for (const [rowKey, entry] of owed ?? []) if (calls.includes(entry.call)) await owedWrite(cycle, rowKey.slice(owedPrefix.length), entry.row, entry.what, entry.call, entry.write);

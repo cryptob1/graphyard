@@ -309,26 +309,37 @@ async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLi
       // delivered on a later cycle once the attempt's own pane verifies, instead of being consumed.
       const paneReason = checkPaneStillBelongs(item, handleId, pane);
       if (paneReason) {
-        // GY-1895: an attempt whose own handle records no pane (or is not on the record at all)
-        // because its coordinate write met the plane's outage is repaired before the refusal
-        // counts: the write is sent again — the engine moves the running record the same principal
-        // held under the guessed id in the same transaction — and the cleared wait is delivered on
-        // a later cycle, once this write verifies. The GY-953 bound below still ends an attempt
-        // whose write never lands, and a refusal that is the record's own still counts, as always.
-        let writeRefused = false;
+        // GY-1895: a paste the fence refuses while this attempt's own coordinate write is still owed
+        // — carried past its bound, or carried by the plane's outage, the launch's own payload in
+        // flight — is that write's pending answer, not the session's fault (one outage is one
+        // condition, GY-1344): the entry counts no fault while the row above stands carried. The
+        // fence itself is never answered by re-writing the handle with the pane the name lookup
+        // resolved: the only pane that puts this attempt's coordinates back is the launch's own
+        // write, retried from the ledger. A refusal that is the record's own counts, as always.
+        const coordinate = state.actions[`owed:handle:${item.id}:${profile.principal}:${epoch}`];
+        performed.push(await record(state, promptKey, { kind: 'session', work: item.key, principal: profile.principal, epoch, state: 'failed', detail: `${item.key} epoch ${epoch}: ${changed}; the recorded pane cannot be re-prompted: ${paneReason}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist, carriedRow(coordinate) ? null : undefined));
+        // A handle that records no pane (its coordinate write failed or never completed) refuses
+        // every resolution for ever: the name-based absence checks see the name's still-listed
+        // holder, and the idle recovery below stays unreachable while the waits stand. So does a
+        // handle that is not on the record at all — a launch registered this session under the
+        // previous attempt's id (its pre-claim guess was stale), so no write of this attempt's
+        // ever landed under its own (GY-1788's paste was refused for ever with no bound to answer
+        // it). The unsafe paste stays refused, but the first unverifiable observation starts the
+        // same reclaim bound a gone pane starts above, and past it the attempt is handed to a new
+        // one that keeps its branch (GY-953). Nothing is closed: no pane is verifiably this attempt's.
         if (!own) {
           const seen = state.actions[keys.idle];
-          if (seen && seen.cycle !== state.cycle && now() - Date.parse(seen.at) >= launchAppearanceMs) {
-            await reclaimIdle(handle ? `its handle ${handleId} has recorded no pane since ${seen.at} (its coordinate write has not completed), so the cleared wait cannot be verified deliverable to it, and its agent name is no address`
-              : `its handle ${handleId} has not been on the record since ${seen.at} (its launch registered its session under another attempt's id), so the cleared wait cannot be verified deliverable to it, and its agent name is no address`, null);
-            return;
-          }
-          writeRefused = await workerHandle(cycle, item, profile, epoch, pane, `re-coordinated at ${new Date(now()).toISOString()}: its handle ${handleId} records no pane (${paneReason})`, false) === 'refused';
-          if (!seen) await entry(keys.idle, 'waiting', handle ? `${item.key} epoch ${epoch}: its handle ${handleId} records no pane yet (its coordinate write has not completed), so the cleared wait cannot be delivered and its agent name is no address; the reclaim bound starts here`
-            : `${item.key} epoch ${epoch}: its handle ${handleId} is not on the record (its launch registered this session under another attempt's id), so the cleared wait cannot be delivered and its agent name is no address; the reclaim bound starts here`);
-          if (!writeRefused) return;
+          if (!seen) { await entry(keys.idle, 'waiting', handle ? `${item.key} epoch ${epoch}: its handle ${handleId} records no pane yet (its coordinate write has not completed), so the cleared wait cannot be delivered and its agent name is no address; the reclaim bound starts here`
+            : `${item.key} epoch ${epoch}: its handle ${handleId} is not on the record (its launch registered this session under another attempt's id), so the cleared wait cannot be delivered and its agent name is no address; the reclaim bound starts here`); return; }
+          if (seen.cycle === state.cycle || now() - Date.parse(seen.at) < launchAppearanceMs) return;
+          // GY-1895: the bound ends an attempt whose coordinate write will never land. One the
+          // plane's outage kept from answering is still owed above and lands when the plane does,
+          // so the write's answer — not the bound — decides while it stands carried, and the
+          // reclaim waits: the attempt keeps its lease, which only its session can still renew.
+          if (carriedRow(coordinate)) return;
+          await reclaimIdle(handle ? `its handle ${handleId} has recorded no pane since ${seen.at} (its coordinate write has not completed), so the cleared wait cannot be verified deliverable to it, and its agent name is no address`
+            : `its handle ${handleId} has not been on the record since ${seen.at} (its launch registered its session under another attempt's id), so the cleared wait cannot be verified deliverable to it, and its agent name is no address`, null);
         }
-        performed.push(await entry(promptKey, 'failed', `${item.key} epoch ${epoch}: ${changed}; the recorded pane cannot be re-prompted: ${paneReason}`, (previous?.attempts ?? 0) + 1));
         return;
       }
       if (status === 'working') { await entry(promptKey, 'done', `${item.key} epoch ${epoch}: ${changed}; ${profile.agentName} is already active, so it is not re-prompted`); await drop(keys.blocker, keys.scope); return; }

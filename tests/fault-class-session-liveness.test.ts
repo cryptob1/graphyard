@@ -44,6 +44,10 @@ import { planeWideRefusal } from '../src/model/blocker-class.js';
 import { RefusedResponse } from '../src/model/refusal.js';
 import * as approversModule from '../src/daemon/cycle-approvers.js';
 import { approvalWatchSchema, type DaemonAction } from '../src/daemon/state.js';
+// GY-1895: the launch's own coordinate write goes through the same ledger the loop's best-effort records do.
+import { launchWrite, retryOwedWrites } from '../src/daemon/step-budget.js';
+import { coordinateOwed } from '../src/model/launch-sentinel.js';
+import { registeredLaunch } from '../src/model/session-launch.js';
 // A namespace import, so the base run of this file, which has no rekeyLaunchedSession, fails only the GY-1788 case that reads it.
 import * as cycleDispatch from '../src/daemon/cycle-dispatch.js';
 const rekeyLaunchedSession = (...args: Parameters<NonNullable<typeof cycleDispatch.rekeyLaunchedSession>>) =>
@@ -547,15 +551,6 @@ test('unit:fault-class-session-liveness GY-1788 action:session — a cleared wai
   const { item, profile, agents } = unaddressableAttempt();
   const world = await resumeWorld(item, profile, agents, { value: 0 });
   const { state } = world;
-  // GY-1895 keeps this path for a coordinate write refused for its own sake: the loop re-sends the
-  // attempt's handle write before the refusal counts, so only a refusal that is the record's own —
-  // a running handle another launch attempt holds, as the engine answers here — still counts the
-  // paste and still ends on the bound. The finished record the reclaim writes is accepted.
-  const writes: SessionHandleInput[] = [];
-  world.effects.recordSession = async (_work: Work, handle: SessionHandleInput) => {
-    if (handle.state === 'running') throw new Error('Session handle graphyard-codex-2:2 is held by another launch attempt that is still recorded running (409)');
-    writes.push(handle);
-  };
   try {
     // The wait the loop marked while the scope request stood, and the scope decision that answered it.
     await record(state, `resume:scope:${item.id}:2`, { kind: 'session', work: item.key, principal: profile.principal, epoch: 2, state: 'waiting',
@@ -585,7 +580,7 @@ test('unit:fault-class-session-liveness GY-1788 action:session — a cleared wai
     assert.match(done!.detail, /its handle graphyard-codex-2:2 has not been on the record since/);
     assert.deepEqual(world.prompts, [], 'still nothing pasted');
     // The loop's own close of the attempt's handle landed under the id the fence keys.
-    assert.deepEqual(writes.map(handle => [handle.id, handle.state]), [['graphyard-codex-2:2', 'finished']]);
+    assert.ok(world.sessions.some(handle => handle.id === 'graphyard-codex-2:2' && handle.state === 'finished'));
   } finally { world.cleanup(); }
 });
 
@@ -1368,8 +1363,11 @@ test('unit:fault-class-session-liveness GY-1863 session — a finished session c
 //   undelivered.
 //
 // The candidate carries the refusal's status and body so planeWideRefusal reads it structurally,
-// applies the GY-1375 rule in the preserve, and re-sends an outage-refused coordinate write
-// before the refusal counts. Each replay below fails at the base, where the instance stood.
+// applies the GY-1375 rule in the preserve, and sends an outage-refused coordinate write again
+// from the ledger that holds it — the launch's own payload, never a pane the resume fence refused
+// and the agent-name lookup resolved — so the paste its waiting refusal counts no fault while the
+// write stands carried, and the fence itself is never answered by a re-write. Each replay below
+// fails at the base, where the instance stood.
 // ---------------------------------------------------------------------------
 
 const GY1895_REGISTRY = 'https://graphyard-production.up.railway.app';
@@ -1485,13 +1483,14 @@ test(`unit:fault-class-session-liveness GY-1895 action:preserve GY-1880 08:53:04
   assert.deepEqual(GY1895_sessionLiveness(ownState).map(entry => [entry.kind, entry.subject]), [['action:preserve', 'GY-1880']]);
 });
 
-/** One outage-refused coordinate-write replay: the attempt's own handle is not on the record (or records no pane), the pane the agent name resolves to is the previous attempt's, and the scope decision stands applied. */
-function gy1895OutageAttempt(key: string, epoch: number, principal: string, guessedEpoch: number, pane: string, paneless: boolean) {
+/** One outage-window attempt the loop holds: the pane the launch's own runtime returned is `pane`, and the coordinate write that should carry it was refused while the plane was down. `shape` is the record the attempt stands under: `guessed` — the pre-claim registration, still running under the guessed id with the pane on it, the move onto the claimed id unwritten (GY-1889); `paneless` — the claimed id's handle exists but records no pane, the pane recorded nowhere (GY-1885); `foreign` — the same paneless handle, but the profile's agent name now resolves to a pane another session holds, not this attempt's. */
+function gy1895OutageAttempt(key: string, epoch: number, principal: string, guessedEpoch: number, pane: string, shape: 'guessed' | 'paneless' | 'foreign') {
   const agentName = principal;
   const ownHandle = { id: `${principal}:${epoch}`, kind: 'implementation', principal, epoch: null, runtime: 'claude', host: 'vishrog', workspace: 'w1V', tab: null,
     pane: null, agentName, role: null, head: null, attach: null, transcript: null, subject: `${key}: Item ${key}`, startedAt: GY1895_AT(-14 * GY1895_minute), updatedAt: GY1895_AT(-GY1895_minute), endedAt: null, state: 'running', outcome: null };
-  const sessions = paneless ? [ownHandle]
-    : [{ ...ownHandle, id: `${principal}:${guessedEpoch}`, pane, attach: `herdr pane attach ${pane} --workspace w1V` }];
+  const sessions = shape === 'guessed' ? [{ ...ownHandle, id: `${principal}:${guessedEpoch}`, pane, attach: `herdr pane attach ${pane} --workspace w1V` }]
+    : shape === 'foreign' ? [ownHandle, { ...ownHandle, id: `${principal}:${guessedEpoch}`, state: 'finished', endedAt: GY1895_AT(-GY1895_minute), outcome: 'closed as failed: its pane was gone', pane, attach: `herdr pane attach ${pane} --workspace w1V` }]
+    : [ownHandle];
   const item = {
     id: `work-${key}`, key, title: `Item ${key}`, description: '', type: 'bug', priority: 1, dependencies: [],
     criteria: [], plannedFiles: ['docs/master-agent-sessions.md'], stage: 'build', ready: true, createdAt: GY1895_AT(-30 * GY1895_minute), updatedAt: GY1895_AT(-GY1895_minute), stageEnteredAt: GY1895_AT(-30 * GY1895_minute),
@@ -1506,18 +1505,11 @@ function gy1895OutageAttempt(key: string, epoch: number, principal: string, gues
   return { item, profile, agents };
 }
 
-/** The replay both session instances ran: the outage refuses the coordinate write, the plane recovers inside the reclaim bound, the pane lands, and the applied scope decision is delivered with no session-liveness instance anywhere. */
-async function gy1895CoordinateReplay(key: string, epoch: number, principal: string, guessedEpoch: number, pane: string, paneless = false) {
-  const { item, profile, agents } = gy1895OutageAttempt(key, epoch, principal, guessedEpoch, pane, paneless);
-  const world = await resumeWorld(item, profile, agents, { value: 0 }, GY1895_NOW);
-  const { state, effects } = world;
-  let planeUp = false;
-  const writes: SessionHandleInput[] = [];
-  // The control plane the outage kept from answering: the coordinate write is refused until it
-  // recovers, and its answer applies like the engine's own — one write moves the running record
-  // the same principal held under the guessed id onto the claimed id.
-  effects.recordSession = async (_work: Work, handle: SessionHandleInput) => {
-    if (!planeUp) throw new RefusedResponse(`Graphyard refused work/${item.id}/session (502): Application failed to respond`, 502, GY1895_502_BODY);
+/** The engine the loop talks to: a write the outage still holds is refused with Railway's 502; once it answers, a landing applies like the engine's own — the pane kept when a write omits it, and one running record per principal, the record a claimed-id write moves closed as superseded. */
+function gy1895Engine(world: Awaited<ReturnType<typeof resumeWorld>>, key: string, plane: { up: boolean }, writes: SessionHandleInput[], refused: SessionHandleInput[]) {
+  const item = world.item;
+  world.effects.recordSession = async (_work: Work, handle: SessionHandleInput) => {
+    if (!plane.up) { refused.push(handle); throw new RefusedResponse(`Graphyard refused work/${item.id}/session (502): Application failed to respond`, 502, GY1895_502_BODY); }
     writes.push(handle);
     const existing = (item.sessions ?? []).find(session => session.id === handle.id);
     if (existing) { existing.pane = handle.pane ?? existing.pane; existing.attach = handle.attach ?? existing.attach; existing.outcome = handle.outcome ?? existing.outcome; }
@@ -1528,53 +1520,153 @@ async function gy1895CoordinateReplay(key: string, epoch: number, principal: str
     }
     return item;
   };
+}
+
+/** The launch's own coordinate write, stashed the way the dispatch's launch stashes it: `launchWrite` under the handle key, refused by the outage, owed to the next cycle's retry. */
+async function gy1895StashLaunchCoordinate(world: Awaited<ReturnType<typeof resumeWorld>>, key: string, principal: string, epoch: number, pane: string, plane: { up: boolean }, writes: SessionHandleInput[], refused: SessionHandleInput[]) {
+  const outcome = await launchWrite(world.cycle(0), `handle:${world.item.id}:${principal}:${epoch}`, { kind: 'session', work: key, principal, epoch: null },
+    `Recording ${principal}:${epoch}'s coordinates on ${key}`, fx => fx.recordSession!(world.item, { id: `${principal}:${epoch}`, kind: 'implementation', principal, runtime: 'claude', host: 'vishrog',
+      workspace: 'w1V', subject: `${key}: Item ${key}`, state: 'running', pane, attach: `herdr pane attach ${pane} --workspace w1V` }));
+  assert.equal(outcome, coordinateOwed, 'the outage kept the plane from answering, so the launch\u2019s own write is stashed owed');
+  assert.equal(writes.length, 0, 'nothing landed while the plane was down');
+  assert.equal(refused.length, 1, 'the plane refused the one send');
+}
+
+/** The recovery both session instances ran: the launch-bound coordinate write the outage refused is retried from the ledger — never re-resolved from the agent name — the pane lands, and the applied scope decision is delivered once, with no session-liveness instance anywhere. */
+async function gy1895CoordinateReplay(key: string, epoch: number, principal: string, guessedEpoch: number, pane: string, shape: 'guessed' | 'paneless') {
+  const { item, profile, agents } = gy1895OutageAttempt(key, epoch, principal, guessedEpoch, pane, shape);
+  const world = await resumeWorld(item, profile, agents, { value: 0 }, GY1895_NOW);
+  const { state } = world;
+  const plane = { up: false }, writes: SessionHandleInput[] = [], refused: SessionHandleInput[] = [];
+  gy1895Engine(world, key, plane, writes, refused);
   const owedKey = `owed:handle:${item.id}:${principal}:${epoch}`;
   try {
-    // Cycle 1, the outage standing: the write is owed, no paste is refused, no instance opens — the base recorded the failed paste here and the instance stood.
+    // The launch happened inside the outage: its own coordinate write is stashed owed with the pane
+    // its runtime returned — the only pane a retry will ever carry.
+    await gy1895StashLaunchCoordinate(world, key, principal, epoch, pane, plane, writes, refused);
+    // Cycle 1, the outage standing: the retry is refused again and stays owed; the fence refuses the
+    // paste — and the refusal counts no fault, because the coordinate row stands carried. The base
+    // recorded the action:session instance for ${key} right here.
     await resumeStep(world.cycle(0), new Set(), true);
     assert.deepEqual(GY1895_sessionLiveness(state), [], `the base opened the action:session instance for ${key} here`);
     assert.deepEqual(world.prompts, [], 'nothing is pasted while the handle records no pane');
     const owed = state.actions[owedKey];
     assert.ok(owed && owed.state === 'waiting' && /the control plane did not answer/.test(owed.detail) && / stays owed and is retried next cycle/.test(owed.detail),
       `the refused write is owed: ${JSON.stringify(owed?.detail)}`);
+    const promptKey = Object.keys(state.actions).find(candidate => candidate.startsWith(`resume:prompt:${item.id}:${epoch}:`))!;
+    assert.equal(state.actions[promptKey]?.faultClass, undefined, 'the refused paste is the outage\u2019s, not the session\u2019s: it counts no instance');
+    assert.match(state.actions[promptKey]!.detail, new RegExp(`pane ${pane} is recorded for ${key}'s session ${principal}:${guessedEpoch}|cannot be verified as ${key}'s session ${principal}:${epoch}`));
     assert.ok(state.actions[`idle:${item.id}:${epoch}`], 'the reclaim bound still starts at the first unverifiable observation');
-    // Cycle 2, still down: the write is asked again and stays owed — the step's owed-write retry at
-    // its start, and the pane branch's own re-send, each count the send they made.
+    assert.equal(writes.length, 0, 'still nothing landed');
+    const refusedWhileDown = refused.length;
+    // Cycle 2, the plane answers inside the bound: the ledger's retry lands the launch's own write —
+    // the claimed id, the launch's pane — and the cleared wait is delivered, once.
+    plane.up = true;
     state.cycle += 1;
     await resumeStep(world.cycle(60_000), new Set(), true);
-    assert.deepEqual(GY1895_sessionLiveness(state), []);
-    assert.equal(state.actions[owedKey]?.attempts, 3, 'the step-start retry and the re-send each made their send');
-    // Cycle 3, the plane answers inside the bound: the write lands — the step's owed-write retry at
-    // its start, and possibly the pane branch's re-send beside it, are the same idempotent write.
-    planeUp = true;
-    state.cycle += 1;
-    await resumeStep(world.cycle(100_000), new Set(), true);
     assert.ok(writes.length >= 1 && writes.every(write => write.id === `${principal}:${epoch}` && write.pane === pane),
-      `the write landed under the claimed id with the pane: ${JSON.stringify(writes.map(write => [write.id, write.pane]))}`);
-    assert.deepEqual(GY1895_sessionLiveness(state), []);
-    assert.match(state.actions[owedKey]?.detail ?? '', /answered on its retry/);
-    // Cycle 4: the landing was consumed at cycle 3's step start, or the re-send lands and the wait
-    // is delivered on this cycle; either way the scope decision is delivered, the wait consumed,
-    // and the attempt is simply idle with its lease — never reclaimed, no instance anywhere.
-    state.cycle += 1;
-    await resumeStep(world.cycle(110_000), new Set(), true);
+      `the retried write landed under the claimed id with the launch's own pane: ${JSON.stringify(writes.map(write => [write.id, write.pane]))}`);
+    assert.equal(refused.length, refusedWhileDown, 'once the plane answers nothing is refused again: every landing carries the launch\u2019s own pane, never a name-resolved one');
+    if (shape === 'guessed') assert.equal((item.sessions ?? []).find(session => session.id === `${principal}:${guessedEpoch}`)?.state, 'finished', 'the engine moved the guessed record onto the claimed id in the landing write');
     assert.equal(world.prompts.length, 1, `the resolution was delivered: ${JSON.stringify(world.prompts)}`);
     assert.match(world.prompts[0]!, /its scope request was applied: plannedFiles now include docs\/master-agent-sessions.md/);
     assert.deepEqual(GY1895_sessionLiveness(state), [], 'no session-liveness instance anywhere in the recovery');
-    assert.equal(state.actions[`resume:scope:${item.id}:${epoch}`], undefined, 'the wait was consumed by the delivery');
+    assert.equal(state.actions[`resume:scope:${item.id}:${epoch}`] ?? state.actions[promptKey]?.state, 'done', 'the wait was consumed by the delivery');
     const idle = state.actions[`idle:${item.id}:${epoch}`];
     assert.ok(!idle || /holds a live lease with no open blocker or scope request/.test(idle.detail), `the attempt was never reclaimed: ${JSON.stringify(idle?.detail)}`);
     assert.ok(!Object.values(state.actions).some(action => /keeping the attempt's branch/.test(action.detail)), 'no reclaim ever ran');
+    // Cycle 3: steady state — the delivery is never repeated, and nothing new counts.
+    state.cycle += 1;
+    await resumeStep(world.cycle(120_000), new Set(), true);
+    assert.equal(world.prompts.length, 1, 'the resume delivery is never repeated');
+    assert.deepEqual(GY1895_sessionLiveness(state), []);
   } finally { world.cleanup(); }
 }
 
-test(`unit:fault-class-session-liveness GY-1895 action:session GY-1889 10:08:25Z — the coordinate write the outage refused is sent again: the pane lands, the scope decision is delivered, and no session-liveness instance opens`, async () => {
-  await gy1895CoordinateReplay('GY-1889', 3, 'graphyard-claude-2', 2, 'w1V:pQMH');
+test(`unit:fault-class-session-liveness GY-1895 action:session GY-1889 10:08:25Z — the launch-bound coordinate write the outage refused is retried from the ledger: the record moves onto the claimed epoch, the scope decision is delivered once, and no session-liveness instance opens`, async () => {
+  await gy1895CoordinateReplay('GY-1889', 3, 'graphyard-claude-2', 2, 'w1V:pQMH', 'guessed');
 });
 
-test(`unit:fault-class-session-liveness GY-1895 action:session GY-1885 10:25:23Z — the same re-send cures the second instance, and a handle that records no pane yet is repaired the same way`, async () => {
-  await gy1895CoordinateReplay('GY-1885', 6, 'graphyard-opencode-2', 5, 'w1V:pQKZ');
-  // The triage's own shape: the handle exists but its coordinate write never completed, so the pane
-  // is recorded nowhere — the same write completes it, and the paste verifies against it.
-  await gy1895CoordinateReplay('GY-1885', 6, 'graphyard-opencode-2', 5, 'w1V:pQKZ', true);
+test(`unit:fault-class-session-liveness GY-1895 action:session GY-1885 10:25:23Z — the same ledger retry cures the paneless handle: the coordinate lands under its own id, and a handle whose write is still owed counts no paste fault while it waits`, async () => {
+  await gy1895CoordinateReplay('GY-1885', 6, 'graphyard-opencode-2', 5, 'w1V:pQKZ', 'paneless');
+});
+
+test('unit:fault-class-session-liveness GY-1895 session isolation — a paneless handle and a reused agent name pointing at another session\'s pane bind nothing, paste nothing and close nothing, and a refusal whose coordinate write is not owed still counts', async () => {
+  // The profile's agent name resolves to a pane this item's finished previous attempt holds: the
+  // name was reassigned to whatever the listing still shows there, and no launch identity ties it
+  // to this attempt. The fence refuses the resolution; the loop must not manufacture ownership by
+  // writing that pane onto this attempt's handle — the GY-852/GY-940 fence the outage repair would
+  // have defeated — so nothing reaches the pane, on this cycle or the bound's.
+  const { item, profile, agents } = gy1895OutageAttempt('GY-1885', 6, 'graphyard-opencode-2', 5, 'w1V:pQKZ', 'foreign');
+  const world = await resumeWorld(item, profile, agents, { value: 0 }, GY1895_NOW);
+  const { state } = world;
+  const plane = { up: true }, writes: SessionHandleInput[] = [], refused: SessionHandleInput[] = [];
+  gy1895Engine(world, 'GY-1885', plane, writes, refused);
+  try {
+    await resumeStep(world.cycle(0), new Set(), true);
+    const promptKey = Object.keys(state.actions).find(candidate => candidate.startsWith(`resume:prompt:${item.id}:6:`))!;
+    assert.match(state.actions[promptKey]!.detail, new RegExp(`pane w1V:pQKZ is recorded for GY-1885's session graphyard-opencode-2:5, not for the attempt this paste concerns`));
+    assert.deepEqual(GY1895_sessionLiveness(state).map(entry => [entry.kind, entry.subject]), [['action:session', 'GY-1885']],
+      'the refusal whose coordinate write is not owed is the session\u2019s own, as it always counted');
+    assert.equal(writes.length, 0, 'no handle write bound the foreign pane to this attempt');
+    assert.deepEqual(world.prompts, [], 'nothing was pasted into the pane another session holds');
+    assert.equal(world.closed.length, 0, 'nothing was closed: no pane is verifiably this attempt\u2019s');
+    // Past the bound the attempt is handed on, and the hand-over still touches no pane but its own
+    // absence: the close is sent with no pane, and the finished record the reclaim writes names none.
+    state.cycle += 1;
+    await resumeStep(world.cycle(150_000), new Set(), true);
+    assert.equal(world.closed.length, 0, 'the reclaim closed nothing');
+    assert.ok(writes.every(write => write.pane !== 'w1V:pQKZ'), `no write ever carried the foreign pane: ${JSON.stringify(writes.map(write => [write.id, write.pane, write.state]))}`);
+    assert.ok(writes.some(write => write.id === 'graphyard-opencode-2:6' && write.state === 'finished' && write.pane === 'none'), 'the attempt\u2019s own close records no pane');
+    assert.ok(Object.values(state.actions).some(action => action.state === 'done' && /keeping the attempt's branch/.test(action.detail)), 'the attempt was handed to a new one on the bound');
+    assert.deepEqual(world.prompts, [], 'and still nothing was ever pasted');
+  } finally { world.cleanup(); }
+});
+
+test('unit:fault-class-session-liveness GY-1895 launch coordinates — a launch the outage window covered registers, coordinates and rekeys through the ledger: the retry carries the launcher\u2019s own payload, an owed move is reported owed, and a refusal that is the record\u2019s own is never hidden', async () => {
+  const { item, profile } = gy1895OutageAttempt('GY-1885', 6, 'graphyard-opencode-2', 5, 'w1V:pQKZ', 'paneless');
+  const world = await resumeWorld(item, profile, [], { value: 0 }, GY1895_NOW);
+  const { state } = world;
+  const plane = { up: false }, writes: SessionHandleInput[] = [], refused: SessionHandleInput[] = [];
+  gy1895Engine(world, 'GY-1885', plane, writes, refused);
+  // The pre-claim registration guessed epoch 5; the launch claimed 6, as the dispatch's snapshot did.
+  const handle: SessionHandleInput = { id: 'graphyard-opencode-2:5', kind: 'implementation', principal: 'graphyard-opencode-2', runtime: 'claude', host: 'vishrog', workspace: 'w1V',
+    subject: 'GY-1885: Item GY-1885', state: 'running' };
+  try {
+    // The launch record goes through the ledger exactly as the dispatch's launch wires it.
+    const record = (write: SessionHandleInput) => launchWrite(world.cycle(0), `handle:${item.id}:${write.id}`, { kind: 'session', work: item.key, principal: write.principal ?? null, epoch: null },
+      `Recording ${write.id}'s coordinates on ${item.key}`, fx => fx.recordSession!(item, write));
+    // Registration, coordinates, move: every write is stashed owed, and the coordinate loop stops
+    // at the first unanswered answer instead of hammering the silent plane three times.
+    const launched = await registeredLaunch(record, handle, async () => ({ epoch: 6, pane: 'w1V:pQKZ', agentName: profile.agentName }),
+      launched => launched, pane => `herdr pane attach ${pane} --workspace w1V`);
+    assert.deepEqual(launched, { epoch: 6, pane: 'w1V:pQKZ', agentName: profile.agentName }, 'the outage never fails a launch');
+    const rekey = await rekeyLaunchedSession(record, handle, 5, { epoch: 6, pane: 'w1V:pQKZ', agentName: null }, pane => `herdr pane attach ${pane} --workspace w1V`, 1);
+    assert.deepEqual(rekey, { outcome: 'owed', from: 'graphyard-opencode-2:5', to: 'graphyard-opencode-2:6' }, 'an unanswered move is reported owed, not moved and not failed');
+    assert.equal(writes.length, 0, 'nothing landed while the plane was down');
+    assert.deepEqual(refused.map(write => write.id), ['graphyard-opencode-2:5', 'graphyard-opencode-2:5', 'graphyard-opencode-2:5', 'graphyard-opencode-2:6'],
+      'the registration, the superseded-registration close it always writes, and the coordinates were each sent once; the coordinate loop stopped at the first unanswered send instead of hammering the silent plane');
+    // The next cycle's bounded steps retry the ledger: both stashed writes land with the exact
+    // payloads the launcher held — the claimed id, the launch's own pane, the launch token.
+    plane.up = true;
+    await retryOwedWrites(world.cycle(60_000), ['recordSession']);
+    assert.deepEqual(writes.map(write => [write.id, write.pane]), [['graphyard-opencode-2:5', 'w1V:pQKZ'], ['graphyard-opencode-2:6', 'w1V:pQKZ']],
+      'the coordinate and the move landed, each with the launcher\u2019s own pane');
+    assert.equal((item.sessions ?? []).find(session => session.id === 'graphyard-opencode-2:6')?.pane, 'w1V:pQKZ', 'the attempt\u2019s own handle records the pane again');
+    // A refusal that is the record's own is never hidden: a registration the engine refuses leaves
+    // the launch unwritten, so the coordinated write still takes the record over (supersede), the
+    // pane-less retries stay exactly the three they always were, and the move reports failed with
+    // the reason instead of being stashed for a retry that could never land.
+    const takenOver: SessionHandleInput[] = [];
+    const deniesRegistration = async (write: SessionHandleInput) => {
+      if (write.state === 'running' && !write.pane) throw new Error('Session handle graphyard-opencode-2:5 is held by another launch attempt that is still recorded running (409)');
+      takenOver.push(write);
+    };
+    await registeredLaunch(deniesRegistration, handle, async () => ({ epoch: 6, pane: 'w1V:pZZZ', agentName: null }), launched => launched, pane => `herdr pane attach ${pane} --workspace w1V`);
+    assert.ok(takenOver.some(write => write.state === 'finished' && (write as { supersede?: boolean }).supersede === true), 'the refused registration is taken over by the coordinated write, as an unwritten registration always was');
+    const deniesEverything = async (write: SessionHandleInput) => { throw new Error('Session handle graphyard-opencode-2:5 is held by another launch attempt that is still recorded running (409)'); };
+    const failed = await rekeyLaunchedSession(deniesEverything, handle, 5, { epoch: 6, pane: 'w1V:pZZZ', agentName: null }, undefined, 1);
+    assert.equal(failed.outcome, 'failed');
+    assert.match((failed as { reason: string }).reason, /held by another launch attempt/);
+  } finally { world.cleanup(); }
 });
