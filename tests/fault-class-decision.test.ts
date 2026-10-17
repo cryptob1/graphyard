@@ -7,7 +7,7 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { storeAction } from '../src/daemon/state.js';
 import type { FaultKind } from '../src/model/fault-classes.js';
 import { trackFaults } from '../src/model/fault-record.js';
-import { containmentInMotion, containmentSettleWaitBoundMs, cycleFaults, emptyDaemonState, reworkDecisionInMotion, reworkDecisionWaitBoundMs } from '../src/master-daemon.js';
+import { containmentInMotion, containmentSettleWaitBoundMs, cycleFaults, emptyDaemonState, reworkDecisionInMotion, reworkDecisionWaitBoundMs, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 // GY-1337's own exports are read through namespaces, so the base exercise runs these replays and each fails on its assertion.
 import * as daemon from '../src/master-daemon.js';
 import * as decisionReport from '../src/cli/decision-report.js';
@@ -19,6 +19,8 @@ import * as decisions from '../src/daemon/decisions.js';
 import { humanNeededAttention } from '../src/cli/owed-report.js';
 import { readDecisions } from '../src/server/decision-ledger.js';
 import { humanNeeded, type NextAction } from '../src/model/next-action.js';
+import { approverSessionName } from '../src/master.js';
+import { RefusedResponse } from '../src/model.js';
 
 // GY-1251 names this file for its proof: manual:fault-class-decision. The master loop filed 5
 // decision faults in 24 hours on 5 October 2026, all recorded at 05:12:49.809Z. Each was an
@@ -1076,4 +1078,166 @@ test('manual:fault-class-decision — approveAcceptance is the independent appro
   assert.equal(await configured.github.approveAcceptance(pr, head, 'the landing approval'), 'approved');
   assert.equal(configured.state.approvals.length, 1, 'an approval already standing on the head is not posted again');
   assert.equal(await world(false).github.approveAcceptance(pr, head, 'the landing approval'), 'unconfigured', 'no approver App, no approval');
+});
+
+// GY-1888 names this file for its proof: manual:fault-class-decision. The master loop filed this
+// item itself on 17 October 2026: 3 decision faults in 24 hours — owed-decision|GY-1834 at
+// 22:35:33.279Z, action:decision|GY-1846 at 02:57:31.390Z, action:decision|GY-1884 at 08:25:26.339Z.
+// The shared cause: the loop's decision machinery repeated an action the record or the runtime had
+// already answered instead of adopting or recovering it, so the decisions it owed — including the
+// new head a request-rework action owes — stood past every bound while the same refusal recurred
+// and counted. Each instance is replayed through the loop's own cycle. Against the base each
+// records the fault or repeats the refusal; against the candidate none.
+
+const instanceClock = Date.parse('2026-10-17T02:00:00Z'), instanceIso = (offsetMs: number) => new Date(instanceClock + offsetMs).toISOString();
+const instanceSha = 'b658b5a614e5'.padEnd(40, '0'), instanceBase = 'b'.repeat(40);
+const loopConfig = config;
+
+/** The item as each GY-1888 instance's loop snapshot held it: a candidate under review, no worker holding it. */
+function instanceItem(key: string, reworkRequested: boolean, verdict: boolean): Work {
+  const candidate = { sha: instanceSha, baseSha: instanceBase, pr: 1884, branch: `graphyard/${key.toLowerCase()}-1`, author: 'worker' };
+  const observation = {
+    clockOffset: { min: 0, max: 0 }, candidate, checks: [{ name: 'test', result: 'success', appId: 15368 }],
+    reviews: [{ reviewer: 'graphyard-reviewer[bot]', sha: instanceSha, state: verdict ? 'CHANGES_REQUESTED' : 'APPROVED', submittedAt: instanceIso(-600_000) }],
+    protected: true, mergeable: true, merged: false, mergeSha: null, files: ['src/loop.ts'], scopeFiles: [], at: instanceIso(-20_000),
+  };
+  return {
+    id: `00000000-0000-4000-8000-${key.replace(/\D/g, '').padStart(12, '0')}`, key, title: key, description: '', type: 'bug', priority: 1,
+    dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:loop'] }], policy: { checks: ['test'], review: true },
+    plannedFiles: ['src/loop.ts'], stage: 'review', revision: 5, policyRevision: 1, createdAt: instanceIso(-3_600_000), updatedAt: instanceIso(0),
+    stageEnteredAt: instanceIso(-1_800_000), ready: true, epoch: 1, lease: null, workspaces: [], submission: { epoch: 1, pr: 1884 },
+    candidate, reworkRequested, scenarioRequirements: [], evidence: [], observation, blocker: null, violations: [],
+    gates: [{ name: 'build', passed: true, reasons: [] }, { name: 'review', passed: !verdict, reasons: verdict ? ['Outstanding change requests must be resolved through a new review'] : [] }],
+  } as unknown as Work;
+}
+
+const instanceEffects = (work: () => Work, overrides: Partial<DaemonEffects>): DaemonEffects => ({
+  agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+  snapshot: async () => ({ work: [work()], now: instanceIso(0), jobs: [] }),
+  closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+  observeDeployment: async () => ({ source: 'unavailable', sha: null, at: instanceIso(0), reason: 'not configured', deployed: [], pending: [] }),
+  recordDeployment: async () => {}, requestSmoke: () => {},
+  decide: async () => ({ id: 'unused' }), decisions: async () => ({ decisions: [] }),
+  approver: async () => ({ agentName: 'graphyard-approver', pane: 'pane-1' }), persist: async () => {},
+  ...overrides,
+});
+const decisionInstances = (state: ReturnType<typeof emptyDaemonState>) => state.faults.instances.filter(instance => instance.faultClass === 'decision');
+
+test('manual:fault-class-decision — action:decision|GY-1846|2026-10-17T02:57:31.390Z: a put the applied rework already answers is adopted, not refused on every retry', async () => {
+  // The hold the control plane named: applied rework 067c0c4f for head b658b5a614e5, no worker having submitted since.
+  const heldId = '067c0c4f-7b1f-4409-86be-b345107d3f31';
+  const history = [{ id: heldId, action: 'rework', state: 'applied', input: { previousWorkerStopped: true }, requestedAt: instanceIso(-3_600_000), approvedAt: instanceIso(-3_500_000), approvedBy: 'graphyard-approver-graphyard', situation: { sha: instanceSha, baseSha: instanceBase }, reason: 'The reviewer requested changes on head b658b5a614e5' }];
+  // The loop's snapshot predates the application (an observation-only install reads slowly), so the
+  // verdict grounds still compute a rework; the control plane refuses the put naming the hold, every time.
+  let work = instanceItem('GY-1846', false, true);
+  const refusedPut = () => new RefusedResponse(`Graphyard refused work/${work.id}/decide (409): GY-1846 already holds rework: decision ${heldId} was applied for head ${instanceSha.slice(0, 12)} and no worker has submitted since, so the item waits for a worker on it and a second rework authorizes nothing. If no worker takes it, what holds its dispatch (an unfinished dependency, a blocker, a fenced launch) is the lever, not another rework`, 409, { heldRework: { decision: heldId } });
+  const puts: number[] = [];
+  const state = emptyDaemonState(loopConfig());
+  await runCycle(loopConfig(), state, instanceEffects(() => work, {
+    decide: async () => { puts.push(state.cycle); throw refusedPut(); },
+    decisions: async () => ({ decisions: structuredClone(history) }),
+  }), () => instanceClock);
+  const adoptedRow = () => Object.values(state.actions).find(action => action.kind === 'decision' && action.state === 'done' && /already holds rework decision/.test(action.detail));
+  // The candidate: the refusal names the applied rework the record holds, so it is adopted as answered —
+  // done once, no fault, and nothing is put again on the item's next cycle.
+  assert.match(adoptedRow()?.detail ?? '', /already holds rework decision 067c0c4f/, JSON.stringify(state.actions));
+  assert.deepEqual(decisionInstances(state), [], 'a hold that answers the request judged nothing');
+  await runCycle(loopConfig(), state, instanceEffects(() => work, {
+    decide: async () => { puts.push(state.cycle); throw refusedPut(); },
+    decisions: async () => ({ decisions: structuredClone(history) }),
+  }), () => instanceClock + 90_000);
+  assert.equal(puts.length, 1, 'the adopted hold is never asked for a second rework');
+  assert.deepEqual(decisionInstances(state), []);
+});
+
+test('manual:fault-class-decision — action:decision|GY-1884|2026-10-17T08:25:26.339Z: a launch the runtime refuses for its own held name recovers the pane and launches', async () => {
+  // The leftover: pane w1V:pQGR held the decision's own approver name while the session inventory
+  // listed nothing under it — by the loop's own liveness rule, a session that is gone.
+  const decisionId = 'a17c5808-0000-4000-8000-000000001884';
+  const name = approverSessionName({ key: 'GY-1884' } as Work, decisionId);
+  const heldName = () => new Error(`No session can be launched as ${JSON.stringify(name)}: the runtime refused it: {"error":{"code":"agent_name_taken","message":"agent name ${name} is already used; candidates: terminal_id=term_65e050436138156a0 pane_id=w1V:pQGR workspace_id=w1V tab_id=w1V:tQGM. A session name must start with a lowercase letter, use only lowercase letters, digits, '-' or '_', and be 1-32 characters. Retry with graphyard master approver GY-1884 ${decisionId}"}}`);
+  let work = instanceItem('GY-1884', false, true);
+  const launches: string[] = [], closed: string[] = [];
+  const state = emptyDaemonState(loopConfig());
+  await runCycle(loopConfig(), state, instanceEffects(() => work, {
+    decide: async () => ({ id: decisionId }),
+    decisions: async () => ({ decisions: [{ id: decisionId, action: 'rework', state: 'requested', input: {}, approvedBy: null }] }),
+    approver: async () => { launches.push(decisionId); if (launches.length === 1) throw heldName(); return { agentName: name, pane: 'w1V:pNEW' }; },
+    closeSession: pane => { closed.push(pane); },
+  }), () => instanceClock);
+  // The candidate: the refusal names the pane that holds the decision's own name; the loop closes the
+  // leftover and makes the launch once more, so the decision is put to an approver instead of standing.
+  assert.deepEqual(closed, ['w1V:pQGR'], 'the leftover pane holding the name is closed');
+  assert.deepEqual(launches, [decisionId, decisionId], 'the launch is made again once the leftover is gone');
+  const watch = Object.values(state.approvals).find(entry => entry.decision === decisionId);
+  assert.equal(watch?.pane, 'w1V:pNEW', 'the watch holds the session the recovered launch started');
+  assert.deepEqual(decisionInstances(state), [], 'a recovered launch judged nothing');
+  assert.ok(Object.values(state.actions).some(action => action.state === 'done' && /closed leftover approver pane w1V:pQGR/.test(action.detail)), JSON.stringify(state.actions));
+  // A pane the inventory lists under another name is a live session this decision's name cannot be
+  // judged against: it is left alone, and the failure stands as it did before.
+  const live = emptyDaemonState(loopConfig());
+  await runCycle(loopConfig(), live, instanceEffects(() => work, {
+    decide: async () => ({ id: decisionId }),
+    decisions: async () => ({ decisions: [{ id: decisionId, action: 'rework', state: 'requested', input: {}, approvedBy: null }] }),
+    approver: async () => { launches.push('live'); throw heldName(); },
+    closeSession: pane => { closed.push(pane); },
+    herdr: () => ({ agents: [{ name: 'something-else', pane_id: 'w1V:pQGR', agent: 'claude', agent_status: 'working' }], available: true }),
+  }), () => instanceClock);
+  assert.deepEqual(launches, [decisionId, decisionId, 'live'], 'the live pane was attempted once and never closed or retried');
+  assert.deepEqual(closed, ['w1V:pQGR'], 'nothing more was closed: a listed pane is not ours to close');
+  assert.ok(Object.values(live.actions).some(action => action.state === 'failed' && /agent_name_taken/.test(action.detail)), 'the refusal stands');
+});
+
+test('manual:fault-class-decision — owed-decision|GY-1834|2026-10-16T22:35:33.279Z: the new head the owed rework names is produced, so the line never stands past its bound', async () => {
+  // The instance: the reviewer's change request owed GY-1834 a new head; for 52 minutes nothing
+  // produced it or settled the decision, because the approver launch met the same held-name refusal
+  // the GY-1884 instance names, and the decision stood unjudged past the wait bound.
+  const decisionId = '969b64a9-0000-4000-8000-000000001834';
+  const name = approverSessionName({ key: 'GY-1834' } as Work, decisionId);
+  const heldName = () => new Error(`No session can be launched as ${JSON.stringify(name)}: the runtime refused it: {"error":{"code":"agent_name_taken","message":"agent name ${name} is already used; candidates: terminal_id=term_65e050436138156a0 pane_id=w1V:pQGR workspace_id=w1V tab_id=w1V:tQGM. A session name must start with a lowercase letter, use only lowercase letters, digits, '-' or '_', and be 1-32 characters. Retry with graphyard master approver GY-1834 ${decisionId}"}}`);
+  // The action row the fault line is dated from, new when the first cycle runs (the round is in
+  // motion there), so it stands past the bound only if the decision never lands.
+  const rowKey = 'request-rework:GY-1834';
+  const at = (offsetMs: number) => new Date(instanceClock + offsetMs).toISOString();
+  const withRow = (item: Work, when: string): Work => {
+    const action: NextAction = { kind: 'request-rework', work: item.id, key: item.key, gate: 'review', refusal: 'Outstanding change requests must be resolved through a new review',
+      reason: `${item.key} needs a new head: graphyard-reviewer[bot] requested changes on ${instanceSha.slice(0, 12)}; the next head is reviewed afresh`,
+      inputs: { kind: 'request-rework', pr: 1834, sha: instanceSha, detail: `graphyard-reviewer[bot] requested changes on ${instanceSha.slice(0, 12)}; the next head is reviewed afresh` }, llmRole: 'approve-decision', binding: rowKey };
+    return { ...item, nextAction: { ...action, needsHuman: humanNeeded(action)! }, actionQueue: { actions: [{ id: `row-${item.key}`, key: item.key, work: item.id, kind: 'request-rework', gate: 'review', binding: rowKey, inputs: action.inputs, reason: action.reason,
+      refusal: action.refusal, state: 'requested', claim: null, result: null, resolution: null, resolvedAt: null, attempts: 0, history: [], requestedAt: when, requestedBy: 'graphyard' }], history: [] } } as unknown as Work;
+  };
+  let judged = false; // the control plane applied the rework once an approver could be launched
+  const item = () => {
+    const base = instanceItem('GY-1834', judged, !judged);
+    if (judged) return base; // the applied rework moves the item to the dispatch the hold authorizes
+    return withRow(base, at(0));
+  };
+  const launches: string[] = [], closed: string[] = [];
+  const state = emptyDaemonState(loopConfig());
+  const fx = () => instanceEffects(item, {
+    decide: async () => ({ id: decisionId }),
+    decisions: async () => ({ decisions: judged ? [{ id: decisionId, action: 'rework', state: 'applied', input: {}, approvedBy: 'graphyard-approver-graphyard' }] : [{ id: decisionId, action: 'rework', state: 'requested', input: {}, approvedBy: null }] }),
+    approver: async () => { launches.push(decisionId); if (launches.length === 1) throw heldName(); judged = true; return { agentName: name, pane: 'w1V:pNEW' }; },
+    closeSession: pane => { closed.push(pane); },
+  });
+  await runCycle(loopConfig(), state, fx(), () => instanceClock);
+  assert.deepEqual(closed, ['w1V:pQGR'], 'the held name is recovered, as the GY-1884 instance requires');
+  // The rework judged and applied, the item waits for a worker on the hold: a fresh attempt is the
+  // lever, and no decision is owed any more.
+  await runCycle(loopConfig(), state, fx(), () => instanceClock + 90_000);
+  assert.equal(judged, true, 'the decision was judged');
+  // The instance's own instant: 52 minutes after the row was requested, the line has nothing to name.
+  const late = instanceClock + 52 * 60_000;
+  await runCycle(loopConfig(), state, fx(), () => late);
+  const reported = humanNeededAttention({ work: [item()], now: at(52 * 60_000) });
+  assert.deepEqual(reported.map(line => line.text), [], 'the new head was produced, so nothing is owed any more');
+  assert.deepEqual(decisionInstances(state), [], 'the line the instance counted never stands');
+
+  // The mechanism the instance counted is the classifier's own: had the decision stood unlanded —
+  // as it did against the base, whose launches stayed refused — the same instant counts it.
+  const unlanded = withRow(instanceItem('GY-1834', false, true), at(0));
+  const standingLine = humanNeededAttention({ work: [unlanded], now: at(52 * 60_000) });
+  assert.match(standingLine[0]?.text ?? '', /a new head for GY-1834 has been owed for 52m/, JSON.stringify(standingLine));
+  const counted = cycleFaults(emptyDaemonState(loopConfig()), [unlanded], late, { config: loopConfig(), reported: standingLine }).filter(fault => fault.faultClass === 'decision');
+  assert.deepEqual(counted.map(fault => fault.kind), ['owed-decision'], 'the instance, reproduced as the base held it');
 });
