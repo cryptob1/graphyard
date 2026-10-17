@@ -41,7 +41,7 @@ Every 30s the guard reverts merges failing checks parents passed; the [revert ap
 
 `mode: local` (`control-plane` merger's default): `{"previews":"local","candidateMaxChanges":5,"productionVerification":true}`, `command` adapter, generated-workflows removed; `delivery.applications` `{id,kind:"static",directory,build}`/`{id,kind:"compose",file,service,port}`; `delivery.cases` case→application (tag/sole one); invalid ones refuse `init`/`install`/`/api/status` (`project.error`); **Delivery** shows `project.delivery` (`GRAPHYARD_PROJECT_DELIVERY`).
 
-Static-application cases preview their item (head, else main; build sees `GRAPHYARD_PREVIEW_TITLE`); passing builds publish to `/preview/KEY/`, served from `GRAPHYARD_PREVIEW_ORIGIN` (previews-only host), else sandboxed storageless; `preview` records state/cases; heads/closures/unconfirmed records clean it.
+Bound cases preview items (head/main; `GRAPHYARD_PREVIEW_TITLE`): static builds publish `/preview/KEY/`; Compose apps run isolated (own project/state/database/images, no `.env`/`include`/`extends`, refusing credentials/sockets/privileges/symlinked-or-outside paths, `GRAPHYARD_PREVIEW_CPUS`/`_MEMORY_MB`/`_PIDS`/`_LIFETIME_MINUTES`/`_COMPOSE_LIMIT`/`_SERVICES`), publishing served pages; `GRAPHYARD_PREVIEW_ORIGIN` serves, else sandboxed; endings/restarts remove containers/volumes/networks/images before recording, retried until gone.
 
 **`graphyard.json` policy**: `risk.sensitive` `{rule,glob}`, else generic; `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; `release.onFailure` `revert`/`hold`; deployed `GRAPHYARD_REPOSITORY_POLICY`; `doctor` prints it.
 
