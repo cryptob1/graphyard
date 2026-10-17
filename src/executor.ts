@@ -449,7 +449,10 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       const observation = await effects.observeDeployment([work]);
       if (observation.source === 'unavailable' || !observation.sha) throw new Error(observation.reason ?? `no deployment could be read for ${work.key}`);
       if (!observation.deployed.includes(work.key)) {
-        const plain = observation.reason ?? `the running release ${observation.sha.slice(0, 12)} does not carry ${work.key}'s merge ${action.inputs.mergeSha.slice(0, 12)} yet`;
+        // An informational reason (an inactive release production still serves) follows the does-not-carry sentence, so a
+        // stall still names the release machinery; a stale containment reason stands alone, its pending list unreliable.
+        const notCarried = `the running release ${observation.sha.slice(0, 12)} does not carry ${work.key}'s merge ${action.inputs.mergeSha.slice(0, 12)} yet`;
+        const plain = !observation.reason ? notCarried : observation.reason.includes(staleContainmentReasonPrefix) ? observation.reason : `${notCarried}: ${observation.reason}`;
         // GY-1831: a release the promotion pipeline is about to serve is the pipeline's ordinary
         // pace, not a fault. GY-1966: the wait names the pipeline's newest demonstrated movement,
         // so the row's unchanged run measures the stretch since the pipeline last moved and the

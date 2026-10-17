@@ -264,6 +264,8 @@ for (const { subject, release, merge, attempts, spacing } of stalledGateInstance
     assert.equal(attention.length, 1);
     assert.equal(attention[0].kind, 'production', 'a row a stopped pipeline holds files as the machinery’s');
     assert.match(attention[0].text, new RegExp(`The release machinery is not moving ${subject}'s delivery`));
+    // Codex review of 766b9083: a promotion that carries the merge yet is not served is production's to recover, not the pipeline's to restart.
+    assert.match((attention[0] as { next?: string }).next ?? '', /recover the production deployment instead, since a new candidate does not repair it/);
     const opened = trackFaults(emptyRecord(), classifyAttention(attention), stamp(40));
     assert.deepEqual(opened.map(instance => instance.faultClass), ['deployment']);
   });
@@ -647,7 +649,11 @@ test('unit:verify-deployment-awaits-promotion — the handler names the promotio
   const stale = `${staleContainmentReasonPrefix}git fetch origin main failed`;
   await assert.rejects(async () => verifyHandlers(notServing(stale), { suffix: async () => wait })(row, executorIdentity), (error: Error) => error.message === stale, 'containment derived without a fresh base branch is not the release-lag shape');
   const inactive = 'production deployment 7 reached success and was later marked inactive with no newer production deployment, so it is the release production serves';
-  await assert.rejects(async () => verifyHandlers(notServing(inactive), { suffix: async () => wait })(row, executorIdentity), (error: Error) => error.message === `${inactive}; ${wait}`, 'an informational reason on a valid serving release still names the wait');
+  await assert.rejects(async () => verifyHandlers(notServing(inactive), { suffix: async () => wait })(row, executorIdentity), (error: Error) => error.message === `${plain}: ${inactive}; ${wait}`, 'an informational reason on a valid serving release still names the wait');
+  // Codex review of 766b9083: once the wait is over, the informational reason still names the release machinery, so the stall files as the machinery's.
+  const informational = await Promise.resolve().then(() => verifyHandlers(notServing(inactive), { suffix: async () => null })(row, executorIdentity)).then(() => '', (error: Error) => error.message);
+  assert.equal(informational, `${plain}: ${inactive}`);
+  assert.ok(namesReleaseMachinery(informational), 'a stalled row on an inactive serving release is the release machinery\'s');
   await assert.rejects(async () => verifyHandlers(notServing(`${inactive}; ${stale}`), { suffix: async () => wait })(row, executorIdentity), (error: Error) => error.message === `${inactive}; ${stale}`, 'a stale containment beside it still stands as it was');
 });
 

@@ -10,6 +10,8 @@ import { promotionWaitBoundMs, promotionWaitClause } from '../src/model/action-k
 import { defaultPromoteEveryMinutes, promotionCandidatesListed, promotionCycle, promotionHandoffMs, type PromotionReads } from '../src/daemon/deployment.js';
 import { emptyDaemonState, writeDaemonState, type PromotionState } from '../src/daemon/state.js';
 import { masterConfigSchema } from '../src/master.js';
+import { runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import type { InvariantCheck } from '../src/model/invariants.js';
 import { stalledActionAttention } from '../src/cli/stalled-actions.js';
 import { classifyAttention } from '../src/model/fault-classes.js';
 import { trackFaults } from '../src/model/fault-record.js';
@@ -67,6 +69,13 @@ const quietFails = (into: number) => quiet.some(([from, to]) => into >= from - h
  */
 const settleBoundMs = promotionWaitBoundMs + actionStallThreshold * actionRetryMaxMs + 2 * minute;
 
+/** A delivered item as the plane lists it, with the fields master status reads. */
+const delivered = (key: string, mergeSha: string, at: number) => ({
+  id: `id-${key}`, key, title: key, description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item'] }],
+  policy: { checks: ['test'], review: true }, plannedFiles: [], revision: 1, policyRevision: 1, createdAt: iso(at), updatedAt: iso(at), stage: 'done', stageEnteredAt: iso(at),
+  ready: true, epoch: 1, lease: null, workspaces: [], submission: null, candidate: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null,
+  blocker: null, violations: [], gates: [], delivery: { mergeSha, mergedAt: iso(at), authorizationRevision: 1 } });
+
 interface Row { key: string; merge: string; mergedAt: number; deliveredAt: number | null; stalledAt: number | null; attemptsAtEnd: number | null; servedAt: number | null; filed: number
   /** The wait's movement this row's last wait-naming failure named, with the dispatch count then — the rework of GY-1966 checks a new cut changes it. */
   lastWait: { cuts: number; movement: string } | null }
@@ -75,7 +84,15 @@ interface Row { key: string; merge: string; mergedAt: number; deliveredAt: numbe
 const movementOf = (reason: string) => reason.includes(promotionWaitClause)
   ? reason.slice(reason.indexOf(promotionWaitClause) + promotionWaitClause.length).trim().replace(/^\(/, '').replace(/\)$/, '') : null;
 
-async function simulate(waits: boolean) {
+/**
+ * `loop`: the review of GY-1966's rework — the same days through the real coordination loop. Each
+ * minute runCycle runs with the day's promotion reads and the delivered items' snapshot: its own
+ * promotion step records the cursor it persists (writeDaemonState, as `master run` persists it),
+ * and its own faults step lists the stalled rows (buildMasterStatus over stalledActionAttention),
+ * classifies and records them on the loop's fault record, and judges the system invariants, which
+ * must hold after every cycle. The executor then drains the queue as above.
+ */
+async function simulate(waits: boolean, loop = false) {
   const mainline = [sha('root')], index = new Map([[mainline[0], 0]]);
   const contains = (ancestor: string, descendant: string) => index.has(ancestor) && index.has(descendant) ? index.get(ancestor)! <= index.get(descendant)! : null;
   let now = t0;
@@ -104,7 +121,8 @@ async function simulate(waits: boolean) {
   execFileSync('git', ['init', '-q', root]);
   const credentials = await temporaryDirectory('gy-1831-soak-credentials');
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard-soak.example', credentialFile: `${credentials}/coordinator.token`, cliPath: '/outside/graphyard.mjs',
-    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'soak-host', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'soak-host', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [],
+    run: { intervalSeconds: intervalMs / 1000, promoteEveryMinutes: defaultPromoteEveryMinutes } });
   // The checkout's object store: `refs/remotes/origin/main` is the tip the failed observation fetched.
   const run = async (command: string, args: string[]) => {
     const [, , ...rest] = args;
@@ -121,17 +139,38 @@ async function simulate(waits: boolean) {
     snapshot: async () => ({ work: open(), now: iso(now) }),
     mutate: async (path: string) => { const key = works.find(work => path === `work/${work.id}/deployment`)?.key; if (key) rows.get(key)!.deliveredAt = now; return {}; },
   });
+  /** Production's endpoint, as the executor and the loop both read it. */
+  const observe = (delivered: Work[]) => {
+    const serving = delivered.filter(work => contains(work.delivery!.mergeSha, production.sha));
+    return { source: 'endpoint', sha: production.sha, at: iso(now), reason: null, deployed: serving.map(work => work.key), pending: delivered.filter(work => !serving.includes(work)).map(work => work.key) } as never;
+  };
   const handler = controlPlaneHandlers(() => config, {
     ...effects, ...(waits ? {} : { promotionWaitSuffix: undefined }),
-    observeDeployment: async (delivered: Work[]) => {
-      const serving = delivered.filter(work => contains(work.delivery!.mergeSha, production.sha));
-      return { source: 'endpoint', sha: production.sha, at: iso(now), deployed: serving.map(work => work.key), pending: delivered.filter(work => !serving.includes(work)).map(work => work.key) } as never;
-    },
+    observeDeployment: async (delivered: Work[]) => observe(delivered),
   })['verify-deployment']!;
   const executor = { id: 'soak-executor', host: 'soak-host', principal: 'coordinator' };
 
-  let promotion: PromotionState | null = null, merges = 0, attempts = 0, handoffs = 0, strandedSoaking = 0, movementChanges = 0;
+  let promotion: PromotionState | null = null, merges = 0, attempts = 0, handoffs = 0, strandedSoaking = 0, movementChanges = 0, retainedChanges = 0;
   const record = { instances: [] as never[], open: {} as Record<string, string>, failing: {} as Record<string, string> };
+  // The loop's own cursor and the effects `master run` hands runCycle here: the day's promotion reads, the snapshot of delivered
+  // items, production's endpoint, the cursor persisted where the executor reads it. The plane's deployment record is not
+  // modelled: a row is delivered when the executor's verify-deployment settles it.
+  const daemon: DaemonState = { ...emptyDaemonState(config) } as DaemonState, seenInstances = new Set<string>();
+  let invariantChecks = 0, cycles = 0;
+  const loopEffects = {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: open(), now: iso(now) }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    observeDeployment: async (items: Work[]) => observe(items),
+    recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }),
+    decide: async (work: Work, action: string) => { violations.push(`the loop decided ${action} on ${work.key}`); throw new Error('nothing is decided on this day'); },
+    persist: async (state: DaemonState) => { await writeDaemonState(config, state); },
+    promotion: reads,
+    // The plane answers, so the faults step reads what master status adds after buildMasterStatus; of that report this day
+    // raises only its stalled-action lines (stalledActionAttention, as master status derives them over the same snapshot).
+    controlPlane: async () => ({ build: { commit: sha('plane') } }),
+    reportedAttention: async (work: Work[], _status: unknown, observed: { now: string }) => ({ items: stalledActionAttention({ work, now: observed.now }) }),
+  } as unknown as DaemonEffects;
   const filed: { subject: string; at: number; kind: string; text: string }[] = [];
   for (; now <= t0 + endsAt; now += intervalMs) {
     const into = now - t0;
@@ -142,7 +181,7 @@ async function simulate(waits: boolean) {
       const row = { id: `verify-${key}`, kind: 'verify-deployment', work: `id-${key}`, key, inputs: { kind: 'verify-deployment', mergeSha: merge, mergedAt: iso(now), state: 'done' },
         gate: 'merge', refusal: null, reason: `${key} merged as ${merge.slice(0, 12)} and no deployment carrying it has been observed`, binding: `delivery:${merge}`,
         requestedBy: 'graphyard', requestedAt: iso(now), state: 'pending', claim: null, attempts: 0, history: [] } as unknown as ActionRow;
-      works.push({ id: `id-${key}`, key, stage: 'done', criteria: [], workspaces: [], delivery: { mergeSha: merge, mergedAt: iso(now) }, actionQueue: { actions: [row], history: [] } } as unknown as Work);
+      works.push({ ...delivered(key, merge, now), actionQueue: { actions: [row], history: [] } } as unknown as Work);
       rows.set(key, { key, merge, mergedAt: now, deliveredAt: null, stalledAt: null, attemptsAtEnd: null, servedAt: null, filed: 0, lastWait: null });
     }
     // The pipeline: a run concludes at the end of its validation, promoting its cut unless it fails; production serves a promotion a few minutes later.
@@ -154,10 +193,22 @@ async function simulate(waits: boolean) {
       production.sha = promoted.sha; production.changes.push(now);
       for (const row of rows.values()) if (row.servedAt === null && contains(row.merge, production.sha)) row.servedAt = now;
     }
-    // The loop: its promotion step, recorded on its cursor.
-    promotion = (await promotionCycle(promotion, reads, { now, everyMinutes: defaultPromoteEveryMinutes, intervalMs })).state;
-    await writeDaemonState(config, { ...emptyDaemonState(config), promotion });
-    if ((promotion.candidates?.length ?? 0) > promotionCandidatesListed) violations.push(`+${into / minute} min: the cursor lists ${promotion.candidates!.length} candidates`);
+    // The loop: its promotion step, recorded on its cursor — the real cycle on the loop day.
+    if (loop) {
+      await runCycle(config, daemon, loopEffects, () => now); cycles++;
+      promotion = daemon.promotion ?? null;
+      for (const check of daemon.invariants.report as InvariantCheck[]) { invariantChecks++; if (!check.holds) violations.push(`+${into / minute} min: ${check.line}`); }
+      for (const instance of daemon.faults.instances) if (!seenInstances.has(instance.id)) {
+        seenInstances.add(instance.id);
+        filed.push({ subject: instance.subject, at: now, kind: instance.kind, text: instance.text });
+        if (rows.has(instance.subject)) rows.get(instance.subject)!.filed++;
+        else violations.push(`+${into / minute} min: the loop filed ${instance.kind} on ${instance.subject}: ${instance.text}`);
+      }
+    } else {
+      promotion = (await promotionCycle(promotion, reads, { now, everyMinutes: defaultPromoteEveryMinutes, intervalMs })).state;
+      await writeDaemonState(config, { ...emptyDaemonState(config), promotion });
+    }
+    if ((promotion?.candidates?.length ?? 0) > promotionCandidatesListed) violations.push(`+${into / minute} min: the cursor lists ${promotion!.candidates!.length} candidates`);
     // The executor: every claimable row, claimed and settled through the queue.
     for (let claim = claimAction(open(), executor, new Date(now), { kinds: ['verify-deployment'] }); claim; claim = claimAction(open(), executor, new Date(now), { kinds: ['verify-deployment'] })) {
       attempts++;
@@ -187,7 +238,11 @@ async function simulate(waits: boolean) {
         if (movement !== null) {
           if (row.lastWait && row.lastWait.cuts < dispatches.length) {
             if (row.lastWait.movement === movement) violations.push(`${row.key}: named ${movement} again after a new cut`);
-            else movementChanges++;
+            else {
+              movementChanges++;
+              // B1's state: the cursor retains an earlier promotion, and a cut made after it moved the wait.
+              if (promotion?.promotedSha && promotion.promotedAt && Date.parse(promotion.promotedAt) < dispatches.at(-1)!.at) retainedChanges++;
+            }
           }
           row.lastWait = { cuts: dispatches.length, movement };
         }
@@ -201,16 +256,16 @@ async function simulate(waits: boolean) {
     // The loop's attention: what it lists as stalled is what it records as a fault.
     const attention = stalledActionAttention({ work: open(), now: iso(now) });
     for (const entry of attention) { const row = rows.get(entry.subject)!; if (row.stalledAt === null) { row.stalledAt = now; row.attemptsAtEnd ??= works.find(work => work.key === entry.subject)!.actionQueue!.actions[0].attempts; } }
-    for (const instance of trackFaults(record, classifyAttention(attention), iso(now))) {
+    if (!loop) for (const instance of trackFaults(record, classifyAttention(attention), iso(now))) {
       filed.push({ subject: instance.subject, at: now, kind: instance.kind, text: instance.text });
       if (rows.has(instance.subject)) rows.get(instance.subject)!.filed++;
     }
   }
-  return { rows: [...rows.values()], filed, violations, logs, attempts, dispatches, changes: production.changes, handoffs, strandedSoaking, movementChanges };
+  return { rows: [...rows.values()], filed, violations, logs, attempts, dispatches, changes: production.changes, handoffs, strandedSoaking, movementChanges, retainedChanges, cycles, invariantChecks, daemon };
 }
 
-test('unit:soak-invariants-hold — GY-1831 and GY-1966: two simulated days of merges riding release candidates that promote, fail and are re-cut behind a moving main, and two quiet stretches: every verify-deployment row ends delivered or stalled within the promotion wait bound of the pipeline\'s last movement, a row its release served within the bound files no instance, a row left on a stopped pipeline files as the release machinery\'s, attempts stay bounded and every row is delivered once merges resume', { timeout: 600_000 }, async () => {
-  const day = await simulate(true);
+/** The days' invariants, whichever drives the loop's side: the component steps or the real cycle. */
+function assertDays(day: Awaited<ReturnType<typeof simulate>>) {
   const { rows, filed, violations, logs, dispatches } = day;
   const at = (ms: number) => `+${Math.round((ms - t0) / minute)} min`;
   if (process.env.SOAK_TRACE) console.error(JSON.stringify({ rows: rows.length, attempts: day.attempts, dispatches: dispatches.map(run => `${run.id}@${at(run.at)}${run.fails ? ' fails' : ''}`), filed: filed.map(entry => `${entry.subject}@${at(entry.at)}`) }));
@@ -260,6 +315,20 @@ test('unit:soak-invariants-hold — GY-1831 and GY-1966: two simulated days of m
   assert.ok(most <= ceiling, `a row makes at most ${ceiling} attempts, the backoff's fill of two bounds, before it is delivered or stalled: ${most}`);
   assert.ok(day.attempts <= rows.length * 20, `attempts over the days stay bounded per row: ${day.attempts} for ${rows.length} rows`);
   assert.deepEqual(rows.filter(row => row.deliveredAt === null).map(row => row.key), [], 'every row is delivered by the end of the days');
+}
+
+test('unit:soak-invariants-hold — GY-1831 and GY-1966: two simulated days of merges riding release candidates that promote, fail and are re-cut behind a moving main, and two quiet stretches: every verify-deployment row ends delivered or stalled within the promotion wait bound of the pipeline\'s last movement, a row its release served within the bound files no instance, a row left on a stopped pipeline files as the release machinery\'s, attempts stay bounded and every row is delivered once merges resume', { timeout: 600_000 }, async () => {
+  assertDays(await simulate(true));
+});
+
+test('unit:soak-invariants-hold — GY-1966 through the real loop: the same two days with runCycle running every minute — its promotion step persisting the cursor the executor reads, after an earlier promotion is retained and while later candidates are dispatched, fail and are re-cut — and its own faults step filing what it lists: every attempt after a new cut names the new movement, every row ends within the bound of the pipeline\'s last movement, a stopped pipeline\'s rows file as the release machinery\'s and stay bounded, nothing else is filed, and every system invariant holds after every cycle', { timeout: 900_000 }, async () => {
+  const day = await simulate(true, true);
+  assertDays(day);
+  assert.ok(day.cycles >= days * 24 * 60, `the loop cycled every minute of the days: ${day.cycles}`);
+  assert.ok(day.invariantChecks >= day.cycles, `the loop judged the system invariants every cycle: ${day.invariantChecks} checks over ${day.cycles} cycles`);
+  assert.ok(day.retainedChanges >= 10, `attempts after a cut made since the cursor's retained promotion named the cut, not the promotion: ${day.retainedChanges}`);
+  const machinery = day.filed.filter(entry => entry.kind === 'production');
+  assert.ok(machinery.length >= 2 && machinery.length <= day.rows.length, `a stopped pipeline's rows filed as the release machinery's, bounded by the rows: ${machinery.length}`);
 });
 
 test('unit:soak-invariants-hold — GY-1831: the same days without the promotion read, as the base ran them, stall and file the rows the pipeline was still carrying — the shape that filed GY-1827, GY-1828 and GY-1830', { timeout: 600_000 }, async () => {
