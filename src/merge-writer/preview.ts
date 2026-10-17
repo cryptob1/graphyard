@@ -1,7 +1,7 @@
 // Concern: the merge preview (GY-1718) — a passing trial merge built and served as a throwaway static site, the repository's required and uat E2E cases run against it before the merge lands.
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { loadCases, type CaseFile } from '../e2e/case.js';
@@ -10,7 +10,7 @@ import { docsOnlyPaths, testOnlyPaths } from '../model/policy.js';
 import { serveStaticSite, type ReleaseCandidate, type StaticUat } from '../release-candidate.js';
 import { hostPassthrough } from '../e2e/steps.js';
 import { buildStaticSite, projectCaseSuite, type StaticBuildShell } from '../release-project.js';
-import { readTempOwner, tempOwnerGone, tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
+import { heldEntries, heldOpenPaths, readTempOwner, tempOwnerGone, tempOwnerJudgeable, tempOwnerMarker, tmpReclaimMinAgeMs, treeLastWritten, writeTempOwner } from '../tmp-reclaim.js';
 
 /** The static UAT a managed repository names (`GRAPHYARD_UAT_STATIC`, `GRAPHYARD_UAT_BUILD`, release-ports.ts): its build output in the checkout and the command that builds it. */
 export interface PreviewSite { directory: string; build: string | null }
@@ -64,15 +64,41 @@ const swept = new Set<string>();
 /**
  * The startup sweep: every preview checkout under `base` whose owner process (its `.owner` marker,
  * tmp-reclaim.ts) is gone, removed with its marker, and git's record of the worktree pruned. A
- * directory with no marker, or one whose owner still runs, is left alone. Answers the removed paths.
+ * directory with no marker, or one whose owner still runs, is left alone. A marker this reader
+ * cannot judge by pid — another PID namespace's, or one recorded before namespaces were kept
+ * (GY-1896) — is judged as an ownerless directory is (reclaimRoot): kept while younger than
+ * `tmpReclaimMinAgeMs`, so a live writer in a sandbox this reader cannot see outlives the sweep,
+ * and removed once older and nothing live holds it, so a crashed preview's or an upgrade's
+ * leftovers do not sit under the managed worktree root forever, which the /tmp reclaim pass never
+ * scans. Answers the removed paths.
  */
 export async function sweepPreviewCheckouts(base: string, options: { root?: string; run?: ChildRun; procRoot?: string } = {}): Promise<string[]> {
   let names: string[];
   try { names = await readdir(base); } catch { return []; }
-  const removed: string[] = [];
+  const removed: string[] = [], procRoot = options.procRoot ?? '/proc';
+  // The holder census runs once, and only when an unjudgeable marker's checkout reaches its age
+  // bound: a sweep that judges every marker by pid never pays for it.
+  let held: Set<string> | null = null;
+  const holders = async () => {
+    if (held) return held;
+    const all = await heldOpenPaths(procRoot), real = await realpath(base).catch(() => base);
+    // /proc names a holder by its resolved path, so a base reached through a symlink is matched by
+    // its realpath; a command line names the path as it was typed, so its own spelling matches too.
+    return held = new Set([...heldEntries(real, all), ...(real === base ? [] : heldEntries(base, all))]);
+  };
   for (const name of names.filter(entry => entry.startsWith(previewCheckoutPrefix) && !entry.endsWith('.owner')).sort()) {
     const directory = join(base, name), owner = await readTempOwner(directory);
-    if (!owner || !tempOwnerGone(owner, options.procRoot)) continue;
+    if (!owner) continue;
+    const gone = tempOwnerGone(owner, procRoot);
+    // A live owner this reader can judge keeps its checkout, as before. A marker it cannot judge —
+    // another namespace's, or a pre-namespace one — goes only as an ownerless directory would.
+    if (!gone && tempOwnerJudgeable(owner, procRoot)) continue;
+    if (!gone) {
+      const info = await lstat(directory).catch(() => null);
+      if (!info) continue;
+      if (Date.now() - await treeLastWritten(directory, info.mtimeMs) < tmpReclaimMinAgeMs) continue;
+      if ((await holders()).has(directory)) continue;
+    }
     await rm(directory, { recursive: true, force: true });
     await rm(tempOwnerMarker(directory), { force: true });
     removed.push(directory);

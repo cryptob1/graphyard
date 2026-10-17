@@ -3,11 +3,11 @@
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Wakes dismiss autocompact suggestions (`esc`), re-read; unconfirmed/unanswerable dialogs hold (`wake:master:held`).
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Wakes dismiss autocompact suggestions, re-read; unconfirmed/unanswerable dialogs hold (`wake:master:held`).
 
 ### Dispatch order
 
-Within a priority: an item with a submitted attempt (a returned rework) precedes items without one, ahead of starvation/cold/scope; `master status`'s schedule follows.
+Within a priority: an item with a submitted attempt precedes items without one, ahead of starvation/cold/scope; `master status`'s schedule follows.
 
 ### Perpetual master loop
 
@@ -72,7 +72,7 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ### Reading the budget
 
-`graphyard status` → `githubBudget`; `billable` (also `master status`): REST-only `perHour` across replicas (`instances`), `limit`/`share`/`target` 0.6/`byEndpoint`; `lastHour`: hourly requests by kind. Immutable, per-cycle, webhook-driven reads [aren't repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
+`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also `master status`): REST-only `perHour` across replicas (`instances`), `limit`/`share`/`target` 0.6/`byEndpoint`; `lastHour`: hourly requests by kind. Immutable, per-cycle, webhook-driven reads [aren't repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
 
 ### Reading under control-plane
 
@@ -84,7 +84,7 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ## Control-plane resources
 
-`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume+`GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes[:ROOT]`, per `TMPDIR`/`/tmp` (any-name checkout/worktree unheld/unregistered 24h; <25% free: escalates, naming consumers; markers from another PID namespace judge ownerless, kept until 6h unheld, GY-1896); `loaded-revision`: code moves. No fault: owed restart within bound, pane unowned <10min, `/tmp` >10% free <30min past a ≥25% pass.
+`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume+`GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes[:ROOT]`, per `TMPDIR`/`/tmp` (any checkout/worktree unheld/unregistered 24h; <25% free: escalates, naming consumers; foreign-namespace markers judge ownerless, kept until 6h unheld, preview checkouts too, GY-1896); `loaded-revision`: code moves. No fault: owed restart within bound, pane unowned <10min, `/tmp` >10% free <30min past a ≥25% pass.
 
 Session-started `npm test`/`test:browser`/typecheck/`tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`). Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; one fault/dip) until 1GB above.
 
@@ -110,7 +110,7 @@ Ungated merges are permanent violations: repair access, file follow-up. Admin di
 
 ## Credentials
 
-Rotate [`GRAPHYARD_PRINCIPALS`](deployment.md#variables), redeploy. Operator agents hold only listed capabilities (`graphyard operator-agent setup|list|rotate|revoke`); `setup` reinstates a revoked ID (`lastMutation.reinstatedAfter`).
+Rotate [`GRAPHYARD_PRINCIPALS`](deployment.md#variables), redeploy. Operator agents hold only listed capabilities (`graphyard operator-agent setup|list|rotate|revoke`); `setup` reinstates a revoked ID.
 
 ## Proof authority grants
 

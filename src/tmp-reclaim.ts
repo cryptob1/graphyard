@@ -265,8 +265,9 @@ async function lastWritten(path: string, own: number): Promise<number> {
  * tree, following no symlink and staying on its device, and, for a linked git worktree, its gitdir's
  * own entries (HEAD, index, logs), which a commit or checkout there rewrites. An edit deep inside a
  * checkout leaves every top-level mtime alone, so the top level alone could call a checkout in use stale.
+ * The merge writer's preview sweep judges an unjudgeable marker's checkout tree by it too (GY-1896).
  */
-async function treeLastWritten(path: string, own: number): Promise<number> {
+export async function treeLastWritten(path: string, own: number): Promise<number> {
   let newest = own;
   const device = (await lstat(path).catch(() => null))?.dev;
   const stack = [path];
