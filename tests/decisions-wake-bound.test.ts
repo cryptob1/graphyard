@@ -84,7 +84,7 @@ test('unit:slow-loop-step-bounded — an observation wake whose resync never ans
   slow.answer(null);
 });
 
-test('unit:slow-loop-step-bounded — a wakeObservation resync past the bound is recorded carried on its row, is no fault, and a later cycle joins it instead of sending a second wake', async () => {
+test('unit:slow-loop-step-bounded — a wakeObservation resync past the bound is recorded carried on its row, is no fault, and the very next cycle retries it — joining the wake still in flight, never held for the re-wake interval — whose answer a later cycle consumes', async () => {
   const work = item('GY-1868'), slow = hanging();
   const fx = effects(work, { observe: async () => null, wakeObservation: slow.call as DaemonEffects['wakeObservation'] } as Partial<DaemonEffects>);
   const state = emptyDaemonState(config());
@@ -96,9 +96,41 @@ test('unit:slow-loop-step-bounded — a wakeObservation resync past the bound is
   assert.equal(row.state, 'waiting', 'a carried wake is an outcome still in flight, not a failure');
   assert.match(row.detail, /Waking GY-1868's observation job was carried to the next cycle: the decisions step's 30 ms per-call bound passed before GY-1868's observation wake answered; the wake stays owed and is retried next cycle/, `the row records the carried wake: ${row.detail}`);
   assert.deepEqual(carriedFaults(state), [], 'a carried wake is no fault');
-  // Once the wake is due again (its row is past the re-wake interval), the retry joins the call still in flight: one resync, applied once.
-  await returns(runCycle(config(), state, fx, () => clock + 300_000));
+  // The carried wake is retried on the very next cycle, inside the re-wake interval a finished wake would hold: the retry joins the call still in flight, so the effect starts once and counts no second send.
+  await returns(runCycle(config(), state, fx, () => clock + 60_000));
+  const retried = wakeRow(state, work);
+  assert.equal(retried.state, 'waiting', 'the retry found the wake still unanswered and carried it again');
+  assert.equal(retried.cycle, row.cycle + 1, `the retry ran on the very next cycle, not after the 5-minute re-wake interval (row at ${retried.at}, cycle ${retried.cycle})`);
+  assert.equal(retried.attempts, row.attempts, 'a retry that joined the call still in flight counts no second send');
+  assert.match(retried.detail, /joining the call still in flight/, `the retry joined the wake in flight: ${retried.detail}`);
   assert.equal(slow.calls.length, 1, 'the retry joined the wake in flight; the effect started once');
+  // The wake answers; the next cycle's retry consumes its kept answer and retires the row: the rework's wake is done, still no second resync.
+  slow.answer(undefined);
+  await returns(runCycle(config(), state, fx, () => clock + 120_000));
+  const consumed = wakeRow(state, work);
+  assert.equal(consumed.state, 'done', `the retry consumed the kept answer: ${consumed?.detail}`);
+  assert.match(consumed.detail, /Woke the observation job of GY-1868/, `the consumed wake retired the carried row: ${consumed.detail}`);
+  assert.equal(slow.calls.length, 1, 'the answer was consumed, never sent twice');
+});
+
+test('unit:slow-loop-step-bounded — a wake the spent budget never sent is recorded carried with no attempt, and the very next cycle makes its first send', async () => {
+  const slowItem = item('GY-1872'), quickItem = item('GY-1873'), slow = hanging();
+  const calls: Work[] = [];
+  // Each waker reading costs 22s of the moving clock: the second item reaches its wake with the step's 30s budget spent, so its wake is carried before it was ever sent.
+  let simulated = clock;
+  const fx = effects([slowItem, quickItem], {
+    observe: (() => { simulated += 22_000; return Promise.resolve(null); }) as unknown as DaemonEffects['observe'],
+    wakeObservation: (async (work: Work) => { calls.push(work); if (work.id === slowItem.id) return slow.call(work); }) as unknown as DaemonEffects['wakeObservation'],
+  } as Partial<DaemonEffects>);
+  const state = emptyDaemonState(config());
+  await returns(runCycle(config(), state, fx, () => simulated));
+  const unsent = wakeRow(state, quickItem);
+  assert.ok(unsent && unsent.state === 'waiting', 'the second item recorded its carried wake');
+  assert.equal(unsent.attempts, 0, 'a wake the spent budget never sent counts no attempt');
+  assert.deepEqual(calls.map(work => work.id), [slowItem.id], 'the spent budget woke nothing new');
+  // The very next cycle makes the first send the spent budget owed, instead of holding the row for the re-wake interval.
+  await returns(runCycle(config(), state, fx, () => simulated));
+  assert.deepEqual(calls.map(work => work.id), [slowItem.id, quickItem.id], 'the next cycle sent the wake the spent budget never made');
   slow.answer(undefined);
 });
 

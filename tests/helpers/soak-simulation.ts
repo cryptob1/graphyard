@@ -2383,7 +2383,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // ---- GY-1286: the slow-server day. Inside the window every decision request and observation wake
   // ---- the loop sends takes `ms` of the clock before the plane answers, as the 30s-timeout writes of
   // ---- cycles 12285 and 12293 did, so the decisions step runs past its budget and puts items off.
-  const budgetDay = { cycles: [] as { cycle: number; elapsed: number; spentMs: number; slow: number; deferred: string[]; carried: number }[], withdrawn: [] as { key: string; cycle: number }[], slowCalls: 0, cycleSlow: 0, slowed: {} as Record<string, number> };
+  const budgetDay = { cycles: [] as { cycle: number; elapsed: number; spentMs: number; slow: number; deferred: string[]; carried: number }[], withdrawn: [] as { key: string; cycle: number }[], slowCalls: 0, cycleSlow: 0, slowed: {} as Record<string, number>, wakeRows: [] as { cycle: number; key: string; state: string; at: number }[] };
   if (options.slowDecisions) {
     const window = options.slowDecisions, { decide, wakeObservation, withdraw } = effects;
     const slow = async () => {
@@ -2394,6 +2394,13 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     effects.decide = async (work, action, reason, input) => { await slow(); return decide!(work, action, reason, input); };
     effects.wakeObservation = async work => { await slow(); return wakeObservation!(work); };
     effects.withdraw = async (work, decision, reason) => { budgetDay.withdrawn.push({ key: work.key, cycle: cycles }); return withdraw!(work, decision, reason); };
+  }
+  // ---- GY-1865 review: the late-reading short-circuits are installed BEFORE the slowCalls wrappers, so a day with both wraps the short-circuited wakeObservation in the window's bound: the conflicted item's rework wake then waits under the decisions step's per-call bound and is carried to the next cycle — the carried observation wake the step-call-bounds soak pins by name — while still answering nothing, as GY-1537's held readings require.
+  if (options.lateReading) {
+    const { observe, wakeObservation } = effects, host = () => items[plan.docsConflict.item - 1];
+    const late = (work: Work) => lateReading.since !== null && work.key === host().key && clock.now() < lateReading.since + conflictReworkBoundMs + 15 * minute;
+    effects.observe = (work, waitMs) => late(work) ? (lateReading.skipped++, Promise.resolve(null)) : observe!(work, waitMs);
+    effects.wakeObservation = work => late(work) ? (lateReading.skipped++, Promise.resolve(undefined)) : wakeObservation!(work);
   }
   // ---- GY-1774: the slow-plane day for every bounded step. Inside the window each approver, decision
   // ---- and session call the loop makes — a pane close, an approver launch, a re-prompt, a decision,
@@ -2438,12 +2445,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // ---- GY-1345: the slow-observation day. Inside the window the attention master status adds answers
   // ---- `attentionMs` after it is asked, as cycle 12621's did in 350.8s: the cycle that asks spends the
   // ---- faults step's whole budget on it and is cut, and the read stays in flight across cycles.
-  if (options.lateReading) {
-    const { observe, wakeObservation } = effects, host = () => items[plan.docsConflict.item - 1];
-    const late = (work: Work) => lateReading.since !== null && work.key === host().key && clock.now() < lateReading.since + conflictReworkBoundMs + 15 * minute;
-    effects.observe = (work, waitMs) => late(work) ? (lateReading.skipped++, Promise.resolve(null)) : observe!(work, waitMs);
-    effects.wakeObservation = work => late(work) ? (lateReading.skipped++, Promise.resolve(undefined)) : wakeObservation!(work);
-  }
   const observationDay = { cycles: [] as { cycle: number; elapsed: number; spentMs: number; cut: boolean; pending: number }[], started: 0, landed: 0, inFlight: 0, maxInFlight: 0 };
   if (options.slowObservation) {
     const window = options.slowObservation, { controlPlane } = effects, attention = effects.reportedAttention ?? (async () => ({ items: [] }) as ReportedAttention);
@@ -3294,6 +3295,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         if (options.staleRelease) { staleReleaseDay.steps.push({ elapsed, ms: result.metrics.steps?.decisions?.ms ?? 0, backlogReads: staleReleaseDay.backlogReads }); staleReleaseDay.backlogReads = 0; }
         if (options.slowAnswers) slowPlaneDay.cycles.push({ cycle: cycles - 1, elapsed, durationMs: result.metrics.durationMs, workMs: result.metrics.workMs ?? result.metrics.durationMs, planeWaitMs: result.metrics.planeWaitMs ?? 0, slowCalls: result.metrics.timings?.slowCalls ?? 0 });
         if (options.slowDecisions || options.slowCalls) budgetDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, slow: budgetDay.cycleSlow, deferred: [...state.decisionsDeferred], carried: Object.values(state.actions).filter(row => row.state === 'waiting' && /stays owed and is retried next cycle/.test(row.detail)).length });
+        for (const [key, row] of Object.entries(state.actions)) if (key.startsWith('wake:observation:') && !budgetDay.wakeRows.some(seen => seen.key === key)) budgetDay.wakeRows.push({ cycle: cycles - 1, key, state: row.state, at: Math.round(elapsed / 60_000) });
         if (options.slowDeployment) deploymentDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, cut: result.actions.some(action => action.kind === 'deployment' && /spent its \d+s budget/.test(action.detail)), pending: deploymentStep.deploymentReadsPending(state) });
         if (options.slowObservation) observationDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, cut: result.actions.some(action => action.kind === 'fault' && /spent its \d+s observation budget/.test(action.detail)), pending: faultsStep.observationReadsPending(state) });
         if (options.workspaceFailure) for (const [name, entry] of Object.entries(state.profiles)) if (/worktree/.test(entry.reason ?? '')) workspaceCooled.push(`+${Math.round(elapsed / minute)} min ${name}: ${entry.reason}`);

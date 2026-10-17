@@ -22,7 +22,7 @@ import type { Cycle } from './cycle.js';
 import { baseRefreshConflict } from '../merge-queue.js'; import { docsSyncRoute } from './docs-sync-route.js';
 import { throughputDecisionAdopts, throughputRoutineDecision } from './cycle-delivery.js';
 import { createApproverSupervisor } from './cycle-approvers.js';
-import { boundedDecisions, decisionBudget, decisionCallCarried, deferredFirst, settleDeferred } from './decision-budget.js'; import { boundedCalls, callKey, recordCarried, stepCallCarried } from './step-budget.js';
+import { boundedDecisions, decisionBudget, decisionCallCarried, deferredFirst, settleDeferred } from './decision-budget.js'; import { boundedCalls, callKey, carriedRow, recordCarried, retireCarried, stepCallCarried } from './step-budget.js';
 import { staleReleaseStep } from './stale-releases.js';
 import { closeStanding, closingItems, recordingWrites, staleCloseStep } from './stale-closes.js';
 /** The approval-watch key prefix of a hand-launched approver, re-exported for the blocker step (GY-403); `approverCalls`: the approvers step's calls (cycle-approvers.ts), bounded like the decisions step's own `decide` (GY-1774), a launch on the launcher beside the cycle using the effects beneath the bound; `agents` is the runtime inventory the step reads in place of an absent `herdr`, bounded the same. */
@@ -411,6 +411,10 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   }
   const waitingRank = (item: Work) => capacityRank.get(item.key) ?? Number.POSITIVE_INFINITY;
   const ordered = deferredFirst(snapshot.work, state.decisionsDeferred), workToProcess = capacityRank.size ? [...ordered].sort((a, b) => waitingRank(a) - waitingRank(b)) : ordered;
+  // GY-1865 review: a carried wake whose item no longer waits is retired, never left `waiting` forever — nothing would retry it, `pruneDaemonState` drops only settled rows, and the row would keep the flight and its answer in memory while status counted a call nothing will make. An item still open is retired where its decision is read (decideItem); one that left the loop's items is retired here, its row's last reader.
+  const present = new Set(snapshot.work.map(work => work.id));
+  for (const [rowKey, row] of Object.entries(state.actions)) if (rowKey.startsWith('wake:observation:') && carriedRow(row) && !present.has(rowKey.slice('wake:observation:'.length)))
+    await retireCarried(cycle, rowKey, row, `Waking ${row.work ?? 'the item'}'s observation job, carried on cycle ${row.cycle}, is moot: the item left the loop's items`);
   // A producer request whose attempts are used up calls for rework once its escalation stood a cycle (GY-496).
   const exhausted = (await cycle.exhaustedProofs()).filter(entry => { const raised = state.actions[exhaustedProofKey(entry)]; return !!raised && raised.cycle < state.cycle; });
   // A needed decision with no watch is requested once ready to retry, or escalated.
@@ -427,10 +431,11 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // GY-1436: one stable wait per held item, naming the docs-sync session, head, base and the end of its bound; that bound, reached or still ahead, ends the loop's idle wait (GY-1622), kept at the latest local time the control plane can reach it (the read's upper clock offset): the cycle it wakes finds the hold ended, at most one round trip late.
   const noteHold = async (item: Work, { wait: detail, deadline }: { wait: string; deadline: string }) => { const bound = Date.parse(deadline); const waitKey = `wait:docs-sync:${item.id}`; if (bound >= clock) bounds.set(item.id, bound + clockOffset.max); if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
   // GY-1865: the waiting refusal's wake is this step's own bounded `wakeObservation` call — its `resync` once held the step for one 30s timeout after another, one waiting item at a time. A wake past the bound is carried to the next cycle (recorded waiting on its row, no fault), which joins the wake still in flight or consumes its answer; anything else fails the row as the delivery step's wake did.
+  // GY-1865 review: a carried wake is owed its retry — due on the very next cycle, joining the call in flight, consuming its kept answer, or making the first send a spent budget never made. It is never held for the re-wake interval as a finished wake would be: its row's `at` stamps a carry, not a wake.
   const wakeJob = async (item: Work, why: string) => {
     if (!effects.wakeObservation) return;
     const key = `wake:observation:${item.id}`, previous = state.actions[key];
-    if (previous?.state === 'failed' ? !readyToRetry(previous, state.cycle) : !observationWakeDue(item, previous?.at, clock, pause)) return;
+    if (previous && !carriedRow(previous) && (previous.state === 'failed' ? !readyToRetry(previous, state.cycle) : !observationWakeDue(item, previous?.at, clock, pause))) return;
     const noteWake = async (outcome: 'done' | 'failed', detail: string, at: number) =>
       performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: outcome, detail, attempts: outcome === 'failed' ? (previous?.state === 'failed' ? previous.attempts : 0) + 1 : 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist));
     try { await effects.wakeObservation(item); }
@@ -439,6 +444,11 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       return void await noteWake('failed', `Could not wake the observation job of ${item.key}: ${message(error)}`, now());
     }
     await noteWake('done', `Woke the observation job of ${item.key}: its ${why} waits for an observation newer than ${item.observation?.at ?? 'none'}`, clock);
+  };
+  /** GY-1865 review: retire the item's carried wake row once its wake is moot — no rework wait, a fresher observation, or the item gone — so no carried call stays owed with nothing left to retry it. */
+  const retireMootWake = async (item: Work, why: string) => {
+    const key = `wake:observation:${item.id}`, row = state.actions[key];
+    if (row && carriedRow(row)) await retireCarried(cycle, key, row, `Waking ${item.key}'s observation job, carried on cycle ${row.cycle}, is moot: ${why}`);
   };
   const mechanicalRead = effects.mechanicalFixes ? await effects.mechanicalFixes().then(read => read, () => null) : null, mechanical = mechanicalRead?.requests ?? []; // GY-971 planned bot rounds; GY-1764: reported to the review gate, an unreported plan holds its item's decision
   const planUnreported = await reportMechanicalPlans(snapshot.work, mechanical, effects, clock, planReportSink(state, note), effects.mechanicalFixes ? mechanicalRead : undefined); // GY-1814: the plans and the answered approvals come from this one ledger read. GY-1795: a write the gate's freshness already supersedes fails visibly but counts no decision fault, and an item delivered meanwhile settles its report (mechanical-plan-report.ts)
@@ -469,6 +479,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // Still called for, only not attestable this cycle: its request is not one the item moved past.
       const called = neededDecision(item, config, cycle.baseFailed.get(item.id), exhausted, mechanical, refused);
       if (called) unattestable.add(decisionKey(item, called));
+      // GY-1865 review: no decision of any kind is needed any more, so the item no longer waits for the observation its carried wake was to fetch; retire the row instead of leaving it waiting behind a wake nothing will send.
+      else await retireMootWake(item, 'the item no longer needs the decision the wake was to feed');
       // The item needs the decision and the loop will not attest what it could not verify. Step 3b
       // has already escalated an open item whose fence this host assessed and could not settle.
       const withheld = withheldDecision(item, config, clock, assessment);
@@ -500,7 +512,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       : decision.action === 'rework' ? reworkObservationWait(item, clock, pause, woken?.state === 'done' ? woken.at : null) : null;
     const fresh = wait && !pause && wake && !state.approvals[key] ? await wake(item, clock) : null;
     const again = fresh && routineDecision(fresh, config, now(), assessment, fresh.candidate?.sha === item.candidate?.sha ? cycle.baseFailed.get(item.id) : undefined, [], [], refused);
-    if (fresh && again?.action !== 'rework') return noteWait(item, `${item.key}: woke its observation for a rework decision; the reading at ${fresh.observation?.at ?? 'unknown'} no longer calls for one`);
+    if (fresh && again?.action !== 'rework') { await retireMootWake(item, `the reading its wake fetched (at ${fresh.observation?.at ?? 'unknown'}) no longer calls for one`); return noteWait(item, `${item.key}: woke its observation for a rework decision; the reading at ${fresh.observation?.at ?? 'unknown'} no longer calls for one`); }
     if (fresh && again) {
       item = fresh; decision = again; key = decisionKey(item, decision); needed.add(key);
       // The fresh reading settles an ended docs-sync hold in the cycle it ended (GY-1436).
@@ -512,10 +524,13 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (wait) {
       await noteWait(item, wait);
       // The refusal wakes the item's observation job at once (GY-710); rework is decided once it lands.
-      // Its one-per-item wake:observation entry stays for guarded merge; pruneDaemonState bounds it.
-      // GY-1865: the wake runs on this step's bound, so its `resync` cannot hold the cycle past the step's budget.
+      // Its one-per-item wake:observation row is retired the cycle its wake is moot (GY-1865 review), and
+      // pruneDaemonState bounds the settled ones. GY-1865: the wake runs on this step's bound, so its
+      // `resync` cannot hold the cycle past the step's budget.
       return wakeJob(item, 'rework');
     }
+    // GY-1865 review: no rework wait stands, so the item no longer waits for the observation its carried wake was to fetch — a fresher reading landed, the rework stands requested, or the need passed. Retire the row so no carried call stays owed with nothing to retry it.
+    await retireMootWake(item, 'the item no longer waits for the observation it was to fetch');
     // Settled watches are done; GY-1701 re-requests when a covering adopt's revision later vanishes.
     if (watch) {
       if (!watch.settledAt) await supervise(item, decision, key, watch);
