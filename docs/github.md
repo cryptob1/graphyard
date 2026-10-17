@@ -30,13 +30,13 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 
 ## Reusing an App
 
-`--reuse-app SLUG` needs a locally saved key (GitHub returns it once); for an App created elsewhere, generate one on its settings page, then `graphyard app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo OWNER/NAME]` proves it by App JWT and saves it `0600` (`imported-app-SLUG.json`, install directory), refusing a control-plane App whose webhook serves another install; `graphyard app list` names each saved App's reusable roles or why not.
+`--reuse-app SLUG` needs a saved key (returned once); else generate one in its settings, then `graphyard app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo OWNER/NAME]` proves it (App JWT), saves `0600` (`imported-app-SLUG.json`, install directory), refusing a control-plane App whose webhook serves another install; `graphyard app list` names reusable roles or why not.
 
-Refused workflow syncs: `sync GY-N --push-via-control-plane COMMIT` (`POST /api/work/:id/sync-push`) pushes COMMIT fast-forwarded and merged with `origin/BASE` (`sync.workflow-push`).
+Refused workflow syncs: `sync GY-N --push-via-control-plane COMMIT` (`POST /api/work/:id/sync-push`) pushes COMMIT fast-forwarded, merged with `origin/BASE` (`sync.workflow-push`).
 
 ## Require the check
 
-Require `Graphyard / merge`, `graphyard/landable` ([landability](coordination.md)) from control-plane App: `strict` **off**, admin-enforced, no force push/deletion (`master protection --apply`, `master browser protection`); GitHub merges only mergeable non-draft PRs with approved head green on `GITHUB_CI_APP_IDS` ([one delivery path](delivery.md#one-delivery-path)).
+Require `Graphyard / merge`, `graphyard/landable` ([landability](coordination.md)) from control-plane App: `strict` **off**, admin-enforced, no force push/deletion (`master protection --apply`, `master browser protection`); merges mergeable non-draft approved heads ([one delivery path](delivery.md#one-delivery-path)) whose latest `Graphyard / merge` and App-bound required runs read success, else held (one `merge.enqueue.refused`, ≤3 runs/head); record drift: `required-checks-disagree`.
 
 ## Failed checks
 
