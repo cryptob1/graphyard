@@ -9,7 +9,7 @@ A `slice-lead` (`product`, `infrastructure`, `docs-experience`) rules on plans, 
 
 A `reviewer` account's `provider` (else launch kind) must differ from the item's newest `worker` session's; same-provider accounts are `skipped` (`shares the implementer's provider P on GY-N`) or, at a session limit, waited for; else the first eligible same-provider.
 
-`worker` tries Pi for an item's first two attempts when every `plannedFiles` entry is normal by risk class, lane aside; a directory scope covering a sensitive surface (`src/`, `src/server/`) is sensitive. Sensitive or unplanned changes, later attempts and two failed starts wait for a strong account.
+`worker` tries Pi for an item's first two attempts unless a `plannedFiles` entry or scope may hold a sensitive path ([risk class](delivery.md#managed-repositories), lane aside); unplanned changes, later attempts and two failed starts wait for strong accounts.
 
 ## Escalation
 

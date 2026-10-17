@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { documentationGlobMatches } from './documentation-glob.js';
 import { documentationScopes } from './scope.js';
 import { deliveryPolicySchema } from './delivery-policy.js';
+import { repositoryPolicySchema } from './repository-policy.js';
 
 // ---------------------------------------------------------------------------
 // Every ticket keeps its project's documentation current (GY-215).
@@ -43,7 +44,8 @@ export const documentationPolicySchema = z.object({
   }).strict().optional(),
 }).strict();
 export type DocumentationPolicy = z.infer<typeof documentationPolicySchema>;
-export const repositoryConfigSchema = z.object({ documentation: documentationPolicySchema, delivery: deliveryPolicySchema.optional() }).strict();
+/** The whole committed file: documentation, delivery, and the repository's own risk, review and E2E policy (model/repository-policy.ts, GY-1843). */
+export const repositoryConfigSchema = z.object({ documentation: documentationPolicySchema, delivery: deliveryPolicySchema.optional(), ...repositoryPolicySchema.shape }).strict();
 export type RepositoryConfig = z.infer<typeof repositoryConfigSchema>;
 
 /** The policy of a repository that configures none: Graphyard's own historical layout. */

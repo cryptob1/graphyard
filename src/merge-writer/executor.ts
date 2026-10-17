@@ -1,6 +1,6 @@
 // Concern: the control-plane merge executor (GY-1524) — the serial queue, one merge's steps against the ledger, the leased deploy-key push and the reconcile of intents a crash left open.
 import type { Work } from '../model.js';
-import { riskOf } from '../model/risk-class.js';
+import { reviewedBeforeMerge, riskOf } from '../model/risk-class.js';
 import { mergeLedgerKinds, type MergeLedgerState } from '../model/merge-ledger.js';
 import { trialFailurePrefix } from '../model/rework-ground.js';
 import { parseFailedTests } from '../model/base-failure.js';
@@ -43,7 +43,8 @@ const gate = (item: Work, name: string) => item.gates.find(entry => entry.name =
 /**
  * The control-plane candidates owed a merge, oldest submission first: submitted (a candidate the
  * control plane observed itself, GY-1523), not done, not returned to a worker, with the `build`
- * gate passed and, for a sensitive delta (`riskOf`), the `review` gate too. A head the writer's own
+ * gate passed and, for a delta reviewed before merge (`reviewedBeforeMerge`: a sensitive one, or any under
+ * a repository declaring `review.normalChanges: pre-merge`), the `review` gate too. A head the writer's own
  * trial already refused (`trial failed`, GY-1524 AC-3) waits for its rework rather than a second
  * trial; one refused `base moved N times` is queued again. An item whose ledger holds an open intent
  * or an unreconciled push blocks the whole queue: `reconcileIntents` settles it before any new merge,
@@ -55,7 +56,7 @@ export function mergeQueue(work: readonly Work[], ledger: Readonly<Record<string
     const candidate = item.candidate;
     if (item.stage === 'done' || !item.submission || !candidate || item.observation?.source !== 'control-plane' || item.reworkRequested || item.observation?.merged) return false;
     if (!gate(item, 'build')) return false;
-    if (riskOf(item).risk === 'sensitive' && !gate(item, 'review')) return false;
+    if (reviewedBeforeMerge(riskOf(item).risk) && !gate(item, 'review')) return false;
     const state = ledger[item.key];
     if (state && state.head === candidate.sha.toLowerCase() && state.state === 'refused' && state.refusal?.kind === 'merge' && state.refusal.reason.startsWith(trialFailurePrefix)) return false;
     if (state && state.head === candidate.sha.toLowerCase() && state.state === 'reconciled') return false;
