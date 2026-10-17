@@ -302,6 +302,17 @@ export const approvedUnappliedWording = 'is approved but unapplied: approved at'
 export const approverWait = (entry: Pick<SilenceEntry, 'kind' | 'detail'>) => entry.kind === 'decision'
   && (entry.detail.includes(approverWaitWording.waiting) || entry.detail.includes(approverWaitWording.unjudged));
 /**
+ * GY-1890. The fixed wording of a claimable item the dispatch step could not place because no
+ * worker profile was free: every launch profile held by a live attempt, its account spent, or the
+ * profile cooling off after a failed launch. The wait is the fleet's slot capacity — a role
+ * starved of slots — which no cycle of the loop can end by acting: only a worker finishing frees
+ * a slot. Counted as the loop's silence, it filed loop faults for one saturated fleet (GY-1886,
+ * GY-1888, GY-1889) while the loop cycled at its responsive cadence the whole time.
+ */
+export const fleetHoldWording = { held: 'is claimable but no worker profile is free; it starts when one frees' } as const;
+/** A silent subject whose wait the fleet's slot capacity owns (GY-1890), as an approver-held decision is the approver's (`approverWait`). */
+export const fleetHold = (entry: Pick<SilenceEntry, 'kind' | 'detail'>) => entry.kind === 'capacity' && entry.detail.includes(fleetHoldWording.held);
+/**
  * When the watch's decision was approved with no outcome recorded, as the loop last found it once the named session ended (GY-1300),
  * or null. The apply step keeps that finding on the watch; a re-request's new decision carries the entry under the old id, never its own.
  */
@@ -311,7 +322,9 @@ export function approvedUnappliedSince(watch: Pick<ApprovalWatch, 'decision' | '
 }
 export interface ActionableSubject { key: string; kind: DaemonActionKind; work: string | null; detail: string }
 export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run'>, work: Work[], now: number,
-  context: { assessments?: Record<string, ContainmentAssessment>; approvals?: DaemonState['approvals']; baseFailed?: Map<string, Set<string>>; docsSyncs?: DaemonState['docsSyncs'] } = {}): ActionableSubject[] {
+  context: { assessments?: Record<string, ContainmentAssessment>; approvals?: DaemonState['approvals']; baseFailed?: Map<string, Set<string>>; docsSyncs?: DaemonState['docsSyncs'];
+    /** GY-1890: the dispatch step stopped on a saturated fleet — no launch profile free by its own `saturatedFleet` decision — so a claimable item's wait is the fleet's slot capacity, not the loop's silence. */ fleetHeld?: boolean;
+    /** GY-1890: whether an item's own launch is in flight; its slot is allocated, so its wait is that launch, never the fleet's capacity. */ launching?: (item: Work) => boolean } = {}): ActionableSubject[] {
   const subjects: ActionableSubject[] = [];
   // The silence record keeps each detail to 500 characters; a refusal or proof list quoted here is cut to fit.
   const add = (kind: DaemonActionKind, item: Work | null, detail: string) => subjects.push({ key: `${kind}:${item?.key ?? 'pipeline'}`, kind, work: item?.key ?? null, detail: boundDetail(detail, 500) });
@@ -342,7 +355,11 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     if (item.stage === 'done') continue;
     const stall = stalled.get(item.key);
     if (stall) add('escalation', item, `${item.key} holds its ${stall.gate ?? 'unevaluated'} gate with no action, no dependency and no recorded human need: ${stall.refusal ?? stall.detail}`);
-    try { assertDispatchable(item, work, new Date(now).toISOString()); add('dispatch', item, `${item.key} is claimable and waiting for a worker`); } catch { /* not claimable: not actionable */ }
+    // GY-1890: with no launch profile free the wait on a claimable item is the fleet's slot
+    // capacity, so it is a capacity subject, not a dispatch one: the loop cannot end it by acting,
+    // and counting it as the loop's silence filed loop faults for a saturated fleet.
+    // An item whose own launch is in flight already holds its slot: it waits on that launch, not the fleet.
+    try { assertDispatchable(item, work, new Date(now).toISOString()); const fleetHeld = context.fleetHeld && !context.launching?.(item); add(fleetHeld ? 'capacity' : 'dispatch', item, fleetHeld ? `${item.key} ${fleetHoldWording.held}` : `${item.key} is claimable and waiting for a worker`); } catch { /* not claimable: not actionable */ }
     const request = item.scopeRequest;
     if (request && (!request.decision || redecidableScopeRefusal(item)) && item.lease && item.lease.epoch === request.epoch && Date.parse(item.lease.expiresAt) > now)
       add('scope', item, boundDetail(`${item.key}: ${request.requestedBy} is waiting for a decision on ${namePaths(request.paths, 300)}`, 500));
@@ -375,12 +392,18 @@ export function trackSilence(state: DaemonState, subjects: ActionableSubject[], 
   // on each refusal would never reach the bound that puts it in front of someone.
   const acted = new Set(performed.filter(action => action.state === 'done').map(action => `${action.kind}:${action.work ?? 'pipeline'}`));
   const live = new Map(subjects.map(subject => [subject.key, subject]));
+  // GY-1890: a claimable item's wait is one wait whether the fleet is saturated or not, so a subject
+  // reclassed between `dispatch:<item>` and `capacity:<item>` keeps the age of the key it replaces;
+  // restarting it there would let saturation transitions hold either class short of the bound.
+  const counterpart = (key: string) => key.startsWith('dispatch:') ? `capacity:${key.slice(9)}` : key.startsWith('capacity:') ? `dispatch:${key.slice(9)}` : null;
+  const reclassed = new Map<string, DaemonState['silence']['subjects'][string]>();
+  for (const key of live.keys()) { const other = counterpart(key), prior = other ? record.subjects[other] : undefined; if (other && prior && !record.subjects[key] && !live.has(other)) reclassed.set(key, prior); }
   for (const key of Object.keys(record.subjects)) if (!live.has(key)) delete record.subjects[key];
   for (const [key, subject] of live) {
-    const previous = record.subjects[key];
+    const previous = record.subjects[key] ?? reclassed.get(key);
     // First sight, or an action for this exact subject: the wait starts again from now.
     if (!previous || acted.has(key)) record.subjects[key] = { since: at, work: subject.work, kind: subject.kind, detail: subject.detail };
-    else record.subjects[key] = { ...previous, detail: subject.detail };
+    else record.subjects[key] = { ...previous, kind: subject.kind, detail: subject.detail };
   }
   if (performed.length) record.lastActionAt = at;
   return silenceReport(record, now);
