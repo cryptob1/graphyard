@@ -734,17 +734,15 @@ export function promotionReads(config: MasterConfig, root: string, run: ChildRun
       const soaked = new Map<string, CandidateSoak>();
       for (const record of await tagRecords(git, 'refs/tags/rc-soak/', 2 * promotionCandidatesListed))
         if (typeof record?.id === 'string' && typeof record?.result === 'string') soaked.set(record.id, { result: record.result, at: typeof record.at === 'string' ? record.at : '', run: typeof record.run === 'string' ? record.run : null });
-      // GY-1882: the newest seal check of each candidate; tags sort by candidate id, then check time.
-      const sealChecks = new Map<string, CandidateSealCheck>();
-      for (const record of await tagRecords(git, 'refs/tags/rc-seal-check/', 4 * promotionCandidatesListed))
-        if (typeof record?.id === 'string' && typeof record?.mayseal === 'boolean' && !sealChecks.has(record.id))
-          sealChecks.set(record.id, { mayseal: record.mayseal, role: String(record.role), needed: Array.isArray(record.needed) ? record.needed.map(String) : [], at: String(record.at), secret: String(record.secret), environment: String(record.environment) });
       for (const record of await tagRecords(git, 'refs/tags/rc/', promotionCandidatesListed)) {
         if (typeof record?.id !== 'string' || typeof record?.sha !== 'string' || typeof record?.cutAt !== 'string') continue;
         const sha = record.sha.toLowerCase();
         let queued: number | null = null;
         if (mainSha) try { queued = Number((await git('rev-list', '--first-parent', '--count', `${sha}..${mainSha}`)).trim()); } catch { queued = null; }
-        candidates.push({ id: record.id, sha, cutAt: record.cutAt, prs: Number.isInteger(record.prs) ? record.prs : null, queued: Number.isInteger(queued) ? queued : null, soak: soaked.get(record.id) ?? null, ...(sealChecks.has(record.id) ? { sealCheck: sealChecks.get(record.id) } : {}) });
+        // GY-1882: this candidate's newest seal check, read under its own prefix (`rc-seal-check/ID.AT` sorts by check time), so another candidate's repeated checks never crowd it out.
+        const check = (await tagRecords(git, `refs/tags/rc-seal-check/${record.id}.*`, 1)).find(entry => entry?.id === record.id && typeof entry?.mayseal === 'boolean');
+        const sealCheck: CandidateSealCheck | undefined = check && { mayseal: check.mayseal, role: String(check.role), needed: Array.isArray(check.needed) ? check.needed.map(String) : [], at: String(check.at), secret: String(check.secret), environment: String(check.environment) };
+        candidates.push({ id: record.id, sha, cutAt: record.cutAt, prs: Number.isInteger(record.prs) ? record.prs : null, queued: Number.isInteger(queued) ? queued : null, soak: soaked.get(record.id) ?? null, ...(sealCheck ? { sealCheck } : {}) });
       }
       return { mainSha, promotedSha, promotedAt, behind, candidates };
     },

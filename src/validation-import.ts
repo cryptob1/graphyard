@@ -8,7 +8,7 @@ import { Refusal, demand } from './model/refusal.js';
 import type { Store } from './store.js';
 import { importExternalRun, type ExternalRunResult } from './runner-report.js';
 import { importedRunVerdict, type FlakyAcceptance, type ImportedBlockingCase } from './e2e/runner.js';
-import { candidateAtHead, candidateTagPrefix, type PromotionImports, type ReleaseCandidate } from './release-candidate.js';
+import { candidateAtHead, candidateTagPrefix, releaseFilingIdentity, type PromotionImports, type ReleaseCandidate } from './release-candidate.js';
 
 /**
  * GY-1842 gave the format and the verdict rule (`importExternalRun`, `importedRunVerdict`); this
@@ -207,6 +207,9 @@ export type SealAuthority = { mayseal: true; role: string } | { mayseal: false; 
  */
 export const sealAuthority = (actor: Principal): SealAuthority =>
   (sealRoles as readonly string[]).includes(actor.role) ? { mayseal: true, role: actor.role } : { mayseal: false, role: actor.role, needed: [...sealRoles] };
+/** Whether a seal-authority read failed only because the plane predates its route: 404, or the operator-agent guard's 403 for a route it did not yet allow. */
+export const sealAuthorityUnserved = (error: { status?: number; message?: string } | null | undefined) =>
+  error?.status === 404 || (error?.status === 403 && /Route is not available to operator agents/.test(error.message ?? ''));
 /** Where the workflows hold the credential `release imports` seals with: the uat environment's release-filing secret. */
 export const sealCredential = { secret: 'GRAPHYARD_RELEASE_TOKEN', environment: 'uat' } as const;
 /** The ledger records `release seal-check ID` writes, one per check, on the candidate's exact SHA (`rc-seal-check/ID.AT`). */
@@ -217,19 +220,23 @@ export function sealCheckRecord(candidate: Pick<ReleaseCandidate, 'id' | 'sha'>,
 }
 export const sealCheckTag = (record: SealCheckRecord) => `${sealCheckTagPrefix}${record.id}.${record.at.replace(/[-:]/g, '')}`;
 /**
- * The one attention item (owned by the master) master status raises when the newest candidate whose seal was checked was refused for
- * seal authority, naming the secret, its environment, the role it holds and the role it needs; null
- * when no candidate was checked, or the newest check may seal.
+ * The one attention item (owned by the master) master status raises while the newest seal check, by its
+ * time across every listed candidate, was refused: an older candidate checked again after a newer one
+ * passed is the current answer. It names the secret, its environment, the role it holds and the role it
+ * needs; null when no candidate was checked, or the newest check may seal.
  */
-export function sealRefusalLine(candidates: readonly { id: string; sealCheck?: Omit<SealCheckRecord, 'id' | 'sha'> | null }[]) {
-  const checked = candidates.find(candidate => candidate.sealCheck);
+export function sealRefusalLine(candidates: readonly { id: string; sealCheck?: Omit<SealCheckRecord, 'id' | 'sha'> | null }[], repository = 'OWNER/REPO') {
+  const at = (check?: { at: string } | null) => { const ms = check ? Date.parse(check.at) : NaN; return Number.isFinite(ms) ? ms : -Infinity; };
+  const checked = candidates.reduce<(typeof candidates)[number] | null>((newest, candidate) => candidate.sealCheck && (!newest || at(candidate.sealCheck) > at(newest.sealCheck)) ? candidate : newest, null);
   const check = checked?.sealCheck;
   if (!checked || !check || check.mayseal) return null;
+  // `master setup --apply` reads a secret newer than its credential as current whatever it holds, so the remedy rotates and re-stores it outright.
+  const store = `TOKEN=$(openssl rand -hex 32); printf %s "$TOKEN" | graphyard operator-agent rotate ${releaseFilingIdentity.id} 600 "seal check refused" --token-stdin; printf %s "$TOKEN" | gh secret set ${check.secret} --repo ${repository} --env ${check.environment}; unset TOKEN`;
   return { subject: 'installation', role: 'master' as const, approvedBy: null, human: false, humanOnly: null, text: `Promotion of candidate ${checked.id} was refused for seal authority at ${check.at}: ${check.secret} in the ${check.environment} environment authenticates as ${check.role}, and sealing a candidate's imports needs ${check.needed.join(' or ')}`,
-    next: `graphyard master setup --apply, which re-issues the release-filing identity (an operator agent) and stores its token as ${check.secret} in the ${check.environment} environment; the next candidate's seal check then passes` };
+    next: `replace ${check.secret} in the ${check.environment} environment with a fresh ${releaseFilingIdentity.id} (operator agent) token, as admin: ${store} (a revoked identity is reinstated by graphyard master setup --apply instead); the next candidate's seal check then passes` };
 }
 /** The loop cursor's promotion state as master status reads it: the refused seal check's item, or none. */
-export const sealRefusalAttention = (promotion?: { candidates?: Parameters<typeof sealRefusalLine>[0] } | null) => { const line = sealRefusalLine(promotion?.candidates ?? []); return line ? [line] : []; };
+export const sealRefusalAttention = (promotion?: { candidates?: Parameters<typeof sealRefusalLine>[0] } | null, repository?: string) => { const line = sealRefusalLine(promotion?.candidates ?? [], repository); return line ? [line] : []; };
 
 /**
  * Read candidate `id`'s hold at `sha` for promotion and, when it is released, seal it in the same

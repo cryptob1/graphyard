@@ -12,7 +12,7 @@ import {
 import { commandDigestAdapter, shellRun, uatDigestSuite, verifyProductionDigests } from '../release-digests.js';
 import { acceptancesFrom, foldHolds, foldRecord, holdItemsFor, holdTag, holdTagPrefix, releaseHolds, type HoldRecord } from '../release-holds.js';
 import { pendingFromPlane, readPlane, servingStage } from '../release-pending.js';
-import { handedImports, handedImportsVariable, promotionImports, sealCheckRecord, sealCheckTag, sealRoles, sealedImports, type SealAuthority } from '../validation-import.js';
+import { handedImports, handedImportsVariable, promotionImports, sealAuthorityUnserved, sealCheckRecord, sealCheckTag, sealRoles, sealedImports, type SealAuthority } from '../validation-import.js';
 import { checkRepositoryContract, contractFile, loadContract } from '../e2e/case.js';
 
 const switches = new Set(['no-push', 'api']);
@@ -142,8 +142,13 @@ export const releaseCommands = defineCommands([
       if (id === 'seal-check') {
         // GY-1882: the read-only check the uat imports job runs first, before soak and UAT results are spent on a seal this credential cannot make.
         // A credential the plane does not accept at all (revoked, expired) may not seal either, and is recorded as such.
-        const answer = await (api('validation/import/seal-authority') as Promise<SealAuthority>)
-          .catch((error: any) => { if (error?.status !== 401) throw error; return { mayseal: false, role: 'unauthenticated', needed: [...sealRoles] } satisfies SealAuthority; });
+        const answer = await (api('validation/import/seal-authority') as Promise<SealAuthority | null>).catch((error: any) => {
+          if (error?.status === 401) return { mayseal: false, role: 'unauthenticated', needed: [...sealRoles] } satisfies SealAuthority;
+          // A plane that predates the route (the release first carrying it is promoted by the plane before it) answers 404, or 403 to an operator agent; nothing is checked or recorded then.
+          if (sealAuthorityUnserved(error)) return null;
+          throw error;
+        });
+        if (!answer) { console.error('release seal-check: the control plane predates GET /api/validation/import/seal-authority, so the credential was not checked; the seal itself still decides'); print({ checked: false }); return; }
         if (options.positional[0]) {
           try {
             syncLedger(git, base);

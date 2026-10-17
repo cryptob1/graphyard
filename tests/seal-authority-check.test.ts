@@ -159,7 +159,8 @@ test('unit:seal-authority-preflight-and-attention — both workflows run release
   assert.match(line.text, new RegExp(`Promotion of candidate ${candidate.id} was refused for seal authority`));
   assert.match(line.text, /GRAPHYARD_RELEASE_TOKEN in the uat environment authenticates as reader/);
   assert.match(line.text, /needs admin or operator-agent/);
-  assert.match(line.next, /graphyard master setup --apply/);
+  const owned = sealRefusalLine(state.candidates!, 'owner/project')!;
+  assert.match(owned.next, /graphyard operator-agent rotate graphyard-release-follow-up \d+ .* --token-stdin; .*gh secret set GRAPHYARD_RELEASE_TOKEN --repo owner\/project --env uat/, 'the remedy replaces the secret outright, whatever its stored time');
   assert.equal(line.role, 'master'); assert.equal(line.human, false);
 
   // Once the secret holds the release-filing identity, the next check passes and the line clears.
@@ -169,9 +170,23 @@ test('unit:seal-authority-preflight-and-attention — both workflows run release
   assert.equal(read.candidates![0].sealCheck?.mayseal, true);
   assert.equal(sealRefusalLine(read.candidates!), null);
   assert.equal(sealRefusalLine([{ id: candidate.id }]), null, 'a candidate never checked raises nothing');
+  // The newest check by time decides across candidates: an older candidate re-checked after a newer one passed.
+  const check = (mayseal: boolean, hour: number) => ({ mayseal, role: mayseal ? 'operator-agent' : 'reader', needed: mayseal ? [] : needed, at: new Date(1_760_000_000_000 + hour * 3_600_000).toISOString(), secret: 'GRAPHYARD_RELEASE_TOKEN', environment: 'uat' });
+  const later = [{ id: 'rc-B', sealCheck: check(true, 9) }, { id: 'rc-A', sealCheck: check(false, 10) }];
+  assert.match(sealRefusalLine(later)?.text ?? '', /candidate rc-A was refused/, 'the later refusal of the older candidate stands');
+  assert.equal(sealRefusalLine([later[0], { id: 'rc-A', sealCheck: check(false, 8) }]), null, 'a refusal a later check passed is cleared');
+
+  // A plane that predates the route: 404, or the operator-agent guard's 403; nothing is checked, recorded or failed.
+  const tagsBefore = gitIn(work)(['tag', '--list', `${sealCheckTagPrefix}*`]);
+  for (const refusal of [{ status: 404, message: '{"error":"Route not found"}' }, { status: 403, message: '{"error":"Route is not available to operator agents"}' }]) {
+    const unserved = await sealCheck(async () => { throw Object.assign(new Error(refusal.message), { status: refusal.status }); }, [candidate.id, '--base', 'main']);
+    assert.deepEqual(unserved.printed, { checked: false }); assert.equal(unserved.exitCode, 0);
+  }
+  assert.equal(gitIn(work)(['tag', '--list', `${sealCheckTagPrefix}*`]), tagsBefore, 'an unserved check records nothing');
+  await assert.rejects(sealCheck(async () => { throw Object.assign(new Error('{"error":"Forbidden"}'), { status: 403 }); }, [candidate.id, '--base', 'main']), 'any other refusal still fails the step');
 
   // master status adds exactly that one line to its attention list.
   const status = await readFile(fileURLToPath(new URL('../src/cli/master-status.ts', import.meta.url)), 'utf8');
-  assert.match(status, /lag\.attention\.push\(.*\.\.\.sealRefusalAttention\(cursor\?\.promotion\)\)/);
+  assert.match(status, /lag\.attention\.push\(.*\.\.\.sealRefusalAttention\(cursor\?\.promotion, master\.repository\)\)/);
   assert.deepEqual(sealRefusalAttention({ candidates: state.candidates }), [line], 'one item from the cursor, owned by the master');
 });
