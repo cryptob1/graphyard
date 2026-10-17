@@ -19,10 +19,13 @@ import { candidateRoot, checkoutHead, createOnboardingFixture, fixtureCases, rec
 const root = candidateRoot as string;
 const caseId = 'preview-serves-change';
 
-/** Chromium as Playwright installs it; false when it does not launch. */
-async function browserLaunches() {
+/** Chromium as Playwright installs it, else the host's Chrome, as the launcher the case's browser steps use; null when neither launches. */
+async function browserLauncher() {
   const { chromium } = await import('@playwright/test');
-  try { await (await chromium.launch({ headless: true })).close(); return true; } catch { return false; }
+  for (const options of [{}, { channel: 'chrome' }]) {
+    try { await (await chromium.launch({ headless: true, ...options })).close(); return { launch: (launch: { headless: boolean }) => chromium.launch({ ...launch, ...options }) } as any; } catch { /* try the next */ }
+  }
+  return null;
 }
 
 const probe: CaseFile = { file: 'e2e/cases/shared-delivery-probe.json', definition: parseCase('e2e/cases/shared-delivery-probe.json', JSON.stringify({
@@ -30,7 +33,8 @@ const probe: CaseFile = { file: 'e2e/cases/shared-delivery-probe.json', definiti
   steps: [{ kind: 'http', method: 'GET', path: '/api/status', status: 200, expect: [{ path: 'project.delivery.source', equals: 'environment' }] }] })) };
 
 test('integration:goal-release-uat-preview-target — preview-serves-change fails on a shared install with no preview loop, as run 39043708413 did, and passes unchanged on a normally onboarded fixture whose real preview loop builds and serves its declared site; the case reads the loop\'s own record and served content, the shared install keeps its configuration, every run is bound to the candidate source and its target, and the run clears the outcome\'s release hold', { timeout: 600_000 }, async t => {
-  if (!await browserLaunches()) { assert.ok(!process.env.CI, 'CI opens the preview in a browser'); t.skip('no Chromium to open the preview in'); return; }
+  const launcher = await browserLauncher();
+  if (!launcher) { assert.ok(!process.env.CI, 'CI opens the preview in a browser'); t.skip('no Chromium or Chrome to open the preview in'); return; }
   const shipped = (await loadCases(root)).find(entry => entry.definition.id === caseId)!;
   // The protected case is the one the release contract binds, with every assertion it was approved with.
   assert.ok(fixtureCases.includes(caseId));
@@ -51,7 +55,7 @@ test('integration:goal-release-uat-preview-target — preview-serves-change fail
     const sharedBefore = await status();
 
     // The previous target reproduces the hold's failure: step 2 finds no preview on the item it created.
-    const before = await runCases([shipped], { url: shared.url, token: shared.token });
+    const before = await runCases([shipped], { url: shared.url, token: shared.token, launcher });
     assert.equal(before.cases[0].verdict, 'failed');
     assert.equal(before.cases[0].failingStep!.index, 1);
     assert.match(before.cases[0].failingStep!.reason, /^preview\.path is undefined, expected "\/preview\/[A-Z]+-\d+"$/);
@@ -78,7 +82,7 @@ test('integration:goal-release-uat-preview-target — preview-serves-change fail
     };
     const policy = checkoutRepositoryPolicy(root);
     const candidate = { id: '20261017T160000Z', sha: head, pendingOutcomes: [] } as any;
-    const report = await runOnboardingE2e([shipped, probe], { url: shared.url, token: shared.token, fixture, candidate, contract, policy, root, fetcher: recording });
+    const report = await runOnboardingE2e([shipped, probe], { url: shared.url, token: shared.token, fixture, candidate, contract, policy, root, launcher, fetcher: recording });
     assert.deepEqual(report.cases.map((outcome: any) => [outcome.id, outcome.verdict, outcome.failingStep]), [[caseId, 'passed', null], ['shared-delivery-probe', 'passed', null]]);
     assert.equal(report.cases[0].executed, shipped.definition.steps.length, 'every step of the case ran');
 
