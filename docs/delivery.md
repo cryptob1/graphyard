@@ -80,14 +80,14 @@ Bound cases preview items (head/main; `GRAPHYARD_PREVIEW_TITLE`): static builds 
 {"registration":{"id":"production-observer","revision":1},"epoch":4,"environment":{"id":"production","revision":1},"expectedGeneration":4,"snapshotId":"railway:snapshot:01J8Q4Z0Y3","observedAt":"2026-09-18T20:15:07Z","validFrom":"2026-09-18T20:12:31Z","validTo":"2026-09-18T20:15:07Z","services":[{"service":"api","complete":true,"deployment":{"id":"dep-a1","status":"success","deployedAt":"2026-09-18T20:12:31Z"},"instances":[{"instance":"api-1","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","measurement":"host-attestation","healthy":true}]},{"service":"web","complete":true,"deployment":{"id":"dep-w7","status":"success","deployedAt":"2026-09-18T20:12:40Z"},"instances":[{"instance":"web-1","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","measurement":"host-attestation","healthy":true}]}]}
 ```
 
-`POST /api/delivery/observe-sha` marks contained merges Deployed (any producer, or a `delivery:observe-sha` principal; [install](install.md)). Needs production's revision, every service, exact 40-hex `sha`, `observedAt` not future:
+`POST /api/delivery/observe-sha` marks contained merges Deployed (any producer, or a `delivery:observe-sha` principal; [install](install.md)). Needs production's revision, every service, exact 40-hex `sha`, `observedAt` not future; optionally `release`/`artifact`:
 
 ```json
-{"environment":{"id":"production","revision":1},"sha":"0123456789abcdef0123456789abcdef01234567","services":["api","web"],"observedAt":"2026-09-18T20:15:07Z"}
+{"environment":{"id":"production","revision":1},"sha":"0123456789abcdef0123456789abcdef01234567","services":["api","web"],"observedAt":"2026-09-18T20:15:07Z","release":"20260918T200000Z","artifact":"tree:89abcdef0123456789abcdef0123456789abcdef"}
 ```
 
-An observation never yields Production verified: smoke-required work needs an `e2e:deploy-smoke` pass naming that `sha`, executed and none skipped. Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery sweep` per `freshnessSeconds`; `graphyard delivery` shows it.
+An observation never yields Production verified: smoke-required work needs an `e2e:deploy-smoke` pass naming that `sha`, executed and none skipped. Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery sweep` per `freshnessSeconds`; `graphyard delivery` shows it. Candidates verify on newest `observe-sha`/sweep (`GRAPHYARD_PRODUCTION_IDENTITY_URL`) matching `release`/`sourceSha`/`artifact`; else `mismatched` (`expected` kept)/`unknown`.
 
 `master status` `delivery`: `readyToMerged`/`mergedToProduction`/`stages` p50/p90; 7-day p90 over `deliverySpeed` alerts.
 
-`POST /api/validation/result` binds manifest/signature/measurements; mismatches void passes as `attribution-undermined` (`GET /api/analytics/attribution`). A loop-owned post-deploy observation item never dispatches: deployment verification reads it; a pass closes it `delivered-observation`, a fail escalates; no-smoke deliveries backfill five per pass.
+`POST /api/validation/result` binds manifest/signature/measurements; mismatches void passes as `attribution-undermined` (`GET /api/analytics/attribution`). A loop-owned post-deploy observation item never dispatches: deployment verification reads it; a pass closes it `delivered-observation`, a fail escalates; no-smoke deliveries backfill five per pass. Ledger reads `manual:post-deploy/onboarding-default-target` (named hold).

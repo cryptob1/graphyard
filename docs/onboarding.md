@@ -80,9 +80,9 @@ Adding workers: worker count `W` and `G` proof groups need `⌈W/2⌉` review an
 
 ### The loop must be supervised
 
-`master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master-OWNER-NAME.service`, runs `systemctl --user enable --now`, `loginctl enable-linger`; never a side effect (worker checkouts, temp directories refused). Move: `master init --token-stdin --replace-supervisor` from new checkout. `master status`: `setup.supervisor`. The loop and `graphyard up` preflight (exit 2, naming paths) refuse a dirty CLI checkout; its research scratch is a managed-repository worktree.
+`master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master-OWNER-NAME.service`, runs `systemctl --user enable --now`, `loginctl enable-linger`; never a side effect (worker checkouts, temp directories refused). Move: `master init --token-stdin --replace-supervisor` there. `master status`: `setup.supervisor`. The loop and `graphyard up` preflight refuse a dirty CLI checkout; its research scratch is a managed-repository worktree.
 
-Shared hosts: units are per repository (`graphyard-executor-OWNER-NAME@N.service` too) in `.graphyard/units.json` (legacy `graphyard-master.service`: recorded alias); setup never touches another checkout's; each install needs its `--herdr-workspace`.
+Shared hosts: units are per repository (`graphyard-executor-OWNER-NAME@N.service` too) in `.graphyard/units.json` (`graphyard-master.service` alias); setup never touches another checkout's; each install needs its `--herdr-workspace`.
 
 ### The pipeline doctor
 
@@ -90,7 +90,7 @@ Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck work (`maste
 
 ### Supervised mode (up --local)
 
-`graphyard up --local` writes `"supervision": "supervised"` and your login (`operatorLogin`) to `master.json`; absent is autonomous. Supervised: your GitHub approval of the exact head passes review, auto-merge lands it; the loop launches no reviewer, approver or escalation. `master status` prints `supervision` and flags PRs your login authored. Promote: `master reviewer setup`, `master reviewer add`, `master promote --admin-token-stdin` ([promotion](master-agent-reference.md#promotion-to-autonomy)).
+`graphyard up --local` writes `"supervision": "supervised"` and your login (`operatorLogin`) to `master.json`; absent is autonomous. Supervised: your GitHub approval of the exact head passes review, auto-merge lands it; the loop launches no reviewer, approver or escalation. `master status` prints `supervision`, flagging your PRs. Promote: `master reviewer setup`, `master reviewer add`, `master promote --admin-token-stdin` ([promotion](master-agent-reference.md#promotion-to-autonomy)).
 
 ## 4. Prove the first PR
 
