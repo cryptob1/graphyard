@@ -826,8 +826,9 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   const observeOnly = !!session.inputs.observeOnly;
   const candidateModel = session.delivery.policy.mode === 'release-candidate';
   // Without an App (GY-1550) the install itself never calls GitHub: gh is a precondition only
-  // for the release wiring a candidate model still creates there.
-  const ghNeeded = !noApp || candidateModel;
+  // for the release wiring a candidate model still creates there. Observe-only still refuses a
+  // signed-out caller in every delivery mode (GY-1862), needing only the `repo` scope.
+  const ghNeeded = !noApp || candidateModel || observeOnly;
   const ghStatus = ghNeeded ? await gh(['auth', 'status'], { allowFailure: true }) : { code: 1, stdout: '', stderr: '' };
   if (ghNeeded) preflight.push(githubCliPreflight(context.provider, ghStatus, session.inputs.repository, { observeOnly }));
   const polling = noApp ? null : webhookPreflight(context.provider);

@@ -32,10 +32,10 @@ function railway(login: typeof REPO_ONLY | typeof SIGNED_OUT) {
   ];
 }
 
-async function observeOnly(login: typeof REPO_ONLY | typeof SIGNED_OUT) {
+async function observeOnly(login: typeof REPO_ONLY | typeof SIGNED_OUT, mode: 'release-candidate' | 'per-pr' = 'release-candidate') {
   const fixture = await harness({ provider: 'railway', extraResponses: railway(login),
     statusBody: { actor: { id: 'owner-project-operator', role: 'admin' }, repository: REPOSITORY, github: false, githubAppId: null, githubInstallationId: null } });
-  await writeFile(join(fixture.root, 'graphyard.json'), JSON.stringify({ documentation: { paths: ['README.md'], changelog: null }, delivery: releaseCandidate }));
+  await writeFile(join(fixture.root, 'graphyard.json'), JSON.stringify({ documentation: { paths: ['README.md'], changelog: null }, ...(mode === 'release-candidate' ? { delivery: releaseCandidate } : {}) }));
   const calls = { githubApp: 0, registerProfiles: 0, runHerdr: 0, provision: 0 };
   const deps: InstallDependencies = { ...fixture.deps, log: () => {},
     githubApp: async () => { calls.githubApp++; throw new Error('observation-only must not bind an App'); },
@@ -85,6 +85,32 @@ test('unit:observe-only-repo-scope-suffices — a repo-only gh login passes the 
     assert.match(gh.detail, /gh is missing or not authenticated/);
     assert.match(gh.fix!, /gh auth login --scopes repo /);
     await assert.rejects(applyInstall(session, plan), /Preflight is incomplete; the installer changed nothing/);
+  } finally { await signedOut.fixture.cleanup(); }
+});
+
+test('unit:observe-only-per-pr-refuses-signed-out — install --observe-only on a per-pr repository still runs gh auth status: a repo-only login passes, and no gh login fails the GitHub CLI preflight so apply refuses before any change', async () => {
+  const signedIn = await observeOnly(REPO_ONLY, 'per-pr');
+  try {
+    const session = await signedIn.prepare('plan');
+    assert.equal(session.delivery.policy.mode, 'per-pr');
+    const gh = githubCli(await buildPlan(session));
+    assert.equal(gh.ok, true, gh.detail);
+    assert.match(gh.detail, /scopes repo; --observe-only registers no webhook/);
+  } finally { await signedIn.fixture.cleanup(); }
+
+  const signedOut = await observeOnly(SIGNED_OUT, 'per-pr');
+  try {
+    const session = await signedOut.prepare('apply');
+    assert.equal(session.delivery.policy.mode, 'per-pr');
+    const plan = await buildPlan(session);
+    const gh = githubCli(plan);
+    assert.ok(gh, 'observe-only on per-pr ran no GitHub CLI preflight');
+    assert.equal(gh.ok, false);
+    assert.match(gh.detail, /gh is missing or not authenticated/);
+    assert.match(gh.fix!, /gh auth login --scopes repo /);
+    await assert.rejects(applyInstall(session, plan), /Preflight is incomplete; the installer changed nothing/);
+    assert.deepEqual(signedOut.calls, { githubApp: 0, registerProfiles: 0, runHerdr: 0, provision: 0 });
+    assert.ok(!signedOut.fixture.allCommandLines().some(line => /^railway (init|add|up)/.test(line)), 'a signed-out observe-only apply provisioned the control plane');
   } finally { await signedOut.fixture.cleanup(); }
 });
 
