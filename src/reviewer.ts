@@ -970,8 +970,10 @@ export async function clearReviewerProfileRefusal(config: Pick<MasterConfig, 'cr
  * dispatcher's retries only refused again, so master status names the profile and the one command
  * that writes the profiles instead of leaving the loop to knock.
  */
-export function reviewerProfileRefusalAttention(refusal: ReviewerProfileRefusal | null): AttentionItem[] {
+export function reviewerProfileRefusalAttention(refusal: ReviewerProfileRefusal | null, current?: Pick<MasterConfig, 'workers' | 'reviewers'>): AttentionItem[] {
   if (!refusal || refusal.refusals < reviewerProfileRefusalLimit) return [];
+  // The profiles changed since the refusals (the missing one written, say): the record is stale until the next launch clears it, so it raises nothing.
+  if (current && configuredProfileFingerprint(current) !== refusal.profiles) return [];
   return [{ subject: `unknown reviewer profile ${refusal.profile}`,
     text: `Review launches asking for reviewer profile ${refusal.profile} were refused ${refusal.refusals} times in a row, the last at ${refusal.at}: no configured reviewer profile carries that name, so no review can start. Run graphyard master environments --apply to write the reviewer and worker profiles from the logged-in environments; the next launch uses them and this clears`,
     // The master fixes the launcher fault (agentOwner('master', …)); a missing profile is a setup step the installation lacks (classified('setup'), the configuration class).

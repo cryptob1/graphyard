@@ -84,6 +84,8 @@ test('unit:unknown-profile-escalates — three review launches refused for an un
   assert.equal(attention.faultClass, 'configuration');
   // Before the limit it stands down: the dispatcher's first widening retries are answer enough.
   assert.deepEqual(reviewerProfileRefusalAttention({ version: 1, profile: 'review-codex', refusals: 2, at: counted!.at, profiles: counted!.profiles }), []);
+  // The profiles changed since the refusals (the missing one written, no launch yet to clear the record): the stale record raises nothing.
+  assert.deepEqual(reviewerProfileRefusalAttention(counted, { workers: config.workers, reviewers: [...config.reviewers, { name: 'review-codex', agentName: 'review-codex-1', kind: 'codex' }] as typeof config.reviewers }), [], 'a record of profiles since changed is stale');
   // master status carries it beside the never-starting accounts (GY-417's wiring).
   const status = await workerLaunchStatus(root, await loadMasterConfig(root));
   assert.ok(status.items.some(item => item.subject === attention.subject && item.text.includes('graphyard master environments --apply')), 'master status raises the configuration attention');
@@ -222,4 +224,27 @@ test('unit:up-writes-profiles — up\'s accounts step runs the profile write mas
   }
   assert.ok(emptyEvents.some(event => event.kind === 'step' && event.step === 'accounts' && event.state === 'waiting'), 'the accounts step is a wait, not a failure');
   assert.ok(!held.completed.includes('accounts'), 'the accounts step did not complete');
+});
+
+test('unit:up-writes-profiles — supervised setup (up --local) launches no reviewer, so a worker profile alone turns its account line green', async () => {
+  const { runUp } = await import('../src/up.js');
+  const checkout = await temporaryDirectory('up-writes-profiles-local');
+  const world = upWorld(checkout, [], { workers: 1, reviewers: 0 });
+  const result = await runUp(request({ provider: 'local' }), world.deps);
+  assert.ok(world.calls.some(args => args.join(' ') === 'master environments --apply'), 'the accounts step runs the profile write');
+  assert.equal(result.checklist.find(item => item.id === 'account:worker')?.done, true, result.next);
+  assert.ok(result.completed.includes('accounts'), 'the accounts step completes without a reviewer profile');
+});
+
+test('unit:up-writes-profiles — a resumed run whose profile write fails stops naming it, rather than passing the account lines unchecked', async () => {
+  const { runUp } = await import('../src/up.js');
+  const checkout = await temporaryDirectory('up-writes-profiles-resumed');
+  const first = upWorld(checkout, [], { workers: 1, reviewers: 1 });
+  assert.equal((await runUp(request(), first.deps)).exitCode, 0);
+  const again = upWorld(checkout, [], { workers: 1, reviewers: 1 });
+  const cli = again.deps.cli;
+  again.deps.cli = async args => args.join(' ') === 'master environments --apply' ? { code: 1, stdout: '', stderr: 'profile write broke' } : cli(args);
+  const result = await runUp(request(), again.deps);
+  assert.notEqual(result.exitCode, 0, 'the failed write is not swallowed');
+  assert.match(result.next ?? '', /accounts/);
 });

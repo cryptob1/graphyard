@@ -465,10 +465,10 @@ export async function readProfileLaunchRecords(root: string, profiles: { name: s
   return records;
 }
 /** Everything `master status` shows of worker launches (GY-417): each profile's row fields, the never-starting accounts, and the day's worktree preparation percentiles (GY-1836). */
-export async function workerLaunchStatus(root: string, config: Pick<MasterConfig, 'credentialFile' | 'cliPath' | 'workers'>) {
+export async function workerLaunchStatus(root: string, config: Pick<MasterConfig, 'credentialFile' | 'cliPath' | 'workers'> & Partial<Pick<MasterConfig, 'reviewers'>>) {
   const failures = await readAccountStartFailures(config);
   // GY-1850: and the one configuration attention an unknown reviewer profile's consecutive refusals raise.
-  return { rows: workerLaunchRows(config.workers, await readProfileLaunchRecords(root, config.workers)), items: [...accountStartFailureAttention(failures, config.cliPath), ...reviewerProfileRefusalAttention(await readReviewerProfileRefusal(config))], prepare: await worktreePrepareSummary(root) };
+  return { rows: workerLaunchRows(config.workers, await readProfileLaunchRecords(root, config.workers)), items: [...accountStartFailureAttention(failures, config.cliPath), ...reviewerProfileRefusalAttention(await readReviewerProfileRefusal(config), config.reviewers ? { workers: config.workers, reviewers: config.reviewers } : undefined)], prepare: await worktreePrepareSummary(root) };
 }
 
 export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: string, epoch: number, agentName: string, pane: string, awaiting: { prompt: string; kind: ConsentHold['kind']; request?: string | null; named?: boolean }, now = Date.now()): ConsentHold {

@@ -567,7 +567,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   let writtenProfiles: { workers: number; reviewers: number } | null = null;
   /** GY-1850: the accounts lines answer for the profiles master.json holds, not only for the fleet's accounts: a fleet whose accounts are all connected still cannot launch a review when the write found no profile to make, so a green line is held back while either count is zero. A report that names no counts (an older CLI, or the write not run yet) leaves the line judging as before. */
   const withWrittenProfiles = async (items: SetupItem[]) => {
-    if (!writtenProfiles || (writtenProfiles.workers > 0 && writtenProfiles.reviewers > 0)) return items;
+    // Supervised mode launches no reviewer (`up --local`), so only its worker profile is required.
+    if (!writtenProfiles || (writtenProfiles.workers > 0 && (supervised || writtenProfiles.reviewers > 0))) return items;
     return items.map(item => (item.id === 'account:worker' || item.id === 'account:reviewer') && item.done ? { ...item, done: false, action: null,
       line: 'The account is connected, but the coordinator has no agent profile for it on this machine yet; sign in on this machine and rerun setup to write one.' } : item);
   };
@@ -1041,9 +1042,12 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     // GY-1850: a run resuming over an earlier pass's completed accounts step still writes the profiles
     // it may lack, so its checklist cannot wait on profiles nothing writes. The report, not the file,
     // is what the checklist reads. The write needs the configured checkout, which every pass that has
-    // reached the accounts step has.
-    if (state.completed.includes('accounts') && existsSync(resolve(deps.root, '.graphyard/master.json'))) {
-      const report = parseJson(await run('accounts', ['master', 'environments', '--apply']).catch(() => '{}'));
+    // reached the accounts step has. A failed write stops the run as the fresh step's does. On a
+    // self-contained host the loop, its login homes and master.json live there, so this machine's
+    // checkout writes nothing (`writeProfiles` below).
+    const writeProfiles = !state.identitiesHost && !remoteLoopProviders.includes(request.provider) && existsSync(resolve(deps.root, '.graphyard/master.json'));
+    if (state.completed.includes('accounts') && writeProfiles) {
+      const report = parseJson(await run('accounts', ['master', 'environments', '--apply']));
       const counts = report?.counts;
       if (counts) writtenProfiles = { workers: counts.workers ?? 0, reviewers: counts.reviewers ?? 0 };
     }
@@ -1056,7 +1060,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // one, the loop's first review launch is refused for an unknown reviewer profile. Its report is
       // what the account checklist lines judge: green only once both a worker and a reviewer profile
       // exist. It needs the configured checkout, which this step always follows.
-      if (existsSync(resolve(deps.root, '.graphyard/master.json'))) {
+      if (writeProfiles) {
         const report = parseJson(await run('accounts', ['master', 'environments', '--apply']));
         const counts = report?.counts;
         if (counts) writtenProfiles = { workers: counts.workers ?? 0, reviewers: counts.reviewers ?? 0 };

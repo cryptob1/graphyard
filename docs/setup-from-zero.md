@@ -65,7 +65,7 @@ The repository needs a GitHub `origin` and an Actions `pull_request` test workfl
 
 ## 4. Register the GitHub App
 
-Legacy merger only. `--apply` serves and prints `http://127.0.0.1:4311`; opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`. Branch protection: `--apply` protects the base; rerun once `Graphyard / merge` requires it; **Verify:** `branch-protection`.
+Legacy merger only. `--apply` serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`. Branch protection: `--apply` protects the base; rerun once `Graphyard / merge` requires it; **Verify:** `branch-protection`.
 
 ## 6. Onboard the checkout
 
@@ -73,7 +73,7 @@ Legacy merger only. `--apply` serves and prints `http://127.0.0.1:4311`; opens n
 
 ## 8. Agent environments
 
-Connect each account in Settings → Agents ([dashboard](dashboard.md#settings-agents)); host-logged-in accounts register with `gy master registry propose --apply`; `gy master environments --apply` (up's accounts step runs both) writes the reviewer and worker profiles. A review launch refused for an unknown profile is one configuration attention in `gy master status`; attempts back off five minutes until the profiles are written. **Verify:** one `agent-environment:NAME` line passes per environment; then [roles](onboarding.md#configure-the-fleet).
+Connect each account in Settings → Agents ([dashboard](dashboard.md#settings-agents)); host-logged-in accounts register with `gy master registry propose --apply`; `gy master environments --apply` (up's accounts step runs both) writes the reviewer and worker profiles. A review launch refused for an unknown profile is one configuration attention in `gy master status`; attempts back off five minutes until profiles are written. **Verify:** one `agent-environment:NAME` line passes per environment; then [roles](onboarding.md#configure-the-fleet).
 
 ## 9. Worker sandbox and harness rules
 
