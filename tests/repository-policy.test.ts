@@ -255,9 +255,9 @@ test('unit:repo-risk-policy — the installer deploys graphyard.json\'s policy a
 test('unit:repo-review-and-pending-policy — under e2e.pendingOutcomes blocking a failing pending-outcome case opens a release hold; non-blocking files none (GY-1802)', async () => {
   const { resolveRepositoryPolicy } = await policyModule();
   const { assessHolds, e2eRecord } = await import('../src/release-holds.js');
-  const candidate = { id: 7, sha: H, pendingOutcomes: ['outcome-a'] } as unknown as Parameters<typeof e2eRecord>[1];
+  const candidate = { id: '20261008T120000Z', sha: H, pendingOutcomes: ['outcome-a'] } as unknown as Parameters<typeof e2eRecord>[1];
   const contract = { outcomes: [{ id: 'outcome-a', title: 'Outcome A', cases: ['pending-case'] }] } as unknown as Parameters<typeof assessHolds>[0];
-  const run = { ...report([{ id: 'pending-case', verdict: 'failed' }]), runId: `rc-${(candidate as { id: number }).id}` };
+  const run = { ...report([{ id: 'pending-case', verdict: 'failed' }]), runId: `rc-${candidate.id}` };
   for (const [rule, opened] of [['blocking', 1], ['non-blocking', 0]] as const) {
     const policy = resolveRepositoryPolicy({ e2e: { pendingOutcomes: rule } });
     const e2e = e2eRecord(run, candidate, contract, policy)!;
