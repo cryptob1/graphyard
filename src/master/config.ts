@@ -158,6 +158,14 @@ export async function atomicPrivateText(file: string, value: string) {
   await chmod(file, 0o600);
 }
 
+/** Records automatic merging on the plane (`POST /api/auto-merge`) with the coordinator credential; an unchanged value writes nothing. */
+async function recordAutoMerge(url: string, token: string, autoMerge: boolean, fetcher: typeof fetch) {
+  const body = JSON.stringify({ autoMerge, reason: `master init ${autoMerge ? '--auto-merge' : '--no-auto-merge'}` });
+  const response = await fetcher(`${url}/api/auto-merge`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': `master-init-auto-merge:${randomUUID()}` }, body, signal: AbortSignal.timeout(15_000) });
+  if (!response.ok) throw new Error(`Graphyard refused to record automatic merging ${autoMerge ? 'on' : 'off'} (${response.status}: ${(await response.text()).slice(0, 300)}); master.json was written, and the plane's setting is unchanged`);
+  return response.json() as Promise<{ autoMerge: boolean }>;
+}
+
 export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; herdrWorkspace?: string; credentialDirectory?: string; autoMerge?: boolean; mergeMethod?: 'merge' | 'squash' | 'rebase'; run?: Partial<MasterRun>; browser?: MasterBrowser;
   /** Accept a control plane with no GitHub App yet, recording APP_PENDING (GY-1413): only `install --apply` passes it, before its App step. */
   allowPendingApp?: boolean;
@@ -224,6 +232,10 @@ export async function setupMaster(root: string, input: { url: string; token: str
   const { writeFile, rename } = await import('node:fs/promises');
   await writeFile(temporary, instructions, { mode, flag: 'wx' }); await rename(temporary, instructionsFile); await chmod(instructionsFile, mode);
   await saveDiscovery(root);
+  // GY-1927: an explicit --[no-]auto-merge is recorded on the plane, which alone enforces it; a rerun without either flag (as `up` makes) never moves it.
+  // A plane that predates the setting (its status carries none) merges on gates alone, and setup says so.
+  const autoMerge = input.autoMerge === undefined || !status.autoMerge ? status.autoMerge ?? null : await recordAutoMerge(url, token, input.autoMerge, fetcher);
+  const unrecorded = input.autoMerge === false && !status.autoMerge ? 'This control plane records no automatic-merging setting, so --no-auto-merge holds nothing: it merges every gate-passing candidate; deploy main and rerun master init --no-auto-merge' : null;
   /**
    * The loop's supervisor is installed here, by setup, rather than left to a guide somebody may
    * follow end to end and still finish with an unsupervised loop (GY-114). The unit is written
@@ -255,7 +267,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   // are — in the same words `master status` will keep using — rather than left for whoever
   // eventually notices the silence. A refused install is stated with what the operator runs.
   const supervision = !supervisor ? [] : supervisor.wrote === 'refused' ? [`${supervisor.reason}: ${supervisor.instruction}`] : loopSupervisionAttention(supervisor).map(gap => `${gap.text}: ${gap.next}`);
-  attention.push(...supervision);
+  attention.push(...supervision, ...(unrecorded ? [unrecorded] : []));
   // Each installation fact keeps its own remedy: a permission shortfall is a GitHub migration, a
   // capacity variable is a deployment setting, and production lag is a deploy to confirm.
   const remedy = appPermissions?.missing?.length || status.appPermissions?.attention?.length ? 'Accept the GitHub App permission request (run graphyard github-setup --update-permissions on the machine holding .graphyard/github-app.json, or graphyard master browser app-permissions and installation-accept, for the exact steps)'
@@ -269,7 +281,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
     const health = await checkAgentEnvironment(environment, { quota: false });
     return { environment: environment.name, kind: environment.kind, home: environment.home, loggedIn: health.loggedIn, login: health.login };
   }));
-  return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: config.autoMerge, workers: config.workers.length, run: config.run, browser: config.browser ?? null, config: '.graphyard/master.json', reviewer: config.reviewer ? `${config.reviewer.slug}[bot]` : null, attention,
+  return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: autoMerge ? autoMerge.autoMerge !== false : true, workers: config.workers.length, run: config.run, browser: config.browser ?? null, config: '.graphyard/master.json', reviewer: config.reviewer ? `${config.reviewer.slug}[bot]` : null, attention,
     worktreeRoot: { path: verifiedRoot.path, freeBytes: verifiedRoot.freeBytes, minFreeBytes: verifiedRoot.minFreeBytes, configured: !!config.run.worktreeRoot },
     agentEnvironments: { directory: environmentDirectory, discovered: environments },
     // What setup installed for the loop, in the words of the commands it ran.

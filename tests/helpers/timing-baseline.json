@@ -571,6 +571,7 @@
     "tests/merge-delegation-clean.test.ts": 2085,
     "tests/merge-executor-owner.test.ts": 1617,
     "tests/merge-executor.test.ts": 4000,
+    "tests/merge-hold-no-auto-merge.test.ts": 2500,
     "tests/merge-fault-class.test.ts": 1411,
     "tests/merge-ledger.test.ts": 600,
     "tests/merge-preview.test.ts": 4500,

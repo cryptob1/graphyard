@@ -1,5 +1,5 @@
 import { ReconciliationRetry, Refusal, MergeConflict, requireCurrent } from './model.js';
-import { recordedMergerMode, type MergerMode } from './merger-mode.js';
+import { mergeHold, recordedMergerMode, type MergerMode } from './merger-mode.js';
 import { createHash, createSign, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -2894,11 +2894,12 @@ export type MergeGateClient = Pick<GitHub, 'publish' | 'mergeQueueState' | 'enqu
  * authorized records it once per sha, base and policy revision, as `merge-acquire` did, so how
  * long GitHub has held the merge is measured from then: the BLOCKED auto-merge probe and the
  * merge-stall lines in master status (GY-344, GY-430, GY-1112) read that time, and with no
- * request recorded neither ever fired.
+ * request recorded neither ever fired. A candidate the automatic-merging hold stands over
+ * (`hold`, GY-1927) is not requested: no merge waits on GitHub for it.
  */
-export async function mergeRequest(engine: Engine, work: Work): Promise<MergeEnqueueRequest | null> {
+export async function mergeRequest(engine: Engine, work: Work, hold: string | null = null): Promise<MergeEnqueueRequest | null> {
   const standing = await engine.enqueueRequest(work.id);
-  if (!mergeAuthorized(work) || enqueueRequestCurrent(work, standing)) return standing;
+  if (!mergeAuthorized(work) || hold || enqueueRequestCurrent(work, standing)) return standing;
   return engine.store.transaction(async (db, now) => {
     const current = await engine.enqueueRequest(work.id, db);
     if (enqueueRequestCurrent(work, current)) return current;
@@ -2914,8 +2915,10 @@ export async function mergeRequest(engine: Engine, work: Work): Promise<MergeEnq
  * auto-merge, or an immediate head-bound merge when GitHub reports it mergeable now), a withdrawn one
  * dequeued, and a queued entry's merge group commit is given the same verdict so the queue can land
  * it. Graphyard never merges past GitHub: branch protection and required checks decide every merge.
+ * Under the automatic-merging hold (`hold`, GY-1927) the check is published as ever, but nothing is
+ * enqueued, and a head GitHub already holds for merging (queued or auto-merge armed) is withdrawn.
  */
-export async function gateMerge(github: MergeGateClient, work: Work, request: MergeEnqueueRequest | null, beforeWrite: () => Promise<void> = async () => {}): Promise<{ action: MergeQueueAction; state: GitHubMergeQueueState | null }> {
+export async function gateMerge(github: MergeGateClient, work: Work, request: MergeEnqueueRequest | null, beforeWrite: () => Promise<void> = async () => {}, hold: string | null = null): Promise<{ action: MergeQueueAction; state: GitHubMergeQueueState | null }> {
   demand(work.candidate, `${work.key} has no candidate to gate`);
   // Failure is written before a dequeue, success before an enqueue: GitHub never holds a head for
   // merging whose published verdict says otherwise.
@@ -2929,7 +2932,8 @@ export async function gateMerge(github: MergeGateClient, work: Work, request: Me
   // (GY-1884): a head whose standing run still reads REFUSED is held, never handed to GitHub. The
   // hold is GitHub's refusal of the verdict, so it is recorded once per head (`merge.enqueue.refused`)
   // and master status and the merge-stall invariant read it as a refusal, not a silent stall.
-  const decided = mergeQueueAction(work, state, request);
+  const queued = mergeQueueAction(work, state, request);
+  const decided: MergeQueueAction = hold && queued.kind !== 'dequeue' ? state.mode !== 'none' ? { kind: 'dequeue', reason: hold } : { kind: 'hold', reason: hold } : queued;
   let action: MergeQueueAction = decided.kind === 'enqueue' && published && published.conclusion !== 'success'
     ? { kind: 'hold', reason: `GitHub refused to record ${work.key}'s passing verdict: the latest ${CHECK_NAME} run at ${work.candidate.sha.slice(0, 12)} reads ${published.conclusion ?? 'no conclusion'}, not success; the merge is not requested until it does` } : decided;
   // Nor while any App-bound required check's latest run at the exact head does not pass: the
@@ -2945,9 +2949,18 @@ export async function gateMerge(github: MergeGateClient, work: Work, request: Me
   try {
     if (action.kind === 'dequeue') await github.dequeuePullRequest(state);
     if (action.kind === 'enqueue') { await beforeWrite(); await github.enqueuePullRequest(state, work.candidate.sha, action.mergeNow); }
-    if (action.kind === 'hold' && state.mode === 'queued' && state.groupHead && state.head === work.candidate.sha && mergeAuthorized(work)) await github.publishGroupCheck(work, state.groupHead);
+    if (action.kind === 'hold' && !hold && state.mode === 'queued' && state.groupHead && state.head === work.candidate.sha && mergeAuthorized(work)) await github.publishGroupCheck(work, state.groupHead);
   } catch (error) { return { action: { kind: 'hold', reason: `GitHub refused to ${action.kind} ${work.key}: ${error instanceof Error ? error.message : String(error)}` }, state }; }
   return { action, state };
+}
+/**
+ * The observation job's merge step: the automatic-merging hold read for an authorized head
+ * (GY-1927: with automatic merging off, a head no applied merge decision releases is held, its
+ * checks published as ever), the merge request recorded unless held, and the merge gated.
+ */
+export async function observeMerge(engine: Engine, github: MergeGateClient, work: Work, beforeWrite?: () => Promise<void>) {
+  const hold = mergeAuthorized(work) ? await mergeHold(engine.store.pool, work) : null;
+  return { ...await gateMerge(github, work, await mergeRequest(engine, work, hold), beforeWrite, hold), hold };
 }
 /** One pull request `master withdraw` acts on: the work item that holds it and the pull request's number. */
 export interface WithdrawEntry { key: string | null; pr: number }
@@ -3341,6 +3354,8 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   // it only when the installation actually changed (see Store.releaseHeldJobs).
   const heldOn = () => installationFingerprint(github.permissionReport?.() ?? null);
   let held: string | null = null;
+  // The automatic-merging hold over this item's authorized head (GY-1927): a held head is observed at the idle cadence, not the merge band's.
+  let mergeHeld: string | null = null;
   // The recorded merger, read once per claim and only when a control-plane candidate asks for it
   // (GY-1835): a GitHub-mode observation spends no query on it, and a mode read is cheap beside
   // the observation it gates.
@@ -3601,7 +3616,8 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
           if (typeof github.mergeQueueState === 'function') {
             // The check and GitHub's queue move together (GY-258): an authorized, requested head is
             // published as passed and handed to GitHub to merge; anything else is failed and taken out.
-            const gated = await gateMerge(github, work, await mergeRequest(engine, work), mergeAuthorized(work) ? mergeGuard(work) : guard(work, work.gates.every(g => g.passed) && !work.violations.length));
+            const gated = await observeMerge(engine, github, work, mergeAuthorized(work) ? mergeGuard(work) : guard(work, work.gates.every(g => g.passed) && !work.violations.length));
+            mergeHeld = gated.hold;
             if (gated.state) work = await engine.recordGitHubQueue(work.id, gated.state, gated.action);
           }
           else await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));
@@ -3614,7 +3630,7 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     // before its merge always carries a fresh observation to attribute the delivery from, and
     // everything else at the 300 s backstop a webhook wake short-circuits; GY-117's fleet bound
     // only ever stretches that backstop for an unchanged candidate, never shortens it.
-    const head = !settled && !held && inMergeBand(work);
+    const head = !settled && !held && !mergeHeld && inMergeBand(work);
     const cadence = schedule.cadence && (head ? { ...schedule.cadence, band: 'merge' as const, ms: headObservationSeconds * 1000 }
       : { ...schedule.cadence, band: schedule.cadence.band === 'merge' ? 'active' as const : schedule.cadence.band, ms: Math.max(idleObservationSeconds * 1000, schedule.cadence.ms) });
     if (cadence && work) github.recordObservation?.(work.id, { requests, uncached, band: cadence.band, cadenceMs: cadence.ms });

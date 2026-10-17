@@ -14,7 +14,7 @@ import { defineRoutes, parseJson } from '../routes.js';
 import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
 import { executorHost } from './agent-registry.js';
 import { directMergeStatus } from '../../direct-merge.js';
-import { mergeWriterStatus } from '../../merger-mode.js';
+import { AutoMergeSettings, autoMergeStatus, mergeHolds, mergeWriterStatus } from '../../merger-mode.js';
 import { projectDelivery } from '../../project-applications.js';
 import { rerunFailedChecksEvent } from '../../merge-queue.js';
 import { maxRerunFailedChecks } from '../../master/profiles.js';
@@ -106,6 +106,8 @@ export const statusRoutes = defineRoutes('status', [
         directMerge: await directMergeStatus(engine.store.pool, engine.directMergeEnvironment, observedAt),
         // The merger setting (merger-mode.ts): which writer lands heads, and one line while it is the control plane.
         mergeWriter: await mergeWriterStatus(engine.store.pool),
+        // Automatic merging (GY-1927): off, a gate-passing candidate is held until a merge decision releases it.
+        autoMerge: await autoMergeStatus(engine.store.pool),
         // Delivery defaults, applications and case bindings (GY-1901).
         project: projectDelivery(),
         // Heartbeat latency and the renewals refused or failed server-side, this process, last 10 minutes (GY-558).
@@ -194,6 +196,9 @@ export const statusRoutes = defineRoutes('status', [
     },
   },
   doctorRoute,
+  // Automatic merging (merger-mode.ts, GY-1927): read like the merger, set with an admin or coordinator credential only.
+  { method: 'GET', path: '/api/auto-merge', handle: ({ actor, services }) => new AutoMergeSettings(services.engine.store).status(actor) },
+  { method: 'POST', path: '/api/auto-merge', handle: async context => new AutoMergeSettings(context.services.engine.store).change(context.actor, await parseJson(context), context.idempotencyKey()) },
   {
     method: 'GET', path: '/api/work-snapshot',
     async handle({ actor, req, url, services, operatorVisible }) {
@@ -249,7 +254,10 @@ export const statusRoutes = defineRoutes('status', [
       // leave it whole, and what the SQL cut is added to what the view says it left out.
       const { trimmed, ...snapshot } = await services.engine.store.coordinationSnapshot();
       const trimmedView = coordinationSnapshot(scope(snapshot));
+      // GY-1927: each held candidate names its hold, so the control-plane merge writer starts no merge for it.
+      const holds = await mergeHolds(services.engine.store.pool, trimmedView.work);
       for (const work of trimmedView.work) {
+        if (holds.get(work.id)) work.mergeHold = holds.get(work.id);
         const cut = trimmed.get(work.id);
         if (cut) { trimmedView.omitted.evidence += cut.evidence; trimmedView.omitted.dispatchHistory += cut.dispatchHistory; trimmedView.omitted.queueHistory += cut.queueHistory; trimmedView.omitted.actionHistory += cut.actionHistory; trimmedView.omitted.sessions += cut.sessions; }
       }

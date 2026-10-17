@@ -55,3 +55,7 @@ Protected `pull_request_target` workflow per `graphyard/*` push: **plan** reads 
 ## Identity-bound agent review
 
 `reviewProvider`: `codex` takes Codex's clean head result; `agent` non-author reviewer App (`github-setup URL --reviewer claude`; `GRAPHYARD_REVIEWER_APPS`; `graphyard reviewpolicy GY-N agent REVISION "reason" --profiles` [FILE](../examples/reviewer-profiles.json)) approving via head-naming `graphyard-verdict` comments.
+
+## Automatic merging
+
+`master init --no-auto-merge` records `policy.auto-merge.set` (admin or coordinator; `/api/auto-merge`, `/api/status` `autoMerge`, master status): checks publish as ever, but no gate-passing head is requested, enqueued, armed or merged by the writer, and armed ones are withdrawn. A `master decide GY-N merge REASON` another identity approves releases that exact sha, base and policy revision; `--auto-merge` restores.
