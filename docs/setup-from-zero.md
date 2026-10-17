@@ -14,13 +14,13 @@ cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --agent --repo OWNER/R
 
 Only legacy `--merger github` needs a human (GitHub Mobile).
 
-Hetzner waits (exit 3) for price approval: rerun with `--confirm-price`, `--max-monthly` or `--ssh-key`.
+Hetzner waits (exit 3) for price approval: `--confirm-price`, `--max-monthly` or `--ssh-key`.
 
-`up` runs, in order: preflight, control plane, host supervisor, Herdr, deploy key, merger setting (legacy: `github` only) and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` reviews and merges, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop. The loop merges onboarding's `graphyard/onboarding` pull request (host install: a person); goals wait. Reruns skip recorded `.graphyard/up.json` steps but redo `master-loop` until loop and executors run this CLI's exact clean commit (`doctor`: `loop-code`).
+`up` runs, in order: preflight, control plane, host supervisor, Herdr, deploy key, merger setting (legacy: `github` only) and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` reviews and merges, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop. The loop merges onboarding's pull request (host install: a person); goals wait. Reruns skip recorded `.graphyard/up.json` steps but redo `master-loop` until loop and executors run this CLI's clean commit (`doctor`: `loop-code`); stale host executor launchers are rebound (declared slots restart), foreign ones refused.
 
 ## The Setup page
 
-A step needing a person prints one Setup-page link (`SERVER/#sign-in=CODE&setup`, signed in 10 minutes), waits until green, then a fresh link; [phone access](dashboard.md#from-your-phone). Items:
+A step needing a person prints one Setup-page link (`SERVER/#sign-in=CODE&setup`, valid 10 minutes), waits until green, then a fresh link; [phone access](dashboard.md#from-your-phone). Items:
 
 | Item | Button
 | --- | ---
@@ -57,7 +57,7 @@ Needs a GitHub `origin` and an Actions `pull_request` test workflow. **Verify:**
 
 ## 3. Install the control plane
 
-`gy install --provider compose --repo OWNER/REPO --reviewer claude --plan`, then `--apply` ([install](install.md); `gy` is `node ~/graphyard/bin/graphyard.mjs`). `--apply` records the master connection `.graphyard/master.json`, its `0600` credential under the plan's `installDirectory`; `gy doctor` reads as it; `GRAPHYARD_TOKEN_FILE` overrides it. **Verify:** `control-plane` and `credentials-file` pass.
+`gy install --provider compose --repo OWNER/REPO --reviewer claude --plan`, then `--apply` ([install](install.md); `gy` is `node ~/graphyard/bin/graphyard.mjs`). `--apply` records the master connection `.graphyard/master.json`, its `0600` credential under `installDirectory`; `gy doctor` reads as it; `GRAPHYARD_TOKEN_FILE` overrides it. **Verify:** `control-plane` and `credentials-file` pass.
 
 ### Control-plane merger
 
@@ -65,7 +65,7 @@ Needs a GitHub `origin` and an Actions `pull_request` test workflow. **Verify:**
 
 ## 4. Register the GitHub App
 
-Legacy merger only. `--apply` serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`. Branch protection: `--apply` protects the base; rerun once `Graphyard / merge` requires it; **Verify:** `branch-protection`.
+Legacy merger only. `--apply` prints and serves `http://127.0.0.1:4311`, opening no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, installed on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`. Branch protection: `--apply` protects the base; rerun once `Graphyard / merge` requires it; **Verify:** `branch-protection`.
 
 ## 6. Onboard the checkout
 

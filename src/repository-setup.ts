@@ -14,7 +14,7 @@ import { documentationAssignment, documentationPolicySchema, parseRepositoryConf
 import { executorRunnableKinds, type NextActionKind } from './model/action-kinds.js';
 import { deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy } from './model/delivery-policy.js';
 import { renderReleasePipeline } from './install/release-pipeline.js';
-import { assertUnitOwned, executorGlob, executorInstance, executorInstancePattern, legacyExecutorTemplate, legacyInstallUnits, readInstallUnits, resolveInstallUnits, systemdCommandLineWords, unitCheckout, type InstallUnits } from './install/units.js';
+import { assertUnitOwned, ForeignUnitRefusal, executorGlob, executorInstance, executorInstancePattern, legacyExecutorTemplate, legacyInstallUnits, readInstallUnits, resolveInstallUnits, systemdCommandLineWords, unitCheckout, type InstallUnits } from './install/units.js';
 import { coordinatorCheckoutRoot } from './master/profiles.js';
 import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
 import { herdrTarget, type HerdrInstance } from './master/herdr.js';
@@ -1189,6 +1189,12 @@ export async function installExecutorSupervision(root: string, options: { count?
   // installer for (GY-1881). A unit working in another checkout, or one whose launcher is no
   // Graphyard executor at all, is genuinely foreign and stays refused.
   if (current !== null && staleExecutorLauncherCheckout(current, primary) === null) assertUnitOwned(unitFile, primary);
+  // An existing unit is replaced only when it starts a Graphyard executor launcher: one working in
+  // this checkout that starts any other program is no executor slot of this install (GY-1881).
+  if (current !== null) {
+    const start = unitCheckout(current).execStart, words = start ? systemdCommandLineWords(start) : [];
+    if (!words.some(part => /\/scripts\/graphyard-executor\.mjs$/.test(part))) throw new ForeignUnitRefusal(unitFile, words.slice(0, 2).join(' ') || 'no ExecStart', primary);
+  }
   // GY-1790: while the CLI pin stands a slot starts the launcher held in the snapshot, never an
   // entry the checkout may hold dirty; a reinstall keeps that binding until the pin lifts. The
   // caller that knows the pin hands the script in (`heldScript`); one that does not (`graphyard

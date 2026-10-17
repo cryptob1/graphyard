@@ -19,7 +19,7 @@ import type { LoopCodeReading } from '../src/repository-setup.js';
  * shipped template, the host's saved declaration and units record, only the systemd runner stubbed —
  * so the repair is certified exactly as it will run.
  *
- * Proof: unit:up-host-executor-repair-real-installer.
+ * Proof: unit:up-host-executor-repair-real-installer, unit:up-host-executor-repair-declared-slots.
  */
 // Loaded inside each test, so a tree without them fails as a test case, not at load.
 const up = () => import('../src/up.js');
@@ -50,7 +50,7 @@ interface HostLayout { base: string; repo: string; home: string; unitDirectory: 
  * master.json and a saved three-slot declaration) and a user unit directory whose executor
  * template UNIT is written as given — a stale Graphyard checkout's launcher, or a foreign program's.
  */
-async function hostLayout(label: string, unit: (paths: { repo: string; staleCheckout: string; foreignTree: string }) => string): Promise<HostLayout> {
+async function hostLayout(label: string, unit: (paths: { repo: string; staleCheckout: string; foreignTree: string }) => string, count = 3): Promise<HostLayout> {
   const base = await temporaryDirectory(label);
   const repo = join(base, 'repo'), home = join(base, 'home'), unitDirectory = join(base, 'units');
   for (const directory of [join(repo, '.graphyard'), unitDirectory, home]) await mkdir(directory, { recursive: true });
@@ -64,7 +64,7 @@ async function hostLayout(label: string, unit: (paths: { repo: string; staleChec
     version: 1, url: SERVER, credentialFile: join(home, 'coordinator.token'), cliPath: join(THIS_CHECKOUT, 'bin', 'graphyard.mjs'),
     repository: REPOSITORY, baseBranch: 'main', githubAppId: 0, hostId: 'test-host', masterAgentName: 'graphyard-master-acme-shop',
   }));
-  await writeFile(join(repo, '.graphyard', 'executors.json'), JSON.stringify({ version: 1, count: 3, kinds: null, intervalSeconds: 5 }));
+  await writeFile(join(repo, '.graphyard', 'executors.json'), JSON.stringify({ version: 1, count, kinds: null, intervalSeconds: 5 }));
   const staleCheckout = join(base, 'graphyard-pilot'), foreignTree = join(base, 'other-app');
   await mkdir(staleCheckout, { recursive: true });
   await mkdir(foreignTree, { recursive: true });
@@ -80,7 +80,7 @@ async function hostLayout(label: string, unit: (paths: { repo: string; staleChec
  * --install [--count N]`) runs the REAL installExecutorSupervision over the host's paths, as the
  * script on the host would: the shipped template, the saved declaration, a stubbed user manager.
  */
-function hostSession(layout: HostLayout, recorded: { installer: string[][]; systemCtl: string[][] }) {
+function hostSession(layout: HostLayout, recorded: { installer: string[][]; systemCtl: string[][]; host?: string[][] }) {
   const layoutShaped = { home: layout.home, graphyard: THIS_CHECKOUT, cli: join(THIS_CHECKOUT, 'bin', 'graphyard.mjs'), checkout: layout.repo, userUnitDirectory: layout.unitDirectory, configDirectory: join(layout.home, '.config', 'graphyard') };
   return {
     layout: layoutShaped,
@@ -99,12 +99,14 @@ function hostSession(layout: HostLayout, recorded: { installer: string[][]; syst
         const count = args.includes('--count') ? Number(args[args.indexOf('--count') + 1]) : undefined;
         const { installExecutorSupervision } = await repositorySetup();
         // The script's own exit shape: the install report on stdout, a thrown refusal's message on stderr with status 1.
-        const run = (managerArgs: string[]) => { recorded.systemCtl.push(managerArgs); return managerArgs[0] === 'is-active' ? 'active' : ''; };
+        // The manager lists the same slots the host's listings name, so the installer sees the fleet the repair saw.
+        const run = (managerArgs: string[]) => { recorded.systemCtl.push(managerArgs); return managerArgs[0] === 'is-active' ? 'active' : managerArgs[0] === 'list-unit-files' ? layout.slots.map(slot => `${slot} enabled enabled\n`).join('') : ''; };
         try {
           const installed = await installExecutorSupervision(layout.repo, { ...(count === undefined ? {} : { count }), run, unitDirectory: layout.unitDirectory });
           return { code: 0, stdout: JSON.stringify(installed), stderr: '' };
         } catch (error: any) { return { code: 1, stdout: '', stderr: `${error.message}\n` }; }
       }
+      if (program === 'systemctl') recorded.host?.push(args);
       if (args[1] === 'list-units') return { code: 0, stdout: `${layout.slots[0]} loaded active running slot 1\n`, stderr: '' };
       if (args[1] === 'list-unit-files') return { code: 0, stdout: layout.slots.map(slot => `${slot} enabled enabled\n`).join(''), stderr: '' };
       return { code: 0, stdout: '', stderr: '' };
@@ -225,6 +227,15 @@ test('unit:up-host-executor-foreign-refused — a unit whose launcher is not a G
   assert.match(refusal.message, new RegExp(quote(direct.foreignTree)), 'the refusal names the foreign checkout');
   assert.equal(await readFile(direct.unitFile, 'utf8'), untouched, 'a refused unit is never rewritten');
 
+  // A unit working in the managed repository itself whose launcher is no Graphyard executor is no
+  // executor slot of this install either: refused, never overwritten (review on #1279).
+  const inRepository = foreignUnitText(direct.repo);
+  await writeFile(direct.unitFile, inRepository);
+  const inRepositoryRefusal = await installExecutorSupervision(direct.repo, { run: () => '', unitDirectory: direct.unitDirectory }).catch((error: any) => error);
+  assert.equal(inRepositoryRefusal?.name, 'ForeignUnitRefusal', `a non-Graphyard launcher in the repository is refused: ${inRepositoryRefusal?.message}`);
+  assert.match(inRepositoryRefusal.message, new RegExp(quote(`${direct.repo}/serve.js`)), 'the refusal names the program the unit starts');
+  assert.equal(await readFile(direct.unitFile, 'utf8'), inRepository, 'the repository\'s own program unit is never rewritten');
+
   // A unit naming no WorkingDirectory whose launcher is another Graphyard checkout's executor is not
   // provably this install's, so it is refused rather than rebound (review thread on #1279).
   const unanchored = executorUnitText(direct.repo, direct.staleCheckout).replace(/^WorkingDirectory=.*\n/m, '');
@@ -251,4 +262,22 @@ test('unit:up-host-executor-foreign-refused — a unit whose launcher is not a G
   assert.equal(recorded.installer.length, 1, 'the repair did run the real installer');
   assert.equal(await readFile(layout.unitFile, 'utf8'), foreignUnitText(layout.foreignTree), 'the genuinely foreign unit is untouched');
   assert.ok(!recorded.systemCtl.some(args => args[0] === 'restart'), 'no slot is restarted onto code the installer refused to write');
+});
+
+test('unit:up-host-executor-repair-declared-slots — after the real installer rebinds a stale launcher, only the slots the kept declaration names restart, never the slots it disabled', async () => {
+  const { alignHostExecutors } = await up();
+  for (const count of [0, 1]) {
+    const layout = await hostLayout(`graphyard-up-host-executor-declared-${count}`, ({ repo, staleCheckout }) => executorUnitText(repo, staleCheckout), count);
+    const recorded = { installer: [] as string[][], systemCtl: [] as string[][], host: [] as string[][] };
+    const aligned = await alignHostExecutors(hostSession(layout, recorded) as any, TEMPLATE);
+    const wanted = layout.slots.slice(0, count), excess = layout.slots.slice(count);
+    assert.equal(aligned.reason, null, `declaration ${count}: ${aligned.reason}`);
+    assert.equal(aligned.wrote, 'updated');
+    const disabled = recorded.systemCtl.find(args => args[0] === 'disable' && args[1] === '--now');
+    assert.deepEqual(disabled?.slice(2), excess, `declaration ${count}: the installer disables the slots above it`);
+    assert.deepEqual(aligned.restarted, wanted, `declaration ${count}: only the declared slots are reported restarted`);
+    const restarts = recorded.host.filter(args => args[1] === 'restart').flatMap(args => args.slice(2));
+    for (const slot of excess) assert.ok(!restarts.includes(slot), `declaration ${count}: the disabled ${slot} is never restarted`);
+    assert.deepEqual(restarts, wanted, `declaration ${count}: the host restarts exactly the declared slots`);
+  }
 });

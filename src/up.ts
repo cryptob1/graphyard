@@ -15,7 +15,7 @@ import { findOnboardingWork, onboardingBranch, onboardingWait, waitedFor, type O
 import { coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutPaths, readCoordinatorCheckout } from './master/profiles.js';
 import { redactString } from './evidence-replay.js';
 import { recordSupervision } from './master/config.js';
-import { executorGlob, executorInstancePattern, unitCheckout, userUnitDirectory } from './install/units.js';
+import { executorGlob, executorInstance, executorInstancePattern, unitCheckout, userUnitDirectory } from './install/units.js';
 import { installIdFor } from './install/types.js';
 import { installDirectory, readInstallRecord } from './install/secrets.js';
 import { settleWorkerCredentials } from './install/worker-credentials.js';
@@ -24,7 +24,7 @@ import type { GitHubCli } from './install/github.js';
 import type { Transport } from './install/transport.js';
 import { herdrAttachCommand, installHerdrInstance, type HerdrInstance } from './master/herdr.js';
 import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, HerdrSetupFailure, herdrSync, hostHerdrDeps, prepareHerdrInstance, withLocalBin, type HerdrHostDeps } from './herdr-host.js';
-import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin, readLoopCode, readHostLoopCode, alignExecutorUnits, liftLoopPins, unitLauncherCheckout, executorDeclarationFile, type LoopCodeReading } from './repository-setup.js';
+import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin, readLoopCode, readHostLoopCode, alignExecutorUnits, liftLoopPins, unitLauncherCheckout, executorDeclarationFile, executorDeclarationSchema, type LoopCodeReading } from './repository-setup.js';
 import { recordHerdrInstance } from './master/config.js';
 import { mergerModes, type MergerMode } from './merger-mode.js';
 
@@ -1890,7 +1890,7 @@ export function hostTemplateStartsOtherCode(text: string, layout: { home: string
  * configured fleet nor disables a slot the operator enabled. GY-1881: the installer itself rebinds
  * a template whose launcher names a stale Graphyard checkout of this install — a unit that works in
  * the host's repository checkout — and still refuses a genuinely foreign one, which the alignment
- * reports rather than papers over.
+ * reports rather than papers over. After a rebind only the slots the kept declaration names restart.
  */
 export async function alignHostExecutors(host: Pick<HostLoopSession, 'remote' | 'layout' | 'environment' | 'asUser' | 'checkoutAtRef'>, template: string | null): Promise<{ wrote: 'updated' | 'unchanged' | 'none'; reason: string | null; restarted: string[] }> {
   if (!template) return { wrote: 'none', reason: `no executor template of this install is installed on ${host.remote.description}; graphyard install --apply installs it`, restarted: [] };
@@ -1900,7 +1900,7 @@ export async function alignHostExecutors(host: Pick<HostLoopSession, 'remote' | 
     const listed = await host.asUser(host.layout.checkout, 'systemctl', ['--user', ...listing]);
     for (const match of listed.stdout.matchAll(executorInstancePattern(units))) known.add(match[0]);
   }
-  const instances = [...known].sort();
+  let instances = [...known].sort();
   // A template starting another checkout is written again by the executor installer, from the host checkout now at this commit.
   const current = await host.remote.exec('cat', [`${host.layout.userUnitDirectory}/${template}`], { allowFailure: true, timeout: 60_000 });
   const rebind = current.code === 0 && hostTemplateStartsOtherCode(current.stdout, host.layout);
@@ -1919,6 +1919,13 @@ export async function alignHostExecutors(host: Pick<HostLoopSession, 'remote' | 
         ? `the executor unit on ${host.remote.description} is genuinely foreign and was left alone: ${failure}`
         : `the executor installer on ${host.remote.description} failed: ${failure}`, restarted: [] };
     }
+    // The installer disabled every slot above the declaration it kept, so only its declared slots
+    // restart and are reported: restarting a slot it just disabled would undo that (GY-1881).
+    const saved = await host.remote.exec('cat', [`${host.layout.checkout}/${executorDeclarationFile}`], { allowFailure: true, timeout: 60_000 });
+    let count: number;
+    try { count = executorDeclarationSchema.parse(JSON.parse(saved.stdout)).count; }
+    catch { return { wrote: 'none', reason: `the executor installer on ${host.remote.description} left no readable ${executorDeclarationFile}`, restarted: [] }; }
+    instances = Array.from({ length: count }, (_, index) => executorInstance(units, index + 1));
   }
   if (instances.length) {
     const restarted = await host.asUser(host.layout.checkout, 'systemctl', ['--user', 'restart', ...instances]);
