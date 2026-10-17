@@ -20,6 +20,7 @@ import { detailChanged } from './decisions.js';
 import { checkoutState, loopCodeRoot, reconcileLoadedRelease, unquotePath, type CheckoutState } from './checkout-state.js';
 import { heldCliSnapshots, heldExecutorEntryOf, holdCliAt, sameCommit } from './held-cli.js';
 import { restartEndedBySupervisorStop } from './loop-supervisor.js';
+import { externalInstallPass, managesOwnCheckout } from './upgrade-ownership.js';
 
 /**
  * Code the loop and the executors load: TypeScript modules and the package manifest. A diff that
@@ -54,6 +55,8 @@ export { heldCliPointer, heldCliSnapshotAt, readHeldCli, holdCliAt, heldLauncher
 export { loopUnitPattern, detectLoopSupervisorUnit, restartEndedBySupervisorStop, supervisorStopGraceMs, awaitSupervisorRestart, alignRunningLoopUnit } from './loop-supervisor.js';
 
 export { checkoutState, type CheckoutState };
+// GY-1958: the project-identification probe re-exported, so every existing import keeps working.
+export { externalUpgradeRefusal, isExternalUpgradeRefusal, managesOwnCheckout } from './upgrade-ownership.js';
 
 export type SelfUpgradeOutcome =
   | { outcome: 'skipped'; reason: string }
@@ -195,9 +198,9 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
    * attempt — an origin outage must not stand in for a restart that never ran (GY-1445).
    */
   const unaligned = async (reason: string, cause?: UpgradeStallCause): Promise<SelfUpgradeOutcome> => { if (cause) stall(cause, reason); await note(reason, true, alignKey); return { outcome: 'failed', reason }; };
-  const refused = async (reason: string, commit: string | null, cause: UpgradeStallCause): Promise<SelfUpgradeOutcome> => {
+  const refused = async (reason: string, commit: string | null, cause?: UpgradeStallCause): Promise<SelfUpgradeOutcome> => {
     state.upgrade.refused = { at: at(), reason, commit };
-    stall(cause, reason);
+    if (cause) stall(cause, reason);
     await persist();
     const refusedKey = 'upgrade:refused', detail = `The loop left the coordinator checkout at ${shortCommit(commit)} untouched: ${reason}`;
     if (detailChanged(state.actions[refusedKey], detail)) {
@@ -229,6 +232,16 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     return aligned;
   };
   const alignUnit = async (): Promise<boolean> => (await alignUnitRecorded()).wrote !== 'refused';
+  // GY-1958: an install managing another project runs no alignment — the checkout is never fetched
+  // in or moved, what an earlier alignment left owed is retired, and the install upgrades by command.
+  const own = await managesOwnCheckout(codeRoot, deps.root, deps.run);
+  if (own === null) return { outcome: 'skipped', reason: 'whether the managed repository is the coordinator checkout\'s own project could not be read, so this pass neither aligns nor refuses; retried next cycle' };
+  if (!own) return externalInstallPass(state, codeRoot, deps.run, {
+    at, persist, unstall, refused, note: (detail, failure) => note(detail, failure, alignKey),
+    settle: async () => (await holdCli(null).then(() => null, error => `the held snapshot pin could not be lifted: ${message(error)}`))
+      ?? (await alignExecutorUnits(null).then(why => why && `the executor units could not be returned to the checkout's launcher: ${why}`))
+      ?? (await alignUnit() ? null : `the loop's supervisor unit could not be returned to the checkout's launcher (upgrade:unit names why)`),
+  });
   /**
    * GY-1790: the unit the restart re-executes the loop through, pointed at the launcher it must
    * start before the cursor records the restart as made — the snapshot's while a snapshot restart's
