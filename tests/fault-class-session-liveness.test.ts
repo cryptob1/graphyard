@@ -1086,14 +1086,16 @@ test('unit:fault-class-session-liveness GY-1863 action:session — a stall reads
   // base answered the same stall by re-submitting the wake text twice more and
   // failing, which is the 17 failed wakes the instance records.
   const dialog: string[][] = [];
-  let dialogDeliveries = 0;
-  const dismissed = await deliverPrompt('w1V:pQ35', 'wake', herdrRunOf(dialog, args => herdrSubcommand(args) === 'agent prompt' && ++dialogDeliveries === 1 ? GY1863_STALLED
-    : herdrSubcommand(args) === 'agent read' ? GY1863_DIALOG : GY1863_OK), { acceptMs: 1_000, pauseMs: 0 });
-  assert.equal(dialogDeliveries, 2, 'the text is delivered again only after the notice is away');
-  assert.equal(dismissed.attempts, 2);
-  assert.deepEqual(dismissed.dismissed, ['autocompact']);
-  assert.deepEqual(dialog.map(herdrSubcommand), ['agent prompt', 'agent read', 'agent send-keys', 'agent prompt'], 'the stall is read off the pane, the notice put away with esc, then the delivery retries');
-  assert.deepEqual(dialog[2], ['agent', 'send-keys', 'w1V:pQ35', 'esc'], 'the dismissal is the no-change answer, never a menu choice');
+  let dialogDeliveries = 0, putAway = 0;
+  // The dialog is on the pane until the delivery's `esc` puts it away, as a runtime draws it.
+  const dismissed = await deliverPrompt('w1V:pQ35', 'wake', herdrRunOf(dialog, args => herdrSubcommand(args) === 'agent send-keys' && ++putAway ? GY1863_OK
+    : herdrSubcommand(args) === 'agent prompt' && ++dialogDeliveries === 1 ? GY1863_STALLED
+    : herdrSubcommand(args) === 'agent read' ? (putAway ? GY1863_OK : GY1863_DIALOG) : GY1863_OK), { acceptMs: 1_000, pauseMs: 0 });
+  assert.equal(dialogDeliveries, 1, 'the text is typed only after the notice is away');
+  assert.equal(dismissed.attempts, 1);
+  assert.deepEqual(dismissed.dismissed, ['autocompact'], 'the notice is put away once, before the first submission, and never again');
+  assert.deepEqual(dialog.map(herdrSubcommand), ['agent read', 'agent send-keys', 'agent prompt', 'agent read', 'agent wait'], 'the pane is read before anything is typed, the notice put away with esc, and the stall over the cleared pane waits the accepted submission out');
+  assert.deepEqual(dialog[1], ['agent', 'send-keys', 'w1V:pQ35', 'esc'], 'the dismissal is the no-change answer, never a menu choice');
 
   // A stall over an undialoged pane is the start Herdr accepted but has not
   // shown yet: the acceptance window waits it out instead of re-typing the
@@ -1102,7 +1104,7 @@ test('unit:fault-class-session-liveness GY-1863 action:session — a stall reads
   const waited = await deliverPrompt('w1V:pQ35', 'wake', herdrRunOf(slow, args => herdrSubcommand(args) === 'agent prompt' ? GY1863_STALLED
     : herdrSubcommand(args) === 'agent read' ? 'the session sits idle, output unchanged' : GY1863_OK), { acceptMs: 1_000, pauseMs: 0 });
   assert.equal(waited.attempts, 1, 'the accepted submission is waited for, not delivered twice');
-  assert.deepEqual(slow.map(herdrSubcommand), ['agent prompt', 'agent read', 'agent wait']);
+  assert.deepEqual(slow.map(herdrSubcommand), ['agent read', 'agent prompt', 'agent read', 'agent wait']);
 
   // A consent dialog is not a notice: it is never put away, and the refusal
   // that finally stands carries the pane's own words instead of a stall triple.
@@ -1195,6 +1197,72 @@ test('unit:fault-class-session-liveness GY-1863 action:wake — a master whose w
   assert.equal(state.master.rotations, 2);
   const wake = Object.values(state.actions).find(action => action.kind === 'wake');
   assert.ok(wake && wake.state === 'done' && /rotated/.test(wake.detail), `the wake action records the rotation it performed: ${JSON.stringify(wake?.detail)}`);
+});
+
+test('unit:fault-class-session-liveness GY-1863 action:wake — the deaf rotation is bounded: after three consecutive deaf ends the loop stops replacing the session and holds the wake failed until one is accepted', async () => {
+  const NOW = Date.parse('2026-10-17T06:00:00.000Z');
+  const cfg = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: 'graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'vishrog', masterAgentName: 'graphyard-master-project',
+    autoMerge: true, mergeMethod: 'merge', workers: [], run: { proofWorkflow: 'acceptance.yml', masterSessionMinutes: 720, masterHeartbeatMinutes: 5 } });
+  const item: Work = {
+    id: 'work-GY-9', key: 'GY-9', title: 'A claimable item keeps a subject standing', description: '', type: 'bug', priority: 0, dependencies: [],
+    criteria: [{ id: 'AC-1', text: 'Done', proofs: ['manual:x'] }], policy: { checks: ['test'], review: true }, plannedFiles: [],
+    stage: 'ready', revision: 1, policyRevision: 1, createdAt: new Date(NOW - 7_200_000).toISOString(), updatedAt: new Date(NOW).toISOString(),
+    stageEnteredAt: new Date(NOW - 3_600_000).toISOString(), ready: true, epoch: 0,
+    lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
+    gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [],
+  } as unknown as Work;
+  const state = emptyDaemonState(cfg);
+  Object.assign(state.master, { agentName: 'graphyard-master-project', pane: 'w1V:pQ35', runtime: 'claude', account: 'claude-b', session: 'reg-1',
+    startedAt: new Date(NOW - 600_000).toISOString(), adopted: true, rotations: 0, misses: 0 });
+  const harness = { agents: [{ name: 'graphyard-master-project', pane_id: 'w1V:pQ35', agent: 'claude', agent_status: 'idle' }] as { name: string; pane_id: string; agent: string; agent_status: string }[],
+    launches: [] as string[], closed: [] as string[], ended: [] as string[] };
+  let deaf = true;
+  const effects = {
+    agents: () => harness.agents, herdr: () => ({ agents: harness.agents, available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: [item], now: new Date(at.value).toISOString() }), dispatch: async () => {}, requestProof: () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(at.value).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: (pane: string) => { harness.closed.push(pane); harness.agents = harness.agents.filter(agent => agent.pane_id !== pane); },
+    // The pane whatever replaces the session stays deaf, as a Herdr regression or an unknown dialog would keep it.
+    promptSession: async () => { if (deaf) throw new PromptNotAcceptedError('the pane did not visibly accept its prompt after 3 deliveries (agent_prompt_stalled, agent_prompt_stalled, agent_prompt_stalled); the session is closed and relaunched rather than left idle'); },
+    endRegistrySession: async (session: string) => { harness.ended.push(session); },
+    masterSession: { launch: async () => {
+      const pane = `w1V:pQ${36 + harness.launches.length}`, session = `reg-${harness.launches.length + 2}`;
+      harness.launches.push(pane);
+      harness.agents = [...harness.agents, { name: cfg.masterAgentName!, pane_id: pane, agent: 'claude', agent_status: 'idle' }];
+      return { agentName: cfg.masterAgentName!, pane, runtime: 'claude', account: 'claude-b', session };
+    } },
+    persist: async () => {},
+  } as unknown as DaemonEffects;
+  const at = { value: NOW };
+  // The heartbeat is due every other cycle (the relaunch restarts the quiet clock), so each
+  // replacement is woken five minutes after it started and answers deaf like its predecessor.
+  const cycle = async (ms: number) => { at.value += ms; await runCycle(cfg, state, effects, () => at.value); };
+  const fiveMinutes = 5 * 60_000;
+  for (let round = 0; round < 6; round++) { await cycle(fiveMinutes); await cycle(fiveMinutes); }
+  // Three replacements, each woken once, each deaf: the bound is reached, and nothing replaces the session again.
+  assert.equal(state.master.rotations, 3, `three deaf rotations: ${JSON.stringify(state.master.lastEnd)}`);
+  assert.equal(harness.launches.length, 3, 'one relaunch per deaf rotation, and no more');
+  assert.equal(harness.closed.length, 3, 'one pane closed per deaf rotation, and no more');
+  assert.equal(state.master.lastEnd?.cause, 'deaf');
+  assert.match(state.master.lastEnd!.detail, /3 consecutive deaf ends without an accepted wake/);
+  const bound = state.actions['master:wake'];
+  assert.ok(bound && bound.state === 'failed' && /stops rotating on this bound/.test(bound.detail), `the wake stands failed on the bound record: ${JSON.stringify(bound?.detail)}`);
+  assert.equal(bound.attempts > 1, true, 'every further deaf wake restates the same standing record');
+  assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'action:wake').length, 1, 'the class counts one standing action:wake instance, not one per cycle');
+  assert.ok(state.faults.failing['master:wake'], 'the failure stands until a delivery is accepted');
+
+  // A session accepts a delivery: the wake records done, the standing failure ends, and a later
+  // deaf end starts a fresh count — the rotation is the remedy again, at the bound's pace.
+  deaf = false;
+  await cycle(fiveMinutes);
+  assert.equal(state.actions['master:wake'].state, 'done', 'the accepted wake closes the standing deaf-bound failure');
+  assert.deepEqual(state.faults.failing['master:wake'], undefined);
+  deaf = true;
+  await cycle(fiveMinutes); await cycle(fiveMinutes);
+  assert.equal(state.master.rotations, 4, 'a deaf end after an accepted wake is rotated once more');
+  assert.equal(harness.launches.length, 4);
 });
 
 test('unit:fault-class-session-liveness GY-1863 session — a finished session counts only once the orphan watch and gone-worker preserve stand down, never inside their establishment', async () => {

@@ -20,12 +20,15 @@ import { herdrCall, herdrJson, herdrRun } from './herdr.js';
  * submission cannot pass, as the production master session was for two hours of failed wakes.
  * Re-submitting blind told a slow session the same thing twice more and failed a dialog-bound one
  * with a bare stall triple, and every caller recorded the refusal as a session-liveness failure of
- * a session that was there all along. Now a stall is read off the pane before anything is
- * re-submitted: a notice the pane's dialog catalogue safely dismisses is dismissed and the text
- * delivered again, and otherwise the submission Herdr accepted is waited out to the acceptance
- * window before it is judged dropped (GY-93) and delivered again. What the pane last showed
- * travels on the error a final refusal carries, so the record names the dialog instead of a stall
- * triple.
+ * a session that was there all along. Now the pane is read before anything is typed — the
+ * submission's Enter would choose a dialog's highlighted option, exactly as the production wake
+ * would have answered the autocompact prompt — a notice the pane's dialog catalogue safely
+ * dismisses is dismissed and the text delivered again, and otherwise the submission Herdr accepted
+ * is waited out to the acceptance window before it is judged dropped (GY-93) and delivered again.
+ * A dismissal never spends one of the attempts: the delivery it enabled is granted on top, so a
+ * notice put away on the last attempt is followed by the delivery it cleared the pane for. What
+ * the pane last showed travels on the error a final refusal carries, so the record names the
+ * dialog instead of a stall triple.
  */
 export const promptAttempts = 3, promptAcceptMs = 20_000, promptRetryPauseMs = 3_000;
 /** How long a dismissed notice is given to clear before the text is delivered again. */
@@ -49,8 +52,22 @@ export async function deliverPrompt(target: string, text: string, run?: ChildRun
   const accepted = ['--until', 'working', '--until', 'blocked', '--timeout', String(acceptMs)];
   const stalls: string[] = [], dismissed: string[] = [];
   let shown: string | null = null;
-  for (let attempt = 1; attempt <= attempts; attempt++) {
+  // A dismissal grants the delivery it enabled on top of the attempts, never instead of one; the
+  // grant is capped at the attempt count, so a pane that re-draws a notice every round is bounded.
+  let granted = 0;
+  for (let attempt = 1; attempt <= attempts + granted; attempt++) {
     try {
+      // The first submission is read off the pane before it is typed: a notice dialog showing now
+      // would take the submission's Enter as its own menu choice, before any stall is ever judged.
+      if (attempt === 1) {
+        shown = await readSessionScreen(target, run);
+        const showing = detectNoticeDialog(shown);
+        if (showing) {
+          await herdrRun(['agent', 'send-keys', target, 'esc'], run);
+          dismissed.push(showing.kind);
+          await sleep(noticeSettleMs);
+        }
+      }
       // Herdr takes options only after the prompt text; 'follow' submits it and then waits for the
       // agent to leave idle, which is the same confirmation for a caller whose text must come last.
       if (options.confirm === 'follow') { await herdrJson(['agent', 'prompt', target, text], run); await herdrJson(['agent', 'wait', target, ...accepted], run); }
@@ -68,10 +85,11 @@ export async function deliverPrompt(target: string, text: string, run?: ChildRun
       if (notice) {
         await herdrRun(['agent', 'send-keys', target, 'esc'], run);
         dismissed.push(notice.kind);
+        if (granted < attempts) granted += 1;
         await sleep(noticeSettleMs);
         continue;
       }
-      if (code === 'agent_prompt_stalled' && attempt < attempts) {
+      if (code === 'agent_prompt_stalled' && attempt < attempts + granted) {
         try { await herdrJson(['agent', 'wait', target, ...accepted], run); return { attempts: attempt, accepted: true as const, ...(dismissed.length ? { dismissed } : {}) }; }
         catch (waited) {
           const waitCode = herdrErrorCode(waited);
@@ -80,7 +98,7 @@ export async function deliverPrompt(target: string, text: string, run?: ChildRun
         }
       }
       // The pause is awaited on the event loop: nothing else in the process waits with it.
-      if (attempt < attempts) await sleep(pauseMs);
+      if (attempt < attempts + granted) await sleep(pauseMs);
     }
   }
   const pane = shown ? sessionWords(shown, 200) : '';

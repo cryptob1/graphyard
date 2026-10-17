@@ -104,7 +104,7 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
         && !(item.kind === 'base-conflict' && baseConflictInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'merge-base-dismissed' && mergeBaseDismissalInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'stalled-step' && reworkDecisionInMotion(byKey.get(item.subject), now))
-      && !(item.kind === 'session' && sessionEndInMotion(state, byKey.get(item.subject)))
+      && !(item.kind === 'session' && sessionEndInMotion(state, byKey.get(item.subject), now))
         && !(item.kind === 'owed-decision' && owedReworkLine(byKey.get(item.subject), item.text) && reworkDecisionInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'owed-decision' && owedEscalationInMotion(byKey.get(item.subject), item.text, now))
         && !(item.kind === 'owed-decision' && owedContainmentLine(byKey.get(item.subject), item.text) && !standingFence(byKey.get(item.subject), now))
@@ -154,10 +154,15 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
  * machinery working, the ordinary pace of work as containmentInMotion is; on 17 October 2026
  * GY-1860's session counted at 03:59:33Z, two minutes before the same machinery's preserve ended
  * its attempt. Once the records are gone — the attempt ended, or the machinery stood down without
- * ending it — the line counts again, as the failed recovery it is.
+ * ending it — the line counts again, as the failed recovery it is. The grace is bounded like
+ * containmentInMotion's: an establishment that outlives `sessionEndMotionBoundMs` (a stop or a
+ * preserve that keeps failing) stops hiding the line, whose own failed escalation or preserve
+ * action still surfaces beside it.
  */
-export function sessionEndInMotion(state: Pick<DaemonState, 'orphans' | 'absences'>, work: Pick<Work, 'id'> | undefined): boolean {
-  return !!work && !!(state.orphans[work.id] ?? state.absences[work.id]);
+export const sessionEndMotionBoundMs = 30 * 60_000;
+export function sessionEndInMotion(state: Pick<DaemonState, 'orphans' | 'absences'>, work: Pick<Work, 'id'> | undefined, now: number): boolean {
+  const seen = work ? state.orphans[work.id] ?? state.absences[work.id] : undefined;
+  return !!seen && now - Date.parse(seen.firstSeenAt) <= sessionEndMotionBoundMs;
 }
 /**
  * GY-1403. Whether an item's blocker is still in motion: it was raised within `masterTurnWaitBoundMs`

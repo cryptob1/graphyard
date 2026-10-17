@@ -788,6 +788,7 @@
     "tests/soak-merge-writer.test.ts": 4000,
     "tests/soak-observation-window.test.ts": 45000,
     "tests/soak-orphan-supervisor.test.ts": 1500,
+    "tests/soak-session-liveness-deaf.test.ts": 1500,
     "tests/soak-pages-environment-and-branch-recovery.test.ts": 61453,
     "tests/soak-pi-provider-limit.test.ts": 80000,
     "tests/soak-plane-stall.test.ts": 2857,

@@ -326,19 +326,21 @@ test('integration:prompt-delivery-confirmed — a launch counts only once the ru
   let prompts = 0, waits = 0; const calls: string[][] = [];
   const delivered = await deliverPrompt('opencode-worker', 'Implement GY-68', herdr(calls, args => args[1] === 'prompt' && ++prompts < 3 ? stalled : args[1] === 'wait' && ++waits < 3 ? timedOut : undefined), fast);
   assert.equal(delivered.attempts, 3);
-  assert.deepEqual(calls[0], ['agent', 'prompt', 'opencode-worker', 'Implement GY-68', '--wait', '--until', 'working', '--until', 'blocked', '--timeout', '1000']);
-  assert.deepEqual(calls[1], ['agent', 'read', 'opencode-worker', '--source', 'recent-unwrapped', '--lines', '80'], 'a stall is read off the pane before anything is re-submitted');
-  assert.deepEqual(calls[2], ['agent', 'wait', 'opencode-worker', '--until', 'working', '--until', 'blocked', '--timeout', '1000'], 'the submission Herdr accepted is waited out');
+  assert.deepEqual(calls[0], ['agent', 'read', 'opencode-worker', '--source', 'recent-unwrapped', '--lines', '80'], 'the pane is read before anything is typed, so a notice dialog never takes the submission as its own answer');
+  assert.deepEqual(calls[1], ['agent', 'prompt', 'opencode-worker', 'Implement GY-68', '--wait', '--until', 'working', '--until', 'blocked', '--timeout', '1000']);
+  assert.deepEqual(calls[2], ['agent', 'read', 'opencode-worker', '--source', 'recent-unwrapped', '--lines', '80'], 'a stall is read off the pane before anything is re-submitted');
+  assert.deepEqual(calls[3], ['agent', 'wait', 'opencode-worker', '--until', 'working', '--until', 'blocked', '--timeout', '1000'], 'the submission Herdr accepted is waited out');
   await assert.rejects(deliverPrompt('dropped', 'x', herdr([], args => args[1] === 'prompt' || args[1] === 'wait' ? stalled : undefined), fast), (error: any) => error instanceof PromptNotAcceptedError && error.promptDropped && /after 3 deliveries/.test(error.message));
   const blocked: string[][] = [];
   await assert.rejects(deliverPrompt('blocked', 'x', herdr(blocked, () => ({ error: { code: 'agent_blocked', message: 'agent is blocked' } })), fast), /agent is blocked/);
-  assert.equal(blocked.length, 1, 'a refusal other than a stall is not retried');
+  assert.equal(blocked.length, 2, 'a refusal other than a stall is not retried: the pre-submit read, then the one refused prompt');
+  assert.equal(blocked[1][1], 'prompt');
   // The real CLI exits non-zero with the error JSON on its output.
   assert.equal(herdrErrorCode(Object.assign(new Error('Command failed: herdr agent prompt'), { stdout: '{"error":{"code":"agent_prompt_stalled","message":"m"}}' })), 'agent_prompt_stalled');
   const follow: string[][] = []; let followWaits = 0;
   assert.equal((await deliverPrompt('master', 'You are the master', herdr(follow, args => args[1] === 'wait' && ++followWaits === 1 ? { error: { code: 'timeout', message: 'timed out' } } : undefined), { ...fast, confirm: 'follow' })).attempts, 2);
-  assert.deepEqual(follow.map(args => args[1]), ['prompt', 'wait', 'read', 'prompt', 'wait']);
-  assert.equal(follow[0].at(-1), 'You are the master');
+  assert.deepEqual(follow.map(args => args[1]), ['read', 'prompt', 'wait', 'read', 'prompt', 'wait']);
+  assert.equal(follow[1].at(-1), 'You are the master', 'the text still travels last on the follow confirmation\'s prompt call');
 
   const { root, credentialDirectory, cleanup } = await master({ reviewer: true });
   try {
