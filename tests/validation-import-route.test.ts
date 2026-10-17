@@ -217,7 +217,7 @@ test('unit:validation-import-feeds-hold — a required failed, blocked or unrun 
   const { handedImports } = await import('../src/validation-import.js');
   const handedNow = async (at = candidate) => handedImports(JSON.stringify({ candidate: at.id, sha: at.sha, imports: await promotionImports(readAs(reader), candidate) }), candidate);
   assert.deepEqual(await handedNow(), await promotionImports(readAs(reader), candidate), 'a hold handed for this candidate is the hold the plane serves');
-  assert.equal((await handedNow()).held, true);
+  assert.equal((await handedNow() as any).held, true);
   assert.match((await handedNow({ ...candidate, id: '20261001T000000Z' }) as any).unread, /was read for candidate 20261001T000000Z/, 'a hold read for another candidate counts for nothing');
   assert.match((handedImports('', candidate) as any).unread, /not the JSON/, 'an empty hand-off is unread, never released');
   assert.equal((handedImports(JSON.stringify({ candidate: candidate.id, sha: candidate.sha, imports: { unread: 'plane down' } }), candidate) as any).unread, 'plane down');
