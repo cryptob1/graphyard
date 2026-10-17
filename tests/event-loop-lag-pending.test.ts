@@ -29,3 +29,17 @@ test('unit:event-loop-lag-counts-pending-overrun — a block that ends just befo
   quiet.stop();
   assert.ok(calm && calm.max < 50, `a window read with no block reads no starvation: ${JSON.stringify(calm)}`);
 });
+
+test('unit:event-loop-lag-nothing-owed-adds-no-sample — a window holding one recorded sample, read before the next deadline, keeps that sample as its p50', () => {
+  // The starved tick after its callback ran: the 200 ms block is recorded and the read comes before
+  // the next deadline, so nothing is owed. Set on the sampler directly so the timers phase cannot
+  // reorder it; a 0 ms "pending" sample here would read p50 0 ms beside max 200 ms.
+  const lag = new EventLoopLag();
+  lag.start();
+  const sampler = lag as unknown as { samples: number[]; due: number };
+  sampler.samples = [200];
+  sampler.due = performance.now() + 60_000;
+  const reading = lag.read();
+  lag.stop();
+  assert.deepEqual(reading, { p50: 200, max: 200 });
+});

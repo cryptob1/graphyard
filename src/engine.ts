@@ -867,12 +867,13 @@ export class EventLoopLag {
    * work — would go unrecorded and the tick would read no lag at all (GY-1886). The overrun the
    * next callback is still owed counts beside the recorded samples, so a block is seen however the
    * event loop orders its read against the timers phase; when nothing is owed and no callback has
-   * run, nothing has been observed and the read says so.
+   * run, nothing has been observed and the read says so. Nothing owed is no observation, so it adds
+   * no 0 ms sample to pull p50 below what the recorded callbacks saw.
    */
   read(): { p50: number; max: number } | null {
     const pending = this.timer ? Math.max(0, performance.now() - this.due) : 0;
-    if (!this.samples.length && !pending) return null;
-    const sorted = [...this.samples, pending].sort((a, b) => a - b);
+    const sorted = (pending > 0 ? [...this.samples, pending] : [...this.samples]).sort((a, b) => a - b);
+    if (!sorted.length) return null;
     return { p50: Math.round(sorted[Math.ceil(sorted.length / 2) - 1]), max: Math.round(sorted[sorted.length - 1]) };
   }
   /** Close the window and forget its samples. */
