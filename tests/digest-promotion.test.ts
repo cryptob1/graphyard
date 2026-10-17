@@ -444,7 +444,7 @@ test('unit:managed-uat-attests-digests — the loop\'s managed-repository UAT va
     const digests = record.suites.find(suite => suite.name === 'digests');
     assert.equal(digests?.passed, false, 'the digests suite judged the managed candidate');
     assert.match(digests!.detail, /web/, 'naming the service whose instance runs another digest');
-    assert.deepEqual(repo.tags().find(tag => tag.id === candidate.id && 'suites' in tag)?.digests, built.artifacts, 'the recorded verdict names the digests UAT was deployed with');
+    assert.equal(repo.tags().find(tag => tag.id === candidate.id && 'suites' in tag)?.digests, undefined, 'the observation refused the digests, so the failed verdict names none (GY-1868)');
     assert.ok(asked.length > 0 && asked.every(entry => entry === 'instances uat'), 'it asked the adapter for UAT\'s instances');
     assert.ok(repo.tagNames().includes(`rc-uat/${candidate.id}`), 'and recorded the verdict');
   } finally { globalThis.fetch = realFetch; }
