@@ -439,8 +439,46 @@ export interface PromotionReads {
   local?: LocalReleasePorts | null;
 }
 /** GY-1966: the promotion-flight reading — the gates that stop every dispatch, local containment and the pipeline-progress answers — is a module of its own (src/daemon/promotion-flight.ts); these names are its public surface. */
-export { localAncestry, noLocalPortsReason, promotionCarryingMerge, promotionFrozenReasonPrefix, promotionHandoffMs, promotionMovement, promotionOffReason, promotionWaitSuffix } from './promotion-flight.js';
-import { localAncestry, noLocalPortsReason, promotionFrozenReasonPrefix, promotionOffReason } from './promotion-flight.js';
+export { noLocalPortsReason, promotionCarryingMerge, promotionFrozenReasonPrefix, promotionHandoffMs, promotionMovement, promotionOffReason, promotionWaitSuffix } from './promotion-flight.js';
+import { noLocalPortsReason, promotionFrozenReasonPrefix, promotionOffReason } from './promotion-flight.js';
+
+/**
+ * Local ancestry over this checkout's own object store, which is what "does the release contain
+ * this merge" actually asks. The base branch is fetched once, lazily: an observation that answers
+ * every delivery from the retained containment fetches nothing at all.
+ */
+export function localAncestry(root: string, baseBranch: string, run: ChildRun) {
+  let fetched: string | null | undefined;
+  const git = (...args: string[]) => run('git', ['-C', root, ...args]);
+  const fetchBase = async () => {
+    if (fetched !== undefined) return fetched;
+    try { await git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`); fetched = null; }
+    catch (error) { fetched = message(error).split('\n')[0]; }
+    return fetched;
+  };
+  const held = async (ancestor: string, descendant: string): Promise<boolean | null> => {
+    try { await git('merge-base', '--is-ancestor', ancestor, descendant); return true; }
+    // Exit 1 is git's "not an ancestor". Anything else — a commit this checkout does not hold,
+    // a broken repository — is unknown, and unknown containment is never read as deployed.
+    catch (error: any) { return error?.status === 1 ? false : null; }
+  };
+  return {
+    get fetchFailure() { return fetched || null; },
+    /** `true`/`false` when git could answer, `null` when this checkout does not hold both commits. */
+    async contains(ancestor: string, descendant: string): Promise<boolean | null> {
+      if (ancestor === descendant) return true;
+      await fetchBase();
+      return held(ancestor, descendant);
+    },
+    /** GY-1831: `contains` over the commits the checkout already holds, fetching nothing — the
+     * caller has just read a release whose observation fetched the base branch, or answers null. */
+    containsHeld(ancestor: string, descendant: string): Promise<boolean | null> {
+      if (ancestor === descendant) return Promise.resolve(true);
+      return held(ancestor, descendant);
+    },
+  };
+}
+
 /** The mode the drive runs in: control-plane only when the merger reads so; an unreadable merger is github's, as it is for an older server. */
 export async function promotionMode(reads: Pick<PromotionReads, 'merger'>): Promise<MergerMode> {
   if (!reads.merger) return 'github';

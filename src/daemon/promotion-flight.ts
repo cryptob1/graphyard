@@ -1,41 +1,20 @@
 // Concern: whether the promotion pipeline is moving a delivered merge toward the release that serves it — the wait a verify-deployment failure may name (GY-1831, GY-1966).
 import type { ChildRun } from '../child-runner.js';
-import { message, type PromotionState } from './state.js';
+import type { PromotionState } from './state.js';
 import { promotionWaitBoundMs, promotionWaitClause } from '../model/action-kinds.js';
 
 /**
- * Local ancestry over this checkout's own object store, which is what "does the release contain
- * this merge" actually asks. The base branch is fetched once, lazily: an observation that answers
- * every delivery from the retained containment fetches nothing at all.
+ * Containment over the commits this checkout already holds — the observation that failed just
+ * fetched the base branch. This module fetches nothing: that fetch stays behind `localAncestry` in
+ * ./deployment.ts, the allowlisted door (tests/git-network-door.test.ts).
  */
-export function localAncestry(root: string, baseBranch: string, run: ChildRun) {
-  let fetched: string | null | undefined;
-  const git = (...args: string[]) => run('git', ['-C', root, ...args]);
-  const fetchBase = async () => {
-    if (fetched !== undefined) return fetched;
-    try { await git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`); fetched = null; }
-    catch (error) { fetched = message(error).split('\n')[0]; }
-    return fetched;
-  };
-  const held = async (ancestor: string, descendant: string): Promise<boolean | null> => {
-    try { await git('merge-base', '--is-ancestor', ancestor, descendant); return true; }
-    // Exit 1 is git's "not an ancestor". Anything else — a commit this checkout does not hold,
-    // a broken repository — is unknown, and unknown containment is never read as deployed.
-    catch (error: any) { return error?.status === 1 ? false : null; }
-  };
+function heldAncestry(root: string, run: ChildRun) {
   return {
-    get fetchFailure() { return fetched || null; },
-    /** `true`/`false` when git could answer, `null` when this checkout does not hold both commits. */
-    async contains(ancestor: string, descendant: string): Promise<boolean | null> {
+    async containsHeld(ancestor: string, descendant: string): Promise<boolean | null> {
       if (ancestor === descendant) return true;
-      await fetchBase();
-      return held(ancestor, descendant);
-    },
-    /** GY-1831: `contains` over the commits the checkout already holds, fetching nothing — the
-     * caller has just read a release whose observation fetched the base branch, or answers null. */
-    containsHeld(ancestor: string, descendant: string): Promise<boolean | null> {
-      if (ancestor === descendant) return Promise.resolve(true);
-      return held(ancestor, descendant);
+      try { await run('git', ['-C', root, 'merge-base', '--is-ancestor', ancestor, descendant]); return true; }
+      // Exit 1 is git's "not an ancestor"; anything else is unknown, never read as deployed.
+      catch (error: any) { return error?.status === 1 ? false : null; }
     },
   };
 }
@@ -93,7 +72,7 @@ export async function promotionCarryingMerge(state: PromotionState | null, merge
   const reason = state.reason;
   if (reason !== null && (reason === promotionOffReason || reason.startsWith(promotionFrozenReasonPrefix) || reason === noLocalPortsReason)) return false;
   if (!state.mainSha) return false;
-  const ancestry = localAncestry(root, baseBranch, run);
+  const ancestry = heldAncestry(root, run);
   const recorded = await ancestry.containsHeld(mergeSha, state.mainSha);
   // A merge that landed after the loop's last ledger read is on the base branch the failed
   // observation just fetched, ahead of the recorded tip: the loop's next read (within its ledger
@@ -135,13 +114,24 @@ export async function promotionCarryingMerge(state: PromotionState | null, merge
  * changes when the pipeline moves again — the row's run of identical failures measures the
  * stretch since the pipeline last moved, and `promotionWaitBoundMs` bounds how long a stretch
  * without one may last.
+ *
+ * It names the newest of the recorded promotion, the in-flight dispatch and the newest
+ * candidate's cut, never the first kind present: the ledger keeps production's last promotion,
+ * so taking it first pinned the movement through every later dispatch and re-cut (GY-1966's
+ * rework). At equal instants the later stage wins.
  */
 export function promotionMovement(state: PromotionState): string {
-  const promotedAt = state.promotedAt ? Date.parse(state.promotedAt) : Number.NaN;
-  if (state.promotedSha && Number.isFinite(promotedAt)) return `the promotion of ${state.promotedSha.slice(0, 12)} recorded ${state.promotedAt}`;
-  if (state.inFlight) return `the release candidate dispatched ${state.lastDispatchAt ?? state.dispatchedAt ?? 'most recently'} is still in validation`;
   const newest = state.candidates?.[0] ?? null, cutAt = newest ? Date.parse(newest.cutAt) : Number.NaN;
-  if (newest && Number.isFinite(cutAt)) return `the newest candidate ${newest.id} was cut ${newest.cutAt}`;
+  const dispatched = state.lastDispatchAt ?? state.dispatchedAt;
+  const dispatchAt = state.inFlight && dispatched ? Date.parse(dispatched) : Number.NaN;
+  const promotedAt = state.promotedSha && state.promotedAt ? Date.parse(state.promotedAt) : Number.NaN;
+  let at = Number.NaN, movement = '';
+  const consider = (instant: number, text: () => string) => { if (Number.isFinite(instant) && (Number.isNaN(at) || instant >= at)) { at = instant; movement = text(); } };
+  consider(promotedAt, () => `the promotion of ${state.promotedSha!.slice(0, 12)} recorded ${state.promotedAt}`);
+  consider(dispatchAt, () => `the release candidate dispatched ${dispatched} is still in validation`);
+  if (newest) consider(cutAt, () => `the newest candidate ${newest.id} was cut ${newest.cutAt}`);
+  if (movement) return movement;
+  if (state.inFlight) return 'the release candidate dispatched most recently is still in validation';
   if (state.cutSha && state.mainSha && state.cutSha !== state.mainSha) return `main ${state.mainSha.slice(0, 12)} moved past the last candidate cut ${state.cutSha.slice(0, 12)}`;
   return 'the recorded promotion state names no newer movement';
 }

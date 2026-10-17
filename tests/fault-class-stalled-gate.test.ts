@@ -511,6 +511,49 @@ test('GY-1904: the wait-named run the ledger held files no more — the movement
   assert.deepEqual(trackFaults(emptyRecord(), classifyAttention(attention), stamp(130)).map(instance => instance.faultClass), ['deployment']);
 });
 
+test('GY-1904 replayed with production\'s earlier promotion recorded — the movement the wait names is the re-cut cycle\'s own, the wait text changes at the re-cut, and a cycle longer than the bound with a movement inside it never stalls', async () => {
+  // The real ledger keeps production's last promotion (the rc-production record), so the state a
+  // live pipeline records carries promotedSha/promotedAt from its first promotion on — GY-1904's
+  // own pipeline had promoted long before its re-cut cycle began. The movement is therefore the
+  // newest of the recorded promotion, the in-flight dispatch and the newest candidate's cut, and
+  // the recorded promotion pins nothing: naming it first kept the movement text fixed through the
+  // whole re-cut cycle, the row's unchanged run outlasted the bound, and the instance filed again.
+  const promoted = { promotedSha, promotedAt: stamp(3) };
+  const before = promotionState({ ...promoted, cutSha: candidateSha, dispatchedAt: stamp(26), lastDispatchAt: stamp(26),
+    candidates: [{ id: 'rc-20261017T182412Z', sha: candidateSha, cutAt: stamp(26), prs: 2, queued: 2 }], reason: dispatchFailedReason });
+  assert.match(promotionMovement(before), /rc-20261017T182412Z/, 'the movement names the re-cut cycle\'s candidate');
+  assert.doesNotMatch(promotionMovement(before), /the promotion of/, 'production\'s earlier promotion does not pin the movement (the rework\'s B1)');
+  const after = promotionState({ ...promoted, cutSha: candidateSha, dispatchedAt: stamp(91), lastDispatchAt: stamp(91),
+    candidates: [{ id: 'rc-20261017T192912Z', sha: candidateSha, cutAt: stamp(91), prs: 2, queued: 2 }], reason: dispatchFailedReason });
+  assert.notEqual(promotionMovement(after), promotionMovement(before), 'the movement changes at the re-cut, so the row\'s unchanged run restarts');
+  const plain = doesNotCarry('GY-1904', '057124e72157', '9198a6c88fb5');
+  const waitBefore = `${plain}; ${await suffixOf(before, stampMs(90))}`;
+  const waitAfter = `${plain}; ${await suffixOf(after, stampMs(95))}`;
+  assert.notEqual(waitAfter, waitBefore, 'the failure\'s reason changes when the pipeline moves');
+  // The re-cut cycle runs 131 minutes — past the 90-minute bound — but moves at its 91st minute: each
+  // movement starts a fresh run of identical failures, and no run outlasts the bound. This is the
+  // stretch that filed GY-1904 at the base, where the pinned movement left one run for the whole cycle.
+  const row = mixedVerify('GY-1904', [
+    ...[0, 8, 16].map(at => [at, at + 1, plain] as const),
+    ...[27, 38, 49, 60, 71, 82, 90].map(at => [at, at + 1, waitBefore] as const),
+    ...[92, 103, 114, 125, 136, 147, 158].map(at => [at, at + 1, waitAfter] as const),
+  ]);
+  assert.equal(actionStall(row), null, 'a cycle longer than the bound with a movement inside it does not stall');
+  assert.deepEqual(attentionFor('GY-1904', row), []);
+  assert.deepEqual(trackFaults(emptyRecord(), classifyAttention(attentionFor('GY-1904', row)), stamp(160)), []);
+  // The control: the same stretch on a pipeline that never moves again is one unchanged run past the
+  // bound — it stalls, and files the machinery's production instance, as a stopped pipeline should.
+  const frozen = mixedVerify('GY-1904', [
+    ...[0, 8, 16].map(at => [at, at + 1, plain] as const),
+    ...[27, 38, 49, 60, 71, 82, 90, 101, 112, 123, 134, 145, 156].map(at => [at, at + 1, waitBefore] as const),
+  ]);
+  assert.ok(actionStall(frozen), 'the same stretch without a movement is one run past the bound, and stalls');
+  const attention = attentionFor('GY-1904', frozen);
+  assert.equal(attention.length, 1);
+  assert.equal(attention[0].kind, 'production');
+  assert.deepEqual(trackFaults(emptyRecord(), classifyAttention(attention), stamp(160)).map(instance => instance.faultClass), ['deployment']);
+});
+
 test('no recorded state, an unreadable containment and an unreadable ledger each answer not carrying: the plain failure stands', async () => {
   assert.equal(await carries(null), false, 'no loop has recorded promotion here, so nothing is in flight');
   assert.equal(await carries(promotionState({ mainSha: null, reason: 'The base branch tip could not be read, so nothing is promoted' })), false);
@@ -528,7 +571,10 @@ test('the executor wiring reads the recorded state alone: no cursor means no chi
   assert.equal(await effects.promotionWaitSuffix!(mergeSha), null, 'no cursor, no loop: the failure stands as it was');
   assert.equal(calls.length, 0, 'answering that read nothing and spawned nothing');
   const state = emptyDaemonState(wiringConfig);
-  await writeDaemonState(wiringConfig, { ...state, promotion: promotionState({ inFlight: true, reason: inFlightReason }) });
+  // The dispatch is the state's newest movement when its candidate is not listed yet — cut moments
+  // before the dispatch, the window before the workflow records the candidate (GY-1966's rework:
+  // the newest instant names the movement, so a tie at the candidate's cut names the cut).
+  await writeDaemonState(wiringConfig, { ...state, promotion: promotionState({ inFlight: true, lastDispatchAt: stamp(2), dispatchedAt: stamp(2), reason: inFlightReason }) });
   const named = await effects.promotionWaitSuffix!(mergeSha);
   assert.match(named!, new RegExp(promotionWaitClause), 'the recorded flight the loop left on its cursor is the wait the executor names');
   assert.match(named!, /still in validation/, 'the wait names the pipeline\'s newest demonstrated movement (GY-1966)');
@@ -552,7 +598,7 @@ test('the wait clause the executor throws is constant, and the movement beside i
   const standing = await suffixOf(gy1831Flight);
   for (const { subject, release, merge } of stalledGateInstances) {
     assert.ok(standing.startsWith(promotionWaitClause));
-    assert.match(standing, new RegExp(`does not carry ${subject}'s merge|the release candidate dispatched`), 'the movement names what the state last demonstrated');
+    assert.match(standing, /the release candidate dispatched|the newest candidate \S+ was cut /, 'the movement names what the state last demonstrated');
     assert.equal(await suffixOf(gy1831Flight), standing, 'the same state names the same wait: the run of unchanged reasons accumulates under the bound');
   }
   // A movement — the candidate concluding, a newer cut, a promotion recorded — changes the movement

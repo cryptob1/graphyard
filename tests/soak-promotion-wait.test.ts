@@ -40,7 +40,9 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * merge; a row whose release was served within the bound files no instance; a row left on a
  * pipeline whose validation window has closed stands plain, stalls, and files as the release
  * machinery's production instance, never a per-item stalled-action (GY-1966); while a failed
- * candidate's window stands the row names the wait, and past it never does; each row's attempts
+ * candidate's window stands the row names the wait, and past it never does; an attempt made after
+ * a new cut names the new movement, never the attempt-before's (the rework of GY-1966: the
+ * movement is the pipeline's newest, so the recorded promotion pins nothing); each row's attempts
  * are bounded; the cursor stays bounded; once merges resume every row is delivered; an attempt
  * while production is still deploying a recorded promotion names the wait. Instants are epoch
  * milliseconds, never a wall-clock reading.
@@ -65,7 +67,13 @@ const quietFails = (into: number) => quiet.some(([from, to]) => into >= from - h
  */
 const settleBoundMs = promotionWaitBoundMs + actionStallThreshold * actionRetryMaxMs + 2 * minute;
 
-interface Row { key: string; merge: string; mergedAt: number; deliveredAt: number | null; stalledAt: number | null; attemptsAtEnd: number | null; servedAt: number | null; filed: number }
+interface Row { key: string; merge: string; mergedAt: number; deliveredAt: number | null; stalledAt: number | null; attemptsAtEnd: number | null; servedAt: number | null; filed: number
+  /** The wait's movement this row's last wait-naming failure named, with the dispatch count then — the rework of GY-1966 checks a new cut changes it. */
+  lastWait: { cuts: number; movement: string } | null }
+
+/** The movement a wait-named failure carries, between the wait clause and its closing parenthesis (GY-1966). */
+const movementOf = (reason: string) => reason.includes(promotionWaitClause)
+  ? reason.slice(reason.indexOf(promotionWaitClause) + promotionWaitClause.length).trim().replace(/^\(/, '').replace(/\)$/, '') : null;
 
 async function simulate(waits: boolean) {
   const mainline = [sha('root')], index = new Map([[mainline[0], 0]]);
@@ -122,7 +130,7 @@ async function simulate(waits: boolean) {
   })['verify-deployment']!;
   const executor = { id: 'soak-executor', host: 'soak-host', principal: 'coordinator' };
 
-  let promotion: PromotionState | null = null, merges = 0, attempts = 0, handoffs = 0, strandedSoaking = 0;
+  let promotion: PromotionState | null = null, merges = 0, attempts = 0, handoffs = 0, strandedSoaking = 0, movementChanges = 0;
   const record = { instances: [] as never[], open: {} as Record<string, string>, failing: {} as Record<string, string> };
   const filed: { subject: string; at: number; kind: string; text: string }[] = [];
   for (; now <= t0 + endsAt; now += intervalMs) {
@@ -135,7 +143,7 @@ async function simulate(waits: boolean) {
         gate: 'merge', refusal: null, reason: `${key} merged as ${merge.slice(0, 12)} and no deployment carrying it has been observed`, binding: `delivery:${merge}`,
         requestedBy: 'graphyard', requestedAt: iso(now), state: 'pending', claim: null, attempts: 0, history: [] } as unknown as ActionRow;
       works.push({ id: `id-${key}`, key, stage: 'done', criteria: [], workspaces: [], delivery: { mergeSha: merge, mergedAt: iso(now) }, actionQueue: { actions: [row], history: [] } } as unknown as Work);
-      rows.set(key, { key, merge, mergedAt: now, deliveredAt: null, stalledAt: null, attemptsAtEnd: null, servedAt: null, filed: 0 });
+      rows.set(key, { key, merge, mergedAt: now, deliveredAt: null, stalledAt: null, attemptsAtEnd: null, servedAt: null, filed: 0, lastWait: null });
     }
     // The pipeline: a run concludes at the end of its validation, promoting its cut unless it fails; production serves a promotion a few minutes later.
     for (const run of dispatches) if (!run.concluded && now >= run.at + validationMs) {
@@ -170,6 +178,20 @@ async function simulate(waits: boolean) {
       if (waits && stranded && !inCycle && outcome.reason.includes(promotionWaitClause)) violations.push(`${row.key}: named the promotion wait after the pipeline had stopped moving`);
       if (handoff && contains(row.merge, production.sha) !== true) handoffs++;
       if (stranded && inCycle) strandedSoaking++;
+      // The rework of GY-1966: the wait names the pipeline's newest movement, so an attempt made
+      // after a new cut names the new movement and the row's run of identical failures restarts
+      // there. The same movement beside two attempts with a cut between them means a recorded
+      // promotion or a stale candidate is pinning the text — B1, the defect that refiled GY-1904.
+      if (waits && outcome.result === 'failed') {
+        const movement = movementOf(outcome.reason);
+        if (movement !== null) {
+          if (row.lastWait && row.lastWait.cuts < dispatches.length) {
+            if (row.lastWait.movement === movement) violations.push(`${row.key}: named ${movement} again after a new cut`);
+            else movementChanges++;
+          }
+          row.lastWait = { cuts: dispatches.length, movement };
+        }
+      }
       settleAction(claim.work, claim.row.id, { executor: executor.id, principal: executor.principal }, outcome.result, outcome.reason, new Date(now));
       if (outcome.result === 'done') {
         row.attemptsAtEnd ??= claim.row.attempts;
@@ -184,7 +206,7 @@ async function simulate(waits: boolean) {
       if (rows.has(instance.subject)) rows.get(instance.subject)!.filed++;
     }
   }
-  return { rows: [...rows.values()], filed, violations, logs, attempts, dispatches, changes: production.changes, handoffs, strandedSoaking };
+  return { rows: [...rows.values()], filed, violations, logs, attempts, dispatches, changes: production.changes, handoffs, strandedSoaking, movementChanges };
 }
 
 test('unit:soak-invariants-hold — GY-1831 and GY-1966: two simulated days of merges riding release candidates that promote, fail and are re-cut behind a moving main, and two quiet stretches: every verify-deployment row ends delivered or stalled within the promotion wait bound of the pipeline\'s last movement, a row its release served within the bound files no instance, a row left on a stopped pipeline files as the release machinery\'s, attempts stay bounded and every row is delivered once merges resume', { timeout: 600_000 }, async () => {
@@ -196,6 +218,7 @@ test('unit:soak-invariants-hold — GY-1831 and GY-1966: two simulated days of m
   assert.deepEqual(logs, [], 'the cursor was readable all day');
   assert.ok(day.handoffs >= 10, `attempts fell inside a deployment handoff and named the wait: ${day.handoffs}`);
   assert.ok(day.strandedSoaking >= 1, `attempts fell on a failed candidate whose validation window stood and named the wait: ${day.strandedSoaking}`);
+  assert.ok(day.movementChanges >= 10, `attempts after a new cut name the new movement: ${day.movementChanges} cut-straddling attempt pairs agreed on the new movement`);
   assert.ok(rows.length >= 120, `merges landed all day: ${rows.length}`);
   assert.ok(dispatches.filter(run => run.fails).length >= 10 && dispatches.filter(run => !run.fails).length >= 30, `candidates promoted and failed and were re-cut: ${dispatches.length}`);
 
