@@ -288,3 +288,59 @@ test('unit:up-issues-install-worker-credentials — with no logged-in account, u
   assert.equal((await stat(join(installDir, 'workers', 'acme-shop-worker-1.token'))).mode & 0o777, 0o600, 'the install\'s workers are issued 0600');
   await rm(checkout, { recursive: true, force: true });
 });
+
+test('unit:up-issues-install-worker-credentials — with one configured worker\'s token present and another\'s missing, up issues the one it holds but fails naming the missing token, never completing with a single worker profile', async () => {
+  const { runUp } = await import('../src/up.js');
+  const checkout = await temporaryDirectory('worker-credentials-partial');
+  const installDir = join(checkout, 'install-dir');
+  await mkdir(join(checkout, '.graphyard'), { recursive: true });
+  await writeFile(join(checkout, '.graphyard', 'master.json'), JSON.stringify({ version: 1, url: UP_SERVER }), { mode: 0o600 });
+  await installRecordIn(installDir);
+  const world = accountsWorld(checkout, installDir, { fleetAfterTicks: 2, loggedIn: 2 });
+  await world.installWorker('acme-shop-worker-1', 'shop-worker-1');
+
+  const result = await runUp(request(), world.deps);
+  assert.equal(result.exitCode, 1, 'a missing worker token is a failed run, even beside one issued');
+  assert.ok(!result.completed.includes('accounts'), 'the accounts step does not complete with a worker missing');
+  assert.match(result.next, new RegExp(`${installDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/tokens/acme-shop-worker-2\\.token`), 'the missing token is named');
+  assert.match(result.next, /issued .*acme-shop-worker-1\.token, but/, 'what was issued is named too');
+  assert.equal((await stat(join(installDir, 'workers', 'acme-shop-worker-1.token'))).mode & 0o777, 0o600);
+  await rm(checkout, { recursive: true, force: true });
+});
+
+test('unit:up-issues-install-worker-credentials — with a usable worker credential beside one the plane refuses, the profiles write\'s refusal stops the run even though the checklist would read green', async () => {
+  const { runUp } = await import('../src/up.js');
+  const checkout = await temporaryDirectory('worker-credentials-mixed');
+  const installDir = join(checkout, 'install-dir');
+  await mkdir(join(checkout, '.graphyard'), { recursive: true });
+  await writeFile(join(checkout, '.graphyard', 'master.json'), JSON.stringify({ version: 1, url: UP_SERVER }), { mode: 0o600 });
+  await installRecordIn(installDir);
+  await mkdir(join(installDir, 'workers'), { recursive: true, mode: 0o700 });
+  await writeFile(join(installDir, 'workers', 'acme-shop-worker-1.token'), tokenValue('shop-worker-1'), { mode: 0o600 });
+  await writeFile(join(installDir, 'workers', 'refused-acme-shop-worker-2.token'), tokenValue('rotated-worker-2'), { mode: 0o600 });
+  // The fleet is green from the start, so no wait would ever run the settle.
+  const world = accountsWorld(checkout, installDir, { fleetAfterTicks: 0, loggedIn: 2 });
+
+  const result = await runUp(request(), world.deps);
+  assert.equal(result.exitCode, 1, 'a refused credential fails the run whatever profiles were written');
+  assert.ok(!result.completed.includes('accounts'));
+  assert.match(result.next, new RegExp(`${installDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/workers/refused-acme-shop-worker-2\\.token`), 'the refused file is named');
+  assert.match(result.next, /the control plane at http:\/\/127\.0\.0\.1:4310 refuses/, 'the plane is named');
+  await rm(checkout, { recursive: true, force: true });
+});
+
+test('unit:up-issues-install-worker-credentials — an install record that exists but cannot be read stops up naming it, never reading as an install with no workers', async () => {
+  const { runUp } = await import('../src/up.js');
+  const checkout = await temporaryDirectory('worker-credentials-bad-record');
+  const installDir = join(checkout, 'install-dir');
+  await mkdir(join(checkout, '.graphyard'), { recursive: true });
+  await writeFile(join(checkout, '.graphyard', 'master.json'), JSON.stringify({ version: 1, url: UP_SERVER }), { mode: 0o600 });
+  await mkdir(installDir, { recursive: true, mode: 0o700 });
+  await writeFile(join(installDir, 'install.json'), '{ not json', { mode: 0o600 });
+  const world = accountsWorld(checkout, installDir, { fleetAfterTicks: 2, loggedIn: 2 });
+
+  const result = await runUp(request(), world.deps);
+  assert.equal(result.exitCode, 1, result.next);
+  assert.match(result.next, /this install's record in .* cannot be read/);
+  await rm(checkout, { recursive: true, force: true });
+});

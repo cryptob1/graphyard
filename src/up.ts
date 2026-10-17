@@ -1075,11 +1075,17 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       else if (existsSync(resolve(deps.root, '.graphyard/master.json'))) report = parseJson(await run('accounts', ['master', 'environments', '--apply']));
       const counts = report?.counts;
       if (counts) writtenProfiles = { workers: counts.workers ?? 0, reviewers: counts.reviewers ?? 0 };
+      // Every write's refusals stop the run, whatever profiles it did write: usable profiles beside
+      // a refused credential would otherwise turn the checklist green with that identity missing.
+      const refused = refusedCredentials(report);
+      if (refused.length) throw new UpStop(`accounts: the control plane at ${await deps.serverUrl().catch(() => null) ?? 'its recorded address'} refuses ${refused.map(entry => entry.file).join(', ')} (${refused.map(entry => String(entry.reason ?? 'refused').split('\n')[0]).join('; ')}), so no worker profile can be written from it; a sign-in cannot fix this. Reissue this install's worker credentials, then rerun ${rerun()}`, upExitCodes.failed);
       return report ?? null;
     };
     /** Files the write refused (a credential the plane would not take); a duplicate of a principal already profiled is not a refusal. */
-    const refusedCredentials = (report: any) => (Array.isArray(report?.skipped) ? report.skipped as unknown[] : [])
-      .filter((entry): entry is { file: string; reason?: string } => !!entry && typeof entry === 'object' && typeof (entry as any).file === 'string' && !/a profile already uses/.test(String((entry as any).reason)));
+    function refusedCredentials(report: any) {
+      return (Array.isArray(report?.skipped) ? report.skipped as unknown[] : [])
+        .filter((entry): entry is { file: string; reason?: string } => !!entry && typeof entry === 'object' && typeof (entry as any).file === 'string' && !/a profile already uses/.test(String((entry as any).reason)));
+    }
     /**
      * GY-1885: a second install on this host gets its own worker credentials instead of waiting on
      * an account sign-in. The install record names the worker principals its plane was deployed
@@ -1091,7 +1097,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
      */
     const issueWorkerCredentials = async (): Promise<string[]> => {
       const directory = deps.installDirectory?.() ?? installDirectory(installIdFor(request.repository));
-      const record = await readInstallRecord(directory).catch(() => null);
+      // Only an absent record means no install here; one that cannot be read or validated stops the run naming it.
+      const record = await readInstallRecord(directory).catch((error: any) => { throw new UpStop(`accounts: this install's record in ${directory} cannot be read: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun graphyard install --repo ${request.repository} --apply to rewrite it, then ${rerun()}`, upExitCodes.failed); });
       const workers = (record?.principals ?? []).filter(principal => principal.role === 'worker');
       const issued: string[] = [], missing: string[] = [];
       for (const principal of workers) {
@@ -1104,17 +1111,17 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         await chmod(file, 0o600);
         issued.push(file);
       }
-      if (!issued.length && missing.length) throw new UpStop(`accounts: this install's worker credentials are missing (${missing.join(', ')}), and none can be regenerated here: the plane accepts only the tokens it was deployed with. Rerun graphyard install --repo ${request.repository} --apply to reissue them, then ${rerun()}`, upExitCodes.failed);
+      // Any missing worker fails, even beside ones issued: one worker profile would turn the line green without the others.
+      if (missing.length) throw new UpStop(`accounts: ${issued.length ? `issued ${issued.join(', ')}, but ` : ''}this install's worker credentials are missing (${missing.join(', ')}), and none can be regenerated here: the plane accepts only the tokens it was deployed with. Rerun graphyard install --repo ${request.repository} --apply to reissue them, then ${rerun()}`, upExitCodes.failed);
       return issued;
     };
     /**
      * GY-1885: the accounts wait settles a role the checklist still holds open. While a profile is
-     * missing the line stays open (withWrittenProfiles), so the settle runs inside the wait: a write
-     * whose report names refused credentials stops the run naming them and the plane — a sign-in
-     * cannot fix a refused credential. Otherwise a missing worker profile on a local install is handed
-     * this install's own worker identities once, and the next write makes a worker profile from each;
-     * any other missing profile keeps waiting. The handoff asks for a
-     * sign-in only while no account is logged in at all.
+     * missing the line stays open (withWrittenProfiles), so the settle runs inside the wait (every
+     * write already stops the run on a refused credential — a sign-in cannot fix it). A missing
+     * worker profile on a local install is handed this install's own worker identities once, and the
+     * next write makes a worker profile from each; any other missing profile keeps waiting. The
+     * handoff asks for a sign-in only while no account is logged in at all.
      */
     const awaitAccounts = async () => {
       let issuedOnce = false;
@@ -1126,8 +1133,6 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
           if (profileMissing()) report = await writeProfiles();
           if (request.agent && polls > 0 && !(report?.counts?.loggedIn > 0)) handoff('accounts')(`Sign in to an AI coding account for ${pending.map(id => id.slice('account:'.length)).join(' and ')}: approve its browser login on your device`, { url: setupUrl });
           if (!profileMissing()) return;
-          const refused = refusedCredentials(report);
-          if (refused.length) throw new UpStop(`accounts: the control plane at ${await deps.serverUrl().catch(() => null) ?? 'its recorded address'} refuses ${refused.map(entry => entry.file).join(', ')} (${refused.map(entry => String(entry.reason ?? 'refused').split('\n')[0]).join('; ')}), so no worker profile can be written; a sign-in cannot fix this. Reissue this install's worker credentials, then rerun ${rerun()}`, upExitCodes.failed);
           // Only a missing worker profile is this install's to issue, once, and only where this
           // machine holds the install directory; anything else keeps waiting as before.
           // With no account logged in the write scans no credential, so issuing waits for a login.
