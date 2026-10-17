@@ -1700,10 +1700,11 @@ const bindAppRegistration = (session: Pick<InstallSession, 'inputs' | 'registrat
 
 /**
  * The plan of `graphyard app bind SLUG`: the App-only bind of an observation-only installation
- * (GY-1877). It runs the full install's App step and nothing more — the five App
- * variables, a deploy, its health, the App webhook repointed here — against the control plane an
- * earlier observation-only apply recorded, for an App `graphyard app import` saved on this host.
- * Everything else a full install performs stays held by observation-only, and the plan says so.
+ * (GY-1877). It runs the full install's App step and nothing more — the five App variables, a
+ * deployment-preserving redeploy on merge adapters (GY-1908; never a source upload), its health,
+ * the App webhook repointed here — against the control plane an earlier observation-only apply
+ * recorded, for an App `graphyard app import` saved on this host. Everything else a full install
+ * performs stays held by observation-only, and the plan says so.
  */
 async function buildBindAppPlan(session: InstallSession): Promise<InstallPlan> {
   const { adapter, context, record } = session;
@@ -1770,7 +1771,9 @@ async function buildBindAppPlan(session: InstallSession): Promise<InstallPlan> {
       { name: 'GITHUB_WEBHOOK_SECRET', value: REDACTED, secret: true, ...(saved?.app.webhookSecret ? { fingerprint: fingerprint(saved.app.webhookSecret) } : { note: 'held by the imported registration' }) },
       { name: 'GITHUB_CI_APP_IDS', value: alreadyBound && bound?.ciAppIds.length ? bound.ciAppIds.join(',') : `<the Apps publishing checks on ${session.inputs.baseBranch}>`, secret: false },
     ] },
-    { id: 'provider.deploy', target: 'provider', state: alreadyBound && !ciPending ? 'satisfied' : 'update', title: `Deploy the application with the App variables and wait for it to become healthy${ciPending ? ' (only if CI Apps are now observed)' : ''}` },
+    { id: 'provider.deploy', target: 'provider', state: alreadyBound && !ciPending ? 'satisfied' : 'update', title: merges
+      ? `Redeploy the current deployment with the App variables (no source upload or GRAPHYARD_BUILD_SHA stamp) and wait for it to become healthy${ciPending ? ' (only if CI Apps are now observed)' : ''}`
+      : `Deploy the application with the App variables and wait for it to become healthy${ciPending ? ' (only if CI Apps are now observed)' : ''}` },
     { id: 'provider.url', target: 'provider', state: url ? 'satisfied' : 'create', title: 'The public HTTPS URL of the service, as recorded', values: url ? [{ name: 'url', value: url, secret: false }] : [] },
     { id: 'verify.health', target: 'graphyard', state: 'update', title: 'Verify GET /healthz returns {"ok":true}' },
     polling
@@ -1880,15 +1883,19 @@ async function performBindApp(session: InstallSession, plan: InstallPlan): Promi
     ciAppIds = await detect();
   }
   if (write) {
-    // Exactly the five App variables. A merge adapter keeps every other variable; a rewrite adapter's
-    // environment is the whole file, so the control-plane variables ride along beside them, proven
-    // unchanged against the deployed file first.
+    // Exactly the five App variables. A merge adapter keeps every other variable and redeploys the
+    // current deployment (GY-1908): never `railway up` or a GRAPHYARD_BUILD_SHA stamp, which would
+    // replace the served source with the CLI checkout. A rewrite adapter's environment is the whole
+    // file, so the control-plane variables ride along beside them, proven unchanged first.
     const appEnv = githubEnv(facts, ciAppIds);
     // Read again just before the write: the deployment may have changed since the plan.
     const rewritten = await rewrittenCoreVariables(session);
     if (rewritten.length) throw new Error(`${context.provider} rewrites the whole environment, and binding the App would also change ${rewritten.join(', ')}; nothing was written. ${rewriteFix(session)}`);
-    await adapter.setEnv(context, typeof adapter.applyVariables === 'function' ? appEnv : [...coreEnv(session), ...appEnv]);
-    await adapter.deploy(context);
+    if (typeof adapter.applyVariables === 'function') await adapter.applyVariables(context, appEnv);
+    else {
+      await adapter.setEnv(context, [...coreEnv(session), ...appEnv]);
+      await adapter.deploy(context);
+    }
   }
   const health = await waitForHealth(session, url);
   if (!health) throw new Error(`The service at ${url} did not return to health after the GitHub credentials were written. Inspect: graphyard install --provider ${context.provider} --repo ${repository} --logs`);

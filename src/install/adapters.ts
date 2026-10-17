@@ -818,7 +818,9 @@ export const railwayAdapter: ProviderAdapter = {
     for (const secret of values.filter(value => value.secret)) await runRailway(ctx, ['variable', 'set', '--service', ctx.service, '--skip-deploys', '--stdin', secret.name], { input: secret.value, timeout: 300_000 });
   },
   async applyVariables(ctx, values) {
-    // Railway sets variables one by one and keeps the rest; the running build restarts once with them all.
+    // Railway sets variables one by one and keeps the rest; the running build restarts once with
+    // them all. App bind (GY-1908) uses this path so a bind never uploads source or stamps
+    // GRAPHYARD_BUILD_SHA — only `install --apply`'s deploy does that.
     await railwayAdapter.setEnv(ctx, values);
     await runRailway(ctx, ['redeploy', '--service', ctx.service, '--yes'], { timeout: 600_000 });
   },

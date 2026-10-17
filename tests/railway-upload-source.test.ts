@@ -101,6 +101,21 @@ test('unit:railway-upload-receipts-and-source — a failed upload is a failed st
   } finally { await fixture.cleanup(); }
 });
 
+test('unit:railway-app-bind-keeps-normal-install-upload — railwayAdapter.deploy still stamps GRAPHYARD_BUILD_SHA and runs railway up; applyVariables only sets variables and redeploys, so the App-bind fix did not globally change deploy/railwayUpload (GY-1908)', async () => {
+  const { railwayAdapter, railwayUploadReceipts } = await adapters();
+  const deploy = context({});
+  await railwayAdapter.deploy(deploy.ctx);
+  assert.deepEqual(deploy.transport.commands.map(command => command.args[0]), ['variables', 'up']);
+  assert.deepEqual(deploy.transport.commands[0].args, ['variables', '--service', 'graphyard-owner-project', '--skip-deploys', '--set', `GRAPHYARD_BUILD_SHA=${SHA}`]);
+  assert.equal(railwayUploadReceipts(deploy.ctx)[0]?.buildSha, SHA);
+
+  const bind = context({});
+  await railwayAdapter.applyVariables!(bind.ctx, [{ name: 'GITHUB_APP_ID', value: '1', secret: false }]);
+  assert.deepEqual(bind.transport.commands.map(command => command.args[0]), ['variables', 'redeploy']);
+  assert.ok(!bind.transport.commands.some(command => command.args[0] === 'up' || command.args.includes('GRAPHYARD_BUILD_SHA')), 'applyVariables uploaded or stamped');
+  assert.deepEqual(railwayUploadReceipts(bind.ctx), []);
+});
+
 test('unit:railway-upload-stamps-build-sha — the upload sets GRAPHYARD_BUILD_SHA to the pinned source commit before `railway up`, a rerun on a deployed app restamps and redeploys, and the plan names it', async () => {
   const { railwayAdapter, railwayUploadReceipts, railwaySourceCommit, emptyObservation } = await adapters();
   const { ctx, transport } = context({ sourceCommit: SHA });
