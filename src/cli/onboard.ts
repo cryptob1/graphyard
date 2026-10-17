@@ -189,7 +189,7 @@ export const onboardCommands = defineCommands([
   {
     name: 'onboard',
     help: [
-      `  ${usage}`,
+      `  ${usage.replace(/^graphyard /, '')}`,
       '                                Read-only import plan for a repository being brought under Graphyard: every open and draft',
       '                                pull request with number, base, head branch, exact head sha, draft flag and URL; the',
       '                                release/deploy workflow triggers and required checks it detects (each fact detected',
