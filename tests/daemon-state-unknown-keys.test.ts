@@ -22,19 +22,14 @@ async function fixture() {
   return { root, master, file: daemonStatePath(master), dispose };
 }
 
-test('unit:daemon-state-ignores-unknown-keys drops undeclared keys, still rejects malformed declared ones, and does not write them back', async () => {
+test('unit:daemon-state-ignores-unknown-keys keeps undeclared keys across read and write (GY-1960), still rejects malformed declared ones', async () => {
   const { root, master, file, dispose } = await fixture();
-  const logged: string[] = [];
-  const original = console.error;
-  console.error = (...args: unknown[]) => { logged.push(args.join(' ')); };
   try {
     const base = { ...emptyDaemonState(master), cycle: 7 };
     await writeFile(file, JSON.stringify({ ...base, undeclaredByAnyVersion: { at: 'x' } }));
     const loaded = await readDaemonState(root, master);
     assert.equal(loaded.cycle, 7);
-    assert.equal('undeclaredByAnyVersion' in loaded, false);
-    assert.equal(logged.length, 1);
-    assert.match(logged[0]!, /undeclaredByAnyVersion/);
+    assert.deepEqual((loaded as any).undeclaredByAnyVersion, { at: 'x' }, 'a field a newer loop wrote parses and is kept, not dropped');
 
     await writeFile(file, JSON.stringify({ ...base, undeclaredByAnyVersion: {}, cycle: 'seven' }));
     await assert.rejects(readDaemonState(root, master));
@@ -44,9 +39,9 @@ test('unit:daemon-state-ignores-unknown-keys drops undeclared keys, still reject
 
     await writeFile(file, JSON.stringify({ ...base, undeclaredByAnyVersion: { at: 'x' } }));
     await writeDaemonState(master, await readDaemonState(root, master));
-    assert.equal('undeclaredByAnyVersion' in JSON.parse(await readFile(file, 'utf8')), false);
+    assert.deepEqual(JSON.parse(await readFile(file, 'utf8')).undeclaredByAnyVersion, { at: 'x' }, 'the kept field is written back unchanged');
     const again = await readDaemonState(root, master);
     assert.equal(again.cycle, 7);
-    assert.equal('undeclaredByAnyVersion' in again, false);
-  } finally { console.error = original; await dispose(); }
+    assert.deepEqual((again as any).undeclaredByAnyVersion, { at: 'x' });
+  } finally { await dispose(); }
 });
