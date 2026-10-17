@@ -12,7 +12,8 @@
 // fixture serves the loop's own item-preview step against its plane, previewing the site onboarding
 // declared with its declared fixture-static-home case, and so does preview-isolation-cleanup (GY-1923):
 // its two items preview the Compose application onboarding declared (tests/fixtures/goal-compose-preview's
-// app) with its declared fixture-compose-app case, and settling one waits for the loop's cleanup. Every other uat case runs
+// app) with its declared fixture-compose-app case, and settling one waits for the loop's cleanup, and so does
+// previews-for-declared-apps (GY-1924): one item previews the declared site, the other the declared Compose app. Every other uat case runs
 // against UAT as before, in one report and one verdict, so the release holds read it unchanged.
 // Nothing here reconfigures the shared install or writes the host's configuration (the fixture's
 // configuration and data homes sit in its scratch directory), and every fixture resource is removed afterwards.
@@ -40,7 +41,7 @@ import { defaultChildRun } from '../src/child-runner.ts';
 
 export const candidateRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 /** The uat cases that describe a freshly onboarded project, and so run against the fixture, never the shared install. */
-export const fixtureCases = ['onboarding-delivery-defaults', 'preview-serves-change', 'preview-isolation-cleanup'];
+export const fixtureCases = ['onboarding-delivery-defaults', 'preview-serves-change', 'preview-isolation-cleanup', 'previews-for-declared-apps'];
 /** The candidate's own definition of a fixture case, tagged with the application it exercises so onboarding's scan binds it by evidence. */
 const declaredCase = (root, id, application) => { const definition = JSON.parse(readFileSync(join(root, 'e2e/cases', `${id}.json`), 'utf8')); return JSON.stringify({ ...definition, tags: [...definition.tags, application] }); };
 /** The candidate's own runnable Compose application (GY-1903's fixture): `web` serving its state and its own database `db`, from alpine:3 alone. */
