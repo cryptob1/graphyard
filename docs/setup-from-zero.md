@@ -53,7 +53,7 @@ bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with
 
 ## 2. Graphyard and the repository
 
-The repository needs a GitHub `origin` and an Actions `pull_request` test workflow (the required check). **Verify:** doctor readiness `repository`, `required-checks` and `test-formats` are `ready`.
+The repository needs a GitHub `origin` and an Actions `pull_request` test workflow (required check). **Verify:** doctor readiness `repository`, `required-checks` and `test-formats` are `ready`.
 
 ## 3. Install the control plane
 
@@ -89,7 +89,7 @@ gy master init --browser-profile Default \
 gy master restart
 ```
 
-**HUMAN:** `--browser-profile` names a GitHub-signed-in Chrome profile. **Verify:** `gy master status` shows `setup.supervisor` active.
+**HUMAN:** `--browser-profile`: a GitHub-signed-in Chrome profile. **Verify:** `gy master status` shows `setup.supervisor` active.
 
 ## 11. Hosted variables (Railway only)
 
