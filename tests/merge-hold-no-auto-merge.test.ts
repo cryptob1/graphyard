@@ -6,14 +6,17 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { recordLegacyMerger } from './helpers/legacy-merger.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { CHECK_NAME, GitHub, observeMerge } from '../src/github.js';
-import { AutoMergeSettings, autoMergeEventKind, autoMergeStatus, mergeHolds, recordedAutoMerge } from '../src/merger-mode.js';
+import * as githubModule from '../src/github.js';
+import { CHECK_NAME, GitHub } from '../src/github.js';
+import * as mergerMode from '../src/merger-mode.js';
 import { mergeQueue } from '../src/merge-writer/executor.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 
 // GY-1927: automatic merging off (`master init --no-auto-merge`) holds every gate-passing candidate
 // until an applied, independently approved merge decision binds its exact head, base and policy
 // revision. Checks keep publishing as they would. Each test is named for the proof it produces.
+// The new exports are read through their namespaces, so the file still loads (and each case fails) against a base without them.
+const { observeMerge, AutoMergeSettings, autoMergeEventKind = 'policy.auto-merge.set', autoMergeStatus, mergeHolds, recordedAutoMerge } = { ...githubModule, ...mergerMode } as any;
 
 const admin: Principal = { id: 'operator', role: 'admin' };
 const coordinator: Principal = { id: 'graphyard-master', role: 'coordinator' };
