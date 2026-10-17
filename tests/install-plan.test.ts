@@ -129,7 +129,9 @@ test('a self-hosted plan treats DATABASE_URL as a secret and names the required 
   try {
     const session = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'compose' }, fixture.deps, 'apply');
     const core = coreEnv(session);
-    assert.deepEqual(core.map(value => value.name), ['HOST', 'PORT', 'DATABASE_URL', 'GRAPHYARD_PRINCIPALS', 'GITHUB_REPOSITORY', 'GITHUB_BASE_BRANCH', 'GRAPHYARD_REVIEWER_APPS', 'GRAPHYARD_MAX_SLICE_LEADS', 'GRAPHYARD_MAX_ENGINEERS_PER_LEAD', 'GRAPHYARD_MIN_REVIEWERS', 'GRAPHYARD_MAX_REVIEWERS', 'GRAPHYARD_REPOSITORY_ROOT']);
+    assert.deepEqual(core.map(value => value.name), ['HOST', 'PORT', 'DATABASE_URL', 'GRAPHYARD_PRINCIPALS', 'GITHUB_REPOSITORY', 'GITHUB_BASE_BRANCH', 'GRAPHYARD_REVIEWER_APPS', 'GRAPHYARD_MAX_SLICE_LEADS', 'GRAPHYARD_MAX_ENGINEERS_PER_LEAD', 'GRAPHYARD_MIN_REVIEWERS', 'GRAPHYARD_MAX_REVIEWERS', 'GRAPHYARD_REPOSITORY_POLICY', 'GRAPHYARD_REPOSITORY_ROOT']);
+    // A repository declaring no risk, review or e2e policy deploys `{}`, so a redeploy clears a removed declaration (GY-1843).
+    assert.equal(core.find(value => value.name === 'GRAPHYARD_REPOSITORY_POLICY')!.value, '{}');
     // A compose install run from a Git checkout observes heads from it, mounted at /repo.
     assert.equal(core.find(value => value.name === 'GRAPHYARD_REPOSITORY_ROOT')!.value, '/repo');
     assert.equal(core.find(value => value.name === 'DATABASE_URL')!.secret, true);

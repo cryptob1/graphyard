@@ -443,7 +443,8 @@ test('D6-6 redaction and retention rules apply to replay inputs and exports', as
   const expired = await validation.replay.replay(operator, { requestId: f.r.id, attemptId: command.attemptId }) as ReplayRecord;
   assert.equal(expired.outcome, 'unmeasured');
   assert.deepEqual(expired.artifacts.map(a => [a.name, a.read, a.reason]), [['inventory', false, 'Artifact retention expired'], ['report', true, null]]);
-  assert.equal(expired.cost.artifactsRead, 1); assert.match(expired.coverage.inventory.reason, /inventory — Artifact retention expired/);
+  // The unmeasured replay is an evaluator-error retried twice (GY-1841), and cost sums every attempt's reads.
+  assert.equal(expired.evaluation.attempts.length, 3); assert.equal(expired.cost.artifactsRead, 3); assert.match(expired.coverage.inventory.reason, /inventory — Artifact retention expired/);
   assert.equal(await validation.expireArtifacts(), 1);
   const swept = await validation.replay.replay(operator, { requestId: f.r.id, attemptId: command.attemptId }) as ReplayRecord;
   assert.equal(swept.artifacts[0].reason, 'Artifact is expired; no bytes were retained');
