@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { DEPLOY_KEY_FILE, deployKeyReadOnly, deployKeyTitle, ensureDeployKey, ensureMainWriteProtection, publicKeyFingerprint } from '../src/install/deploy-key.js';
+import { DEPLOY_KEY_FILE, deployKeyTitle, ensureDeployKey, ensureMainWriteProtection, publicKeyFingerprint } from '../src/install/deploy-key.js';
 import type { GitHubCli } from '../src/install/github.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -158,6 +158,8 @@ function protectionGitHub(keys: Record<string, unknown>[]) {
 }
 
 test('unit:deploy-key-read-only-field — a listed key is read-write when it carries read_only false (gh\'s field) or readOnly false; main is protected when the writer key is the only read-write key, and a key carrying neither flag refuses naming the missing flag', async () => {
+  // Imported here, not at the top, so the file still loads against a base that lacks the export and this case fails on its own.
+  const { deployKeyReadOnly } = await import('../src/install/deploy-key.js') as { deployKeyReadOnly: (entry: unknown) => boolean | null };
   assert.equal(deployKeyReadOnly({ read_only: false }), false);
   assert.equal(deployKeyReadOnly({ readOnly: false }), false);
   assert.equal(deployKeyReadOnly({ read_only: true }), true);
