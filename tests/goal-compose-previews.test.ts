@@ -18,7 +18,7 @@ import { masterConfigSchema } from '../src/master.js';
 import { emptyDaemonState } from '../src/daemon/state-cursor.js';
 import { mergeWriterReads, mergeWriterStep } from '../src/daemon/cycle-merge-writer.js';
 import { mergeRecordKey, previewRecordEvent, type MergeRecordEvent } from '../src/merge-writer/executor.js';
-import { composeLeftovers, composeMountProblems, composeStack, composePreviewConfig, composeProjectName, composeProjectPrefix, sweepComposePreviews, composeBounds, currentOwner, defaultDocker, removeComposeProject, snapshotComposeSite, type Docker } from '../src/compose-preview.js';
+import { composeLeftovers, composeMountProblems, composeSourceProblems, composeSnapshotFetches, composeStack, composePreviewConfig, composeProjectName, composeProjectPrefix, sweepComposePreviews, composeBounds, currentOwner, defaultDocker, removeComposeProject, snapshotComposeSite, type Docker } from '../src/compose-preview.js';
 import { previewPath, type ItemPreview } from '../src/project-previews.js';
 import { defaultChildRun } from '../src/child-runner.js';
 import type { Cycle } from '../src/daemon/cycle.js';
@@ -151,9 +151,14 @@ async function leaveAbandoned(name: string) {
   const directory = await temporaryDirectory('compose-abandoned');
   await writeFile(join(directory, 'compose.json'), JSON.stringify(composePreviewConfig(resolved, { project: name, service: 'web', port: 8080, bounds: composeBounds(bounds), variables: {}, owner: { pid: spawnSync('true').pid!, startedAt: 1, pidNamespace: processPidNamespace(), at: new Date().toISOString() } })));
   execFileSync('docker', ['compose', '-f', join(directory, 'compose.json'), '-p', name, '--project-directory', repo, 'up', '--detach', '--wait'], { stdio: 'ignore' });
-  assert.equal((await composeLeftovers(name)).containers.length, 2);
+  const left = await composeLeftovers(name);
+  assert.deepEqual([left.containers.length, left.images.length], [2, 1], 'its containers, and the image it built under its own label');
 }
-const nothingLeft = async (name: string) => assert.deepEqual(await composeLeftovers(name), { containers: [], volumes: [], networks: [] }, `${name} left nothing behind`);
+/** Nothing of `name` is left — its built image included — and no preview ever took the fixture's own image tag. */
+const nothingLeft = async (name: string) => {
+  assert.deepEqual(await composeLeftovers(name), { containers: [], volumes: [], networks: [], images: [] }, `${name} left nothing behind`);
+  assert.notEqual(spawnSync('docker', ['image', 'inspect', 'fixture/compose-db:custom']).status, 0, 'a preview\'s build never takes the tag its Compose file names');
+};
 
 test('integration:goal-declared-application-previews — a declared static site and a declared Compose application each get a real local preview of the exact change: the item names the local runner, the link serves the changed page, and the declared cases\' results are on the item', { timeout: 300_000 }, async t => {
   if (!docker) { assert.ok(!process.env.CI, 'CI runs the Compose previews'); t.skip('no Docker Compose or alpine:3 image on this host'); return; }
@@ -352,7 +357,7 @@ test('unit:compose-preview-config — the resolved configuration is refused for 
   assert.equal(rewritten.volumes.data.name, 'graphyard-preview-gy-1-abcdef12_data', 'a fixed volume name is the preview\'s own');
   assert.equal(rewritten.networks.outside.labels['graphyard.preview.owner'], JSON.stringify(owner));
   assert.equal(composeProjectName('GY-12', 'ABCDEF12-0000'), 'graphyard-preview-gy-12-abcdef12');
-  assert.deepEqual(composeBounds({}), { cpus: 1, memoryMb: 512, pids: 256, lifetimeMs: 720 * 60_000, concurrent: 4 });
+  assert.deepEqual(composeBounds({}), { cpus: 1, memoryMb: 512, pids: 256, lifetimeMs: 720 * 60_000, concurrent: 4, services: 16 });
 });
 
 test('unit:compose-preview-config-reach — symlinks out of the checkout, the API socket, another container\'s volumes and replicas never reach a preview', async () => {
@@ -370,8 +375,47 @@ test('unit:compose-preview-config-reach — symlinks out of the checkout, the AP
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test('unit:compose-preview-config-escalation — privileged builds and hooks, build entitlements, exported or host-read build caches, device rules and external secrets or configs are refused; a built image is the preview\'s own by name and label', () => {
+  const checkout = '/work/checkout';
+  const resolved = { services: {
+    web: { image: 'alpine:3', build: { context: '/work/checkout', privileged: true, entitlements: ['security.insecure'], cache_to: ['type=local,dest=/srv/cache'], cache_from: ['type=local,src=/srv/cache'] }, post_start: [{ command: 'id', privileged: true }] },
+    db: { image: 'postgres:16', build: { context: '/work/checkout/db', labels: ['tier=db'] }, device_cgroup_rules: ['a *:* rwm'] },
+  }, secrets: { token: { external: true } }, configs: { settings: { external: true } } };
+  assert.deepEqual(composeMountProblems(resolved, checkout, 'web'), [
+    'service web builds privileged', 'service web builds with the entitlements security.insecure', 'service web exports its build cache', 'service web reads a build cache from the host (type=local,src=/srv/cache)', 'service web runs a privileged lifecycle hook',
+    'service db sets device cgroup rules', 'the secret token is external, shared with something outside the preview', 'the config settings is external, shared with something outside the preview']);
+  const owner = currentOwner();
+  const rewritten = composePreviewConfig({ services: { db: resolved.services.db } }, { project: 'graphyard-preview-gy-1-abcdef12', service: 'db', port: 5432, bounds: composeBounds({}), variables: {}, owner });
+  assert.equal(rewritten.services.db.image, 'graphyard-preview-gy-1-abcdef12-db', 'a built image never takes a host image\'s tag');
+  assert.deepEqual(rewritten.services.db.build.labels, { tier: 'db', 'graphyard.preview.owner': JSON.stringify(owner), 'graphyard.preview.project': 'graphyard-preview-gy-1-abcdef12' });
+});
+
+test('unit:compose-preview-sources-checked-first — a Compose file that includes or extends others, or lies outside the checkout, and one declaring more services than the bound, is refused before anything starts', async () => {
+  const directory = await realpath(await temporaryDirectory('compose-sources'));
+  try {
+    const checkout = join(directory, 'checkout'); await mkdir(checkout);
+    await writeFile(join(checkout, 'include.yml'), 'include:\n  - /srv/production/compose.yml\nservices:\n  web: { image: alpine:3 }\n');
+    await writeFile(join(checkout, 'extends.yml'), 'services:\n  web:\n    extends: { file: ../outside.yml, service: web }\n');
+    await writeFile(join(checkout, 'escaped.yml'), '"\\x69nclude": [/srv/production/compose.yml]\n');
+    await writeFile(join(directory, 'outside.yml'), 'services: {}\n'); await symlink(join(directory, 'outside.yml'), join(checkout, 'linked.yml'));
+    await writeFile(join(checkout, 'many.yml'), 'services: {}\n');
+    assert.match((await composeSourceProblems(checkout, 'include.yml'))[0]!, /includes or extends other Compose files/);
+    assert.match((await composeSourceProblems(checkout, 'extends.yml'))[0]!, /includes or extends other Compose files/);
+    assert.match((await composeSourceProblems(checkout, 'escaped.yml'))[0]!, /writes a character by an escape/);
+    assert.match((await composeSourceProblems(checkout, 'linked.yml'))[0]!, /is outside the change's checkout/);
+    const calls: string[][] = [];
+    const docker: Docker = async args => { calls.push(args); return args.includes('config') ? JSON.stringify({ services: Object.fromEntries(Array.from({ length: 5 }, (_, n) => [`s${n}`, { image: 'alpine:3' }])) }) : ''; };
+    const stack = (file: string) => composeStack({ checkout, file, service: 's0', port: 8080, project: 'graphyard-preview-gy-1-abcdef12', environment: {}, variables: {}, bounds: composeBounds({ GRAPHYARD_PREVIEW_SERVICES: '4' }), scratch: join(directory, 'scratch'), docker });
+    await assert.rejects(stack('include.yml').start(AbortSignal.timeout(5_000), 5_000), /cannot be previewed in isolation: the Compose file include\.yml includes or extends/);
+    assert.equal(calls.length, 0, 'Compose never read a file that reaches others');
+    await assert.rejects(stack('many.yml').start(AbortSignal.timeout(5_000), 5_000), /declares 5 services, more than the 4 a preview runs/);
+    assert.ok(!calls.some(args => args.includes('up')), 'nothing started');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test('unit:compose-preview-env-files-checked-unresolved — under a Compose that resolves env files despite --no-env-resolution, an env file outside the checkout is refused from the uninterpolated declaration and nothing starts', async () => {
   const directory = await realpath(await temporaryDirectory('compose-env-files'));
+  await writeFile(join(directory, 'compose.yml'), 'services: {}\n');
   try {
     const calls: string[][] = [];
     const docker: Docker = async args => {
@@ -390,19 +434,21 @@ test('unit:compose-preview-env-files-checked-unresolved — under a Compose that
 
 test('unit:compose-preview-removal-confirmed — a removal the daemon refuses rejects, naming what remains, and succeeds only once nothing of the project is left', async () => {
   let refuse = true;
-  const held = { containers: ['c1'], volumes: ['graphyard-preview-gy-1-abcdef12_data'], networks: ['graphyard-preview-gy-1-abcdef12_default'] };
+  const held = { containers: ['c1'], volumes: ['graphyard-preview-gy-1-abcdef12_data'], networks: ['graphyard-preview-gy-1-abcdef12_default'], images: ['sha256:built'] };
   const docker: Docker = async args => {
     if (args[0] === 'ps') return held.containers.join('\n');
     if (args[0] === 'volume' && args[1] === 'ls') return held.volumes.join('\n');
     if (args[0] === 'network' && args[1] === 'ls') return held.networks.join('\n');
+    // A built image is found by the preview's label, whatever tag it was given.
+    if (args[0] === 'image' && args[1] === 'ls') return args.includes('label=graphyard.preview.project=graphyard-preview-gy-1-abcdef12') ? held.images.join('\n') : '';
     if (refuse) throw new Error('injected daemon failure');
-    held.containers = []; held.volumes = []; held.networks = [];
+    held.containers = []; held.volumes = []; held.networks = []; held.images = [];
     return '';
   };
-  await assert.rejects(removeComposeProject('graphyard-preview-gy-1-abcdef12', { docker, env: {} }), /was not removed: container c1, volume graphyard-preview-gy-1-abcdef12_data, network graphyard-preview-gy-1-abcdef12_default remain/);
+  await assert.rejects(removeComposeProject('graphyard-preview-gy-1-abcdef12', { docker, env: {} }), /was not removed: container c1, volume graphyard-preview-gy-1-abcdef12_data, network graphyard-preview-gy-1-abcdef12_default, image sha256:built remain/);
   refuse = false;
   await removeComposeProject('graphyard-preview-gy-1-abcdef12', { docker, env: {} });
-  assert.deepEqual(held, { containers: [], volumes: [], networks: [] });
+  assert.deepEqual(held, { containers: [], volumes: [], networks: [], images: [] });
 });
 
 test('unit:compose-preview-snapshot — root-relative links resolve under the preview link, and an answer past the byte bound is cut off while it streams', async () => {
@@ -420,4 +466,27 @@ test('unit:compose-preview-snapshot — root-relative links resolve under the pr
   const endless = new ReadableStream<Uint8Array>({ pull(controller) { sent += 1 << 20; controller.enqueue(new Uint8Array(1 << 20)); } });
   await assert.rejects(snapshotComposeSite('http://127.0.0.1:1', (async () => new Response(endless, { headers: { 'content-type': 'text/html' } })) as typeof fetch), /larger than the \d+ bytes a preview publishes/);
   assert.ok(sent < 64 << 20, `stopped reading at the bound, not after ${sent} bytes`);
+});
+
+test('unit:compose-preview-snapshot-bounded — a same-origin redirect is followed and one off the origin is not, unpublishable links stop at the request bound, and a cancellation ends the crawl', async () => {
+  const html = (body: string) => new Response(body, { headers: { 'content-type': 'text/html' } });
+  const redirect = (to: string) => new Response(null, { status: 302, headers: { location: to } });
+  const pages: Record<string, () => Response> = { '/': () => redirect('/app/'), '/app/': () => html('<a href="/old">old</a><a href="/away">away</a>'), '/old': () => redirect('/app/'), '/away': () => redirect('https://elsewhere.example/') };
+  const site = await snapshotComposeSite('http://127.0.0.1:1', (async (target: URL) => pages[target.pathname]?.() ?? new Response('', { status: 404 })) as typeof fetch);
+  const text = Object.fromEntries(site.map(file => [file.path, Buffer.from(file.content, 'base64').toString()]));
+  assert.deepEqual(Object.keys(text), ['app/index.html', 'index.html', 'old/index.html']);
+  assert.match(text['index.html']!, /url=\.\/app\//);
+  assert.match(text['old/index.html']!, /url=\.\.\/app\//);
+  await assert.rejects(snapshotComposeSite('http://127.0.0.1:1', (async () => redirect('https://elsewhere.example/')) as typeof fetch), /redirected \/ to https:\/\/elsewhere\.example\/, off its own origin/);
+  // Every link names a path no preview publishes, so none enters the site: the requests still stop at the bound.
+  let fetched = 0;
+  const long = Array.from({ length: 5_000 }, (_, n) => `<a href="/${'x'.repeat(600)}${n}">x</a>`).join('');
+  const rejected = await snapshotComposeSite('http://127.0.0.1:1', (async (target: URL) => { fetched++; return target.pathname === '/' ? html(long) : html('x'); }) as typeof fetch);
+  assert.deepEqual(rejected.map(file => file.path), ['index.html']);
+  assert.equal(fetched, composeSnapshotFetches);
+  const cancel = new AbortController();
+  let crawled = 0;
+  const many = Array.from({ length: 100 }, (_, n) => `<a href="/p${n}">p</a>`).join('');
+  await assert.rejects(snapshotComposeSite('http://127.0.0.1:1', (async (_target: URL, init?: RequestInit) => { if (++crawled === 3) cancel.abort(); init?.signal?.throwIfAborted(); return html(many); }) as typeof fetch, cancel.signal), /abort/i);
+  assert.ok(crawled <= 4, `the crawl ended with its cancellation, after ${crawled} requests`);
 });

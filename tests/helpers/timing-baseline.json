@@ -436,7 +436,7 @@
     "tests/github-setup-manifest.test.ts": 494,
     "tests/github.test.ts": 968,
     "tests/goal-acceptance.test.ts": 2600,
-    "tests/goal-compose-previews.test.ts": 15000,
+    "tests/goal-compose-previews.test.ts": 40000,
     "tests/goal-delivery-onboarding.test.ts": 6500,
     "tests/goal-pipeline-outright-refusals.test.ts": 1238,
     "tests/goal-planner.test.ts": 2900,

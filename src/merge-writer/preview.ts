@@ -186,8 +186,8 @@ export interface PreviewOptions {
 }
 /** What serves a preview while it runs: the static site's server, or the Compose project (compose-preview.ts). */
 type Served = { url: string | null; close(): Promise<void> };
-/** A preview that passed and is still served: its loopback origin, the built site's directory it serves (or, for a Compose application, `publish`, its served pages), and `close`, which ends the server and removes the checkout. */
-export interface OpenedPreview { verdict: PreviewVerdict; url: string | null; site?: string | null; publish?: () => Promise<PreviewSiteFile[]>; close(): Promise<void> }
+/** A preview that passed and is still served: its loopback origin, the built site's directory it serves (or, for a Compose application, `publish`, its served pages, given up once `signal` aborts), and `close`, which ends the server and removes the checkout. */
+export interface OpenedPreview { verdict: PreviewVerdict; url: string | null; site?: string | null; publish?: (signal?: AbortSignal) => Promise<PreviewSiteFile[]>; close(): Promise<void> }
 
 /**
  * The preview of one passing trial merge: in a free slot (at most `previewConcurrency` at once), a
@@ -302,7 +302,7 @@ export async function openPreview(input: PreviewInput, options: PreviewOptions &
     const first = await Promise.race([running, expired, stopped]);
     if (first === 'stopped') return { verdict: outcome = verdict('error', 'the preview was cancelled'), url: null, close };
     const url = (served as Served | null)?.url ?? null;
-    if (first !== 'expired') return { verdict: outcome = first, url, site: served && !input.compose ? join(directory, 'checkout', input.site.directory) : null, ...(input.compose && url ? { publish: () => snapshotComposeSite(url, input.fetcher) } : {}), close };
+    if (first !== 'expired') return { verdict: outcome = first, url, site: served && !input.compose ? join(directory, 'checkout', input.site.directory) : null, ...(input.compose && url ? { publish: (signal?: AbortSignal) => snapshotComposeSite(url, input.fetcher, signal) } : {}), close };
     // Past the budget: the run is cancelled, and its slot is not freed until it has ended (finally).
     cancel.abort();
     return { verdict: outcome = verdict('timeout', `the preview ran past its ${Math.round(input.timeoutMs / 60_000)}-minute budget`), url: null, close };
@@ -545,7 +545,8 @@ export async function itemPreviewStep(live: Map<string, LivePreview>, work: read
       // The link serves the site the cases passed on: its built files, published with the running record.
       let site: PreviewSiteFile[] | null = null, unpublished = '';
       if (!entry.ending && opened.url && opened.verdict.result === 'pass') {
-        try { site = opened.publish ? await opened.publish() : await readPreviewSite(opened.site!); } catch (error) { unpublished = `; not published: ${error instanceof Error ? error.message : String(error)}`; }
+        // Publication is bounded by the preview's budget and ends with the preview: an item cancelled while its pages are read is cleaned up at once.
+        try { site = opened.publish ? await opened.publish(AbortSignal.any([entry.stop.signal, AbortSignal.timeout(ports.timeoutMs)])) : await readPreviewSite(opened.site!); } catch (error) { unpublished = `; not published: ${error instanceof Error ? error.message : String(error)}`; }
       }
       if (entry.ending || !opened.url || opened.verdict.result !== 'pass' || !site) {
         // Recorded ended only once removed: a failed removal is retried until it succeeds.
