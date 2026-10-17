@@ -9,7 +9,7 @@ Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`
 
 - `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N new first-parent merges (`GRAPHYARD_RC_MAX_PRS`, 10; rest queue); `.github/workflows/release-candidate.yml` cuts on loop dispatch (cron fallback).
 - `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*` credentials); refused while an unjudged candidate <4h old serves.
-- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser`, suites ([below](#pre-merge-gate-and-release-candidate-validation); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`; [pending](validation.md#release-verdicts) cases block only under `e2e.pendingOutcomes: blocking`.
+- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser`, suites ([below](#pre-merge-gate-and-release-candidate-validation); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`; [pending](validation.md#release-verdicts) cases block only if `e2e.pendingOutcomes: blocking`.
 - `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`; `release verify --url URL` confirms.
 - Failed candidates file a [hold](validation.md#release-holds) per outcome, else a `release follow-up ID` as the [filing credential](#release-filing-credential).
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records `rc-soak/ID` (advisory).
@@ -18,7 +18,7 @@ Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`
 
 ### Release filing credential
 
-UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds and follow-ups as `graphyard-release-follow-up` (only `intent:create`, work items `*`). Hourly `master setup --apply` (admin token) issues, rotates, stores it; without one `master status` names the step (`graphyard operator-agent setup FILE --token-stdin`, FILE `{"id":"graphyard-release-follow-up","displayName":"Release follow-up","capabilities":["intent:create"],"scope":{"repositories":["OWNER/REPO"],"workItems":["*"]},"reason":"..."}`). `doctor`: `FAIL release-filing`. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` with only `e2e:record`, never admin.
+UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds and follow-ups as `graphyard-release-follow-up` (only `intent:create`, work items `*`). Hourly `master setup --apply` (admin token) issues, rotates, stores it; else `master status` names the step (`graphyard operator-agent setup FILE --token-stdin`, FILE `{"id":"graphyard-release-follow-up","displayName":"Release follow-up","capabilities":["intent:create"],"scope":{"repositories":["OWNER/REPO"],"workItems":["*"]},"reason":"..."}`). `doctor`: `FAIL release-filing`. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` (only `e2e:record`), never admin.
 
 ### Pre-merge gate and release-candidate validation
 
@@ -38,7 +38,7 @@ Every 30 s the guard reruns, then reverts merges failing checks parents passed; 
 
 `init --scan` splits checks (`delivery.mergeGate`, per-candidate); `--apply` renders `graphyard-release-candidate.yml` (`candidateSchedule`, `--candidate-cron CRON|off`), `graphyard-promotion.yml`. `deploy.adapter`: `railway` (`deploy.project`), `command` (`deploy.uat`/`deploy.production` with `GRAPHYARD_CANDIDATE_SHA`; unset renders none). `--delivery per-pr` keeps per-PR checks; `install --plan` lists resources.
 
-**`graphyard.json` policy**: `risk.sensitive` `{rule,glob}` (`only`: `risk`/`lane`), else generic; `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; `install` deploys it as `GRAPHYARD_REPOSITORY_POLICY`; `doctor`: `repositoryPolicy`.
+**`graphyard.json` policy**: `risk.sensitive` `{rule,glob}` (`only`: `risk`/`lane`), else generic; `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; deployed as `GRAPHYARD_REPOSITORY_POLICY`; `doctor`: `repositoryPolicy`.
 
 ```json
 {"kind":"environment","id":"production","expectedRevision":0,"repository":"owner/repository","url":"https://app.example.test","instance":"production-cluster","immutable":true,"services":["api","web"],"resources":["production-smoke-account"],"delivery":{"freshnessSeconds":300,"approvalRequired":true}}
