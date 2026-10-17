@@ -80,9 +80,8 @@ export async function assembleStatusSections<
     humanOnly: humanOnly.map(humanOnlyStatusRow),
     conflictHotspots: hs.report,
     merger: { merger: merger.merger, detail: merger.detail },
-    // GY-1927: what the plane enforces, from its recorded setting; a plane that records none merges on gates alone.
-    autoMerge: coordinator?.autoMerge?.autoMerge !== false,
-    mergeApproval: coordinator?.autoMerge?.line ?? 'routine merges permitted after gates pass',
+    autoMerge: master.autoMerge,
+    mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     conflictProbe: probe,
     observationThroughput: observation,
     leaseHealth: health.report,

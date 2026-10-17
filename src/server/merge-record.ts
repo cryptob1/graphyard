@@ -14,7 +14,6 @@ import { trialPhases, type TrialPhase } from '../merge-writer/trial.js';
 import { applyCandidateRevert, candidateRevertReason, revertLedgerKind, type CandidateRevert } from '../release-revert.js';
 import type { Engine } from '../engine.js';
 import type { Services } from './routes.js';
-import { mergeHold } from '../merger-mode.js';
 
 /**
  * GY-1524. The merge writer's ledger, written by the loop's coordinator identity through
@@ -158,8 +157,6 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
       demand(intended === data.mergeSha, unintendedShaRefusal(work!.key, data.mergeSha, intended), 409);
       if (data.kind === 'reconciled') demand(held, unheldShaRefusal(data.mergeSha, base), 409);
     }
-    // GY-1927: a merge opens only while no automatic-merging hold stands over the head, read in this transaction, so a writer selecting from a snapshot taken before the hold was recorded starts nothing.
-    if (data.kind === 'intent') { const hold = await mergeHold(db, work!); demand(!hold, hold!, 409); }
     const { kind, ...fields } = data;
     const event: MergeRecordEvent = data;
     const payload = kind === 'intent' ? { key: work!.key, ...fields } : kind === 'refused' ? { ...fields, kind: 'merge' } : fields;

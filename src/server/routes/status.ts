@@ -14,8 +14,10 @@ import { defineRoutes, parseJson } from '../routes.js';
 import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
 import { executorHost } from './agent-registry.js';
 import { directMergeStatus } from '../../direct-merge.js';
-import { autoMergeStatus, mergeHolds, mergeWriterStatus } from '../../merger-mode.js';
+import { mergeWriterStatus } from '../../merger-mode.js';
 import { projectDelivery } from '../../project-applications.js';
+import { rerunFailedChecksEvent } from '../../merge-queue.js';
+import { maxRerunFailedChecks } from '../../master/profiles.js';
 import { eventStats } from '../../store/snapshot-delta.js';
 import { repositoryPolicy } from '../../model/repository-policy.js';
 import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment } from '../../flow-analytics.js';
@@ -104,8 +106,6 @@ export const statusRoutes = defineRoutes('status', [
         directMerge: await directMergeStatus(engine.store.pool, engine.directMergeEnvironment, observedAt),
         // The merger setting (merger-mode.ts): which writer lands heads, and one line while it is the control plane.
         mergeWriter: await mergeWriterStatus(engine.store.pool),
-        // Automatic merging (GY-1927): off, a gate-passing candidate is held until a merge decision releases it.
-        autoMerge: await autoMergeStatus(engine.store.pool),
         // Delivery defaults, applications and case bindings (GY-1901).
         project: projectDelivery(),
         // Heartbeat latency and the renewals refused or failed server-side, this process, last 10 minutes (GY-558).
@@ -164,6 +164,35 @@ export const statusRoutes = defineRoutes('status', [
       return { productionEnvironment: environment, recorded: true };
     },
   },
+  {
+    // The master loop publishes `mergeQueue.rerunFailedChecks` (GY-516) from its own configuration,
+    // which lives only on the master's host: how many times a failed required check is rerun on its
+    // sha. It is recorded once per change in the installation ledger and applied to every
+    // evaluation from then on; a restarted server reads it back from there. The retired keys an
+    // older master may still send — `optimistic` and `optimisticExclude` (GY-1233), `batchSize` and
+    // `parallelTips` of Graphyard's removed merge queue (GY-1236) — are ignored.
+    method: 'POST', path: '/api/merge-queue',
+    async handle(context) {
+      const { actor, services: { engine } } = context;
+      demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+      const body = await parseJson(context, 16384, '{}');
+      const { batchSize, parallelTips, rerunFailedChecks } = body ?? {};
+      demand(batchSize !== undefined || parallelTips !== undefined || rerunFailedChecks !== undefined, 'rerunFailedChecks is required', 400);
+      if (rerunFailedChecks !== undefined) demand(Number.isSafeInteger(rerunFailedChecks) && rerunFailedChecks >= 0 && rerunFailedChecks <= maxRerunFailedChecks, `rerunFailedChecks must be an integer from 0 to ${maxRerunFailedChecks}`, 400);
+      let recorded = false;
+      // Each value is applied only once the ledger holds it (GY-384): a failed INSERT leaves the
+      // evaluation on the recorded value and the master unpublished, so its next cycle retries.
+      const record = async (kind: string, field: string, value: number, previous: number, apply: () => void) => {
+        const latest = (await engine.store.pool.query('SELECT 1 FROM events WHERE work_id IS NULL AND kind=$1 LIMIT 1', [kind])).rowCount;
+        if (latest && JSON.stringify(previous) === JSON.stringify(value)) return apply();
+        await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, kind, JSON.stringify({ [field]: value, previous: latest ? previous : null })]);
+        apply();
+        recorded = true;
+      };
+      if (rerunFailedChecks !== undefined) await record(rerunFailedChecksEvent, 'rerunFailedChecks', rerunFailedChecks, await engine.loadRerunFailedChecks(), () => { engine.rerunFailedChecks = rerunFailedChecks; });
+      return { mergeQueue: { rerunFailedChecks: engine.rerunFailedChecks }, recorded };
+    },
+  },
   doctorRoute,
   {
     method: 'GET', path: '/api/work-snapshot',
@@ -220,10 +249,7 @@ export const statusRoutes = defineRoutes('status', [
       // leave it whole, and what the SQL cut is added to what the view says it left out.
       const { trimmed, ...snapshot } = await services.engine.store.coordinationSnapshot();
       const trimmedView = coordinationSnapshot(scope(snapshot));
-      // GY-1927: each held candidate names its hold, so the control-plane merge writer starts no merge for it.
-      const holds = await mergeHolds(services.engine.store.pool, trimmedView.work);
       for (const work of trimmedView.work) {
-        if (holds.get(work.id)) work.mergeHold = holds.get(work.id);
         const cut = trimmed.get(work.id);
         if (cut) { trimmedView.omitted.evidence += cut.evidence; trimmedView.omitted.dispatchHistory += cut.dispatchHistory; trimmedView.omitted.queueHistory += cut.queueHistory; trimmedView.omitted.actionHistory += cut.actionHistory; trimmedView.omitted.sessions += cut.sessions; }
       }

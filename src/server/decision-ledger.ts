@@ -49,9 +49,8 @@ export type DecisionRecord = Omit<Decision, 'state'> & { state: DecisionState | 
 function foldLedger(workId: string, rows: { actor: string; kind: string; payload: any; created_at: Date | string }[]): DecisionRecord[] {
   const events = rows.map(row => ({ kind: row.kind as string, actor: row.actor as string, at: new Date(row.created_at).toISOString(), payload: row.payload }));
   const decisions: DecisionRecord[] = foldDecisions(workId, events).map(decision => ({ ...decision, race: null, pin: null }));
-  const byId = new Map(decisions.map(decision => [decision.id, decision]));
   for (const event of events) {
-    const decision = byId.get(event.payload?.id);
+    const decision = decisions.find(entry => entry.id === event.payload?.id);
     if (!decision) continue;
     if (event.kind === 'decision.requested') Object.assign(decision, { pin: event.payload.pin ?? null });
     if (event.kind === 'decision.stale') Object.assign(decision, { state: 'stale', staleAt: event.at, outcome: event.payload.reason ?? null, race: { expected: event.payload.expected ?? null, current: event.payload.current ?? null } });
@@ -75,11 +74,7 @@ export async function decisionsByWork(db: { query: Db['query'] }, ids: readonly 
   const byWork: Record<string, DecisionRecord[]> = {};
   if (!ids.length) return byWork;
   const rows = (await db.query("SELECT work_id, actor, kind, payload, created_at FROM events WHERE work_id=ANY($1::uuid[]) AND kind LIKE 'decision.%' ORDER BY seq", [[...ids]])).rows;
-  // Grouped once, so the fold reads each row once however many items the set names: the merge
-  // hold (merger-mode.ts) asks for every candidate on each coordination poll.
-  const rowsByWork = new Map<string, any[]>();
-  for (const row of rows) { const id = row.work_id, group = rowsByWork.get(id); if (group) group.push(row); else rowsByWork.set(id, [row]); }
-  for (const id of ids) byWork[id] = foldLedger(id, rowsByWork.get(id) ?? []);
+  for (const id of ids) byWork[id] = foldLedger(id, rows.filter(row => row.work_id === id));
   return byWork;
 }
 
