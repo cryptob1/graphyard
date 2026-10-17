@@ -126,23 +126,32 @@ export async function acceptanceMergeRefusal(git: GitRunner, base: string, head:
 }
 
 /**
- * GY-1661: the land route's judgement of a merge-writer landing, read after fetching BASE from
- * origin, so a merge commit the writer pushed after this checkout's last fetch is found. A failed
- * fetch records nothing: a stale origin/BASE could still hold an obsolete merge and protect its
- * cases, so the landing is refused with 503 and the loop records it again on its next poll. The
- * fetch is bounded by `timeoutMs` (the runner kills git at it, and the route stops waiting at it
- * whatever the runner does), so a stalled origin, DNS lookup, SSH negotiation or credential helper
- * answers with the same retryable 503 inside the caller's own timeout.
+ * GY-1661: the land route's judgement of a merge-writer landing. GY-1922: the checkout's own
+ * `refs/remotes/origin/BASE` is read first, since the loop fetches into that same checkout (bind-mounted
+ * into a compose server container that has no credential or host key for an SSH origin); a ref that
+ * already holds exactly that merge of the approved head on its first-parent history is enough, as
+ * no obsolete merge passes that check. Only otherwise is BASE fetched, so a merge the writer pushed
+ * after the checkout's last fetch is found. A failed fetch records nothing: the landing is refused
+ * with 503 and the loop records it again on its next poll. The fetch is bounded by `timeoutMs` (the
+ * runner kills git at it, and the route stops waiting at it whatever the runner does), so a stalled
+ * origin, DNS lookup, SSH negotiation or credential helper answers with the same retryable 503
+ * inside the caller's own timeout.
  */
 export async function acceptanceLandingRefusal(git: GitRunner, base: string, head: string, mergeSha: string, timeoutMs = acceptanceFetchTimeoutMs): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
   let timer: NodeJS.Timeout | undefined;
-  const expired = new Promise<GitResult>(resolve => { timer = setTimeout(() => resolve({ status: null, stdout: '', stderr: `git fetch did not finish within ${timeoutMs}ms` }), timeoutMs); timer.unref(); });
-  const fetched = await Promise.race([
-    git(['fetch', '--no-tags', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`], { timeoutMs })
-      .catch((error: unknown): GitResult => ({ status: null, stdout: '', stderr: error instanceof Error ? error.message : String(error) })),
-    expired,
-  ]).finally(() => clearTimeout(timer));
-  if (fetched.status !== 0) throw new Refusal(`The control plane could not fetch ${base} from origin to read the merge writer's landing (${fetched.stderr.trim().slice(0, 500) || `git exited ${fetched.status}`}); nothing is recorded until it can`, 503);
+  const expired = new Promise<'expired'>(resolve => { timer = setTimeout(() => resolve('expired'), timeoutMs); timer.unref(); });
+  try {
+    const held = await Promise.race([acceptanceMergeRefusal(git, base, head, mergeSha).catch(() => 'unread'), expired]);
+    if (held === null) return null;
+    const fetched = held === 'expired' ? 'expired' : await Promise.race([
+      git(['fetch', '--no-tags', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`], { timeoutMs: Math.max(1, deadline - Date.now()) })
+        .catch((error: unknown): GitResult => ({ status: null, stdout: '', stderr: error instanceof Error ? error.message : String(error) })),
+      expired,
+    ]);
+    const failure = fetched === 'expired' ? `${held === 'expired' ? `reading refs/remotes/origin/${base}` : 'git fetch'} did not finish within ${timeoutMs}ms` : fetched.status === 0 ? null : fetched.stderr.trim().slice(0, 500) || `git exited ${fetched.status}`;
+    if (failure) throw new Refusal(`The control plane could not fetch ${base} from origin to read the merge writer's landing (${failure}); nothing is recorded until it can`, 503);
+  } finally { clearTimeout(timer); }
   return acceptanceMergeRefusal(git, base, head, mergeSha);
 }
 /** How long the land route waits on its base fetch (GY-1661): well inside the loop's 30-second request timeout. */

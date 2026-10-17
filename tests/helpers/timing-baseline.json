@@ -438,6 +438,7 @@
     "tests/goal-acceptance.test.ts": 2600,
     "tests/goal-compose-previews.test.ts": 40000,
     "tests/goal-delivery-onboarding.test.ts": 6500,
+    "tests/goal-land-without-server-fetch.test.ts": 3000,
     "tests/goal-pipeline-outright-refusals.test.ts": 1238,
     "tests/goal-planner.test.ts": 2900,
     "tests/goal-static-item-preview.test.ts": 4500,
