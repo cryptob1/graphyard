@@ -19,7 +19,7 @@ Leases expire 120s after last heartbeat (recorded renewal fault, plane stall: 30
 
 ## Submitted implementation needs rework
 
-Stop worker; [rework](operations.md) `--previous-worker-stopped`. `scripts/rework-causes.mjs` classifies 100 deliveries' rounds (55% own-change, 33% conflicts; raw median 2); `speed.reworkRounds.ownChange` (`master status`) excludes out-of-item causes.
+Stop worker; [rework](operations.md) `--previous-worker-stopped`. `scripts/rework-causes.mjs` classifies 100 deliveries' rounds (55% own-change, 33% conflicts; raw median 2); `master status` `speed.reworkRounds.ownChange` excludes out-of-item causes.
 
 ## Retro synthesis
 
@@ -27,7 +27,7 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 
 ## Flaky CI check
 
-[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); a pass clears it; main merges await reruns. Cancelled/timed-out jobs rerun ≤3×, then one `escalation:main-guard:SHA` fault names run and step, reverting nothing. A real failure reruns once; a pass joins `mainGuardFlakes` (last 20); a second failure, refusal or unconcluded hour reverts.
+[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); a pass clears it; main merges wait for reruns. Cancelled/timed-out jobs rerun ≤3×, then one `escalation:main-guard:SHA` infrastructure fault names run and step, reverting nothing. A real failure reruns once: a pass joins `mainGuardFlakes` (last 20); a second failure, refusal or unconcluded hour reverts.
 
 ## Accepted evidence turns out to be wrong
 
@@ -52,7 +52,7 @@ Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`).
 
 ### The merge-path reserve
 
-Below **500 requests** (`GRAPHYARD_GITHUB_RESERVE`), non-merge observations await reset (`githubBudget.deferrals`); token (`githubBudget.tokens`) projected below reserve at reset raises `github`.
+Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observations await reset (`githubBudget.deferrals`); token (`githubBudget.tokens`) projected below reserve at reset raises `github`.
 
 ### What an observation costs
 
@@ -66,7 +66,9 @@ Below **500 requests** (`GRAPHYARD_GITHUB_RESERVE`), non-merge observations awai
 
 `graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also `master status`): REST-only `perHour` across replicas (`instances`), `limit`/`share`/`target` 0.6/`byEndpoint`; `lastHour` (also `master status`): hourly requests by kind. Immutable, per-cycle, webhook-driven reads [aren't repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
 
-`master merger control-plane`: control-plane-observed candidates are observed from its checkout, GitHub polled for none of their pull request, reviews, checks; a person-opened one is still observed. Diagnostician, doctor read `graphyard status GY-N`, not `gh pr view`.
+### Reading under control-plane
+
+`master merger control-plane`: control-plane-observed candidates are observed from its checkout, GitHub unpolled for their pull request, reviews, checks; person-opened ones still are. Diagnostician, doctor read `graphyard status GY-N`, not `gh pr view`.
 
 ### Webhook liveness
 
@@ -84,7 +86,7 @@ Compaction deletes past `GRAPHYARD_LEDGER_RETENTION_DAYS` (14), appending `ledge
 
 ## Bootstrap mode for a self-proving change
 
-`policy:bootstrap` holders add `"bootstrap":{"reason":"…","contractPaths":["src/herdr/recovery.ts"]}` to criterion; `e2e:` proofs never defer, next item touching those paths owes it (`graphyard obligations`).
+`policy:bootstrap` holders add `"bootstrap":{"reason":"…","contractPaths":["src/herdr/recovery.ts"]}` to criterion; `e2e:` never defer, next item touching those paths owes it (`graphyard obligations`).
 
 ## Delivered with a failed smoke proof
 
@@ -92,7 +94,7 @@ Stays Done, **delivered with failure**; new item reverts.
 
 ## Merge bypass
 
-Ungated merges are permanent: repair access, file follow-up. Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
+Ungated merges are permanent: repair access, file follow-up. Direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
 
 ## Merge-intent withdrawal
 
