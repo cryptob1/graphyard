@@ -289,7 +289,7 @@ test('unit:up-issues-install-worker-credentials — with no logged-in account, u
   await rm(checkout, { recursive: true, force: true });
 });
 
-test('unit:up-issues-install-worker-credentials — with one configured worker\'s token present and another\'s missing, up issues the one it holds but fails naming the missing token, never completing with a single worker profile', async () => {
+test('unit:up-issues-install-worker-credentials — with one configured worker\'s token present and another\'s missing, up issues the one it holds but fails naming the missing token, never completing with a single worker profile, on this run or a rerun, and a rerun after the token is restored issues it', async () => {
   const { runUp } = await import('../src/up.js');
   const checkout = await temporaryDirectory('worker-credentials-partial');
   const installDir = join(checkout, 'install-dir');
@@ -305,6 +305,23 @@ test('unit:up-issues-install-worker-credentials — with one configured worker\'
   assert.match(result.next, new RegExp(`${installDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/tokens/acme-shop-worker-2\\.token`), 'the missing token is named');
   assert.match(result.next, /issued .*acme-shop-worker-1\.token, but/, 'what was issued is named too');
   assert.equal((await stat(join(installDir, 'workers', 'acme-shop-worker-1.token'))).mode & 0o777, 0o600);
+
+  // A rerun finds worker-1's profile already written, so the checklist reads one worker profile;
+  // the settle still judges every configured worker and fails again on the one still missing.
+  const rerun = await runUp(request(), world.deps);
+  assert.equal(rerun.exitCode, 1, 'a rerun with a worker token still missing fails again, never completing on the one worker profile');
+  assert.ok(!rerun.completed.includes('accounts'));
+  assert.match(rerun.next, /tokens\/acme-shop-worker-2\.token/, 'the rerun names the still-missing token');
+  assert.ok(!existsSync(join(installDir, 'workers', 'acme-shop-worker-2.token')));
+
+  // Once the missing token is restored, the next rerun issues exactly it and completes.
+  await world.installWorker('acme-shop-worker-2', 'shop-worker-2');
+  const restored = await runUp(request(), world.deps);
+  assert.equal(restored.exitCode, 0, restored.next);
+  assert.ok(restored.completed.includes('accounts'));
+  const file = join(installDir, 'workers', 'acme-shop-worker-2.token');
+  assert.equal((await stat(file)).mode & 0o777, 0o600, 'the restored worker is issued 0600');
+  assert.equal((await readFile(file, 'utf8')).trim(), tokenValue('shop-worker-2'));
   await rm(checkout, { recursive: true, force: true });
 });
 
