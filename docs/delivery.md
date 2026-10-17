@@ -11,11 +11,11 @@ Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`
 - `release uat ID` deploys `uat`, refused while unjudged <4h candidates serve.
 - `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint/API (`GRAPHYARD_UAT_TOKEN`)/`browser`/suites ([validation](validation.md#release-verdicts); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`.
 - `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`; `release verify --url URL` confirms. Direct promotion seals its read [imported-run hold](validation.md#release-verdicts) before deploying; `admin`/`operator-agent` seal **released** holds only ([filing credential](#release-filing-credential), loop operator agent); unsealable refuses; planes lacking operator agents promote unsealed.
-- `GRAPHYARD_RELEASE_BUILD` records cuts' per-service digests; with `GRAPHYARD_DEPLOY_DIGESTS` `uat`/`promote` deploy them, else SHA. A recorded build promotes by digest, never rebuilt, once UAT names it — refused unless the UAT `digests` suite observed it.
-- Failures file a [hold](validation.md#release-holds) per outcome, else `release follow-up ID` ([filing credential](#release-filing-credential)).
+- `GRAPHYARD_RELEASE_BUILD` records cuts' per-service digests; with `GRAPHYARD_DEPLOY_DIGESTS` `uat`/`promote` deploy them, else SHA. A recorded build promotes by digest, never rebuilt, once UAT names it via its `digests` suite.
+- Failures file [holds](validation.md#release-holds) per outcome, else `release follow-up ID` ([filing credential](#release-filing-credential)).
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records `rc-soak/ID`.
 
-**The master loop promotes** once main differs from the last `rc-production/`/cut SHAs, nothing queued, `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`) passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`/`GRAPHYARD_PRODUCTION_URL`; no workflow; managed repositories run [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. `release.onFailure` `hold` (default `revert`) names each failing case, step and would-be target or `no map matched`, reverting/reopening nothing; `release.revertUnmatched: false` holds an unmatched failure instead of the newest item. `GRAPHYARD_UAT_STATIC` [merge-writer](delivery-redesign.md#merge-writer) trials run required/uat cases uncredentialed: a failing, secret-declaring or unrunnable required case fails; timeouts re-queue. `release status` lists; `release GY-N EPOCH` leases.
+**The master loop promotes** once main differs from the last `rc-production/`/cut SHAs, nothing queued, `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`) passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`/`GRAPHYARD_PRODUCTION_URL`; no workflow; managed repositories run [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. `release.onFailure` `hold` (default `revert`) names each failing case, step and would-be target or `no map matched`, reverting/reopening nothing; `release.revertUnmatched: false` holds an unmatched failure instead of the newest item. `GRAPHYARD_UAT_STATIC` [merge-writer](delivery-redesign.md#merge-writer) trials run required/uat cases uncredentialed: failing, secret-declaring or unrunnable ones fail; timeouts re-queue. `release status` lists; `release GY-N EPOCH` leases. Tip mismatch names both SHAs in `master status` (off skips stuck).
 
 ### Release filing credential
 
@@ -23,7 +23,7 @@ UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds/follow-ups as `g
 
 ### Pre-merge gate and release-candidate validation
 
-Required: `typecheck`, `test`; per candidate `releaseCandidateTests`/container/chart; UAT's `zero-touch` suite (`up --agent --goal`) merges a first item; human steps block.
+Required: `typecheck`, `test`; per candidate `releaseCandidateTests`/container/chart; UAT's `zero-touch` suite (`up --agent --goal`) merges a first item unaided.
 
 `deploy/helm/exercise.sh` forwards a kubectl-chosen free port, re-forwarding a lost or foreign one within `FORWARD_BUDGET` seconds; waits for the rollout's new Ready pod, retrying transient API failures (empty reply, reset, stall, non-2xx, bodiless 2xx), else ending `api METHOD /api/PATH failed after 15 attempts: status STATUS, body: BODY`.
 
@@ -33,7 +33,7 @@ Exact-head gates merge; [candidates](#release-candidates) deploy. Only Graphyard
 
 ### Main guard
 
-Every 30s the guard reruns, reverting merges failing checks parents passed; the [revert approver App](deployment.md#variables) approves only green exact inverses; three refusals abandon (`approval-refused`). A revert failing the merge's named tests closes `base-failure`; later merges failing only those are `coveredBy` until main passes. Failing trial files rerun on merge, then base: [flakes](validation.md#flake-ledger) land; base failures file P0; no rework/proof loss.
+Every 30s the guard reverts merges failing checks parents passed; the [revert approver App](deployment.md#variables) approves only green exact inverses; three refusals abandon (`approval-refused`). A revert failing the merge's named tests closes `base-failure`; later merges failing only those are `coveredBy` until main passes. Failing trial files rerun on merge, then base: [flakes](validation.md#flake-ledger) land; base failures file P0; no rework/proof loss.
 
 ## Managed repositories
 
@@ -61,7 +61,7 @@ Every 30s the guard reruns, reverting merges failing checks parents passed; the 
 {"id":"2026.09.18-1","expectedRevision":0,"environment":{"id":"production","revision":1},"sourceSha":"0123456789abcdef0123456789abcdef01234567","buildId":"5d7c6b7e-8c35-4b3f-9c4a-0a1f2e3d4c5b","manifest":[{"service":"api","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},{"service":"web","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"}],"members":[{"workId":"2f7d1a5e-3b8c-4d9e-8f10-1a2b3c4d5e6f","mergeSha":"89abcdef0123456789abcdef0123456789abcdef","included":true},{"workId":"3a8e2b6f-4c9d-4eaf-9021-2b3c4d5e6f70","mergeSha":"9abcdef0123456789abcdef0123456789abcdef0","included":false,"note":"Reverted"}]}
 ```
 
-`POST /api/delivery/approve`, select:
+`POST /api/delivery/approve` selects:
 
 ```json
 {"environment":{"id":"production","revision":1},"release":{"id":"2026.09.18-1","revision":1},"expectedGeneration":3,"approvalId":"0c1d2e3f-4a5b-4c6d-8e7f-90a1b2c3d4e5"}
