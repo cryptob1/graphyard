@@ -51,8 +51,8 @@ const freePort = async () => {
   await new Promise(done => probe.close(done));
   return port;
 };
-/** The environment a fixture process starts from: the host's basics, never a Graphyard, GitHub, Railway or database setting of the job. */
-const isolated = (env) => Object.fromEntries(Object.entries(env).filter(([key]) => !/^(GRAPHYARD_|GITHUB_|RAILWAY_|DATABASE_URL$|PORT$|HOST$|SOURCE_COMMIT$)/.test(key)));
+/** The environment a fixture process starts from: the host's basics, never a Graphyard, GitHub or gh, Railway or database setting of the job. */
+const isolated = (env) => Object.fromEntries(Object.entries(env).filter(([key]) => !/^(GRAPHYARD_|GITHUB_|GH_|RAILWAY_|DATABASE_URL$|PORT$|HOST$|SOURCE_COMMIT$)/.test(key)));
 /**
  * The fixture-owned configuration, state and data homes under `scratch`: init writes worker profiles,
  * credentials and install records, and gh its state, under these, so none reaches, or is read from, the host's own.
@@ -144,7 +144,8 @@ export async function createOnboardingFixture({ root = candidateRoot, sha, dashb
  * against `url` with `token`, as one report under the candidate's run id. A run retries a failing
  * case once and stops at the first required case that fails outside a pending outcome, as the e2e
  * suite does. The report names a served SHA only when every case's target served the same one, so
- * a fixture that served another source than UAT is never attributed to the candidate.
+ * a fixture that served another source than UAT is never attributed to the candidate. `targets`
+ * names each executed case's own target URL and served SHA, so its recorded runs say where it ran.
  */
 export async function runOnboardingE2e(cases, { url, token, fixture, candidate = null, contract = null, policy, root = candidateRoot, launcher, fetcher, stepTimeoutMs, now = Date.now }) {
   const selected = cases.filter(entry => entry.definition.target === 'uat');
@@ -152,7 +153,7 @@ export async function runOnboardingE2e(cases, { url, token, fixture, candidate =
   const pending = contractPendingCases(contract, candidate?.pendingOutcomes);
   const pendingCases = policy.e2e.pendingOutcomes === 'blocking' ? [] : pending;
   const startedAt = new Date(now()).toISOString();
-  const outcomes = [], served = new Set();
+  const outcomes = [], served = new Set(), targets = [];
   let stoppedBy = null, open = null;
   try {
     for (const entry of selected) {
@@ -171,6 +172,8 @@ export async function runOnboardingE2e(cases, { url, token, fixture, candidate =
       }
       const report = await runCases([entry], { url: target.url, token: target.token, environment: 'uat', runId, retries: releaseRetries, root, pendingCases: pending, policy, launcher, fetcher, stepTimeoutMs, now });
       served.add(report.sha);
+      const known = targets.find(entry => entry.url === target.url && entry.sha === report.sha);
+      if (known) known.cases.push(id); else targets.push({ url: target.url, sha: report.sha, cases: [id] });
       const outcome = report.cases[0];
       outcomes.push(outcome);
       if (outcome.verdict === 'failed' && required && !pendingCases.includes(id)) stoppedBy = id;
@@ -179,7 +182,21 @@ export async function runOnboardingE2e(cases, { url, token, fixture, candidate =
   const sha = served.size === 1 ? [...served][0] : null;
   const tally = verdict => outcomes.filter(outcome => outcome.verdict === verdict).length;
   return { runId, url, environment: 'uat', sha, startedAt, finishedAt: new Date(now()).toISOString(),
-    passed: tally('passed'), failed: tally('failed'), flaky: tally('flaky'), unrun: tally('unrun'), cases: outcomes, pendingOutcomes: policy.e2e.pendingOutcomes };
+    passed: tally('passed'), failed: tally('failed'), flaky: tally('flaky'), unrun: tally('unrun'), cases: outcomes, pendingOutcomes: policy.e2e.pendingOutcomes, targets };
+}
+
+/**
+ * The report split into one report per executed target, each with that target's own `url` and
+ * served `sha`, for `e2e record`, which records every run of a report at its `url`: a fixture case's
+ * runs name the isolated plane it ran on, never the shared install. A fixture case whose fixture
+ * could not be built ran nowhere, so no target records it; its failure still holds the candidate.
+ */
+export function recordingReports(report) {
+  return (report.targets ?? []).map(({ url, sha, cases }) => {
+    const { targets: _targets, ...rest } = report, outcomes = report.cases.filter(outcome => cases.includes(outcome.id));
+    const tally = verdict => outcomes.filter(outcome => outcome.verdict === verdict).length;
+    return { ...rest, url, sha, passed: tally('passed'), failed: tally('failed'), flaky: tally('flaky'), unrun: 0, cases: outcomes };
+  });
 }
 
 /** The suite's verdict over a report, in the e2e suite's own words. */
@@ -210,7 +227,11 @@ export async function main(env = process.env, root = env.GRAPHYARD_E2E_ROOT ?? p
     const report = await runOnboardingE2e(await loadCases(root), { url, token, candidate, contract, policy, root,
       fixture: suiteFixture(env, root) });
     console.log(summarize(report));
-    if (env.GRAPHYARD_E2E_REPORT) await writeFile(env.GRAPHYARD_E2E_REPORT, `${JSON.stringify(report, null, 2)}\n`);
+    if (env.GRAPHYARD_E2E_REPORT) {
+      await writeFile(env.GRAPHYARD_E2E_REPORT, `${JSON.stringify(report, null, 2)}\n`);
+      // The reports the workflow records, one per target, beside the combined one release validate reads.
+      for (const [index, part] of recordingReports(report).entries()) await writeFile(env.GRAPHYARD_E2E_REPORT.replace(/(\.json)?$/, `.target-${index + 1}.json`), `${JSON.stringify(part, null, 2)}\n`);
+    }
     const pending = policy.e2e.pendingOutcomes === 'blocking' ? [] : contractPendingCases(contract, candidate?.pendingOutcomes);
     const result = suiteResult(report, pending, policy);
     console.log(result.detail);

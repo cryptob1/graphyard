@@ -4,8 +4,8 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileS
 import { join } from 'node:path';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { loadCases, loadContract, parseCase, type CaseFile } from '../src/e2e/case.js';
-import { runCases, type E2eLauncher, type E2eLocator, type E2ePage } from '../src/e2e/runner.js';
+import { loadCases, loadContract, parseCase, scenarioDefinition, type CaseFile } from '../src/e2e/case.js';
+import { recordRuns, runCases, type E2eLauncher, type E2eLocator, type E2ePage } from '../src/e2e/runner.js';
 import { assessHolds, e2eRecord, foldHolds, type HoldRecord } from '../src/release-holds.js';
 import { checkoutRepositoryPolicy } from '../src/model/repository-policy.js';
 import { projectDeliveryAssignment } from '../src/project-applications.js';
@@ -15,7 +15,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { tempOwnerMarker } from '../src/tmp-reclaim.js';
 import { execFileSync } from 'node:child_process';
 // @ts-expect-error The fixture is a plain ES module the uat job runs under tsx.
-import { candidateRoot, checkoutHead, createOnboardingFixture, fixtureCases, runOnboardingE2e, startControlPlane, suiteFixture } from '../scripts/onboarding-delivery-fixture.mjs';
+import { candidateRoot, checkoutHead, createOnboardingFixture, fixtureCases, recordingReports, runOnboardingE2e, startControlPlane, suiteFixture } from '../scripts/onboarding-delivery-fixture.mjs';
 
 // GY-1910 (release hold GY-1909): onboarding-delivery-defaults runs on an isolated project onboarded
 // the normal way from the candidate's source, never on the shared UAT install, which keeps its
@@ -119,6 +119,16 @@ test('integration:onboarding-uat-fresh-project-target — onboarding-delivery-de
     assert.deepEqual(report.cases.map((outcome: any) => [outcome.id, outcome.verdict, outcome.failingStep]), [[caseId, 'passed', null], ['shared-merger-probe', 'passed', null]]);
     assert.equal(report.sha, head, 'both targets served the candidate source');
     assert.equal(report.runId, `rc-${candidate.id}`);
+    // Recorded provenance: each case's runs name the target it ran on, so the fixture case is never recorded as a shared-UAT run.
+    const recorded: Record<string, string[]> = {};
+    const recorder = async (path: string, data?: any) => {
+      if (path === 'scenarios') return [shipped, probe].map(entry => ({ ...scenarioDefinition(entry), revision: 1 }));
+      (recorded[decodeURIComponent(path.split('/')[1])] ??= []).push(data.baseUrl);
+    };
+    for (const part of recordingReports(report)) await recordRuns(recorder, [shipped, probe], part);
+    assert.deepEqual(recorded['shared-merger-probe'], [shared.url]);
+    assert.deepEqual(recorded[caseId], [opened[0].url], 'the fixture case records the isolated plane it ran on');
+    assert.notEqual(recorded[caseId][0], recorded['shared-merger-probe'][0]);
 
     // The fixture came from normal init with the candidate's own CLI and serves what init committed.
     const [made] = opened;

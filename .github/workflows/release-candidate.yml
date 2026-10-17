@@ -330,7 +330,13 @@ jobs:
         shell: bash
         run: |
           if [[ -z "$GRAPHYARD_TOKEN" ]]; then echo 'GRAPHYARD_E2E_RECORD_TOKEN is not set; the E2E case runs are not recorded'
-          elif [[ -f "$RUNNER_TEMP/e2e-report.json" ]]; then node bin/graphyard.mjs e2e record "$RUNNER_TEMP/e2e-report.json"; else echo 'The e2e suite wrote no report; nothing to record'; fi
+          elif [[ -f "$RUNNER_TEMP/e2e-report.json" ]]; then
+            # One report per target the suite wrote (GY-1910), so each run records the URL it ran against.
+            shopt -s nullglob; parts=("$RUNNER_TEMP"/e2e-report.target-*.json); status=0
+            if (( ${#parts[@]} == 0 )); then node bin/graphyard.mjs e2e record "$RUNNER_TEMP/e2e-report.json"; exit; fi
+            for report in "${parts[@]}"; do node bin/graphyard.mjs e2e record "$report" || status=1; done
+            exit "$status"
+          else echo 'The e2e suite wrote no report; nothing to record'; fi
         env:
           GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
           GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_E2E_RECORD_TOKEN }}
