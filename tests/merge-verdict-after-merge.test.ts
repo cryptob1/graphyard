@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CHECK_NAME, GitHub, gateMerge } from '../src/github.js';
 import { type Observation, type Work } from '../src/model.js';
-import { verdictContradictions, type MergeEnqueueRequest } from '../src/merge-queue.js';
+import * as mergeQueue from '../src/merge-queue.js';
+import type { MergeEnqueueRequest } from '../src/merge-queue.js';
 import { mergeStallAttention } from '../src/cli/status-attention.js';
 
 // GY-1917. On GY-1912 (PR #1300) the `Graphyard / merge` run at head 7252bcc7 read success when
@@ -12,6 +13,8 @@ import { mergeStallAttention } from '../src/cli/status-attention.js';
 
 const head = '7'.repeat(40), base = 'e'.repeat(40), mergeSha = '3'.repeat(40);
 const APP = 4935393, CI = 15368;
+// Read through the namespace, so the file still loads (and its cases fail) against a base without it.
+const verdictContradictions = (work: Work[]) => (mergeQueue as any).verdictContradictions(work) as { key: string; head: string; run: number; conclusion: string | null }[];
 const reconciliationFailed = 'Reconciliation failed; fresh verification required';
 
 function work(overrides: Partial<Work> = {}): Work {
