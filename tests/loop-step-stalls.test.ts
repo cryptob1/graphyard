@@ -662,6 +662,24 @@ test('unit:stall-wake-acknowledges-only-delivered — a wake beside a failed cyc
   assert.deepEqual(await wakeMasterForStalls(config, loop, effects, () => tick(60_000)), [], 'every stall delivered once: nothing more to wake');
 });
 
+test('unit:stall-wake-leaves-a-dialog-to-the-step — a wake beside a failed cycle never types into a dialog on the master pane: it sends nothing and acknowledges nothing, so the step answers or holds the dialog and delivers the wake', async () => {
+  const { S } = await load();
+  const { wakeMasterForStalls } = await import('../src/daemon/cycle-master.js');
+  const loop = state(), config = loopConfig();
+  loop.master.agentName = 'master-test'; loop.master.pane = 'pane-master'; loop.master.startedAt = new Date(clock).toISOString();
+  for (const cycle of [1, 2, 3]) S.noteCycleStalls(loop, [{ kind: 'snapshot-read', state: 'failed' as const, detail: 'unbound refusal' }], cycle, tick(60_000));
+  const prompts: string[] = [];
+  let screen = 'Do you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel';
+  const effects = { agents: () => [], herdr: async () => ({ agents: [{ name: 'master-test', pane_id: 'pane-master', agent: 'claude', agent_status: 'idle' }], available: true }),
+    sessionOutput: () => screen, masterSession: { launch: async () => { throw new Error('never launched'); } }, promptSession: async (_agent: unknown, text: string) => { prompts.push(text); }, persist: async () => {} } as unknown as DaemonEffects;
+  assert.deepEqual(await wakeMasterForStalls(config, loop, effects, () => clock), [], 'a dialog on the pane holds the wake');
+  assert.equal(prompts.length, 0, 'nothing is typed into the dialog');
+  assert.deepEqual(loop.master.subjects, {}, 'nothing is acknowledged');
+  screen = '> ';
+  tick(60_000);
+  assert.equal((await wakeMasterForStalls(config, loop, effects, () => clock)).length, 1, 'a clear pane receives the wake');
+});
+
 test('unit:stall-remedy-written-before-it-runs — the remedy attempt is on the cursor before its mutation runs, so a process ending during it restarts into a remedied run that wakes the master and is never applied twice', async () => {
   const { S } = await load();
   const loop = state();
