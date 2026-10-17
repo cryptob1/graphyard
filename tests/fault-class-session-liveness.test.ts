@@ -17,7 +17,7 @@ import type { SessionHandle, SessionHandleInput } from '../src/model/sessions.js
 import { awaitRuntimeStart, buildMasterStatus, deliverPrompt, masterConfigSchema, PromptNotAcceptedError, SessionStartError, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { launchWaitAttention } from '../src/auto-dispatch.js';
 import { GhPausedError } from '../src/gh-pause.js';
-import { emptyDaemonState, runCycle } from '../src/master-daemon.js';
+import { emptyDaemonState, pruneDaemonState, runCycle } from '../src/master-daemon.js';
 import { record, launchAppearanceMs } from '../src/daemon/effects.js';
 import { resumeStep, checkPaneStillBelongs } from '../src/daemon/cycle-resume.js';
 import { reclaimLaunchedPanes } from '../src/daemon/cycle-reclaim.js';
@@ -1142,6 +1142,18 @@ test('unit:fault-class-session-liveness GY-1863 action:session — a stall reads
   assert.equal(state.faults.instances.filter(entry => entry.kind === 'action:session').length, 1, 'a delivered re-prompt opens nothing of its own');
 });
 
+test('unit:fault-class-session-liveness GY-1863 action:wake — a notice under unrelated output that names a login, a password or billing is still put away; a consent question in the notice or a consent menu at the bottom is not', () => {
+  const notice = ['  Want to autocompact at 400k tokens instead?', '     Autocompact at ‹ 400k › tokens', '     Keep auto (1m tokens)', '   ↑/↓ choose · enter confirm · esc not now'];
+  for (const output of ['● Implemented login handling for the settings page', '● The password reset form now validates its token', '● Billing totals are rounded once, at the end']) {
+    const found = consent.detectNoticeDialog([output, '  Tests pass.', ...notice].join('\n'));
+    assert.deepEqual(found?.keys, ['esc'], `the session's own output above the notice is not what the keystroke answers: ${output}`);
+    assert.equal(found?.kind, 'autocompact');
+    assert.ok(!found!.text.includes(output), 'the notice text starts at the notice');
+  }
+  assert.equal(consent.detectNoticeDialog(['  Want to autocompact at 400k tokens? Sign in to keep your settings', ...notice.slice(1)].join('\n')), null, 'a consent question inside the notice keeps it for a human');
+  assert.equal(consent.detectNoticeDialog(['● autocompacting soon', 'Please log in to continue', '  1. Log in with your browser', '  2. Exit', '  esc to cancel'].join('\n')), null, 'a consent menu at the bottom is never a notice');
+});
+
 test('unit:fault-class-session-liveness GY-1863 action:wake — a master whose wake is not visibly accepted is rotated deaf instead of failing every cycle, and no action:wake instance opens', async () => {
   const NOW = Date.parse('2026-10-17T02:44:27.516Z');
   const iso = (ms: number) => new Date(NOW + ms).toISOString();
@@ -1252,6 +1264,18 @@ test('unit:fault-class-session-liveness GY-1863 action:wake — the deaf rotatio
   assert.equal(bound.attempts > 1, true, 'every further deaf wake restates the same standing record');
   assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'action:wake').length, 1, 'the class counts one standing action:wake instance, not one per cycle');
   assert.ok(state.faults.failing['master:wake'], 'the failure stands until a delivery is accepted');
+
+  // Ordinary work outlives the episode's rows: newer resolved actions than the cursor keeps push
+  // every rotation record out under pruning. The bound is the session's own record, so it holds —
+  // the base of this round counted the rotation rows, lost them here and replaced the session again.
+  for (let index = 0; index < 600; index++) state.actions[`traffic:${index}`] = { kind: 'refresh', work: `work-T-${index}`, principal: null, state: 'done',
+    detail: `refreshed T-${index}`, attempts: 1, epoch: null, cycle: state.cycle, at: new Date(at.value + index).toISOString() };
+  pruneDaemonState(state);
+  assert.ok(!Object.values(state.actions).some(action => action.kind === 'failover'), 'pruning retired every rotation record');
+  for (let round = 0; round < 3; round++) { await cycle(fiveMinutes); await cycle(fiveMinutes); pruneDaemonState(state); }
+  assert.equal(harness.launches.length, 3, 'no deaf replacement past the bound once its rows are pruned');
+  assert.equal(state.master.rotations, 3);
+  assert.equal(state.actions['master:wake'].state, 'failed', 'the wake still stands failed on the bound');
 
   // A session accepts a delivery: the wake records done, the standing failure ends, and a later
   // deaf end starts a fresh count — the rotation is the remedy again, at the bound's pace.

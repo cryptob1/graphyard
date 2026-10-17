@@ -131,8 +131,8 @@ export function screenDialog(screen: string | null | undefined): string | null {
  * no-change answer. It is not consent: nothing is granted, nothing is declined on the record's
  * behalf, and the session's own next keystroke works exactly as before. A notice is recognised
  * only as the last thing on the pane, with its dismiss hint at the bottom, and never when the
- * tail also asks one of the neverAnswered questions — those stay with a human, whatever else the
- * screen says.
+ * screen ends on a consent dialog or the notice's own lines ask a consent question — those stay
+ * with a human. Output above the notice is not read for that: it is not what the keystroke answers.
  */
 export interface NoticeDialog { kind: string; text: string; keys: string[] }
 export const noticeScreenLines = 12, noticeTextLimit = 300;
@@ -145,12 +145,16 @@ export function detectNoticeDialog(screen: string | null | undefined): NoticeDia
   if (!screen) return null;
   const tail = screen.split('\n').map(line => line.replace(/\s+/g, ' ').trim()).filter(Boolean).slice(-noticeScreenLines);
   if (tail.length < 2 || !noticeHint.test(tail.slice(-noticeHintLines).join(' '))) return null;
-  // A consent dialog is never a notice, whatever else it offers: the kinds above decide it.
-  if (promptKinds.some(([, asks]) => asks.test(tail.join('\n')))) return null;
+  // A consent dialog the screen ends on is never a notice, whatever else it offers.
+  if (detectConsentPrompt(tail.join('\n'))) return null;
   const found = noticeDialogs.find(dialog => dialog.asks.test(tail.join('\n')));
   if (!found) return null;
-  const first = tail.findIndex(line => found.asks.test(line));
-  const text = tail.slice(Math.max(0, first)).join(' / ');
+  // The notice is the tail from the first line that names it: output the session printed above it
+  // ("Implemented login handling") asks nothing and is no reason to leave the overlay up, while a
+  // consent question inside the notice's own lines still keeps it for a human.
+  const first = tail.findIndex(line => found.asks.test(line)), notice = tail.slice(Math.max(0, first));
+  if (promptKinds.some(([, asks]) => asks.test(notice.join('\n')))) return null;
+  const text = notice.join(' / ');
   return { kind: found.kind, text: text.length > noticeTextLimit ? `${text.slice(0, noticeTextLimit - 1)}…` : text, keys: ['esc'] };
 }
 

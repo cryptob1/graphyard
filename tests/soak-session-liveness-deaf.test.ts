@@ -11,7 +11,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import * as cycleMaster from '../src/daemon/cycle-master.js';
 const masterDeafRotationBound = cycleMaster.masterDeafRotationBound ?? 3;
 const masterWakeKey = cycleMaster.masterWakeKey ?? 'master:wake';
-const deafRotationsSince = (actions: Parameters<NonNullable<typeof cycleMaster.deafRotationsSince>>[0]) => cycleMaster.deafRotationsSince?.(actions) ?? 0;
+const deafStreak = (master: Parameters<NonNullable<typeof cycleMaster.deafStreak>>[0]) => cycleMaster.deafStreak?.(master) ?? 0;
 
 /**
  * GY-1863 across the real loop's cycles, over simulated days: the two per-cycle behaviours the
@@ -85,7 +85,7 @@ test('soak:session-liveness — a persistently deaf master is rotated at most th
     const masterName = config.masterAgentName!;
     let now = start, deaf = true;
     const agents: HerdrAgent[] = [{ name: masterName, pane_id: 'w1V:pQ35', agent: 'claude', agent_status: 'idle' }];
-    const launched: string[] = [], closed: string[] = [], ended: string[] = [], accepted: number[] = [], opened: number[] = [], boundHeld: number[] = [];
+    const launched: string[] = [], closed: string[] = [], ended: string[] = [], endReasons: string[] = [], accepted: number[] = [], opened: number[] = [], boundHeld: number[] = [];
     const effects: DaemonEffects = {
       agents: () => [],
       herdr: () => ({ agents, available: true }),
@@ -97,7 +97,7 @@ test('soak:session-liveness — a persistently deaf master is rotated at most th
       closeSession: pane => { closed.push(pane); const keep = agents.filter(agent => agent.pane_id !== pane); agents.splice(0, agents.length, ...keep); },
       // The pane whatever replaces the session stays deaf, as a Herdr regression or an unknown dialog would keep it.
       promptSession: async () => { if (deaf) throw new PromptNotAcceptedError(stalled); accepted.push(now); },
-      endRegistrySession: async session => { ended.push(session); },
+      endRegistrySession: async (session, reason) => { ended.push(session); endReasons.push(reason); },
       masterSession: { launch: async () => {
         const pane = `w1V:pQ${40 + launched.length}`, session = `master-registry-${launched.length + 1}`;
         launched.push(pane);
@@ -123,7 +123,7 @@ test('soak:session-liveness — a persistently deaf master is rotated at most th
       for (const check of state.invariants.report) if (!check.holds) violations.push(`cycle ${cycle}: ${check.invariant} — ${check.reading}`);
       const instances = instancesBefore();
       if (instances > flying) opened.push(cycle);
-      if (deafRotationsSince(state.actions) >= masterDeafRotationBound) boundHeld.push(cycle);
+      if (deafStreak(state.master) >= masterDeafRotationBound) boundHeld.push(cycle);
       const record = state.actions[masterWakeKey];
       if (record?.state === 'failed' && record.at === new Date(now).toISOString()) { boundFailedAt.push(cycle); boundAttempts.push(record.attempts); }
       // Past the bound no pane is closed and no session replaced: the churn is capped at three.
@@ -163,6 +163,39 @@ test('soak:session-liveness — a persistently deaf master is rotated at most th
     assert.equal(state.master.rotations, rotationsBefore + 1, 'a deaf end after an accepted wake is rotated once more');
     assert.equal(launched.length, launchesBefore + 1, "and replaced once, back at the bound's pace");
     assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'action:wake').length, 1, 'the recovery closed the episode; the record keeps its one instance');
+
+    // Two more simulated days of the same deaf episode beside ordinary work: every cycle resolves
+    // more unrelated actions than the cursor keeps, so pruning retires the episode's rotation rows
+    // within the first hours. The bound rides on the master session's own record, so the episode is
+    // replaced at most twice more (three in all) and never again before a wake is accepted; the
+    // session's budget still rotates it every twelve hours, and each replacement inherits the streak.
+    const deafEnds = () => endReasons.filter(reason => /\(deaf\)/.test(reason)).length;
+    const deafBefore = deafEnds(), budgetBefore = endReasons.filter(reason => /\(budget\)/.test(reason)).length;
+    let traffic = 0, prunedRotations = false;
+    const days = 2, cycles = (days * 24 * 60 * minute) / cycleMs;
+    for (let cycle = 1; cycle <= cycles; cycle++, now += cycleMs) {
+      for (let row = 0; row < 120; row++, traffic++) state.actions[`traffic:${traffic}`] = { kind: 'refresh', work: `work-T-${traffic}`, principal: null, state: 'done',
+        detail: `refreshed T-${traffic}`, attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now).toISOString() };
+      const flying = instancesBefore();
+      await runCycle(config, state, effects, () => now);
+      pruneDaemonState(state);
+      for (const check of state.invariants.report) if (!check.holds) violations.push(`day cycle ${cycle}: ${check.invariant} — ${check.reading}`);
+      if (instancesBefore() > flying) opened.push(14 + cycle);
+      if (!Object.values(state.actions).some(action => action.kind === 'failover' && /\(deaf\)/.test(action.detail))) prunedRotations = true;
+      assert.ok(deafEnds() - deafBefore <= masterDeafRotationBound - 1, `day cycle ${cycle}: no deaf replacement past the bound (${deafEnds()} deaf ends)`);
+    }
+    assert.deepEqual(violations.join('\n'), '', 'every system invariant holds after every cycle of the pruned days');
+    assert.ok(prunedRotations, 'pruning retired the episode\'s rotation rows while it stood');
+    assert.equal(deafEnds() - deafBefore, masterDeafRotationBound - 1, 'the episode reached the bound — three deaf ends in all — and stopped there');
+    assert.ok(endReasons.filter(reason => /\(budget\)/.test(reason)).length - budgetBefore >= days * 2 - 1, 'the session budget still rotated the deaf session over the days');
+    assert.equal(deafStreak(state.master), masterDeafRotationBound, 'each budget replacement inherited the streak');
+    assert.equal(state.actions[masterWakeKey]?.state, 'failed', 'the wake still stands failed on the bound');
+    assert.ok(state.faults.failing[masterWakeKey], 'the standing failure is kept through pruning');
+    assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'action:wake').length, 2, 'the second episode opened its one instance, never one per cycle or per pruning');
+    deaf = false;
+    for (let cycle = 1; cycle <= 2; cycle++, now += cycleMs) { await runCycle(config, state, effects, () => now); pruneDaemonState(state); }
+    assert.equal(state.actions[masterWakeKey]?.state, 'done', 'an accepted wake ends the standing failure');
+    assert.equal(deafStreak(state.master), 0, 'and the streak with it');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

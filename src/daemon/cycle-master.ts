@@ -4,7 +4,7 @@ import { paneAlreadyGone } from '../request-settlement.js';
 import { launchAppearanceMs, promptDigest, record, stoppedStates, type DaemonEffects } from './effects.js';
 import { actionableSubjects } from './metrics.js';
 import { detailChanged } from './decisions.js';
-import { message, type DaemonAction } from './state.js';
+import { message } from './state.js';
 import { emptyMasterSession, type MasterSessionState } from './state.js';
 import { sessionCapMs } from '../model/registry-sessions.js';
 import { masterHandover, masterSessionBudgetMs, masterHeartbeatIntervalMs, masterWakeText, masterProfile } from '../master/master-session.js';
@@ -201,14 +201,15 @@ async function masterSessionStepWithin(cycle: Cycle) {
         // both records done and no fault reading any of it. The wake stands failed on masterWakeKey
         // instead: one action:wake instance the class counts, exactly the surface the same condition
         // had before the rotation existed, until a session accepts a delivery.
-        if (deafRotationsSince(state.actions) >= masterDeafRotationBound) {
+        const streak = deafStreak(state.master);
+        if (streak >= masterDeafRotationBound) {
           performed.push(await record(state, masterWakeKey, { kind: 'wake', work: null, principal: null, state: 'failed',
             detail: `The wake for ${keys.join(', ') || 'its heartbeat'} was not visibly accepted by master session ${live.agentName} (${message(error)})`
               + `; ${masterDeafRotationBound} consecutive deaf ends were each answered with a replacement already, so the loop stops rotating on this bound and the wake stands failed until a session accepts a delivery`,
-            attempts: (state.actions[masterWakeKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+            attempts: Math.min(1000, (state.actions[masterWakeKey]?.attempts ?? 0) + 1), cycle: state.cycle }, now(), effects.persist));
           return;
         }
-        const rotated = await rotateMasterSession(cycle, 'deaf', message(error), null, deafRotationsSince(state.actions) + 1);
+        const rotated = await rotateMasterSession(cycle, 'deaf', message(error), null, streak + 1);
         performed.push(await record(state, `wake:master:${state.cycle}`, { kind: 'wake', work: null, principal: null, state: 'done',
           detail: `The wake for ${keys.join(', ') || 'its heartbeat'} was not visibly accepted by master session ${live.agentName} (${message(error)})`
             + `; the session was ${rotated ? 'rotated — closed, and the role relaunches from the durable handover' : 'left in place, its rotation refused'} rather than kept deaf`,
@@ -222,7 +223,7 @@ async function masterSessionStepWithin(cycle: Cycle) {
       if (state.actions[masterWakeKey]?.state === 'failed')
         performed.push(await record(state, masterWakeKey, { kind: 'wake', work: null, principal: null, state: 'done',
           detail: `Master session ${live.agentName} accepted its wake; the standing deaf-bound failure ends`,
-          attempts: (state.actions[masterWakeKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+          attempts: Math.min(1000, (state.actions[masterWakeKey]?.attempts ?? 0) + 1), cycle: state.cycle }, now(), effects.persist));
       performed.push(await record(state, `wake:master:${state.cycle}`, { kind: 'wake', work: null, principal: null, state: 'done',
         detail: heartbeat ? `Woke master session ${live.agentName}: no material event for ${Math.round(quietMs / 60_000)} minutes (the heartbeat fallback)`
           : `Woke master session ${live.agentName} for changed subjects: ${keys.join(', ')}`,
@@ -232,22 +233,19 @@ async function masterSessionStepWithin(cycle: Cycle) {
 }
 
 /**
- * GY-1863: how many consecutive `deaf` rotations stand since the last wake a master session
- * accepted — the `(deaf)` rotation records newer than the newest accepted wake, both on the
- * cursor's own action records, so the count needs no state of its own and survives restarts.
- * A rotation for another cause between two deaf ones does not reset the count: the role was
- * not heard from either way, which is the churn the bound exists to cap. pruneDaemonState retires
- * resolved rows oldest first, so a rotation older than the newest accepted wake goes before it.
+ * GY-1863: how many consecutive `deaf` ends stand without a wake a master session accepted. The
+ * count travels on the master session's own record, never on the action rows: pruneDaemonState
+ * retires resolved rows oldest first, so a persistently deaf episode outlived by ordinary traffic
+ * would lose its rotation rows, and the bound with them. A session that accepted a wake (its
+ * `lastWake`, which a rotation never carries over) ends the streak; otherwise the streak is the
+ * one its predecessor's end recorded, which every rotation — `deaf` or another cause, since the
+ * role was not heard from either way — writes on `lastEnd`, the record the replacement keeps.
  */
-export function deafRotationsSince(actions: Readonly<Record<string, DaemonAction>>): number {
-  let accepted = 0;
-  const deaf: number[] = [];
-  for (const action of Object.values(actions)) {
-    if (action.state !== 'done') continue;
-    if (action.kind === 'wake' && action.detail.startsWith('Woke master session')) accepted = Math.max(accepted, Date.parse(action.at));
-    else if (action.kind === 'failover' && /\(deaf\):/.test(action.detail)) deaf.push(Date.parse(action.at));
-  }
-  return deaf.filter(at => at > accepted).length;
+const deafStreakText = (streak: number) => `; ${streak} consecutive deaf end${streak === 1 ? '' : 's'} without an accepted wake`;
+export function deafStreak(master: Pick<MasterSessionState, 'lastWake' | 'lastEnd'>): number {
+  if (master.lastWake) return 0;
+  const carried = master.lastEnd ? /; (\d+) consecutive deaf ends? without an accepted wake$/.exec(master.lastEnd.detail) : null;
+  return carried ? Number(carried[1]) : 0;
 }
 
 /**
@@ -258,12 +256,13 @@ export function deafRotationsSince(actions: Readonly<Record<string, DaemonAction
  * handover. The subject digests are kept: the replacement inherits the same standing subjects,
  * which the handover names, so a rotation never reads as a wake.
  */
-async function rotateMasterSession(cycle: Cycle, cause: MasterRotationCause, detail: string, resetsAt: string | null = null, deafStreak = 0): Promise<boolean> {
+async function rotateMasterSession(cycle: Cycle, cause: MasterRotationCause, detail: string, resetsAt: string | null = null, deafEnds = 0): Promise<boolean> {
   const { state, effects, now, clock, performed } = cycle;
   const master = state.master;
-  // A `deaf` rotation names its place in the bound (deafRotationsSince counts these records), so
-  // the streak travels on the record the rotation leaves behind and survives restarts.
-  const streak = cause === 'deaf' && deafStreak > 0 ? `; ${deafStreak} consecutive deaf end${deafStreak === 1 ? '' : 's'} without an accepted wake` : '';
+  // Every end names the deaf streak it leaves (deafStreak reads it off lastEnd), so the bound
+  // travels on the record the replacement keeps and survives pruning and restarts alike.
+  const carried = cause === 'deaf' ? deafEnds : deafStreak(master);
+  const streak = carried > 0 ? deafStreakText(carried) : '';
   const composed = `${detail.slice(0, 500 - streak.length)}${streak}`;
   const reason = `master session ${master.agentName} ended (${cause}): ${composed.slice(0, 300)}`;
   const released = master.session && effects.endRegistrySession ? await effects.endRegistrySession(master.session, reason).then(() => true, () => false) : true;
