@@ -104,6 +104,7 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
         && !(item.kind === 'base-conflict' && baseConflictInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'merge-base-dismissed' && mergeBaseDismissalInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'stalled-step' && reworkDecisionInMotion(byKey.get(item.subject), now))
+      && !(item.kind === 'session' && sessionEndInMotion(state, byKey.get(item.subject), now))
         && !(item.kind === 'owed-decision' && owedReworkLine(byKey.get(item.subject), item.text) && reworkDecisionInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'owed-decision' && owedEscalationInMotion(byKey.get(item.subject), item.text, now))
         && !(item.kind === 'owed-decision' && owedContainmentLine(byKey.get(item.subject), item.text) && !standingFence(byKey.get(item.subject), now))
@@ -143,6 +144,25 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
   const settling = new Set(work.filter(item => item.scopeRequest && !standingScopeRequest(item, now, routes)).map(item => item.key));
   const shown = new Set([...recorded.map(fault => `${fault.subject}|${fault.kind}`), ...[...settling].map(key => `${key}|scope-request`)]);
   return [...own, ...derived.filter(fault => ![fault.kind, ...(restatements[fault.kind] ?? []), ...(fenceLines.has(fault) ? ['containment'] : [])].some(kind => shown.has(`${fault.subject}|${kind}`)))];
+}
+/**
+ * GY-1863. Whether a finished worker session the status attention names is still inside the loop's
+ * own recovery for exactly that state: the sessions step ends such an attempt itself — the orphan
+ * watch needs two observations (the lease advancing past the one first seen with the session gone)
+ * and the gone-worker preserve establishes the same way, both tracked under the item's id in
+ * `state.orphans` and `state.absences`. A `session` line standing inside that establishment is the
+ * machinery working, the ordinary pace of work as containmentInMotion is; on 17 October 2026
+ * GY-1860's session counted at 03:59:33Z, two minutes before the same machinery's preserve ended
+ * its attempt. Once the records are gone — the attempt ended, or the machinery stood down without
+ * ending it — the line counts again, as the failed recovery it is. The grace is bounded like
+ * containmentInMotion's: an establishment that outlives `sessionEndMotionBoundMs` (a stop or a
+ * preserve that keeps failing) stops hiding the line, whose own failed escalation or preserve
+ * action still surfaces beside it.
+ */
+export const sessionEndMotionBoundMs = 30 * 60_000;
+export function sessionEndInMotion(state: Pick<DaemonState, 'orphans' | 'absences'>, work: Pick<Work, 'id'> | undefined, now: number): boolean {
+  const seen = work ? state.orphans[work.id] ?? state.absences[work.id] : undefined;
+  return !!seen && now - Date.parse(seen.firstSeenAt) <= sessionEndMotionBoundMs;
 }
 /**
  * GY-1403. Whether an item's blocker is still in motion: it was raised within `masterTurnWaitBoundMs`

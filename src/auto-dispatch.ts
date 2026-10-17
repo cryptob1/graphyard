@@ -19,7 +19,7 @@ import { withLaunchedRuntime } from './master/launch.js';
 import { herdrSubcommand, isHerdrCommand } from './master/herdr.js';
 import { boundedLaunch, launchBoundMs } from './master/launch-bound.js';
 import { capacityRefusal } from './fleet.js';
-import { answeredByPendingReview, postMergeFindingsMax, launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, updateReviewLedger, vanishedSettledSession, type ReviewRecord } from './reviewer.js';
+import { answeredByPendingReview, postMergeFindingsMax, launchReview, reconcileReviews, reviewVerdictReminderMs, UnknownReviewerProfileError, unpostedVerdict, updateReviewLedger, vanishedSettledSession, type ReviewRecord } from './reviewer.js';
 import { owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId, wholeFindings } from './model/post-merge-review.js';
 import { reviewedBeforeMerge, riskOf } from './model/risk-class.js';
 import { blockingFindings, followUpFindingsOf } from './review-cap.js';
@@ -1225,6 +1225,8 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
           }
           // A launch deferred by the gh rate-limit pause is a wait, never a failure: nothing is counted against the request, and it launches on the first tick after the pause.
           else if (error instanceof GhPausedError) { delete cursor.failures[review.id]; wait('review', item, review, message(error)); }
+          // An unknown reviewer profile is a configuration wait (GY-1850): the launch boundary spaces its own attempts and master status names the fix, so nothing is counted and the request resumes once the profiles change.
+          else if (error instanceof UnknownReviewerProfileError) { delete cursor.failures[review.id]; wait('review', item, review, message(error)); }
           else if (!outOfCapacity('review', item, review, error)) refuse('review', item, review, error);
         }
         await persist();
@@ -1335,6 +1337,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       } catch (error) {
         const answered = answeredByPendingReview(error, request);
         if (answered) wait('review', item, request, `reviewer session ${answered.agentName} is already pending on ${request.sha.slice(0, 12)}; ${launchWaitWording.settles}`);
+        else if (error instanceof UnknownReviewerProfileError) { delete cursor.failures[request.id]; wait('review', item, request, message(error)); }
         else if (!outOfCapacity('review', item, request, error)) refuse('review', item, request, error);
       }
       await persist();
