@@ -5,12 +5,12 @@ Releases ([rollback](recovery.md#rollback)): `admin` sets policy; `builder`s bui
 
 ## Release candidates
 
-Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`/`release/production` (moved by `graphyard release`) to candidate SHAs.
+Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`/`release/production` (`graphyard release` moves them).
 
-- `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N new first-parent merges (`GRAPHYARD_RC_MAX_PRS`=10; rest queue); `.github/workflows/release-candidate.yml` cuts on loop dispatch.
-- `release uat ID` deploys `uat`; refused while an unjudged <4h candidate serves.
+- `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N new first-parent merges (`GRAPHYARD_RC_MAX_PRS`=10; rest queue); `release-candidate.yml` cuts on loop dispatch.
+- `release uat ID` deploys `uat`, refused while unjudged <4h candidates serve.
 - `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint/API (`GRAPHYARD_UAT_TOKEN`)/`browser`/suites ([validation](validation.md#release-verdicts); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`.
-- `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`; `release verify --url URL` confirms. A direct promotion seals the [imported-run hold](validation.md#release-verdicts) it read before any deployer runs — an import in between refuses it; `admin`/`operator-agent` seal a **released** hold only ([release-filing credential](#release-filing-credential) in workflows, the loop's operator agent); unsealable refuses; a plane with no operator-agent identity keeps its read alone, promoting unsealed.
+- `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`; `release verify --url URL` confirms. Direct promotion seals its read [imported-run hold](validation.md#release-verdicts) before deploying; `admin`/`operator-agent` seal **released** holds only ([filing credential](#release-filing-credential), loop operator agent); unsealable refuses; planes lacking operator agents promote unsealed.
 - `GRAPHYARD_RELEASE_BUILD` records cuts' per-service digests; with `GRAPHYARD_DEPLOY_DIGESTS` `uat`/`promote` deploy them, else SHA. A recorded build promotes by digest, never rebuilt, once UAT names it — refused unless the UAT `digests` suite observed it.
 - Failures file a [hold](validation.md#release-holds) per outcome, else `release follow-up ID` ([filing credential](#release-filing-credential)).
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records `rc-soak/ID`.
@@ -19,7 +19,7 @@ Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`
 
 ### Release filing credential
 
-UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds/follow-ups as `graphyard-release-follow-up` (only `intent:create`, work items `*`); the loop's hourly `master setup --apply` keeps it, else `master status` names the administrator's step (`graphyard operator-agent setup FILE --token-stdin`). `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` with only `e2e:record`, never admin.
+UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds/follow-ups as `graphyard-release-follow-up` (only `intent:create`, work items `*`); the loop's hourly `master setup --apply` keeps it, else `master status` names the administrator's step (`graphyard operator-agent setup FILE --token-stdin`). `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` with only `e2e:record`, never admin. Uat imports first run read-only `release seal-check ID` (`GET /api/validation/import/seal-authority`, recording `rc-seal-check/ID.AT`; older planes skip): refusal fails pre-seal; `master status` (promotion on/off) names `GRAPHYARD_RELEASE_TOKEN` in `uat`, role, rotation.
 
 ### Pre-merge gate and release-candidate validation
 
@@ -33,11 +33,11 @@ Exact-head gates merge; [candidates](#release-candidates) deploy. Only Graphyard
 
 ### Main guard
 
-Every 30s the guard reruns, reverting merges failing checks parents passed; the [revert approver App](deployment.md#variables) approves only green exact inverses; three refusals abandon (`approval-refused`). A revert failing the merge's named tests closes `base-failure`; later merges failing only that set are covered (`coveredBy`) until main passes. Failing trial files rerun on merge, then base: [flakes](validation.md#flake-ledger) land; base failures file P0; no rework/proof loss.
+Every 30s the guard reruns, reverting merges failing checks parents passed; the [revert approver App](deployment.md#variables) approves only green exact inverses; three refusals abandon (`approval-refused`). A revert failing the merge's named tests closes `base-failure`; later merges failing only those are `coveredBy` until main passes. Failing trial files rerun on merge, then base: [flakes](validation.md#flake-ledger) land; base failures file P0; no rework/proof loss.
 
 ## Managed repositories
 
-`init --scan` splits checks (`delivery.mergeGate`/per-candidate); `--apply` renders `graphyard-release-candidate.yml` (`candidateSchedule`/`--candidate-cron CRON|off`), `graphyard-promotion.yml`. `deploy.adapter`: `railway` or `command` (`deploy.uat`/`deploy.production` with `GRAPHYARD_CANDIDATE_SHA`; unset none). `--delivery per-pr` keeps per-PR checks; `install --plan` lists resources.
+`init --scan` splits checks (`delivery.mergeGate`/per-candidate); `--apply` renders `graphyard-release-candidate.yml` (`candidateSchedule`/`--candidate-cron CRON|off`), `graphyard-promotion.yml`. `deploy.adapter`: `railway` or `command` (`deploy.uat`/`deploy.production`, given `GRAPHYARD_CANDIDATE_SHA`). `--delivery per-pr` keeps per-PR checks; `install --plan` lists resources.
 
 **`graphyard.json` policy**: `risk.sensitive` `{rule,glob}`, else generic; `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; `release.onFailure` `revert`/`hold`; deployed `GRAPHYARD_REPOSITORY_POLICY`; `doctor` prints it.
 
