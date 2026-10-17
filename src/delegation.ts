@@ -5,6 +5,7 @@ import { blockingRulingActions, demand, escalationTriggers, holdDelivery, implem
 import { save, wakeJob, type Store } from './store.js';
 import { fileConflicts, resourceConflicts } from './coordination.js';
 import { workIdByRef } from './store/locked-read.js';
+import { laneOnlyProducer } from './server/principals.js';
 
 export interface DelegationLimits { maxLeads: number; maxEngineersPerLead: number; minReviewers: number; maxReviewers: number }
 export const defaultDelegationLimits: DelegationLimits = { maxLeads: 3, maxEngineersPerLead: 2, minReviewers: 1, maxReviewers: 2 };
@@ -57,9 +58,21 @@ async function once<T>(store: Store, actor: Principal, key: string, fingerprintI
 export const delegationLimitVariables = ['GRAPHYARD_MAX_SLICE_LEADS', 'GRAPHYARD_MAX_ENGINEERS_PER_LEAD', 'GRAPHYARD_MIN_REVIEWERS', 'GRAPHYARD_MAX_REVIEWERS'] as const;
 export type DelegationLimitVariable = typeof delegationLimitVariables[number];
 const limitDefaults: Record<DelegationLimitVariable, number> = { GRAPHYARD_MAX_SLICE_LEADS: 3, GRAPHYARD_MAX_ENGINEERS_PER_LEAD: 2, GRAPHYARD_MIN_REVIEWERS: 1, GRAPHYARD_MAX_REVIEWERS: 2 };
-type Roster = readonly Pick<Principal, 'id' | 'role'>[];
 const countLeads = (principals: Roster) => principals.filter(p => p.role === 'slice-lead').length;
-const countProducers = (principals: Roster) => principals.filter(p => p.role === 'producer').length;
+type Roster = readonly Pick<Principal, 'id' | 'role' | 'grants' | 'proofs' | 'deploymentProviders'>[];
+// A reviewer slot is held only by a producer holding proof grants (GY-1879): a lane-only producer, a
+// producer configured with no proofs and one whose recorded grant was revoked to none hold none.
+// Callers holding the grant store pass the roster through `withRecordedProofs`, so a recorded grant decides it.
+export const proofProducer = (p: Pick<Principal, 'role' | 'proofs'>) => p.role === 'producer' && !!p.proofs?.length;
+/**
+ * The roster with each producer's proofs as Graphyard's grant store records them (proof-grants.ts: a
+ * record supersedes the environment seed), so a reviewer slot is counted from effective proof
+ * authority: a lane producer later granted proofs holds one, and holds none again once they are revoked.
+ */
+export function withRecordedProofs<T extends Roster[number]>(principals: readonly T[], recorded: ReadonlyMap<string, readonly string[]>): T[] {
+  return principals.map(p => p.role === 'producer' && recorded.has(p.id) ? { ...p, proofs: [...recorded.get(p.id)!] } : p);
+}
+const countProducers = (principals: Roster) => principals.filter(proofProducer).length;
 
 /**
  * The values an installer sets from the principal set it generates: the defaults, widened
@@ -129,7 +142,7 @@ export function delegationLimits(env: NodeJS.ProcessEnv = process.env, principal
 export function validateDelegationPrincipals(principals: (Principal & { token?: string })[], limits = defaultDelegationLimits, known?: readonly string[]): { attention: string[] } {
   const attention: string[] = [];
   const leads = principals.filter(p => p.role === 'slice-lead');
-  const reviewers = principals.filter(p => p.role === 'producer');
+  const producers = principals.filter(p => p.role === 'producer'), reviewers = producers.filter(proofProducer);
   const overLimit = (group: Principal[], limit: number, variable: DelegationLimitVariable, what: string) => {
     if (group.length <= limit) return;
     const added = known ? group.filter(p => !known.includes(p.id)).map(p => p.id) : group.map(p => p.id);
@@ -144,7 +157,7 @@ export function validateDelegationPrincipals(principals: (Principal & { token?: 
   // Review/proof agents are shared and independent: never a lead identity, never
   // bound to one slice. Co-located credentials are not a separation of duties.
   const leadIds = new Set(leads.map(p => p.id));
-  for (const reviewer of reviewers) {
+  for (const reviewer of producers) {
     demand(!leadIds.has(reviewer.id), `Producer ${reviewer.id} cannot also hold slice-lead authority`);
     demand(!reviewer.slice, `Producer ${reviewer.id} must remain independent of every slice`);
   }
@@ -199,7 +212,8 @@ export function delegationSnapshot(principals: Principal[], work: Work[], now: n
       workers: workers.map(w => ({ key: w.key, ...identify(w.lease!.owner) })),
       bottlenecks: items.filter(w => w.blocker || standingEscalations(w).length || w.leadHold || w.gates.some(g => !g.passed))
         .map(w => ({ key: w.key, reason: w.blocker ?? standingEscalations(w)[0]?.reason ?? leadHoldRefusal(w) ?? w.gates.find(g => !g.passed)?.reasons[0] ?? 'Awaiting a gate decision' })) };
-  }), reviewers: principals.filter(p => p.role === 'producer').map(p => identify(p.id)) };
+  // The snapshot lists every producer that is not lane-only; the reviewer limits count only proof holders.
+  }), reviewers: principals.filter(p => p.role === 'producer' && !laneOnlyProducer(p)).map(p => identify(p.id)) };
 }
 
 export function enforceLeadCapacity(actor: Principal, work: Work[], now: number, limits: DelegationLimits) {

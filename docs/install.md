@@ -11,18 +11,18 @@ Ask only: **Which provider**; **Provider login**; **GitHub App confirmation clic
 - **One principal per role** (`--workers N`); never share worker credentials.
 - **Workers never receive an admin, coordinator, or producer credential.**
 - **Proof producers get explicit grants only** (`--producer-proof NAME`).
-- Credentials only under `$GRAPHYARD_CONFIG_HOME` (default `~/.config/graphyard`): the plan's `installDirectory`, `init --apply`'s `workers/` (directories `0700`, files `0600`).
+- Credentials only under `$GRAPHYARD_CONFIG_HOME` (default `~/.config/graphyard`): plan's `installDirectory`, `init --apply`'s `workers/` (`0700`/`0600`).
 
 ## Preconditions
 
-Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`, admin `gh auth status` scope `repo` (and `admin:repo_hook` except compose/local/`--observe-only`; `--no-github-app` needs `gh` only for release-candidate `release.*`); worker/non-Actions unit-proof hosts pass [`bwrap` probe](setup-from-zero.md#1-machine-prerequisites).
+Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`, admin `gh auth status` scope `repo` (and `admin:repo_hook` except compose/local/`--observe-only`; `--no-github-app` needs `gh` only for `release.*`); worker/non-Actions unit-proof hosts pass [`bwrap` probe](setup-from-zero.md#1-machine-prerequisites).
 
 ### Providers
 
-- `railway`: `npm i -g @railway/cli`, `railway login`. Stamps `GRAPHYARD_BUILD_SHA` (unknown/dirty refuses), uploads `--path-as-root`; failed upload fails `provider.deploy`.
+- `railway`: `npm i -g @railway/cli`, `railway login`. Stamps `GRAPHYARD_BUILD_SHA` (unknown/dirty refuses), uploads `--path-as-root`; failed upload/unserved commit (10 min) fails `provider.deploy`.
 - `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; `--ssh-key NAME`/`--domain`. `manual:…install…-live` coordinators need `HCLOUD_TOKEN`, `HETZNER_SPEND_CAP_USD_MONTHLY` in repo-root `.env` (`0600`, uncommitted), optionally `HETZNER_SSH_KEY`.
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; `--ssh-host`/`--domain`.
-- `compose` (local): `curl -fsSL https://get.docker.com | sh`. Polls GitHub (no webhook steps); publishes `127.0.0.1:4310`, else first free port ≤4329, kept on reruns (`up`/`master init` use it); a taken `--port N` fails preflight. Under `up`, failed steps' `next` carries last 20 redacted lines. Stale network endpoint: disconnected, retried once.
+- `compose` (local): `curl -fsSL https://get.docker.com | sh`. Polls GitHub (no webhook steps); publishes `127.0.0.1:4310`, else first free port ≤4329, kept on reruns (`up`/`master init` use it); a taken `--port N` fails preflight. `up` failures' `next` carries last 20 redacted lines. Stale `already exists in network` endpoint: disconnected, retried once.
 - `local` (`graphyard up --local`, no other `--provider`): no Docker; embedded Postgres (`npm install` without `--omit=optional`), cluster `INSTALL/postgres`; user unit `graphyard-local-INSTALL.service` migrates (`db migrate`), serves (no systemd: prints command). Polls GitHub like compose.
 
 ## Step 1: plan and approve
@@ -39,7 +39,7 @@ node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --apply
 ```
 
-Writes credentials, [variables](deployment.md#variables); deploys; [protects](github.md#require-the-check) branch (not `--no-github-app`/`--observe-only`), recording prior protection once (`protection-record.json`, no-replace); one apply at once (`apply.lock`, partials too; dead/pid-reused holder reclaimed); `--restore-protection --plan|--apply` restores, re-read-verified; unrecorded/unreadable/other-branch refuses. **Verify** `/healthz`.
+Writes credentials, [variables](deployment.md#variables); deploys; [protects](github.md#require-the-check) branch (not `--no-github-app`/`--observe-only`), recording prior protection once (`protection-record.json`); one apply at once (`apply.lock`, partials too; dead/pid-reused holder reclaimed); `--restore-protection --plan|--apply` restores, re-read-verified; unrecorded/unreadable/other-branch refuses. **Verify** `/healthz`.
 
 ## Step 3: App confirmation
 
@@ -52,6 +52,10 @@ Skip with `--no-github-app`/`--observe-only`; else `--apply` serves `http://127.
 ## Step 5: first pull request
 
 Skip until an App binds; else dispatch [small item](onboarding.md#4-prove-the-first-pr); once `Graphyard / merge` appears, rerun idempotent `--apply` requiring it and `graphyard/landable`.
+
+## Principal roster
+
+`principal add ID --role ROLE [--grant external-runs:import]...`/`principal remove ID`: one non-installer `install.json` entry, kept by `--apply` (planned-ID collisions refuse); writes only `GRAPHYARD_PRINCIPALS`, reads back, idempotent, under `apply.lock`; producers need `--grant` ([lane](validation.md#release-verdicts)).
 
 ## Self-contained host
 
@@ -74,7 +78,7 @@ Price: `--confirm-price`/`--max-monthly`; saved Apps (`--github-app FILE`/this i
 | `already serves a GitHub App setup page` | finish/stop it
 | `webhook.delivered` `false`, 401 | rerun
 | `Branch protection could not be applied` | admin `gh auth login`
-| `already binds`/`still holds GITHUB_APP_`/`could not be read` | remove binding/variables, or drop `--no-github-app`
+| `already binds`/`still holds GITHUB_APP_`/`could not be read` | drop binding/variables or `--no-github-app`
 | `inside the managed repository` | `GRAPHYARD_CONFIG_HOME` outside worktrees
 | fresh database (401) | `up` re-issues credentials, refiles onboarding/goal, archives cursor
 
