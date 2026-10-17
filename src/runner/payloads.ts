@@ -82,18 +82,27 @@ export type DecompositionPayload = z.infer<typeof decompositionPayloadSchema>;
 /**
  * `run.decomposition` in .graphyard/master.json (GY-1126): the size bounds an item is judged
  * against before its first dispatch, and the bound on one decomposition run. The run uses the
- * research account and model (`run.research`); a loop without one splits nothing.
+ * research account and model (`run.research`); a loop without one splits nothing. `maxPlannedFiles`
+ * counts planned source files only (GY-1858): test files under `tests/`, test helpers, docs pages
+ * and the timing baseline are companions of the source change and never count toward it. The
+ * estimated-lines bound scales with it: left unset it is `maxPlannedFiles` at
+ * `estimatedLinesPerSourceFile` a file (600 at the default bound of 5), and an installation may
+ * still set either bound explicitly in `run.decomposition`.
  */
+export const estimatedLinesPerSourceFile = 120;
 export const decompositionSettingsSchema = z.object({
   enabled: z.boolean().default(true),
   maxCriteria: z.number().int().min(1).max(50).default(4),
   maxBroadScopes: z.number().int().min(0).max(20).default(2),
-  maxPlannedFiles: z.number().int().min(1).max(200).default(12),
-  maxEstimatedLines: z.number().int().min(100).max(100_000).default(1_500),
+  maxPlannedFiles: z.number().int().min(1).max(200).default(5),
+  maxEstimatedLines: z.number().int().min(100).max(100_000).optional(),
   timeoutMinutes: z.number().int().min(1).max(60).default(10),
   concurrency: z.number().int().min(1).max(16).default(4),
 }).strict();
 export type DecompositionSettings = z.infer<typeof decompositionSettingsSchema>;
+/** The estimated-lines bound in force: what the installation set, else scaled to its source-file bound. */
+export const estimatedLinesBound = (settings: DecompositionSettings) =>
+  settings.maxEstimatedLines ?? settings.maxPlannedFiles * estimatedLinesPerSourceFile;
 
 export const graphyardTools = { decide: 'graphyard_decide', evidence: 'graphyard_submit_evidence', diagnose: 'graphyard_diagnose', decompose: 'graphyard_decompose' } as const;
 
