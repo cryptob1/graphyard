@@ -19,13 +19,13 @@ const workflowJob = (text: string, id: string) => {
   return end < 0 ? rest : rest.slice(0, end + 1);
 };
 
-test('unit:ci-sharded — the required test check aggregates a matrix of seven duration-balanced shards that finish within 20% of each other, and passes only when every shard passes', async () => {
+test('unit:ci-sharded — the required test check aggregates a matrix of eight duration-balanced shards that finish within 20% of each other, and passes only when every shard passes', async () => {
   const ci = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
   // Branch protection is unchanged: the check it names is still the job `test`, now an aggregate.
   const jobs = readWorkflow(ci).jobs.map(job => job.id);
   for (const id of ['test', 'test-shard', 'test-browser']) assert.ok(jobs.includes(id), `ci.yml defines ${id}`);
   const shard = workflowJob(ci, 'test-shard'), aggregate = workflowJob(ci, 'test');
-  assert.match(shard, /matrix:\n\s+shard: \[1, 2, 3, 4, 5, 6, 7\]/, 'seven shards by default');
+  assert.match(shard, /matrix:\n\s+shard: \[1, 2, 3, 4, 5, 6, 7, 8\]/, 'eight shards by default');
   assert.match(shard, /fail-fast: false/, 'one failing shard does not hide the others');
   assert.match(shard, /SHARD: \$\{\{ matrix\.shard \}\}\/\$\{\{ strategy\.job-total \}\}/, 'each shard knows its index and the matrix size');
   assert.match(shard, /node scripts\/ci-tests\.mjs select --out "\$RUNNER_TEMP\/selected-tests\.txt"/);
