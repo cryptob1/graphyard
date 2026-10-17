@@ -4,6 +4,7 @@ import { assignment } from './assignment.js';
 import { ciCheckRefusalPattern } from './ci-refusal.js';
 import { formatAge, statusDuration, type StatusDuration } from './duration.js';
 import { blockerView, classifyBlocker, type BlockerClass } from './blocker-class.js';
+import { deliveryOutcome } from './format.js';
 
 /**
  * Plain-English status for people who have never read the Graphyard docs. Every sentence is
@@ -21,7 +22,15 @@ export const phaseLabel: Record<Phase, string> = {
   checks: 'Automated checks', proof: 'Proving it works', merging: 'Merging', shipped: 'Shipped',
 };
 export type Tone = 'stuck' | 'waiting' | 'working' | 'shipped';
-export interface PlainStatus { sentence: string; tone: Tone; phase: Phase; who: string | null; blocking: string | null }
+export interface PlainStatus { sentence: string; tone: Tone; phase: Phase; who: string | null; blocking: string | null
+  /**
+   * GY-1845: the item's outcome once it has merged — the production state from `deliveryOutcome`,
+   * one of 'Merged, awaiting deployment', 'Deployed, awaiting verification', 'Production verified'
+   * or 'Deployed with a failure', with the serving release when known. Never the word Done, and
+   * never Merged alone, so every surface that shows it keeps merged code from reading as shipped.
+   * Null before the item merges, and for work closed without delivery.
+   */
+  outcome: string | null }
 
 const trigger: Record<string, string> = {
   'lease-loss': 'the builder lost contact', 'evidence-policy-conflict': 'a proof breaks the rules',
@@ -188,15 +197,19 @@ export function plainStatus(work: Work, now: number): PlainStatus {
   const phase = phaseOf(work, now);
   const who = builder(work, now);
   const link = pr(work);
-  const make = (sentence: string, tone: Tone, blocking: string | null = null, person: string | null = null): PlainStatus => ({ sentence, tone, phase, who: person, blocking });
+  // GY-1845: a done item's headline is its production state (`deliveryOutcome`), so every reader of
+  // a plain status sees how far past the merge the item has carried, never a bare Done or Merged.
+  const outcome = !work.closure && phase === 'shipped' ? deliveryOutcome(work) : null;
+  const make = (sentence: string, tone: Tone, blocking: string | null = null, person: string | null = null): PlainStatus => ({ sentence, tone, phase, who: person, blocking, outcome });
   // Closed without delivery (src/model/closure.ts): terminal, never "shipped".
   if (work.closure) return make(`Closed as ${work.closure.kind}${work.closure.ref ? ` (${work.closure.ref})` : ''}: ${work.closure.reason}`, 'shipped');
   if (phase === 'shipped') {
     const state = deliveryState(work);
     const merged = link ? `Shipped in ${link}` : 'Shipped';
-    if (state === 'delivered-with-failure') return make(`${merged} — the check after deploying failed`, 'stuck', 'The check after deploying failed');
+    if (state === 'delivered-with-failure') return make(`Deployed with a failure — the check after deploying failed${link ? ` (${link})` : ''}`, 'stuck', 'The check after deploying failed');
     if (state === 'awaiting-deployment') return make(`${merged} — waiting to be deployed`, 'waiting', 'Waiting to be deployed');
-    if (state === 'awaiting-smoke') return make(`${merged} — deployed, waiting for the check after deploying`, 'waiting', 'Waiting for the check after deploying');
+    if (state === 'awaiting-smoke') return make(`Deployed, awaiting verification${link ? ` — ${link}` : ''}`, 'waiting', 'Waiting for the check after deploying');
+    if (state === 'smoke-passed') return make(`Production verified${link ? ` — ${link}` : ''}`, 'shipped');
     return make(merged, 'shipped');
   }
   if (work.violations.length) return make(`Stuck: ${work.violations[0]}`, 'stuck', work.violations[0]);

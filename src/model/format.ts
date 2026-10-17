@@ -1,4 +1,6 @@
-import type { EvidenceArtifact, deliveryState } from '../model.js';
+import type { EvidenceArtifact } from '../model.js';
+import type { Work } from './work.js';
+import { deliveryState } from './delivery.js';
 import { formatAge } from './duration.js';
 
 export function age(time: string) { return formatAge(time, Date.now()); }
@@ -18,6 +20,25 @@ export function safeExternalUrl(value?: string) {
   if (!value) return undefined;
   try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? value : undefined; } catch { return undefined; }
 }
+/**
+ * Each delivery state's own headline (GY-1845): the production state, never the word Done, and
+ * never Merged alone, so merged code cannot read as shipped. A policy that asks for no
+ * post-deployment check is `delivered` at its merge; the other labels name how far production has
+ * carried it and what, if anything, still stands between the merge and a verified release.
+ */
 export const deliveryLabel: Record<NonNullable<ReturnType<typeof deliveryState>>, string> = {
-  delivered: 'Delivered', 'awaiting-deployment': 'Awaiting deployment', 'awaiting-smoke': 'Awaiting smoke proof', 'smoke-passed': 'Smoke proof passed', 'delivered-with-failure': 'Delivered with failure',
+  delivered: 'Delivered', 'awaiting-deployment': 'Merged, awaiting deployment', 'awaiting-smoke': 'Deployed, awaiting verification', 'smoke-passed': 'Production verified', 'delivered-with-failure': 'Deployed with a failure',
 };
+
+/**
+ * A done item's outcome, as every surface headlines it (GY-1845): the delivery state's own label,
+ * with the observed release that serves the merge named beside it when the delivery carries its
+ * deployment record (`delivery.deployment`, the commit production was seen serving). Null until
+ * the item has merged.
+ */
+export function deliveryOutcome(work: Work): string | null {
+  const state = deliveryState(work);
+  if (!state) return null;
+  const serving = work.delivery?.deployment ? ` — release ${shortShas(work.delivery.deployment.sha)} serving it` : '';
+  return `${deliveryLabel[state]}${serving}`;
+}
