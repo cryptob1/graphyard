@@ -154,11 +154,26 @@ export async function verifyProductionDigests(ledger: Deployments, instances?: D
   return { ...at, ...verifyPromotedDigests({ sha: current.sha, digests: current.digests }, await instances('production')) };
 }
 
+/**
+ * Which suites are the instance observation (GY-1868): only `uatDigestSuite` enters this
+ * module-private set, so a caller-named suite — `release validate --suite digests=…` — can never
+ * pose as the observation. `validateAndRecord` stamps a verdict's digests only from a suite this
+ * predicate accepts, and only when that suite passed.
+ */
+const observedSuites = new WeakSet<Suite>();
+
+/** Pure: whether this suite is the instance observation only `uatDigestSuite` can have built. */
+export const isObservedDigestSuite = (suite: Suite): boolean => observedSuites.has(suite);
+
 /** UAT's digest suite: every service of the digests UAT was deployed with runs exactly them, so the verdict that names them tested them. */
-export const uatDigestSuite = (digests: Manifest, instances: NonNullable<DigestAdapter['instances']>): Suite => ({
-  name: 'digests',
-  run: async () => {
-    const verification = verifyPromotedDigests({ sha: '', digests }, await instances('uat'));
-    return { name: 'digests', passed: verification.verified, detail: verification.verified ? `every instance runs ${digests.map(entry => entry.service).join(', ')}'s recorded digest` : verification.mismatches.map(mismatch => mismatch.detail).join('; ') };
-  },
-});
+export const uatDigestSuite = (digests: Manifest, instances: NonNullable<DigestAdapter['instances']>): Suite => {
+  const suite: Suite = {
+    name: 'digests',
+    run: async () => {
+      const verification = verifyPromotedDigests({ sha: '', digests }, await instances('uat'));
+      return { name: 'digests', passed: verification.verified, detail: verification.verified ? `every instance runs ${digests.map(entry => entry.service).join(', ')}'s recorded digest` : verification.mismatches.map(mismatch => mismatch.detail).join('; ') };
+    },
+  };
+  observedSuites.add(suite);
+  return suite;
+};
