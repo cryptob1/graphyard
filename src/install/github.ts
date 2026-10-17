@@ -362,11 +362,22 @@ async function readConfirmed(gh: GitHubCli, args: string[], what: string, absent
   return parsed;
 }
 
-/** Graphyard's own merge-queue ruleset on the repository, by name, or null when the listing confirms none; an operator's other rulesets are never read here. */
+/** Rulesets per page of the listing the record and the restore read: GitHub's maximum (its default is 30). */
+const queueRulesetPageSize = 100;
+/**
+ * Graphyard's own merge-queue ruleset on the repository, by name, or null when the whole listing
+ * confirms none: pages are read until a short one, so a queue ruleset past the first page is never
+ * taken for absent. An operator's other rulesets are never read here.
+ */
 export async function readQueueRuleset(gh: GitHubCli, repository: string): Promise<Record<string, unknown> | null> {
-  const rulesets = await readConfirmed(gh, ['api', `repos/${repository}/rulesets?includes_parents=false`], `the rulesets of ${repository}`);
-  if (!Array.isArray(rulesets)) throw new Error(`GitHub answered the rulesets of ${repository} with no list, so whether ${mergeQueueRulesetName} stands is unknown; rerun`);
-  const found = rulesets.find(ruleset => ruleset?.name === mergeQueueRulesetName);
+  let found: any;
+  for (let page = 1; !found; page++) {
+    const listing = `repos/${repository}/rulesets?includes_parents=false&per_page=${queueRulesetPageSize}&page=${page}`;
+    const rulesets = await readConfirmed(gh, ['api', listing], `page ${page} of the rulesets of ${repository}`);
+    if (!Array.isArray(rulesets)) throw new Error(`GitHub answered page ${page} of the rulesets of ${repository} with no list, so whether ${mergeQueueRulesetName} stands is unknown; rerun`);
+    found = rulesets.find(ruleset => ruleset?.name === mergeQueueRulesetName);
+    if (!found && rulesets.length < queueRulesetPageSize) return null;
+  }
   if (!found) return null;
   const document = await readConfirmed(gh, ['api', `repos/${repository}/rulesets/${found.id}`], `ruleset ${found.id} of ${repository}`);
   if (document.id !== found.id || document.name !== mergeQueueRulesetName) throw new Error(`GitHub answered ruleset ${found.id} of ${repository} with another document, so ${mergeQueueRulesetName} cannot be recorded or compared; rerun`);

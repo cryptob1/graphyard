@@ -130,7 +130,7 @@ export function githubResponses(state: FakeState, repository = REPOSITORY, branc
     { match: `gh api repos/${repository}/branches/${branch}/protection`, result: state.protection ? JSON.stringify(state.protection) : { stdout: '', stderr: 'Branch not protected', code: 1 } },
     // The repository and its rulesets as GitHub answers them, which the protection record reads (GY-1870); any other line under them answers empty, as an unmatched one does.
     { match: `gh api repos/${repository}`, result: (line: string) => line === `gh api repos/${repository}` ? JSON.stringify({ full_name: repository, owner: { type: 'User' }, allow_auto_merge: false })
-      : line === `gh api repos/${repository}/rulesets?includes_parents=false` ? '[]' : '' },
+      : line.startsWith(`gh api repos/${repository}/rulesets?includes_parents=false`) ? '[]' : '' },
   ];
 }
 

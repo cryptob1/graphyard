@@ -47,7 +47,12 @@ function fakeGitHub(initial: { protection?: any; allowAutoMerge?: boolean } = {}
     if (line === `gh api repos/${REPOSITORY}`) return JSON.stringify({ full_name: REPOSITORY, owner: { type: 'User' }, allow_auto_merge: github.allowAutoMerge });
     if (line.startsWith(`gh api --method PATCH repos/${REPOSITORY} `)) { github.allowAutoMerge = line.endsWith('allow_auto_merge=true'); return '{}'; }
     if (line === `gh api repos/${REPOSITORY}/rules/branches/main`) return '[]';
-    if (line === `gh api repos/${REPOSITORY}/rulesets?includes_parents=false`) return JSON.stringify(github.rulesets.map(({ id, name }) => ({ id, name })));
+    // The listing pages as GitHub does (30 by default), so a ruleset past the first page is only found by reading on.
+    const listing = /^gh api repos\/[^/]+\/[^/]+\/rulesets\?includes_parents=false(?:&per_page=(\d+)&page=(\d+))?$/.exec(line);
+    if (listing) {
+      const size = Number(listing[1] ?? 30), page = Number(listing[2] ?? 1);
+      return JSON.stringify(github.rulesets.slice((page - 1) * size, page * size).map(({ id, name }) => ({ id, name })));
+    }
     const ruleset = /^gh api (?:--method (\w+) )?repos\/[^/]+\/[^/]+\/rulesets\/(\d+)/.exec(line);
     if (ruleset) {
       const index = github.rulesets.findIndex(entry => entry.id === Number(ruleset[2]));
@@ -66,7 +71,9 @@ function fakeGitHub(initial: { protection?: any; allowAutoMerge?: boolean } = {}
 /** GitHub failing one GET (HTTP 500), or answering it with a document the reads must not trust. */
 const serverError = { stdout: '', stderr: 'gh: Server Error (HTTP 500)', code: 1 };
 const failing = (exact: string, answer: string | typeof serverError = serverError) => (line: string) => line === `gh api ${exact}` ? answer : undefined;
-const RULESETS = `repos/${REPOSITORY}/rulesets?includes_parents=false`;
+const RULESETS = `repos/${REPOSITORY}/rulesets?includes_parents=false&per_page=100&page=1`;
+/** A hundred of the operator's own rulesets: a full first page, which puts the next ruleset on page two. */
+const operatorRulesets = () => Array.from({ length: 100 }, (_, index) => ({ id: 1000 + index, name: `Operator rules ${index}`, target: 'branch', enforcement: 'active', rules: [] }));
 
 async function install(github: ReturnType<typeof fakeGitHub>, reuse?: Harness) {
   const fixture = await harness({ provider: 'railway', extraResponses: github.responses, ...(reuse ? { root: reuse.root, configHome: reuse.configHome } : {}) });
@@ -144,6 +151,14 @@ test('unit:protection-prior-state-recorded-before-first-apply — the first gith
       assert.ok(!broken.github.writes.some(write => write.line.includes(PROTECTION) || write.line.includes('/rulesets') || write.line.includes(`repos/${REPOSITORY} `)), `a failed ${what} read still wrote`);
     } finally { await fixture.cleanup(); }
   }
+
+  // Graphyard's queue ruleset past the first page of the listing is recorded, not taken for absent.
+  const paged = fakeGitHub();
+  paged.github.rulesets.push(...operatorRulesets(), queue);
+  const pagedFixture = await install(paged);
+  try {
+    assert.deepEqual(JSON.parse(await readFile(paged.github.recordFile, 'utf8')).mergeQueueRuleset, queue);
+  } finally { await pagedFixture.cleanup(); }
 
   // A record taken for another branch refuses, so this branch never changes unrecorded.
   const { recordProtectionOnce } = await import('../src/install/github.js') as any;
@@ -233,6 +248,23 @@ test('unit:protection-restore-matches-recorded-state — the restore plan lists 
     await writeFile(bare.github.recordFile, JSON.stringify({ ...record, format: 'graphyard-protection-record-v9' }));
     await assert.rejects(restore(unprotected, 'plan'), /format graphyard-protection-record-v9, which this release does not read/);
   } finally { await unprotected.cleanup(); }
+
+  // Graphyard's queue ruleset on the second page of the listing: the plan deletes it, and the re-read reads every page to verify.
+  const later = fakeGitHub();
+  const laterFixture = await install(later);
+  try {
+    const queue = { id: 7, name: mergeQueueRulesetName, target: 'branch', enforcement: 'active', bypass_actors: [], conditions: null, rules: [{ type: 'merge_queue' }] };
+    later.github.rulesets.push(...operatorRulesets(), queue);
+    const writes = later.github.writes.length;
+    later.github.override = failing(`repos/${REPOSITORY}/rulesets?includes_parents=false&per_page=100&page=2`);
+    await assert.rejects(restore(laterFixture, 'plan'), /GitHub did not answer page 2 of the rulesets/);
+    later.github.override = null;
+    assert.deepEqual((await restore(laterFixture, 'plan')).changes.map((change: any) => change.write), [`DELETE ${PROTECTION}`, `PATCH repos/${REPOSITORY} allow_auto_merge=false`, `DELETE repos/${REPOSITORY}/rulesets/7`]);
+    assert.equal((await restore(laterFixture, 'apply')).verified, true);
+    assert.ok(later.github.writes.slice(writes).some(write => write.line === `gh api --method DELETE repos/${REPOSITORY}/rulesets/7`));
+    assert.deepEqual(later.github.rulesets.map(ruleset => ruleset.id), operatorRulesets().map(ruleset => ruleset.id));
+    assert.deepEqual((await restore(laterFixture, 'plan')).changes, []);
+  } finally { await laterFixture.cleanup(); }
 
   // A re-read that fails after the writes refuses instead of verifying.
   const lost = fakeGitHub();
