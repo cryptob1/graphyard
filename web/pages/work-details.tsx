@@ -50,7 +50,7 @@ export function PreviewPanel({ preview }: { preview: ItemPreview }) {
     <dl className="facts">
       <div><dt>Link</dt><dd>{preview.state === 'running' ? <a href={`${preview.path}/`} target="_blank" rel="noopener noreferrer">{preview.path}/ ↗</a> : <span className="mono">{preview.path}</span>}</dd></div>
       <div><dt>State</dt><dd>{previewWords[preview.state]}{preview.endReason ? ` · ${preview.endReason}` : ''}{preview.cleanedAt ? ` · cleaned ${new Date(preview.cleanedAt).toLocaleString()}` : ''}</dd></div>
-      <div><dt>Commit</dt><dd><span className="mono">{preview.sha.slice(0, 12)}</span>{preview.source === 'base' ? ' · the base branch, until a pull request is submitted' : ''}</dd></div>
+      <div><dt>Commit</dt><dd><span className="mono">{preview.sha.slice(0, 8)}</span>{preview.source === 'base' ? ' · the base branch, until a pull request is submitted' : ''}</dd></div>
       <div><dt>Application</dt><dd>{preview.application} · {preview.runner} runner</dd></div>
     </dl>
     <ul className="proof-markers">{preview.cases.map(entry => <li key={entry.case} className={`marker-${caseMarks[entry.result].tone}`}>{caseMarks[entry.result].symbol} {entry.case} {caseMarks[entry.result].word}{entry.reason ? ` · ${entry.reason}` : ''}</li>)}</ul>

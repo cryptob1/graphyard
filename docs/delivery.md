@@ -89,4 +89,4 @@ Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery swee
 
 `master status` `delivery`: `readyToMerged`/`mergedToProduction`/`stages` p50/p90; 7-day p90 over `deliverySpeed` alerts.
 
-`POST /api/validation/result` binds manifest/signature/measurements; mismatches void passes as `attribution-undermined` (`GET /api/analytics/attribution`). Loop-owned post-deploy observations never dispatch: verification reads them; passes close `delivered-observation`, fails escalate; no-smoke deliveries backfill five/pass.
+`POST /api/validation/result` binds manifest/signature/measurements; mismatches void passes as `attribution-undermined` (`GET /api/analytics/attribution`). A loop-owned post-deploy observation item never dispatches: deployment verification reads it; a pass closes it `delivered-observation`, a fail escalates; no-smoke deliveries backfill five per pass.

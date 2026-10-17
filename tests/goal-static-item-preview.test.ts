@@ -71,7 +71,7 @@ before(async () => {
   repo = join(scratch, 'repo'); base = join(scratch, 'worktrees'); await mkdir(base);
   await fixture();
   const port = await freePort();
-  database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('goal-static-preview-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('preview_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/preview_test`); await store.init();
   http = server(new Engine(store, [15368], 120, 'owner/fixture'), [{ ...operator, token: tokens.operator }, { ...coordinator, token: tokens.coordinator }, { ...worker, token: tokens.worker }]);
