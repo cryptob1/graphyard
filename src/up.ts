@@ -21,7 +21,7 @@ import { ensureDeployKey, ensureMainWriteProtection } from './install/deploy-key
 import type { GitHubCli } from './install/github.js';
 import { herdrAttachCommand, installHerdrInstance, type HerdrInstance } from './master/herdr.js';
 import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, HerdrSetupFailure, herdrSync, hostHerdrDeps, prepareHerdrInstance, withLocalBin, type HerdrHostDeps } from './herdr-host.js';
-import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin } from './repository-setup.js';
+import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin, readLoopCode, alignExecutorUnits, type LoopCodeReading } from './repository-setup.js';
 import { recordHerdrInstance } from './master/config.js';
 import { mergerModes, type MergerMode } from './merger-mode.js';
 
@@ -199,6 +199,15 @@ export interface UpDependencies {
    * own session as a name only: the gh credential is used for setup and never written anywhere.
    */
   supervise?(): Promise<{ operatorLogin: string | null }>;
+  /**
+   * GY-1859: what the install's loop and executor units run against this CLI's code, read from the
+   * host (repository-setup's readLoopCode). A live master-loop checklist item says only that a loop
+   * runs; this says whose code it runs. Absent — a dependency double from before it — the
+   * master-loop step does not check the code and keeps its earlier behaviour.
+   */
+  loopCode?(): Promise<LoopCodeReading | null>;
+  /** GY-1859: re-bind the install's executor template to this CLI's code and restart its slots (repository-setup's alignExecutorUnits). */
+  alignExecutors?(): Promise<{ wrote: 'updated' | 'unchanged' | 'none'; reason: string | null; restarted: string[] }>;
   /** Agent mode: drive the App manifest page at URL in the master's browser profile, recorded as a master browser flow. */
   driveApp?(url: string, handoff: Handoff): Promise<DriveOutcome>;
   /** GY-1477: this host's Tailscale node (its MagicDNS name and tailnet address), or null without a running Tailscale. */
@@ -901,14 +910,53 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
 
     await step('master-loop', async () => {
       await cleanCli('master-loop');
-      if (!(await checklist()).find(item => item.id === 'master-loop')?.done) await run('master-loop', ['master', 'restart']);
+      // GY-1859: a live checklist item says only that a loop runs, not whose code it runs. The loop
+      // serving the repository may be a process an earlier checkout left: every fix since merged is
+      // invisible to it, and setup kept saying nothing was needed. Read the units against this CLI
+      // first; a loop or executor on other code is rewritten to this CLI and restarted.
+      const reading = deps.loopCode ? await deps.loopCode().catch(() => null) : null;
+      const loopStale = reading?.loopStale ?? null, executorStale = reading?.executorStale ?? null;
+      let rewrote: string | null = null;
+      if (loopStale) {
+        const token = await deps.masterToken();
+        if (!token) throw new UpStop(`master-loop: ${loopStale}, and no master credential is recorded here to rewrite the unit; run graphyard master init --token-stdin --replace-supervisor from this checkout, then rerun ${rerun()}`, upExitCodes.prerequisite);
+        const init = parseJson(await run('master-loop', ['master', 'init', '--token-stdin', '--replace-supervisor'], { stdin: token }));
+        rewrote = typeof init?.supervisor?.state === 'string' ? init.supervisor.state : null;
+        if (rewrote === 'refused') throw new UpStop(`master-loop: the loop unit was not rewritten: ${String(init?.supervisor?.refused ?? 'the install refused it')}; rerun ${rerun()} once that is fixed`, upExitCodes.failed);
+      }
+      if (executorStale && deps.alignExecutors) {
+        const aligned = await deps.alignExecutors();
+        // An uninstalled template is not created here: installing executors stays the operator's scripts/graphyard-executor.mjs --install.
+        if (aligned.wrote === 'none' && aligned.reason) throw new UpStop(`master-loop: ${executorStale}, and it could not be aligned: ${aligned.reason}`, upExitCodes.failed);
+        if (aligned.wrote === 'updated') deps.emit({ kind: 'note', text: `master-loop: ${executorStale}; the template now runs this checkout${aligned.restarted.length ? `, and ${aligned.restarted.join(', ')} restarted onto it` : ''}.` });
+      }
+      // The rewrite through master init restarts the unit it updated; a loop whose unit already named
+      // this CLI but whose cursor records another commit, or none rewritten, is restarted here.
+      if (!(await checklist()).find(item => item.id === 'master-loop')?.done || (loopStale && rewrote !== 'updated' && rewrote !== 'created')) await run('master-loop', ['master', 'restart']);
       // A loop that refuses to run is a failed setup step naming its cause, never a wait that stalls.
       const refused = async () => {
         const reason = await deps.loopRefusal?.();
         if (reason) throw new UpStop(`master-loop: the master loop refuses to run: ${reason}`, upExitCodes.failed);
       };
       await waitGreen(['master-loop'], false, refused);
+      // GY-1859: green is the restarted loop reporting this CLI's commit, within one cycle — a cursor
+      // still naming the old code would leave the install stuck on fixes it cannot see, the same
+      // silence the restart meant to end.
+      if (loopStale) {
+        const deadline = deps.now() + machineWaitMs;
+        for (let polls = 0; ; polls++) {
+          const now = deps.loopCode ? await deps.loopCode().catch(() => null) : null;
+          if (!now?.loopStale) {
+            const commit = now?.loopCommit ?? now?.cli.commit ?? null;
+            deps.emit({ kind: 'note', text: `master-loop: replaced ${loopStale}; the loop now runs ${now?.cli.root ?? 'this checkout'} at ${commit ? commit.slice(0, 12) : 'its commit'}.` });
+            break;
+          }
+          if (deps.now() >= deadline) throw new UpStop(`master-loop: ${loopStale}; the unit was rewritten and the loop restarted, but it still reports ${now.loopCommit ? now.loopCommit.slice(0, 12) : 'no commit'} instead of this checkout's ${now.cli.commit ? now.cli.commit.slice(0, 12) : 'commit'}; rerun ${rerun()}`, upExitCodes.failed);
+          await deps.sleep(pollMs);
+        }
+      }
       await refused();
+      return loopStale || executorStale ? `replaced: ${[loopStale, executorStale].filter(Boolean).join('; ')}` : undefined;
     });
 
     await waitGreen(last.map(item => item.id), true);
@@ -1527,6 +1575,9 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     publishOnboarding: workflows => publishOnboarding(root, request.repository, (program, args, env) => execFileSync(program, args, { cwd: root, encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env: { ...process.env, ...env } } : {}) }), workflows),
     cliCheckout: async () => { const checkout = await loopCheckout(); return { root: checkout.root, dirty: dirtyCheckoutPaths(checkout) }; },
     loopRefusal: async () => coordinatorCheckoutRefusal(await loopCheckout(), 'the master loop'),
+    // GY-1859: the loop and executor units are judged against the CLI running up, whose launcher and checkout are this run's.
+    loopCode: () => readLoopCode(root, { cliPath }),
+    alignExecutors: () => alignExecutorUnits(root),
     onboardingMerged: async url => execFileSync('gh', ['pr', 'view', url, '--json', 'state', '--jq', '.state'], { encoding: 'utf8', timeout: 60_000 }).trim() === 'MERGED',
     fileOnboarding: async (url, commit, operatorTokenFile, requestId) => {
       const server = await serverUrl();

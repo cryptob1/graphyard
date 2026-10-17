@@ -433,6 +433,7 @@
     "tests/goal-pipeline-outright-refusals.test.ts": 1238,
     "tests/goal-planner.test.ts": 2900,
     "tests/graphyard-up.test.ts": 4200,
+    "tests/up-loop-code.test.ts": 291,
     "tests/gy-1050-review-followups.test.ts": 833,
     "tests/gy-1053-review-followups.test.ts": 789,
     "tests/gy-1158-review-followups.test.ts": 570,

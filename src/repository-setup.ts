@@ -1,8 +1,8 @@
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { chmod, lstat, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { execFileSync, spawn } from 'node:child_process';
-import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -14,7 +14,11 @@ import { documentationAssignment, documentationPolicySchema, parseRepositoryConf
 import { executorRunnableKinds, type NextActionKind } from './model/action-kinds.js';
 import { deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy } from './model/delivery-policy.js';
 import { renderReleasePipeline } from './install/release-pipeline.js';
-import { assertUnitOwned, executorGlob, executorInstance, executorInstancePattern, legacyExecutorTemplate, legacyInstallUnits, readInstallUnits, resolveInstallUnits, type InstallUnits } from './install/units.js';
+import { assertUnitOwned, executorGlob, executorInstance, executorInstancePattern, legacyExecutorTemplate, legacyInstallUnits, readInstallUnits, resolveInstallUnits, unitCheckout, type InstallUnits } from './install/units.js';
+import { coordinatorCheckoutRoot } from './master/profiles.js';
+import { knownGoodState } from './master/known-good.js';
+import { installDirectory } from './install/secrets.js';
+import { installIdFor } from './install/types.js';
 import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
 import { herdrTarget, type HerdrInstance } from './master/herdr.js';
 import { herdrSync } from './herdr-host.js';
@@ -363,6 +367,9 @@ export async function readSetupStatus(root: string) {
     githubApp: applied.value?.artifacts.githubApp ?? null,
     unreadable: [proposal.error && `.graphyard/${proposalFileName} ${proposal.error}`, applied.error && `.graphyard/${appliedFileName} ${applied.error}`].filter(Boolean),
     drift,
+    // GY-1859: what the host's loop and executor units run against this CLI's code, so `doctor`'s
+    // readiness checklist flags a unit on other code as one line naming both paths and the rerun.
+    loopCode: await readLoopCode(root).catch(() => null),
   };
 }
 
@@ -758,6 +765,159 @@ export async function alignExecutorUnitScript(root: string, script: string | nul
   await atomicWrite(unitFile, rendered, 0o644);
   (options.run ?? systemctl)(['daemon-reload']);
   return { wrote: 'updated', reason: null };
+}
+
+// GY-1859: a running unit is not proof the install runs the right code. The loop serving a
+// repository may be a process an earlier checkout left behind: it answers, the setup checklist
+// reads it as green, and every fix merged since is invisible to it. So the master-loop step of
+// `graphyard up` reads what its units actually run — the checkout and launcher each ExecStart
+// names, and the commit the loop recorded loading on its cursor — and compares them with the CLI
+// running the command. A unit on other code is rewritten onto this CLI and restarted through
+// systemd; `doctor` flags the same mismatch as one line naming both paths and the rerun.
+
+/** What one of the install's units runs, read beside the install's own record (GY-1859). */
+export interface UnitCode { unit: string; path: string; /** The checkout the unit loads its code from: the directory above the launcher its ExecStart starts, else its WorkingDirectory. */ checkout: string | null }
+/** GY-1859: the loop and executor code this install's units run, against the CLI running the command. */
+export interface LoopCodeReading {
+  /** The master loop's unit; null while none is installed for the units this checkout records. */
+  loop: UnitCode | null;
+  /** The commit the running loop recorded loading (its cursor's release); null when none is recorded. */
+  loopCommit: string | null;
+  /** The executor template; null while none is installed. */
+  executor: UnitCode | null;
+  /** The CLI running this command: the checkout it runs from and that checkout's commit. */
+  cli: { root: string; commit: string | null };
+  /** The managed repository, as master.json records it: whose units these are, and what a rerun names. */
+  repository: string | null;
+  /** Why the loop runs other code than this CLI's — another checkout, or another commit — or null. */
+  loopStale: string | null;
+  /** Why the executor template runs other code than this CLI's or the repository's own, or null. */
+  executorStale: string | null;
+  /** Why the reading could not be taken at all; null when it was. */
+  error: string | null;
+}
+const canonicalPath = (path: string) => { const absolute = resolve(path); try { return realpathSync(absolute); } catch { return absolute; } };
+const shortSha = (commit: string | null | undefined) => commit ? String(commit).slice(0, 12) : 'no commit';
+/** The checkout a unit runs its code from: the directory above the launcher its ExecStart names — `bin/graphyard.mjs`, a pin's `dist/cli.js`, or `scripts/graphyard-executor.mjs` — else its WorkingDirectory (GY-1859). A unit naming neither reads as its WorkingDirectory, so a unit this install wrote never reads as foreign. */
+function unitCodeCheckout(text: string, home: string): string | null {
+  const { workingDirectory, execStart } = unitCheckout(text, home);
+  const launcher = execStart?.split(/\s+/).map(part => part.replace(/^"|"$/g, '')).find(part => /(?:bin\/graphyard\.mjs|dist\/cli\.js|scripts\/graphyard-executor\.mjs)$/.test(part));
+  return launcher ? dirname(dirname(launcher)) : workingDirectory;
+}
+/** Under the test runner only a unit directory under the system temporary directory is read, as legacyUnitFiles guards: the operator's real units belong to no checkout a test made. */
+const readableUnitsDirectory = (unitDirectory: string) => {
+  const underTestRunner = !!process.env.NODE_TEST_CONTEXT || process.execArgv.includes('--test') || process.env.npm_lifecycle_event === 'test';
+  if (!underTestRunner) return true;
+  const temporary = canonicalPath(tmpdir());
+  return `${canonicalPath(unitDirectory)}${sep}`.startsWith(`${temporary}${sep}`);
+};
+/** The loop's cursor, beside its credential as daemonStatePath keeps it: what reports the commit the running loop loaded. */
+const loopCursorPath = (credentialFile: string) => resolve(dirname(credentialFile), `${basenameFile(credentialFile).replace(/\.token$/, '')}.daemon.json`);
+const basenameFile = (path: string) => path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf(sep)) + 1);
+/** The CLI launcher a pin of REPOSITORY runs: beside the install directory, as knownGoodCli keeps it. */
+const knownGoodCliPath = (installDirectory: string) => resolve(installDirectory, 'coordinator', 'current', 'dist', 'cli.js');
+/**
+ * What the install at ROOT runs, against the CLI running this command (GY-1859). The loop's code is
+ * this CLI's when its unit starts this checkout's launcher (or the known-good pin or held snapshot
+ * the upgrade machinery keeps, GY-1529/GY-1790) and its cursor records one of those commits; the
+ * executors' code is this CLI's or the repository's own. Every host reach is injectable, so tests
+ * judge the judgement itself, never this machine.
+ */
+export async function readLoopCode(root: string, options: {
+  /** The launcher of the CLI running this command; default this process's own checkout's. */
+  cliPath?: string;
+  /** Runs git for the CLI checkout's commit. */
+  run?: (command: string, args: string[]) => string;
+  /** The units ROOT records; default readInstallUnits; null forces none. */
+  units?: InstallUnits | null;
+  unitDirectory?: string;
+  home?: string;
+  /** The master configuration; default .graphyard/master.json in ROOT. */
+  master?: { cliPath?: string | null; credentialFile?: string | null; repository?: string | null } | null;
+  /** The loop cursor's text; default read beside the master credential. */
+  cursor?: string | null;
+} = {}): Promise<LoopCodeReading> {
+  const run = options.run ?? ((command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 }));
+  const unitDirectory = options.unitDirectory ?? executorUnitDirectory(), home = options.home ?? homedir();
+  const cliPath = options.cliPath ?? fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
+  const cliRoot = coordinatorCheckoutRoot(cliPath);
+  let cliCommit: string | null = null;
+  try { cliCommit = run('git', ['-C', cliRoot, 'rev-parse', 'HEAD']).trim() || null; } catch { cliCommit = null; }
+  const primary = await (async () => { try { return connectionRoots(root)[0]; } catch { return root; } })();
+  let master = options.master !== undefined ? options.master : null;
+  if (options.master === undefined) { try { master = JSON.parse(await readFile(resolve(root, '.graphyard', 'master.json'), 'utf8')); } catch { master = null; } }
+  const repository = typeof master?.repository === 'string' ? master.repository : null;
+  const reading = (over: Partial<LoopCodeReading>): LoopCodeReading => ({ loop: null, loopCommit: null, executor: null, cli: { root: cliRoot, commit: cliCommit }, repository, loopStale: null, executorStale: null, error: null, ...over });
+  let units: InstallUnits | null;
+  if (options.units !== undefined) units = options.units;
+  else if (!readableUnitsDirectory(unitDirectory)) units = null;
+  else { try { units = readInstallUnits(root, unitDirectory, home); } catch (failure) { return reading({ error: failure instanceof Error ? failure.message.split('\n')[0] : String(failure) }); } }
+  if (!units) return reading({});
+  const text = async (name: string) => { try { return await readFile(resolve(unitDirectory, name), 'utf8'); } catch { return null; } };
+  const loopText = await text(units.master);
+  const loop = loopText === null ? null : { unit: units.master, path: resolve(unitDirectory, units.master), checkout: unitCodeCheckout(loopText, home) };
+  let loopCommit: string | null = null;
+  if (loop) {
+    const cursor = options.cursor !== undefined ? options.cursor : typeof master?.credentialFile === 'string' ? await readFile(loopCursorPath(master.credentialFile), 'utf8').catch(() => null) : null;
+    try { const recorded = cursor === null ? null : JSON.parse(cursor)?.release?.commit; loopCommit = typeof recorded === 'string' ? recorded : null; } catch { loopCommit = null; }
+  }
+  const executorText = await text(units.executorTemplate);
+  const executor = executorText === null ? null : { unit: units.executorTemplate, path: resolve(unitDirectory, units.executorTemplate), checkout: unitCodeCheckout(executorText, home) };
+  // The checkouts and commits that are this install's own code even when they are neither this CLI's
+  // checkout nor its HEAD: the known-good pin the unit runs while one is promoted (GY-1529) and the
+  // snapshot a held restart pins the launcher to (GY-1790). A loop on those is this install's doing.
+  const ownCheckouts = new Set([cliRoot, primary].map(canonicalPath));
+  const ownCommits = new Set([cliCommit].filter((commit): commit is string => !!commit));
+  if (repository) { try { const directory = installDirectory(installIdFor(repository)), pin = knownGoodState(directory); if (pin) { ownCommits.add(pin.sha); ownCheckouts.add(canonicalPath(dirname(dirname(knownGoodCliPath(directory))))); } } catch { /* no install directory: no pin stands here */ } }
+  try { const held = JSON.parse(await readFile(resolve(root, '.graphyard', 'held-cli.json'), 'utf8')); if (typeof held?.commit === 'string' && held.commit) ownCommits.add(held.commit); if (typeof held?.root === 'string' && held.root) ownCheckouts.add(canonicalPath(held.root)); } catch { /* no held pin */ }
+  const loopStale = !loop ? null
+    : loop.checkout && !ownCheckouts.has(canonicalPath(loop.checkout)) ? `${loop.path} starts the CLI in ${loop.checkout}, not this checkout (${cliRoot})`
+    : loopCommit && !ownCommits.has(loopCommit.toLowerCase()) ? `${loop.path} runs ${shortSha(loopCommit)}, not this checkout's ${shortSha(cliCommit)}` : null;
+  const executorStale = executor?.checkout && !ownCheckouts.has(canonicalPath(executor.checkout)) ? `${executor.path} runs ${executor.checkout}, not this checkout (${cliRoot}) or the repository checkout (${primary})` : null;
+  return reading({ loop, loopCommit, executor, loopStale, executorStale });
+}
+/**
+ * The executor template this install records, re-bound to this checkout when it runs another's, and
+ * its slots restarted through systemd (GY-1859). `installExecutorSupervision` refuses a template
+ * another checkout runs (GY-1441), because it cannot tell another repository's unit from a stale
+ * one; here the name comes from ROOT's own units record, so the unit is this install's, and a
+ * binding left by an earlier checkout of the same install is exactly what alignment replaces. An
+ * uninstalled template is reported, never created: installing executors stays the operator's
+ * `scripts/graphyard-executor.mjs --install`.
+ */
+export async function alignExecutorUnits(root: string, options: { run?: SystemctlRunner; unitDirectory?: string; node?: string; heldScript?: string | null } = {}): Promise<{ wrote: 'updated' | 'unchanged' | 'none'; reason: string | null; restarted: string[] }> {
+  const primary = connectionRoots(root)[0];
+  const unitDirectory = options.unitDirectory ?? executorUnitDirectory();
+  const units = await executorInstallUnits(primary, unitDirectory);
+  const unitFile = resolve(unitDirectory, units.executorTemplate);
+  let current: string;
+  try { current = await readFile(unitFile, 'utf8'); }
+  catch (error: any) {
+    if (error.code === 'ENOENT') return { wrote: 'none', reason: `${unitFile} is not installed; node scripts/graphyard-executor.mjs --install installs it`, restarted: [] };
+    throw error;
+  }
+  // GY-1790: while the CLI pin stands a slot starts the entry held in the snapshot; the alignment
+  // keeps that binding, read lazily as the installer does, so it never points a slot at a checkout
+  // entry the checkout may hold dirty.
+  const heldScript = options.heldScript !== undefined ? options.heldScript : await (await import('./daemon/held-cli.js')).heldExecutorEntryOf(primary);
+  let rendered: string;
+  try { rendered = renderExecutorUnit(current, { root: primary, node: options.node ?? process.execPath, ...(heldScript ? { script: heldScript, checkoutRoot: primary } : {}) }); }
+  catch (error) { return { wrote: 'none', reason: `${unitFile} could not be re-bound to this checkout: ${error instanceof Error ? error.message : String(error)}`, restarted: [] }; }
+  if (current === rendered) return { wrote: 'unchanged', reason: null, restarted: [] };
+  await mkdir(dirname(unitFile), { recursive: true });
+  await atomicWrite(unitFile, rendered, 0o644);
+  const run = options.run ?? systemctl;
+  run(['daemon-reload']);
+  // Every instance of this install's template the manager knows: each starts from the template's
+  // own ExecStart, so all of them reload the binding, not only the slots a restart would have
+  // picked for another reason.
+  const known = new Set<string>();
+  for (const listing of [['list-units', '--all', '--plain', '--no-legend', executorGlob(units)], ['list-unit-files', '--plain', '--no-legend', executorGlob(units)]]) {
+    try { for (const match of run(listing).matchAll(executorInstancePattern(units))) known.add(match[0]); } catch { /* an older systemctl without the glob; nothing to restart by name */ }
+  }
+  const instances = [...known].sort();
+  if (instances.length) run(['restart', ...instances]);
+  return { wrote: 'updated', reason: null, restarted: instances };
 }
 
 export type SystemctlRunner = (args: string[]) => string;
